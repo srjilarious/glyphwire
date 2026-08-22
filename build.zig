@@ -66,4 +66,22 @@ pub fn build(b: *std.Build) void {
 
     const shell_step = b.step("shell", "Run the glyphwire shell launcher");
     shell_step.dependOn(&run_shell.step);
+
+    const client_exe = b.addExecutable(.{
+        .name = "glyphwire-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("client/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    client_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    b.installArtifact(client_exe);
+
+    const run_client = b.addRunArtifact(client_exe);
+    run_client.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_client.addArgs(args);
+
+    const client_step = b.step("client", "Run the glyphwire test client");
+    client_step.dependOn(&run_client.step);
 }
