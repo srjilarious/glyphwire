@@ -142,6 +142,12 @@ pub const Layer = struct {
     }
 };
 
+/// Fixed id for the single auto-created context this slice's server ever
+/// has. There's no `create_context` yet (decisions.md, Object Model), so
+/// server and clients just agree on this sentinel out of band rather than
+/// negotiating it over the wire.
+pub const default_context_id = "0";
+
 pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
