@@ -29,4 +29,22 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("tests", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    const server_exe = b.addExecutable(.{
+        .name = "glyphwire-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("server/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    server_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    b.installArtifact(server_exe);
+
+    const run_server = b.addRunArtifact(server_exe);
+    run_server.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_server.addArgs(args);
+
+    const server_step = b.step("server", "Run the glyphwire server");
+    server_step.dependOn(&run_server.step);
 }
