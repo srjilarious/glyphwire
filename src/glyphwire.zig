@@ -1,4 +1,5 @@
 const core = @import("core.zig");
+pub const wire = @import("wire.zig");
 
 pub const Color = core.Color;
 pub const ImageHandle = core.ImageHandle;
