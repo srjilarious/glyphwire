@@ -22,8 +22,11 @@ const c = struct {
 /// writes to the grid itself over its own connection, the same way
 /// `glyphwire-demo` or `glyphwire-ls` do -- the shell just spawns it and
 /// waits, no stdout/stderr capture. Capturing output from a plain,
-/// non-glyphwire-aware program is separate, later work. ctrl+c/ctrl+v are
-/// ignored for now too.
+/// non-glyphwire-aware program is separate, later work. `cd` is a builtin
+/// (see `Prompt.doCd`) rather than spawned, since changing directory in a
+/// child process wouldn't affect this one; the prompt shows the current
+/// directory before `> ` so a `cd` actually taking effect is visible.
+/// ctrl+c/ctrl+v are ignored for now too.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const arena = init.arena.allocator();
@@ -35,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
         try spawnOwnServer(init.io, arena, init.environ_map);
 
     if (args.len < 2) {
-        return runPrompt(init.io, alloc, socket_path);
+        return runPrompt(init.io, alloc, socket_path, init.environ_map);
     }
 
     const child_argv = try arena.allocSentinel(?[*:0]const u8, args.len - 1, null);
@@ -100,12 +103,13 @@ fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
     return error.ServerNeverCameUp;
 }
 
-/// Prints `> `, echoes typed characters live, Enter commits the line and
-/// starts a new prompt row below it. See `Prompt` for the rest of the line
-/// editing (cursor movement, interior insert/delete). Runs forever (killed
-/// along with the rest of the process tree, same as any other long-lived
-/// child in this codebase).
-fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) !void {
+/// Prints the current directory followed by `> `, echoes typed characters
+/// live, Enter commits the line and starts a new prompt row below it. See
+/// `Prompt` for the rest of the line editing (cursor movement, interior
+/// insert/delete) and command dispatch. Runs forever (killed along with
+/// the rest of the process tree, same as any other long-lived child in
+/// this codebase).
+fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, environ_map: *const std.process.Environ.Map) !void {
     var client = glyphwire.Client.connect(io, alloc, socket_path) catch |err| {
         std.log.err("prompt: failed to connect: {t}", .{err});
         return;
@@ -118,7 +122,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) !voi
     };
     defer listener.deinit();
 
-    var prompt: Prompt = .{ .client = &client };
+    var prompt: Prompt = .{ .client = &client, .environ_map = environ_map };
     try prompt.showPrompt();
 
     while (true) {
@@ -177,6 +181,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) !voi
 /// read back over the wire.
 const Prompt = struct {
     client: *glyphwire.Client,
+    environ_map: *const std.process.Environ.Map,
     line_start_row: usize = 0,
     line_start_col: usize = 0,
     buffer: std.ArrayList(u8) = std.ArrayList(u8).empty,
@@ -184,8 +189,17 @@ const Prompt = struct {
     /// insert/delete acts and where the on-screen cursor should sit.
     cursor: usize = 0,
 
+    /// Writes the current directory followed by `> ` -- reading it fresh
+    /// each time (rather than caching it) is what makes a successful `cd`
+    /// visible on the very next prompt.
     fn showPrompt(self: *Prompt) !void {
-        try self.client.writeText("> ", null, null);
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_len = std.process.currentPath(self.client.io, &cwd_buf) catch 0;
+
+        var prefix_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&prefix_buf, "{s} > ", .{cwd_buf[0..cwd_len]}) catch "> ";
+
+        try self.client.writeText(prefix, null, null);
         const cur = try self.client.getCursor();
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
@@ -283,7 +297,13 @@ const Prompt = struct {
         var it = std.mem.tokenizeAny(u8, self.buffer.items, " \t");
         while (it.next()) |tok| try argv.append(alloc, tok);
 
-        if (argv.items.len > 0) try self.runCommand(argv.items);
+        if (argv.items.len > 0) {
+            if (std.mem.eql(u8, argv.items[0], "cd")) {
+                try self.doCd(argv.items[1..]);
+            } else {
+                try self.runCommand(argv.items);
+            }
+        }
 
         const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
         try self.client.setCursor(cur.row + 1, 0);
@@ -317,6 +337,39 @@ const Prompt = struct {
         _ = child.wait(self.client.io) catch |err| {
             std.log.err("runCommand: wait({s}) failed: {t}", .{ argv[0], err });
         };
+    }
+
+    /// `cd` is a shell builtin, not a spawned program -- unlike
+    /// `runCommand`, changing directory in a *child* process wouldn't
+    /// affect this one, so it has to happen here directly. No args goes
+    /// to `$HOME`, matching a real shell; a bad path or missing `$HOME`
+    /// is reported onto the grid the same way `runCommand` reports a
+    /// spawn failure, rather than propagated.
+    fn doCd(self: *Prompt, args: []const []const u8) !void {
+        const io = self.client.io;
+        const target = if (args.len > 0)
+            args[0]
+        else
+            self.environ_map.get("HOME") orelse {
+                try self.client.writeText("cd: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
+                return;
+            };
+
+        var dir = std.Io.Dir.cwd().openDir(io, target, .{}) catch |err| {
+            try self.reportCdError(target, err);
+            return;
+        };
+        defer dir.close(io);
+
+        std.process.setCurrentDir(io, dir) catch |err| {
+            try self.reportCdError(target, err);
+        };
+    }
+
+    fn reportCdError(self: *Prompt, target: []const u8, err: anyerror) !void {
+        var buf: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "cd: {s}: {t}", .{ target, err }) catch "cd: failed";
+        try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
     }
 };
 

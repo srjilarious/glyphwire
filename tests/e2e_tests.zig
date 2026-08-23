@@ -179,9 +179,17 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
 
-    // Waits for the shell's initial "> " to land before typing, rather
+    // The prompt is now prefixed with the shell's cwd ("{cwd} > "), which
+    // the spawned shell inherits from this test process -- `cwd_len`
+    // (already computed above for `shell_path`) gives the column
+    // assertions below without hardcoding the path this repo happens to
+    // be checked out at.
+    const arrow_col = cwd_len + 1;
+    const text_col = cwd_len + 3;
+
+    // Waits for the shell's initial prompt to land before typing, rather
     // than assuming a fixed startup delay is enough.
-    try waitForCell(&reporter, 0, 0, ">");
+    try waitForCell(&reporter, 0, arrow_col, ">");
 
     // "nosuchcmd" resolves to nothing in zig-out/bin or $PATH, so Enter
     // reports the failure on the row below rather than crashing the
@@ -192,15 +200,16 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
         try reporter.reportKey(k, false);
     }
 
-    // The failed-command report lands on row 1; the next prompt starts on
-    // row 2 once the shell resyncs its cursor after that.
-    try waitForCell(&reporter, 2, 0, ">");
+    // The failed-command report lands on row 1 (always at col 0 -- it's
+    // written before any prompt prefix); the next prompt starts on row 2
+    // once the shell resyncs its cursor after that.
+    try waitForCell(&reporter, 2, arrow_col, ">");
 
     // "z" after the backspace is an unambiguous completion marker: it can
-    // only land at col 4 (where "e" was) if the backspace actually ran
-    // first, so waiting for it also proves the backspace worked, not just
-    // that events arrived in order. (Waiting for "y" to land instead,
-    // tried first, is wrong: "y" appears in the sequence *before*
+    // only land where "e" was if the backspace actually ran first, so
+    // waiting for it also proves the backspace worked, not just that
+    // events arrived in order. (Waiting for "y" to land instead, tried
+    // first, is wrong: "y" appears in the sequence *before*
     // "e"/"backspace" are even sent, so it doesn't wait for the
     // asynchronous hop through the real shell process at all -- it was
     // passing on stale state.)
@@ -210,20 +219,20 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
         try reporter.reportKey(k, false);
     }
 
-    try waitForCell(&reporter, 2, 4, "z");
+    try waitForCell(&reporter, 2, text_col + 2, "z");
 
     var snapshot = try reporter.getCells();
     defer snapshot.deinit();
-    try testz.expectEqualStr(">", snapshot.cellAt(0, 0).grapheme);
-    try testz.expectEqualStr("n", snapshot.cellAt(0, 2).grapheme);
-    try testz.expectEqualStr("o", snapshot.cellAt(0, 3).grapheme);
+    try testz.expectEqualStr(">", snapshot.cellAt(0, arrow_col).grapheme);
+    try testz.expectEqualStr("n", snapshot.cellAt(0, text_col).grapheme);
+    try testz.expectEqualStr("o", snapshot.cellAt(0, text_col + 1).grapheme);
     try testz.expectEqualStr("n", snapshot.cellAt(1, 0).grapheme); // "nosuchcmd: command not found (...)"
     try testz.expectEqualStr("o", snapshot.cellAt(1, 1).grapheme);
     try testz.expectEqualStr(":", snapshot.cellAt(1, 9).grapheme);
-    try testz.expectEqualStr(">", snapshot.cellAt(2, 0).grapheme);
-    try testz.expectEqualStr("b", snapshot.cellAt(2, 2).grapheme);
-    try testz.expectEqualStr("y", snapshot.cellAt(2, 3).grapheme);
-    try testz.expectEqualStr("z", snapshot.cellAt(2, 4).grapheme); // "e" was backspaced away, "z" took its place
+    try testz.expectEqualStr(">", snapshot.cellAt(2, arrow_col).grapheme);
+    try testz.expectEqualStr("b", snapshot.cellAt(2, text_col).grapheme);
+    try testz.expectEqualStr("y", snapshot.cellAt(2, text_col + 1).grapheme);
+    try testz.expectEqualStr("z", snapshot.cellAt(2, text_col + 2).grapheme); // "e" was backspaced away, "z" took its place
 }
 
 /// Proves the real `glyphwire-ls` binary (see ls/main.zig, the first
