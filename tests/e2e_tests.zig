@@ -85,7 +85,7 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
             try testz.expectEqual(bg.g, 40);
             try testz.expectEqual(bg.b, 90);
         },
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
 
     // A bg-only color swatch (space glyph, red background) at row 6, col 0.
@@ -97,7 +97,7 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
             try testz.expectEqual(bg.g, 85);
             try testz.expectEqual(bg.b, 85);
         },
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
 }
 

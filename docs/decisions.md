@@ -210,18 +210,26 @@ surface.
   handle — `draw_icon(row, col, name)` looks the name up against
   `Context.icons` and draws it into exactly one cell (unlike `draw_image`,
   no span — an icon is scoped to a single cell for now).
+- **Scaled, not clipped — deliberately different from `draw_image`/
+  `draw_box`.** An icon always shows the *whole* source image, scaled
+  uniformly (never stretched non-uniformly) to fit the cell and centered
+  — `Background.icon` is its own tagged-union variant (just an
+  `ImageHandle`, no offset or per-cell pixel bookkeeping at all), not
+  `ImageBg` with a zero offset. The reasoning cuts the other way from
+  `draw_image`'s clip-not-stretch rule: an icon is a small complete
+  picture meant to read correctly regardless of exactly how its native
+  pixel size relates to the cell's, where a clip would just as often lop
+  off part of it. `draw_image`/`draw_box` keep clipping — those are
+  either arbitrary content (clipping is the more honest default) or tiles
+  already built to fit the cell exactly.
 - **v1 built:** a single flat, global catalog (`Context.registerIcon`/
   `iconHandle`), seeded at `glyphwire-host` startup from
   `core.default_icon_manifest` — 12 colorful icons from the KDE Oxygen
-  icon theme (LGPLv3, see `assets/icons/oxygen/README.txt`), covering
-  common categories (folder, file, audio, image, video, archive,
-  executable, drive, unknown). Sourced at Oxygen's native 32x32 but
-  downscaled to 12x12 to match `Context`'s default cell pixel size before
-  vendoring — `draw_icon` never stretches (same clip-not-stretch rule as
-  `draw_image`), so a 32x32 icon in a 12x12 cell would otherwise just show
-  its clipped top-left corner. Chosen over a flatter/more minimal icon set
-  specifically to show off what drawing real multi-tone artwork into a
-  cell looks like, not just a monochrome glyph.
+  icon theme (LGPLv3, see `assets/icons/oxygen/README.txt`), kept at
+  Oxygen's native 32x32 (scale-to-fit means there's no need to pre-shrink
+  them to any particular cell size). Chosen over a flatter/more minimal
+  icon set specifically to show off what drawing real multi-tone artwork
+  into a cell looks like, not just a monochrome glyph.
 - **Not built — still open:** theming (a context-local catalog overriding
   the global one, so swapping a theme changes what a name resolves to
   without any client needing to know or reload anything) and a way to

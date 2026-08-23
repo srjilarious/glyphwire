@@ -25,11 +25,20 @@ pub const ImageBg = struct {
     offset_y: u32,
 };
 
-/// A cell's background: a flat color, or a reference to a loaded
-/// image/icon tile. Mutually exclusive per decisions.md.
+/// A cell's background: a flat color, a reference to a loaded image tile
+/// (`draw_image`/`draw_box`, clipped rather than stretched -- see
+/// `ImageBg`), or a reference to a loaded icon (`draw_icon`, scaled to
+/// fit the cell aspect-correct -- see decisions.md's Icon section). Icons
+/// get their own variant rather than reusing `ImageBg` with a zero
+/// offset: unlike a clipped image, an icon always shows the *whole*
+/// source image scaled into the *whole* cell, so there's no offset (or
+/// image dimensions, or cell metrics) to track at all -- resolving a name
+/// to a handle and drawing it is the entire job. Mutually exclusive per
+/// decisions.md.
 pub const Background = union(enum) {
     color: Color,
     image: ImageBg,
+    icon: ImageHandle,
 };
 
 pub const ImageInfo = struct {
@@ -204,6 +213,34 @@ pub const Layer = struct {
         for (self.rowSlice(self.physicalRow(self.height - 1))) |*c| c.* = .{};
     }
 
+    /// Resolves an absolute row a caller named (an explicit
+    /// `set_property(cursor)`, or `drawImage`/`drawBox`/`drawIcon`'s
+    /// anchor row) against the current viewport, scrolling first if it's
+    /// at or past the bottom -- the same rule `putAtCursor` already
+    /// applies when text advances past the edge. Without this, a client
+    /// tracking "the next row" itself (rather than reading the cursor
+    /// back) drifts out of sync the moment a scroll happens: text written
+    /// through the cursor self-corrects (via `putAtCursor`), but an
+    /// explicit row handed to `draw_image`/`draw_icon` didn't -- it just
+    /// silently landed past `self.height` and got clamped to nothing,
+    /// which is exactly what made glyphwire-ls's icons quietly stop
+    /// appearing after enough rows had scrolled by.
+    ///
+    /// A single explicit row can only ever be at most one row past the
+    /// bottom in the intended use (mirroring one write's worth of
+    /// advance), but this loops rather than assuming that, so a
+    /// caller-supplied row far past the edge still resolves sanely
+    /// instead of under-scrolling. Capped at `capacity()` iterations so a
+    /// wildly out-of-range value (a hostile or buggy client) can't spin
+    /// the server scrolling an unbounded number of times.
+    fn resolveRow(self: *Layer, row: usize) usize {
+        if (row < self.height) return row;
+        const overshoot = @min(row - self.height + 1, self.capacity());
+        var i: usize = 0;
+        while (i < overshoot) : (i += 1) self.scrollOne();
+        return self.height - 1;
+    }
+
     /// Appends `text` as grapheme clusters starting at the layer's cursor,
     /// advancing and wrapping it at the layer edge. Naive UTF-8 codepoint
     /// splitting for now, not real grapheme segmentation (UAX #29) — see
@@ -223,10 +260,7 @@ pub const Layer = struct {
             self.cursor.col = 0;
             self.cursor.row += 1;
         }
-        if (self.cursor.row >= self.height) {
-            self.scrollOne();
-            self.cursor.row = self.height - 1;
-        }
+        self.cursor.row = self.resolveRow(self.cursor.row);
 
         var c = self.cell(self.cursor.row, self.cursor.col);
         c.setGrapheme(bytes);
@@ -300,12 +334,13 @@ pub const Layer = struct {
         cell_px_w: u32,
         cell_px_h: u32,
     ) void {
-        const row_end = @min(row + row_span, self.height);
+        const anchor_row = self.resolveRow(row);
+        const row_end = @min(anchor_row + row_span, self.height);
         const col_end = @min(col + col_span, self.width);
 
-        var r = row;
+        var r = anchor_row;
         while (r < row_end) : (r += 1) {
-            const offset_y = @as(u32, @intCast(r - row)) * cell_px_h;
+            const offset_y = @as(u32, @intCast(r - anchor_row)) * cell_px_h;
             if (offset_y >= img_h) continue;
 
             var c = col;
@@ -321,6 +356,21 @@ pub const Layer = struct {
 
     fn setCellImage(self: *Layer, row: usize, col: usize, handle: ImageHandle, offset_x: u32, offset_y: u32) void {
         self.cell(row, col).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y } };
+    }
+
+    /// Marks exactly one cell as backed by `handle`, resolved server-side
+    /// by name against the icon catalog (`Context.iconHandle`) --
+    /// dispatch.zig's job, not this method's. Unlike `drawImage`, there's
+    /// no offset/dimension tracking at all: an icon always shows the
+    /// whole source image scaled (aspect-correct) into the whole cell, so
+    /// the renderer just needs the handle -- see `Background`'s doc
+    /// comment for why icons get their own variant instead of reusing
+    /// `ImageBg`.
+    pub fn drawIcon(self: *Layer, handle: ImageHandle, row: usize, col: usize) void {
+        const resolved_row = self.resolveRow(row);
+        if (col >= self.width) return;
+        self.cell(resolved_row, col).style.bg = .{ .icon = handle };
+        self.revision += 1;
     }
 
     /// One piece of a `BoxTiles` set: an icon-catalog handle plus its
@@ -369,14 +419,15 @@ pub const Layer = struct {
     ) void {
         if (rows == 0 or cols == 0) return;
 
-        const row_end = @min(row + rows, self.height);
+        const anchor_row = self.resolveRow(row);
+        const row_end = @min(anchor_row + rows, self.height);
         const col_end = @min(col + cols, self.width);
-        const last_row = row + rows - 1;
+        const last_row = anchor_row + rows - 1;
         const last_col = col + cols - 1;
 
-        var r = row;
+        var r = anchor_row;
         while (r < row_end) : (r += 1) {
-            const is_top = r == row;
+            const is_top = r == anchor_row;
             const is_bottom = r == last_row;
 
             var c = col;
@@ -438,7 +489,7 @@ pub const Layer = struct {
 
     pub fn setProperty(self: *Layer, value: PropertyValue) void {
         switch (value) {
-            .cursor => |c| self.cursor = c,
+            .cursor => |c| self.cursor = .{ .row = self.resolveRow(c.row), .col = c.col },
             .revision => unreachable, // get-only; see PropertyName.revision
         }
     }

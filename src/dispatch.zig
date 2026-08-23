@@ -63,13 +63,14 @@ const CellMetricsResult = struct { cell_px_w: u32, cell_px_h: u32 };
 const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
 
 /// One flattened cell in a `get_cells` response, row-major starting at
-/// (0,0). Exactly one of `bg`/`bg_image` is non-null, per `core.Background`'s
-/// tagged union — see decisions.md's Cell section.
+/// (0,0). Exactly one of `bg`/`bg_image`/`bg_icon` is non-null, per
+/// `core.Background`'s tagged union — see decisions.md's Cell section.
 const CellJson = struct {
     g: []const u8,
     fg: ColorJson,
     bg: ?ColorJson,
     bg_image: ?ImageBgJson = null,
+    bg_icon: ?core.ImageHandle = null,
 };
 
 const CellsResult = struct {
@@ -432,17 +433,22 @@ pub const Dispatcher = struct {
                 const cell = layer.cell(row, col);
                 const bg: ?ColorJson = switch (cell.style.bg) {
                     .color => |bgc| .{ .r = bgc.r, .g = bgc.g, .b = bgc.b, .a = bgc.a },
-                    .image => null,
+                    .image, .icon => null,
                 };
                 const bg_image: ?ImageBgJson = switch (cell.style.bg) {
-                    .color => null,
                     .image => |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y },
+                    .color, .icon => null,
+                };
+                const bg_icon: ?core.ImageHandle = switch (cell.style.bg) {
+                    .icon => |icon_handle| icon_handle,
+                    .color, .image => null,
                 };
                 cells[row * layer.width + col] = .{
                     .g = cell.grapheme(),
                     .fg = .{ .r = cell.style.fg.r, .g = cell.style.fg.g, .b = cell.style.fg.b, .a = cell.style.fg.a },
                     .bg = bg,
                     .bg_image = bg_image,
+                    .bg_icon = bg_icon,
                 };
             }
         }
@@ -611,8 +617,9 @@ pub const Dispatcher = struct {
     /// (`Context.iconHandle`, populated from `default_icon_manifest` by
     /// `glyphwire-host`) and draws it into exactly one cell -- an icon is
     /// scoped to a single cell for now, per decisions.md's Icon section.
-    /// Reuses `Layer.drawImage` with a 1x1 span rather than a separate
-    /// core mechanism, same as `handleDrawImage`.
+    /// `Layer.drawIcon` just needs the handle -- no dimensions/cell
+    /// metrics to look up, unlike `handleDrawImage`, since an icon always
+    /// scales the whole source image into the whole cell.
     fn handleDrawIcon(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
         const parsed = try std.json.parseFromValue(DrawIconParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
@@ -621,18 +628,7 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         const icon_handle = self.ctx.iconHandle(p.name) orelse return DispatchError.UnknownIcon;
-        const info = self.ctx.imageInfo(icon_handle) orelse return DispatchError.UnknownImage;
-        self.ctx.root.drawImage(
-            icon_handle,
-            p.row,
-            p.col,
-            1,
-            1,
-            info.width,
-            info.height,
-            self.ctx.cell_px_w,
-            self.ctx.cell_px_h,
-        );
+        self.ctx.root.drawIcon(icon_handle, p.row, p.col);
     }
 
     /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog

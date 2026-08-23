@@ -40,7 +40,7 @@ pub fn writeTextAppliesStyleTest(io: std.Io, alloc: std.mem.Allocator) !void {
             try testz.expectEqual(bg.g, 2);
             try testz.expectEqual(bg.b, 3);
         },
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
 }
 
@@ -77,6 +77,46 @@ pub fn getSetCursorPropertyTest(io: std.Io, alloc: std.mem.Allocator) !void {
     const after = layer.getProperty(.cursor);
     try testz.expectEqual(after.cursor.row, 3);
     try testz.expectEqual(after.cursor.col, 7);
+}
+
+/// The regression: an explicit set_property(cursor) naming a row at or
+/// past the bottom used to just take that row literally (no scrolling),
+/// unlike write_text's cursor advancing past the edge (which scrolls via
+/// putAtCursor). That mismatch is what let glyphwire-ls's icons silently
+/// stop landing once enough rows had scrolled -- see Layer.resolveRow.
+pub fn setCursorPastBottomScrollsLikeWritingPastItWouldTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 3, 10);
+    defer layer.deinit();
+
+    try layer.writeText("a", glyphwire.default_style);
+    try testz.expectEqual(layer.cursor.row, 0);
+
+    // Row 3 is one past the last valid row (0..2) -- should scroll once
+    // and land on the new bottom row (2), the same place writing a 4th
+    // line's worth of text would land.
+    layer.setProperty(.{ .cursor = .{ .row = 3, .col = 0 } });
+
+    try testz.expectEqual(layer.cursor.row, 2);
+    try testz.expectEqual(layer.cursor.col, 0);
+    // The scroll actually happened (not just clamped in place): row 0's
+    // "a" is now history, not the live top row.
+    try testz.expectEqual(layer.history_len, 1);
+}
+
+/// A row far past the bottom still resolves sanely (scrolls until it
+/// fits, landing on the last row) rather than hanging -- the loop in
+/// resolveRow is capped at `capacity()` iterations specifically so this
+/// can't spin forever for a hostile/buggy client-supplied row.
+pub fn setCursorFarPastBottomStillTerminatesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 3, 5);
+    defer layer.deinit();
+
+    layer.setProperty(.{ .cursor = .{ .row = 1_000_000, .col = 1 } });
+
+    try testz.expectEqual(layer.cursor.row, 2);
+    try testz.expectEqual(layer.cursor.col, 1);
 }
 
 pub fn contextCreatesRootLayerAtSizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -313,7 +353,7 @@ pub fn layerDrawImageMarksCoveredCellsWithOffsetsTest(io: std.Io, alloc: std.mem
     // Untouched cells outside the span keep the default color background.
     switch (layer.cell(0, 0).style.bg) {
         .color => {},
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
 }
 
@@ -334,12 +374,58 @@ pub fn layerDrawImageLeavesCellsBeyondImageBoundsUntouchedTest(io: std.Io, alloc
     try testz.expectEqual(layer.cell(0, 2).style.bg.image.handle, 1);
     switch (layer.cell(0, 3).style.bg) {
         .color => |c| try testz.expectEqual(c.r, 9),
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
     switch (layer.cell(1, 2).style.bg) {
         .color => {},
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
+}
+
+pub fn layerDrawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    layer.drawIcon(7, 1, 2);
+
+    try testz.expectEqual(layer.cell(1, 2).style.bg.icon, 7);
+    switch (layer.cell(1, 3).style.bg) {
+        .color => {},
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+}
+
+/// The same regression as setCursorPastBottomScrollsLikeWritingPastItWouldTest,
+/// but for draw_icon's own anchor row directly (not via set_property) --
+/// glyphwire-ls calls drawIcon with an explicit row before it ever calls
+/// setCursor for that entry, so drawIcon itself has to resolve a
+/// past-the-bottom row the same way, not just rely on setCursor doing it
+/// afterward.
+pub fn layerDrawIconPastBottomScrollsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 3, 10);
+    defer layer.deinit();
+
+    layer.drawIcon(1, 2, 0); // valid, the last row (height=3, rows 0..2)
+    layer.drawIcon(2, 3, 0); // one past the bottom -- scrolls once, lands on row 2
+
+    try testz.expectEqual(layer.history_len, 1);
+    // The scroll shifted the first icon up into row 1 rather than losing
+    // it, and the second landed on the freshly-scrolled-to row 2.
+    try testz.expectEqual(layer.cell(1, 0).style.bg.icon, 1);
+    try testz.expectEqual(layer.cell(2, 0).style.bg.icon, 2);
+}
+
+pub fn layerDrawIconColPastEdgeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+    const revision_before = layer.revision;
+
+    layer.drawIcon(1, 0, 10);
+
+    try testz.expectEqual(layer.revision, revision_before);
 }
 
 pub fn contextRegisterIconThenLookUpByNameTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -418,7 +504,7 @@ pub fn layerDrawBoxPlacesEachPieceByRoleTest(io: std.Io, alloc: std.mem.Allocato
     // Outside the box entirely: untouched.
     switch (layer.cell(0, 0).style.bg) {
         .color => {},
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
 }
 
@@ -447,7 +533,7 @@ pub fn layerDrawBoxZeroSizeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqual(layer.revision, revision_before);
     switch (layer.cell(0, 0).style.bg) {
         .color => {},
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
 }
 
@@ -477,7 +563,7 @@ pub fn layerClearWholeLayerViaFullSpanTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
     switch (layer.cell(2, 2).style.bg) {
         .color => {},
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
 }
 

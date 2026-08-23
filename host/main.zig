@@ -25,8 +25,8 @@ const font_size: f32 = 18.0;
 // window (and thus the framebuffer the font gets packed for) has to be
 // created before a font atlas exists to measure -- see the comment on
 // AppRunner.init below.
-const cell_w = 12;
-const cell_h = 12;
+const cell_w = 10;
+const cell_h = 16;
 const cursor_width = 2;
 
 // Typematic repeat timing for arrow keys -- how long a key must be held
@@ -144,7 +144,10 @@ pub const App = struct {
             break :blk managed;
         };
 
-        const live = managed.get() orelse return null;
+        const live = managed.get() orelse {
+            std.log.warn("glyphwire-host: image handle {d} has no live generation", .{handle});
+            return null;
+        };
         return &live.val;
     }
 
@@ -178,6 +181,32 @@ pub const App = struct {
             tex,
             pixzig.RectF.fromPosSize(pos.x, pos.y, avail_w, avail_h),
             pixzig.RectF{ .l = uv_l, .t = uv_t, .r = uv_r, .b = uv_b },
+        );
+    }
+
+    /// Draws an icon into its cell: the *whole* source image, scaled
+    /// uniformly (never stretched non-uniformly) to fit within the cell
+    /// and centered, per decisions.md's Icon section -- deliberately
+    /// different from `drawImageCell`'s clip-not-stretch rule, since an
+    /// icon is meant to always read as a complete little picture
+    /// regardless of exactly how its own pixel size relates to the cell's.
+    fn drawIconCell(self: *App, eng: *AppRunner.Engine, handle: glyphwire.ImageHandle, pos: pixzig.Vec2I) void {
+        const entry = self.server.ctx.images.get(handle) orelse return;
+        const tex = self.textureForImage(eng, handle) orelse return;
+        if (entry.width == 0 or entry.height == 0) return;
+
+        const img_w_f: f32 = @floatFromInt(entry.width);
+        const img_h_f: f32 = @floatFromInt(entry.height);
+        const scale = @min(@as(f32, cell_w) / img_w_f, @as(f32, cell_h) / img_h_f);
+        const dest_w = img_w_f * scale;
+        const dest_h = img_h_f * scale;
+        const dest_x = @as(f32, @floatFromInt(pos.x)) + (@as(f32, cell_w) - dest_w) / 2;
+        const dest_y = @as(f32, @floatFromInt(pos.y)) + (@as(f32, cell_h) - dest_h) / 2;
+
+        eng.renderer.draw(
+            tex,
+            pixzig.RectF{ .l = dest_x, .t = dest_y, .r = dest_x + dest_w, .b = dest_y + dest_h },
+            pixzig.RectF{ .l = 0, .t = 0, .r = 1, .b = 1 },
         );
     }
 
@@ -327,6 +356,7 @@ pub const App = struct {
                         }
                     },
                     .image => |img| self.drawImageCell(eng, img, pos),
+                    .icon => |handle| self.drawIconCell(eng, handle, pos),
                 }
 
                 const g = c.grapheme();

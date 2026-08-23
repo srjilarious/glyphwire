@@ -353,6 +353,60 @@ and logs-and-continues if so, only propagating (severing the connection)
 for a failed *request*, where there's no error-response mechanism yet to
 answer it with instead — see Milestone 0, still open.
 
+## Fixed since Phase 3.8: icons silently stopped appearing after enough rows
+
+**Symptom:** running `glyphwire-ls` a few times in the same session, icons
+would render for a while and then just stop showing up on later rows,
+with no error anywhere — text kept appearing correctly throughout.
+
+**Root cause:** `glyphwire-ls`'s `writeGrid` tracked its own local `row`
+counter across the whole listing, incrementing it by 1 per entry. Once
+enough entries had been written (cumulatively, across possibly several
+`ls` runs) to reach the bottom of the grid, the *server* would scroll the
+viewport the next time `write_text` advanced the cursor past the edge
+(`putAtCursor` already handled this) — but `draw_icon`'s explicit `row`
+had no equivalent handling: `Layer.drawImage`'s old span-clamping just
+silently drew nothing once `row >= height`. `ls`'s local counter had no
+way to know the scroll had happened, so every `draw_icon` call after that
+point named a row that no longer meant anything, while the corresponding
+`write_text` (cursor-based, self-correcting) kept landing fine.
+
+**Fix, two parts:**
+- `Layer.resolveRow(row)` — scrolls the viewport (capped at `capacity()`
+  iterations, so a wild client-supplied row can't spin the server
+  forever) until `row` refers to an in-bounds row, same as `putAtCursor`
+  already did for the cursor advancing past the edge. Wired into
+  `set_property(cursor)` and into `drawImage`/`drawBox`/`drawIcon`'s own
+  anchor row, so *every* absolute-row API behaves consistently whether it
+  came from typing past the bottom or a client naming a row directly.
+- `glyphwire-ls`'s `writeGrid` no longer tracks a local row counter at
+  all — it calls `get_property(cursor)` fresh before each entry and uses
+  that. One extra request per entry, but it means the row `draw_icon` and
+  `write_text` both use for an entry is always whatever the server
+  actually just resolved, never a locally-computed guess that can drift.
+
+**Also landed while fixing this:** `Background` gained a third variant,
+`icon: ImageHandle`, instead of icons reusing `ImageBg` (handle + pixel
+offset). An icon always shows the whole source image scaled into the
+whole cell — no offset or per-cell pixel math needed at all — so
+`Layer.drawIcon(handle, row, col)` is now just "resolve the row, stamp
+the handle," simpler than routing through `drawImage`'s clip-oriented
+per-cell offset logic. `glyphwire-host`'s renderer picks this variant
+apart with its own draw path (`drawIconCell`): aspect-correct scale to
+fit the cell, centered, rather than `drawImageCell`'s clip-not-stretch —
+see decisions.md's Icon section for why the two draw operations
+deliberately disagree on this. The default icon set went back to its
+native 32x32 (no longer needs pre-shrinking to a specific cell size now
+that it scales) — see `assets/icons/oxygen/README.txt`.
+
+**Known follow-up, not fixed here:** the bundled `"box"` tile set
+(`assets/icons/box/`) is still 12x12 and still clip-based (`draw_image`'s
+rule, unchanged) — `glyphwire-host`'s cell size has since been retuned
+away from 12x12 (see `host/main.zig`'s `cell_w`/`cell_h`), so box borders
+may now clip slightly rather than filling the cell exactly. Not reported
+as broken yet; regenerate the tiles at the current cell size (or give
+`draw_box` its own scale-to-fit option) if it turns out to matter.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

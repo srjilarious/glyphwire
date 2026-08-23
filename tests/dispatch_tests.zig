@@ -389,7 +389,7 @@ pub fn drawImageMarksRootLayerCellsTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(ctx.root.cell(0, 1).style.bg.image.offset_x, 12);
     switch (ctx.root.cell(1, 0).style.bg) {
         .color => {},
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
     }
 }
 
@@ -410,13 +410,50 @@ pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !vo
     const result = try d.handle(alloc, draw_message);
     try testz.expectTrue(result.response == null);
 
-    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.image.handle, 1);
-    // A 32x32px icon at 12px cells only reaches one cell either way, but
-    // the span passed to Layer.drawImage is what actually guarantees this
-    // -- confirm the neighboring cell wasn't touched.
+    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.icon, 1);
+    // Confirm the neighboring cell wasn't touched -- draw_icon always
+    // scopes to exactly one cell.
     switch (ctx.root.cell(2, 4).style.bg) {
         .color => {},
-        .image => return error.TestUnexpectedResult,
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+}
+
+/// Reproduces the actual glyphwire-ls regression end to end at the
+/// dispatch level: draw_icon(row, ...) then set_property(cursor, row,
+/// ...) then write_text, repeated for enough rows to push past the
+/// bottom of a small grid. Before Layer.resolveRow, draw_icon's raw row
+/// silently no-op'd once it exceeded height while write_text kept
+/// self-correcting via the cursor -- so text kept appearing but icons
+/// stopped. This drives it exactly the way glyphwire-ls does (a fresh
+/// get_property(cursor) read before each row, mirroring writeGrid) and
+/// asserts every row still ends up icon-backed.
+pub fn drawIconKeepsLandingAcrossAScrollBoundaryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 20);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("folder", 1);
+
+    var name_buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < 6) : (i += 1) { // 3-row grid -- guarantees at least one scroll
+        const row = ctx.root.cursor.row;
+
+        const draw_msg = try std.fmt.bufPrint(&name_buf, "{{\"jsonrpc\":\"2.0\",\"method\":\"draw_icon\",\"params\":{{\"row\":{d},\"col\":0,\"name\":\"folder\"}}}}", .{row});
+        try testz.expectTrue((try d.handle(alloc, draw_msg)).response == null);
+
+        // Every entry lands on the *current* cursor row, same as
+        // glyphwire-ls's writeGrid -- confirms the icon actually marked
+        // whatever row write_text is about to use, not a stale one.
+        try testz.expectEqual(ctx.root.cell(row, 0).style.bg.icon, 1);
+
+        const set_msg = try std.fmt.bufPrint(&name_buf, "{{\"jsonrpc\":\"2.0\",\"method\":\"set_property\",\"params\":{{\"property\":\"cursor\",\"row\":{d},\"col\":0}}}}", .{row + 1});
+        try testz.expectTrue((try d.handle(alloc, set_msg)).response == null);
     }
 }
 
@@ -474,7 +511,7 @@ pub fn drawBoxPlacesAllNinePiecesTest(io: std.Io, alloc: std.mem.Allocator) !voi
         while (c <= 3) : (c += 1) {
             switch (ctx.root.cell(r, c).style.bg) {
                 .image => {},
-                .color => return error.TestUnexpectedResult,
+                .color, .icon => return error.TestUnexpectedResult,
             }
         }
     }

@@ -340,6 +340,7 @@ const CellJson = struct {
     fg: ColorJson,
     bg: ?ColorJson,
     bg_image: ?ImageBgJson = null,
+    bg_icon: ?core.ImageHandle = null,
 };
 
 const CellsResultJson = struct {
@@ -357,13 +358,14 @@ const InputStateResultJson = struct {
 };
 
 /// A cell in renderer-friendly form: `core.Color`/`core.ImageBg` fields
-/// instead of raw JSON. Exactly one of `bg`/`bg_image` is non-null,
-/// mirroring `core.Background`'s tagged union.
+/// instead of raw JSON. Exactly one of `bg`/`bg_image`/`bg_icon` is
+/// non-null, mirroring `core.Background`'s tagged union.
 pub const RenderCell = struct {
     grapheme: []const u8,
     fg: core.Color,
     bg: ?core.Color,
     bg_image: ?core.ImageBg = null,
+    bg_icon: ?core.ImageHandle = null,
 };
 
 /// Owns the parsed JSON backing a `getCells` response; `deinit` frees it.
@@ -395,6 +397,7 @@ pub const CellsSnapshot = struct {
             .fg = .{ .r = c.fg.r, .g = c.fg.g, .b = c.fg.b, .a = c.fg.a },
             .bg = if (c.bg) |bg| .{ .r = bg.r, .g = bg.g, .b = bg.b, .a = bg.a } else null,
             .bg_image = if (c.bg_image) |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y } else null,
+            .bg_icon = c.bg_icon,
         };
     }
 };

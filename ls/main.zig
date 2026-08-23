@@ -205,12 +205,23 @@ const icon_col_width = 2;
 /// glyphwire-shell resyncs from `get_property(cursor)` after this process
 /// exits (see `Prompt.submitLine`), so there's no fixed row count it needs
 /// to guess. Each row gets a leading icon (`iconForEntry`) before the name.
+///
+/// Reads the cursor back before *each* entry rather than tracking a local
+/// row counter across the whole loop: the grid can scroll mid-listing
+/// (once enough entries have pushed the cursor to the bottom), and only
+/// the server knows the post-scroll row. A local counter drifts out of
+/// sync the moment that happens -- `write_text`'s cursor-based
+/// positioning self-corrects for it, but `draw_icon`'s explicit row
+/// doesn't, so a stale counter silently pointed icons at rows already
+/// scrolled out of the way, and every icon after that just stopped
+/// appearing. Costs one extra request per entry; fine for what a
+/// directory listing needs over a local socket.
 fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry) !void {
-    const start = try client.getCursor();
-    var row = start.row;
-
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
     for (entries) |entry| {
+        const cur = try client.getCursor();
+        const row = cur.row;
+
         try client.drawIcon(row, 0, iconForEntry(entry));
         try client.setCursor(row, icon_col_width);
         switch (entry.kind) {
@@ -227,10 +238,12 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry) !void {
             },
             else => try client.writeText(entry.name, file_color, null),
         }
-        row += 1;
+        // set_property(cursor) scrolls-and-clamps a row at or past the
+        // bottom (Layer.resolveRow), so it's always safe to just name the
+        // next row directly here -- the *next* iteration's getCursor()
+        // reads back wherever that actually landed.
+        try client.setCursor(row + 1, 0);
     }
-
-    try client.setCursor(row, 0);
 }
 
 fn writePlain(io: std.Io, entries: []const FileEntry) !void {
