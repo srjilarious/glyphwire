@@ -11,6 +11,10 @@
         .pixzig = .{
             .path = "../pixzig",
         },
+        .zargunaught = .{
+            .url = "https://github.com/srjilarious/zargunaught/archive/refs/tags/v1.2.1.tar.gz",
+            .hash = "zargunaught-1.2.1-aoeNIzTpAAArdAo7Hjp1FfdI6BYKPlZMRL2YRP6kc2UN",
+        },
     },
     .paths = .{
         "build.zig",
@@ -22,6 +26,8 @@
         "client",
         "demo",
         "host",
+        "ls",
+        "view",
         "assets",
     },
 }

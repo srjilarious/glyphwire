@@ -11,6 +11,8 @@ pub fn build(b: *std.Build) void {
     const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });
     const pixzig_mod = pixzig_dep.module("pixzig");
 
+    const zargunaught_mod = b.dependency("zargunaught", .{}).module("zargunaught");
+
     const tests_exe = b.addExecutable(.{
         .name = "tests",
         .root_module = b.createModule(.{
@@ -134,6 +136,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     ls_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    ls_exe.root_module.addImport("zargunaught", zargunaught_mod);
+    ls_exe.root_module.link_libc = true;
     b.installArtifact(ls_exe);
 
     const run_ls = b.addRunArtifact(ls_exe);

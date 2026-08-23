@@ -107,6 +107,16 @@ fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
     };
 }
 
+/// Accepts connections forever instead of a fixed, easy-to-miscount
+/// number of `acceptOne` calls -- see `shellExpandsTildeInCommandArgsTest`
+/// for why getting that count wrong is a real, silent-hang-shaped bug.
+/// Not joined by its caller: it only returns once the listener closes.
+fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
+    server.serveForever(alloc) catch |err| {
+        std.log.err("test server stopped: {t}", .{err});
+    };
+}
+
 /// Drives the real glyphwire-shell binary's interactive prompt (its
 /// no-args mode) through a full real process: connects it to a
 /// library-bound Server, reports simulated key presses over a second
@@ -235,6 +245,157 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqualStr("z", snapshot.cellAt(2, text_col + 2).grapheme); // "e" was backspaced away, "z" took its place
 }
 
+/// Reports key presses that reproduce typing `text` at the shell prompt --
+/// the reverse of shell/main.zig's `charFromKeyName` table. Only covers
+/// the characters this file's tests actually type (lowercase letters,
+/// digits, `-`, `.`, `/`, `~`), not a general typing simulator.
+fn typeText(reporter: *glyphwire.Client, text: []const u8) !void {
+    for (text) |ch| {
+        var one_char_buf: [1]u8 = .{ch};
+        var shift = false;
+        const key: []const u8 = switch (ch) {
+            'a'...'z' => &one_char_buf,
+            ' ' => "space",
+            '0' => "zero",
+            '1' => "one",
+            '2' => "two",
+            '3' => "three",
+            '4' => "four",
+            '5' => "five",
+            '6' => "six",
+            '7' => "seven",
+            '8' => "eight",
+            '9' => "nine",
+            '-' => "minus",
+            '.' => "period",
+            '/' => "slash",
+            '~' => blk: {
+                shift = true;
+                break :blk "grave_accent";
+            },
+            else => unreachable, // extend the table above if a test needs a new character
+        };
+        if (shift) try reporter.reportKey("left_shift", true);
+        try reporter.reportKey(key, true);
+        try reporter.reportKey(key, false);
+        if (shift) try reporter.reportKey("left_shift", false);
+    }
+}
+
+/// Proves `Prompt.runCommand` actually expands a leading `~/` in a
+/// command's arguments before spawning, the same way `doCd` already did
+/// for `cd`'s target -- see shell/main.zig. Types `ls ~/<marker dir>` at
+/// the real interactive prompt (`glyphwire-ls`, itself a real spawned
+/// process, writes the result onto the grid) and confirms the marker
+/// file inside a real directory under `$HOME` shows up -- proving `~/`
+/// resolved to the actual home directory, not a literal `~` that
+/// `openDir` would just fail to find.
+pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const home_z = std.c.getenv("HOME") orelse return error.HomeNotSetInTestEnvironment;
+    const home = std.mem.sliceTo(home_z, 0);
+    const dir_name = try std.fmt.allocPrint(alloc, "glyphwire-tilde-test-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(dir_name);
+    const dir_path = try std.fs.path.join(alloc, &.{ home, dir_name });
+    defer alloc.free(dir_path);
+
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io, dir_path) catch {};
+    var marker_dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{});
+    defer marker_dir.close(io);
+    (try marker_dir.createFile(io, "marker.txt", .{})).close(io);
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-tilde-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // serveForever (not a fixed count of acceptOne threads, the pattern
+    // the other e2e tests in this file use): this test's own reporter,
+    // the shell's Client + InputListener, *and* glyphwire-ls's own Client
+    // once the typed command spawns it all need servicing, and getting a
+    // fixed accept-thread count wrong is exactly the kind of bug that
+    // doesn't fail loudly -- it hangs. An earlier version of this test
+    // hand-counted 3, then 4, connections and was wrong both times: ls's
+    // connection would succeed at the socket layer (kernel-queued, within
+    // the listen backlog) but sit unaccepted forever, so its first
+    // request (`get_property` cursor, in `writeGrid`) blocked forever
+    // waiting for a response that would never come -- which hung `ls`,
+    // which hung `Prompt.runCommand`'s `child.wait()`, which hung the
+    // shell. This test's own `waitForCell` still timed out on its own,
+    // but `shell_child.kill()` afterward can't un-hang a *grandchild* it
+    // doesn't own, so the shell was left orphaned and permanently
+    // blocked. `serveForever` (same as `glyphwire-host` itself runs, see
+    // host/main.zig's `serveForeverThread`) accepts connections as they
+    // arrive instead of needing to know the count in advance. Not
+    // joined: it only returns once the listener closes (`srv.deinit`),
+    // and nothing needs its result before then.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // Explicit environ_map replaces the child's whole environment (unlike
+    // a plain inherited spawn), so HOME has to be threaded through by
+    // hand for the shell's own expandTilde to resolve against the same
+    // $HOME this test just created the marker directory under.
+    try shell_env.put("HOME", home);
+    // Same dev-mode PATH convenience shell/main.zig's own
+    // prependZigOutBinToPath gives itself, so plain "ls" (typed below)
+    // resolves to the real glyphwire-ls binary this test just built.
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    var cmd_buf: [128]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "ls ~/{s}", .{dir_name});
+    try typeText(&reporter, cmd);
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // If ~/ expanded correctly, glyphwire-ls lists the marker directory
+    // and "marker.txt" lands on row 1 starting at ls/main.zig's
+    // icon_col_width (icon in col 0, name starting at col 2). If it
+    // didn't (a literal "~" directory that doesn't exist), the listing is
+    // empty and the *next prompt* shows up on row 1 instead -- so waiting
+    // specifically for "marker.txt"'s first letter here fails (times out)
+    // rather than false-passing on an empty listing.
+    try waitForCell(&reporter, 1, 2, "m");
+
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+    for ("marker.txt", 0..) |expected_ch, i| {
+        var expected_buf: [1]u8 = .{expected_ch};
+        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, 2 + i).grapheme);
+    }
+}
+
 /// Proves the real `glyphwire-ls` binary (see ls/main.zig, the first
 /// "ported real program" client, built on lsz's directory-scanning logic)
 /// connects, lists a directory, and writes the entries onto the grid --
@@ -308,10 +469,16 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
 
 /// Polls get_cells (briefly) until `cell(row,col)`'s grapheme matches, so
 /// this test doesn't race the shell's own asynchronous processing with a
-/// guessed fixed delay.
+/// guessed fixed delay. 1000 attempts (~10s worst case) rather than a
+/// tighter bound: `shellExpandsTildeInCommandArgsTest` waits on a second
+/// spawned process (glyphwire-ls) on top of the shell itself, and under
+/// load a smaller budget wasn't consistently enough for that extra
+/// process-spawn hop -- intermittent, not a logic bug, but a real one (it
+/// read as a hang until bisected with a standalone repro outside testz's
+/// output capturing).
 fn waitForCell(client: *glyphwire.Client, row: usize, col: usize, expected: []const u8) !void {
     var attempts: usize = 0;
-    while (attempts < 200) : (attempts += 1) {
+    while (attempts < 1000) : (attempts += 1) {
         var snapshot = try client.getCells();
         defer snapshot.deinit();
         if (std.mem.eql(u8, snapshot.cellAt(row, col).grapheme, expected)) return;

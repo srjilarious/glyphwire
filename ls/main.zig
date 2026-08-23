@@ -1,5 +1,6 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const zargs = @import("zargunaught");
 
 /// glyphwire-ls: a directory listing built on `lsz`'s core scanning logic
 /// (see /home/jeffdw/code/lsz/src/main.zig) but re-targeted to draw over a
@@ -12,11 +13,14 @@ const glyphwire = @import("glyphwire");
 /// decisions.md's Discovery & Connection.
 ///
 /// Deliberately narrower than lsz: no terminal-width grid packing (doesn't
-/// mean anything over a fixed-size cell grid), no long-listing
-/// permissions/owner/group columns -- directory/symlink/file coloring
-/// plus a trailing `/` or ` -> target` covers the same information lsz's
-/// coloring conveys. lsz itself stays the terminal tool; this is a
-/// demonstration client, not a replacement.
+/// mean anything over a fixed-size cell grid), no full permission-bit/
+/// owner/group columns (would need the same raw `fstatat`/`getpwuid`/
+/// `getgrgid` C bindings lsz uses -- `-l` here sticks to what
+/// `std.Io.Dir.statFile`'s cross-platform `Stat` already gives: size and
+/// modified time) -- directory/symlink/file coloring plus a trailing `/`
+/// or ` -> target` covers the rest of what lsz's coloring conveys. lsz
+/// itself stays the terminal tool; this is a demonstration client, not a
+/// replacement.
 ///
 /// Each entry does get a per-type icon (`draw_icon`, see `iconForEntry`):
 /// a real Nerd-Font-style per-extension glyph set was ruled out for lsz's
@@ -30,30 +34,54 @@ const glyphwire = @import("glyphwire");
 /// bare `glyphwire-server` with nothing registered, `draw_icon` would
 /// error server-side and drop the connection -- not handled specially
 /// here since glyphwire-ls is meant to run under glyphwire-host anyway.
+///
+/// Arg parsing is zargunaught, the same library and pattern lsz itself
+/// uses (`zargs.ArgParser` + `hasOption`/`positional`), ported over
+/// rather than hand-rolling another arg loop.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    var show_hidden = false;
-    var dir_path: []const u8 = ".";
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--hidden")) {
-            show_hidden = true;
-        } else {
-            dir_path = arg;
-        }
+    var parser = try zargs.ArgParser.init(alloc, .{
+        .name = "ls",
+        .description = "Lists the contents of a directory, drawn over a glyphwire connection.",
+        .opts = &.{
+            .{ .longName = "hidden", .shortName = "a", .description = "Show hidden files and directories", .maxNumParams = 0 },
+            .{ .longName = "long", .shortName = "l", .description = "Long listing: adds size and modified time", .maxNumParams = 0 },
+            .{ .longName = "help", .description = "Print help" },
+        },
+    });
+    defer parser.deinit();
+
+    var args = parser.parse(init.minimal.args) catch |err| {
+        std.debug.print("glyphwire-ls: error parsing args: {t}\n", .{err});
+        return;
+    };
+    defer args.deinit();
+
+    if (args.hasOption("help")) {
+        var stdout = try zargs.print.Printer.stdout(alloc);
+        defer stdout.deinit();
+        var help = try zargs.help.HelpFormatter.init(&parser, stdout, zargs.help.DefaultTheme, alloc);
+        defer help.deinit();
+        help.printHelpText() catch |err| std.debug.print("glyphwire-ls: error printing help: {t}\n", .{err});
+        try stdout.flush();
+        return;
     }
 
-    const entries = try listDir(io, alloc, dir_path, show_hidden);
+    const show_hidden = args.hasOption("hidden");
+    const long_list = args.hasOption("long");
+    const dir_path: []const u8 = if (args.positional.items.len > 0) args.positional.items[0] else ".";
+
+    const entries = try listDir(io, alloc, dir_path, show_hidden, long_list);
     defer freeEntries(alloc, entries);
 
     if (glyphwire.Client.connectFromEnv(io, alloc, init.environ_map)) |connected| {
         var client = connected;
         defer client.deinit();
-        try writeGrid(&client, entries);
+        try writeGrid(&client, entries, long_list);
     } else |_| {
-        try writePlain(io, entries);
+        try writePlain(io, entries, long_list);
     }
 }
 
@@ -63,9 +91,11 @@ const FileEntry = struct {
     name: []const u8,
     kind: EntryKind,
     link_target: ?[]const u8, // non-null for symlinks; caller owns memory
+    size: u64 = 0,
+    mtime_sec: i64 = 0,
 };
 
-fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidden: bool) ![]FileEntry {
+fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidden: bool, long_list: bool) ![]FileEntry {
     var entries: std.ArrayList(FileEntry) = .empty;
     errdefer freeEntries(alloc, entries.items);
 
@@ -95,8 +125,25 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
         }
         errdefer if (link_target) |t| alloc.free(t);
 
+        // Only stat when -l actually needs it -- a plain listing has no
+        // use for size/mtime, and stat is a syscall per entry.
+        var size: u64 = 0;
+        var mtime_sec: i64 = 0;
+        if (long_list) {
+            if (dir.statFile(io, entry.name, .{ .follow_symlinks = false })) |st| {
+                size = st.size;
+                mtime_sec = st.mtime.toSeconds();
+            } else |_| {}
+        }
+
         const name_copy = try alloc.dupe(u8, entry.name);
-        try entries.append(alloc, .{ .name = name_copy, .kind = kind, .link_target = link_target });
+        try entries.append(alloc, .{
+            .name = name_copy,
+            .kind = kind,
+            .link_target = link_target,
+            .size = size,
+            .mtime_sec = mtime_sec,
+        });
     }
 
     std.mem.sort(FileEntry, entries.items, {}, struct {
@@ -125,6 +172,7 @@ fn rgb(r: u8, g: u8, b: u8) glyphwire.Color {
 const dir_color = rgb(98, 114, 164);
 const symlink_color = rgb(139, 233, 253);
 const file_color = rgb(220, 220, 220);
+const detail_color = rgb(120, 120, 120);
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 
@@ -194,6 +242,38 @@ fn iconForExtension(name: []const u8) []const u8 {
     return "file";
 }
 
+// ── Long-listing formatting ─────────────────────────────────────────────────
+
+const KBytes: u64 = 1024;
+const MBytes: u64 = 1024 * KBytes;
+const GBytes: u64 = 1024 * MBytes;
+
+/// Human-readable size, right-padded to a fixed width so the timestamp
+/// that follows lines up across rows -- e.g. `  512 B`, ` 12.3 KB`.
+fn formatSize(buf: []u8, size: u64) []const u8 {
+    if (size < KBytes) return std.fmt.bufPrint(buf, "{d:>4} B ", .{size}) catch buf[0..0];
+    if (size < MBytes) return std.fmt.bufPrint(buf, "{d:>5.1} KB", .{@as(f64, @floatFromInt(size)) / @as(f64, @floatFromInt(KBytes))}) catch buf[0..0];
+    if (size < GBytes) return std.fmt.bufPrint(buf, "{d:>5.1} MB", .{@as(f64, @floatFromInt(size)) / @as(f64, @floatFromInt(MBytes))}) catch buf[0..0];
+    return std.fmt.bufPrint(buf, "{d:>5.1} GB", .{@as(f64, @floatFromInt(size)) / @as(f64, @floatFromInt(GBytes))}) catch buf[0..0];
+}
+
+/// `YYYY-MM-DD HH:MM`, purely from `std.time.epoch` -- no libc needed.
+fn formatTimestamp(buf: []u8, sec: i64) []const u8 {
+    if (sec < 0) return "";
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = @intCast(sec) };
+    const epoch_day = epoch.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_secs = epoch.getDaySeconds();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day_secs.getHoursIntoDay(),
+        day_secs.getMinutesIntoHour(),
+    }) catch buf[0..0];
+}
+
 // ── glyphwire output ──────────────────────────────────────────────────────
 
 /// Icon column width: one cell for the icon plus one blank cell of
@@ -209,7 +289,7 @@ const icon_col_width = 2;
 /// its row/col explicitly -- the loop always enters each iteration with
 /// the cursor already sitting at that row's start (see the trailing
 /// `setCursor(row + 1, 0)` below), so there's nothing to add by repeating
-/// it.
+/// it. With `-l`, size and modified time follow the name.
 ///
 /// Reads the cursor back before *each* entry rather than tracking a local
 /// row counter across the whole loop: the grid can scroll mid-listing
@@ -221,7 +301,7 @@ const icon_col_width = 2;
 /// the *name* one column over and to advance to the next row. Costs one
 /// extra request per entry; fine for what a directory listing needs over
 /// a local socket.
-fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry) !void {
+fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: bool) !void {
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
     for (entries) |entry| {
         const cur = try client.getCursor();
@@ -243,6 +323,16 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry) !void {
             },
             else => try client.writeText(entry.name, file_color, null),
         }
+
+        if (long_list) {
+            var size_buf: [16]u8 = undefined;
+            var time_buf: [20]u8 = undefined;
+            try client.writeText("  ", null, null);
+            try client.writeText(formatSize(&size_buf, entry.size), detail_color, null);
+            try client.writeText("  ", null, null);
+            try client.writeText(formatTimestamp(&time_buf, entry.mtime_sec), detail_color, null);
+        }
+
         // set_property(cursor) scrolls-and-clamps a row at or past the
         // bottom (Layer.resolveRow), so it's always safe to just name the
         // next row directly here -- the *next* iteration's getCursor()
@@ -251,18 +341,24 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry) !void {
     }
 }
 
-fn writePlain(io: std.Io, entries: []const FileEntry) !void {
+fn writePlain(io: std.Io, entries: []const FileEntry, long_list: bool) !void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
     for (entries) |entry| {
         switch (entry.kind) {
-            .directory => try w.interface.print("{s}/\n", .{entry.name}),
+            .directory => try w.interface.print("{s}/", .{entry.name}),
             .sym_link => if (entry.link_target) |tgt|
-                try w.interface.print("{s} -> {s}\n", .{ entry.name, tgt })
+                try w.interface.print("{s} -> {s}", .{ entry.name, tgt })
             else
-                try w.interface.print("{s}\n", .{entry.name}),
-            else => try w.interface.print("{s}\n", .{entry.name}),
+                try w.interface.print("{s}", .{entry.name}),
+            else => try w.interface.print("{s}", .{entry.name}),
         }
+        if (long_list) {
+            var size_buf: [16]u8 = undefined;
+            var time_buf: [20]u8 = undefined;
+            try w.interface.print("  {s}  {s}", .{ formatSize(&size_buf, entry.size), formatTimestamp(&time_buf, entry.mtime_sec) });
+        }
+        try w.interface.print("\n", .{});
     }
     try w.interface.flush();
 }

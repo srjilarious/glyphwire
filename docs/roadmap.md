@@ -421,6 +421,38 @@ value itself, to position the name one column over and to advance to the
 next row), but removes a redundant explicit position that was always
 just restating where the cursor already was.
 
+## Tilde expansion in command arguments, and `glyphwire-ls`'s zargunaught port
+
+`Prompt.runCommand` (shell/main.zig) now expands a leading `~`/`~/...` in
+*every* argument before spawning, the same way `doCd` already did for
+`cd`'s target — most spawned programs don't do their own tilde expansion
+(that's normally the shell's job), so `cat ~/notes.txt` used to hand the
+child a literal `~` it had no way to resolve.
+
+`glyphwire-ls`'s arg parsing was ported from lsz's `zargunaught`-based
+pattern (`zargs.ArgParser` + `hasOption`/`positional`) instead of a
+hand-rolled loop, gaining `--help` for free alongside the existing
+`-a`/`--hidden`. New: `-l`/`--long`, adding size and modified time columns
+— `std.Io.Dir.statFile`'s cross-platform `Stat`, not lsz's raw
+`fstatat`/`getpwuid`/`getgrgid` C bindings, so no full permission-bit/
+owner/group columns (matches this file's existing "deliberately narrower
+than lsz" scope).
+
+**A real, intermittent test bug found and fixed along the way.** The new
+e2e test for tilde expansion (`shellExpandsTildeInCommandArgsTest`) hung
+the test binary outright the first few times, for two separate reasons:
+a fixed `acceptOne` thread count that didn't account for `glyphwire-ls`
+making its own connection once the typed command spawned it (fixed by
+switching to `serveForever`, matching how `glyphwire-host` itself runs,
+instead of hand-counting connections), and a `typeText` test helper that
+didn't handle the space character, panicking on `unreachable` in a way
+that testz's per-test output capture never surfaced (diagnosed with a
+standalone repro built outside the test harness, since testz buffers a
+hung test's output and never flushes it). Once actually visible, the
+remaining flakiness was genuine timing, not a logic bug: spawning a
+second real process (`ls`) on top of the shell needs more headroom under
+load than `waitForCell`'s original ~2s budget — bumped to ~10s.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and
