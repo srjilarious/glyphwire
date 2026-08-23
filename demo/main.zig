@@ -31,6 +31,14 @@ fn rgb(r: u8, g: u8, b: u8) glyphwire.Color {
     return .{ .r = r, .g = g, .b = b, .a = 255 };
 }
 
+// The box/icon panel's region -- named so the final cursor placement (see
+// `run`) can stay in sync with wherever the panel actually is instead of
+// duplicating its row/col/rows/cols as separate magic numbers.
+const panel_row = 8;
+const panel_col = 0;
+const panel_rows = 5;
+const panel_cols = 30;
+
 const runs = [_]Run{
     .{ .row = 0, .col = 0, .text = "glyphwire", .fg = rgb(0, 255, 255) },
     .{ .row = 0, .col = 10, .text = "styled text demo", .fg = rgb(255, 255, 255) },
@@ -55,6 +63,14 @@ fn run(init: std.process.Init) !void {
     var client = try glyphwire.Client.connectFromEnv(init.io, init.gpa, init.environ_map);
     defer client.deinit();
 
+    // Clears the whole grid up front, not just the panel's own region:
+    // this demo writes to several disjoint areas (the `runs` text above
+    // the panel, the panel itself), and a re-run against an
+    // already-drawn-on grid (e.g. running it twice from the shell prompt)
+    // would otherwise leave stale content peeking out from under/around
+    // whatever's redrawn this time.
+    try client.clear(0, 0, null, null);
+
     for (runs) |r| {
         try client.setCursor(r.row, r.col);
         try client.writeText(r.text, r.fg, r.bg);
@@ -62,16 +78,22 @@ fn run(init: std.process.Init) !void {
 
     // Images/icons/box-drawing showcase (Phase 3/3.5/3.6) -- a panel built
     // from the bundled "box" tile style, with a row of default icons
-    // inside it. Clears the region first so a re-run of this demo against
-    // an already-drawn-on grid doesn't leave stale content peeking out
-    // from under/around the new panel.
-    try client.clear(8, 0, 5, 30);
-    try client.drawBox(8, 0, 5, 30, "box");
-    try client.setCursor(9, 2);
+    // inside it.
+    try client.drawBox(panel_row, panel_col, panel_rows, panel_cols, "box");
+    try client.setCursor(panel_row + 1, panel_col + 2);
     try client.writeText("icons + box tiles", rgb(255, 255, 255), null);
 
     const icon_names = [_][]const u8{ "folder", "file", "audio", "image", "video", "archive", "executable", "drive" };
     for (icon_names, 0..) |name, i| {
-        try client.drawIcon(11, 2 + i * 2, name);
+        try client.drawIcon(panel_row + 3, panel_col + 2 + i * 2, name);
     }
+
+    // Leaves the cursor a couple of blank rows below the panel: none of
+    // draw_box/draw_icon move the cursor, so without this it would still
+    // sit wherever the last write_text call ("icons + box tiles") left
+    // it -- inside the panel. glyphwire-shell draws its next prompt one
+    // row below wherever the cursor ends up after a child runs (see
+    // Prompt.submitLine), so leaving it inside the panel made the next
+    // prompt overwrite the icon row.
+    try client.setCursor(panel_row + panel_rows + 2, 0);
 }

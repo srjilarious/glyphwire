@@ -87,9 +87,17 @@ of it. `docs/decisions.md` stays the place for *why*.
 `Dispatcher.handle`'s errors (unknown method, unknown property, bad
 JSON) still propagate as plain Zig errors, not JSON-RPC error
 *responses* — there's no `{"error": {"code", "message"}}` wire shape
-yet, for `get_property` today or anything else. Notifications with no
-`id` still have nowhere to report an error anyway — per JSON-RPC, that
-stays a server-side log line, not a wire message.
+yet, for `get_property` today or anything else, so a failed *request*
+still severs the connection (the client's `request()` call would
+otherwise hang forever waiting for a response that will never come).
+
+Notifications are better off now: they have nowhere to report an error
+anyway (per JSON-RPC, that stays a server-side log line, not a wire
+message) — decisions.md said so from early on, but `serveConnection`
+didn't actually behave that way until Phase 3.8 fixed it
+(`dispatch.isNotification` + a log-and-continue path), after a failed
+`draw_icon` notification turned out to take the whole connection down
+same as a failed request would.
 
 The other half of what this section originally flagged — one malformed
 message from any client taking down the *whole* server, all connections
@@ -302,14 +310,48 @@ over from a previous draw.
   the same zero-value blank cell `Layer.init` starts with — empty
   grapheme, default style, no image background. `rows`/`cols` default to
   "the rest of the layer from `row`/`col`" (themselves defaulting to 0),
-  so a bare `clear()` wipes everything — one call covers both "clear this
-  one region before redrawing it" (see `demo/main.zig`, before its
-  box/icon panel) and "clear the whole screen" (ctrl+l).
+  so a bare `clear()` wipes everything — one call covers both "clear a
+  region before redrawing it" and "clear the whole screen" (ctrl+l).
+  `demo/main.zig` calls the all-defaulted form once up front (it writes to
+  several disjoint areas — the styled-text runs, the box/icon panel — so
+  clearing just the panel's own region wasn't enough to keep a re-run from
+  leaving stale content elsewhere), then explicitly moves the cursor a
+  couple of rows below the panel when it's done, since none of
+  `draw_box`/`draw_icon` move the cursor themselves and leaving it inside
+  the panel made `glyphwire-shell`'s next prompt land on top of the icons.
 - `glyphwire-shell`'s prompt now binds ctrl+l to clear the screen and
   redraw the current line (prefix + whatever's already typed) at the top,
   same as a real shell — `Prompt.clearScreen`, sharing a
   `writePromptPrefix` helper with `showPrompt` rather than duplicating
   the cwd-prefix logic.
+
+## Phase 3.8: Icons in `glyphwire-ls`
+
+**Goal:** the first real use of `draw_icon` by an actual tool, not just
+the demo — a leading icon per listed entry, chosen from a coarse
+extension → icon-registry-name table (`ls/main.zig`'s `extension_icons`):
+directories get `"folder"`, recognized extensions map to `"image"`/
+`"audio"`/`"video"`/`"archive"`/`"executable"`/`"media-optical"`, anything
+else falls back to `"file"`. Not a real mime-type lookup (no such
+dependency pulled in) — extension sniffing covers the same buckets for
+what a directory listing actually needs.
+
+**Found and fixed along the way — notification errors used to sever the
+whole connection.** `glyphwire-ls` run against a bare `Context` with no
+icon registry loaded (exactly what the existing e2e test does; only
+`glyphwire-host` loads `default_icon_manifest`) made every `draw_icon`
+call fail server-side, and that dispatch error propagated all the way up
+through `Server.serveConnection`, closing the connection entirely —
+`glyphwire-ls`'s next write then failed too, so a single unresolvable
+icon name took down the whole listing. This contradicted what
+decisions.md already said should happen ("Notifications with no id still
+have nowhere to report an error anyway... that stays a server-side log
+line, not a wire message") — the code just didn't actually do that yet.
+Fixed generally, not just for `draw_icon`: `serveConnection` now checks
+whether a failed message was a notification (`dispatch.isNotification`)
+and logs-and-continues if so, only propagating (severing the connection)
+for a failed *request*, where there's no error-response mechanism yet to
+answer it with instead — see Milestone 0, still open.
 
 ## Further out (sequencing noted, not detailed yet)
 
