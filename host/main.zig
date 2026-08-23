@@ -68,6 +68,13 @@ const ArrowRepeatState = struct {
 pub const App = struct {
     alloc: std.mem.Allocator,
     server: *glyphwire.server.Server,
+    /// Set by `reapChild` once glyphwire-shell's process actually exits
+    /// (normally from its `exit` builtin, but this covers a crash or
+    /// external kill just as well) -- the one thing that ends the host,
+    /// deliberately not `escape` the way a typical pixzig example/game
+    /// would: an accidental Escape shouldn't kill an interactive shell
+    /// session out from under whatever's running in it.
+    shell_exited: *std.atomic.Value(bool),
     last_mouse_px: pixzig.Vec2F = .{ .x = -1, .y = -1 },
     arrow_repeat: struct {
         up: ArrowRepeatState = .{},
@@ -76,10 +83,10 @@ pub const App = struct {
         right: ArrowRepeatState = .{},
     } = .{},
 
-    pub fn init(alloc: std.mem.Allocator, eng: *AppRunner.Engine, server: *glyphwire.server.Server) !*App {
+    pub fn init(alloc: std.mem.Allocator, eng: *AppRunner.Engine, server: *glyphwire.server.Server, shell_exited: *std.atomic.Value(bool)) !*App {
         _ = eng;
         const app = try alloc.create(App);
-        app.* = .{ .alloc = alloc, .server = server };
+        app.* = .{ .alloc = alloc, .server = server, .shell_exited = shell_exited };
         return app;
     }
 
@@ -88,7 +95,7 @@ pub const App = struct {
     }
 
     pub fn update(self: *App, eng: *AppRunner.Engine, deltaTimeMs: f64) bool {
-        if (eng.inputs.keyboard.pressed(.escape)) return false;
+        if (self.shell_exited.load(.monotonic)) return false;
 
         self.reportKeyEvents(eng);
         self.reportMouseEvents(eng);
@@ -271,9 +278,16 @@ fn cellFromPixel(x: f32, y: f32) glyphwire.CellPos {
     return .{ .row = row, .col = col };
 }
 
-fn reapChild(io: std.Io, child_in: std.process.Child) void {
+/// Waits for glyphwire-shell to exit, then flags `shell_exited` so
+/// `App.update` ends the window loop -- the shell process actually
+/// terminating (via its `exit` builtin, a crash, or an external kill) is
+/// what quits the host now, not a keypress. Not joined by `main`, same as
+/// `serveForeverThread`: nothing needs its result once the run loop below
+/// is what keeps the process alive.
+fn reapChild(io: std.Io, child_in: std.process.Child, shell_exited: *std.atomic.Value(bool)) void {
     var child = child_in;
     _ = child.wait(io) catch {};
+    shell_exited.store(true, .monotonic);
 }
 
 /// Runs `Server.serveForever` for the lifetime of the process, on its own
@@ -336,8 +350,11 @@ pub fn main(init: std.process.Init) !void {
     const shell_path = try resolveSibling(alloc, io, "glyphwire-shell");
     const shell_argv = try std.mem.concat(alloc, []const u8, &.{ &.{shell_path}, shell_child_argv });
 
+    // Left false (no other way to quit) if the spawn itself fails --
+    // an edge case not worth a fallback keybinding for.
+    var shell_exited: std.atomic.Value(bool) = .init(false);
     if (std.process.spawn(io, .{ .argv = shell_argv, .environ_map = &shell_env })) |shell_child| {
-        _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child });
+        _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child, &shell_exited });
     } else |err| {
         std.log.err("failed to spawn glyphwire-shell: {t}", .{err});
     }
@@ -351,7 +368,7 @@ pub fn main(init: std.process.Init) !void {
         .resizable = false,
         .renderInitOpts = .{ .font = .{ .path = .{ .face = "assets/JetBrainsMono-Regular.ttf", .size = font_size } } },
     });
-    const app = try App.init(alloc, appRunner.engine, &srv);
+    const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited);
 
     appRunner.run(app);
 }

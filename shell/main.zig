@@ -26,7 +26,12 @@ const c = struct {
 /// (see `Prompt.doCd`) rather than spawned, since changing directory in a
 /// child process wouldn't affect this one; the prompt shows the current
 /// directory before `> ` so a `cd` actually taking effect is visible.
-/// ctrl+c/ctrl+v are ignored for now too.
+/// `exit` is a builtin too -- typing it is the only way to quit, deliberately
+/// unlike the escape-quits-immediately convention most pixzig
+/// examples/games use, which would kill an interactive shell session out
+/// from under whatever's running in it; `glyphwire-host` watches for this
+/// process actually exiting (see host/main.zig's `reapChild`) rather than
+/// listening for a keypress itself. ctrl+c/ctrl+v are ignored for now too.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const arena = init.arena.allocator();
@@ -156,6 +161,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     defer listener.deinit();
 
     var prompt: Prompt = .{ .client = &client, .environ_map = environ_map };
+    // Unreachable before `exit` gave this loop a clean return path --
+    // every previous exit was a hard kill, so this never ran and the leak
+    // never surfaced.
+    defer prompt.buffer.deinit(alloc);
     try prompt.showPrompt();
 
     while (true) {
@@ -171,6 +180,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
 
         if (std.mem.eql(u8, ev.key, "enter")) {
             try prompt.submitLine();
+            if (prompt.should_exit) return; // "exit" was typed -- see submitLine
         } else if (std.mem.eql(u8, ev.key, "backspace")) {
             try prompt.deleteBackward();
         } else if (std.mem.eql(u8, ev.key, "delete")) {
@@ -221,6 +231,10 @@ const Prompt = struct {
     /// Offset into `buffer`, 0..=buffer.items.len, where the next
     /// insert/delete acts and where the on-screen cursor should sit.
     cursor: usize = 0,
+    /// Set by `submitLine` when the typed line was `exit` -- the caller
+    /// (`runPrompt`'s key loop) checks this after every submitted line and
+    /// returns instead of drawing another prompt, ending this process.
+    should_exit: bool = false,
 
     /// Writes the current directory followed by `> ` -- reading it fresh
     /// each time (rather than caching it) is what makes a successful `cd`
@@ -320,7 +334,8 @@ const Prompt = struct {
     /// resyncs from the server before starting a fresh prompt -- the
     /// child may have written any number of rows while it ran, so the
     /// next prompt's position isn't knowable in advance the way it was
-    /// back when this just echoed the line to a fixed offset.
+    /// back when this just echoed the line to a fixed offset. `exit`
+    /// skips all of that and just sets `should_exit` for the caller.
     fn submitLine(self: *Prompt) !void {
         try self.client.setCursor(self.line_start_row + 1, 0);
 
@@ -331,7 +346,10 @@ const Prompt = struct {
         while (it.next()) |tok| try argv.append(alloc, tok);
 
         if (argv.items.len > 0) {
-            if (std.mem.eql(u8, argv.items[0], "cd")) {
+            if (std.mem.eql(u8, argv.items[0], "exit")) {
+                self.should_exit = true;
+                return;
+            } else if (std.mem.eql(u8, argv.items[0], "cd")) {
                 try self.doCd(argv.items[1..]);
             } else {
                 try self.runCommand(argv.items);
