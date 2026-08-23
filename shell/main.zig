@@ -14,12 +14,16 @@ const c = struct {
 /// src/client.zig's `InputListener`), captured by glyphwire-host and
 /// relayed through the server, not read directly.
 ///
-/// The prompt is intentionally minimal for now: echo, Enter, real cursor
-/// movement and interior insert/delete (arrow keys, ctrl+a/e/u, ctrl+
-/// arrow word jumps -- see `Prompt`), but no command parsing or execution
-/// yet. That'll turn `Prompt.submitLine` into something that spawns a
-/// child process per line -- closer to a real shell -- without needing to
-/// restructure what's built here; ctrl+c/ctrl+v are ignored for now too.
+/// The prompt supports echo, Enter, real cursor movement and interior
+/// insert/delete (arrow keys, ctrl+a/e/u, ctrl+arrow word jumps -- see
+/// `Prompt`), and now launches a child process per submitted line (see
+/// `Prompt.runCommand`). Every child is assumed "glyphwire compatible":
+/// it inherits `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` from this process and
+/// writes to the grid itself over its own connection, the same way
+/// `glyphwire-demo` or `glyphwire-ls` do -- the shell just spawns it and
+/// waits, no stdout/stderr capture. Capturing output from a plain,
+/// non-glyphwire-aware program is separate, later work. ctrl+c/ctrl+v are
+/// ignored for now too.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const arena = init.arena.allocator();
@@ -264,17 +268,78 @@ const Prompt = struct {
     }
 
     /// Leaves the just-typed line where it already is (it's been live-
-    /// echoed character by character), echoes it back on the row below
-    /// -- a stand-in for the command output `submitLine` will eventually
-    /// produce once it spawns a child process per line -- then starts a
-    /// fresh prompt on the row after that.
+    /// echoed character by character), moves to the row below it, runs
+    /// the line as a command if it names one (see `runCommand`), then
+    /// resyncs from the server before starting a fresh prompt -- the
+    /// child may have written any number of rows while it ran, so the
+    /// next prompt's position isn't knowable in advance the way it was
+    /// back when this just echoed the line to a fixed offset.
     fn submitLine(self: *Prompt) !void {
         try self.client.setCursor(self.line_start_row + 1, 0);
-        try self.client.writeText(self.buffer.items, .{ .r = 128, .g = 128, .b = 128 }, null);
-        try self.client.setCursor(self.line_start_row + 2, 0);
+
+        const alloc = self.client.alloc;
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(alloc);
+        var it = std.mem.tokenizeAny(u8, self.buffer.items, " \t");
+        while (it.next()) |tok| try argv.append(alloc, tok);
+
+        if (argv.items.len > 0) try self.runCommand(argv.items);
+
+        const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
+        try self.client.setCursor(cur.row + 1, 0);
         try self.showPrompt();
     }
+
+    /// Resolves `argv[0]` (see `resolveCommand`), spawns it, and waits for
+    /// it to exit. No stdout/stderr capture, no argument quoting -- the
+    /// child is expected to be a glyphwire-aware program that draws to the
+    /// grid itself over its own connection (inheriting
+    /// `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` automatically, since child
+    /// processes inherit the environment by default). A resolution or
+    /// spawn failure (e.g. unknown command) is reported onto the grid
+    /// rather than propagated, so a typo doesn't take down the prompt.
+    fn runCommand(self: *Prompt, argv: []const []const u8) !void {
+        const alloc = self.client.alloc;
+
+        const resolved = resolveCommand(alloc, self.client.io, argv[0]) catch argv[0];
+        defer if (resolved.ptr != argv[0].ptr) alloc.free(resolved);
+
+        const full_argv = try alloc.dupe([]const u8, argv);
+        defer alloc.free(full_argv);
+        full_argv[0] = resolved;
+
+        var child = std.process.spawn(self.client.io, .{ .argv = full_argv }) catch |err| {
+            var buf: [160]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}: command not found ({t})", .{ argv[0], err }) catch "command not found";
+            try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+            return;
+        };
+        _ = child.wait(self.client.io) catch |err| {
+            std.log.err("runCommand: wait({s}) failed: {t}", .{ argv[0], err });
+        };
+    }
 };
+
+/// Resolves a command name to a path to exec. Checks
+/// `<cwd>/zig-out/bin/<name>` first -- a dev-mode convenience so typing
+/// `ls` or `glyphwire-demo` at the prompt finds binaries built alongside
+/// glyphwire-shell itself, mirroring `host/main.zig`'s `resolveSibling` --
+/// falling back to the bare name unresolved, which `std.process.spawn`
+/// then resolves via `$PATH` the normal way. Already-qualified names
+/// (containing `/`) are passed through untouched either way.
+fn resolveCommand(alloc: std.mem.Allocator, io: std.Io, name: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return name;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const candidate = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/{s}", .{ cwd_buf[0..cwd_len], name });
+
+    std.Io.Dir.cwd().access(io, candidate, .{}) catch {
+        alloc.free(candidate);
+        return name;
+    };
+    return candidate;
+}
 
 /// Resolves a wire-level key name (see `client.zig`'s doc comment --
 /// `@tagName` of pixzig's GLFW-backed key enum, e.g. "a", "left_bracket")

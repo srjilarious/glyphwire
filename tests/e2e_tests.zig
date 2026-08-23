@@ -112,8 +112,10 @@ fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
 /// library-bound Server, reports simulated key presses over a second
 /// connection (standing in for glyphwire-host, which would normally
 /// capture and report them), and asserts the resulting grid content --
-/// echo, Enter starting a new prompt row, and Backspace erasing a
-/// character.
+/// echo, Enter running the typed line as a command (see
+/// `Prompt.runCommand`), and Backspace erasing a character in the prompt
+/// that follows. Types a command name unlikely to exist so the failure
+/// path is deterministic rather than depending on what's installed.
 pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
@@ -181,6 +183,19 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     // than assuming a fixed startup delay is enough.
     try waitForCell(&reporter, 0, 0, ">");
 
+    // "nosuchcmd" resolves to nothing in zig-out/bin or $PATH, so Enter
+    // reports the failure on the row below rather than crashing the
+    // prompt -- see `Prompt.runCommand`.
+    const cmd_keys = [_][]const u8{ "n", "o", "s", "u", "c", "h", "c", "m", "d", "enter" };
+    for (cmd_keys) |k| {
+        try reporter.reportKey(k, true);
+        try reporter.reportKey(k, false);
+    }
+
+    // The failed-command report lands on row 1; the next prompt starts on
+    // row 2 once the shell resyncs its cursor after that.
+    try waitForCell(&reporter, 2, 0, ">");
+
     // "z" after the backspace is an unambiguous completion marker: it can
     // only land at col 4 (where "e" was) if the backspace actually ran
     // first, so waiting for it also proves the backspace worked, not just
@@ -189,23 +204,94 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     // "e"/"backspace" are even sent, so it doesn't wait for the
     // asynchronous hop through the real shell process at all -- it was
     // passing on stale state.)
-    const keys = [_][]const u8{ "h", "i", "enter", "b", "y", "e", "backspace", "z" };
-    for (keys) |k| {
+    const edit_keys = [_][]const u8{ "b", "y", "e", "backspace", "z" };
+    for (edit_keys) |k| {
         try reporter.reportKey(k, true);
         try reporter.reportKey(k, false);
     }
 
-    try waitForCell(&reporter, 1, 4, "z");
+    try waitForCell(&reporter, 2, 4, "z");
 
     var snapshot = try reporter.getCells();
     defer snapshot.deinit();
     try testz.expectEqualStr(">", snapshot.cellAt(0, 0).grapheme);
-    try testz.expectEqualStr("h", snapshot.cellAt(0, 2).grapheme);
-    try testz.expectEqualStr("i", snapshot.cellAt(0, 3).grapheme);
-    try testz.expectEqualStr(">", snapshot.cellAt(1, 0).grapheme);
-    try testz.expectEqualStr("b", snapshot.cellAt(1, 2).grapheme);
-    try testz.expectEqualStr("y", snapshot.cellAt(1, 3).grapheme);
-    try testz.expectEqualStr("z", snapshot.cellAt(1, 4).grapheme); // "e" was backspaced away, "z" took its place
+    try testz.expectEqualStr("n", snapshot.cellAt(0, 2).grapheme);
+    try testz.expectEqualStr("o", snapshot.cellAt(0, 3).grapheme);
+    try testz.expectEqualStr("n", snapshot.cellAt(1, 0).grapheme); // "nosuchcmd: command not found (...)"
+    try testz.expectEqualStr("o", snapshot.cellAt(1, 1).grapheme);
+    try testz.expectEqualStr(":", snapshot.cellAt(1, 9).grapheme);
+    try testz.expectEqualStr(">", snapshot.cellAt(2, 0).grapheme);
+    try testz.expectEqualStr("b", snapshot.cellAt(2, 2).grapheme);
+    try testz.expectEqualStr("y", snapshot.cellAt(2, 3).grapheme);
+    try testz.expectEqualStr("z", snapshot.cellAt(2, 4).grapheme); // "e" was backspaced away, "z" took its place
+}
+
+/// Proves the real `glyphwire-ls` binary (see ls/main.zig, the first
+/// "ported real program" client, built on lsz's directory-scanning logic)
+/// connects, lists a directory, and writes the entries onto the grid --
+/// the same discovery/write path `demoClientWritesStyledTextOverRealSocketTest`
+/// exercises for the styled-text demo, but for the client meant to be
+/// launched from glyphwire-shell's prompt. Uses a throwaway temp directory
+/// with known contents rather than this repo's own tree, so the assertions
+/// don't depend on glyphwire's directory layout.
+pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tmp_name = try std.fmt.allocPrint(alloc, "glyphwire-ls-e2e-test-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(tmp_name);
+    try std.Io.Dir.cwd().createDirPath(io, tmp_name);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_name) catch {};
+    var tmp_dir = try std.Io.Dir.cwd().openDir(io, tmp_name, .{ .iterate = true });
+    defer tmp_dir.close(io);
+
+    // Sorted by name: "afile.txt" < "bdir" < "clink" < ".hidden" is
+    // excluded by default (no -a), proving that filter still applies.
+    (try tmp_dir.createFile(io, "afile.txt", .{})).close(io);
+    try tmp_dir.createDir(io, "bdir", .default_dir);
+    try tmp_dir.symLink(io, "afile.txt", "clink", .{});
+    (try tmp_dir.createFile(io, ".hidden", .{})).close(io);
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-ls-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    errdefer thread.join();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const ls_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/ls", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(ls_path);
+
+    var environ_map = std.process.Environ.Map.init(alloc);
+    defer environ_map.deinit();
+    try environ_map.put("GLYPHWIRE_SOCK", socket_path);
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ ls_path, tmp_name },
+        .environ_map = &environ_map,
+    });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| try testz.expectEqual(code, 0),
+        else => return error.TestUnexpectedResult,
+    }
+
+    thread.join();
+
+    try testz.expectEqualStr("a", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("b", ctx.root.cell(1, 0).grapheme());
+    try testz.expectEqualStr("/", ctx.root.cell(1, 4).grapheme()); // "bdir/"
+    try testz.expectEqualStr("c", ctx.root.cell(2, 0).grapheme());
+    try testz.expectEqualStr(">", ctx.root.cell(2, 7).grapheme()); // "clink -> afile.txt"
 }
 
 /// Polls get_cells (briefly) until `cell(row,col)`'s grapheme matches, so
