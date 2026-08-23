@@ -68,6 +68,13 @@ const ArrowRepeatState = struct {
 pub const App = struct {
     alloc: std.mem.Allocator,
     server: *glyphwire.server.Server,
+    /// Uploaded lazily, on first encountering a cell whose background
+    /// references a given image handle -- see decisions.md's Image
+    /// section ("the renderer... decodes when it first encounters a
+    /// `.image` background it hasn't uploaded yet"). The headless core
+    /// never decodes pixels; it only stores the raw bytes `load_image`
+    /// received (`Context.images`) plus IHDR-parsed dimensions.
+    image_textures: std.AutoHashMap(glyphwire.ImageHandle, pixzig.Texture),
     /// Set by `reapChild` once glyphwire-shell's process actually exits
     /// (normally from its `exit` builtin, but this covers a crash or
     /// external kill just as well) -- the one thing that ends the host,
@@ -86,12 +93,79 @@ pub const App = struct {
     pub fn init(alloc: std.mem.Allocator, eng: *AppRunner.Engine, server: *glyphwire.server.Server, shell_exited: *std.atomic.Value(bool)) !*App {
         _ = eng;
         const app = try alloc.create(App);
-        app.* = .{ .alloc = alloc, .server = server, .shell_exited = shell_exited };
+        app.* = .{
+            .alloc = alloc,
+            .server = server,
+            .image_textures = std.AutoHashMap(glyphwire.ImageHandle, pixzig.Texture).init(alloc),
+            .shell_exited = shell_exited,
+        };
         return app;
     }
 
     pub fn deinit(self: *App) void {
+        self.image_textures.deinit();
         self.alloc.destroy(self);
+    }
+
+    /// Returns the uploaded texture for `handle`, decoding and uploading it
+    /// first if this is the first time this App has seen it -- see
+    /// `image_textures`'s doc comment. Null if `handle` isn't in
+    /// `ctx.images` (shouldn't happen: `draw_image` already validated the
+    /// handle before marking a cell with it) or decoding the stored bytes
+    /// fails.
+    fn textureForImage(self: *App, eng: *AppRunner.Engine, handle: glyphwire.ImageHandle) ?pixzig.Texture {
+        if (self.image_textures.get(handle)) |tex| return tex;
+
+        const entry = self.server.ctx.images.get(handle) orelse return null;
+        var image = pixzig.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
+            std.log.err("glyphwire-host: failed to decode image handle {d}: {t}", .{ handle, err });
+            return null;
+        };
+        defer image.deinit();
+
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "glyphwire-image-{d}", .{handle}) catch unreachable;
+        const managed = eng.resources.loadTextureFromBuffer(name, image.width, image.height, image.data) catch |err| {
+            std.log.err("glyphwire-host: failed to upload image handle {d}: {t}", .{ handle, err });
+            return null;
+        };
+        const tex = (managed.get() orelse return null).val;
+
+        self.image_textures.put(handle, tex) catch {};
+        return tex;
+    }
+
+    /// Draws one cell's portion of an image background: the sub-rect of
+    /// the source texture starting at `img.offset_x/y`, sized to whatever
+    /// actually fits both the cell and the image's remaining pixels --
+    /// never stretched, and clipped rather than overflowing into a
+    /// neighboring cell when the image's edge falls mid-cell (decisions.md's
+    /// Image section). `img.offset_x/y` are always inside the image's
+    /// bounds -- `Layer.drawImage` only marks a cell at all when that
+    /// holds -- but this re-checks defensively rather than trusting that
+    /// invariant blindly at render time.
+    fn drawImageCell(self: *App, eng: *AppRunner.Engine, img: glyphwire.ImageBg, pos: pixzig.Vec2I) void {
+        const entry = self.server.ctx.images.get(img.handle) orelse return;
+        if (img.offset_x >= entry.width or img.offset_y >= entry.height) return;
+
+        var tex = self.textureForImage(eng, img.handle) orelse return;
+
+        const avail_w: i32 = @min(cell_w, @as(i32, @intCast(entry.width - img.offset_x)));
+        const avail_h: i32 = @min(cell_h, @as(i32, @intCast(entry.height - img.offset_y)));
+        if (avail_w <= 0 or avail_h <= 0) return;
+
+        const img_w_f: f32 = @floatFromInt(entry.width);
+        const img_h_f: f32 = @floatFromInt(entry.height);
+        const uv_l = @as(f32, @floatFromInt(img.offset_x)) / img_w_f;
+        const uv_t = @as(f32, @floatFromInt(img.offset_y)) / img_h_f;
+        const uv_r = @as(f32, @floatFromInt(img.offset_x + @as(u32, @intCast(avail_w)))) / img_w_f;
+        const uv_b = @as(f32, @floatFromInt(img.offset_y + @as(u32, @intCast(avail_h)))) / img_h_f;
+
+        eng.renderer.draw(
+            &tex,
+            pixzig.RectF.fromPosSize(pos.x, pos.y, avail_w, avail_h),
+            pixzig.RectF{ .l = uv_l, .t = uv_t, .r = uv_r, .b = uv_b },
+        );
     }
 
     pub fn update(self: *App, eng: *AppRunner.Engine, deltaTimeMs: f64) bool {
@@ -239,7 +313,7 @@ pub const App = struct {
                             );
                         }
                     },
-                    .image => {}, // unbuilt, see core.zig's Background
+                    .image => |img| self.drawImageCell(eng, img, pos),
                 }
 
                 const g = c.grapheme();
@@ -332,6 +406,12 @@ pub fn main(init: std.process.Init) !void {
 
     var ctx = try glyphwire.Context.init(alloc, grid_cols, grid_rows, scrollback_rows);
     defer ctx.deinit();
+    // Context.init defaults these to 12x12 already; set explicitly so they
+    // stay tied to this file's own cell_w/cell_h constants rather than
+    // silently relying on the default matching -- see Context's doc
+    // comment on cell_px_w/cell_px_h.
+    ctx.cell_px_w = cell_w;
+    ctx.cell_px_h = cell_h;
 
     // `.listen()` inside `bind` is synchronous -- the socket is already
     // accept-ready (kernel-queued, even before `serveForever`'s thread

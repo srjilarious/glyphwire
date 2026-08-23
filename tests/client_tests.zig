@@ -157,6 +157,74 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(listener.cursorPixel().y, 34);
 }
 
+/// A minimal byte stream `pngDimensions` accepts -- see core_tests.zig's
+/// identical fixture. Exercises `Client.loadImage` over a real socket, the
+/// one path that needs the binary side-channel's raw-byte framing (see
+/// wire.zig's `readRaw`/`takeRaw`) rather than plain JSON-RPC frames.
+fn fakePngBytes(width: u32, height: u32) [24]u8 {
+    var bytes: [24]u8 = undefined;
+    @memcpy(bytes[0..8], &[_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' });
+    std.mem.writeInt(u32, bytes[8..12], 13, .big);
+    @memcpy(bytes[12..16], "IHDR");
+    std.mem.writeInt(u32, bytes[16..20], width, .big);
+    std.mem.writeInt(u32, bytes[20..24], height, .big);
+    return bytes;
+}
+
+pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // Same connection makes every call below, so one acceptOne suffices --
+    // see clientWriteTextThenGetCellsRoundTripTest.
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const metrics = try client.getCellMetrics();
+    try testz.expectEqual(metrics.w, 12);
+    try testz.expectEqual(metrics.h, 12);
+
+    // 24x12px = exactly a 2x1-cell span at the session's 12px cells.
+    const png = fakePngBytes(24, 12);
+    const handle = try client.loadImage("png", &png);
+    try testz.expectEqual(handle, 1);
+
+    const info = try client.getImageInfo(handle);
+    try testz.expectEqual(info.width, 24);
+    try testz.expectEqual(info.height, 12);
+
+    try client.drawImage(handle, 0, 0, 1, 2);
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+
+    const c00 = snapshot.cellAt(0, 0);
+    try testz.expectTrue(c00.bg == null);
+    try testz.expectEqual(c00.bg_image.?.handle, handle);
+    try testz.expectEqual(c00.bg_image.?.offset_x, 0);
+
+    const c01 = snapshot.cellAt(0, 1);
+    try testz.expectEqual(c01.bg_image.?.offset_x, 12);
+
+    // Sending a normal notification right after `load_image`'s raw
+    // payload proves the decoder correctly resumed normal frame parsing
+    // afterward, rather than the raw bytes bleeding into the next frame's
+    // header -- see wire.zig's `takeRaw` leaving any excess buffered.
+    try client.writeText("z", null, null);
+    const cursor = try client.getCursor();
+    try testz.expectEqual(cursor.col, 1);
+}
+
 fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
     server.acceptOne(alloc) catch |err| {
         std.debug.print("test server connection failed: {t}\n", .{err});

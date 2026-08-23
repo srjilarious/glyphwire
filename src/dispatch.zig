@@ -18,6 +18,7 @@ pub const DispatchError = error{
     UnknownMethod,
     UnknownProperty,
     NotARequest,
+    UnknownImage,
 };
 
 const Envelope = struct {
@@ -56,13 +57,18 @@ const GetPropertyParams = struct {
 const CursorResult = struct { row: usize, col: usize };
 const RevisionResult = struct { revision: u64 };
 
+const CellMetricsResult = struct { cell_px_w: u32, cell_px_h: u32 };
+
+const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
+
 /// One flattened cell in a `get_cells` response, row-major starting at
-/// (0,0). `bg` is null for the (currently unbuilt) image-background case —
-/// see decisions.md's Cell section.
+/// (0,0). Exactly one of `bg`/`bg_image` is non-null, per `core.Background`'s
+/// tagged union — see decisions.md's Cell section.
 const CellJson = struct {
     g: []const u8,
     fg: ColorJson,
     bg: ?ColorJson,
+    bg_image: ?ImageBgJson = null,
 };
 
 const CellsResult = struct {
@@ -98,6 +104,30 @@ const SubscribeParams = struct {
 
 const SubscribeResult = struct {
     subscribed: []const []const u8,
+};
+
+const ImageInfoParams = struct { handle: core.ImageHandle };
+const ImageInfoResult = struct { width: u32, height: u32 };
+const LoadImageResult = struct { handle: core.ImageHandle };
+
+const DrawImageParams = struct {
+    handle: core.ImageHandle,
+    row: usize,
+    col: usize,
+    row_span: usize,
+    col_span: usize,
+};
+
+/// The `load_image` request's JSON header, peeked out of a frame body
+/// before the binary side-channel payload it declares (`bytes` raw bytes,
+/// following directly on the wire) can be read — see `peekLoadImage` and
+/// wire.zig's `readRaw`. `id` is copied by value straight out of the
+/// envelope's arena: safe only because `Client` always sends integer
+/// request ids (never a string, which would need its own copy) — see
+/// `Client.request`'s `next_id: i64`.
+pub const LoadImageHeader = struct {
+    id: std.json.Value,
+    bytes: usize,
 };
 
 const InputStateResult = struct {
@@ -151,6 +181,32 @@ pub const HandleResult = struct {
     broadcast: ?Broadcast = null,
 };
 
+/// Peeks at a decoded frame body to see whether it's a `load_image`
+/// request — if so, the caller must read `bytes` raw bytes directly off
+/// the wire next, before normal frame processing can continue (the binary
+/// side-channel: a JSON header frame declares a byte count, then that many
+/// raw bytes follow directly on the wire, not wrapped in `Content-Length`
+/// framing — see decisions.md's Transport & Wire Format). Returns null for
+/// every other message, which the caller should route to `handle` as
+/// usual. Module-level (not a `Dispatcher` method) since it needs no
+/// `Context` access — it's pure parsing, done before dispatch.
+pub fn peekLoadImage(alloc: std.mem.Allocator, body: []const u8) !?LoadImageHeader {
+    const parsed = try std.json.parseFromSlice(Envelope, alloc, body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.method, "load_image")) return null;
+    const id = parsed.value.id orelse return DispatchError.NotARequest;
+
+    const Params = struct { bytes: usize };
+    const p = try std.json.parseFromValue(Params, alloc, parsed.value.params, .{
+        .ignore_unknown_fields = true,
+    });
+    defer p.deinit();
+
+    return .{ .id = id, .bytes = p.value.bytes };
+}
+
 pub const Dispatcher = struct {
     ctx: *core.Context,
     /// This connection's current subscriptions; see `Subscriptions`. Not
@@ -202,8 +258,34 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "get_input_state")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleGetInputState(alloc, id) };
+        } else if (std.mem.eql(u8, envelope.method, "get_image_info")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetImageInfo(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "draw_image")) {
+            try self.handleDrawImage(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "get_cell_metrics")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetCellMetrics(alloc, id) };
         }
         return DispatchError.UnknownMethod;
+    }
+
+    /// Handles the `load_image` request's JSON header once its binary
+    /// payload has already been read off the wire by the caller (see
+    /// server.zig's `serveConnection`, which special-cases this method
+    /// instead of routing it through `handle` — the payload isn't a normal
+    /// frame `handle` can see). Stores `raw_bytes` and returns the response
+    /// frame for `hdr.id`.
+    pub fn handleLoadImage(self: *Dispatcher, alloc: std.mem.Allocator, hdr: LoadImageHeader, raw_bytes: []const u8) ![]u8 {
+        const image_handle = try self.ctx.loadImage(raw_bytes);
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: LoadImageResult,
+        };
+        const response: Response = .{ .id = hdr.id, .result = .{ .handle = image_handle } };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }
 
     fn handleWriteText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
@@ -299,10 +381,15 @@ pub const Dispatcher = struct {
                     .color => |bgc| .{ .r = bgc.r, .g = bgc.g, .b = bgc.b, .a = bgc.a },
                     .image => null,
                 };
+                const bg_image: ?ImageBgJson = switch (cell.style.bg) {
+                    .color => null,
+                    .image => |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y },
+                };
                 cells[row * layer.width + col] = .{
                     .g = cell.grapheme(),
                     .fg = .{ .r = cell.style.fg.r, .g = cell.style.fg.g, .b = cell.style.fg.b, .a = cell.style.fg.a },
                     .bg = bg,
+                    .bg_image = bg_image,
                 };
             }
         }
@@ -426,6 +513,62 @@ pub const Dispatcher = struct {
                 .cursor_px = .{ .x = self.ctx.input.cursor_px.x, .y = self.ctx.input.cursor_px.y },
                 .cursor_cell = .{ .row = self.ctx.input.cursor_cell.row, .col = self.ctx.input.cursor_cell.col },
             },
+        };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
+    fn handleGetImageInfo(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(ImageInfoParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        const info = self.ctx.imageInfo(parsed.value.handle) orelse return DispatchError.UnknownImage;
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: ImageInfoResult,
+        };
+        const response: Response = .{ .id = id, .result = .{ .width = info.width, .height = info.height } };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
+    fn handleDrawImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DrawImageParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const info = self.ctx.imageInfo(p.handle) orelse return DispatchError.UnknownImage;
+        self.ctx.root.drawImage(
+            p.handle,
+            p.row,
+            p.col,
+            p.row_span,
+            p.col_span,
+            info.width,
+            info.height,
+            self.ctx.cell_px_w,
+            self.ctx.cell_px_h,
+        );
+    }
+
+    /// A client-side convenience for aspect-ratio-aware placement
+    /// (decisions.md: "the client's job, not the server's") — lets a
+    /// client compute how many cells an image needs without hardcoding the
+    /// session's cell pixel metrics, which otherwise live only in
+    /// `Context.cell_px_w`/`cell_px_h` and glyphwire-host's matching
+    /// constants.
+    fn handleGetCellMetrics(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: CellMetricsResult,
+        };
+        const response: Response = .{
+            .id = id,
+            .result = .{ .cell_px_w = self.ctx.cell_px_w, .cell_px_h = self.ctx.cell_px_h },
         };
         return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }

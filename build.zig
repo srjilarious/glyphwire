@@ -142,4 +142,22 @@ pub fn build(b: *std.Build) void {
 
     const ls_step = b.step("ls", "Run the glyphwire ls client (directory listing over the wire)");
     ls_step.dependOn(&run_ls.step);
+
+    const view_exe = b.addExecutable(.{
+        .name = "glyphwire-view",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("view/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    view_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    b.installArtifact(view_exe);
+
+    const run_view = b.addRunArtifact(view_exe);
+    run_view.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_view.addArgs(args);
+
+    const view_step = b.step("view", "Run the glyphwire image-viewer client (glyphwire-view <image.png>)");
+    view_step.dependOn(&run_view.step);
 }

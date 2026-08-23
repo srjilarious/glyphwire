@@ -121,6 +121,27 @@ pub const Server = struct {
             while (try decoder.next(alloc)) |body| {
                 defer alloc.free(body);
 
+                // `load_image` is special: its JSON header frame declares a
+                // raw byte count that follows directly on the wire, not
+                // wrapped in another frame -- see wire.zig's `readRaw` and
+                // decisions.md's binary side-channel framing. That payload
+                // has to be pulled off this connection's stream (and
+                // decoder buffer) before dispatch can respond, so it can't
+                // go through `Dispatcher.handle`'s normal single-frame path.
+                if (try dispatch.peekLoadImage(alloc, body)) |hdr| {
+                    const raw = try wire.readRaw(self.io, &stream, &decoder, alloc, hdr.bytes);
+                    defer alloc.free(raw);
+
+                    const resp = blk: {
+                        self.ctx_mutex.lockUncancelable(self.io);
+                        defer self.ctx_mutex.unlock(self.io);
+                        break :blk try d.handleLoadImage(alloc, hdr, raw);
+                    };
+                    defer alloc.free(resp);
+                    try conn.send(self.io, resp);
+                    continue;
+                }
+
                 const result = blk: {
                     self.ctx_mutex.lockUncancelable(self.io);
                     defer self.ctx_mutex.unlock(self.io);

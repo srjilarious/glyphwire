@@ -157,6 +157,74 @@ pub const Client = struct {
         defer parsed.deinit();
     }
 
+    /// `load_image(format, bytes)` -- a request using the binary
+    /// side-channel: the JSON header frame declares `bytes.len`, then
+    /// `bytes` follows directly on the wire (not another framed message) —
+    /// see decisions.md's Transport & Wire Format. Only `"png"` is
+    /// meaningful today (decisions.md's "assume PNG" scope), but `format`
+    /// is still sent so the wire shape doesn't need to change when that
+    /// widens. Returns a server-generated handle for `get_image_info`/
+    /// `drawImage`.
+    pub fn loadImage(self: *Client, format: []const u8, bytes: []const u8) !core.ImageHandle {
+        const id = self.next_id;
+        self.next_id += 1;
+
+        const Msg = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: i64,
+            method: []const u8 = "load_image",
+            params: struct { format: []const u8, bytes: usize },
+        };
+        try self.send(Msg{ .id = id, .params = .{ .format = format, .bytes = bytes.len } });
+
+        var write_buf: [4096]u8 = undefined;
+        var w = self.stream.writer(self.io, &write_buf);
+        try w.interface.writeAll(bytes);
+        try w.interface.flush();
+
+        const resp_body = try self.readFrame();
+        defer self.alloc.free(resp_body);
+        const parsed = try std.json.parseFromSlice(ResponseOf(struct { handle: core.ImageHandle }), self.alloc, resp_body, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    /// `get_image_info(handle)` -- a request returning the image's natural
+    /// pixel dimensions.
+    pub fn getImageInfo(self: *Client, handle: core.ImageHandle) !core.ImageInfo {
+        var parsed = try self.request(struct { width: u32, height: u32 }, "get_image_info", .{ .handle = handle });
+        defer parsed.deinit();
+        return .{ .width = parsed.value.result.width, .height = parsed.value.result.height };
+    }
+
+    /// `draw_image(handle, row, col, row_span, col_span)` -- a
+    /// notification. Places the image at its natural pixel size, anchored
+    /// at `(row, col)`, clipped to the given span rather than stretched to
+    /// fill it — see decisions.md's Image section. Aspect-ratio-aware
+    /// placement (choosing `row_span`/`col_span` to match the image's
+    /// shape) is the caller's job; `getImageInfo` plus `getCellMetrics`
+    /// give it what it needs to compute that.
+    pub fn drawImage(self: *Client, handle: core.ImageHandle, row: usize, col: usize, row_span: usize, col_span: usize) !void {
+        try self.notify("draw_image", .{
+            .handle = handle,
+            .row = row,
+            .col = col,
+            .row_span = row_span,
+            .col_span = col_span,
+        });
+    }
+
+    /// `get_cell_metrics` -- a request returning the session's fixed cell
+    /// pixel size, for a client computing `draw_image`'s span from an
+    /// image's natural pixel dimensions.
+    pub fn getCellMetrics(self: *Client) !struct { w: u32, h: u32 } {
+        var parsed = try self.request(struct { cell_px_w: u32, cell_px_h: u32 }, "get_cell_metrics", .{});
+        defer parsed.deinit();
+        return .{ .w = parsed.value.result.cell_px_w, .h = parsed.value.result.cell_px_h };
+    }
+
     /// `get_input_state` -- a request returning which keys/mouse buttons
     /// are currently down and the last known cursor position. A one-time
     /// bootstrap query; `InputListener` is the live-updating counterpart.
@@ -240,10 +308,13 @@ fn ResponseOf(comptime ResultT: type) type {
 
 const ColorJson = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
 
+const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
+
 const CellJson = struct {
     g: []const u8,
     fg: ColorJson,
     bg: ?ColorJson,
+    bg_image: ?ImageBgJson = null,
 };
 
 const CellsResultJson = struct {
@@ -260,13 +331,14 @@ const InputStateResultJson = struct {
     cursor_cell: CellPos,
 };
 
-/// A cell in renderer-friendly form: `core.Color` fields instead of raw
-/// JSON, `bg` null for "no background color" (the image-background case,
-/// unbuilt server-side -- see `dispatch.zig`'s `CellJson`).
+/// A cell in renderer-friendly form: `core.Color`/`core.ImageBg` fields
+/// instead of raw JSON. Exactly one of `bg`/`bg_image` is non-null,
+/// mirroring `core.Background`'s tagged union.
 pub const RenderCell = struct {
     grapheme: []const u8,
     fg: core.Color,
     bg: ?core.Color,
+    bg_image: ?core.ImageBg = null,
 };
 
 /// Owns the parsed JSON backing a `getCells` response; `deinit` frees it.
@@ -297,6 +369,7 @@ pub const CellsSnapshot = struct {
             .grapheme = c.g,
             .fg = .{ .r = c.fg.r, .g = c.fg.g, .b = c.fg.b, .a = c.fg.a },
             .bg = if (c.bg) |bg| .{ .r = bg.r, .g = bg.g, .b = bg.b, .a = bg.a } else null,
+            .bg_image = if (c.bg_image) |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y } else null,
         };
     }
 };

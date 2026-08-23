@@ -240,3 +240,104 @@ pub fn insertAndDeleteCellsAreNoOpsPastRowEdgeTest(io: std.Io, alloc: std.mem.Al
     try testz.expectEqualStr("e", layer.cell(0, 4).grapheme());
     try testz.expectEqual(layer.revision, revision_before);
 }
+
+/// A minimal byte stream `pngDimensions` accepts: the 8-byte PNG signature
+/// followed by exactly an IHDR chunk header (4-byte length, "IHDR", then
+/// big-endian width/height) -- 24 bytes total, nothing past what
+/// `pngDimensions` actually reads. Not a real, decodable PNG (no further
+/// chunks, no CRC) -- fine, since the headless core never decodes pixels.
+fn fakePngBytes(width: u32, height: u32) [24]u8 {
+    var bytes: [24]u8 = undefined;
+    @memcpy(bytes[0..8], &[_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' });
+    std.mem.writeInt(u32, bytes[8..12], 13, .big); // IHDR chunk length, unchecked
+    @memcpy(bytes[12..16], "IHDR");
+    std.mem.writeInt(u32, bytes[16..20], width, .big);
+    std.mem.writeInt(u32, bytes[20..24], height, .big);
+    return bytes;
+}
+
+pub fn pngDimensionsParsesIhdrTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    const bytes = fakePngBytes(64, 32);
+    const info = try glyphwire.pngDimensions(&bytes);
+    try testz.expectEqual(info.width, 64);
+    try testz.expectEqual(info.height, 32);
+}
+
+pub fn pngDimensionsRejectsBadSignatureTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    var bytes = fakePngBytes(64, 32);
+    bytes[0] = 0; // corrupt the signature
+    try testz.expectError(glyphwire.pngDimensions(&bytes), glyphwire.ImageError.InvalidPng);
+}
+
+pub fn contextLoadImageParsesDimensionsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try ctx.loadImage(&bytes);
+
+    const info = ctx.imageInfo(handle).?;
+    try testz.expectEqual(info.width, 48);
+    try testz.expectEqual(info.height, 24);
+    try testz.expectTrue(ctx.imageInfo(handle + 1) == null);
+}
+
+pub fn layerDrawImageMarksCoveredCellsWithOffsetsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // A 2x2-cell span at 12px cells covers a 24x24px image exactly.
+    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12);
+
+    const c00 = layer.cell(1, 1).style.bg;
+    const c01 = layer.cell(1, 2).style.bg;
+    const c10 = layer.cell(2, 1).style.bg;
+    const c11 = layer.cell(2, 2).style.bg;
+
+    try testz.expectEqual(c00.image.handle, 1);
+    try testz.expectEqual(c00.image.offset_x, 0);
+    try testz.expectEqual(c00.image.offset_y, 0);
+    try testz.expectEqual(c01.image.offset_x, 12);
+    try testz.expectEqual(c01.image.offset_y, 0);
+    try testz.expectEqual(c10.image.offset_x, 0);
+    try testz.expectEqual(c10.image.offset_y, 12);
+    try testz.expectEqual(c11.image.offset_x, 12);
+    try testz.expectEqual(c11.image.offset_y, 12);
+
+    // Untouched cells outside the span keep the default color background.
+    switch (layer.cell(0, 0).style.bg) {
+        .color => {},
+        .image => return error.TestUnexpectedResult,
+    }
+}
+
+pub fn layerDrawImageLeavesCellsBeyondImageBoundsUntouchedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // Pre-mark a cell with a distinct color so an untouched cell is
+    // distinguishable from the layer's blank default.
+    layer.cell(0, 3).style.bg = .{ .color = .{ .r = 9, .g = 9, .b = 9 } };
+
+    // A 12x12px image (one cell) drawn into a 2x2-cell span: only the
+    // top-left cell is actually covered -- the other three cells the
+    // image doesn't reach should be left as they were.
+    layer.drawImage(1, 0, 2, 2, 2, 12, 12, 12, 12);
+
+    try testz.expectEqual(layer.cell(0, 2).style.bg.image.handle, 1);
+    switch (layer.cell(0, 3).style.bg) {
+        .color => |c| try testz.expectEqual(c.r, 9),
+        .image => return error.TestUnexpectedResult,
+    }
+    switch (layer.cell(1, 2).style.bg) {
+        .color => {},
+        .image => return error.TestUnexpectedResult,
+    }
+}

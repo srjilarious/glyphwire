@@ -11,16 +11,63 @@ pub const Color = struct {
 };
 
 /// Server-generated reference to a loaded image, per the Object Model's
-/// Image section. Unused until Image support lands; kept here so Cell's
-/// background shape doesn't need to change when it does.
+/// Image section.
 pub const ImageHandle = u32;
 
-/// A cell's background: a flat color, or (post-slice) a reference to a
-/// loaded image/icon tile. Mutually exclusive per decisions.md.
+/// A cell's image-backed background: which loaded image, and the pixel
+/// offset into that image this cell should display. `draw_image` computes
+/// this per cell from the draw call's anchor -- see `Layer.drawImage` --
+/// rather than a sub-image ever being extracted or cached as its own
+/// resource (decisions.md's Image section).
+pub const ImageBg = struct {
+    handle: ImageHandle,
+    offset_x: u32,
+    offset_y: u32,
+};
+
+/// A cell's background: a flat color, or a reference to a loaded
+/// image/icon tile. Mutually exclusive per decisions.md.
 pub const Background = union(enum) {
     color: Color,
-    image: ImageHandle,
+    image: ImageBg,
 };
+
+pub const ImageInfo = struct {
+    width: u32,
+    height: u32,
+};
+
+/// A loaded image resource: the raw bytes as received (PNG only for now,
+/// per decisions.md's "assume PNG" scope), plus natural pixel dimensions.
+/// The headless core never decodes pixels -- `width`/`height` come from
+/// parsing just the PNG IHDR chunk (`pngDimensions`), not a real decode --
+/// so `get_image_info` doesn't need an image-codec dependency here, and
+/// unlike an earlier idea in roadmap.md, the *client* doesn't need to
+/// supply dimensions either. Full pixel decoding stays the renderer's job
+/// (glyphwire-host, which already links zstbi), lazily on first
+/// encountering a `.image` background it hasn't uploaded yet.
+pub const ImageEntry = struct {
+    bytes: []u8,
+    width: u32,
+    height: u32,
+};
+
+pub const ImageError = error{InvalidPng};
+
+/// Parses just the IHDR chunk's width/height from a PNG byte stream -- not
+/// a decoder. Per the PNG spec, the 8-byte signature is always followed
+/// immediately by the IHDR chunk (4-byte length, 4-byte "IHDR" tag, then
+/// big-endian u32 width and height), so this is a fixed-offset read, not a
+/// real parse.
+pub fn pngDimensions(bytes: []const u8) ImageError!ImageInfo {
+    const sig = [_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    if (bytes.len < 24 or !std.mem.eql(u8, bytes[0..8], &sig)) return ImageError.InvalidPng;
+    if (!std.mem.eql(u8, bytes[12..16], "IHDR")) return ImageError.InvalidPng;
+    return .{
+        .width = std.mem.readInt(u32, bytes[16..20], .big),
+        .height = std.mem.readInt(u32, bytes[20..24], .big),
+    };
+}
 
 pub const Style = struct {
     fg: Color,
@@ -225,6 +272,53 @@ pub const Layer = struct {
         self.revision += 1;
     }
 
+    /// Marks cells in `[row, row+row_span) x [col, col+col_span)` (clamped
+    /// to the layer's own bounds) as backed by `handle`'s pixels, anchored
+    /// at `(row, col)` with **no stretching** -- see decisions.md's Image
+    /// section. Each covered cell gets the pixel offset into the source
+    /// image it should display, computed from its position relative to the
+    /// anchor; `img_w`/`img_h` are the image's natural pixel dimensions
+    /// (from `pngDimensions`), `cell_px_w`/`cell_px_h` the session's fixed
+    /// cell pixel metrics (`Context.cell_px_w`/`cell_px_h`).
+    ///
+    /// A cell the image doesn't actually reach -- its computed offset
+    /// falls at or past the image's own edge, i.e. the image is smaller
+    /// than the requested span -- is left untouched rather than blanked,
+    /// so drawing a small image over existing content only overwrites what
+    /// the image actually covers. Cells the image *does* reach always get
+    /// marked, even where the image only partially fills them at the
+    /// image's bottom/right edge -- the renderer clips those, not this.
+    pub fn drawImage(
+        self: *Layer,
+        handle: ImageHandle,
+        row: usize,
+        col: usize,
+        row_span: usize,
+        col_span: usize,
+        img_w: u32,
+        img_h: u32,
+        cell_px_w: u32,
+        cell_px_h: u32,
+    ) void {
+        const row_end = @min(row + row_span, self.height);
+        const col_end = @min(col + col_span, self.width);
+
+        var r = row;
+        while (r < row_end) : (r += 1) {
+            const offset_y = @as(u32, @intCast(r - row)) * cell_px_h;
+            if (offset_y >= img_h) continue;
+
+            var c = col;
+            while (c < col_end) : (c += 1) {
+                const offset_x = @as(u32, @intCast(c - col)) * cell_px_w;
+                if (offset_x >= img_w) continue;
+
+                self.cell(r, c).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y } };
+            }
+        }
+        self.revision += 1;
+    }
+
     pub fn getProperty(self: *const Layer, name: PropertyName) PropertyValue {
         return switch (name) {
             .cursor => .{ .cursor = self.cursor },
@@ -338,17 +432,52 @@ pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
     input: InputState,
+    images: std.AutoHashMap(ImageHandle, ImageEntry),
+    next_image_handle: ImageHandle = 1,
+    /// The session's fixed cell pixel metrics -- decisions.md's "one
+    /// monospace font + size per session" -- needed to translate a
+    /// `draw_image` span into per-cell pixel offsets (see
+    /// `Layer.drawImage`). Defaults match glyphwire-host's current
+    /// JetBrainsMono tuning (`host/main.zig`'s `cell_w`/`cell_h`); a host
+    /// with different metrics should overwrite these right after `init`.
+    cell_px_w: u32 = 12,
+    cell_px_h: u32 = 12,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Context {
         return .{
             .alloc = alloc,
             .root = try Layer.init(alloc, width, height, scrollback_rows),
             .input = InputState.init(alloc),
+            .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
         };
     }
 
     pub fn deinit(self: *Context) void {
         self.root.deinit();
         self.input.deinit();
+        var it = self.images.valueIterator();
+        while (it.next()) |entry| self.alloc.free(entry.bytes);
+        self.images.deinit();
+    }
+
+    /// `load_image`: stores `bytes` verbatim (PNG only for now) and parses
+    /// just its IHDR dimensions -- see `ImageEntry`'s doc comment. Returns
+    /// a fresh server-generated handle.
+    pub fn loadImage(self: *Context, bytes: []const u8) !ImageHandle {
+        const info = try pngDimensions(bytes);
+        const owned = try self.alloc.dupe(u8, bytes);
+        errdefer self.alloc.free(owned);
+
+        const handle = self.next_image_handle;
+        self.next_image_handle += 1;
+        try self.images.put(handle, .{ .bytes = owned, .width = info.width, .height = info.height });
+        return handle;
+    }
+
+    /// `get_image_info`: natural pixel dimensions, or null for an unknown
+    /// handle.
+    pub fn imageInfo(self: *const Context, handle: ImageHandle) ?ImageInfo {
+        const entry = self.images.get(handle) orelse return null;
+        return .{ .width = entry.width, .height = entry.height };
     }
 };

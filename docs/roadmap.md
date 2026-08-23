@@ -172,45 +172,52 @@ not per-region.
 - **Out of scope:** transferring ownership, multiple owners, admin
   override — none of it asked for yet.
 
-## Phase 3: Images (`load_image`, `get_image_info`, `draw_image`)
+## Phase 3: Images (`load_image`, `get_image_info`, `draw_image`) — done
 
 **Goal:** the `Cell.style.bg = .image` arm — already modeled in
-`core.zig` since Milestone 1 — becomes reachable.
+`core.zig` since Milestone 1 — becomes reachable. Landed with one
+decision revised from what this section originally said (**clip, not
+stretch** — see decisions.md's Image section) and the open question below
+resolved a third way, better than either option originally listed.
 
-- Wire framing extension: `wire.zig` only does JSON-body
-  `Content-Length` framing today. The binary side-channel (JSON header
-  `{bytes: N, format: "png", ...}` immediately followed by `N` raw
-  bytes, decided in decisions.md) is new wire-level work — `FrameDecoder`
-  needs a mode where it consumes a declared byte count directly instead
-  of looking for the next `Content-Length` header.
-- **Open question — where does decoding happen?** decisions.md says
-  `get_image_info` returns "natural pixel dimensions," implying the
-  server decodes the image to know that. But decisions.md's
-  headless-first principle says core state shouldn't depend on
-  rendering, and `glyphwire`'s core module has no image-decode
-  dependency today (only `glyphwire-host` links pixzig, which pulls in
-  zstbi — `glyphwire-shell` deliberately doesn't, see Current state).
-  Two shapes:
-  - Headless core decodes just enough to answer `get_image_info` (needs
-    zstbi or similar as a core dependency, a real headless-first
-    compromise).
-  - Client supplies `width`/`height` on `load_image` instead of the
-    server deriving them; the core stores raw bytes + a handle and never
-    decodes anything; only the renderer (which already has zstbi)
-    decodes when it first encounters a `.image` background it hasn't
-    uploaded yet.
-  - Leaning toward the second — it keeps decisions.md's headless-first
-    line intact and matches how `glyphwire-host`'s render loop already
-    has a natural "first time I see this handle, load it" hook.
-- `draw_image(layer, handle, row, col, row_span, col_span)` just sets
-  `Cell.style.bg = .{ .image = handle }` on the target span — no new
-  core mechanics needed beyond what Phase 1's per-layer `write_text`
-  already requires.
-- Renderer-side work (`host/main.zig`): resolve `.image` handles to an
-  actual texture instead of today's "fall back to plain black."
-- **Out of scope:** icon-by-name (post-v1 per decisions.md), video,
-  aspect-ratio-aware placement (decisions.md already puts that on the
-  client, not the server).
+- Wire framing extension landed: `wire.zig`'s `FrameDecoder.takeRaw` /
+  `readRaw` consume a declared raw byte count directly, draining any
+  already-buffered leftover first, then reading more off the socket —
+  the binary side-channel (`{bytes: N, format: "png"}` header immediately
+  followed by `N` raw bytes) `load_image` needs. `server.zig`'s
+  `serveConnection` special-cases `load_image` (via `dispatch.peekLoadImage`)
+  ahead of the normal per-frame dispatch loop, since the payload isn't a
+  normal frame.
+- **Resolved — where decoding happens:** neither of the two shapes this
+  section originally listed. The headless core parses just the PNG
+  IHDR chunk's width/height (`core.pngDimensions`, ~15 lines, no image
+  codec dependency) instead of a real decode, so `get_image_info` needs
+  neither zstbi in core nor client-supplied dimensions. Full pixel
+  decoding is still renderer-only (`glyphwire-host`'s `App.textureForImage`,
+  lazily on first encountering a handle it hasn't uploaded), exactly as
+  this section originally leaned.
+- `draw_image(handle, row, col, row_span, col_span)` (`Layer.drawImage`)
+  marks each covered cell with `{handle, offset_x, offset_y}` — the pixel
+  offset into the source image that cell should show, computed from the
+  cell's position relative to the draw call's anchor — rather than
+  `Cell.style.bg = .{ .image = handle }` alone; see decisions.md for why
+  (clip semantics need a per-cell offset, not just a handle). Needs
+  `Context.cell_px_w`/`cell_px_h` (new fields, default 12×12 matching
+  `glyphwire-host`'s current tuning) to do that math headlessly.
+- Renderer-side work landed: `glyphwire-host`'s `App.drawImageCell`
+  resolves `.image` handles to an uploaded texture and draws exactly the
+  sub-rect that fits (never stretched, clipped at both the image's own
+  edge and the cell edge).
+- **New, not in the original plan:** `get_cell_metrics` request (returns
+  `cell_px_w`/`cell_px_h`) — a client needs the session's cell pixel size
+  to compute `row_span`/`col_span` from an image's natural dimensions
+  (decisions.md: aspect-ratio-aware placement is the client's job), and
+  nothing already on the wire exposed that.
+- **`glyphwire-view`** (`view/main.zig`) is the first client exercising
+  this: loads a PNG file given on argv, computes the span from
+  `get_image_info` + `get_cell_metrics`, and calls `draw_image`.
+- **Out of scope, unchanged:** icon-by-name (post-v1 per decisions.md),
+  video.
 
 ## Further out (sequencing noted, not detailed yet)
 
@@ -248,8 +255,10 @@ not per-region.
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).
-2. Image decoding in the headless core vs. client-supplied dimensions
-   plus renderer-only decoding (Phase 3).
+2. ~~Image decoding in the headless core vs. client-supplied dimensions
+   plus renderer-only decoding (Phase 3).~~ Resolved: neither — the
+   headless core parses just the PNG IHDR chunk instead of decoding, see
+   Phase 3 above.
 3. Layer z-order / compositing order once a second layer exists (Phase 1).
 4. Should `insert_cells`/`delete_cells` ever operate across multiple
    physical rows for a display-wrapped logical line, or stay strictly

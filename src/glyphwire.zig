@@ -14,6 +14,11 @@ pub const CellPos = client.CellPos;
 
 pub const Color = core.Color;
 pub const ImageHandle = core.ImageHandle;
+pub const ImageBg = core.ImageBg;
+pub const ImageInfo = core.ImageInfo;
+pub const ImageEntry = core.ImageEntry;
+pub const ImageError = core.ImageError;
+pub const pngDimensions = core.pngDimensions;
 pub const Background = core.Background;
 pub const Style = core.Style;
 pub const default_style = core.default_style;

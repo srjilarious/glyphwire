@@ -35,6 +35,7 @@ today; the server auto-creates exactly one context at startup.
 | `create_layer` | request | `context, parent?, width?, height?, scrollback_rows?` | layer handle | 🔶 |
 | `get_property` | request | `layer, property` | property value | ✅ (`cursor` only) |
 | `set_property` | notification | `layer, property, value` | — | ✅ (`cursor` only) |
+| `get_cells` | request | *(implicitly the root layer — no `layer` param yet, see Phase 1 in roadmap.md)* | full row-major cell snapshot (`cols, rows, revision, cells`) | ✅ |
 
 **Property names** (the `property` argument to `get_property`/`set_property` —
 one generic mechanism per decisions.md rather than a bespoke get/set pair
@@ -59,14 +60,17 @@ about resizes should subscribe instead.
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
 | `write_text` | notification | `layer, text, style, row?, col?` | — | ✅ implicit cursor positioning + fg/bg color only; explicit `row`/`col` and style attributes beyond fg/bg (bold, italic, underline, strikethrough, dim) are decided in decisions.md but not yet wired into `Layer.writeText` |
+| `insert_cells` | notification | `count` (cursor-implicit, root-layer-implicit like `write_text`) | — | ✅ ECMA-48's ICH: shifts cells at and after the cursor right within its row, discarding any past the row's right edge; row-scoped only, see roadmap.md's open questions |
+| `delete_cells` | notification | `count` (cursor-implicit, root-layer-implicit like `write_text`) | — | ✅ ECMA-48's DCH: removes cells at and after the cursor, shifting the row's remainder left and blanking the tail |
 
 ## Image
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `load_image` | request (binary side-channel: JSON header + raw bytes) | `format, bytes` | image handle | 🔶 |
-| `get_image_info` | request | `handle` | natural pixel dimensions | 🔶 |
-| `draw_image` | notification | `layer, handle, row, col, row_span, col_span` | — | 🔶 |
+| `load_image` | request (binary side-channel: JSON header + raw bytes) | `format, bytes` | image handle | ✅ `format` is accepted but unchecked — PNG is the only format the core parses (`pngDimensions`); bytes are stored verbatim either way |
+| `get_image_info` | request | `handle` | natural pixel dimensions (from the PNG IHDR chunk, not a real decode) | ✅ |
+| `draw_image` | notification | `handle, row, col, row_span, col_span` (implicitly the root layer, like `write_text` — see Phase 1 in roadmap.md) | — | ✅ clips to the given span rather than stretching to fill it; see decisions.md |
+| `get_cell_metrics` | request | — | `{cell_px_w, cell_px_h}` | ✅ lets a client compute `row_span`/`col_span` from an image's natural size without hardcoding the session's cell pixel metrics |
 | *(icon-by-name)* | — | — | — | ⬜ post-v1, not designed in detail — see decisions.md's Icon section |
 
 ## Animation
@@ -79,16 +83,24 @@ about resizes should subscribe instead.
 ## Input
 
 Two independent, separately-subscribable streams (raw events and mapped
-actions) per decisions.md's Input model — nothing here is implemented
-yet.
+actions) per decisions.md's Input model. Raw key/mouse-button events are
+implemented end to end (an input-capturing process reports what it sees;
+subscribers get it re-broadcast); mouse move as a live stream, scroll,
+gamepad, resize, IME, and action maps are all still open.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `subscribe` | ⬜ request or notification, not decided | event type list (raw, action, or both) | — | 🔶 mechanism decided (opt-in, X11 event-mask precedent), exact message shape ⬜ |
-| `key_down` / `key_up` | notification, server→client | keycode, modifiers | — | 🔶 |
-| `mouse_move` / `mouse_button` / `mouse_scroll` | notification, server→client | position, button/delta | — | 🔶 |
+| `subscribe` | request | `events: []str` (e.g. `["key", "mouse_button"]`) | acked subscription list | ✅ |
+| `report_key` | notification, client→server | `key, pressed` | — | ✅ from whatever process captures input (`glyphwire-host`); see also `Server.reportKey`/`reportKeyRepeat` for a caller reporting in-process rather than over the wire |
+| `report_mouse_button` | notification, client→server | `button, pressed, px, cell` | — | ✅ |
+| `report_mouse_move` | notification, client→server | `px, cell` | — | ✅ updates `get_input_state`'s cursor fields only, no broadcast — see below |
+| `get_input_state` | request | — | `keys_down, mouse_buttons_down, cursor_px, cursor_cell` | ✅ one-time snapshot; `InputListener` is the live-updating equivalent, fed by the notifications below |
+| `key_down` / `key_up` | notification, server→client | `key` | — | ✅ also re-sent (still `key_down`) on typematic repeat for a held key — no separate "this was a repeat" signal on the wire |
+| `mouse_button` | notification, server→client | `button, pressed, px, cell` | — | ✅ |
+| `mouse_move` | notification, server→client | position | — | 🔶 no live push stream yet — `report_mouse_move` only updates state, doesn't broadcast |
+| `mouse_scroll` | notification, server→client | delta | — | 🔶 |
 | `gamepad_*` | notification, server→client | — | — | 🔶 |
-| `resize` | notification, server→client | new `{cols, rows}` | — | 🔶 |
+| `resize` | notification, server→client | new `{cols, rows}` | — | 🔶 moot today since `glyphwire-host`'s window is fixed-size, but should exist for whenever that changes |
 | *(text/IME composition)* | — | — | — | ⬜ own state machine, not detailed yet — kept distinct from raw key events |
 | `action` | notification, server→client | action name, phase | — | 🔶 sent alongside raw events, never instead of |
 

@@ -52,7 +52,48 @@ pub const FrameDecoder = struct {
 
         return body;
     }
+
+    /// Consumes exactly `n` raw bytes from the front of the buffer, not
+    /// frame-parsed -- the binary side-channel's payload, following a JSON
+    /// header frame that declared the count (`{bytes: N, ...}`, see
+    /// decisions.md's Transport & Wire Format). Returns null (buffer
+    /// untouched) if fewer than `n` bytes are currently buffered; caller
+    /// should `feed` more and retry, mirroring how `next()` is used. Bytes
+    /// past `n` are left in the buffer for whatever comes next (the
+    /// following normal frame, or more of this payload on a later call).
+    pub fn takeRaw(self: *FrameDecoder, alloc: std.mem.Allocator, n: usize) !?[]u8 {
+        if (self.buf.items.len < n) return null;
+
+        const raw = try alloc.dupe(u8, self.buf.items[0..n]);
+        errdefer alloc.free(raw);
+
+        const remaining_len = self.buf.items.len - n;
+        std.mem.copyForwards(u8, self.buf.items[0..remaining_len], self.buf.items[n..]);
+        self.buf.shrinkRetainingCapacity(remaining_len);
+
+        return raw;
+    }
 };
+
+/// Reads exactly `n` raw bytes directly off `stream`, not frame-parsed --
+/// the binary side-channel's payload following a JSON header frame that
+/// declared the count. Drains `decoder`'s already-buffered leftover bytes
+/// first (a single socket read can pull in bytes past the header frame's
+/// boundary), then reads more directly off the socket as needed. Shared by
+/// server.zig (reading a `load_image` request's payload) and client.zig
+/// (symmetric handling, if a server-to-client binary payload is ever
+/// added) since both use the same `std.Io.net.Stream` type.
+pub fn readRaw(io: std.Io, stream: *std.Io.net.Stream, decoder: *FrameDecoder, alloc: std.mem.Allocator, n: usize) ![]u8 {
+    while (true) {
+        if (try decoder.takeRaw(alloc, n)) |raw| return raw;
+
+        var read_buf: [4096]u8 = undefined;
+        var data: [1][]u8 = .{&read_buf};
+        const read_n = try stream.read(io, &data);
+        if (read_n == 0) return error.ConnectionClosed;
+        try decoder.feed(alloc, read_buf[0..read_n]);
+    }
+}
 
 fn parseContentLength(header: []const u8) !usize {
     const prefix = "content-length:";
