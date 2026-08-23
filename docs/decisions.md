@@ -183,8 +183,20 @@ surface.
 - A loaded resource (via the binary side-channel framing decided earlier:
   JSON header + raw bytes), referenced by a server-generated handle.
 - `draw_image(layer, handle, row, col, row_span, col_span)` places the
-  image to exactly fill the given cell span — a naive fit, not an
-  aspect-preserving one. No letterboxing or cropping logic in v1.
+  image at its natural pixel size, anchored at the span's top-left cell —
+  **no stretching**. If the image is larger than the span's pixel bounds,
+  it's clipped; if smaller, only the cells actually covered by image
+  pixels are marked as image-backed. Superseded from an earlier "naive
+  fit, stretch to fill" decision — stretching reads badly for the actual
+  v1 use cases (viewing an image, TUI background art), and isn't worth
+  keeping as the default just to avoid clipping. Stretching may return as
+  an opt-in mode later; not needed now.
+- Per-cell storage stays a resource reference, not a stored sub-image: a
+  cell within the span holds `{handle, offset}` (the pixel offset into the
+  source image that cell should display), computed from the cell's
+  position relative to the draw call's anchor. The host resolves `handle +
+  offset` against the actual texture at render time — no per-cell tile is
+  ever extracted or cached as its own resource.
 - Aspect-ratio-aware placement is the **client's** job, not the server's —
   a client that cares queries the image's natural pixel dimensions
   (`get_image_info`) plus the session's fixed cell pixel metrics, and
@@ -281,6 +293,21 @@ surface.
 - **Image protocol specifics** — formats supported, chunking/streaming for
   large images, placement semantics. Only the binary side-channel framing
   is decided; the rest isn't fleshed out.
+- **Layer content as its own axis, separate from geometry** — today a
+  layer's content is implicitly "a cell grid"; nothing forces that. Worth
+  keeping layer geometry (position/size/clip/scroll, already generic via
+  `get_property`/`set_property`) conceptually separate from what fills the
+  layer, so a future "external surface" content kind (a client-shared
+  buffer for something like a full-screen animated GL layer) doesn't need
+  a breaking change to Layer itself — only cell-grid content is built now.
+  Not designed, just flagged so the fork stays cheap later.
+- **Client-shared buffers for surface-backed layers** — a full-screen
+  animated GL layer or similar would need the client's pixel content
+  composited without going through per-frame JSON+binary IPC. Unix domain
+  sockets support fd-passing (`SCM_RIGHTS`), which is how Wayland
+  compositors do zero-copy client→compositor buffer sharing (DMA-BUF)
+  instead of copying pixels through the socket — noted as an option this
+  transport already leaves open, not something to build or design now.
 - **Session/socket lifecycle** — multiple concurrent servers, reconnection
   behavior after a server crash or restart, persisted vs. ephemeral socket
   paths. Not discussed yet.
