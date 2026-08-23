@@ -400,8 +400,34 @@ const Prompt = struct {
     /// `prependZigOutBinToPath`. A spawn failure (e.g. unknown command) is
     /// reported onto the grid rather than propagated, so a typo doesn't
     /// take down the prompt.
+    ///
+    /// Every argument gets the same leading `~`/`~/...` expansion `cd`
+    /// already gives its target (see `expandTilde`) -- most spawned
+    /// programs don't do their own tilde expansion (that's normally the
+    /// shell's job), so `cat ~/notes.txt` would otherwise hand the child a
+    /// literal `~` it has no way to resolve.
     fn runCommand(self: *Prompt, argv: []const []const u8) !void {
-        var child = std.process.spawn(self.client.io, .{ .argv = argv }) catch |err| {
+        const alloc = self.client.alloc;
+        var expanded: std.ArrayList([]const u8) = .empty;
+        defer {
+            // Only the prefix actually appended before an early return
+            // (the HOME-not-set case below) needs freeing -- zip against
+            // that same prefix of argv, not the full slice, or this would
+            // walk past the end of `expanded.items`.
+            for (expanded.items, argv[0..expanded.items.len]) |exp, raw| {
+                if (exp.ptr != raw.ptr) alloc.free(exp);
+            }
+            expanded.deinit(alloc);
+        }
+        for (argv) |arg| {
+            const exp = self.expandTilde(arg) catch {
+                try self.client.writeText("~: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
+                return;
+            };
+            try expanded.append(alloc, exp);
+        }
+
+        var child = std.process.spawn(self.client.io, .{ .argv = expanded.items }) catch |err| {
             var buf: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "{s}: command not found ({t})", .{ argv[0], err }) catch "command not found";
             try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
