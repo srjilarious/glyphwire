@@ -74,7 +74,18 @@ pub const App = struct {
     /// `.image` background it hasn't uploaded yet"). The headless core
     /// never decodes pixels; it only stores the raw bytes `load_image`
     /// received (`Context.images`) plus IHDR-parsed dimensions.
-    image_textures: std.AutoHashMap(glyphwire.ImageHandle, pixzig.Texture),
+    ///
+    /// Stores the `*ManagedTexture` pool, not a `Texture` value: the
+    /// sprite batch (`eng.renderer.draw`) stores the `*const Texture`
+    /// pointer it's given and only dereferences it later, at `flush()`/
+    /// `end()` -- not immediately. A pointer to a local stack copy (this
+    /// used to cache `pixzig.Texture` by value and pass `&tex`) goes
+    /// dangling the moment the drawing function returns, so the batch
+    /// reads stack garbage once it actually flushes. `ManagedTexture`'s
+    /// heap-allocated `Handle` is documented as staying at a stable
+    /// address for its full lifetime, so `&managed.get().?.val` stays
+    /// valid through the whole frame.
+    image_textures: std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture),
     /// Set by `reapChild` once glyphwire-shell's process actually exits
     /// (normally from its `exit` builtin, but this covers a crash or
     /// external kill just as well) -- the one thing that ends the host,
@@ -96,7 +107,7 @@ pub const App = struct {
         app.* = .{
             .alloc = alloc,
             .server = server,
-            .image_textures = std.AutoHashMap(glyphwire.ImageHandle, pixzig.Texture).init(alloc),
+            .image_textures = std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture).init(alloc),
             .shell_exited = shell_exited,
         };
         return app;
@@ -107,32 +118,34 @@ pub const App = struct {
         self.alloc.destroy(self);
     }
 
-    /// Returns the uploaded texture for `handle`, decoding and uploading it
-    /// first if this is the first time this App has seen it -- see
-    /// `image_textures`'s doc comment. Null if `handle` isn't in
-    /// `ctx.images` (shouldn't happen: `draw_image` already validated the
-    /// handle before marking a cell with it) or decoding the stored bytes
-    /// fails.
-    fn textureForImage(self: *App, eng: *AppRunner.Engine, handle: glyphwire.ImageHandle) ?pixzig.Texture {
-        if (self.image_textures.get(handle)) |tex| return tex;
+    /// Returns a stable pointer to the uploaded texture for `handle`,
+    /// decoding and uploading it first if this is the first time this App
+    /// has seen it -- see `image_textures`'s doc comment. Null if `handle`
+    /// isn't in `ctx.images` (shouldn't happen: `draw_image` already
+    /// validated the handle before marking a cell with it), decoding the
+    /// stored bytes fails, or (defensively) the managed pool somehow has
+    /// no live generation right after we just added one.
+    fn textureForImage(self: *App, eng: *AppRunner.Engine, handle: glyphwire.ImageHandle) ?*pixzig.Texture {
+        const managed = self.image_textures.get(handle) orelse blk: {
+            const entry = self.server.ctx.images.get(handle) orelse return null;
+            var image = pixzig.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
+                std.log.err("glyphwire-host: failed to decode image handle {d}: {t}", .{ handle, err });
+                return null;
+            };
+            defer image.deinit();
 
-        const entry = self.server.ctx.images.get(handle) orelse return null;
-        var image = pixzig.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
-            std.log.err("glyphwire-host: failed to decode image handle {d}: {t}", .{ handle, err });
-            return null;
+            var name_buf: [32]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buf, "glyphwire-image-{d}", .{handle}) catch unreachable;
+            const managed = eng.resources.loadTextureFromBuffer(name, image.width, image.height, image.data) catch |err| {
+                std.log.err("glyphwire-host: failed to upload image handle {d}: {t}", .{ handle, err });
+                return null;
+            };
+            self.image_textures.put(handle, managed) catch {};
+            break :blk managed;
         };
-        defer image.deinit();
 
-        var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "glyphwire-image-{d}", .{handle}) catch unreachable;
-        const managed = eng.resources.loadTextureFromBuffer(name, image.width, image.height, image.data) catch |err| {
-            std.log.err("glyphwire-host: failed to upload image handle {d}: {t}", .{ handle, err });
-            return null;
-        };
-        const tex = (managed.get() orelse return null).val;
-
-        self.image_textures.put(handle, tex) catch {};
-        return tex;
+        const live = managed.get() orelse return null;
+        return &live.val;
     }
 
     /// Draws one cell's portion of an image background: the sub-rect of
@@ -148,7 +161,7 @@ pub const App = struct {
         const entry = self.server.ctx.images.get(img.handle) orelse return;
         if (img.offset_x >= entry.width or img.offset_y >= entry.height) return;
 
-        var tex = self.textureForImage(eng, img.handle) orelse return;
+        const tex = self.textureForImage(eng, img.handle) orelse return;
 
         const avail_w: i32 = @min(cell_w, @as(i32, @intCast(entry.width - img.offset_x)));
         const avail_h: i32 = @min(cell_h, @as(i32, @intCast(entry.height - img.offset_y)));
@@ -162,7 +175,7 @@ pub const App = struct {
         const uv_b = @as(f32, @floatFromInt(img.offset_y + @as(u32, @intCast(avail_h)))) / img_h_f;
 
         eng.renderer.draw(
-            &tex,
+            tex,
             pixzig.RectF.fromPosSize(pos.x, pos.y, avail_w, avail_h),
             pixzig.RectF{ .l = uv_l, .t = uv_t, .r = uv_r, .b = uv_b },
         );
