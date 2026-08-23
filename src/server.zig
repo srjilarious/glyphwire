@@ -142,10 +142,24 @@ pub const Server = struct {
                     continue;
                 }
 
-                const result = blk: {
+                const handle_result = blk: {
                     self.ctx_mutex.lockUncancelable(self.io);
                     defer self.ctx_mutex.unlock(self.io);
-                    break :blk try d.handle(alloc, body);
+                    break :blk d.handle(alloc, body);
+                };
+
+                // A notification's dispatch error (e.g. draw_icon naming
+                // an unregistered icon) has no response channel to report
+                // on anyway -- log and move on rather than severing the
+                // whole connection over it. A request's error still
+                // propagates: see dispatch.zig's `isNotification` doc
+                // comment for why.
+                const result = handle_result catch |err| result: {
+                    if (dispatch.isNotification(alloc, body) catch true) {
+                        std.log.warn("glyphwire: notification failed: {t}", .{err});
+                        break :result dispatch.HandleResult{};
+                    }
+                    return err;
                 };
                 conn.subscriptions = d.subscriptions;
 

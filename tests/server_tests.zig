@@ -176,3 +176,58 @@ pub fn subscribedConnectionReceivesBroadcastKeyEventTest(io: std.Io, alloc: std.
     try testz.expectEqualStr("a", parsed.value.params.key);
     try testz.expectTrue(ctx.input.isKeyDown("a"));
 }
+
+/// A notification whose dispatch fails server-side (here: draw_icon
+/// naming an icon nothing registered) has no response channel to report
+/// the error on anyway -- should just be logged, not sever the whole
+/// connection. Proves it by sending a bad notification, then two more
+/// ordinary messages on the *same* connection and confirming both still
+/// land.
+pub fn badNotificationDoesNotSeverTheConnectionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-badnotif-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer thread.join();
+
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":0,"col":0,"name":"not-registered"}}
+    );
+    try w.interface.flush();
+
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi"}}
+    );
+    try w.interface.flush();
+
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"get_property","params":{"property":"cursor"}}
+    );
+    try w.interface.flush();
+
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+    const response_body = try readOneFrame(io, alloc, &stream, &decoder);
+    defer alloc.free(response_body);
+
+    const Response = struct { id: i64, result: struct { row: usize, col: usize } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try testz.expectEqual(parsed.value.result.col, 2);
+    try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
+}

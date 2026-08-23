@@ -232,6 +232,25 @@ pub fn peekLoadImage(alloc: std.mem.Allocator, body: []const u8) !?LoadImageHead
     return .{ .id = id, .bytes = p.value.bytes };
 }
 
+/// Peeks at a decoded frame body to determine whether it's a notification
+/// (no `id`) rather than a request. Used by server.zig to decide whether a
+/// `Dispatcher.handle` error should just be logged or propagated: a
+/// notification has no response channel to report an error on anyway (per
+/// JSON-RPC, that's a server-side log line, not a wire message -- see
+/// decisions.md's latent-robustness-gap note), so severing the whole
+/// connection over e.g. one `draw_icon` naming an unregistered icon would
+/// be a disproportionate failure mode. A request needs *some* response;
+/// until real JSON-RPC error responses land (roadmap.md's Milestone 0),
+/// severing the connection is the least-bad fallback there rather than
+/// leaving the client's request hanging forever with no reply.
+pub fn isNotification(alloc: std.mem.Allocator, body: []const u8) !bool {
+    const parsed = try std.json.parseFromSlice(Envelope, alloc, body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    return parsed.value.id == null;
+}
+
 pub const Dispatcher = struct {
     ctx: *core.Context,
     /// This connection's current subscriptions; see `Subscriptions`. Not

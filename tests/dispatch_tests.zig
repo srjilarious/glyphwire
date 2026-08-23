@@ -556,3 +556,19 @@ pub fn clearWithRowPastEdgeAndOmittedRowsIsNoOpTest(io: std.Io, alloc: std.mem.A
     try testz.expectTrue(result.response == null);
     try testz.expectEqual(ctx.root.revision, revision_before);
 }
+
+pub fn isNotificationTrueForMessageWithNoIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const message =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi"}}
+    ;
+    try testz.expectTrue(try dispatch.isNotification(alloc, message));
+}
+
+pub fn isNotificationFalseForMessageWithIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const message =
+        \\{"jsonrpc":"2.0","id":1,"method":"get_property","params":{"property":"cursor"}}
+    ;
+    try testz.expectTrue(!try dispatch.isNotification(alloc, message));
+}
