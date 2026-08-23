@@ -375,6 +375,30 @@ fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator
     };
 }
 
+/// Reads each `glyphwire.default_icon_manifest` entry's PNG file and
+/// registers it in `ctx`'s icon catalog -- the real file I/O `core.zig`
+/// deliberately doesn't do itself (headless-first, see decisions.md).
+/// Logs and skips any icon whose file is missing or fails to load rather
+/// than failing the whole host, so a broken/missing icon asset doesn't
+/// block startup.
+fn loadDefaultIcons(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context) void {
+    for (glyphwire.default_icon_manifest) |entry| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, entry.path, alloc, .limited(16 * 1024 * 1024)) catch |err| {
+            std.log.warn("glyphwire-host: couldn't read icon '{s}' ({s}): {t}", .{ entry.name, entry.path, err });
+            continue;
+        };
+        defer alloc.free(bytes);
+
+        const handle = ctx.loadImage(bytes) catch |err| {
+            std.log.warn("glyphwire-host: couldn't load icon '{s}': {t}", .{ entry.name, err });
+            continue;
+        };
+        ctx.registerIcon(entry.name, handle) catch |err| {
+            std.log.warn("glyphwire-host: couldn't register icon '{s}': {t}", .{ entry.name, err });
+        };
+    }
+}
+
 fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
     const dir = environ_map.get("XDG_RUNTIME_DIR") orelse "/tmp";
     const pid = std.os.linux.getpid();
@@ -412,6 +436,7 @@ pub fn main(init: std.process.Init) !void {
     // comment on cell_px_w/cell_px_h.
     ctx.cell_px_w = cell_w;
     ctx.cell_px_h = cell_h;
+    loadDefaultIcons(io, alloc, &ctx);
 
     // `.listen()` inside `bind` is synchronous -- the socket is already
     // accept-ready (kernel-queued, even before `serveForever`'s thread

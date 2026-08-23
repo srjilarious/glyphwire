@@ -341,3 +341,32 @@ pub fn layerDrawImageLeavesCellsBeyondImageBoundsUntouchedTest(io: std.Io, alloc
         .image => return error.TestUnexpectedResult,
     }
 }
+
+pub fn contextRegisterIconThenLookUpByNameTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const png = fakePngBytes(32, 32);
+    const handle = try ctx.loadImage(&png);
+    try ctx.registerIcon("folder", handle);
+
+    try testz.expectEqual(ctx.iconHandle("folder").?, handle);
+    try testz.expectTrue(ctx.iconHandle("not-registered") == null);
+}
+
+pub fn contextRegisterIconTwiceUnderSameNameOverwritesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const png_a = fakePngBytes(16, 16);
+    const handle_a = try ctx.loadImage(&png_a);
+    try ctx.registerIcon("icon", handle_a);
+
+    const png_b = fakePngBytes(32, 32);
+    const handle_b = try ctx.loadImage(&png_b);
+    try ctx.registerIcon("icon", handle_b);
+
+    try testz.expectEqual(ctx.iconHandle("icon").?, handle_b);
+}

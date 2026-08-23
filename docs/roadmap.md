@@ -216,8 +216,30 @@ resolved a third way, better than either option originally listed.
 - **`glyphwire-view`** (`view/main.zig`) is the first client exercising
   this: loads a PNG file given on argv, computes the span from
   `get_image_info` + `get_cell_metrics`, and calls `draw_image`.
-- **Out of scope, unchanged:** icon-by-name (post-v1 per decisions.md),
-  video.
+- **Out of scope, unchanged:** video.
+
+## Phase 3.5: Icons (`draw_icon`) — done
+
+**Goal:** a way to show one of a bundled set of small images in a single
+cell by name, rather than every caller having to `load_image` its own
+copy of common icons like "folder" or "audio file" — decisions.md's Icon
+section, previously flagged post-v1.
+
+- `Context` gained a second registry (`icons: std.StringHashMap(ImageHandle)`)
+  alongside `images`, plus `registerIcon`/`iconHandle`. `draw_icon(row,
+  col, name)` resolves through it and reuses `Layer.drawImage` with a 1x1
+  span — no new core drawing mechanics.
+- `core.default_icon_manifest` is a pure-data name → asset-path table (12
+  entries); `glyphwire-host`'s `loadDefaultIcons` (real file I/O, kept out
+  of core per headless-first) reads each file and registers it at
+  startup, logging and skipping any that fail rather than blocking boot.
+- Icons are colorful 32x32 PNGs from the KDE Oxygen theme (LGPLv3) — see
+  `assets/icons/oxygen/README.txt` for attribution and the full file list.
+  Picked over a flatter monochrome set deliberately, to actually show off
+  drawing real artwork into a cell.
+- **Out of scope:** theming (a context-local catalog overriding the
+  global one) and a wire-exposed way to list/query the catalog's
+  contents — both still open, see decisions.md.
 
 ## Further out (sequencing noted, not detailed yet)
 

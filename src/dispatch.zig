@@ -19,6 +19,7 @@ pub const DispatchError = error{
     UnknownProperty,
     NotARequest,
     UnknownImage,
+    UnknownIcon,
 };
 
 const Envelope = struct {
@@ -116,6 +117,12 @@ const DrawImageParams = struct {
     col: usize,
     row_span: usize,
     col_span: usize,
+};
+
+const DrawIconParams = struct {
+    row: usize,
+    col: usize,
+    name: []const u8,
 };
 
 /// The `load_image` request's JSON header, peeked out of a frame body
@@ -263,6 +270,9 @@ pub const Dispatcher = struct {
             return .{ .response = try self.handleGetImageInfo(alloc, id, envelope.params) };
         } else if (std.mem.eql(u8, envelope.method, "draw_image")) {
             try self.handleDrawImage(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "draw_icon")) {
+            try self.handleDrawIcon(alloc, envelope.params);
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "get_cell_metrics")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
@@ -547,6 +557,34 @@ pub const Dispatcher = struct {
             p.col,
             p.row_span,
             p.col_span,
+            info.width,
+            info.height,
+            self.ctx.cell_px_w,
+            self.ctx.cell_px_h,
+        );
+    }
+
+    /// `draw_icon`: resolves `name` against the icon catalog
+    /// (`Context.iconHandle`, populated from `default_icon_manifest` by
+    /// `glyphwire-host`) and draws it into exactly one cell -- an icon is
+    /// scoped to a single cell for now, per decisions.md's Icon section.
+    /// Reuses `Layer.drawImage` with a 1x1 span rather than a separate
+    /// core mechanism, same as `handleDrawImage`.
+    fn handleDrawIcon(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DrawIconParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const icon_handle = self.ctx.iconHandle(p.name) orelse return DispatchError.UnknownIcon;
+        const info = self.ctx.imageInfo(icon_handle) orelse return DispatchError.UnknownImage;
+        self.ctx.root.drawImage(
+            icon_handle,
+            p.row,
+            p.col,
+            1,
+            1,
             info.width,
             info.height,
             self.ctx.cell_px_w,

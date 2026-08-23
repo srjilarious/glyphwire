@@ -393,6 +393,45 @@ pub fn drawImageMarksRootLayerCellsTest(io: std.Io, alloc: std.mem.Allocator) !v
     }
 }
 
+pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("folder", 1);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder"}}
+    ;
+    const result = try d.handle(alloc, draw_message);
+    try testz.expectTrue(result.response == null);
+
+    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.image.handle, 1);
+    // A 32x32px icon at 12px cells only reaches one cell either way, but
+    // the span passed to Layer.drawImage is what actually guarantees this
+    // -- confirm the neighboring cell wasn't touched.
+    switch (ctx.root.cell(2, 4).style.bg) {
+        .color => {},
+        .image => return error.TestUnexpectedResult,
+    }
+}
+
+pub fn drawIconUnknownNameErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":0,"col":0,"name":"not-registered"}}
+    ;
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownIcon);
+}
+
 pub fn getCellMetricsReturnsSessionDefaultsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

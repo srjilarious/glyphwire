@@ -216,6 +216,14 @@ pub const Client = struct {
         });
     }
 
+    /// `draw_icon(row, col, name)` -- a notification. Draws a bundled,
+    /// named icon (decisions.md's Icon section; the default set comes from
+    /// `core.default_icon_manifest`) into exactly one cell -- unlike
+    /// `drawImage`, no span: an icon is scoped to a single cell for now.
+    pub fn drawIcon(self: *Client, row: usize, col: usize, name: []const u8) !void {
+        try self.notify("draw_icon", .{ .row = row, .col = col, .name = name });
+    }
+
     /// `get_cell_metrics` -- a request returning the session's fixed cell
     /// pixel size, for a client computing `draw_image`'s span from an
     /// image's natural pixel dimensions.

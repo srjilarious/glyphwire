@@ -71,7 +71,7 @@ about resizes should subscribe instead.
 | `get_image_info` | request | `handle` | natural pixel dimensions (from the PNG IHDR chunk, not a real decode) | ✅ |
 | `draw_image` | notification | `handle, row, col, row_span, col_span` (implicitly the root layer, like `write_text` — see Phase 1 in roadmap.md) | — | ✅ clips to the given span rather than stretching to fill it; see decisions.md |
 | `get_cell_metrics` | request | — | `{cell_px_w, cell_px_h}` | ✅ lets a client compute `row_span`/`col_span` from an image's natural size without hardcoding the session's cell pixel metrics |
-| *(icon-by-name)* | — | — | — | ⬜ post-v1, not designed in detail — see decisions.md's Icon section |
+| `draw_icon` | notification | `row, col, name` | — | ✅ resolves `name` against `Context.icons` (seeded at `glyphwire-host` startup from `core.default_icon_manifest`) and draws it into exactly one cell; theming and a wire-exposed catalog listing are still open — see decisions.md's Icon section |
 
 ## Animation
 

@@ -205,15 +205,24 @@ surface.
   span-based placement model, just with a streaming/updating source
   instead of a static bitmap.
 
-**Icon (post-v1)**
-- A themable, named reference to an image, resolved server-side rather
-  than by raw handle — a cell or draw call references an icon by name
-  (`"folder"`, `"audio-file"`), resolved against a context-local catalog
-  first, falling back to a global catalog. Swapping a theme changes what a
-  name resolves to without any client needing to know or reload anything.
-- Not designed in detail yet — flagged here so the Cell/Image model above
-  leaves room for it (the background tagged union should eventually cover
-  "icon by name" alongside "image by handle").
+**Icon**
+- A named reference to an image, resolved server-side rather than by raw
+  handle — `draw_icon(row, col, name)` looks the name up against
+  `Context.icons` and draws it into exactly one cell (unlike `draw_image`,
+  no span — an icon is scoped to a single cell for now).
+- **v1 built:** a single flat, global catalog (`Context.registerIcon`/
+  `iconHandle`), seeded at `glyphwire-host` startup from
+  `core.default_icon_manifest` — 12 colorful 32x32 PNGs from the KDE
+  Oxygen icon theme (LGPLv3, see `assets/icons/oxygen/README.txt`),
+  covering common categories (folder, file, audio, image, video, archive,
+  executable, drive, unknown). Chosen over a flatter/more minimal icon set
+  specifically to show off what drawing real multi-tone artwork into a
+  cell looks like, not just a monochrome glyph.
+- **Not built — still open:** theming (a context-local catalog overriding
+  the global one, so swapping a theme changes what a name resolves to
+  without any client needing to know or reload anything) and a way to
+  query the catalog's contents over the wire (a client currently just has
+  to know the names from `default_icon_manifest`).
 
 ### Events
 - No separate wire-level "event" mechanism — events are just notifications

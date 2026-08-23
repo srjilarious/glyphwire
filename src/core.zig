@@ -428,12 +428,42 @@ pub const InputState = struct {
 /// negotiating it over the wire.
 pub const default_context_id = "0";
 
+/// A bundled default icon, resolved server-side by name -- the v1 slice of
+/// decisions.md's post-v1 Icon section ("a themable, named reference to an
+/// image"). Just the flat name -> asset-path table; theming (a
+/// context-local catalog overriding this global one) isn't built -- see
+/// that section's remaining open scope. `path` is relative to the process
+/// cwd, same convention as `host/main.zig`'s font asset path; loading them
+/// (real file I/O) is `glyphwire-host`'s job, not core's -- see
+/// `main.zig`'s `loadDefaultIcons`.
+pub const IconManifestEntry = struct { name: []const u8, path: []const u8 };
+
+pub const default_icon_manifest = [_]IconManifestEntry{
+    .{ .name = "folder", .path = "assets/icons/oxygen/folder.png" },
+    .{ .name = "folder-open", .path = "assets/icons/oxygen/folder-open.png" },
+    .{ .name = "home", .path = "assets/icons/oxygen/home.png" },
+    .{ .name = "file", .path = "assets/icons/oxygen/file.png" },
+    .{ .name = "audio", .path = "assets/icons/oxygen/audio.png" },
+    .{ .name = "image", .path = "assets/icons/oxygen/image.png" },
+    .{ .name = "video", .path = "assets/icons/oxygen/video.png" },
+    .{ .name = "archive", .path = "assets/icons/oxygen/archive.png" },
+    .{ .name = "executable", .path = "assets/icons/oxygen/executable.png" },
+    .{ .name = "unknown", .path = "assets/icons/oxygen/unknown.png" },
+    .{ .name = "drive", .path = "assets/icons/oxygen/drive.png" },
+    .{ .name = "media-optical", .path = "assets/icons/oxygen/media-optical.png" },
+};
+
 pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
     input: InputState,
     images: std.AutoHashMap(ImageHandle, ImageEntry),
     next_image_handle: ImageHandle = 1,
+    /// Name -> image handle, for `draw_icon` (decisions.md's Icon
+    /// section). Populated from `default_icon_manifest` by whoever loads
+    /// the icon files (`glyphwire-host`) -- empty until then, same as
+    /// `images` before any `load_image` call.
+    icons: std.StringHashMap(ImageHandle),
     /// The session's fixed cell pixel metrics -- decisions.md's "one
     /// monospace font + size per session" -- needed to translate a
     /// `draw_image` span into per-cell pixel offsets (see
@@ -449,6 +479,7 @@ pub const Context = struct {
             .root = try Layer.init(alloc, width, height, scrollback_rows),
             .input = InputState.init(alloc),
             .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
+            .icons = std.StringHashMap(ImageHandle).init(alloc),
         };
     }
 
@@ -458,6 +489,26 @@ pub const Context = struct {
         var it = self.images.valueIterator();
         while (it.next()) |entry| self.alloc.free(entry.bytes);
         self.images.deinit();
+        var icon_it = self.icons.keyIterator();
+        while (icon_it.next()) |k| self.alloc.free(k.*);
+        self.icons.deinit();
+    }
+
+    /// Registers `handle` under `name` in the icon catalog, for `draw_icon`
+    /// to resolve later. `name` is duped -- the caller (`loadDefaultIcons`)
+    /// doesn't need to keep its own copy alive. Overwrites any existing
+    /// registration under the same name (its old key is freed) rather than
+    /// erroring, so re-running icon loading is idempotent.
+    pub fn registerIcon(self: *Context, name: []const u8, handle: ImageHandle) !void {
+        if (self.icons.fetchRemove(name)) |kv| self.alloc.free(kv.key);
+        const owned = try self.alloc.dupe(u8, name);
+        errdefer self.alloc.free(owned);
+        try self.icons.put(owned, handle);
+    }
+
+    /// `draw_icon`'s name -> handle lookup. Null for an unregistered name.
+    pub fn iconHandle(self: *const Context, name: []const u8) ?ImageHandle {
+        return self.icons.get(name);
     }
 
     /// `load_image`: stores `bytes` verbatim (PNG only for now) and parses
