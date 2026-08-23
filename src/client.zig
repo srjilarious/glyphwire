@@ -199,14 +199,16 @@ pub const Client = struct {
         return .{ .width = parsed.value.result.width, .height = parsed.value.result.height };
     }
 
-    /// `draw_image(handle, row, col, row_span, col_span)` -- a
+    /// `draw_image(handle, row?, col?, row_span, col_span)` -- a
     /// notification. Places the image at its natural pixel size, anchored
-    /// at `(row, col)`, clipped to the given span rather than stretched to
-    /// fill it — see decisions.md's Image section. Aspect-ratio-aware
-    /// placement (choosing `row_span`/`col_span` to match the image's
-    /// shape) is the caller's job; `getImageInfo` plus `getCellMetrics`
-    /// give it what it needs to compute that.
-    pub fn drawImage(self: *Client, handle: core.ImageHandle, row: usize, col: usize, row_span: usize, col_span: usize) !void {
+    /// at `(row, col)` (defaulting to the layer's cursor when either is
+    /// omitted, same as `write_text`'s documented convention), clipped to
+    /// the given span rather than stretched to fill it — see decisions.md's
+    /// Image section. Aspect-ratio-aware placement (choosing `row_span`/
+    /// `col_span` to match the image's shape) is the caller's job;
+    /// `getImageInfo` plus `getCellMetrics` give it what it needs to
+    /// compute that.
+    pub fn drawImage(self: *Client, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize) !void {
         try self.notify("draw_image", .{
             .handle = handle,
             .row = row,
@@ -216,20 +218,22 @@ pub const Client = struct {
         });
     }
 
-    /// `draw_icon(row, col, name)` -- a notification. Draws a bundled,
+    /// `draw_icon(row?, col?, name)` -- a notification. Draws a bundled,
     /// named icon (decisions.md's Icon section; the default set comes from
-    /// `core.default_icon_manifest`) into exactly one cell -- unlike
-    /// `drawImage`, no span: an icon is scoped to a single cell for now.
-    pub fn drawIcon(self: *Client, row: usize, col: usize, name: []const u8) !void {
+    /// `core.default_icon_manifest`) into exactly one cell, anchored at the
+    /// layer's cursor when `row`/`col` is omitted -- unlike `drawImage`, no
+    /// span: an icon is scoped to a single cell for now.
+    pub fn drawIcon(self: *Client, row: ?usize, col: ?usize, name: []const u8) !void {
         try self.notify("draw_icon", .{ .row = row, .col = col, .name = name });
     }
 
-    /// `draw_box(row, col, rows, cols, style)` -- a notification. Draws a
+    /// `draw_box(row?, col?, rows, cols, style)` -- a notification. Draws a
     /// `rows x cols` box using `style`'s 9 registered corner/edge/fill
     /// tiles (`"{style}-tl"`, ... -- see `core.default_box_manifest` for
-    /// the bundled `"box"` style's pieces), one tile per cell, tiled
-    /// rather than stretched.
-    pub fn drawBox(self: *Client, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) !void {
+    /// the bundled `"box"` style's pieces), one tile per cell, tiled rather
+    /// than stretched, anchored at the layer's cursor when `row`/`col` is
+    /// omitted.
+    pub fn drawBox(self: *Client, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
         try self.notify("draw_box", .{ .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
     }
 

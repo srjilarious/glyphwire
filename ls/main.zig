@@ -204,25 +204,30 @@ const icon_col_width = 2;
 /// leaving the cursor at the start of the row after the last entry --
 /// glyphwire-shell resyncs from `get_property(cursor)` after this process
 /// exits (see `Prompt.submitLine`), so there's no fixed row count it needs
-/// to guess. Each row gets a leading icon (`iconForEntry`) before the name.
+/// to guess. Each row gets a leading icon (`iconForEntry`) before the name,
+/// drawn at the cursor (`drawIcon(null, null, ...)`) rather than naming
+/// its row/col explicitly -- the loop always enters each iteration with
+/// the cursor already sitting at that row's start (see the trailing
+/// `setCursor(row + 1, 0)` below), so there's nothing to add by repeating
+/// it.
 ///
 /// Reads the cursor back before *each* entry rather than tracking a local
 /// row counter across the whole loop: the grid can scroll mid-listing
 /// (once enough entries have pushed the cursor to the bottom), and only
 /// the server knows the post-scroll row. A local counter drifts out of
 /// sync the moment that happens -- `write_text`'s cursor-based
-/// positioning self-corrects for it, but `draw_icon`'s explicit row
-/// doesn't, so a stale counter silently pointed icons at rows already
-/// scrolled out of the way, and every icon after that just stopped
-/// appearing. Costs one extra request per entry; fine for what a
-/// directory listing needs over a local socket.
+/// positioning self-corrects for it, and now `draw_icon` does too by
+/// drawing at the cursor, but the row is still needed below to position
+/// the *name* one column over and to advance to the next row. Costs one
+/// extra request per entry; fine for what a directory listing needs over
+/// a local socket.
 fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry) !void {
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
     for (entries) |entry| {
         const cur = try client.getCursor();
         const row = cur.row;
 
-        try client.drawIcon(row, 0, iconForEntry(entry));
+        try client.drawIcon(null, null, iconForEntry(entry));
         try client.setCursor(row, icon_col_width);
         switch (entry.kind) {
             .directory => {

@@ -452,6 +452,16 @@ always appends at the layer's cursor and advances it — the same behavior
 a plain stdout-writing program already expects, so porting a
 straightforward `print`-style tool needs no positioning logic at all.
 
+**Extended to `draw_image`/`draw_icon`/`draw_box`:** the same
+omit-means-cursor convention now applies to every absolute-position draw
+call, not just `write_text` — `row`/`col` default to the layer's current
+cursor when left out. Unlike `write_text`, none of the three *advance*
+the cursor afterward (a drawn image/icon/box isn't "text that was just
+typed," so there's no obvious single cursor position to land on
+afterward the way there is after writing N characters) — a caller
+chaining a draw with more content on the same row still positions
+explicitly for what comes next.
+
 **Decision:** cursor position, layer position, clip rect, size, and
 scroll offset are all exposed through one generic mechanism —
 `get_property(layer, name)` / `set_property(layer, name, value)` — rather

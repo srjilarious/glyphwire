@@ -393,6 +393,28 @@ pub fn drawImageMarksRootLayerCellsTest(io: std.Io, alloc: std.mem.Allocator) !v
     }
 }
 
+/// draw_image with row/col omitted anchors at the layer's current cursor
+/// -- the same convention decisions.md already documents for write_text,
+/// now actually wired in for the draw_* family too.
+pub fn drawImageOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    ctx.root.setProperty(.{ .cursor = .{ .row = 4, .col = 5 } });
+
+    const png = fakePngBytes(12, 12);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_image","params":{"handle":1,"row_span":1,"col_span":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, draw_message)).response == null);
+
+    try testz.expectEqual(ctx.root.cell(4, 5).style.bg.image.handle, 1);
+}
+
 pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
@@ -439,7 +461,7 @@ pub fn drawIconKeepsLandingAcrossAScrollBoundaryTest(io: std.Io, alloc: std.mem.
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
-    var name_buf: [64]u8 = undefined;
+    var name_buf: [128]u8 = undefined;
     var i: usize = 0;
     while (i < 6) : (i += 1) { // 3-row grid -- guarantees at least one scroll
         const row = ctx.root.cursor.row;
@@ -467,6 +489,26 @@ pub fn drawIconUnknownNameErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":0,"col":0,"name":"not-registered"}}
     ;
     try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownIcon);
+}
+
+pub fn drawIconOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    ctx.root.setProperty(.{ .cursor = .{ .row = 2, .col = 6 } });
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("folder", 1);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"name":"folder"}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, draw_message)).response == null);
+
+    try testz.expectEqual(ctx.root.cell(2, 6).style.bg.icon, 1);
 }
 
 /// Registers all 9 pieces of a `style`-prefixed box under distinct
@@ -514,6 +556,25 @@ pub fn drawBoxPlacesAllNinePiecesTest(io: std.Io, alloc: std.mem.Allocator) !voi
                 .color, .icon => return error.TestUnexpectedResult,
             }
         }
+    }
+}
+
+pub fn drawBoxOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try registerTestBoxStyle(&d, alloc, &ctx, "box");
+    ctx.root.setProperty(.{ .cursor = .{ .row = 3, .col = 2 } });
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"draw_box","params":{"rows":2,"cols":2,"style":"box"}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, message)).response == null);
+
+    switch (ctx.root.cell(3, 2).style.bg) {
+        .image => {},
+        .color, .icon => return error.TestUnexpectedResult,
     }
 }
 

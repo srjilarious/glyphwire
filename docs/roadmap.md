@@ -407,6 +407,20 @@ may now clip slightly rather than filling the cell exactly. Not reported
 as broken yet; regenerate the tiles at the current cell size (or give
 `draw_box` its own scale-to-fit option) if it turns out to matter.
 
+## `draw_image`/`draw_icon`/`draw_box` now default to the cursor
+
+`row`/`col` are optional on all three, defaulting to the layer's current
+cursor when omitted — the same convention decisions.md already documented
+for `write_text` (and, unlike `write_text`, only wired in there loosely
+before now) but had never actually been extended to the draw-a-thing
+family. `Dispatcher.resolveAnchor` is the shared resolution point.
+`glyphwire-ls`'s icon draw uses this now (`drawIcon(null, null, ...)`
+instead of repeating the row it already knows the cursor is sitting at)
+— doesn't reduce its per-entry request count (it still needs the row
+value itself, to position the name one column over and to advance to the
+next row), but removes a redundant explicit position that was always
+just restating where the cursor already was.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

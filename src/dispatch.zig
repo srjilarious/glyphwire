@@ -112,23 +112,26 @@ const ImageInfoParams = struct { handle: core.ImageHandle };
 const ImageInfoResult = struct { width: u32, height: u32 };
 const LoadImageResult = struct { handle: core.ImageHandle };
 
+/// `row`/`col` are optional, same as `write_text`'s documented (if not
+/// yet wired in there) convention: omitted means "at the layer's
+/// cursor" -- see `handleDrawImage`/`resolveAnchor`.
 const DrawImageParams = struct {
     handle: core.ImageHandle,
-    row: usize,
-    col: usize,
+    row: ?usize = null,
+    col: ?usize = null,
     row_span: usize,
     col_span: usize,
 };
 
 const DrawIconParams = struct {
-    row: usize,
-    col: usize,
+    row: ?usize = null,
+    col: ?usize = null,
     name: []const u8,
 };
 
 const DrawBoxParams = struct {
-    row: usize,
-    col: usize,
+    row: ?usize = null,
+    col: ?usize = null,
     rows: usize,
     cols: usize,
     style: []const u8,
@@ -592,6 +595,18 @@ pub const Dispatcher = struct {
         return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }
 
+    /// Resolves an optional `row`/`col` pair against the layer's current
+    /// cursor -- shared by `draw_image`/`draw_icon`/`draw_box`, matching
+    /// `write_text`'s documented (if not yet wired in there) convention:
+    /// omitted means "at the cursor," same as it would for text. Doesn't
+    /// itself scroll or otherwise validate -- `Layer.resolveRow` (called
+    /// downstream by `drawImage`/`drawIcon`/`drawBox` themselves) still
+    /// handles a resulting row that's out of bounds.
+    fn resolveAnchor(self: *Dispatcher, row: ?usize, col: ?usize) struct { row: usize, col: usize } {
+        const cursor = self.ctx.root.cursor;
+        return .{ .row = row orelse cursor.row, .col = col orelse cursor.col };
+    }
+
     fn handleDrawImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
         const parsed = try std.json.parseFromValue(DrawImageParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
@@ -600,10 +615,11 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         const info = self.ctx.imageInfo(p.handle) orelse return DispatchError.UnknownImage;
+        const anchor = self.resolveAnchor(p.row, p.col);
         self.ctx.root.drawImage(
             p.handle,
-            p.row,
-            p.col,
+            anchor.row,
+            anchor.col,
             p.row_span,
             p.col_span,
             info.width,
@@ -628,7 +644,8 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         const icon_handle = self.ctx.iconHandle(p.name) orelse return DispatchError.UnknownIcon;
-        self.ctx.root.drawIcon(icon_handle, p.row, p.col);
+        const anchor = self.resolveAnchor(p.row, p.col);
+        self.ctx.root.drawIcon(icon_handle, anchor.row, anchor.col);
     }
 
     /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog
@@ -666,7 +683,8 @@ pub const Dispatcher = struct {
             .b = pieces[7],
             .br = pieces[8],
         };
-        self.ctx.root.drawBox(tiles, p.row, p.col, p.rows, p.cols);
+        const anchor = self.resolveAnchor(p.row, p.col);
+        self.ctx.root.drawBox(tiles, anchor.row, anchor.col, p.rows, p.cols);
     }
 
     /// `clear`: resets a region of the root layer's cells to blank. `rows`/
