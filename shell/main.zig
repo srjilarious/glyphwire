@@ -191,6 +191,8 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             try prompt.moveCursorTo(prompt.buffer.items.len);
         } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
             try prompt.killToStart();
+        } else if (ctrl and std.mem.eql(u8, ev.key, "l")) {
+            try prompt.clearScreen();
         } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
             try prompt.moveCursorTo(prompt.wordLeft());
         } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
@@ -236,10 +238,12 @@ const Prompt = struct {
     /// returns instead of drawing another prompt, ending this process.
     should_exit: bool = false,
 
-    /// Writes the current directory followed by `> ` -- reading it fresh
-    /// each time (rather than caching it) is what makes a successful `cd`
-    /// visible on the very next prompt.
-    fn showPrompt(self: *Prompt) !void {
+    /// Writes the current directory followed by `> ` at the cursor's
+    /// current position -- reading the directory fresh each time (rather
+    /// than caching it) is what makes a successful `cd` visible on the
+    /// very next prompt. Returns the cursor position right after the
+    /// prefix, for the caller to record as `line_start_row`/`_col`.
+    fn writePromptPrefix(self: *Prompt) !glyphwire.Cursor {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(self.client.io, &cwd_buf) catch 0;
 
@@ -247,11 +251,36 @@ const Prompt = struct {
         const prefix = std.fmt.bufPrint(&prefix_buf, "{s} > ", .{cwd_buf[0..cwd_len]}) catch "> ";
 
         try self.client.writeText(prefix, null, null);
-        const cur = try self.client.getCursor();
+        return try self.client.getCursor();
+    }
+
+    /// A fresh prompt: writes the prefix and resets the line -- empty
+    /// buffer, cursor at 0. Used to start a brand new input line (after
+    /// `submitLine` or at startup); see `clearScreen` for the ctrl+l case,
+    /// which redraws the prefix but keeps whatever's already typed.
+    fn showPrompt(self: *Prompt) !void {
+        const cur = try self.writePromptPrefix();
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
         self.cursor = 0;
         self.buffer.clearRetainingCapacity();
+    }
+
+    /// ctrl+l: clears the whole screen (`Client.clear`) and redraws the
+    /// current prompt line -- prefix plus whatever's already typed -- at
+    /// the top, with the cursor restored to its same offset within the
+    /// line. Unlike `showPrompt`, doesn't touch `buffer`/`cursor`: this is
+    /// a mid-edit redraw, not a fresh prompt.
+    fn clearScreen(self: *Prompt) !void {
+        try self.client.clear(0, 0, null, null);
+        try self.client.setCursor(0, 0);
+
+        const cur = try self.writePromptPrefix();
+        self.line_start_row = cur.row;
+        self.line_start_col = cur.col;
+
+        if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
+        try self.setCursorAt(self.cursor);
     }
 
     /// Inserts `ch` at the cursor (append, if the cursor's at the end):

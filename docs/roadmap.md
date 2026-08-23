@@ -271,6 +271,46 @@ vector shape+border primitive (that alternative stays unbuilt).
   The fill tile is fully transparent, so a box's interior shows through to
   whatever background color/content is already there.
 
+## Fixed since Phase 3.6
+
+- **A dangling-pointer bug made images/icons/box tiles render for a
+  moment then vanish, sometimes crashing `glyphwire-host`.**
+  `eng.renderer.draw()` (pixzig's sprite batch) stores the `*const
+  Texture` pointer it's given and only dereferences it later, at
+  `flush()`/`end()` — not immediately. `App.textureForImage` was caching
+  a `Texture` by value and handing the batch the address of a local stack
+  copy, which went dangling the instant the drawing function returned.
+  Fixed by caching the `*ManagedTexture` pool instead and returning a
+  pointer into its heap-allocated `Handle`, which pixzig documents as
+  staying at a stable address for its full lifetime.
+- **`glyphwire-view` looked broken because the whole host window closed
+  the instant it finished drawing.** Launched as `glyphwire-host
+  glyphwire-view <path>`, this process *is* what `glyphwire-shell` execs
+  into — `glyphwire-host`'s `reapChild`/`shell_exited` treats any exec'd
+  child's exit as "done" and closes the window. `glyphwire-view` used to
+  draw and return immediately; now it subscribes to `key` and blocks
+  until any keypress before exiting, like a real image viewer.
+
+## Phase 3.7: `clear`
+
+**Goal:** a way to reset cells back to blank without a client redrawing
+over everything with spaces — needed once `draw_image`/`draw_icon`/
+`draw_box` mean a region can have *content* (not just stale text) left
+over from a previous draw.
+
+- `clear(row?, col?, rows?, cols?)` (`Layer.clear`) resets a region to
+  the same zero-value blank cell `Layer.init` starts with — empty
+  grapheme, default style, no image background. `rows`/`cols` default to
+  "the rest of the layer from `row`/`col`" (themselves defaulting to 0),
+  so a bare `clear()` wipes everything — one call covers both "clear this
+  one region before redrawing it" (see `demo/main.zig`, before its
+  box/icon panel) and "clear the whole screen" (ctrl+l).
+- `glyphwire-shell`'s prompt now binds ctrl+l to clear the screen and
+  redraw the current line (prefix + whatever's already typed) at the top,
+  same as a real shell — `Prompt.clearScreen`, sharing a
+  `writePromptPrefix` helper with `showPrompt` rather than duplicating
+  the cwd-prefix logic.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

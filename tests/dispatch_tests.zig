@@ -506,3 +506,53 @@ pub fn getCellMetricsReturnsSessionDefaultsTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"cell_px_w\":12") != null);
     try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"cell_px_h\":12") != null);
 }
+
+pub fn clearWithExplicitRegionOnlyTouchesThatRegionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try ctx.root.writeText("hello", glyphwire.default_style);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"clear","params":{"row":0,"col":0,"rows":1,"cols":3}}
+    ;
+    const result = try d.handle(alloc, message);
+    try testz.expectTrue(result.response == null);
+
+    try testz.expectEqual(ctx.root.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqual(ctx.root.cell(0, 2).grapheme().len, 0);
+    try testz.expectEqualStr("l", ctx.root.cell(0, 3).grapheme());
+}
+
+pub fn clearWithNoParamsWipesWholeLayerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try ctx.root.writeText("hello", glyphwire.default_style);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"clear","params":{}}
+    ;
+    const result = try d.handle(alloc, message);
+    try testz.expectTrue(result.response == null);
+
+    try testz.expectEqual(ctx.root.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqual(ctx.root.cell(0, 4).grapheme().len, 0);
+}
+
+pub fn clearWithRowPastEdgeAndOmittedRowsIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const revision_before = ctx.root.revision;
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"clear","params":{"row":9}}
+    ;
+    const result = try d.handle(alloc, message);
+    try testz.expectTrue(result.response == null);
+    try testz.expectEqual(ctx.root.revision, revision_before);
+}

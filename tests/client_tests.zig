@@ -51,6 +51,31 @@ pub fn clientWriteTextThenGetCellsRoundTripTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectEqualStr("", blank.grapheme);
 }
 
+pub fn clientClearWipesTheWholeLayerByDefaultTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    try client.writeText("hi", null, null);
+    try client.clear(0, 0, null, null);
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+    try testz.expectEqualStr("", snapshot.cellAt(0, 0).grapheme);
+}
+
 pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
     defer ctx.deinit();

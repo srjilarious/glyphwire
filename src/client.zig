@@ -233,6 +233,14 @@ pub const Client = struct {
         try self.notify("draw_box", .{ .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
     }
 
+    /// `clear(row?, col?, rows?, cols?)` -- a notification. Resets cells in
+    /// the given region back to blank/default style. `rows`/`cols` null
+    /// means "the rest of the layer from `row`/`col`", so
+    /// `clear(0, 0, null, null)` wipes the whole layer.
+    pub fn clear(self: *Client, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+        try self.notify("clear", .{ .row = row, .col = col, .rows = rows, .cols = cols });
+    }
+
     /// `get_cell_metrics` -- a request returning the session's fixed cell
     /// pixel size, for a client computing `draw_image`'s span from an
     /// image's natural pixel dimensions.

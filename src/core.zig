@@ -409,6 +409,26 @@ pub const Layer = struct {
         self.revision += 1;
     }
 
+    /// Resets cells in `[row, row+rows) x [col, col+cols)` (clamped to the
+    /// layer's own bounds) back to a blank cell -- empty grapheme, default
+    /// style, no image background -- the same zero value `Layer.init`
+    /// leaves every cell in. A no-op if the region is empty (`rows`/`cols`
+    /// 0) or `row`/`col` is already past the layer's edge. Doesn't touch
+    /// the cursor -- a caller wanting "clear and home the cursor" (a real
+    /// terminal's `clear`/ctrl+l) does that itself via `set_property`.
+    pub fn clear(self: *Layer, row: usize, col: usize, rows: usize, cols: usize) void {
+        if (row >= self.height or col >= self.width or rows == 0 or cols == 0) return;
+
+        const row_end = @min(row + rows, self.height);
+        const col_end = @min(col + cols, self.width);
+
+        var r = row;
+        while (r < row_end) : (r += 1) {
+            for (self.rowSlice(self.physicalRow(r))[col..col_end]) |*cell_ptr| cell_ptr.* = .{};
+        }
+        self.revision += 1;
+    }
+
     pub fn getProperty(self: *const Layer, name: PropertyName) PropertyValue {
         return switch (name) {
             .cursor => .{ .cursor = self.cursor },

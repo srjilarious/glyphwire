@@ -62,7 +62,10 @@ fn run(init: std.process.Init) !void {
 
     // Images/icons/box-drawing showcase (Phase 3/3.5/3.6) -- a panel built
     // from the bundled "box" tile style, with a row of default icons
-    // inside it.
+    // inside it. Clears the region first so a re-run of this demo against
+    // an already-drawn-on grid doesn't leave stale content peeking out
+    // from under/around the new panel.
+    try client.clear(8, 0, 5, 30);
     try client.drawBox(8, 0, 5, 30, "box");
     try client.setCursor(9, 2);
     try client.writeText("icons + box tiles", rgb(255, 255, 255), null);

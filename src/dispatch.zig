@@ -133,6 +133,16 @@ const DrawBoxParams = struct {
     style: []const u8,
 };
 
+/// `rows`/`cols` are optional: omitted means "the rest of the layer from
+/// `row`/`col`", so a bare `clear()` (every field defaulted) wipes the
+/// whole layer -- see `handleClear`.
+const ClearParams = struct {
+    row: usize = 0,
+    col: usize = 0,
+    rows: ?usize = null,
+    cols: ?usize = null,
+};
+
 /// The `load_image` request's JSON header, peeked out of a frame body
 /// before the binary side-channel payload it declares (`bytes` raw bytes,
 /// following directly on the wire) can be read — see `peekLoadImage` and
@@ -284,6 +294,9 @@ pub const Dispatcher = struct {
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "draw_box")) {
             try self.handleDrawBox(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "clear")) {
+            try self.handleClear(alloc, envelope.params);
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "get_cell_metrics")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
@@ -639,6 +652,23 @@ pub const Dispatcher = struct {
             .br = pieces[8],
         };
         self.ctx.root.drawBox(tiles, p.row, p.col, p.rows, p.cols);
+    }
+
+    /// `clear`: resets a region of the root layer's cells to blank. `rows`/
+    /// `cols` default to "the rest of the layer from `row`/`col`" (clamped
+    /// to 0 if `row`/`col` is already past the edge), so an all-defaulted
+    /// `clear()` wipes everything.
+    fn handleClear(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(ClearParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const layer = &self.ctx.root;
+        const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
+        const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
+        layer.clear(p.row, p.col, rows, cols);
     }
 
     /// A client-side convenience for aspect-ratio-aware placement

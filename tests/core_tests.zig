@@ -450,3 +450,47 @@ pub fn layerDrawBoxZeroSizeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !voi
         .image => return error.TestUnexpectedResult,
     }
 }
+
+pub fn layerClearResetsRegionToBlankTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+    try layer.writeText("hello", glyphwire.default_style);
+    layer.drawBox(testBoxTiles(), 1, 1, 3, 3);
+
+    layer.clear(0, 0, 1, 5);
+
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    // Untouched region keeps its content.
+    try testz.expectEqual(layer.cell(1, 1).style.bg.image.handle, 1);
+}
+
+pub fn layerClearWholeLayerViaFullSpanTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+    try layer.writeText("hello", glyphwire.default_style);
+    layer.drawBox(testBoxTiles(), 2, 2, 3, 3);
+
+    layer.clear(0, 0, layer.height, layer.width);
+
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    switch (layer.cell(2, 2).style.bg) {
+        .color => {},
+        .image => return error.TestUnexpectedResult,
+    }
+}
+
+pub fn layerClearOutOfBoundsAnchorIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+    const revision_before = layer.revision;
+
+    layer.clear(10, 0, 3, 3);
+    layer.clear(0, 10, 3, 3);
+    layer.clear(0, 0, 0, 3);
+    layer.clear(0, 0, 3, 0);
+
+    try testz.expectEqual(layer.revision, revision_before);
+}
