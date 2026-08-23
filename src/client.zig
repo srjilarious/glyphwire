@@ -45,7 +45,23 @@ pub const Client = struct {
         return connect(io, alloc, socket_path);
     }
 
+    /// Closes the connection. First drains it: `write_text`/`set_property`
+    /// and friends are notifications, so the server may still be
+    /// processing ones already sent when a short-lived client (e.g.
+    /// `glyphwire-ls`) reaches the end of its run -- a plain socket close
+    /// says nothing about whether the *server* has caught up, only that
+    /// this client is done *sending*. A caller like glyphwire-shell that
+    /// waits for the child process to exit and then queries state on its
+    /// *own* connection (see `Prompt.submitLine`) would otherwise race
+    /// the server's dispatch of this connection's last few notifications,
+    /// intermittently reading stale state. One final request-response
+    /// round trip forces that: this connection's dispatch is strictly
+    /// in-order and mutex-guarded, so the response can't arrive until
+    /// every prior notification has been applied, and any later lock
+    /// acquisition by another connection's dispatch thread is guaranteed
+    /// (standard mutex acquire/release semantics) to observe them.
     pub fn deinit(self: *Client) void {
+        _ = self.getRevision() catch {};
         self.decoder.deinit(self.alloc);
         self.stream.close(self.io);
     }
