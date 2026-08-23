@@ -32,6 +32,11 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
 
+    // Must run before *any* std.process.spawn/replace call below (both
+    // the exec path a few lines down and everything Prompt.runCommand
+    // spawns later) -- see the doc comment for why.
+    try prependZigOutBinToPath(init.io, arena, init.environ_map);
+
     const socket_path = if (init.environ_map.get("GLYPHWIRE_SOCK")) |sp|
         sp
     else
@@ -48,6 +53,34 @@ pub fn main(init: std.process.Init) !void {
     // execvp only returns on failure.
     std.debug.print("failed to exec {s}\n", .{args[1]});
     return error.ExecFailed;
+}
+
+/// Prepends `<startup cwd>/zig-out/bin` to `PATH` -- a dev-mode
+/// convenience so typing `ls` or `glyphwire-demo` at the prompt finds
+/// binaries built alongside glyphwire-shell itself, the same way an
+/// installed program's sibling binaries would already be on `$PATH`.
+/// Deliberately mutates *this* process's real environment (`libc`
+/// `setenv`, like `spawnOwnServer` already does for the discovery vars)
+/// rather than passing a one-off `environ_map` to each spawn call: an
+/// `environ_map` passed to `std.process.spawn` only replaces the
+/// *child's* environment, and per its own doc comment PATH from there is
+/// never used to resolve `argv[0]` -- that resolution always reads the
+/// *parent* (this process's) environment instead. And unlike a live
+/// `cd`-relative lookup, an entry on `PATH` stays valid regardless of
+/// where the shell's cwd wanders later.
+///
+/// Must run before the first `std.process.spawn`/`replace` call anywhere
+/// in this process (verified empirically, not documented behavior): the
+/// IO backend scans and caches `PATH` lazily on first use and never
+/// rescans, so a `setenv` after that first call has no effect on argv[0]
+/// resolution for any spawn after it either.
+fn prependZigOutBinToPath(io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) !void {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = std.process.currentPath(io, &cwd_buf) catch return;
+    const old_path = environ_map.get("PATH") orelse "";
+    const new_path = try std.fmt.allocPrintSentinel(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], old_path }, 0);
+    defer alloc.free(new_path);
+    if (c.setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
 }
 
 /// Sets up its own server and discovery env vars (GLYPHWIRE_SOCK isn't
@@ -310,25 +343,18 @@ const Prompt = struct {
         try self.showPrompt();
     }
 
-    /// Resolves `argv[0]` (see `resolveCommand`), spawns it, and waits for
-    /// it to exit. No stdout/stderr capture, no argument quoting -- the
-    /// child is expected to be a glyphwire-aware program that draws to the
-    /// grid itself over its own connection (inheriting
-    /// `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` automatically, since child
-    /// processes inherit the environment by default). A resolution or
-    /// spawn failure (e.g. unknown command) is reported onto the grid
-    /// rather than propagated, so a typo doesn't take down the prompt.
+    /// Spawns `argv` and waits for it to exit. No stdout/stderr capture,
+    /// no argument quoting -- the child is expected to be a
+    /// glyphwire-aware program that draws to the grid itself over its own
+    /// connection (inheriting `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX`
+    /// automatically, since child processes inherit the environment by
+    /// default). `argv[0]` resolution (including the `zig-out/bin` dev
+    /// convenience) is `std.process.spawn`'s own `$PATH` search -- see
+    /// `prependZigOutBinToPath`. A spawn failure (e.g. unknown command) is
+    /// reported onto the grid rather than propagated, so a typo doesn't
+    /// take down the prompt.
     fn runCommand(self: *Prompt, argv: []const []const u8) !void {
-        const alloc = self.client.alloc;
-
-        const resolved = resolveCommand(alloc, self.client.io, argv[0]) catch argv[0];
-        defer if (resolved.ptr != argv[0].ptr) alloc.free(resolved);
-
-        const full_argv = try alloc.dupe([]const u8, argv);
-        defer alloc.free(full_argv);
-        full_argv[0] = resolved;
-
-        var child = std.process.spawn(self.client.io, .{ .argv = full_argv }) catch |err| {
+        var child = std.process.spawn(self.client.io, .{ .argv = argv }) catch |err| {
             var buf: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "{s}: command not found ({t})", .{ argv[0], err }) catch "command not found";
             try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
@@ -341,19 +367,20 @@ const Prompt = struct {
 
     /// `cd` is a shell builtin, not a spawned program -- unlike
     /// `runCommand`, changing directory in a *child* process wouldn't
-    /// affect this one, so it has to happen here directly. No args goes
-    /// to `$HOME`, matching a real shell; a bad path or missing `$HOME`
-    /// is reported onto the grid the same way `runCommand` reports a
-    /// spawn failure, rather than propagated.
+    /// affect this one, so it has to happen here directly. No args (or a
+    /// bare `~`) goes to `$HOME`, matching a real shell; a bad path or
+    /// missing `$HOME` is reported onto the grid the same way
+    /// `runCommand` reports a spawn failure, rather than propagated.
     fn doCd(self: *Prompt, args: []const []const u8) !void {
         const io = self.client.io;
-        const target = if (args.len > 0)
-            args[0]
-        else
-            self.environ_map.get("HOME") orelse {
-                try self.client.writeText("cd: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
-                return;
-            };
+        const alloc = self.client.alloc;
+        const raw_target: []const u8 = if (args.len > 0) args[0] else "~";
+
+        const target = self.expandTilde(raw_target) catch {
+            try self.client.writeText("cd: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
+            return;
+        };
+        defer if (target.ptr != raw_target.ptr) alloc.free(target);
 
         var dir = std.Io.Dir.cwd().openDir(io, target, .{}) catch |err| {
             try self.reportCdError(target, err);
@@ -366,33 +393,26 @@ const Prompt = struct {
         };
     }
 
+    /// Expands a leading `~` to `$HOME` -- bare `~` or `~/rest`; `~user`
+    /// (another account's home directory) isn't supported, matching how
+    /// most shells treat that as a rarer case not worth the lookup here.
+    /// Returns `target` itself (same pointer) when there's nothing to
+    /// expand, so `doCd` knows whether the result needs freeing.
+    fn expandTilde(self: *Prompt, target: []const u8) ![]const u8 {
+        if (target.len == 0 or target[0] != '~') return target;
+        if (target.len > 1 and target[1] != '/') return target;
+
+        const home = self.environ_map.get("HOME") orelse return error.HomeNotSet;
+        if (target.len == 1) return try self.client.alloc.dupe(u8, home);
+        return try std.fmt.allocPrint(self.client.alloc, "{s}{s}", .{ home, target[1..] });
+    }
+
     fn reportCdError(self: *Prompt, target: []const u8, err: anyerror) !void {
         var buf: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "cd: {s}: {t}", .{ target, err }) catch "cd: failed";
         try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
     }
 };
-
-/// Resolves a command name to a path to exec. Checks
-/// `<cwd>/zig-out/bin/<name>` first -- a dev-mode convenience so typing
-/// `ls` or `glyphwire-demo` at the prompt finds binaries built alongside
-/// glyphwire-shell itself, mirroring `host/main.zig`'s `resolveSibling` --
-/// falling back to the bare name unresolved, which `std.process.spawn`
-/// then resolves via `$PATH` the normal way. Already-qualified names
-/// (containing `/`) are passed through untouched either way.
-fn resolveCommand(alloc: std.mem.Allocator, io: std.Io, name: []const u8) ![]const u8 {
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return name;
-
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const candidate = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/{s}", .{ cwd_buf[0..cwd_len], name });
-
-    std.Io.Dir.cwd().access(io, candidate, .{}) catch {
-        alloc.free(candidate);
-        return name;
-    };
-    return candidate;
-}
 
 /// Resolves a wire-level key name (see `client.zig`'s doc comment --
 /// `@tagName` of pixzig's GLFW-backed key enum, e.g. "a", "left_bracket")
