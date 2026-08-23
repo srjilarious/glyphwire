@@ -296,11 +296,14 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
 
     thread.join();
 
-    try testz.expectEqualStr("a", ctx.root.cell(0, 0).grapheme());
-    try testz.expectEqualStr("b", ctx.root.cell(1, 0).grapheme());
-    try testz.expectEqualStr("/", ctx.root.cell(1, 4).grapheme()); // "bdir/"
-    try testz.expectEqualStr("c", ctx.root.cell(2, 0).grapheme());
-    try testz.expectEqualStr(">", ctx.root.cell(2, 7).grapheme()); // "clink -> afile.txt"
+    // Each row starts with a leading icon cell plus one blank cell of
+    // spacing (see ls/main.zig's icon_col_width) before the name -- text
+    // columns below are offset by that much from the name's own start.
+    try testz.expectEqualStr("a", ctx.root.cell(0, 2).grapheme());
+    try testz.expectEqualStr("b", ctx.root.cell(1, 2).grapheme());
+    try testz.expectEqualStr("/", ctx.root.cell(1, 6).grapheme()); // "bdir/"
+    try testz.expectEqualStr("c", ctx.root.cell(2, 2).grapheme());
+    try testz.expectEqualStr(">", ctx.root.cell(2, 9).grapheme()); // "clink -> afile.txt"
 }
 
 /// Polls get_cells (briefly) until `cell(row,col)`'s grapheme matches, so

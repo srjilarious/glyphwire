@@ -13,12 +13,23 @@ const glyphwire = @import("glyphwire");
 ///
 /// Deliberately narrower than lsz: no terminal-width grid packing (doesn't
 /// mean anything over a fixed-size cell grid), no long-listing
-/// permissions/owner/group columns, no per-extension icons (the bundled
-/// JetBrainsMono-Regular.ttf isn't Nerd-Font-patched, so those glyphs
-/// would just render as tofu) -- directory/symlink/file coloring plus a
-/// trailing `/` or ` -> target` covers the same information lsz's
+/// permissions/owner/group columns -- directory/symlink/file coloring
+/// plus a trailing `/` or ` -> target` covers the same information lsz's
 /// coloring conveys. lsz itself stays the terminal tool; this is a
 /// demonstration client, not a replacement.
+///
+/// Each entry does get a per-type icon (`draw_icon`, see `iconForEntry`):
+/// a real Nerd-Font-style per-extension glyph set was ruled out for lsz's
+/// terminal output (the bundled JetBrainsMono-Regular.ttf isn't
+/// Nerd-Font-patched, so those glyphs would render as tofu), but that
+/// limitation doesn't apply here -- glyphwire's icons are small bitmap
+/// images (the default Oxygen-icon registry, see core.zig's
+/// `default_icon_manifest`), not font glyphs, so no font patching is
+/// needed. Requires whatever's serving the connection to have actually
+/// loaded that registry (glyphwire-host does, at startup); run against a
+/// bare `glyphwire-server` with nothing registered, `draw_icon` would
+/// error server-side and drop the connection -- not handled specially
+/// here since glyphwire-ls is meant to run under glyphwire-host anyway.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
@@ -115,20 +126,93 @@ const dir_color = rgb(98, 114, 164);
 const symlink_color = rgb(139, 233, 253);
 const file_color = rgb(220, 220, 220);
 
+// ── Icons ──────────────────────────────────────────────────────────────────
+
+/// Extension (including the leading `.`, case-insensitive) -> default
+/// icon-registry name (`core.default_icon_manifest`). Coarse, extension-
+/// based classification -- the same thing a mime-type lookup would give
+/// for these, without needing an actual mime database dependency just for
+/// a handful of buckets.
+const extension_icons = [_]struct { ext: []const u8, icon: []const u8 }{
+    .{ .ext = ".png", .icon = "image" },
+    .{ .ext = ".jpg", .icon = "image" },
+    .{ .ext = ".jpeg", .icon = "image" },
+    .{ .ext = ".gif", .icon = "image" },
+    .{ .ext = ".bmp", .icon = "image" },
+    .{ .ext = ".svg", .icon = "image" },
+    .{ .ext = ".webp", .icon = "image" },
+
+    .{ .ext = ".mp3", .icon = "audio" },
+    .{ .ext = ".wav", .icon = "audio" },
+    .{ .ext = ".flac", .icon = "audio" },
+    .{ .ext = ".ogg", .icon = "audio" },
+    .{ .ext = ".m4a", .icon = "audio" },
+
+    .{ .ext = ".mp4", .icon = "video" },
+    .{ .ext = ".mkv", .icon = "video" },
+    .{ .ext = ".mov", .icon = "video" },
+    .{ .ext = ".webm", .icon = "video" },
+    .{ .ext = ".avi", .icon = "video" },
+
+    .{ .ext = ".zip", .icon = "archive" },
+    .{ .ext = ".tar", .icon = "archive" },
+    .{ .ext = ".gz", .icon = "archive" },
+    .{ .ext = ".tgz", .icon = "archive" },
+    .{ .ext = ".xz", .icon = "archive" },
+    .{ .ext = ".bz2", .icon = "archive" },
+    .{ .ext = ".7z", .icon = "archive" },
+    .{ .ext = ".rar", .icon = "archive" },
+
+    .{ .ext = ".sh", .icon = "executable" },
+    .{ .ext = ".bin", .icon = "executable" },
+    .{ .ext = ".exe", .icon = "executable" },
+    .{ .ext = ".appimage", .icon = "executable" },
+
+    .{ .ext = ".iso", .icon = "media-optical" },
+};
+
+/// The icon-registry name (see `core.default_icon_manifest`) for one
+/// entry: `"folder"` for directories, an extension-derived bucket for
+/// regular files (`extension_icons`, falling back to `"file"` for an
+/// unrecognized extension), `"unknown"` for anything else (device files,
+/// sockets, ...). Symlinks reuse `"file"` -- there's no dedicated symlink
+/// icon in the bundled set yet.
+fn iconForEntry(entry: FileEntry) []const u8 {
+    return switch (entry.kind) {
+        .directory => "folder",
+        .sym_link => "file",
+        .other => "unknown",
+        .file => iconForExtension(entry.name),
+    };
+}
+
+fn iconForExtension(name: []const u8) []const u8 {
+    const ext = std.fs.path.extension(name);
+    for (extension_icons) |e| {
+        if (std.ascii.eqlIgnoreCase(ext, e.ext)) return e.icon;
+    }
+    return "file";
+}
+
 // ── glyphwire output ──────────────────────────────────────────────────────
+
+/// Icon column width: one cell for the icon plus one blank cell of
+/// spacing before the name starts.
+const icon_col_width = 2;
 
 /// Writes one entry per row starting at the layer's current cursor row,
 /// leaving the cursor at the start of the row after the last entry --
 /// glyphwire-shell resyncs from `get_property(cursor)` after this process
 /// exits (see `Prompt.submitLine`), so there's no fixed row count it needs
-/// to guess.
+/// to guess. Each row gets a leading icon (`iconForEntry`) before the name.
 fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry) !void {
     const start = try client.getCursor();
     var row = start.row;
 
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
     for (entries) |entry| {
-        try client.setCursor(row, 0);
+        try client.drawIcon(row, 0, iconForEntry(entry));
+        try client.setCursor(row, icon_col_width);
         switch (entry.kind) {
             .directory => {
                 const text = std.fmt.bufPrint(&buf, "{s}/", .{entry.name}) catch entry.name;
