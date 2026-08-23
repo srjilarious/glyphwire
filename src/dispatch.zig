@@ -125,6 +125,14 @@ const DrawIconParams = struct {
     name: []const u8,
 };
 
+const DrawBoxParams = struct {
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+    style: []const u8,
+};
+
 /// The `load_image` request's JSON header, peeked out of a frame body
 /// before the binary side-channel payload it declares (`bytes` raw bytes,
 /// following directly on the wire) can be read — see `peekLoadImage` and
@@ -273,6 +281,9 @@ pub const Dispatcher = struct {
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "draw_icon")) {
             try self.handleDrawIcon(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "draw_box")) {
+            try self.handleDrawBox(alloc, envelope.params);
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "get_cell_metrics")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
@@ -590,6 +601,44 @@ pub const Dispatcher = struct {
             self.ctx.cell_px_w,
             self.ctx.cell_px_h,
         );
+    }
+
+    /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog
+    /// (`"{style}-tl"`, `"{style}-t"`, ... `"{style}-br"`/`"{style}-fill"`
+    /// — see `core.default_box_manifest`) and draws them via
+    /// `Layer.drawBox`. Errors (missing name, or a registered name that
+    /// somehow isn't in `ctx.images`) abort before drawing anything,
+    /// rather than leaving a box half-drawn with some pieces missing.
+    fn handleDrawBox(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DrawBoxParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const piece_names = [_][]const u8{ "tl", "t", "tr", "l", "fill", "r", "bl", "b", "br" };
+        var pieces: [piece_names.len]core.Layer.BoxTile = undefined;
+
+        var name_buf: [64]u8 = undefined;
+        for (piece_names, 0..) |piece, i| {
+            const name = try std.fmt.bufPrint(&name_buf, "{s}-{s}", .{ p.style, piece });
+            const piece_handle = self.ctx.iconHandle(name) orelse return DispatchError.UnknownIcon;
+            const info = self.ctx.imageInfo(piece_handle) orelse return DispatchError.UnknownImage;
+            pieces[i] = .{ .handle = piece_handle, .width = info.width, .height = info.height };
+        }
+
+        const tiles: core.Layer.BoxTiles = .{
+            .tl = pieces[0],
+            .t = pieces[1],
+            .tr = pieces[2],
+            .l = pieces[3],
+            .fill = pieces[4],
+            .r = pieces[5],
+            .bl = pieces[6],
+            .b = pieces[7],
+            .br = pieces[8],
+        };
+        self.ctx.root.drawBox(tiles, p.row, p.col, p.rows, p.cols);
     }
 
     /// A client-side convenience for aspect-ratio-aware placement

@@ -432,6 +432,66 @@ pub fn drawIconUnknownNameErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownIcon);
 }
 
+/// Registers all 9 pieces of a `style`-prefixed box under distinct
+/// handles, reusing `fakePngBytes` so each is a real (if minimal) loaded
+/// image `ctx.imageInfo` can resolve.
+fn registerTestBoxStyle(d: *dispatch.Dispatcher, alloc: std.mem.Allocator, ctx: *glyphwire.Context, style: []const u8) !void {
+    const pieces = [_][]const u8{ "tl", "t", "tr", "l", "fill", "r", "bl", "b", "br" };
+    for (pieces) |piece| {
+        const png = fakePngBytes(12, 12);
+        const id: i64 = 1;
+        const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = id }, .bytes = png.len }, &png);
+        defer alloc.free(load_resp);
+
+        const parsed = try std.json.parseFromSlice(struct { result: struct { handle: glyphwire.ImageHandle } }, alloc, load_resp, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+
+        var name_buf: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "{s}-{s}", .{ style, piece });
+        try ctx.registerIcon(name, parsed.value.result.handle);
+    }
+}
+
+pub fn drawBoxPlacesAllNinePiecesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try registerTestBoxStyle(&d, alloc, &ctx, "box");
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"draw_box","params":{"row":1,"col":1,"rows":3,"cols":3,"style":"box"}}
+    ;
+    const result = try d.handle(alloc, message);
+    try testz.expectTrue(result.response == null);
+
+    // All 9 cells got marked as image-backed -- role-correctness is
+    // core_tests.zig's job (layerDrawBoxPlacesEachPieceByRoleTest); this
+    // just proves the name-resolution + dispatch wiring reaches Layer.drawBox.
+    var r: usize = 1;
+    while (r <= 3) : (r += 1) {
+        var c: usize = 1;
+        while (c <= 3) : (c += 1) {
+            switch (ctx.root.cell(r, c).style.bg) {
+                .image => {},
+                .color => return error.TestUnexpectedResult,
+            }
+        }
+    }
+}
+
+pub fn drawBoxUnknownStyleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"draw_box","params":{"row":0,"col":0,"rows":3,"cols":3,"style":"not-a-style"}}
+    ;
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownIcon);
+}
+
 pub fn getCellMetricsReturnsSessionDefaultsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

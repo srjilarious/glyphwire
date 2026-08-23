@@ -313,7 +313,97 @@ pub const Layer = struct {
                 const offset_x = @as(u32, @intCast(c - col)) * cell_px_w;
                 if (offset_x >= img_w) continue;
 
-                self.cell(r, c).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y } };
+                self.setCellImage(r, c, handle, offset_x, offset_y);
+            }
+        }
+        self.revision += 1;
+    }
+
+    fn setCellImage(self: *Layer, row: usize, col: usize, handle: ImageHandle, offset_x: u32, offset_y: u32) void {
+        self.cell(row, col).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y } };
+    }
+
+    /// One piece of a `BoxTiles` set: an icon-catalog handle plus its
+    /// natural pixel dimensions (so `drawBox` can pass them straight to
+    /// `setCellImage`/clipping without a second `imageInfo` lookup per
+    /// cell).
+    pub const BoxTile = struct { handle: ImageHandle, width: u32, height: u32 };
+
+    /// The 9 resolved tiles a `draw_box` call needs -- corners, edges, and
+    /// a fill, per decisions.md's Icon section / roadmap.md's Phase 3.5.
+    /// Resolving these (by `"{style}-tl"` etc. against the icon catalog)
+    /// is dispatch.zig's job; `Layer.drawBox` just consumes the result, so
+    /// it's testable headlessly without going through name resolution.
+    pub const BoxTiles = struct {
+        tl: BoxTile,
+        t: BoxTile,
+        tr: BoxTile,
+        l: BoxTile,
+        fill: BoxTile,
+        r: BoxTile,
+        bl: BoxTile,
+        b: BoxTile,
+        br: BoxTile,
+    };
+
+    /// Draws a `rows x cols` box anchored at `(row, col)` (clamped to the
+    /// layer's own bounds) using `tiles`: each cell gets exactly one tile,
+    /// chosen by whether it's on the box's top/bottom row and/or
+    /// left/right column, always at that tile's own offset `(0, 0)` --
+    /// unlike `drawImage`'s single large image clipped across a span,
+    /// this repeats a small tile once per cell (each cell is its own
+    /// `drawImage`-style placement, see `setCellImage`), which is what
+    /// makes a multi-cell edge or fill actually tile instead of only
+    /// covering the first cell or two before running out of source
+    /// pixels. A 1x1 or 1xN/Nx1 box collapses reasonably: the top/left
+    /// role is checked before bottom/right, so a single-row or
+    /// single-column box shows corners/top/left tiles rather than
+    /// picking arbitrarily.
+    pub fn drawBox(
+        self: *Layer,
+        tiles: BoxTiles,
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+    ) void {
+        if (rows == 0 or cols == 0) return;
+
+        const row_end = @min(row + rows, self.height);
+        const col_end = @min(col + cols, self.width);
+        const last_row = row + rows - 1;
+        const last_col = col + cols - 1;
+
+        var r = row;
+        while (r < row_end) : (r += 1) {
+            const is_top = r == row;
+            const is_bottom = r == last_row;
+
+            var c = col;
+            while (c < col_end) : (c += 1) {
+                const is_left = c == col;
+                const is_right = c == last_col;
+
+                const tile = if (is_top and is_left)
+                    tiles.tl
+                else if (is_top and is_right)
+                    tiles.tr
+                else if (is_bottom and is_left)
+                    tiles.bl
+                else if (is_bottom and is_right)
+                    tiles.br
+                else if (is_top)
+                    tiles.t
+                else if (is_bottom)
+                    tiles.b
+                else if (is_left)
+                    tiles.l
+                else if (is_right)
+                    tiles.r
+                else
+                    tiles.fill;
+
+                self.setCellImage(r, c, tile.handle, 0, 0);
             }
         }
         self.revision += 1;
@@ -451,6 +541,24 @@ pub const default_icon_manifest = [_]IconManifestEntry{
     .{ .name = "unknown", .path = "assets/icons/oxygen/unknown.png" },
     .{ .name = "drive", .path = "assets/icons/oxygen/drive.png" },
     .{ .name = "media-optical", .path = "assets/icons/oxygen/media-optical.png" },
+};
+
+/// The default box-drawing tile set, registered into the same `icons`
+/// catalog as `default_icon_manifest` (there's only one flat catalog --
+/// see decisions.md's Icon section) under a `"box-"`-prefixed name per
+/// piece. `draw_box`'s `style` param is this prefix, so a future
+/// additional style (e.g. a double-line or rounded variant) is just more
+/// manifest entries under a different prefix -- no protocol change.
+pub const default_box_manifest = [_]IconManifestEntry{
+    .{ .name = "box-tl", .path = "assets/icons/box/tl.png" },
+    .{ .name = "box-t", .path = "assets/icons/box/t.png" },
+    .{ .name = "box-tr", .path = "assets/icons/box/tr.png" },
+    .{ .name = "box-l", .path = "assets/icons/box/l.png" },
+    .{ .name = "box-fill", .path = "assets/icons/box/fill.png" },
+    .{ .name = "box-r", .path = "assets/icons/box/r.png" },
+    .{ .name = "box-bl", .path = "assets/icons/box/bl.png" },
+    .{ .name = "box-b", .path = "assets/icons/box/b.png" },
+    .{ .name = "box-br", .path = "assets/icons/box/br.png" },
 };
 
 pub const Context = struct {

@@ -370,3 +370,83 @@ pub fn contextRegisterIconTwiceUnderSameNameOverwritesTest(io: std.Io, alloc: st
 
     try testz.expectEqual(ctx.iconHandle("icon").?, handle_b);
 }
+
+fn testBoxTiles() glyphwire.Layer.BoxTiles {
+    // Distinct handles per piece (not real loaded images -- drawBox never
+    // looks them up in ctx.images, it just stamps the given handle/width/
+    // height straight into each cell), so a test can tell which piece
+    // landed where purely from the handle number.
+    const w: u32 = 12;
+    const h: u32 = 12;
+    return .{
+        .tl = .{ .handle = 1, .width = w, .height = h },
+        .t = .{ .handle = 2, .width = w, .height = h },
+        .tr = .{ .handle = 3, .width = w, .height = h },
+        .l = .{ .handle = 4, .width = w, .height = h },
+        .fill = .{ .handle = 5, .width = w, .height = h },
+        .r = .{ .handle = 6, .width = w, .height = h },
+        .bl = .{ .handle = 7, .width = w, .height = h },
+        .b = .{ .handle = 8, .width = w, .height = h },
+        .br = .{ .handle = 9, .width = w, .height = h },
+    };
+}
+
+pub fn layerDrawBoxPlacesEachPieceByRoleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 10, 0);
+    defer layer.deinit();
+
+    // A 4x5 box anchored at (1, 1): rows 1..4, cols 1..5.
+    layer.drawBox(testBoxTiles(), 1, 1, 4, 5);
+
+    try testz.expectEqual(layer.cell(1, 1).style.bg.image.handle, 1); // tl
+    try testz.expectEqual(layer.cell(1, 3).style.bg.image.handle, 2); // t (interior top col)
+    try testz.expectEqual(layer.cell(1, 5).style.bg.image.handle, 3); // tr
+    try testz.expectEqual(layer.cell(2, 1).style.bg.image.handle, 4); // l
+    try testz.expectEqual(layer.cell(2, 3).style.bg.image.handle, 5); // fill
+    try testz.expectEqual(layer.cell(2, 5).style.bg.image.handle, 6); // r
+    try testz.expectEqual(layer.cell(4, 1).style.bg.image.handle, 7); // bl
+    try testz.expectEqual(layer.cell(4, 3).style.bg.image.handle, 8); // b
+    try testz.expectEqual(layer.cell(4, 5).style.bg.image.handle, 9); // br
+
+    // Every marked cell samples its tile's own origin, not an offset
+    // computed from the box's anchor -- see drawImage's offset math for
+    // the contrast.
+    try testz.expectEqual(layer.cell(2, 3).style.bg.image.offset_x, 0);
+    try testz.expectEqual(layer.cell(2, 3).style.bg.image.offset_y, 0);
+
+    // Outside the box entirely: untouched.
+    switch (layer.cell(0, 0).style.bg) {
+        .color => {},
+        .image => return error.TestUnexpectedResult,
+    }
+}
+
+pub fn layerDrawBoxClipsToLayerBoundsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // A box requesting more rows/cols than the layer has past its anchor
+    // shouldn't panic or write out of bounds.
+    layer.drawBox(testBoxTiles(), 3, 3, 10, 10);
+
+    try testz.expectEqual(layer.cell(3, 3).style.bg.image.handle, 1); // tl, still placed
+    try testz.expectEqual(layer.cell(4, 4).style.bg.image.handle, 5); // clamped corner lands as fill, not br
+}
+
+pub fn layerDrawBoxZeroSizeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+    const revision_before = layer.revision;
+
+    layer.drawBox(testBoxTiles(), 0, 0, 0, 5);
+    layer.drawBox(testBoxTiles(), 0, 0, 5, 0);
+
+    try testz.expectEqual(layer.revision, revision_before);
+    switch (layer.cell(0, 0).style.bg) {
+        .color => {},
+        .image => return error.TestUnexpectedResult,
+    }
+}

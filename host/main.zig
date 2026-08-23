@@ -375,14 +375,15 @@ fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator
     };
 }
 
-/// Reads each `glyphwire.default_icon_manifest` entry's PNG file and
-/// registers it in `ctx`'s icon catalog -- the real file I/O `core.zig`
-/// deliberately doesn't do itself (headless-first, see decisions.md).
-/// Logs and skips any icon whose file is missing or fails to load rather
-/// than failing the whole host, so a broken/missing icon asset doesn't
-/// block startup.
-fn loadDefaultIcons(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context) void {
-    for (glyphwire.default_icon_manifest) |entry| {
+/// Reads each entry in `manifest` (either `glyphwire.default_icon_manifest`
+/// or `glyphwire.default_box_manifest` -- both register into the same flat
+/// `icons` catalog, see decisions.md's Icon section) and loads its PNG
+/// file into `ctx` -- the real file I/O `core.zig` deliberately doesn't do
+/// itself (headless-first). Logs and skips any entry whose file is
+/// missing or fails to load rather than failing the whole host, so one
+/// broken/missing asset doesn't block startup.
+fn loadIconManifest(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, manifest: []const glyphwire.IconManifestEntry) void {
+    for (manifest) |entry| {
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, entry.path, alloc, .limited(16 * 1024 * 1024)) catch |err| {
             std.log.warn("glyphwire-host: couldn't read icon '{s}' ({s}): {t}", .{ entry.name, entry.path, err });
             continue;
@@ -436,7 +437,8 @@ pub fn main(init: std.process.Init) !void {
     // comment on cell_px_w/cell_px_h.
     ctx.cell_px_w = cell_w;
     ctx.cell_px_h = cell_h;
-    loadDefaultIcons(io, alloc, &ctx);
+    loadIconManifest(io, alloc, &ctx, &glyphwire.default_icon_manifest);
+    loadIconManifest(io, alloc, &ctx, &glyphwire.default_box_manifest);
 
     // `.listen()` inside `bind` is synchronous -- the socket is already
     // accept-ready (kernel-queued, even before `serveForever`'s thread

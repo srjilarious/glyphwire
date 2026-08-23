@@ -233,13 +233,43 @@ section, previously flagged post-v1.
   entries); `glyphwire-host`'s `loadDefaultIcons` (real file I/O, kept out
   of core per headless-first) reads each file and registers it at
   startup, logging and skipping any that fail rather than blocking boot.
-- Icons are colorful 32x32 PNGs from the KDE Oxygen theme (LGPLv3) — see
-  `assets/icons/oxygen/README.txt` for attribution and the full file list.
-  Picked over a flatter monochrome set deliberately, to actually show off
-  drawing real artwork into a cell.
+- Icons are colorful PNGs from the KDE Oxygen theme (LGPLv3), sourced at
+  32x32 and downscaled to the session's 12x12 cell size so `draw_icon`
+  doesn't clip them — see `assets/icons/oxygen/README.txt` for attribution
+  and the full file list. Picked over a flatter monochrome set
+  deliberately, to actually show off drawing real artwork into a cell.
 - **Out of scope:** theming (a context-local catalog overriding the
   global one) and a wire-exposed way to list/query the catalog's
   contents — both still open, see decisions.md.
+
+## Phase 3.6: Box drawing (`draw_box`) — done
+
+**Goal:** build boxes/panels on screen out of corner/edge/fill tiles —
+the background-tile registry idea from the original planning
+conversation, resolved in favor of a tile-based 9-slice approach over a
+vector shape+border primitive (that alternative stays unbuilt).
+
+- `Layer.drawBox(tiles: BoxTiles, row, col, rows, cols)` places one of 9
+  tiles per cell by role (corner/edge/fill, decided by whether a cell is
+  on the box's top/bottom row and/or left/right column), always at that
+  tile's own pixel origin — unlike `drawImage`'s offset-from-anchor math,
+  each cell is independently "this tile, from the start," which is what
+  makes an edge or fill actually *tile* across multiple cells instead of
+  only covering the first one or two before running out of source pixels.
+  Both `drawImage` and `drawBox` now funnel through a shared
+  `setCellImage` primitive.
+- `draw_box(row, col, rows, cols, style)` (dispatch.zig) resolves the 9
+  pieces by name (`"{style}-tl"`, `"{style}-t"`, ... `"{style}-fill"`)
+  against the *same* `icons` catalog `draw_icon` already uses — no new
+  registry. A future second style is just more manifest entries under a
+  different prefix, no protocol change.
+- The bundled `"box"` style (`core.default_box_manifest`, 9 files in
+  `assets/icons/box/`) is generated, not sourced from an icon theme:
+  simple single-line corners/edges rendered directly to 12x12 (supersampled
+  then downscaled for antialiasing) with Pillow, sidestepping any
+  licensing question for what's just straight lines meeting at a corner.
+  The fill tile is fully transparent, so a box's interior shows through to
+  whatever background color/content is already there.
 
 ## Further out (sequencing noted, not detailed yet)
 

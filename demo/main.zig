@@ -59,4 +59,16 @@ fn run(init: std.process.Init) !void {
         try client.setCursor(r.row, r.col);
         try client.writeText(r.text, r.fg, r.bg);
     }
+
+    // Images/icons/box-drawing showcase (Phase 3/3.5/3.6) -- a panel built
+    // from the bundled "box" tile style, with a row of default icons
+    // inside it.
+    try client.drawBox(8, 0, 5, 30, "box");
+    try client.setCursor(9, 2);
+    try client.writeText("icons + box tiles", rgb(255, 255, 255), null);
+
+    const icon_names = [_][]const u8{ "folder", "file", "audio", "image", "video", "archive", "executable", "drive" };
+    for (icon_names, 0..) |name, i| {
+        try client.drawIcon(11, 2 + i * 2, name);
+    }
 }

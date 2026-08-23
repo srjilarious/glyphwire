@@ -224,6 +224,15 @@ pub const Client = struct {
         try self.notify("draw_icon", .{ .row = row, .col = col, .name = name });
     }
 
+    /// `draw_box(row, col, rows, cols, style)` -- a notification. Draws a
+    /// `rows x cols` box using `style`'s 9 registered corner/edge/fill
+    /// tiles (`"{style}-tl"`, ... -- see `core.default_box_manifest` for
+    /// the bundled `"box"` style's pieces), one tile per cell, tiled
+    /// rather than stretched.
+    pub fn drawBox(self: *Client, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) !void {
+        try self.notify("draw_box", .{ .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
+    }
+
     /// `get_cell_metrics` -- a request returning the session's fixed cell
     /// pixel size, for a client computing `draw_image`'s span from an
     /// image's natural pixel dimensions.

@@ -21,6 +21,7 @@ pub const ImageError = core.ImageError;
 pub const pngDimensions = core.pngDimensions;
 pub const IconManifestEntry = core.IconManifestEntry;
 pub const default_icon_manifest = core.default_icon_manifest;
+pub const default_box_manifest = core.default_box_manifest;
 pub const Background = core.Background;
 pub const Style = core.Style;
 pub const default_style = core.default_style;
