@@ -236,6 +236,25 @@ surface.
   query the catalog's contents over the wire (a client currently just has
   to know the names from `default_icon_manifest`).
 
+**Box**
+- `draw_box` shares `Background.icon` with `draw_icon` (each of the 9
+  tiles is just an `ImageHandle`, stamped whole into its cell), not
+  `draw_image`'s clip-based `ImageBg` — **superseded from the original
+  clip-based tile design.** The bundled tile set was originally 12x12 and
+  clip-based to match the cell size at the time; once the host's cell size
+  moved (`host/main.zig`'s `cell_w`/`cell_h`), the tiles started clipping
+  against the edge rather than filling the cell exactly. Scale-to-fit
+  (regenerated at 32x32, same as the icon set) makes the tile set
+  independent of whatever cell size a given host happens to run at, the
+  same reasoning that already applies to icons.
+- **Edge-hugging border, not centered.** A box's border lines are drawn
+  against the outer boundary of each tile's cell rather than centered
+  within it, so a bordered region reads as "a border around this area"
+  with the interior cell still usable for content (e.g. text) rather than
+  the border eating a visible margin on all sides. This is what makes a
+  box usable as a tight background/panel frame, not just a standalone
+  decorative box.
+
 ### Events
 - No separate wire-level "event" mechanism — events are just notifications
   (method name + payload), same as everything else. The actual design work

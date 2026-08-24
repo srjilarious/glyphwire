@@ -399,13 +399,12 @@ deliberately disagree on this. The default icon set went back to its
 native 32x32 (no longer needs pre-shrinking to a specific cell size now
 that it scales) — see `assets/icons/oxygen/README.txt`.
 
-**Known follow-up, not fixed here:** the bundled `"box"` tile set
+**Known follow-up, fixed below:** the bundled `"box"` tile set
 (`assets/icons/box/`) is still 12x12 and still clip-based (`draw_image`'s
 rule, unchanged) — `glyphwire-host`'s cell size has since been retuned
 away from 12x12 (see `host/main.zig`'s `cell_w`/`cell_h`), so box borders
-may now clip slightly rather than filling the cell exactly. Not reported
-as broken yet; regenerate the tiles at the current cell size (or give
-`draw_box` its own scale-to-fit option) if it turns out to matter.
+may now clip slightly rather than filling the cell exactly. See "Box
+tiles move to scale-to-fit" below.
 
 ## `draw_image`/`draw_icon`/`draw_box` now default to the cursor
 
@@ -452,6 +451,61 @@ hung test's output and never flushes it). Once actually visible, the
 remaining flakiness was genuine timing, not a logic bug: spawning a
 second real process (`ls`) on top of the shell needs more headroom under
 load than `waitForCell`'s original ~2s budget — bumped to ~10s.
+
+## Box tiles move to scale-to-fit, and a 32x32 edge-hugging redraw
+
+Resolves the "Known follow-up" left open in Phase 3.6: the bundled
+`"box"` tile set was 12x12 and clip-based, drawn against a cell size that
+has since moved, so borders no longer filled the cell exactly.
+
+- `Layer.BoxTiles` changed from 9 `{handle, width, height}` structs (fed
+  into the same clip-based `setCellImage` primitive `drawImage` uses) to 9
+  plain `ImageHandle`s, stamped via `Background.icon` — the same
+  scale-to-fit variant `draw_icon` already uses. `draw_box`
+  (dispatch.zig) no longer needs `imageInfo()` at all now that there's no
+  per-cell pixel offset to compute; resolving each of the 9 names against
+  the `icons` catalog is the whole job.
+- The bundled tiles were regenerated at 32x32 (matching the icon set) with
+  the border lines redrawn hugging the outer edge of each tile rather than
+  centered within it — see decisions.md's Box section for why: it's what
+  makes a box usable as a background/panel frame with the interior cell
+  still available for content, instead of the border eating a margin.
+- `core_tests.zig` and `dispatch_tests.zig`'s box assertions moved from
+  `.style.bg.image.handle` to `.style.bg.icon` to match.
+
+## Fixed while stress-testing the above: two real races in the test suite
+
+Running the full suite repeatedly (not just once) to confirm the box
+change surfaced two pre-existing, intermittent bugs unrelated to it —
+neither reproduced reliably on a single run, which is exactly why they'd
+gone unnoticed.
+
+- **`Server.serveForever`-spawned connection threads could outlive the
+  `Server` that owned them, segfaulting inside `unregisterConnection`.**
+  `serveForever` spawns one thread per accepted connection and discards
+  the handle (`_ = try std.Thread.spawn(...)`), correct for
+  `glyphwire-host`'s real usage where the `Server` lives for the whole
+  process — but in an e2e test, `Server` is a local variable on the test
+  function's stack. Killing/closing every client a test spawned doesn't
+  guarantee the *server-side* thread handling that connection has finished
+  unwinding through `unregisterConnection` by the time the test function
+  returns and `srv.deinit()` frees `self.connections` out from under it —
+  a race, not a hang, so it only crashed intermittently (roughly 1 in 4-8
+  full-suite runs), and `coredumpctl`'s backtrace was needed to actually
+  see `mem.findScalar`, called from `unregisterConnection`, segfaulting on
+  reused stack memory. Fixed by having `Server` track every
+  `serveForever`-spawned thread (`connection_threads`) and join all of
+  them at the start of `deinit`, before freeing anything they touch — safe
+  for `glyphwire-host` (which never calls `deinit`) and correct for tests
+  (which, by construction, close every connection before reaching
+  `deinit`, so the join can't hang).
+- **`inputListenerReceivesReportedInputTest` (client_tests.zig) asserted
+  a mouse-button broadcast landed after only polling for a *different*,
+  earlier key-down broadcast to land.** `reportKey` and
+  `reportMouseButton` are two separate async notifications; waiting for
+  the first gave no guarantee the second had also arrived, so the
+  assertion occasionally ran too early. Fixed by polling for both
+  conditions together instead of just the first.
 
 ## Further out (sequencing noted, not detailed yet)
 

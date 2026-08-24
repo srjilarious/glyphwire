@@ -167,10 +167,12 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
     try reporter.reportKey("a", true);
     try reporter.reportMouseButton("left", true, .{ .x = 12, .y = 34 }, .{ .row = 1, .col = 2 });
 
-    // The listener's background thread updates asynchronously; poll
-    // briefly rather than assuming it's already landed.
+    // The listener's background thread updates asynchronously, and the key
+    // and mouse-button reports are two separate notifications -- polling
+    // only until the first lands doesn't guarantee the second has too, so
+    // wait for both.
     var attempts: usize = 0;
-    while (!listener.isKeyDown("a") and attempts < 100) : (attempts += 1) {
+    while (!(listener.isKeyDown("a") and listener.isMouseButtonDown("left")) and attempts < 100) : (attempts += 1) {
         std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
     }
 

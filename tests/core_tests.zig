@@ -458,22 +458,20 @@ pub fn contextRegisterIconTwiceUnderSameNameOverwritesTest(io: std.Io, alloc: st
 }
 
 fn testBoxTiles() glyphwire.Layer.BoxTiles {
-    // Distinct handles per piece (not real loaded images -- drawBox never
-    // looks them up in ctx.images, it just stamps the given handle/width/
-    // height straight into each cell), so a test can tell which piece
-    // landed where purely from the handle number.
-    const w: u32 = 12;
-    const h: u32 = 12;
+    // Distinct handles per piece so a test can tell which piece landed
+    // where purely from the handle number -- drawBox draws each with the
+    // .icon Background variant (scale-to-fit, same as draw_icon), which
+    // is just a handle, not a real loaded image lookup.
     return .{
-        .tl = .{ .handle = 1, .width = w, .height = h },
-        .t = .{ .handle = 2, .width = w, .height = h },
-        .tr = .{ .handle = 3, .width = w, .height = h },
-        .l = .{ .handle = 4, .width = w, .height = h },
-        .fill = .{ .handle = 5, .width = w, .height = h },
-        .r = .{ .handle = 6, .width = w, .height = h },
-        .bl = .{ .handle = 7, .width = w, .height = h },
-        .b = .{ .handle = 8, .width = w, .height = h },
-        .br = .{ .handle = 9, .width = w, .height = h },
+        .tl = 1,
+        .t = 2,
+        .tr = 3,
+        .l = 4,
+        .fill = 5,
+        .r = 6,
+        .bl = 7,
+        .b = 8,
+        .br = 9,
     };
 }
 
@@ -485,21 +483,15 @@ pub fn layerDrawBoxPlacesEachPieceByRoleTest(io: std.Io, alloc: std.mem.Allocato
     // A 4x5 box anchored at (1, 1): rows 1..4, cols 1..5.
     layer.drawBox(testBoxTiles(), 1, 1, 4, 5);
 
-    try testz.expectEqual(layer.cell(1, 1).style.bg.image.handle, 1); // tl
-    try testz.expectEqual(layer.cell(1, 3).style.bg.image.handle, 2); // t (interior top col)
-    try testz.expectEqual(layer.cell(1, 5).style.bg.image.handle, 3); // tr
-    try testz.expectEqual(layer.cell(2, 1).style.bg.image.handle, 4); // l
-    try testz.expectEqual(layer.cell(2, 3).style.bg.image.handle, 5); // fill
-    try testz.expectEqual(layer.cell(2, 5).style.bg.image.handle, 6); // r
-    try testz.expectEqual(layer.cell(4, 1).style.bg.image.handle, 7); // bl
-    try testz.expectEqual(layer.cell(4, 3).style.bg.image.handle, 8); // b
-    try testz.expectEqual(layer.cell(4, 5).style.bg.image.handle, 9); // br
-
-    // Every marked cell samples its tile's own origin, not an offset
-    // computed from the box's anchor -- see drawImage's offset math for
-    // the contrast.
-    try testz.expectEqual(layer.cell(2, 3).style.bg.image.offset_x, 0);
-    try testz.expectEqual(layer.cell(2, 3).style.bg.image.offset_y, 0);
+    try testz.expectEqual(layer.cell(1, 1).style.bg.icon, 1); // tl
+    try testz.expectEqual(layer.cell(1, 3).style.bg.icon, 2); // t (interior top col)
+    try testz.expectEqual(layer.cell(1, 5).style.bg.icon, 3); // tr
+    try testz.expectEqual(layer.cell(2, 1).style.bg.icon, 4); // l
+    try testz.expectEqual(layer.cell(2, 3).style.bg.icon, 5); // fill
+    try testz.expectEqual(layer.cell(2, 5).style.bg.icon, 6); // r
+    try testz.expectEqual(layer.cell(4, 1).style.bg.icon, 7); // bl
+    try testz.expectEqual(layer.cell(4, 3).style.bg.icon, 8); // b
+    try testz.expectEqual(layer.cell(4, 5).style.bg.icon, 9); // br
 
     // Outside the box entirely: untouched.
     switch (layer.cell(0, 0).style.bg) {
@@ -517,8 +509,8 @@ pub fn layerDrawBoxClipsToLayerBoundsTest(io: std.Io, alloc: std.mem.Allocator) 
     // shouldn't panic or write out of bounds.
     layer.drawBox(testBoxTiles(), 3, 3, 10, 10);
 
-    try testz.expectEqual(layer.cell(3, 3).style.bg.image.handle, 1); // tl, still placed
-    try testz.expectEqual(layer.cell(4, 4).style.bg.image.handle, 5); // clamped corner lands as fill, not br
+    try testz.expectEqual(layer.cell(3, 3).style.bg.icon, 1); // tl, still placed
+    try testz.expectEqual(layer.cell(4, 4).style.bg.icon, 5); // clamped corner lands as fill, not br
 }
 
 pub fn layerDrawBoxZeroSizeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -548,7 +540,7 @@ pub fn layerClearResetsRegionToBlankTest(io: std.Io, alloc: std.mem.Allocator) !
 
     try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
     // Untouched region keeps its content.
-    try testz.expectEqual(layer.cell(1, 1).style.bg.image.handle, 1);
+    try testz.expectEqual(layer.cell(1, 1).style.bg.icon, 1);
 }
 
 pub fn layerClearWholeLayerViaFullSpanTest(io: std.Io, alloc: std.mem.Allocator) !void {

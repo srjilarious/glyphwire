@@ -58,6 +58,17 @@ pub const Server = struct {
     /// iterated (read-only) by `broadcastToOthers`.
     registry_mutex: std.Io.Mutex = .init,
     connections: std.ArrayList(*Connection) = .empty,
+    /// Guards `connection_threads`. Separate from `registry_mutex`: that
+    /// one is held for the duration of a `broadcast` fan-out, and `deinit`
+    /// joining threads while holding the same lock a thread needs to reach
+    /// `unregisterConnection` would deadlock.
+    threads_mutex: std.Io.Mutex = .init,
+    /// One handle per `serveConnectionThread` spawned by `serveForever`.
+    /// Not touched by `acceptOne`/`serveOne`-style tests (their caller
+    /// already owns and joins those threads directly) -- only `serveForever`
+    /// spawns threads this struct itself is responsible for reaping. See
+    /// `deinit`.
+    connection_threads: std.ArrayList(std.Thread) = .empty,
 
     pub fn bind(io: std.Io, ctx: *core.Context, socket_path: []const u8) !Server {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
@@ -65,19 +76,37 @@ pub const Server = struct {
         return .{ .io = io, .ctx = ctx, .listener = listener };
     }
 
+    /// Joins every `serveForever`-spawned connection thread before freeing
+    /// anything they touch (`connections`, and this `Server` itself once
+    /// the caller's stack frame that owns it returns). Each such thread
+    /// only returns once its connection's peer closes -- production usage
+    /// (glyphwire-host) never calls `deinit` at all, so this only matters
+    /// for tests, which close every client they spawned before reaching
+    /// here; if a peer were still open this would hang, which is correct
+    /// (a genuine bug, not something to paper over).
     pub fn deinit(self: *Server, alloc: std.mem.Allocator) void {
+        self.threads_mutex.lockUncancelable(self.io);
+        for (self.connection_threads.items) |t| t.join();
+        self.connection_threads.deinit(alloc);
+        self.threads_mutex.unlock(self.io);
+
         self.listener.deinit(self.io);
         self.connections.deinit(alloc);
     }
 
-    /// Accepts connections forever, serving each one on its own thread
-    /// (not joined -- reaped on process exit, same as other background
-    /// threads in this codebase) so multiple clients can be connected at
-    /// once.
+    /// Accepts connections forever, serving each one on its own thread so
+    /// multiple clients can be connected at once. Each thread's handle is
+    /// recorded in `connection_threads` so `deinit` can join it -- without
+    /// that, a thread still unwinding through `unregisterConnection` after
+    /// this `Server`'s owner has already moved on (a test function
+    /// returning, freeing its stack-local `Server`) touches freed memory.
     pub fn serveForever(self: *Server, alloc: std.mem.Allocator) !void {
         while (true) {
             const stream = try self.listener.accept(self.io);
-            _ = try std.Thread.spawn(.{}, serveConnectionThread, .{ self, alloc, stream });
+            const t = try std.Thread.spawn(.{}, serveConnectionThread, .{ self, alloc, stream });
+            self.threads_mutex.lockUncancelable(self.io);
+            try self.connection_threads.append(alloc, t);
+            self.threads_mutex.unlock(self.io);
         }
     }
 

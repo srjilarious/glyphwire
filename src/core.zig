@@ -373,42 +373,41 @@ pub const Layer = struct {
         self.revision += 1;
     }
 
-    /// One piece of a `BoxTiles` set: an icon-catalog handle plus its
-    /// natural pixel dimensions (so `drawBox` can pass them straight to
-    /// `setCellImage`/clipping without a second `imageInfo` lookup per
-    /// cell).
-    pub const BoxTile = struct { handle: ImageHandle, width: u32, height: u32 };
-
     /// The 9 resolved tiles a `draw_box` call needs -- corners, edges, and
-    /// a fill, per decisions.md's Icon section / roadmap.md's Phase 3.5.
-    /// Resolving these (by `"{style}-tl"` etc. against the icon catalog)
-    /// is dispatch.zig's job; `Layer.drawBox` just consumes the result, so
-    /// it's testable headlessly without going through name resolution.
+    /// a fill, per decisions.md's Icon section / roadmap.md's Phase 3.6.
+    /// Just handles, same as `draw_icon`: each tile is drawn with the
+    /// `.icon` Background variant (whole source image, scaled aspect-
+    /// correct into the whole cell -- see `drawIcon`'s doc comment), not
+    /// `.image`'s clip-and-offset scheme, so there's no per-tile
+    /// width/height to carry here either. Resolving these (by
+    /// `"{style}-tl"` etc. against the icon catalog) is dispatch.zig's
+    /// job; `Layer.drawBox` just consumes the result, so it's testable
+    /// headlessly without going through name resolution.
     pub const BoxTiles = struct {
-        tl: BoxTile,
-        t: BoxTile,
-        tr: BoxTile,
-        l: BoxTile,
-        fill: BoxTile,
-        r: BoxTile,
-        bl: BoxTile,
-        b: BoxTile,
-        br: BoxTile,
+        tl: ImageHandle,
+        t: ImageHandle,
+        tr: ImageHandle,
+        l: ImageHandle,
+        fill: ImageHandle,
+        r: ImageHandle,
+        bl: ImageHandle,
+        b: ImageHandle,
+        br: ImageHandle,
     };
 
     /// Draws a `rows x cols` box anchored at `(row, col)` (clamped to the
     /// layer's own bounds) using `tiles`: each cell gets exactly one tile,
     /// chosen by whether it's on the box's top/bottom row and/or
-    /// left/right column, always at that tile's own offset `(0, 0)` --
-    /// unlike `drawImage`'s single large image clipped across a span,
-    /// this repeats a small tile once per cell (each cell is its own
-    /// `drawImage`-style placement, see `setCellImage`), which is what
-    /// makes a multi-cell edge or fill actually tile instead of only
-    /// covering the first cell or two before running out of source
-    /// pixels. A 1x1 or 1xN/Nx1 box collapses reasonably: the top/left
-    /// role is checked before bottom/right, so a single-row or
-    /// single-column box shows corners/top/left tiles rather than
-    /// picking arbitrarily.
+    /// left/right column, drawn the same scale-to-fit way `drawIcon` draws
+    /// a single cell. The bundled tile art is drawn with its border line
+    /// hugging the tile's own outer edge rather than centered, so a
+    /// caller can still put a character in a border cell (`write_text`
+    /// only touches `Cell.grapheme`/`fg`, independent of `bg`) without it
+    /// colliding with the line -- see decisions.md's Icon section on why
+    /// `draw_box` gets this treatment now, same as icons. A 1x1 or
+    /// 1xN/Nx1 box collapses reasonably: the top/left role is checked
+    /// before bottom/right, so a single-row or single-column box shows
+    /// corners/top/left tiles rather than picking arbitrarily.
     pub fn drawBox(
         self: *Layer,
         tiles: BoxTiles,
@@ -454,7 +453,7 @@ pub const Layer = struct {
                 else
                     tiles.fill;
 
-                self.setCellImage(r, c, tile.handle, 0, 0);
+                self.cell(r, c).style.bg = .{ .icon = tile };
             }
         }
         self.revision += 1;

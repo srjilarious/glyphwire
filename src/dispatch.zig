@@ -662,14 +662,12 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         const piece_names = [_][]const u8{ "tl", "t", "tr", "l", "fill", "r", "bl", "b", "br" };
-        var pieces: [piece_names.len]core.Layer.BoxTile = undefined;
+        var pieces: [piece_names.len]core.ImageHandle = undefined;
 
         var name_buf: [64]u8 = undefined;
         for (piece_names, 0..) |piece, i| {
             const name = try std.fmt.bufPrint(&name_buf, "{s}-{s}", .{ p.style, piece });
-            const piece_handle = self.ctx.iconHandle(name) orelse return DispatchError.UnknownIcon;
-            const info = self.ctx.imageInfo(piece_handle) orelse return DispatchError.UnknownImage;
-            pieces[i] = .{ .handle = piece_handle, .width = info.width, .height = info.height };
+            pieces[i] = self.ctx.iconHandle(name) orelse return DispatchError.UnknownIcon;
         }
 
         const tiles: core.Layer.BoxTiles = .{

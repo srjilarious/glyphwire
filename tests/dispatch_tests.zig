@@ -544,7 +544,7 @@ pub fn drawBoxPlacesAllNinePiecesTest(io: std.Io, alloc: std.mem.Allocator) !voi
     const result = try d.handle(alloc, message);
     try testz.expectTrue(result.response == null);
 
-    // All 9 cells got marked as image-backed -- role-correctness is
+    // All 9 cells got marked as icon-backed -- role-correctness is
     // core_tests.zig's job (layerDrawBoxPlacesEachPieceByRoleTest); this
     // just proves the name-resolution + dispatch wiring reaches Layer.drawBox.
     var r: usize = 1;
@@ -552,8 +552,8 @@ pub fn drawBoxPlacesAllNinePiecesTest(io: std.Io, alloc: std.mem.Allocator) !voi
         var c: usize = 1;
         while (c <= 3) : (c += 1) {
             switch (ctx.root.cell(r, c).style.bg) {
-                .image => {},
-                .color, .icon => return error.TestUnexpectedResult,
+                .icon => {},
+                .color, .image => return error.TestUnexpectedResult,
             }
         }
     }
@@ -573,8 +573,8 @@ pub fn drawBoxOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectTrue((try d.handle(alloc, message)).response == null);
 
     switch (ctx.root.cell(3, 2).style.bg) {
-        .image => {},
-        .color, .icon => return error.TestUnexpectedResult,
+        .icon => {},
+        .color, .image => return error.TestUnexpectedResult,
     }
 }
 
