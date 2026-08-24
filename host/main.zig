@@ -322,12 +322,21 @@ pub const App = struct {
         }
     }
 
-    /// Reads the root layer's cells straight out of the in-process
-    /// `Context` -- no `get_property`/`get_cells` round trip, and nothing
-    /// to skip-if-unchanged: a direct read is cheap enough to just do every
+    /// Reads every layer's cells straight out of the in-process `Context`
+    /// -- no `get_property`/`get_cells` round trip, and nothing to
+    /// skip-if-unchanged: a direct read is cheap enough to just do every
     /// frame. `ctx_mutex` is the same lock `Server` takes around dispatch
     /// for connected clients (e.g. glyphwire-shell's `write_text` calls),
     /// so this can't race a concurrent write.
+    ///
+    /// Composites the root layer first, then every `create_layer`-made
+    /// layer in `ctx.layer_order` (creation order -- a later-created
+    /// layer draws on top of an earlier one and of root, see that field's
+    /// doc comment), each offset by its own `pos`. Only the root layer's
+    /// cursor gets a caret: root is the layer keystrokes actually land on
+    /// (glyphwire-shell's prompt), where a notification-style layer's own
+    /// `cursor` is just bookkeeping `write_text` needs to know where to
+    /// place its next character, not something a user is looking at.
     pub fn render(self: *App, eng: *AppRunner.Engine) void {
         eng.renderer.clear(0.0, 0.0, 0.0, 1.0);
         eng.renderer.begin(eng.projMat);
@@ -335,15 +344,34 @@ pub const App = struct {
         self.server.ctx_mutex.lockUncancelable(self.server.io);
         defer self.server.ctx_mutex.unlock(self.server.io);
 
-        const layer = &self.server.ctx.root;
+        self.renderLayer(eng, &self.server.ctx.root, 0, 0, true);
+        for (self.server.ctx.layer_order.items) |handle| {
+            const layer = self.server.ctx.layers.getPtr(handle) orelse continue;
+            self.renderLayer(
+                eng,
+                layer,
+                @intFromFloat(@round(layer.pos.x)),
+                @intFromFloat(@round(layer.pos.y)),
+                false,
+            );
+        }
+
+        eng.renderer.end();
+    }
+
+    /// Draws one layer's visible viewport with its top-left cell at
+    /// `(origin_x, origin_y)` in screen pixels -- shared by `render` for
+    /// the root layer (origin `(0, 0)`) and every other layer (origin its
+    /// own `pos`, rounded to the nearest pixel).
+    fn renderLayer(self: *App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, draw_cursor: bool) void {
         var row: usize = 0;
         while (row < layer.height) : (row += 1) {
             var col: usize = 0;
             while (col < layer.width) : (col += 1) {
                 const c = layer.cell(row, col);
                 const pos = pixzig.Vec2I{
-                    .x = @as(i32, @intCast(col)) * cell_w,
-                    .y = @as(i32, @intCast(row)) * cell_h,
+                    .x = origin_x + @as(i32, @intCast(col)) * cell_w,
+                    .y = origin_y + @as(i32, @intCast(row)) * cell_h,
                 };
 
                 switch (c.style.bg) {
@@ -369,16 +397,14 @@ pub const App = struct {
         // Cursor caret: a solid bar at the start (left edge) of the
         // cursor's cell, drawn last so it sits on top of that cell's own
         // background/glyph.
-        if (layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
-            const cx = @as(i32, @intCast(layer.cursor.col)) * cell_w;
-            const cy = @as(i32, @intCast(layer.cursor.row)) * cell_h;
+        if (draw_cursor and layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
+            const cx = origin_x + @as(i32, @intCast(layer.cursor.col)) * cell_w;
+            const cy = origin_y + @as(i32, @intCast(layer.cursor.row)) * cell_h;
             eng.renderer.drawFilledRect(
                 pixzig.RectF.fromPosSize(cx, cy, cursor_width, cell_h),
                 pixzig.Color.from(255, 255, 255, 255),
             );
         }
-
-        eng.renderer.end();
     }
 };
 

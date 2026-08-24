@@ -32,10 +32,17 @@ today; the server auto-creates exactly one context at startup.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `create_layer` | request | `context, parent?, width?, height?, scrollback_rows?` | layer handle | 🔶 |
-| `get_property` | request | `layer, property` | property value | ✅ (`cursor` only) |
-| `set_property` | notification | `layer, property, value` | — | ✅ (`cursor` only) |
-| `get_cells` | request | *(implicitly the root layer — no `layer` param yet, see Phase 1 in roadmap.md)* | full row-major cell snapshot (`cols, rows, revision, cells`) | ✅ |
+| `create_layer` | request | `width?, height?, scrollback_rows` | layer handle | ✅ always parented to the root layer (no `parent`/`context` params — there's only one context per decisions.md's current scope, and deeper nesting isn't exercised yet); `width`/`height` default to the root layer's own size |
+| `destroy_layer` | notification | `layer` | — | ✅ frees the layer and drops it from compositing; the root layer (handle 0, i.e. an omitted `layer` elsewhere) can't be destroyed this way — an unknown or root handle both just report `UnknownLayer` |
+| `get_property` | request | `layer?, property` | property value | ✅ (`cursor`, `revision`, `position`) |
+| `set_property` | notification | `layer?, property, value` | — | ✅ (`cursor`, `position`) |
+| `get_cells` | request | `layer?` | full row-major cell snapshot (`cols, rows, revision, cells`) | ✅ |
+
+Every message above whose params include `layer?` defaults to the root
+layer when omitted, same convention `row?`/`col?` already use for "at the
+cursor" — see decisions.md's Layer section. `write_text`/`insert_cells`/
+`delete_cells`/`clear`/`draw_image`/`draw_icon`/`draw_box` (below) all
+accept the same optional `layer` param too.
 
 **Property names** (the `property` argument to `get_property`/`set_property` —
 one generic mechanism per decisions.md rather than a bespoke get/set pair
@@ -44,8 +51,9 @@ per property):
 | Property | Meaning | Status |
 |---|---|---|
 | `cursor` | `{row, col}` | ✅ |
+| `revision` | `{revision}` — get-only, bumped once per `write_text` call | ✅ |
 | `size` | `{cols, rows}` — this is what answers "get window size" for the root layer, since a Context's base size **is** its root layer's default size | 🔶 |
-| `position` | pixel-precise position in the parent layer | 🔶 |
+| `position` | `{x, y}`, pixel-precise, relative to the layer's parent (the root layer for every `create_layer`-made layer today) | ✅ |
 | `clip` | clip rect | 🔶 |
 | `scroll` | scroll offset (pixel-precise; distinct from the cell-grid scrollback ring in core.zig) | 🔶 |
 | `visibility` | shown/hidden | 🔶 |
@@ -59,10 +67,10 @@ about resizes should subscribe instead.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `write_text` | notification | `layer, text, style, row?, col?` | — | ✅ implicit cursor positioning + fg/bg color only; explicit `row`/`col` and style attributes beyond fg/bg (bold, italic, underline, strikethrough, dim) are decided in decisions.md but not yet wired into `Layer.writeText` |
-| `insert_cells` | notification | `count` (cursor-implicit, root-layer-implicit like `write_text`) | — | ✅ ECMA-48's ICH: shifts cells at and after the cursor right within its row, discarding any past the row's right edge; row-scoped only, see roadmap.md's open questions |
-| `delete_cells` | notification | `count` (cursor-implicit, root-layer-implicit like `write_text`) | — | ✅ ECMA-48's DCH: removes cells at and after the cursor, shifting the row's remainder left and blanking the tail |
-| `clear` | notification | `row?, col?, rows?, cols?` (all default: `row`/`col` to 0, `rows`/`cols` to "the rest of the layer from here") | — | ✅ resets a region back to blank (empty grapheme, default style, no image background); an all-defaulted `clear()` wipes the whole layer |
+| `write_text` | notification | `layer?, text, style, row?, col?` | — | ✅ implicit cursor positioning + fg/bg color only; explicit `row`/`col` and style attributes beyond fg/bg (bold, italic, underline, strikethrough, dim) are decided in decisions.md but not yet wired into `Layer.writeText` |
+| `insert_cells` | notification | `layer?, count` (cursor-implicit like `write_text`) | — | ✅ ECMA-48's ICH: shifts cells at and after the cursor right within its row, discarding any past the row's right edge; row-scoped only, see roadmap.md's open questions |
+| `delete_cells` | notification | `layer?, count` (cursor-implicit like `write_text`) | — | ✅ ECMA-48's DCH: removes cells at and after the cursor, shifting the row's remainder left and blanking the tail |
+| `clear` | notification | `layer?, row?, col?, rows?, cols?` (all default: `row`/`col` to 0, `rows`/`cols` to "the rest of the layer from here") | — | ✅ resets a region back to blank (empty grapheme, default style, no image background); an all-defaulted `clear()` wipes the whole layer |
 
 ## Image
 
@@ -70,10 +78,10 @@ about resizes should subscribe instead.
 |---|---|---|---|---|
 | `load_image` | request (binary side-channel: JSON header + raw bytes) | `format, bytes` | image handle | ✅ `format` is accepted but unchecked — PNG is the only format the core parses (`pngDimensions`); bytes are stored verbatim either way |
 | `get_image_info` | request | `handle` | natural pixel dimensions (from the PNG IHDR chunk, not a real decode) | ✅ |
-| `draw_image` | notification | `handle, row?, col?, row_span, col_span` (implicitly the root layer, like `write_text` — see Phase 1 in roadmap.md) | — | ✅ clips to the given span rather than stretching to fill it; see decisions.md. `row`/`col` default to the layer's cursor when omitted, same convention as `write_text` |
+| `draw_image` | notification | `layer?, handle, row?, col?, row_span, col_span` | — | ✅ clips to the given span rather than stretching to fill it; see decisions.md. `row`/`col` default to the layer's cursor when omitted, same convention as `write_text` |
 | `get_cell_metrics` | request | — | `{cell_px_w, cell_px_h}` | ✅ lets a client compute `row_span`/`col_span` from an image's natural size without hardcoding the session's cell pixel metrics |
-| `draw_icon` | notification | `row?, col?, name` | — | ✅ resolves `name` against `Context.icons` (seeded at `glyphwire-host` startup from `core.default_icon_manifest`) and draws it into exactly one cell, scaled aspect-correct to fit (not clipped, unlike `draw_image`/`draw_box`) — see decisions.md's Icon section; theming and a wire-exposed catalog listing are still open. `row`/`col` default to the cursor when omitted |
-| `draw_box` | notification | `row?, col?, rows, cols, style` | — | ✅ resolves `style`'s 9 corner/edge/fill pieces (`"{style}-tl"`, ... — same `icons` catalog as `draw_icon`, see `core.default_box_manifest`) and tiles them across the given rectangle, one tile per cell. `row`/`col` default to the cursor when omitted |
+| `draw_icon` | notification | `layer?, row?, col?, name` | — | ✅ resolves `name` against `Context.icons` (seeded at `glyphwire-host` startup from `core.default_icon_manifest`) and draws it into exactly one cell, scaled aspect-correct to fit (not clipped, unlike `draw_image`/`draw_box`) — see decisions.md's Icon section; theming and a wire-exposed catalog listing are still open. `row`/`col` default to the cursor when omitted |
+| `draw_box` | notification | `layer?, row?, col?, rows, cols, style` | — | ✅ resolves `style`'s 9 corner/edge/fill pieces (`"{style}-tl"`, ... — same `icons` catalog as `draw_icon`, see `core.default_box_manifest`) and tiles them across the given rectangle, one tile per cell. `row`/`col` default to the cursor when omitted |
 
 ## Animation
 

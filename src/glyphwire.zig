@@ -33,5 +33,7 @@ pub const PropertyName = core.PropertyName;
 pub const PropertyValue = core.PropertyValue;
 pub const PropertyError = core.PropertyError;
 pub const Layer = core.Layer;
+pub const LayerHandle = core.LayerHandle;
+pub const root_layer_handle = core.root_layer_handle;
 pub const default_context_id = core.default_context_id;
 pub const Context = core.Context;

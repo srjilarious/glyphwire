@@ -122,14 +122,30 @@ pub const PropertyName = enum {
     /// cell grid again this frame. Get-only: `Layer.setProperty` traps if
     /// asked to set it.
     revision,
+    /// Pixel-precise position relative to the layer's parent (the root
+    /// layer for every layer `create_layer` makes today -- see
+    /// decisions.md's Layer section on why position stays pixel-precise
+    /// rather than cell-snapped: smooth animation, e.g. sliding a
+    /// notification layer on/off screen, needs sub-cell steps).
+    position,
 };
 
 pub const PropertyValue = union(PropertyName) {
     cursor: Cursor,
     revision: u64,
+    position: PxPos,
 };
 
 pub const PropertyError = error{UnknownProperty};
+
+/// A server-generated handle for a layer created via `create_layer`.
+/// `root_layer_handle` (0) always refers to the context's root layer,
+/// which always exists and isn't itself stored in `Context.layers` --
+/// every other handle (1, 2, ...) is a `Context.layers` entry.
+pub const LayerHandle = u32;
+pub const root_layer_handle: LayerHandle = 0;
+
+pub const LayerError = error{UnknownLayer};
 
 /// A layer's cell grid is a fixed-capacity ring buffer of
 /// `height + scrollback_rows` physical rows, one contiguous allocation.
@@ -157,6 +173,10 @@ pub const Layer = struct {
     cursor: Cursor = .{},
     /// See `PropertyName.revision`.
     revision: u64 = 0,
+    /// See `PropertyName.position`. Zero for the root layer (there's no
+    /// wire path that moves it) and for a freshly created layer until its
+    /// creator calls `set_property(layer, "position", ...)`.
+    pos: PxPos = .{},
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Layer {
         const total_rows = height + scrollback_rows;
@@ -483,6 +503,7 @@ pub const Layer = struct {
         return switch (name) {
             .cursor => .{ .cursor = self.cursor },
             .revision => .{ .revision = self.revision },
+            .position => .{ .position = self.pos },
         };
     }
 
@@ -490,6 +511,7 @@ pub const Layer = struct {
         switch (value) {
             .cursor => |c| self.cursor = .{ .row = self.resolveRow(c.row), .col = c.col },
             .revision => unreachable, // get-only; see PropertyName.revision
+            .position => |p| self.pos = p,
         }
     }
 };
@@ -634,6 +656,20 @@ pub const default_box_manifest = [_]IconManifestEntry{
 pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
+    /// Layers created via `create_layer`, keyed by handle -- the root
+    /// layer isn't in here (it's always addressed as `root_layer_handle`
+    /// and always exists; see that constant's doc comment). Every layer
+    /// here is parented to the root: decisions.md's Layer tree allows
+    /// deeper nesting, but nothing creates or needs a non-root parent yet,
+    /// so that generality isn't built.
+    layers: std.AutoHashMap(LayerHandle, Layer),
+    /// Creation order of `layers`' entries, for compositing -- a later-
+    /// created layer draws on top of an earlier one, and the root layer is
+    /// always underneath all of them. Kept separate from `layers` itself
+    /// since `AutoHashMap` iteration order is unspecified, not something
+    /// a renderer should draw in.
+    layer_order: std.ArrayList(LayerHandle) = .empty,
+    next_layer_handle: LayerHandle = 1,
     input: InputState,
     images: std.AutoHashMap(ImageHandle, ImageEntry),
     next_image_handle: ImageHandle = 1,
@@ -655,6 +691,7 @@ pub const Context = struct {
         return .{
             .alloc = alloc,
             .root = try Layer.init(alloc, width, height, scrollback_rows),
+            .layers = std.AutoHashMap(LayerHandle, Layer).init(alloc),
             .input = InputState.init(alloc),
             .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
             .icons = std.StringHashMap(ImageHandle).init(alloc),
@@ -663,6 +700,10 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         self.root.deinit();
+        var layer_it = self.layers.valueIterator();
+        while (layer_it.next()) |l| l.deinit();
+        self.layers.deinit();
+        self.layer_order.deinit(self.alloc);
         self.input.deinit();
         var it = self.images.valueIterator();
         while (it.next()) |entry| self.alloc.free(entry.bytes);
@@ -670,6 +711,50 @@ pub const Context = struct {
         var icon_it = self.icons.keyIterator();
         while (icon_it.next()) |k| self.alloc.free(k.*);
         self.icons.deinit();
+    }
+
+    /// `create_layer`: allocates a fresh layer parented to the root,
+    /// defaulting to the context's base size (the root layer's own
+    /// width/height) when `width`/`height` is omitted -- decisions.md's
+    /// Layer section. Returns its handle.
+    pub fn createLayer(self: *Context, width: ?usize, height: ?usize, scrollback_rows: usize) !LayerHandle {
+        var layer = try Layer.init(self.alloc, width orelse self.root.width, height orelse self.root.height, scrollback_rows);
+        errdefer layer.deinit();
+
+        const handle = self.next_layer_handle;
+        try self.layer_order.append(self.alloc, handle);
+        errdefer _ = self.layer_order.pop();
+
+        try self.layers.put(handle, layer);
+        self.next_layer_handle += 1;
+        return handle;
+    }
+
+    /// `destroy_layer`: frees a previously created layer and drops it from
+    /// the compositing order. The root layer isn't in `layers` at all
+    /// (see `root_layer_handle`'s doc comment), so a handle of 0 reports
+    /// `UnknownLayer` here the same as any other bogus handle -- there's
+    /// no wire path that destroys the root.
+    pub fn destroyLayer(self: *Context, handle: LayerHandle) LayerError!void {
+        var removed = self.layers.fetchRemove(handle) orelse return LayerError.UnknownLayer;
+        removed.value.deinit();
+        for (self.layer_order.items, 0..) |h, i| {
+            if (h == handle) {
+                _ = self.layer_order.orderedRemove(i);
+                break;
+            }
+        }
+    }
+
+    /// Resolves a wire-level layer handle to its `Layer` -- `null` (an
+    /// omitted `layer` param) and `root_layer_handle` both mean the root
+    /// layer, matching how omitted `row`/`col` already means "at the
+    /// cursor" elsewhere in the wire API. Null for an unknown non-root
+    /// handle (a destroyed or never-created layer).
+    pub fn layerPtr(self: *Context, handle: ?LayerHandle) ?*Layer {
+        const h = handle orelse root_layer_handle;
+        if (h == root_layer_handle) return &self.root;
+        return self.layers.getPtr(h);
     }
 
     /// Registers `handle` under `name` in the icon catalog, for `draw_icon`

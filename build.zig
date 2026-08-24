@@ -164,4 +164,22 @@ pub fn build(b: *std.Build) void {
 
     const view_step = b.step("view", "Run the glyphwire image-viewer client (glyphwire-view <image.png>)");
     view_step.dependOn(&run_view.step);
+
+    const notify_exe = b.addExecutable(.{
+        .name = "glyphwire-notify",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("notify/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    notify_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    b.installArtifact(notify_exe);
+
+    const run_notify = b.addRunArtifact(notify_exe);
+    run_notify.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_notify.addArgs(args);
+
+    const notify_step = b.step("notify", "Run the glyphwire notification client (glyphwire-notify <message>)");
+    notify_step.dependOn(&run_notify.step);
 }

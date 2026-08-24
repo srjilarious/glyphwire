@@ -20,6 +20,7 @@ pub const DispatchError = error{
     NotARequest,
     UnknownImage,
     UnknownIcon,
+    UnknownLayer,
 };
 
 const Envelope = struct {
@@ -33,7 +34,10 @@ const ColorJson = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
 /// No `row`/`col` fields: this slice's `Layer.writeText` only supports
 /// cursor-implicit writes (see core.zig). Explicit positioning is decided
 /// in decisions.md but not needed until a milestone past this slice.
+/// `layer` (omitted, or `root_layer_handle`) means the root layer, same
+/// convention as `row`/`col` defaulting to the cursor elsewhere.
 const WriteTextParams = struct {
+    layer: ?core.LayerHandle = null,
     text: []const u8,
     fg: ?ColorJson = null,
     bg: ?ColorJson = null,
@@ -42,21 +46,43 @@ const WriteTextParams = struct {
 /// Params shared by `insert_cells`/`delete_cells` -- also cursor-implicit
 /// like `write_text`, see `WriteTextParams`.
 const CellCountParams = struct {
+    layer: ?core.LayerHandle = null,
     count: usize,
 };
 
-const CursorPropertyParams = struct {
+/// Params shared by `set_property`/`get_property`. Not every field is
+/// meaningful for every `property` value -- `row`/`col` for `"cursor"`,
+/// `x`/`y` for `"position"` -- the handler picks which subset to read
+/// once it knows `property`, the same "flexible bag, dispatched on a
+/// string" shape `ClearParams` already uses for its own optional fields.
+const PropertyParams = struct {
+    layer: ?core.LayerHandle = null,
     property: []const u8,
     row: usize = 0,
     col: usize = 0,
-};
-
-const GetPropertyParams = struct {
-    property: []const u8,
+    x: f32 = 0,
+    y: f32 = 0,
 };
 
 const CursorResult = struct { row: usize, col: usize };
 const RevisionResult = struct { revision: u64 };
+const PositionResult = struct { x: f32, y: f32 };
+
+const GetCellsParams = struct {
+    layer: ?core.LayerHandle = null,
+};
+
+const CreateLayerParams = struct {
+    width: ?usize = null,
+    height: ?usize = null,
+    scrollback_rows: usize = 0,
+};
+
+const CreateLayerResult = struct { handle: core.LayerHandle };
+
+const DestroyLayerParams = struct {
+    layer: core.LayerHandle,
+};
 
 const CellMetricsResult = struct { cell_px_w: u32, cell_px_h: u32 };
 
@@ -116,6 +142,7 @@ const LoadImageResult = struct { handle: core.ImageHandle };
 /// yet wired in there) convention: omitted means "at the layer's
 /// cursor" -- see `handleDrawImage`/`resolveAnchor`.
 const DrawImageParams = struct {
+    layer: ?core.LayerHandle = null,
     handle: core.ImageHandle,
     row: ?usize = null,
     col: ?usize = null,
@@ -124,12 +151,14 @@ const DrawImageParams = struct {
 };
 
 const DrawIconParams = struct {
+    layer: ?core.LayerHandle = null,
     row: ?usize = null,
     col: ?usize = null,
     name: []const u8,
 };
 
 const DrawBoxParams = struct {
+    layer: ?core.LayerHandle = null,
     row: ?usize = null,
     col: ?usize = null,
     rows: usize,
@@ -141,6 +170,7 @@ const DrawBoxParams = struct {
 /// `row`/`col`", so a bare `clear()` (every field defaulted) wipes the
 /// whole layer -- see `handleClear`.
 const ClearParams = struct {
+    layer: ?core.LayerHandle = null,
     row: usize = 0,
     col: usize = 0,
     rows: ?usize = null,
@@ -292,7 +322,13 @@ pub const Dispatcher = struct {
             return .{ .response = try self.handleGetProperty(alloc, id, envelope.params) };
         } else if (std.mem.eql(u8, envelope.method, "get_cells")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetCells(alloc, id) };
+            return .{ .response = try self.handleGetCells(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "create_layer")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleCreateLayer(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "destroy_layer")) {
+            try self.handleDestroyLayer(alloc, envelope.params);
+            return .{};
         } else if (std.mem.eql(u8, envelope.method, "report_key")) {
             return try self.handleReportKey(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "report_mouse_button")) {
@@ -345,18 +381,26 @@ pub const Dispatcher = struct {
         return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }
 
+    /// Resolves a wire-level `layer` field (omitted means the root layer,
+    /// same convention `resolveAnchor` already uses for `row`/`col`) to
+    /// its `Layer` -- shared by every layer-scoped handler below.
+    fn resolveLayer(self: *Dispatcher, layer: ?core.LayerHandle) !*core.Layer {
+        return self.ctx.layerPtr(layer) orelse DispatchError.UnknownLayer;
+    }
+
     fn handleWriteText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
         const parsed = try std.json.parseFromValue(WriteTextParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
         const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
 
         const style: core.Style = .{
             .fg = if (p.fg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else core.default_style.fg,
             .bg = if (p.bg) |c| .{ .color = .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } } else core.default_style.bg,
         };
-        try self.ctx.root.writeText(p.text, style);
+        try layer.writeText(p.text, style);
     }
 
     fn handleInsertCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
@@ -364,7 +408,8 @@ pub const Dispatcher = struct {
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
-        self.ctx.root.insertCells(parsed.value.count);
+        const layer = try self.resolveLayer(parsed.value.layer);
+        layer.insertCells(parsed.value.count);
     }
 
     fn handleDeleteCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
@@ -372,18 +417,25 @@ pub const Dispatcher = struct {
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
-        self.ctx.root.deleteCells(parsed.value.count);
+        const layer = try self.resolveLayer(parsed.value.layer);
+        layer.deleteCells(parsed.value.count);
     }
 
     fn handleSetProperty(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(CursorPropertyParams, alloc, params_value, .{
+        const parsed = try std.json.parseFromValue(PropertyParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
         const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
 
-        if (!std.mem.eql(u8, p.property, "cursor")) return DispatchError.UnknownProperty;
-        self.ctx.root.setProperty(.{ .cursor = .{ .row = p.row, .col = p.col } });
+        if (std.mem.eql(u8, p.property, "cursor")) {
+            layer.setProperty(.{ .cursor = .{ .row = p.row, .col = p.col } });
+        } else if (std.mem.eql(u8, p.property, "position")) {
+            layer.setProperty(.{ .position = .{ .x = p.x, .y = p.y } });
+        } else {
+            return DispatchError.UnknownProperty;
+        }
     }
 
     fn handleGetProperty(
@@ -392,14 +444,15 @@ pub const Dispatcher = struct {
         id: std.json.Value,
         params_value: std.json.Value,
     ) ![]u8 {
-        const parsed = try std.json.parseFromValue(GetPropertyParams, alloc, params_value, .{
+        const parsed = try std.json.parseFromValue(PropertyParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
         const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
 
         if (std.mem.eql(u8, p.property, "cursor")) {
-            const cursor = self.ctx.root.getProperty(.cursor).cursor;
+            const cursor = layer.getProperty(.cursor).cursor;
             const Response = struct {
                 jsonrpc: []const u8 = "2.0",
                 id: std.json.Value,
@@ -408,7 +461,7 @@ pub const Dispatcher = struct {
             const response: Response = .{ .id = id, .result = .{ .row = cursor.row, .col = cursor.col } };
             return try std.json.Stringify.valueAlloc(alloc, response, .{});
         } else if (std.mem.eql(u8, p.property, "revision")) {
-            const revision = self.ctx.root.getProperty(.revision).revision;
+            const revision = layer.getProperty(.revision).revision;
             const Response = struct {
                 jsonrpc: []const u8 = "2.0",
                 id: std.json.Value,
@@ -416,16 +469,60 @@ pub const Dispatcher = struct {
             };
             const response: Response = .{ .id = id, .result = .{ .revision = revision } };
             return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        } else if (std.mem.eql(u8, p.property, "position")) {
+            const pos = layer.getProperty(.position).position;
+            const Response = struct {
+                jsonrpc: []const u8 = "2.0",
+                id: std.json.Value,
+                result: PositionResult,
+            };
+            const response: Response = .{ .id = id, .result = .{ .x = pos.x, .y = pos.y } };
+            return try std.json.Stringify.valueAlloc(alloc, response, .{});
         }
         return DispatchError.UnknownProperty;
     }
 
-    /// Returns a full row-major snapshot of the root layer's visible
-    /// viewport, plus its current revision -- the read-back path
-    /// decisions.md flagged as not yet exposed over the wire. No params:
-    /// v1 has exactly one layer (the root), so there's nothing to select.
-    fn handleGetCells(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
-        const layer = &self.ctx.root;
+    /// `create_layer`: allocates a fresh layer parented to the root (see
+    /// `Context.createLayer`) and returns its handle.
+    fn handleCreateLayer(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(CreateLayerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const layer_handle = try self.ctx.createLayer(p.width, p.height, p.scrollback_rows);
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: CreateLayerResult,
+        };
+        const response: Response = .{ .id = id, .result = .{ .handle = layer_handle } };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
+    /// `destroy_layer`: frees a layer and drops it from compositing (see
+    /// `Context.destroyLayer`). Errors (an unknown handle, or the root's)
+    /// surface as `DispatchError.UnknownLayer` via `core.LayerError`'s own
+    /// single member.
+    fn handleDestroyLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DestroyLayerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.destroyLayer(parsed.value.layer) catch return DispatchError.UnknownLayer;
+    }
+
+    /// Returns a full row-major snapshot of the given layer's (default:
+    /// root's) visible viewport, plus its current revision -- the
+    /// read-back path decisions.md flagged as not yet exposed over the
+    /// wire.
+    fn handleGetCells(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(GetCellsParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
         const cells = try alloc.alloc(CellJson, layer.width * layer.height);
         defer alloc.free(cells);
 
@@ -595,16 +692,15 @@ pub const Dispatcher = struct {
         return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }
 
-    /// Resolves an optional `row`/`col` pair against the layer's current
+    /// Resolves an optional `row`/`col` pair against `layer`'s current
     /// cursor -- shared by `draw_image`/`draw_icon`/`draw_box`, matching
     /// `write_text`'s documented (if not yet wired in there) convention:
     /// omitted means "at the cursor," same as it would for text. Doesn't
     /// itself scroll or otherwise validate -- `Layer.resolveRow` (called
     /// downstream by `drawImage`/`drawIcon`/`drawBox` themselves) still
     /// handles a resulting row that's out of bounds.
-    fn resolveAnchor(self: *Dispatcher, row: ?usize, col: ?usize) struct { row: usize, col: usize } {
-        const cursor = self.ctx.root.cursor;
-        return .{ .row = row orelse cursor.row, .col = col orelse cursor.col };
+    fn resolveAnchor(layer: *const core.Layer, row: ?usize, col: ?usize) struct { row: usize, col: usize } {
+        return .{ .row = row orelse layer.cursor.row, .col = col orelse layer.cursor.col };
     }
 
     fn handleDrawImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
@@ -613,10 +709,11 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
 
         const info = self.ctx.imageInfo(p.handle) orelse return DispatchError.UnknownImage;
-        const anchor = self.resolveAnchor(p.row, p.col);
-        self.ctx.root.drawImage(
+        const anchor = resolveAnchor(layer, p.row, p.col);
+        layer.drawImage(
             p.handle,
             anchor.row,
             anchor.col,
@@ -642,10 +739,11 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
 
         const icon_handle = self.ctx.iconHandle(p.name) orelse return DispatchError.UnknownIcon;
-        const anchor = self.resolveAnchor(p.row, p.col);
-        self.ctx.root.drawIcon(icon_handle, anchor.row, anchor.col);
+        const anchor = resolveAnchor(layer, p.row, p.col);
+        layer.drawIcon(icon_handle, anchor.row, anchor.col);
     }
 
     /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog
@@ -660,6 +758,7 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
 
         const piece_names = [_][]const u8{ "tl", "t", "tr", "l", "fill", "r", "bl", "b", "br" };
         var pieces: [piece_names.len]core.ImageHandle = undefined;
@@ -681,14 +780,14 @@ pub const Dispatcher = struct {
             .b = pieces[7],
             .br = pieces[8],
         };
-        const anchor = self.resolveAnchor(p.row, p.col);
-        self.ctx.root.drawBox(tiles, anchor.row, anchor.col, p.rows, p.cols);
+        const anchor = resolveAnchor(layer, p.row, p.col);
+        layer.drawBox(tiles, anchor.row, anchor.col, p.rows, p.cols);
     }
 
-    /// `clear`: resets a region of the root layer's cells to blank. `rows`/
-    /// `cols` default to "the rest of the layer from `row`/`col`" (clamped
-    /// to 0 if `row`/`col` is already past the edge), so an all-defaulted
-    /// `clear()` wipes everything.
+    /// `clear`: resets a region of the given layer's (default: root's)
+    /// cells to blank. `rows`/`cols` default to "the rest of the layer
+    /// from `row`/`col`" (clamped to 0 if `row`/`col` is already past the
+    /// edge), so an all-defaulted `clear()` wipes everything.
     fn handleClear(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
         const parsed = try std.json.parseFromValue(ClearParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
@@ -696,7 +795,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const p = parsed.value;
 
-        const layer = &self.ctx.root;
+        const layer = try self.resolveLayer(p.layer);
         const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
         const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
         layer.clear(p.row, p.col, rows, cols);

@@ -167,6 +167,20 @@ surface.
   isn't exposed over the wire yet — no message needs it yet, since the
   message catalog so far only covers `write_text` and
   `get_property`/`set_property("cursor")`.
+- **v1 built:** `create_layer`/`destroy_layer`, every layer parented
+  directly to the (single, implicit) context's root layer — deeper
+  nesting is designed above but nothing creates or needs a non-root
+  parent yet, so `create_layer` takes no `parent`/`context` params.
+  `write_text`/`insert_cells`/`delete_cells`/`clear`/`draw_image`/
+  `draw_icon`/`draw_box`/`get_cells`/`get_property`/`set_property` all
+  take an optional `layer` (root when omitted, per the root-layer-
+  implicit convention already established for `row`/`col`).
+  `set_property`/`get_property("position")` moves/reads a layer's
+  pixel-precise position — `glyphwire-notify` (see notify/main.zig) is
+  the first client to use it, sliding a notification layer on/off
+  screen a step at a time.
+- **Not built — still open:** `create_context`, non-root parenting,
+  `size`/`clip`/`scroll`/`visibility` properties.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline

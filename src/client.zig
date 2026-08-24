@@ -114,11 +114,23 @@ pub const Client = struct {
         return parsed.value.result.revision;
     }
 
-    /// `get_cells` -- a request returning a full row-major snapshot of the
-    /// root layer's visible viewport. Owns its own parsed JSON arena;
-    /// caller must call `.deinit()` on the result.
+    /// `get_cells(layer?)` -- a request returning a full row-major
+    /// snapshot of the given layer's (default: root's) visible viewport.
+    /// Owns its own parsed JSON arena; caller must call `.deinit()` on
+    /// the result. `.{ .layer = null }`, not a bare `.{}`: an empty
+    /// anonymous struct serializes as a JSON *array* (Zig's tuple
+    /// encoding), not `{}` -- fine for a method the server never parses
+    /// params for, but `get_cells` now does (`GetCellsParams`), so it
+    /// needs a real single-field object on the wire.
     pub fn getCells(self: *Client) !CellsSnapshot {
-        const parsed = try self.request(CellsResultJson, "get_cells", .{});
+        const parsed = try self.request(CellsResultJson, "get_cells", .{ .layer = @as(?core.LayerHandle, null) });
+        return .{ .parsed = parsed };
+    }
+
+    /// `get_cells(layer)` for a specific (non-root) layer -- see
+    /// `getCells` for the root-layer version.
+    pub fn getCellsOn(self: *Client, layer: core.LayerHandle) !CellsSnapshot {
+        const parsed = try self.request(CellsResultJson, "get_cells", .{ .layer = layer });
         return .{ .parsed = parsed };
     }
 
@@ -243,6 +255,61 @@ pub const Client = struct {
     /// `clear(0, 0, null, null)` wipes the whole layer.
     pub fn clear(self: *Client, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
         try self.notify("clear", .{ .row = row, .col = col, .rows = rows, .cols = cols });
+    }
+
+    /// `create_layer(width?, height?, scrollback_rows)` -- a request.
+    /// Allocates a fresh layer parented to the root, defaulting to the
+    /// context's base size when `width`/`height` is omitted -- see
+    /// decisions.md's Layer section. Returns its handle, for the
+    /// `*On`/`*Layer` methods below.
+    pub fn createLayer(self: *Client, width: ?usize, height: ?usize, scrollback_rows: usize) !core.LayerHandle {
+        var parsed = try self.request(struct { handle: core.LayerHandle }, "create_layer", .{
+            .width = width,
+            .height = height,
+            .scrollback_rows = scrollback_rows,
+        });
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    /// `destroy_layer(layer)` -- a notification. Frees a layer created by
+    /// `createLayer` and drops it from compositing; there's nothing more
+    /// to do afterward, including no need to `clear` it first.
+    pub fn destroyLayer(self: *Client, layer: core.LayerHandle) !void {
+        try self.notify("destroy_layer", .{ .layer = layer });
+    }
+
+    /// `set_property(layer, "cursor", {row, col})` on a non-root layer --
+    /// see `setCursor` for the root-layer version. `write_text` is always
+    /// cursor-implicit (no `row`/`col` params of its own), so placing text
+    /// on a layer other than root goes through this first.
+    pub fn setCursorOn(self: *Client, layer: core.LayerHandle, row: usize, col: usize) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
+    }
+
+    /// `set_property(layer, "position", {x, y})` -- a notification. Moves
+    /// `layer` to a pixel-precise position relative to the root (see
+    /// `PropertyName.position`'s doc comment) -- e.g. sliding a
+    /// notification layer across the screen one small step at a time.
+    pub fn setLayerPosition(self: *Client, layer: core.LayerHandle, x: f32, y: f32) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "position", .x = x, .y = y });
+    }
+
+    /// `write_text(layer, text, fg?, bg?)` on a non-root layer -- see
+    /// `writeText` for the root-layer version.
+    pub fn writeTextOn(self: *Client, layer: core.LayerHandle, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
+        try self.notify("write_text", .{
+            .layer = layer,
+            .text = text,
+            .fg = colorToJson(fg),
+            .bg = colorToJson(bg),
+        });
+    }
+
+    /// `draw_box(layer, row?, col?, rows, cols, style)` on a non-root
+    /// layer -- see `drawBox` for the root-layer version.
+    pub fn drawBoxOn(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
+        try self.notify("draw_box", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
     }
 
     /// `get_cell_metrics` -- a request returning the session's fixed cell
