@@ -11,6 +11,13 @@ pub const Server = struct {
     io: std.Io,
     ctx: *core.Context,
     listener: std.Io.net.Server,
+    /// Optional lock held around each dispatched message. Needed when the
+    /// `Context` is also read concurrently by something outside this
+    /// server's own thread (e.g. a renderer running the socket server
+    /// in-process on a background thread while its own game loop reads
+    /// `ctx` every frame). Null keeps single-threaded callers (unit tests,
+    /// the standalone `glyphwire-server` binary) lock-free.
+    mutex: ?*std.Io.Mutex = null,
 
     pub fn bind(io: std.Io, ctx: *core.Context, socket_path: []const u8) !Server {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
@@ -52,9 +59,15 @@ pub const Server = struct {
 
             while (try decoder.next(alloc)) |body| {
                 defer alloc.free(body);
-                if (try d.handle(alloc, body)) |response| {
-                    defer alloc.free(response);
-                    try self.sendFrame(stream, response);
+                const response = if (self.mutex) |m| blk: {
+                    m.lockUncancelable(self.io);
+                    defer m.unlock(self.io);
+                    break :blk try d.handle(alloc, body);
+                } else try d.handle(alloc, body);
+
+                if (response) |r| {
+                    defer alloc.free(r);
+                    try self.sendFrame(stream, r);
                 }
             }
         }

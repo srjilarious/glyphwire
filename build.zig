@@ -8,6 +8,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/glyphwire.zig"),
     });
 
+    const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });
+    const pixzig_mod = pixzig_dep.module("pixzig");
+
     const tests_exe = b.addExecutable(.{
         .name = "tests",
         .root_module = b.createModule(.{
@@ -57,6 +60,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     shell_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    shell_exe.root_module.addImport("pixzig", pixzig_mod);
     shell_exe.root_module.link_libc = true;
     b.installArtifact(shell_exe);
 
@@ -84,4 +88,22 @@ pub fn build(b: *std.Build) void {
 
     const client_step = b.step("client", "Run the glyphwire test client");
     client_step.dependOn(&run_client.step);
+
+    const demo_exe = b.addExecutable(.{
+        .name = "glyphwire-demo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demo/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    demo_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    b.installArtifact(demo_exe);
+
+    const run_demo = b.addRunArtifact(demo_exe);
+    run_demo.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_demo.addArgs(args);
+
+    const demo_step = b.step("demo", "Run the glyphwire styled-text demo client");
+    demo_step.dependOn(&run_demo.step);
 }
