@@ -47,7 +47,15 @@ pub fn main(init: std.process.Init) !void {
     const cols = (info.width + metrics.w - 1) / metrics.w;
     const rows = (info.height + metrics.h - 1) / metrics.h;
 
-    try client.drawImage(handle, 0, 0, rows, cols);
+    // Draw at the cursor rather than a fixed (0, 0) -- like a real inline
+    // image viewer (iTerm2's imgcat, kitty's icat), the image should land
+    // wherever the caller's cursor already is, then leave the cursor just
+    // past its bottom edge so whatever runs next continues below the
+    // image instead of overlapping it. Same get-cursor/draw/set-cursor
+    // shape glyphwire-ls uses per entry -- see its writeGrid doc comment.
+    const cur = try client.getCursor();
+    try client.drawImage(handle, null, null, rows, cols);
+    try client.setCursor(cur.row + rows, 0);
 
     // See the doc comment above: stay open until the user dismisses it
     // (any keypress) rather than returning immediately. Falls back to
