@@ -50,7 +50,7 @@ fn requestMessage(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8,
 }
 
 pub fn socketWriteTextThenGetPropertyRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    var ctx = try glyphwire.Context.init(alloc, 80, 24);
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
 
     const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-test-{d}.sock", .{std.Thread.getCurrentId()});

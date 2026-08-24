@@ -21,7 +21,7 @@ fn roundTripThroughWire(alloc: std.mem.Allocator, body: []const u8) ![]u8 {
 
 pub fn writeTextNotificationUpdatesCoreStateTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 80, 24);
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
 
@@ -42,7 +42,7 @@ pub fn writeTextNotificationUpdatesCoreStateTest(io: std.Io, alloc: std.mem.Allo
 
 pub fn getPropertyRequestReturnsDecodedResponseTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 80, 24);
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
 
@@ -83,7 +83,7 @@ pub fn getPropertyRequestReturnsDecodedResponseTest(io: std.Io, alloc: std.mem.A
 
 pub fn setPropertyNotificationMovesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 80, 24);
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
 
@@ -100,7 +100,7 @@ pub fn setPropertyNotificationMovesCursorTest(io: std.Io, alloc: std.mem.Allocat
 
 pub fn unknownMethodErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 80, 24);
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
 

@@ -69,37 +69,84 @@ pub const PropertyValue = union(PropertyName) {
 
 pub const PropertyError = error{UnknownProperty};
 
+/// A layer's cell grid is a fixed-capacity ring buffer of
+/// `height + scrollback_rows` physical rows, one contiguous allocation.
+/// The visible viewport is always the most recently written `height`
+/// rows; writing past the bottom row scrolls (the old top row becomes
+/// history, evicting the oldest history row once scrollback is full) —
+/// the same "live tail" behavior a real terminal has. `scrollback_rows`
+/// is a per-layer creation parameter (0 for a layer with no need for
+/// history, e.g. a small popup notification) rather than a fixed default,
+/// since layers range from a terminal-sized root layer down to something
+/// like a 45x3 notification.
 pub const Layer = struct {
     alloc: std.mem.Allocator,
     width: usize,
     height: usize,
-    /// Row-major cell grid: rows[row][col].
-    rows: [][]Cell,
+    scrollback_rows: usize,
+    /// Ring buffer storage: `capacity()` rows of `width` cells each.
+    buf: []Cell,
+    /// Physical row index (row units, not cell units) of the viewport's
+    /// top row.
+    viewport_start: usize = 0,
+    /// How many rows above the viewport currently hold real history, vs.
+    /// never-written blank space. Saturates at `scrollback_rows`.
+    history_len: usize = 0,
     cursor: Cursor = .{},
 
-    pub fn init(alloc: std.mem.Allocator, width: usize, height: usize) !Layer {
-        const rows = try alloc.alloc([]Cell, height);
-        errdefer alloc.free(rows);
+    pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Layer {
+        const total_rows = height + scrollback_rows;
+        const buf = try alloc.alloc(Cell, width * total_rows);
+        for (buf) |*c| c.* = .{};
 
-        var built: usize = 0;
-        errdefer for (rows[0..built]) |row| alloc.free(row);
-
-        for (rows) |*row| {
-            row.* = try alloc.alloc(Cell, width);
-            for (row.*) |*c| c.* = .{};
-            built += 1;
-        }
-
-        return .{ .alloc = alloc, .width = width, .height = height, .rows = rows };
+        return .{
+            .alloc = alloc,
+            .width = width,
+            .height = height,
+            .scrollback_rows = scrollback_rows,
+            .buf = buf,
+        };
     }
 
     pub fn deinit(self: *Layer) void {
-        for (self.rows) |row| self.alloc.free(row);
-        self.alloc.free(self.rows);
+        self.alloc.free(self.buf);
+    }
+
+    pub fn capacity(self: *const Layer) usize {
+        return self.height + self.scrollback_rows;
+    }
+
+    fn physicalRow(self: *const Layer, viewport_row: usize) usize {
+        return (self.viewport_start + viewport_row) % self.capacity();
+    }
+
+    fn rowSlice(self: *const Layer, physical_row: usize) []Cell {
+        const start = physical_row * self.width;
+        return self.buf[start .. start + self.width];
     }
 
     pub fn cell(self: *const Layer, row: usize, col: usize) *Cell {
-        return &self.rows[row][col];
+        return &self.rowSlice(self.physicalRow(row))[col];
+    }
+
+    /// Returns the row `rows_above_viewport` above the current viewport
+    /// (0 = the row immediately above viewport row 0), or null if that
+    /// much history hasn't been retained (either scrolled past
+    /// `scrollback_rows` already, or never scrolled that far yet).
+    pub fn scrollbackRow(self: *const Layer, rows_above_viewport: usize) ?[]const Cell {
+        if (rows_above_viewport >= self.history_len) return null;
+        const cap = self.capacity();
+        const physical = (self.viewport_start + cap - 1 - rows_above_viewport) % cap;
+        return self.rowSlice(physical);
+    }
+
+    /// Scrolls the viewport down by one row: the current top row becomes
+    /// history (evicting the oldest history row once `scrollback_rows`
+    /// is full), and a fresh blank row appears at the bottom.
+    fn scrollOne(self: *Layer) void {
+        self.history_len = @min(self.history_len + 1, self.scrollback_rows);
+        self.viewport_start = (self.viewport_start + 1) % self.capacity();
+        for (self.rowSlice(self.physicalRow(self.height - 1))) |*c| c.* = .{};
     }
 
     /// Appends `text` as grapheme clusters starting at the layer's cursor,
@@ -120,8 +167,10 @@ pub const Layer = struct {
             self.cursor.col = 0;
             self.cursor.row += 1;
         }
-        // No scrollback in this slice: writes past the last row are dropped.
-        if (self.cursor.row >= self.height) return;
+        if (self.cursor.row >= self.height) {
+            self.scrollOne();
+            self.cursor.row = self.height - 1;
+        }
 
         var c = self.cell(self.cursor.row, self.cursor.col);
         c.setGrapheme(bytes);
@@ -152,8 +201,8 @@ pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
 
-    pub fn init(alloc: std.mem.Allocator, width: usize, height: usize) !Context {
-        return .{ .alloc = alloc, .root = try Layer.init(alloc, width, height) };
+    pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Context {
+        return .{ .alloc = alloc, .root = try Layer.init(alloc, width, height, scrollback_rows) };
     }
 
     pub fn deinit(self: *Context) void {

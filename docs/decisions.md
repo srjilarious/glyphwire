@@ -152,6 +152,21 @@ surface.
   sized directly in pixels instead — not designed yet.
 - `create_layer` returns a server-generated handle, defaulting to the
   context's base width/height when no explicit size is given.
+- Storage: a fixed-capacity ring buffer of `height + scrollback_rows`
+  physical rows (one contiguous allocation), where the visible viewport
+  is always the most recently written `height` rows. Writing past the
+  bottom row scrolls — the old top row becomes history (evicting the
+  oldest history row once `scrollback_rows` is full) — rather than
+  dropping content, the same "live tail" behavior a real terminal has.
+- `scrollback_rows` is a per-layer *creation* parameter, not a fixed
+  engine default: a terminal-sized root layer might ask for hundreds or
+  thousands of rows of history, while a small transient layer (e.g. a
+  45×3 popup notification) can reasonably ask for 0. Whatever creates a
+  context/layer (the shell, eventually via `create_context`/
+  `create_layer`) decides this per layer. Reading scrollback rows back
+  isn't exposed over the wire yet — no message needs it yet, since the
+  message catalog so far only covers `write_text` and
+  `get_property`/`set_property("cursor")`.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline

@@ -4,7 +4,7 @@ const glyphwire = @import("glyphwire");
 
 pub fn writeTextAdvancesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 80, 24);
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
     try layer.writeText("hello", glyphwire.default_style);
@@ -21,7 +21,7 @@ pub fn writeTextAdvancesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
 
 pub fn writeTextAppliesStyleTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 80, 24);
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
     const style: glyphwire.Style = .{
@@ -46,7 +46,7 @@ pub fn writeTextAppliesStyleTest(io: std.Io, alloc: std.mem.Allocator) !void {
 
 pub fn writeTextWrapsAtLayerEdgeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 3, 2);
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 0);
     defer layer.deinit();
 
     try layer.writeText("hello", glyphwire.default_style);
@@ -63,7 +63,7 @@ pub fn writeTextWrapsAtLayerEdgeTest(io: std.Io, alloc: std.mem.Allocator) !void
 
 pub fn getSetCursorPropertyTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 80, 24);
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
     try layer.writeText("hello", glyphwire.default_style);
@@ -81,11 +81,59 @@ pub fn getSetCursorPropertyTest(io: std.Io, alloc: std.mem.Allocator) !void {
 
 pub fn contextCreatesRootLayerAtSizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 80, 24);
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
 
     try testz.expectEqual(ctx.root.width, 80);
     try testz.expectEqual(ctx.root.height, 24);
     try testz.expectEqual(ctx.root.cursor.row, 0);
     try testz.expectEqual(ctx.root.cursor.col, 0);
+}
+
+pub fn scrollingRetainsScrolledOffRowsAsHistoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // width=3, height=2, scrollback=2 (capacity=4 rows). Writing 10
+    // characters wraps across 4 logical rows, forcing the viewport to
+    // scroll twice.
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 2);
+    defer layer.deinit();
+
+    try layer.writeText("abcdefghij", glyphwire.default_style);
+
+    // Viewport now shows the last two rows written.
+    try testz.expectEqualStr("g", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("h", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("i", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("j", layer.cell(1, 0).grapheme());
+    try testz.expectEqual(layer.cell(1, 1).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(1, 2).grapheme().len, 0);
+    try testz.expectEqual(layer.cursor.row, 1);
+    try testz.expectEqual(layer.cursor.col, 1);
+
+    // The two rows that scrolled off are retained, most recent first.
+    const most_recent = layer.scrollbackRow(0).?;
+    try testz.expectEqualStr("d", most_recent[0].grapheme());
+    try testz.expectEqualStr("e", most_recent[1].grapheme());
+    try testz.expectEqualStr("f", most_recent[2].grapheme());
+
+    const older = layer.scrollbackRow(1).?;
+    try testz.expectEqualStr("a", older[0].grapheme());
+    try testz.expectEqualStr("b", older[1].grapheme());
+    try testz.expectEqualStr("c", older[2].grapheme());
+
+    try testz.expectTrue(layer.scrollbackRow(2) == null);
+}
+
+pub fn scrollingWithNoScrollbackKeepsNoHistoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // A layer with scrollback_rows=0 (e.g. a small popup notification)
+    // still scrolls its viewport, it just never retains history.
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 0);
+    defer layer.deinit();
+
+    try layer.writeText("abcdefghij", glyphwire.default_style);
+
+    try testz.expectEqualStr("g", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("j", layer.cell(1, 0).grapheme());
+    try testz.expectTrue(layer.scrollbackRow(0) == null);
 }

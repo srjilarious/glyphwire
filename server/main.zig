@@ -12,7 +12,11 @@ pub fn main(init: std.process.Init) !void {
     }
     const socket_path = args[1];
 
-    var ctx = try glyphwire.Context.init(init.gpa, 80, 24);
+    // Scrollback is a per-layer creation parameter (see core.zig); until
+    // `create_context` exists over the wire, this default stands in for
+    // what a real shell would specify when allocating its root context.
+    const default_scrollback_rows = 1000;
+    var ctx = try glyphwire.Context.init(init.gpa, 80, 24, default_scrollback_rows);
     defer ctx.deinit();
 
     var srv = try glyphwire.server.Server.bind(init.io, &ctx, socket_path);
