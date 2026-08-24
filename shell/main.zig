@@ -15,23 +15,26 @@ const c = struct {
 /// relayed through the server, not read directly.
 ///
 /// The prompt supports echo, Enter, real cursor movement and interior
-/// insert/delete (arrow keys, ctrl+a/e/u, ctrl+arrow word jumps -- see
-/// `Prompt`), and now launches a child process per submitted line (see
-/// `Prompt.runCommand`). Every child is assumed "glyphwire compatible":
-/// it inherits `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` from this process and
-/// writes to the grid itself over its own connection, the same way
-/// `glyphwire-demo` or `glyphwire-ls` do -- the shell just spawns it and
-/// waits, no stdout/stderr capture. Capturing output from a plain,
-/// non-glyphwire-aware program is separate, later work. `cd` is a builtin
-/// (see `Prompt.doCd`) rather than spawned, since changing directory in a
-/// child process wouldn't affect this one; the prompt shows the current
-/// directory before `> ` so a `cd` actually taking effect is visible.
-/// `exit` is a builtin too -- typing it is the only way to quit, deliberately
-/// unlike the escape-quits-immediately convention most pixzig
-/// examples/games use, which would kill an interactive shell session out
-/// from under whatever's running in it; `glyphwire-host` watches for this
-/// process actually exiting (see host/main.zig's `reapChild`) rather than
-/// listening for a keypress itself. ctrl+c/ctrl+v are ignored for now too.
+/// insert/delete (arrow keys, ctrl+a/e/u, ctrl+arrow word jumps, ctrl+up/
+/// down history recall -- see `Prompt`), and now launches a child process
+/// per submitted line (see `Prompt.runCommand`). Every child is assumed
+/// "glyphwire compatible": it inherits `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX`
+/// from this process and writes to the grid itself over its own
+/// connection, the same way `glyphwire-demo` or `glyphwire-ls` do -- the
+/// shell just spawns it and waits, no stdout/stderr capture. Capturing
+/// output from a plain, non-glyphwire-aware program is separate, later
+/// work. `cd` is a builtin (see `Prompt.doCd`) rather than spawned, since
+/// changing directory in a child process wouldn't affect this one; the
+/// prompt shows the current directory before `> ` so a `cd` actually
+/// taking effect is visible. `exit` is a builtin too -- typing it is the
+/// only way to quit, deliberately unlike the escape-quits-immediately
+/// convention most pixzig examples/games use, which would kill an
+/// interactive shell session out from under whatever's running in it;
+/// `glyphwire-host` watches for this process actually exiting (see
+/// host/main.zig's `reapChild`) rather than listening for a keypress
+/// itself. Any key chorded with ctrl/alt/super that isn't one of the
+/// sequences above is swallowed rather than typed literally into the
+/// line (see `runPrompt`'s key loop) -- ctrl+c/ctrl+v included.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const arena = init.arena.allocator();
@@ -164,7 +167,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     // Unreachable before `exit` gave this loop a clean return path --
     // every previous exit was a hard kill, so this never ran and the leak
     // never surfaced.
-    defer prompt.buffer.deinit(alloc);
+    defer prompt.deinit();
     try prompt.showPrompt();
 
     while (true) {
@@ -177,6 +180,8 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         if (!ev.pressed) continue; // only key-down drives the prompt
 
         const ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
+        const alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt");
+        const super = listener.isKeyDown("left_super") or listener.isKeyDown("right_super");
 
         if (std.mem.eql(u8, ev.key, "enter")) {
             try prompt.submitLine();
@@ -197,6 +202,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             try prompt.moveCursorTo(prompt.wordLeft());
         } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
             try prompt.moveCursorTo(prompt.wordRight());
+        } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
+            try prompt.historyUp();
+        } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
+            try prompt.historyDown();
         } else if (std.mem.eql(u8, ev.key, "left")) {
             // Not explicitly asked for, but needed alongside ctrl+left/
             // right: without plain single-character movement too, the
@@ -207,7 +216,13 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             try prompt.moveCursorTo(prompt.cursor -| 1);
         } else if (std.mem.eql(u8, ev.key, "right")) {
             try prompt.moveCursorTo(prompt.cursor + 1);
-        } else {
+        } else if (!ctrl and !alt and !super) {
+            // A ctrl/alt/super chord that isn't one of the explicit cases
+            // above (e.g. ctrl+c, ctrl+z, alt+f) falls through to here too
+            // -- `charFromKeyName` only looks at the base key and shift,
+            // so without this guard an unhandled chord would still type
+            // its plain character into the line instead of being
+            // swallowed like a real terminal does.
             const shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift");
             if (charFromKeyName(ev.key, shift)) |ch| {
                 try prompt.insertChar(ch);
@@ -237,6 +252,28 @@ const Prompt = struct {
     /// (`runPrompt`'s key loop) checks this after every submitted line and
     /// returns instead of drawing another prompt, ending this process.
     should_exit: bool = false,
+    /// Every non-empty line ever submitted, oldest first -- `submitLine`
+    /// appends to it, `historyUp`/`historyDown` read from it. Each entry
+    /// is an owned dupe (the submitted line's `buffer` gets cleared by the
+    /// next `showPrompt`, so history can't just borrow it).
+    history: std.ArrayList([]const u8) = .empty,
+    /// `null` means the line on screen is the one actually being typed
+    /// (not a recalled history entry). Otherwise, an index into `history`
+    /// for whichever entry `historyUp`/`historyDown` last loaded.
+    history_index: ?usize = null,
+    /// What `buffer` held right before the first `historyUp` of a
+    /// recall -- `historyDown` past the newest entry restores this,
+    /// mirroring a real shell's "go back to what I was typing" behavior.
+    /// Only meaningful while `history_index != null`.
+    scratch: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *Prompt) void {
+        const alloc = self.client.alloc;
+        for (self.history.items) |line| alloc.free(line);
+        self.history.deinit(alloc);
+        self.scratch.deinit(alloc);
+        self.buffer.deinit(alloc);
+    }
 
     /// Writes the current directory followed by `> ` at the cursor's
     /// current position -- reading the directory fresh each time (rather
@@ -281,6 +318,60 @@ const Prompt = struct {
 
         if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
         try self.setCursorAt(self.cursor);
+    }
+
+    /// Replaces the whole line -- on-screen and in `buffer` -- with
+    /// `text`, leaving the cursor at its end. Shared by `historyUp`/
+    /// `historyDown`: clears whatever's currently drawn via
+    /// `deleteCells` from column 0 (same `setCursorAt(0)`-then-
+    /// `deleteCells` order `killToStart` already uses) rather than
+    /// tracking a diff against the old text, since a recalled history
+    /// entry has no relation to what it's replacing.
+    fn setLine(self: *Prompt, text: []const u8) !void {
+        try self.setCursorAt(0);
+        if (self.buffer.items.len > 0) try self.client.deleteCells(self.buffer.items.len);
+
+        self.buffer.clearRetainingCapacity();
+        try self.buffer.appendSlice(self.client.alloc, text);
+        if (text.len > 0) try self.client.writeText(text, null, null);
+        self.cursor = self.buffer.items.len;
+        try self.setCursorAt(self.cursor);
+    }
+
+    /// ctrl+up: recalls the previous (older) history entry, most recent
+    /// first. The first press of a recall stashes the in-progress line in
+    /// `scratch` so `historyDown` can get back to it later; further presses
+    /// just walk `history_index` back, stopping at the oldest entry rather
+    /// than wrapping.
+    fn historyUp(self: *Prompt) !void {
+        if (self.history.items.len == 0) return;
+
+        if (self.history_index) |i| {
+            if (i == 0) return;
+            self.history_index = i - 1;
+        } else {
+            self.scratch.clearRetainingCapacity();
+            try self.scratch.appendSlice(self.client.alloc, self.buffer.items);
+            self.history_index = self.history.items.len - 1;
+        }
+        try self.setLine(self.history.items[self.history_index.?]);
+    }
+
+    /// ctrl+down: the mirror of `historyUp`. Walking past the newest entry
+    /// restores whatever `historyUp` stashed in `scratch` and clears
+    /// `history_index` back to `null` -- "the current scratch one" the line
+    /// was on before recall started. A no-op when not currently recalling
+    /// (`history_index == null`): there's nothing further "down" than the
+    /// line already on screen.
+    fn historyDown(self: *Prompt) !void {
+        const i = self.history_index orelse return;
+        if (i + 1 < self.history.items.len) {
+            self.history_index = i + 1;
+            try self.setLine(self.history.items[self.history_index.?]);
+        } else {
+            self.history_index = null;
+            try self.setLine(self.scratch.items);
+        }
     }
 
     /// Inserts `ch` at the cursor (append, if the cursor's at the end):
@@ -369,6 +460,17 @@ const Prompt = struct {
         try self.client.setCursor(self.line_start_row + 1, 0);
 
         const alloc = self.client.alloc;
+
+        // Record into history before `showPrompt` clears `buffer` below --
+        // an owned dupe, since `buffer`'s own storage gets reused for the
+        // next line. Blank lines aren't worth recalling, so they're not
+        // recorded, matching a real shell. Submitting always leaves the
+        // next prompt on the not-recalling line, `historyUp` included.
+        if (self.buffer.items.len > 0) {
+            try self.history.append(alloc, try alloc.dupe(u8, self.buffer.items));
+        }
+        self.history_index = null;
+
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(alloc);
         var it = std.mem.tokenizeAny(u8, self.buffer.items, " \t");
