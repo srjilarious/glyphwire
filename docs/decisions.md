@@ -258,10 +258,10 @@ surface.
 
 ## Open Items
 
-- **Message catalog.** `create_layer`, `set_property`, `animate`,
-  `bind_actions`, `subscribe`, draw ops, and the notification shapes for
-  input/action/lifecycle events are named in concept but not enumerated
-  concretely yet.
+- **Message catalog.** Now enumerated in `docs/api.md`, but most of it is
+  still 🔶 planned/⬜ open rather than built — `subscribe` and
+  `bind_actions` in particular don't have a decided request-vs-notification
+  shape yet.
 - **Multi-process layer ownership.** Single foreground owner per grid
   (classic shell model) vs. multiple concurrent processes owning separate
   regions (tmux-pane-like, negotiated over the protocol) — explicitly
