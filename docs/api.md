@@ -36,7 +36,7 @@ today; the server auto-creates exactly one context at startup.
 | `destroy_layer` | notification | `layer` | — | ✅ frees the layer and drops it from compositing; the root layer (handle 0, i.e. an omitted `layer` elsewhere) can't be destroyed this way — an unknown or root handle both just report `UnknownLayer` |
 | `get_property` | request | `layer?, property` | property value | ✅ (`cursor`, `revision`, `position`) |
 | `set_property` | notification | `layer?, property, value` | — | ✅ (`cursor`, `position`) |
-| `get_cells` | request | `layer?` | full row-major cell snapshot (`cols, rows, revision, cells`) | ✅ |
+| `get_cells` | request | `layer?` | full row-major cell snapshot (`cols, rows, revision, cells`) | ✅ each cell also reports `metadata_id?` (see Metadata below) alongside `bg`/`bg_image`/`bg_icon` — just the id, not the resolved JSON, same "handle, not content" treatment `bg_image`/`bg_icon` give image/icon handles |
 
 Every message above whose params include `layer?` defaults to the root
 layer when omitted, same convention `row?`/`col?` already use for "at the
@@ -67,7 +67,7 @@ about resizes should subscribe instead.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `write_text` | notification | `layer?, text, style, row?, col?` | — | ✅ implicit cursor positioning + fg/bg color only; explicit `row`/`col` and style attributes beyond fg/bg (bold, italic, underline, strikethrough, dim) are decided in decisions.md but not yet wired into `Layer.writeText` |
+| `write_text` | notification | `layer?, text, style, row?, col?, metadata_id?` | — | ✅ implicit cursor positioning + fg/bg color only; explicit `row`/`col` and style attributes beyond fg/bg (bold, italic, underline, strikethrough, dim) are decided in decisions.md but not yet wired into `Layer.writeText`. `metadata_id?` (see Metadata below) tags every cell the text touches with the same id — omitted (or any cell a later plain `write_text` overwrites) means untagged |
 | `insert_cells` | notification | `layer?, count` (cursor-implicit like `write_text`) | — | ✅ ECMA-48's ICH: shifts cells at and after the cursor right within its row, discarding any past the row's right edge; row-scoped only, see roadmap.md's open questions |
 | `delete_cells` | notification | `layer?, count` (cursor-implicit like `write_text`) | — | ✅ ECMA-48's DCH: removes cells at and after the cursor, shifting the row's remainder left and blanking the tail |
 | `clear` | notification | `layer?, row?, col?, rows?, cols?` (all default: `row`/`col` to 0, `rows`/`cols` to "the rest of the layer from here") | — | ✅ resets a region back to blank (empty grapheme, default style, no image background); an all-defaulted `clear()` wipes the whole layer |
@@ -80,8 +80,29 @@ about resizes should subscribe instead.
 | `get_image_info` | request | `handle` | natural pixel dimensions (from the PNG IHDR chunk, not a real decode) | ✅ |
 | `draw_image` | notification | `layer?, handle, row?, col?, row_span, col_span` | — | ✅ clips to the given span rather than stretching to fill it; see decisions.md. `row`/`col` default to the layer's cursor when omitted, same convention as `write_text` |
 | `get_cell_metrics` | request | — | `{cell_px_w, cell_px_h}` | ✅ lets a client compute `row_span`/`col_span` from an image's natural size without hardcoding the session's cell pixel metrics |
-| `draw_icon` | notification | `layer?, row?, col?, name, scale?, h_align?, v_align?, max_w?, max_h?` | — | ✅ resolves `name` against `Context.icons` (seeded at `glyphwire-host` startup from `core.default_icon_manifest`) and draws it anchored at exactly one cell. `scale`: `"fit"` (the default, aspect-preserved to exactly fill the cell), `"natural"` (the image's own pixel size, optionally shrunk — aspect preserved, never upscaled — to stay within `max_w`/`max_h` pixels if given; can still overflow past the anchor cell), or `"stretch"` (fills the cell exactly on both axes, aspect *not* preserved — what `draw_box`'s tiles use). `h_align`/`v_align` (`"start"`/`"center"`/`"end"`, default `"center"`) place the result within/around the cell for `"fit"`/`"natural"` (no-ops for `"stretch"`, which always fills exactly) — see decisions.md's Icon section, including why `"natural"` overflow is a rendering-only effect with no data-model footprint on the cells it visually spills into. Theming and a wire-exposed catalog listing are still open. `row`/`col` default to the cursor when omitted |
+| `draw_icon` | notification | `layer?, row?, col?, name, scale?, h_align?, v_align?, max_w?, max_h?, metadata_id?` | — | ✅ `metadata_id?` (see Metadata below) tags the anchor cell, same as `write_text`'s. resolves `name` against `Context.icons` (seeded at `glyphwire-host` startup from `core.default_icon_manifest`) and draws it anchored at exactly one cell. `scale`: `"fit"` (the default, aspect-preserved to exactly fill the cell), `"natural"` (the image's own pixel size, optionally shrunk — aspect preserved, never upscaled — to stay within `max_w`/`max_h` pixels if given; can still overflow past the anchor cell), or `"stretch"` (fills the cell exactly on both axes, aspect *not* preserved — what `draw_box`'s tiles use). `h_align`/`v_align` (`"start"`/`"center"`/`"end"`, default `"center"`) place the result within/around the cell for `"fit"`/`"natural"` (no-ops for `"stretch"`, which always fills exactly) — see decisions.md's Icon section, including why `"natural"` overflow is a rendering-only effect with no data-model footprint on the cells it visually spills into. Theming and a wire-exposed catalog listing are still open. `row`/`col` default to the cursor when omitted |
 | `draw_box` | notification | `layer?, row?, col?, rows, cols, style` | — | ✅ resolves `style`'s 9 corner/edge/fill pieces (`"{style}-tl"`, ... — same `icons` catalog as `draw_icon`, see `core.default_box_manifest`) and tiles them across the given rectangle, one tile per cell, each stretched (`draw_icon`'s `scale: "stretch"`) to fill its cell exactly so the border stays continuous regardless of the cell's aspect ratio. `row`/`col` default to the cursor when omitted |
+
+## Metadata
+
+An opaque, client-defined JSON string a cell can be tagged with — a
+handle-and-table resource like images, not embedded per-cell, so many
+cells can share one without copying it. See decisions.md's Metadata
+section for the full reasoning (why JSON and not fixed fields, why
+`destroy_metadata` exists but garbage collection doesn't yet, why a
+dangling id isn't an error).
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `create_metadata` | request | `json` | metadata handle | ✅ stores `json` verbatim — the server never parses it, only stores/returns it |
+| `destroy_metadata` | notification | `id` | — | ✅ frees `id`'s stored JSON; errors `UnknownMetadata` on an unknown id, same treatment `destroy_layer` gives an unknown layer handle. No reference counting — a cell still tagged with `id` afterward is left dangling, see `get_metadata` |
+| `get_metadata` | request | `layer?, row, col` | `{id, json}`, both nullable | ✅ resolves `(row, col)` to a cell and reports its `metadata_id` plus that id's stored JSON. `row`/`col` are required (unlike `draw_icon`/`draw_image`'s cursor-defaulted `row?`/`col?`) — this is a targeted lookup (e.g. resolving whatever cell a mouse click landed on), not a draw at "wherever the cursor is". `id` non-null with `json` null means a dangling tag (the id was `destroy_metadata`'d after the cell was tagged) — reported rather than treated as an error, so a caller can tell "untagged" apart from "tagged but the data's gone" |
+
+`write_text`/`draw_icon` (above) both take an optional `metadata_id` —
+tagging is a side effect of drawing, not its own separate call. A bad id
+(unknown or already-destroyed) there errors `UnknownMetadata` immediately,
+same "fail loud on a bad handle at the point of use" treatment
+`UnknownImage`/`UnknownIcon`/`UnknownLayer` already get elsewhere.
 
 ## Animation
 

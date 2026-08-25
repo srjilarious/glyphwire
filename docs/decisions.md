@@ -192,6 +192,9 @@ surface.
   handle (something that had to be loaded/registered first), not a
   hot-path optimization concern, so it doesn't conflict with keeping style
   itself inline.
+- New: an optional `metadata_id`, a sibling of `style.bg` rather than part
+  of that union — a cell can be tagged regardless of what its background
+  is. See the Metadata section below.
 
 **Image**
 - A loaded resource (via the binary side-channel framing decided earlier:
@@ -310,6 +313,74 @@ surface.
   the border eating a visible margin on all sides. This is what makes a
   box usable as a tight background/panel frame, not just a standalone
   decorative box.
+
+**Metadata**
+- Motivating use case: tagging a cell (or a whole run of them, e.g. every
+  character of a filename `write_text` wrote) with data a client can act
+  on later — a command to run when the cell is "selected" (`cd ...`,
+  eventually with a whitelist of commands the host auto-runs vs. pastes
+  into the shell for the user to confirm), or file info (path, filetype)
+  a context menu (view/edit/copy path/...) could offer. Both are future
+  work — this section is only the storage primitive they'd build on:
+  tagging a cell, and reading the tag back.
+- **Handle-and-table, like images/icons — not embedded per-cell.**
+  `create_metadata(json) -> id` stores the blob once; a cell only ever
+  holds the id (`Cell.metadata_id: ?MetadataHandle`), so a whole
+  `write_text` run (every cell it touches) or several unrelated cells can
+  share one without copying it. Same reasoning `ImageBg`/`IconBg` already
+  use for images/icons.
+- **Opaque JSON, not fixed server-known fields.** The server stores
+  `json` verbatim and never parses it — same treatment `ImageEntry.bytes`
+  gets for PNG bytes. The two motivating use cases above want different
+  shapes (a command string vs. path/filetype/...), and more are expected
+  later (a hover tooltip, other context-menu entries) — a fixed field set
+  would mean growing the server's own schema every time a client invents
+  a new kind of tag. Client-defined JSON means the server's job stays
+  "store an opaque blob," identical in spirit to how it already doesn't
+  interpret `write_text`'s content either. The convention (not enforced
+  by the server) is a JSON object so multiple command-line tools and a
+  future TUI can each embed whatever fields they care about, e.g.
+  `{"kind":"file","path":"/home/x/afile.txt","command":null}` or
+  `{"kind":"dir","path":"/home/x/bdir","command":"cd /home/x/bdir"}`.
+- **`destroy_metadata` exists now; garbage collection doesn't yet.** A
+  metadata-heavy client (e.g. `glyphwire-ls`, tagging every entry of
+  every listing) will create ids far more often than `load_image` ever
+  loads images, so unlike images (which have no delete path at all),
+  explicit cleanup matters from the start. But there's no reference
+  counting — destroying an id a cell still points at just leaves that
+  cell dangling (see below) — full garbage collection (freeing ids no
+  cell references any more, including on scrollback eviction and possibly
+  other scenarios) is deliberately deferred: it needs the GC to actually
+  exist first, and until then a client that destroys thoughtfully is
+  enough to keep this useful.
+- **A dangling id is a normal read result, not an error.** `get_metadata`
+  reports `{id, json: null}` rather than erroring when `id` is set on a
+  cell but has since been destroyed — expected, not exceptional, given
+  destruction is explicit and cell-level reference tracking doesn't
+  exist. This lets a caller (e.g. a future hover handler) tell "nothing
+  tagged here" (`id: null`) apart from "tagged, but the data's gone"
+  (`id` set, `json: null`).
+- **Validated at write time, though.** `write_text`/`draw_icon`'s
+  `metadata_id` param errors `UnknownMetadata` immediately if the id
+  doesn't exist (typo, or already destroyed) — same "fail loud on a bad
+  handle at the point of use" treatment `UnknownImage`/`UnknownIcon`/
+  `UnknownLayer` already get. This is a different moment than the
+  dangling-read case above: catching a bad id when a client is *about to
+  reference it* is a cheap, immediate sanity check; a cell that was
+  validly tagged and only became dangling *afterward* (because something
+  else destroyed that id later) is the expected steady-state the read
+  path has to handle gracefully regardless.
+- **`get_cells` reports `metadata_id` per cell; `get_metadata(layer?, row,
+  col)` resolves one to its content.** Same split `bg_image`/`bg_icon`
+  already have: a full-grid snapshot is cheap to extend with just the id
+  (a client doing a bulk render can tell which cells are tagged without
+  probing each one), while resolving the actual JSON is a separate,
+  targeted request — the pair a future mouse-click handler needs
+  (`get_metadata` to resolve whatever cell the click landed on, reporting
+  both the id and its content in one round trip). `row`/`col` are
+  required there, not cursor-defaulted like `draw_icon`/`draw_image`'s
+  `row?`/`col?` — a lookup always has a definite target (the clicked
+  cell), unlike a draw that can reasonably mean "wherever the cursor is".
 
 ### Events
 - No separate wire-level "event" mechanism — events are just notifications

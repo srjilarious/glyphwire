@@ -481,6 +481,144 @@ pub fn drawIconStretchScaleParsesTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqual(ctx.root.cell(2, 3).style.bg.icon.scale, .stretch);
 }
 
+pub fn createMetadataReturnsHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_metadata","params":{"json":"{\"path\":\"/tmp/a\"}"}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(result.response != null);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"handle\":1") != null);
+}
+
+pub fn writeTextTaggedThenGetMetadataRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const create_message =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_metadata","params":{"json":"{\"path\":\"/tmp/a\"}"}}
+    ;
+    const create_result = try d.handle(alloc, create_message);
+    defer if (create_result.response) |r| alloc.free(r);
+
+    const write_message =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"a","metadata_id":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, write_message)).response == null);
+
+    const get_message =
+        \\{"jsonrpc":"2.0","id":2,"method":"get_metadata","params":{"row":0,"col":0}}
+    ;
+    const get_result = try d.handle(alloc, get_message);
+    defer if (get_result.response) |r| alloc.free(r);
+    try testz.expectTrue(get_result.response != null);
+    try testz.expectTrue(std.mem.indexOf(u8, get_result.response.?, "\"id\":1") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, get_result.response.?, "\\\"path\\\":\\\"/tmp/a\\\"") != null);
+}
+
+pub fn getMetadataUntaggedCellReturnsNullTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":1,"method":"get_metadata","params":{"row":0,"col":0}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(result.response != null);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"id\":null") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"json\":null") != null);
+}
+
+pub fn writeTextUnknownMetadataIdErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"a","metadata_id":99}}
+    ;
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownMetadata);
+}
+
+pub fn drawIconUnknownMetadataIdErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("folder", 1);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":0,"col":0,"name":"folder","metadata_id":99}}
+    ;
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownMetadata);
+}
+
+pub fn destroyMetadataThenGetMetadataReportsDanglingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const id = try ctx.createMetadata("{}");
+    try ctx.root.writeTextTagged("a", glyphwire.default_style, id);
+
+    var msg_buf: [128]u8 = undefined;
+    const destroy_message = try std.fmt.bufPrint(&msg_buf, "{{\"jsonrpc\":\"2.0\",\"method\":\"destroy_metadata\",\"params\":{{\"id\":{d}}}}}", .{id});
+    try testz.expectTrue((try d.handle(alloc, destroy_message)).response == null);
+
+    const get_message =
+        \\{"jsonrpc":"2.0","id":2,"method":"get_metadata","params":{"row":0,"col":0}}
+    ;
+    const get_result = try d.handle(alloc, get_message);
+    defer if (get_result.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, get_result.response.?, "\"id\":1") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, get_result.response.?, "\"json\":null") != null);
+}
+
+pub fn destroyMetadataUnknownIdErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"destroy_metadata","params":{"id":99}}
+    ;
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownMetadata);
+}
+
+pub fn getCellsIncludesMetadataIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const id = try ctx.createMetadata("{}");
+    try ctx.root.writeTextTagged("a", glyphwire.default_style, id);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":1,"method":"get_cells","params":{}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"metadata_id\":1") != null);
+}
+
 pub fn drawIconInvalidScaleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);

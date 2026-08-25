@@ -77,6 +77,20 @@ pub const Client = struct {
         });
     }
 
+    /// Same as `writeText`, but every cell the text touches is also
+    /// tagged with `metadata_id` (`create_metadata`'s return value) -- see
+    /// `core.Cell.metadata_id`'s doc comment. A separate method rather
+    /// than a new required param on `writeText` since Zig has no default
+    /// parameter values.
+    pub fn writeTextTagged(self: *Client, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: core.MetadataHandle) !void {
+        try self.notify("write_text", .{
+            .text = text,
+            .fg = colorToJson(fg),
+            .bg = colorToJson(bg),
+            .metadata_id = metadata_id,
+        });
+    }
+
     /// `set_property(layer, "cursor", {row, col})` -- a notification.
     pub fn setCursor(self: *Client, row: usize, col: usize) !void {
         try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
@@ -248,16 +262,19 @@ pub const Client = struct {
         v_align: core.VAlign = .center,
         max_w: ?u32 = null,
         max_h: ?u32 = null,
+        /// See `core.Cell.metadata_id`'s doc comment.
+        metadata_id: ?core.MetadataHandle = null,
     };
 
     /// `draw_icon(row?, col?, name, scale?, h_align?, v_align?, max_w?,
-    /// max_h?)` -- like `drawIcon`, but lets the icon be drawn at its own
-    /// native pixel size (`opts.scale = .natural`, optionally capped by
-    /// `opts.max_w`/`opts.max_h`) or stretched to exactly fill the cell
-    /// (`.stretch`) instead of shrunk to fit the anchor cell, and aligned
-    /// relative to the anchor cell per `opts.h_align`/`opts.v_align`. A
-    /// separate method rather than extra params on `drawIcon` itself since
-    /// Zig has no default parameter values.
+    /// max_h?, metadata_id?)` -- like `drawIcon`, but lets the icon be
+    /// drawn at its own native pixel size (`opts.scale = .natural`,
+    /// optionally capped by `opts.max_w`/`opts.max_h`) or stretched to
+    /// exactly fill the cell (`.stretch`) instead of shrunk to fit the
+    /// anchor cell, aligned relative to the anchor cell per
+    /// `opts.h_align`/`opts.v_align`, and optionally tagged with
+    /// `opts.metadata_id`. A separate method rather than extra params on
+    /// `drawIcon` itself since Zig has no default parameter values.
     pub fn drawIconStyled(self: *Client, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
         try self.notify("draw_icon", .{
             .row = row,
@@ -268,6 +285,7 @@ pub const Client = struct {
             .v_align = @tagName(opts.v_align),
             .max_w = opts.max_w,
             .max_h = opts.max_h,
+            .metadata_id = opts.metadata_id,
         });
     }
 
@@ -351,6 +369,41 @@ pub const Client = struct {
         var parsed = try self.request(struct { cell_px_w: u32, cell_px_h: u32 }, "get_cell_metrics", .{});
         defer parsed.deinit();
         return .{ .w = parsed.value.result.cell_px_w, .h = parsed.value.result.cell_px_h };
+    }
+
+    /// `create_metadata(json)` -- a request. Stores `json` verbatim (the
+    /// server never parses it, only stores/returns it -- see decisions.md's
+    /// Metadata section) and returns a fresh handle that
+    /// `writeTextTagged`/`drawIconStyled`'s `metadata_id`, `getMetadata`,
+    /// or `destroyMetadata` can reference.
+    pub fn createMetadata(self: *Client, json: []const u8) !core.MetadataHandle {
+        var parsed = try self.request(struct { handle: core.MetadataHandle }, "create_metadata", .{ .json = json });
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    /// `destroy_metadata(id)` -- a notification. Frees `id`'s stored JSON;
+    /// any cell still tagged with it afterward is left with a dangling
+    /// reference -- `getMetadata` resolves that gracefully (reports the
+    /// id, `json: null`) rather than erroring. There's no reference
+    /// counting yet, so this is the caller's responsibility to get right.
+    pub fn destroyMetadata(self: *Client, id: core.MetadataHandle) !void {
+        try self.notify("destroy_metadata", .{ .id = id });
+    }
+
+    /// `get_metadata(layer?, row, col)` -- a request. Resolves `(row, col)`
+    /// to a cell (root layer when `layer` is omitted) and returns its
+    /// `metadata_id` plus that id's stored JSON -- the pair a mouse-click
+    /// handler needs to both resolve "what's tagged here" and know the id
+    /// for a later `destroyMetadata` or comparison. `json`, if non-null,
+    /// is a fresh copy the caller owns (free with this Client's
+    /// allocator) -- unlike `CellsSnapshot`, there's no borrowed-data
+    /// wrapper to keep alive for a single scalar lookup like this.
+    pub fn getMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize) !struct { id: ?core.MetadataHandle, json: ?[]u8 } {
+        var parsed = try self.request(struct { id: ?core.MetadataHandle, json: ?[]const u8 }, "get_metadata", .{ .layer = layer, .row = row, .col = col });
+        defer parsed.deinit();
+        const json = if (parsed.value.result.json) |j| try self.alloc.dupe(u8, j) else null;
+        return .{ .id = parsed.value.result.id, .json = json };
     }
 
     /// `get_input_state` -- a request returning which keys/mouse buttons
@@ -445,6 +498,7 @@ const CellJson = struct {
     bg: ?ColorJson,
     bg_image: ?ImageBgJson = null,
     bg_icon: ?IconBgJson = null,
+    metadata_id: ?core.MetadataHandle = null,
 };
 
 const CellsResultJson = struct {
@@ -463,13 +517,16 @@ const InputStateResultJson = struct {
 
 /// A cell in renderer-friendly form: `core.Color`/`core.ImageBg` fields
 /// instead of raw JSON. Exactly one of `bg`/`bg_image`/`bg_icon` is
-/// non-null, mirroring `core.Background`'s tagged union.
+/// non-null, mirroring `core.Background`'s tagged union. `metadata_id` is
+/// a sibling of those, not part of the union -- see `core.Cell`'s doc
+/// comment.
 pub const RenderCell = struct {
     grapheme: []const u8,
     fg: core.Color,
     bg: ?core.Color,
     bg_image: ?core.ImageBg = null,
     bg_icon: ?core.IconBg = null,
+    metadata_id: ?core.MetadataHandle = null,
 };
 
 /// Owns the parsed JSON backing a `getCells` response; `deinit` frees it.
@@ -509,6 +566,7 @@ pub const CellsSnapshot = struct {
                 .max_w = icon.max_w,
                 .max_h = icon.max_h,
             } else null,
+            .metadata_id = c.metadata_id,
         };
     }
 };

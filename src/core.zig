@@ -14,6 +14,26 @@ pub const Color = struct {
 /// Image section.
 pub const ImageHandle = u32;
 
+/// Server-generated reference to an opaque, client-defined metadata blob
+/// (`create_metadata`) -- a cell tags itself with one via
+/// `Cell.metadata_id`, e.g. `write_text`/`draw_icon`'s optional
+/// `metadata_id` param, rather than embedding the blob directly, so many
+/// cells can share one without copying it (a whole filename written by one
+/// `write_text` call, say, all pointing at the same id).
+pub const MetadataHandle = u32;
+
+pub const MetadataError = error{UnknownMetadata};
+
+/// An opaque, server-stored-but-not-interpreted blob -- `json` because the
+/// convention is a JSON string (so command-line tools and a future TUI can
+/// each embed whatever shape of data they want, e.g. `{"kind":"file",
+/// "path":"...","command":"cd ..."}`), but the server never parses it,
+/// only stores and returns it verbatim (same treatment `ImageEntry.bytes`
+/// gets for PNG bytes).
+pub const Metadata = struct {
+    json: []u8,
+};
+
 /// A cell's image-backed background: which loaded image, and the pixel
 /// offset into that image this cell should display. `draw_image` computes
 /// this per cell from the draw call's anchor -- see `Layer.drawImage` --
@@ -142,6 +162,13 @@ pub const Cell = struct {
     grapheme_bytes: [grapheme_inline_len]u8 = [_]u8{0} ** grapheme_inline_len,
     grapheme_len: u8 = 0,
     style: Style = default_style,
+    /// Sibling of `style.bg`, not part of it -- a cell can be tagged
+    /// regardless of whether its background is a color/image/icon. Set (or
+    /// cleared) as a whole by `write_text`/`draw_icon`'s optional
+    /// `metadata_id` param, the same way those calls already overwrite
+    /// `grapheme`/`style` outright rather than merging with whatever was
+    /// there before.
+    metadata_id: ?MetadataHandle = null,
 
     pub fn setGrapheme(self: *Cell, bytes: []const u8) void {
         std.debug.assert(bytes.len <= grapheme_inline_len);
@@ -311,15 +338,25 @@ pub const Layer = struct {
     /// decisions.md; swapping in the real thing later shouldn't change this
     /// shape.
     pub fn writeText(self: *Layer, text: []const u8, style: Style) !void {
+        return self.writeTextTagged(text, style, null);
+    }
+
+    /// Same as `writeText`, but every cell the text touches also gets
+    /// tagged with `metadata_id` (see `Cell.metadata_id`'s doc comment) --
+    /// a separate method rather than a new required param on `writeText`
+    /// itself since Zig has no default parameter values, matching this
+    /// codebase's existing convention for additive options (`drawIcon`'s
+    /// `IconDrawOpts`).
+    pub fn writeTextTagged(self: *Layer, text: []const u8, style: Style, metadata_id: ?MetadataHandle) !void {
         const view = try std.unicode.Utf8View.init(text);
         var it = view.iterator();
         while (it.nextCodepointSlice()) |cp_bytes| {
-            self.putAtCursor(cp_bytes, style);
+            self.putAtCursor(cp_bytes, style, metadata_id);
         }
         self.revision += 1;
     }
 
-    fn putAtCursor(self: *Layer, bytes: []const u8, style: Style) void {
+    fn putAtCursor(self: *Layer, bytes: []const u8, style: Style, metadata_id: ?MetadataHandle) void {
         if (self.cursor.col >= self.width) {
             self.cursor.col = 0;
             self.cursor.row += 1;
@@ -329,6 +366,7 @@ pub const Layer = struct {
         var c = self.cell(self.cursor.row, self.cursor.col);
         c.setGrapheme(bytes);
         c.style = style;
+        c.metadata_id = metadata_id;
         self.cursor.col += 1;
     }
 
@@ -430,6 +468,8 @@ pub const Layer = struct {
         v_align: VAlign = .center,
         max_w: ?u32 = null,
         max_h: ?u32 = null,
+        /// See `Cell.metadata_id`'s doc comment.
+        metadata_id: ?MetadataHandle = null,
     };
 
     /// Marks exactly one cell as backed by `handle`, resolved server-side
@@ -440,7 +480,8 @@ pub const Layer = struct {
     pub fn drawIcon(self: *Layer, handle: ImageHandle, row: usize, col: usize, opts: IconDrawOpts) void {
         const resolved_row = self.resolveRow(row);
         if (col >= self.width) return;
-        self.cell(resolved_row, col).style.bg = .{ .icon = .{
+        const c = self.cell(resolved_row, col);
+        c.style.bg = .{ .icon = .{
             .handle = handle,
             .scale = opts.scale,
             .h_align = opts.h_align,
@@ -448,6 +489,7 @@ pub const Layer = struct {
             .max_w = opts.max_w,
             .max_h = opts.max_h,
         } };
+        c.metadata_id = opts.metadata_id;
         self.revision += 1;
     }
 
@@ -737,6 +779,8 @@ pub const Context = struct {
     /// the icon files (`glyphwire-host`) -- empty until then, same as
     /// `images` before any `load_image` call.
     icons: std.StringHashMap(ImageHandle),
+    metadata: std.AutoHashMap(MetadataHandle, Metadata),
+    next_metadata_handle: MetadataHandle = 1,
     /// The session's fixed cell pixel metrics -- decisions.md's "one
     /// monospace font + size per session" -- needed to translate a
     /// `draw_image` span into per-cell pixel offsets (see
@@ -754,6 +798,7 @@ pub const Context = struct {
             .input = InputState.init(alloc),
             .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
             .icons = std.StringHashMap(ImageHandle).init(alloc),
+            .metadata = std.AutoHashMap(MetadataHandle, Metadata).init(alloc),
         };
     }
 
@@ -770,6 +815,44 @@ pub const Context = struct {
         var icon_it = self.icons.keyIterator();
         while (icon_it.next()) |k| self.alloc.free(k.*);
         self.icons.deinit();
+        var metadata_it = self.metadata.valueIterator();
+        while (metadata_it.next()) |m| self.alloc.free(m.json);
+        self.metadata.deinit();
+    }
+
+    /// `create_metadata`: stores `json` verbatim (duped -- the caller's
+    /// copy, e.g. a just-parsed request buffer, isn't guaranteed to
+    /// outlive this) and returns a fresh handle. No cleanup happens here
+    /// or anywhere else yet -- `destroy_metadata` is explicit-only for
+    /// now, and a real garbage collector (scrollback eviction and
+    /// possibly other scenarios freeing ids no cell references any more)
+    /// is future work, not needed for this to be useful today.
+    pub fn createMetadata(self: *Context, json: []const u8) !MetadataHandle {
+        const owned = try self.alloc.dupe(u8, json);
+        errdefer self.alloc.free(owned);
+
+        const handle = self.next_metadata_handle;
+        self.next_metadata_handle += 1;
+        try self.metadata.put(handle, .{ .json = owned });
+        return handle;
+    }
+
+    /// `destroy_metadata`: frees `id`'s stored JSON. Errors on an unknown
+    /// id, same as `destroyLayer` -- there's no reference counting, so a
+    /// cell can still be tagged with `id` afterward; `getMetadataAt`
+    /// resolves that gracefully (reports the id, `metadata: null`) rather
+    /// than erroring, since a dangling tag is an expected, not
+    /// exceptional, state once destruction is explicit.
+    pub fn destroyMetadata(self: *Context, id: MetadataHandle) MetadataError!void {
+        const removed = self.metadata.fetchRemove(id) orelse return MetadataError.UnknownMetadata;
+        self.alloc.free(removed.value.json);
+    }
+
+    /// `id`'s stored JSON, or null if it was never created or has since
+    /// been destroyed (see `destroyMetadata`'s doc comment on why that's
+    /// not an error here).
+    pub fn metadataJson(self: *const Context, id: MetadataHandle) ?[]const u8 {
+        return if (self.metadata.get(id)) |m| m.json else null;
     }
 
     /// `create_layer`: allocates a fresh layer parented to the root,

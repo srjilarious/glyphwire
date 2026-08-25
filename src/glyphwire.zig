@@ -14,6 +14,9 @@ pub const CellPos = client.CellPos;
 
 pub const Color = core.Color;
 pub const ImageHandle = core.ImageHandle;
+pub const MetadataHandle = core.MetadataHandle;
+pub const Metadata = core.Metadata;
+pub const MetadataError = core.MetadataError;
 pub const ImageBg = core.ImageBg;
 pub const IconBg = core.IconBg;
 pub const IconScale = core.IconScale;

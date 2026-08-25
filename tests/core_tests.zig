@@ -435,6 +435,42 @@ pub fn layerDrawIconAppliesMaxWidthAndHeightTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectEqual(icon.max_h, 60);
 }
 
+pub fn layerDrawIconTaggedSetsMetadataIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    layer.drawIcon(7, 1, 2, .{ .metadata_id = 42 });
+
+    try testz.expectEqual(layer.cell(1, 2).metadata_id.?, 42);
+    // A sibling of style.bg, not part of the icon variant itself.
+    try testz.expectEqual(layer.cell(1, 2).style.bg.icon.handle, 7);
+}
+
+pub fn layerWriteTextTaggedMarksEveryCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
+    defer layer.deinit();
+
+    try layer.writeTextTagged("abc", glyphwire.default_style, 7);
+
+    try testz.expectEqual(layer.cell(0, 0).metadata_id.?, 7);
+    try testz.expectEqual(layer.cell(0, 1).metadata_id.?, 7);
+    try testz.expectEqual(layer.cell(0, 2).metadata_id.?, 7);
+    // Untouched by this call: no tag.
+    try testz.expectTrue(layer.cell(0, 3).metadata_id == null);
+}
+
+pub fn layerWriteTextLeavesMetadataUntaggedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
+    defer layer.deinit();
+
+    try layer.writeText("abc", glyphwire.default_style);
+
+    try testz.expectTrue(layer.cell(0, 0).metadata_id == null);
+}
+
 /// The same regression as setCursorPastBottomScrollsLikeWritingPastItWouldTest,
 /// but for draw_icon's own anchor row directly (not via set_property) --
 /// glyphwire-ls calls drawIcon with an explicit row before it ever calls
@@ -494,6 +530,33 @@ pub fn contextRegisterIconTwiceUnderSameNameOverwritesTest(io: std.Io, alloc: st
     try ctx.registerIcon("icon", handle_b);
 
     try testz.expectEqual(ctx.iconHandle("icon").?, handle_b);
+}
+
+pub fn contextCreateMetadataThenLookUpByIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const id = try ctx.createMetadata("{\"path\":\"/tmp/afile.txt\"}");
+
+    try testz.expectEqualStr(ctx.metadataJson(id).?, "{\"path\":\"/tmp/afile.txt\"}");
+}
+
+pub fn contextDestroyMetadataFreesItAndErrorsOnUnknownIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const id = try ctx.createMetadata("{}");
+    try ctx.destroyMetadata(id);
+
+    // Dangling read: not an error, just gone -- see destroyMetadata's doc
+    // comment.
+    try testz.expectTrue(ctx.metadataJson(id) == null);
+
+    // Destroying again (or an id that was never created) is an error --
+    // same treatment destroyLayer gives an unknown layer handle.
+    try testz.expectError(ctx.destroyMetadata(id), glyphwire.MetadataError.UnknownMetadata);
 }
 
 fn testBoxTiles() glyphwire.Layer.BoxTiles {

@@ -22,6 +22,7 @@ pub const DispatchError = error{
     UnknownIcon,
     UnknownLayer,
     InvalidIconOption,
+    UnknownMetadata,
 };
 
 const Envelope = struct {
@@ -42,6 +43,8 @@ const WriteTextParams = struct {
     text: []const u8,
     fg: ?ColorJson = null,
     bg: ?ColorJson = null,
+    /// See `core.Cell.metadata_id`'s doc comment.
+    metadata_id: ?core.MetadataHandle = null,
 };
 
 /// Params shared by `insert_cells`/`delete_cells` -- also cursor-implicit
@@ -85,6 +88,32 @@ const DestroyLayerParams = struct {
     layer: core.LayerHandle,
 };
 
+const CreateMetadataParams = struct {
+    json: []const u8,
+};
+
+const CreateMetadataResult = struct { handle: core.MetadataHandle };
+
+const DestroyMetadataParams = struct {
+    id: core.MetadataHandle,
+};
+
+const GetMetadataParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: usize,
+    col: usize,
+};
+
+/// `id`/`json` are both null together (the cell isn't tagged) or `id` is
+/// set with `json` still possibly null (tagged, but the id has since been
+/// `destroy_metadata`'d -- see `Context.destroyMetadata`'s doc comment).
+/// Reporting `id` even when `json` can't be resolved is what lets a
+/// caller like a future mouse-click handler tell those two cases apart.
+const GetMetadataResult = struct {
+    id: ?core.MetadataHandle,
+    json: ?[]const u8,
+};
+
 const CellMetricsResult = struct { cell_px_w: u32, cell_px_h: u32 };
 
 const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
@@ -99,6 +128,10 @@ const CellJson = struct {
     bg: ?ColorJson,
     bg_image: ?ImageBgJson = null,
     bg_icon: ?IconBgJson = null,
+    /// Just the id, not the resolved JSON -- same "handle, not content"
+    /// treatment `bg_image`/`bg_icon` already give image/icon handles.
+    /// `get_metadata` resolves an id to its actual content.
+    metadata_id: ?core.MetadataHandle = null,
 };
 
 const CellsResult = struct {
@@ -165,6 +198,8 @@ const DrawIconParams = struct {
     /// Only consulted when `scale == "natural"` -- see `core.IconBg`.
     max_w: ?u32 = null,
     max_h: ?u32 = null,
+    /// See `core.Cell.metadata_id`'s doc comment.
+    metadata_id: ?core.MetadataHandle = null,
 };
 
 /// Parses `draw_icon`'s `scale`/`h_align`/`v_align` wire strings against
@@ -377,6 +412,15 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "get_cell_metrics")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleGetCellMetrics(alloc, id) };
+        } else if (std.mem.eql(u8, envelope.method, "create_metadata")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleCreateMetadata(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "destroy_metadata")) {
+            try self.handleDestroyMetadata(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "get_metadata")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetMetadata(alloc, id, envelope.params) };
         }
         return DispatchError.UnknownMethod;
     }
@@ -405,6 +449,20 @@ pub const Dispatcher = struct {
         return self.ctx.layerPtr(layer) orelse DispatchError.UnknownLayer;
     }
 
+    /// Validates an optional `metadata_id` param against `Context.metadata`
+    /// before it's stored on a cell (`write_text`/`draw_icon`), the same
+    /// "fail loud on a bad handle at the point of use" treatment
+    /// `UnknownImage`/`UnknownIcon`/`UnknownLayer` already get -- catches a
+    /// typo'd or already-`destroy_metadata`'d id immediately rather than
+    /// silently tagging a cell with a dangling reference. `null` (the
+    /// field omitted) passes through untouched.
+    fn resolveMetadata(self: *Dispatcher, id: ?core.MetadataHandle) !?core.MetadataHandle {
+        if (id) |m| {
+            if (self.ctx.metadataJson(m) == null) return DispatchError.UnknownMetadata;
+        }
+        return id;
+    }
+
     fn handleWriteText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
         const parsed = try std.json.parseFromValue(WriteTextParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
@@ -417,7 +475,8 @@ pub const Dispatcher = struct {
             .fg = if (p.fg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else core.default_style.fg,
             .bg = if (p.bg) |c| .{ .color = .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } } else core.default_style.bg,
         };
-        try layer.writeText(p.text, style);
+        const metadata_id = try self.resolveMetadata(p.metadata_id);
+        try layer.writeTextTagged(p.text, style, metadata_id);
     }
 
     fn handleInsertCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
@@ -530,6 +589,69 @@ pub const Dispatcher = struct {
         self.ctx.destroyLayer(parsed.value.layer) catch return DispatchError.UnknownLayer;
     }
 
+    /// `create_metadata`: stores `json` verbatim (see `Context.createMetadata`
+    /// -- the server never parses it, just stores/returns it) and returns a
+    /// fresh handle a later `write_text`/`draw_icon`/`destroy_metadata` can
+    /// reference.
+    fn handleCreateMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(CreateMetadataParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        const metadata_handle = try self.ctx.createMetadata(parsed.value.json);
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: CreateMetadataResult,
+        };
+        const response: Response = .{ .id = id, .result = .{ .handle = metadata_handle } };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
+    /// `destroy_metadata`: frees `id`'s stored JSON (see
+    /// `Context.destroyMetadata`'s doc comment on why a cell still tagged
+    /// with `id` afterward isn't this call's problem -- there's no
+    /// reference counting yet). Errors on an unknown id, same treatment
+    /// `destroy_layer` gives an unknown layer handle.
+    fn handleDestroyMetadata(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DestroyMetadataParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.destroyMetadata(parsed.value.id) catch return DispatchError.UnknownMetadata;
+    }
+
+    /// `get_metadata`: resolves `(row, col)` on `layer` (root when omitted)
+    /// to a cell and reports its `metadata_id` plus that id's stored JSON
+    /// -- see `GetMetadataResult`'s doc comment for how those two can
+    /// diverge (a dangling id). Unlike `draw_icon`/`draw_image`, `row`/
+    /// `col` are required rather than cursor-defaulted: this is a targeted
+    /// lookup (e.g. resolving whatever cell a mouse click landed on), not
+    /// a draw at "wherever the cursor currently is".
+    fn handleGetMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(GetMetadataParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+
+        const metadata_id = if (p.row < layer.height and p.col < layer.width)
+            layer.cell(p.row, p.col).metadata_id
+        else
+            null;
+        const json = if (metadata_id) |m| self.ctx.metadataJson(m) else null;
+
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: GetMetadataResult,
+        };
+        const response: Response = .{ .id = id, .result = .{ .id = metadata_id, .json = json } };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
     /// Returns a full row-major snapshot of the given layer's (default:
     /// root's) visible viewport, plus its current revision -- the
     /// read-back path decisions.md flagged as not yet exposed over the
@@ -573,6 +695,7 @@ pub const Dispatcher = struct {
                     .bg = bg,
                     .bg_image = bg_image,
                     .bg_icon = bg_icon,
+                    .metadata_id = cell.metadata_id,
                 };
             }
         }
@@ -767,12 +890,14 @@ pub const Dispatcher = struct {
 
         const icon_handle = self.ctx.iconHandle(p.name) orelse return DispatchError.UnknownIcon;
         const anchor = resolveAnchor(layer, p.row, p.col);
+        const metadata_id = try self.resolveMetadata(p.metadata_id);
         layer.drawIcon(icon_handle, anchor.row, anchor.col, .{
             .scale = try parseIconOption(core.IconScale, p.scale, .fit),
             .h_align = try parseIconOption(core.HAlign, p.h_align, .center),
             .v_align = try parseIconOption(core.VAlign, p.v_align, .center),
             .max_w = p.max_w,
             .max_h = p.max_h,
+            .metadata_id = metadata_id,
         });
     }
 
