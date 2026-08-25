@@ -157,7 +157,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     };
     defer client.deinit();
 
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{"key"}) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "mouse_button" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -178,6 +178,24 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     try prompt.showPrompt();
 
     while (true) {
+        // Drains any pending mouse click before (possibly) blocking below
+        // -- non-blocking, so this never delays key handling. A left
+        // click resolves the same way Enter-while-browsing does
+        // (`cdIfDirectoryAt`), regardless of whether anything's currently
+        // being typed: a click is a deliberate, targeted action, not
+        // something that should be gated on browse state the way
+        // keyboard Enter is. Worst-case latency for a click that arrives
+        // with no keyboard activity at all is bounded by the 500ms
+        // fallback timeout below, same as this loop's general
+        // responsiveness tradeoff -- there's no single wait that blocks
+        // on both key and mouse events at once.
+        if (listener.pollMouseButtonEvent()) |mev| {
+            defer alloc.free(mev.button);
+            if (mev.pressed and std.mem.eql(u8, mev.button, "left")) {
+                try prompt.cdIfDirectoryAt(mev.cell.row, mev.cell.col);
+            }
+        }
+
         // Blocks until a key event is queued rather than polling on a fixed
         // interval, so a keystroke gets picked up immediately instead of
         // waiting out however much of the poll interval was left; the
@@ -520,21 +538,30 @@ const Prompt = struct {
     }
 
     /// Enter while browsing: looks up whatever cell the browse cursor is
-    /// over (`get_metadata`) and, if it's tagged with `mimetype:
-    /// "directory"` (glyphwire-ls tags every entry it draws this way --
-    /// see `iconForEntry`'s caller in ls/main.zig), runs `cd <path>` as if
-    /// it had been typed -- `setLine` both echoes it and, via
-    /// `setCursorAt`, ends browsing before `submitLine` runs it. A no-op
-    /// for anything else (untagged, a file, empty space) per the "don't
-    /// guess" policy: nothing should happen on a browsed cell that isn't
-    /// unambiguously a directory to cd into. Doesn't handle a `path`
-    /// containing a space -- this shell doesn't support quoted arguments
-    /// anywhere yet (see `runCommand`'s doc comment), so neither does this.
+    /// over and, if it's a directory, cds into it -- see
+    /// `cdIfDirectoryAt`'s doc comment for the actual logic, shared with
+    /// `runPrompt`'s mouse-click handling.
     fn browseEnter(self: *Prompt) !void {
         const bp = self.browse_pos orelse return;
+        try self.cdIfDirectoryAt(bp.row, bp.col);
+    }
+
+    /// Looks up `(row, col)`'s metadata (`get_metadata`) and, if it's
+    /// tagged with `mimetype: "directory"` (glyphwire-ls tags every entry
+    /// it draws this way -- see `iconForEntry`'s caller in ls/main.zig),
+    /// runs `cd <path>` as if it had been typed -- `setLine` both echoes
+    /// it and, via `setCursorAt`, ends any in-progress browsing before
+    /// `submitLine` runs it. A no-op for anything else (untagged, a file,
+    /// empty space) per the "don't guess" policy: nothing should happen
+    /// on a cell that isn't unambiguously a directory to cd into. Doesn't
+    /// handle a `path` containing a space -- this shell doesn't support
+    /// quoted arguments anywhere yet (see `runCommand`'s doc comment), so
+    /// neither does this. Shared by `browseEnter` (Enter while browsing)
+    /// and `runPrompt`'s left-click handling.
+    fn cdIfDirectoryAt(self: *Prompt, row: usize, col: usize) !void {
         const alloc = self.client.alloc;
 
-        const lookup = self.client.getMetadata(null, bp.row, bp.col) catch return;
+        const lookup = self.client.getMetadata(null, row, col) catch return;
         const json = lookup.json orelse return;
         defer alloc.free(json);
 

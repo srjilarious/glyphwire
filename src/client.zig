@@ -644,6 +644,7 @@ pub const InputStateSnapshot = struct {
 /// enter", exactly once). `key` is owned; pop it via `pollKeyEvent` and
 /// free it with the same allocator passed to `InputListener.connect`.
 pub const KeyEvent = struct { key: []const u8, pressed: bool };
+pub const MouseButtonEvent = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos };
 
 pub const InputListener = struct {
     io: std.Io,
@@ -660,6 +661,13 @@ pub const InputListener = struct {
     /// `waitKeyEvent` wakes once to an empty queue, no worse than a spurious
     /// poll.
     key_sem: std.Io.Semaphore = .{},
+    /// Edge events (button-down and button-up, like `key_events`), not
+    /// just the level state `isMouseButtonDown`/`cursorCell` already
+    /// tracked -- a click handler (e.g. glyphwire-shell's auto-cd) needs
+    /// to know *when* a press happened, not just whether the button is
+    /// currently down.
+    mouse_events: std.ArrayList(MouseButtonEvent) = .empty,
+    mouse_sem: std.Io.Semaphore = .{},
 
     /// Connects, subscribes to `events`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
@@ -715,6 +723,8 @@ pub const InputListener = struct {
         self.state.deinit();
         for (self.key_events.items) |ev| self.alloc.free(ev.key);
         self.key_events.deinit(self.alloc);
+        for (self.mouse_events.items) |ev| self.alloc.free(ev.button);
+        self.mouse_events.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -751,6 +761,26 @@ pub const InputListener = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.state.isMouseButtonDown(button);
+    }
+
+    /// Pops the oldest queued mouse button event, if any -- see
+    /// `pollKeyEvent`, the same non-blocking-drain shape. Caller must free
+    /// `.button` with the same allocator passed to `connect`.
+    pub fn pollMouseButtonEvent(self: *InputListener) ?MouseButtonEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.mouse_events.items.len == 0) return null;
+        return self.mouse_events.orderedRemove(0);
+    }
+
+    /// Blocks until a mouse button event is queued or `timeout` elapses --
+    /// see `waitKeyEvent`.
+    pub fn waitMouseButtonEvent(self: *InputListener, timeout: std.Io.Timeout) !?MouseButtonEvent {
+        self.mouse_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
+            error.Timeout => return null,
+            error.Canceled => |e| return e,
+        };
+        return self.pollMouseButtonEvent();
     }
 
     pub fn cursorPixel(self: *InputListener) PxPos {
@@ -852,11 +882,16 @@ pub const InputListener = struct {
             });
             defer p.deinit();
 
+            const owned_button = try self.alloc.dupe(u8, p.value.button);
+            errdefer self.alloc.free(owned_button);
+
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
             self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
             _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
+            try self.mouse_events.append(self.alloc, .{ .button = owned_button, .pressed = p.value.pressed, .px = p.value.px, .cell = p.value.cell });
+            self.mouse_sem.post(self.io);
         }
     }
 };

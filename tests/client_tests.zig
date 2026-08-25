@@ -184,6 +184,63 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(listener.cursorPixel().y, 34);
 }
 
+/// `isMouseButtonDown`/`cursorCell` (above) are level state -- this proves
+/// the separate edge-event queue (`pollMouseButtonEvent`, mirroring
+/// `pollKeyEvent`) a click handler (glyphwire-shell's mouse-driven
+/// auto-cd) actually needs also gets populated, with both the press and
+/// the release queued as distinct events in order.
+pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{"mouse_button"});
+    defer listener.deinit();
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+    try reporter.reportMouseButton("left", true, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 });
+    try reporter.reportMouseButton("left", false, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 });
+
+    var press: ?glyphwire.client.MouseButtonEvent = null;
+    var attempts: usize = 0;
+    while (press == null and attempts < 100) : (attempts += 1) {
+        press = listener.pollMouseButtonEvent();
+        if (press == null) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    try testz.expectTrue(press != null);
+    defer alloc.free(press.?.button);
+    try testz.expectEqualStr(press.?.button, "left");
+    try testz.expectTrue(press.?.pressed);
+    try testz.expectEqual(press.?.cell.row, 2);
+    try testz.expectEqual(press.?.cell.col, 3);
+
+    var release: ?glyphwire.client.MouseButtonEvent = null;
+    attempts = 0;
+    while (release == null and attempts < 100) : (attempts += 1) {
+        release = listener.pollMouseButtonEvent();
+        if (release == null) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    try testz.expectTrue(release != null);
+    defer alloc.free(release.?.button);
+    try testz.expectTrue(!release.?.pressed);
+}
+
 /// A minimal byte stream `pngDimensions` accepts -- see core_tests.zig's
 /// identical fixture. Exercises `Client.loadImage` over a real socket, the
 /// one path that needs the binary side-channel's raw-byte framing (see
