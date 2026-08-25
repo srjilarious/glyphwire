@@ -234,17 +234,35 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         } else if (ctrl and std.mem.eql(u8, ev.key, "l")) {
             try prompt.clearScreen();
         } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
+            // Deliberately unaffected by browse mode, unlike ctrl+up/down
+            // above: ctrl+left/right always means "word-jump on the live
+            // line," which (via moveCursorTo -> setCursorAt) always snaps
+            // browsing back to the prompt first -- there's no "bigger
+            // browse step" meaning for these two.
             try prompt.moveCursorTo(prompt.wordLeft());
         } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
             try prompt.moveCursorTo(prompt.wordRight());
         } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
-            try prompt.historyUp();
+            // Ctrl+up means history recall at the prompt (unchanged), but
+            // a bigger browse-step (5 rows) while already browsing --
+            // there's no real "recall history while browsing" case to
+            // preserve, since browsing and editing the live line are
+            // mutually exclusive states.
+            if (prompt.browse_pos != null) {
+                try prompt.browseUp(5);
+            } else {
+                try prompt.historyUp();
+            }
         } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
-            try prompt.historyDown();
+            if (prompt.browse_pos != null) {
+                try prompt.browseDown(5);
+            } else {
+                try prompt.historyDown();
+            }
         } else if (std.mem.eql(u8, ev.key, "up")) {
-            try prompt.browseUp();
+            try prompt.browseUp(1);
         } else if (std.mem.eql(u8, ev.key, "down")) {
-            try prompt.browseDown();
+            try prompt.browseDown(1);
         } else if (std.mem.eql(u8, ev.key, "left")) {
             // Not explicitly asked for, but needed alongside ctrl+left/
             // right: without plain single-character movement too, the
@@ -483,36 +501,44 @@ const Prompt = struct {
         try self.setCursorAt(self.cursor);
     }
 
-    /// Plain Up: moves the cursor up into the scrollback above the prompt
-    /// instead of editing anything -- entering "browse" mode (`browse_pos`)
-    /// on the first press, starting directly above wherever the real
-    /// cursor currently sits so it reads as "look straight up from here"
-    /// rather than jumping to a fixed column. A no-op at row 0 (the very
-    /// first prompt): there's nothing above to browse.
-    fn browseUp(self: *Prompt) !void {
+    /// Plain Up (`count == 1`) moves the cursor up into the scrollback
+    /// above the prompt instead of editing anything -- entering "browse"
+    /// mode (`browse_pos`) on the first press, starting directly above
+    /// wherever the real cursor currently sits so it reads as "look
+    /// straight up from here" rather than jumping to a fixed column.
+    /// Ctrl+Up (`count == 5`, only while already browsing -- see the key
+    /// loop) is a bigger step for scanning a long listing faster, still
+    /// clamped at row 0 the same way. A no-op at row 0 (the very first
+    /// prompt) when not yet browsing: there's nothing above to browse.
+    fn browseUp(self: *Prompt, count: usize) !void {
         if (self.browse_pos) |*bp| {
-            if (bp.row == 0) return;
-            bp.row -= 1;
+            bp.row -|= count;
         } else {
             if (self.line_start_row == 0) return;
-            self.browse_pos = .{ .row = self.line_start_row - 1, .col = self.line_start_col + self.cursor };
+            self.browse_pos = .{ .row = (self.line_start_row - 1) -| (count - 1), .col = self.line_start_col + self.cursor };
         }
         try self.client.setCursor(self.browse_pos.?.row, self.browse_pos.?.col);
     }
 
-    /// Plain Down while browsing: moves the browse cursor down a row, or --
-    /// once the *next* row down would be the prompt's own row -- ends
-    /// browsing and lands back on the real prompt cursor instead (rather
-    /// than "browsing" a row that's actually the live line). A no-op when
-    /// not currently browsing; Down has no other meaning at the prompt
-    /// (ctrl+down is history recall, handled separately).
-    fn browseDown(self: *Prompt) !void {
+    /// Plain Down (`count == 1`) while browsing moves the browse cursor
+    /// down a row, or -- when already at the bottom of the browsable
+    /// range (one row above the prompt) -- ends browsing and lands back
+    /// on the real prompt cursor instead (rather than "browsing" a row
+    /// that's actually the live line). Ctrl+Down (`count == 5`, only
+    /// while already browsing) is a bigger step, but clamps at that same
+    /// bottom row rather than overshooting into a snap-back -- jumping 5
+    /// rows down from 2 rows above the prompt should land at the bottom
+    /// of the browsable range, not suddenly exit browsing because the
+    /// step overshot it. A no-op when not currently browsing; Down has no
+    /// other meaning at the prompt (ctrl+down is history recall, handled
+    /// separately).
+    fn browseDown(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
         if (bp.row + 1 >= self.line_start_row) {
             try self.setCursorAt(self.cursor);
             return;
         }
-        bp.row += 1;
+        bp.row = @min(bp.row + count, self.line_start_row - 1);
         self.browse_pos = bp;
         try self.client.setCursor(bp.row, bp.col);
     }
