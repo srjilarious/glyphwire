@@ -48,6 +48,23 @@ const GetPropertyParams = struct {
 };
 
 const CursorResult = struct { row: usize, col: usize };
+const RevisionResult = struct { revision: u64 };
+
+/// One flattened cell in a `get_cells` response, row-major starting at
+/// (0,0). `bg` is null for the (currently unbuilt) image-background case —
+/// see decisions.md's Cell section.
+const CellJson = struct {
+    g: []const u8,
+    fg: ColorJson,
+    bg: ?ColorJson,
+};
+
+const CellsResult = struct {
+    cols: usize,
+    rows: usize,
+    revision: u64,
+    cells: []const CellJson,
+};
 
 pub const Dispatcher = struct {
     ctx: *core.Context,
@@ -75,6 +92,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "get_property")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return try self.handleGetProperty(alloc, id, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "get_cells")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return try self.handleGetCells(alloc, id);
         }
         return DispatchError.UnknownMethod;
     }
@@ -116,15 +136,63 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const p = parsed.value;
 
-        if (!std.mem.eql(u8, p.property, "cursor")) return DispatchError.UnknownProperty;
+        if (std.mem.eql(u8, p.property, "cursor")) {
+            const cursor = self.ctx.root.getProperty(.cursor).cursor;
+            const Response = struct {
+                jsonrpc: []const u8 = "2.0",
+                id: std.json.Value,
+                result: CursorResult,
+            };
+            const response: Response = .{ .id = id, .result = .{ .row = cursor.row, .col = cursor.col } };
+            return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        } else if (std.mem.eql(u8, p.property, "revision")) {
+            const revision = self.ctx.root.getProperty(.revision).revision;
+            const Response = struct {
+                jsonrpc: []const u8 = "2.0",
+                id: std.json.Value,
+                result: RevisionResult,
+            };
+            const response: Response = .{ .id = id, .result = .{ .revision = revision } };
+            return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        }
+        return DispatchError.UnknownProperty;
+    }
 
-        const cursor = self.ctx.root.getProperty(.cursor).cursor;
+    /// Returns a full row-major snapshot of the root layer's visible
+    /// viewport, plus its current revision -- the read-back path
+    /// decisions.md flagged as not yet exposed over the wire. No params:
+    /// v1 has exactly one layer (the root), so there's nothing to select.
+    fn handleGetCells(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        const layer = &self.ctx.root;
+        const cells = try alloc.alloc(CellJson, layer.width * layer.height);
+        defer alloc.free(cells);
+
+        var row: usize = 0;
+        while (row < layer.height) : (row += 1) {
+            var col: usize = 0;
+            while (col < layer.width) : (col += 1) {
+                const cell = layer.cell(row, col);
+                const bg: ?ColorJson = switch (cell.style.bg) {
+                    .color => |bgc| .{ .r = bgc.r, .g = bgc.g, .b = bgc.b, .a = bgc.a },
+                    .image => null,
+                };
+                cells[row * layer.width + col] = .{
+                    .g = cell.grapheme(),
+                    .fg = .{ .r = cell.style.fg.r, .g = cell.style.fg.g, .b = cell.style.fg.b, .a = cell.style.fg.a },
+                    .bg = bg,
+                };
+            }
+        }
+
         const Response = struct {
             jsonrpc: []const u8 = "2.0",
             id: std.json.Value,
-            result: CursorResult,
+            result: CellsResult,
         };
-        const response: Response = .{ .id = id, .result = .{ .row = cursor.row, .col = cursor.col } };
+        const response: Response = .{
+            .id = id,
+            .result = .{ .cols = layer.width, .rows = layer.height, .revision = layer.revision, .cells = cells },
+        };
         return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }
 };

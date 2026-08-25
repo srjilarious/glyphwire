@@ -2,6 +2,11 @@ const core = @import("core.zig");
 pub const wire = @import("wire.zig");
 pub const dispatch = @import("dispatch.zig");
 pub const server = @import("server.zig");
+pub const client = @import("client.zig");
+
+pub const Client = client.Client;
+pub const RenderCell = client.RenderCell;
+pub const CellsSnapshot = client.CellsSnapshot;
 
 pub const Color = core.Color;
 pub const ImageHandle = core.ImageHandle;

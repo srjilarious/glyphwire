@@ -10,9 +10,7 @@ const glyphwire = @import("glyphwire");
 /// message to stdout and degrades ... never partially assuming the grid
 /// is present."
 pub fn main(init: std.process.Init) !void {
-    const socket_path = init.environ_map.get("GLYPHWIRE_SOCK") orelse return fallback(init.io);
-
-    sendHello(init.io, socket_path) catch return fallback(init.io);
+    sendHello(init) catch return fallback(init.io);
 }
 
 fn fallback(io: std.Io) !void {
@@ -22,15 +20,9 @@ fn fallback(io: std.Io) !void {
     try w.interface.flush();
 }
 
-fn sendHello(io: std.Io, socket_path: []const u8) !void {
-    const addr = try std.Io.net.UnixAddress.init(socket_path);
-    var stream = try addr.connect(io);
-    defer stream.close(io);
+fn sendHello(init: std.process.Init) !void {
+    var client = try glyphwire.Client.connectFromEnv(init.io, init.gpa, init.environ_map);
+    defer client.deinit();
 
-    var write_buf: [256]u8 = undefined;
-    var w = stream.writer(io, &write_buf);
-    try glyphwire.wire.writeFrame(&w.interface,
-        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hello"}}
-    );
-    try w.interface.flush();
+    try client.writeText("hello", null, null);
 }

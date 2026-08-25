@@ -60,7 +60,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     shell_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    shell_exe.root_module.addImport("pixzig", pixzig_mod);
     shell_exe.root_module.link_libc = true;
     b.installArtifact(shell_exe);
 
@@ -106,4 +105,23 @@ pub fn build(b: *std.Build) void {
 
     const demo_step = b.step("demo", "Run the glyphwire styled-text demo client");
     demo_step.dependOn(&run_demo.step);
+
+    const host_exe = b.addExecutable(.{
+        .name = "glyphwire-host",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("host/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    host_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    host_exe.root_module.addImport("pixzig", pixzig_mod);
+    b.installArtifact(host_exe);
+
+    const run_host = b.addRunArtifact(host_exe);
+    run_host.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_host.addArgs(args);
+
+    const host_step = b.step("host", "Run the glyphwire pixzig-windowed host (spawns glyphwire-shell)");
+    host_step.dependOn(&run_host.step);
 }

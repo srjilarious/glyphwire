@@ -61,10 +61,16 @@ pub const Cursor = struct {
 
 pub const PropertyName = enum {
     cursor,
+    /// Bumped once per `writeText` call; a cheap poll a renderer client can
+    /// use to decide whether it's worth fetching the (much larger) full
+    /// cell grid again this frame. Get-only: `Layer.setProperty` traps if
+    /// asked to set it.
+    revision,
 };
 
 pub const PropertyValue = union(PropertyName) {
     cursor: Cursor,
+    revision: u64,
 };
 
 pub const PropertyError = error{UnknownProperty};
@@ -93,6 +99,8 @@ pub const Layer = struct {
     /// never-written blank space. Saturates at `scrollback_rows`.
     history_len: usize = 0,
     cursor: Cursor = .{},
+    /// See `PropertyName.revision`.
+    revision: u64 = 0,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Layer {
         const total_rows = height + scrollback_rows;
@@ -160,6 +168,7 @@ pub const Layer = struct {
         while (it.nextCodepointSlice()) |cp_bytes| {
             self.putAtCursor(cp_bytes, style);
         }
+        self.revision += 1;
     }
 
     fn putAtCursor(self: *Layer, bytes: []const u8, style: Style) void {
@@ -181,12 +190,14 @@ pub const Layer = struct {
     pub fn getProperty(self: *const Layer, name: PropertyName) PropertyValue {
         return switch (name) {
             .cursor => .{ .cursor = self.cursor },
+            .revision => .{ .revision = self.revision },
         };
     }
 
     pub fn setProperty(self: *Layer, value: PropertyValue) void {
         switch (value) {
             .cursor => |c| self.cursor = c,
+            .revision => unreachable, // get-only; see PropertyName.revision
         }
     }
 };
