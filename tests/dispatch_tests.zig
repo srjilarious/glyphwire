@@ -415,6 +415,89 @@ pub fn drawImageOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqual(ctx.root.cell(4, 5).style.bg.image.handle, 1);
 }
 
+pub fn drawIconAppliesScaleAndAlignParamsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("folder", 1);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder","scale":"natural","h_align":"start","v_align":"end"}}
+    ;
+    const result = try d.handle(alloc, draw_message);
+    try testz.expectTrue(result.response == null);
+
+    const icon = ctx.root.cell(2, 3).style.bg.icon;
+    try testz.expectEqual(icon.handle, 1);
+    try testz.expectEqual(icon.scale, .natural);
+    try testz.expectEqual(icon.h_align, .start);
+    try testz.expectEqual(icon.v_align, .end);
+}
+
+pub fn drawIconAppliesMaxWidthAndHeightParamsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("folder", 1);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder","scale":"natural","max_w":40,"max_h":60}}
+    ;
+    const result = try d.handle(alloc, draw_message);
+    try testz.expectTrue(result.response == null);
+
+    const icon = ctx.root.cell(2, 3).style.bg.icon;
+    try testz.expectEqual(icon.max_w, 40);
+    try testz.expectEqual(icon.max_h, 60);
+}
+
+pub fn drawIconStretchScaleParsesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("folder", 1);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder","scale":"stretch"}}
+    ;
+    const result = try d.handle(alloc, draw_message);
+    try testz.expectTrue(result.response == null);
+
+    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.icon.scale, .stretch);
+}
+
+pub fn drawIconInvalidScaleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("folder", 1);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder","scale":"huge"}}
+    ;
+    try testz.expectError(d.handle(alloc, draw_message), dispatch.DispatchError.InvalidIconOption);
+}
+
 pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
@@ -432,7 +515,7 @@ pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !vo
     const result = try d.handle(alloc, draw_message);
     try testz.expectTrue(result.response == null);
 
-    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.icon, 1);
+    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.icon.handle, 1);
     // Confirm the neighboring cell wasn't touched -- draw_icon always
     // scopes to exactly one cell.
     switch (ctx.root.cell(2, 4).style.bg) {
@@ -472,7 +555,7 @@ pub fn drawIconKeepsLandingAcrossAScrollBoundaryTest(io: std.Io, alloc: std.mem.
         // Every entry lands on the *current* cursor row, same as
         // glyphwire-ls's writeGrid -- confirms the icon actually marked
         // whatever row write_text is about to use, not a stale one.
-        try testz.expectEqual(ctx.root.cell(row, 0).style.bg.icon, 1);
+        try testz.expectEqual(ctx.root.cell(row, 0).style.bg.icon.handle, 1);
 
         const set_msg = try std.fmt.bufPrint(&name_buf, "{{\"jsonrpc\":\"2.0\",\"method\":\"set_property\",\"params\":{{\"property\":\"cursor\",\"row\":{d},\"col\":0}}}}", .{row + 1});
         try testz.expectTrue((try d.handle(alloc, set_msg)).response == null);
@@ -508,7 +591,7 @@ pub fn drawIconOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator)
     ;
     try testz.expectTrue((try d.handle(alloc, draw_message)).response == null);
 
-    try testz.expectEqual(ctx.root.cell(2, 6).style.bg.icon, 1);
+    try testz.expectEqual(ctx.root.cell(2, 6).style.bg.icon.handle, 1);
 }
 
 /// Registers all 9 pieces of a `style`-prefixed box under distinct

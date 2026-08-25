@@ -18,16 +18,16 @@ pub const std_options = pixzig.system.std_options;
 const grid_cols = 120;
 const grid_rows = 50;
 const scrollback_rows = 1000;
+const font_path = "assets/JetBrainsMono-Regular.ttf";
 const font_size: f32 = 18.0;
-// Tuned for JetBrainsMono-Regular at font_size (unitsPerEm 1000, advance
-// 600, ascent+|descent| 1320): advance*font_size/1000 and
-// lineHeight*font_size/1000, rounded. Not measured at runtime because the
-// window (and thus the framebuffer the font gets packed for) has to be
-// created before a font atlas exists to measure -- see the comment on
-// AppRunner.init below.
-const cell_w = 10;
-const cell_h = 16;
 const cursor_width = 2;
+
+// Cell size in pixels, set from the loaded font's own metrics at startup
+// -- see `main`. `var` (not `const`) because `pixzig.renderer.measureFontFile`
+// has to run before the window exists (see the comment there), so these
+// can't be comptime/const like the rest of this block.
+var cell_w: i32 = undefined;
+var cell_h: i32 = undefined;
 
 // Typematic repeat timing for arrow keys -- how long a key must be held
 // before it starts repeating, and how often it repeats after that. Typical
@@ -86,6 +86,10 @@ pub const App = struct {
     /// address for its full lifetime, so `&managed.get().?.val` stays
     /// valid through the whole frame.
     image_textures: std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture),
+    /// Scratch buffer for `renderLayer`'s deferred-overflow pass -- see
+    /// `DeferredIcon`. Cleared (not freed) at the start of each
+    /// `renderLayer` call and reused across frames/layers.
+    deferred_icons: std.ArrayList(DeferredIcon) = .empty,
     /// Set by `reapChild` once glyphwire-shell's process actually exits
     /// (normally from its `exit` builtin, but this covers a crash or
     /// external kill just as well) -- the one thing that ends the host,
@@ -114,6 +118,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.deferred_icons.deinit(self.alloc);
         self.image_textures.deinit();
         self.alloc.destroy(self);
     }
@@ -184,24 +189,62 @@ pub const App = struct {
         );
     }
 
-    /// Draws an icon into its cell: the *whole* source image, scaled
+    /// Draws an icon anchored at `pos` (its cell's top-left corner):
+    /// `icon.scale == .fit` shows the *whole* source image, scaled
     /// uniformly (never stretched non-uniformly) to fit within the cell
-    /// and centered, per decisions.md's Icon section -- deliberately
-    /// different from `drawImageCell`'s clip-not-stretch rule, since an
-    /// icon is meant to always read as a complete little picture
-    /// regardless of exactly how its own pixel size relates to the cell's.
-    fn drawIconCell(self: *App, eng: *AppRunner.Engine, handle: glyphwire.ImageHandle, pos: pixzig.Vec2I) void {
-        const entry = self.server.ctx.images.get(handle) orelse return;
-        const tex = self.textureForImage(eng, handle) orelse return;
+    /// -- the original, still-default behavior, per decisions.md's Icon
+    /// section, deliberately different from `drawImageCell`'s clip-not-
+    /// stretch rule. `.natural` instead draws it at its own native pixel
+    /// size (shrunk, aspect preserved, if it exceeds `icon.max_w`/
+    /// `icon.max_h`), which may still be bigger than the cell -- see
+    /// `glyphwire.IconBg`'s doc comment on why that overflow is a pure
+    /// rendering effect with no data-model footprint on whatever cells it
+    /// visually spills into (this function draws into exactly the rect
+    /// it's given; the caller -- `renderLayer` -- decides whether that
+    /// means drawing immediately in grid order, for `.fit`/`.stretch`,
+    /// which never overflow, or deferring to a second pass so the
+    /// overflow paints over already-drawn neighbors, for `.natural`).
+    /// `.stretch` fills the cell exactly on both axes (see `IconScale`'s
+    /// doc comment) -- `icon.h_align`/`icon.v_align` are no-ops for it
+    /// (there's no leftover space to align within), but still apply to
+    /// `.fit`/`.natural` to place the (possibly smaller, possibly bigger)
+    /// result within the cell's bounds.
+    fn drawIconCell(self: *App, eng: *AppRunner.Engine, icon: glyphwire.IconBg, pos: pixzig.Vec2I) void {
+        const entry = self.server.ctx.images.get(icon.handle) orelse return;
+        const tex = self.textureForImage(eng, icon.handle) orelse return;
         if (entry.width == 0 or entry.height == 0) return;
 
+        const cell_w_f: f32 = @floatFromInt(cell_w);
+        const cell_h_f: f32 = @floatFromInt(cell_h);
         const img_w_f: f32 = @floatFromInt(entry.width);
         const img_h_f: f32 = @floatFromInt(entry.height);
-        const scale = @min(@as(f32, cell_w) / img_w_f, @as(f32, cell_h) / img_h_f);
-        const dest_w = img_w_f * scale;
-        const dest_h = img_h_f * scale;
-        const dest_x = @as(f32, @floatFromInt(pos.x)) + (@as(f32, cell_w) - dest_w) / 2;
-        const dest_y = @as(f32, @floatFromInt(pos.y)) + (@as(f32, cell_h) - dest_h) / 2;
+
+        const dest_w, const dest_h = switch (icon.scale) {
+            .fit => blk: {
+                const scale = @min(cell_w_f / img_w_f, cell_h_f / img_h_f);
+                break :blk .{ img_w_f * scale, img_h_f * scale };
+            },
+            .stretch => .{ cell_w_f, cell_h_f },
+            .natural => blk: {
+                var scale: f32 = 1.0;
+                if (icon.max_w) |mw| scale = @min(scale, @as(f32, @floatFromInt(mw)) / img_w_f);
+                if (icon.max_h) |mh| scale = @min(scale, @as(f32, @floatFromInt(mh)) / img_h_f);
+                break :blk .{ img_w_f * scale, img_h_f * scale };
+            },
+        };
+
+        const pos_x_f: f32 = @floatFromInt(pos.x);
+        const pos_y_f: f32 = @floatFromInt(pos.y);
+        const dest_x = pos_x_f + switch (icon.h_align) {
+            .start => 0,
+            .center => (cell_w_f - dest_w) / 2,
+            .end => cell_w_f - dest_w,
+        };
+        const dest_y = pos_y_f + switch (icon.v_align) {
+            .start => 0,
+            .center => (cell_h_f - dest_h) / 2,
+            .end => cell_h_f - dest_h,
+        };
 
         eng.renderer.draw(
             tex,
@@ -209,6 +252,13 @@ pub const App = struct {
             pixzig.RectF{ .l = 0, .t = 0, .r = 1, .b = 1 },
         );
     }
+
+    /// One `.natural`-scale icon whose draw is deferred past the rest of
+    /// `renderLayer`'s grid -- see `drawIconCell`'s doc comment.
+    const DeferredIcon = struct {
+        icon: glyphwire.IconBg,
+        pos: pixzig.Vec2I,
+    };
 
     pub fn update(self: *App, eng: *AppRunner.Engine, deltaTimeMs: f64) bool {
         if (self.shell_exited.load(.monotonic)) return false;
@@ -364,6 +414,8 @@ pub const App = struct {
     /// the root layer (origin `(0, 0)`) and every other layer (origin its
     /// own `pos`, rounded to the nearest pixel).
     fn renderLayer(self: *App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, draw_cursor: bool) void {
+        self.deferred_icons.clearRetainingCapacity();
+
         var row: usize = 0;
         while (row < layer.height) : (row += 1) {
             var col: usize = 0;
@@ -384,7 +436,18 @@ pub const App = struct {
                         }
                     },
                     .image => |img| self.drawImageCell(eng, img, pos),
-                    .icon => |handle| self.drawIconCell(eng, handle, pos),
+                    .icon => |icon| {
+                        // `.fit` never exceeds its cell, so it's safe (and
+                        // simplest) to draw immediately in grid order;
+                        // `.natural` can overflow into cells this loop
+                        // hasn't reached yet, so it's deferred past the
+                        // whole grid -- see `drawIconCell`'s doc comment.
+                        if (icon.scale == .natural) {
+                            self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos }) catch {};
+                        } else {
+                            self.drawIconCell(eng, icon, pos);
+                        }
+                    },
                 }
 
                 const g = c.grapheme();
@@ -394,9 +457,18 @@ pub const App = struct {
             }
         }
 
+        // `.natural`-scale icons deferred above: drawn now, after the
+        // whole grid, so an icon's overflow always paints over every
+        // cell's own background/glyph regardless of row/col draw order --
+        // see `drawIconCell`'s doc comment.
+        for (self.deferred_icons.items) |d| {
+            self.drawIconCell(eng, d.icon, d.pos);
+        }
+
         // Cursor caret: a solid bar at the start (left edge) of the
         // cursor's cell, drawn last so it sits on top of that cell's own
-        // background/glyph.
+        // background/glyph (and any deferred icon overflow just drawn
+        // above).
         if (draw_cursor and layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
             const cx = origin_x + @as(i32, @intCast(layer.cursor.col)) * cell_w;
             const cy = origin_y + @as(i32, @intCast(layer.cursor.row)) * cell_h;
@@ -498,14 +570,24 @@ pub fn main(init: std.process.Init) !void {
 
     const socket_path = try socketPath(alloc, init.environ_map);
 
+    // Measuring metrics needs only the font's own bytes (stb_truetype's
+    // InitFont/GetFontVMetrics/GetCodepointHMetrics), not a GL context, so
+    // this can run before the window exists -- unlike packing the font into
+    // an atlas texture, which does need one (see AppRunner.init below).
+    // That means the window can be sized correctly for whatever font is
+    // configured instead of a size tuned by hand for one specific font.
+    const metrics = try pixzig.renderer.measureFontFile(font_path, font_size, alloc);
+    cell_w = metrics.advance;
+    cell_h = metrics.line_height;
+
     var ctx = try glyphwire.Context.init(alloc, grid_cols, grid_rows, scrollback_rows);
     defer ctx.deinit();
     // Context.init defaults these to 12x12 already; set explicitly so they
-    // stay tied to this file's own cell_w/cell_h constants rather than
-    // silently relying on the default matching -- see Context's doc
-    // comment on cell_px_w/cell_px_h.
-    ctx.cell_px_w = cell_w;
-    ctx.cell_px_h = cell_h;
+    // stay tied to this file's own cell_w/cell_h (now measured from
+    // `font_path` above) rather than silently relying on the default
+    // matching -- see Context's doc comment on cell_px_w/cell_px_h.
+    ctx.cell_px_w = @intCast(cell_w);
+    ctx.cell_px_h = @intCast(cell_h);
     loadIconManifest(io, alloc, &ctx, &glyphwire.default_icon_manifest);
     loadIconManifest(io, alloc, &ctx, &glyphwire.default_box_manifest);
 
@@ -535,14 +617,12 @@ pub fn main(init: std.process.Init) !void {
         std.log.err("failed to spawn glyphwire-shell: {t}", .{err});
     }
 
-    // Font atlas packing needs a GL context, which needs the window created
-    // first -- so cell_w/cell_h above are tuned constants rather than a
-    // runtime measurement of the loaded font, avoiding a chicken-and-egg
-    // dependency between window size and font metrics.
+    // Font atlas packing (unlike the metrics measured above) does need a GL
+    // context, so it still happens here, after the window is created.
     const appRunner = try AppRunner.init("glyphwire", alloc, .{
         .windowSize = .{ .x = grid_cols * cell_w, .y = grid_rows * cell_h },
         .resizable = false,
-        .renderInitOpts = .{ .font = .{ .path = .{ .face = "assets/JetBrainsMono-Regular.ttf", .size = font_size } } },
+        .renderInitOpts = .{ .font = .{ .path = .{ .face = font_path, .size = font_size } } },
     });
     const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited);
 

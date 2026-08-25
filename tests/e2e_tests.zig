@@ -381,18 +381,19 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
 
     // If ~/ expanded correctly, glyphwire-ls lists the marker directory
     // and "marker.txt" lands on row 1 starting at ls/main.zig's
-    // icon_col_width (icon in col 0, name starting at col 2). If it
-    // didn't (a literal "~" directory that doesn't exist), the listing is
-    // empty and the *next prompt* shows up on row 1 instead -- so waiting
-    // specifically for "marker.txt"'s first letter here fails (times out)
-    // rather than false-passing on an empty listing.
-    try waitForCell(&reporter, 1, 2, "m");
+    // icon_col_width -- 4 at this ctx's default 12x12 cell metrics, see
+    // lsClientWritesEntriesOverRealSocketTest's comment for the formula.
+    // If it didn't (a literal "~" directory that doesn't exist), the
+    // listing is empty and the *next prompt* shows up on row 1 instead --
+    // so waiting specifically for "marker.txt"'s first letter here fails
+    // (times out) rather than false-passing on an empty listing.
+    try waitForCell(&reporter, 1, 4, "m");
 
     var snapshot = try reporter.getCells();
     defer snapshot.deinit();
     for ("marker.txt", 0..) |expected_ch, i| {
         var expected_buf: [1]u8 = .{expected_ch};
-        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, 2 + i).grapheme);
+        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, 4 + i).grapheme);
     }
 }
 
@@ -457,14 +458,19 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
 
     thread.join();
 
-    // Each row starts with a leading icon cell plus one blank cell of
-    // spacing (see ls/main.zig's icon_col_width) before the name -- text
-    // columns below are offset by that much from the name's own start.
-    try testz.expectEqualStr("a", ctx.root.cell(0, 2).grapheme());
-    try testz.expectEqualStr("b", ctx.root.cell(1, 2).grapheme());
-    try testz.expectEqualStr("/", ctx.root.cell(1, 6).grapheme()); // "bdir/"
-    try testz.expectEqualStr("c", ctx.root.cell(2, 2).grapheme());
-    try testz.expectEqualStr(">", ctx.root.cell(2, 9).grapheme()); // "clink -> afile.txt"
+    // Each row starts with a `.natural`-scaled icon, reserving enough
+    // columns for its native 32px width before the name starts -- see
+    // ls/main.zig's `writeGrid` doc comment for the `icon_col_width`
+    // formula. This ctx uses `Context.init`'s default 12x12 cell metrics
+    // (unset by anything host-specific here), giving
+    // `(32 + 12 - 1) / 12 + 1 == 4`. Entries also land two rows apart, not
+    // one (`row + 2`, room for the icon's vertical overflow), so
+    // "bdir"/"clink" are at rows 2/4, not 1/2.
+    try testz.expectEqualStr("a", ctx.root.cell(0, 4).grapheme());
+    try testz.expectEqualStr("b", ctx.root.cell(2, 4).grapheme());
+    try testz.expectEqualStr("/", ctx.root.cell(2, 8).grapheme()); // "bdir/"
+    try testz.expectEqualStr("c", ctx.root.cell(4, 4).grapheme());
+    try testz.expectEqualStr(">", ctx.root.cell(4, 11).grapheme()); // "clink -> afile.txt"
 }
 
 /// Polls get_cells (briefly) until `cell(row,col)`'s grapheme matches, so

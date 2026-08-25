@@ -239,6 +239,38 @@ pub const Client = struct {
         try self.notify("draw_icon", .{ .row = row, .col = col, .name = name });
     }
 
+    /// `scale`/`h_align`/`v_align`/`max_w`/`max_h` for `drawIconStyled` --
+    /// see `core.IconBg`'s doc comment. Defaults match `drawIcon`'s
+    /// behavior. `max_w`/`max_h` only apply when `scale == .natural`.
+    pub const DrawIconOpts = struct {
+        scale: core.IconScale = .fit,
+        h_align: core.HAlign = .center,
+        v_align: core.VAlign = .center,
+        max_w: ?u32 = null,
+        max_h: ?u32 = null,
+    };
+
+    /// `draw_icon(row?, col?, name, scale?, h_align?, v_align?, max_w?,
+    /// max_h?)` -- like `drawIcon`, but lets the icon be drawn at its own
+    /// native pixel size (`opts.scale = .natural`, optionally capped by
+    /// `opts.max_w`/`opts.max_h`) or stretched to exactly fill the cell
+    /// (`.stretch`) instead of shrunk to fit the anchor cell, and aligned
+    /// relative to the anchor cell per `opts.h_align`/`opts.v_align`. A
+    /// separate method rather than extra params on `drawIcon` itself since
+    /// Zig has no default parameter values.
+    pub fn drawIconStyled(self: *Client, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
+        try self.notify("draw_icon", .{
+            .row = row,
+            .col = col,
+            .name = name,
+            .scale = @tagName(opts.scale),
+            .h_align = @tagName(opts.h_align),
+            .v_align = @tagName(opts.v_align),
+            .max_w = opts.max_w,
+            .max_h = opts.max_h,
+        });
+    }
+
     /// `draw_box(row?, col?, rows, cols, style)` -- a notification. Draws a
     /// `rows x cols` box using `style`'s 9 registered corner/edge/fill
     /// tiles (`"{style}-tl"`, ... -- see `core.default_box_manifest` for
@@ -405,13 +437,14 @@ fn ResponseOf(comptime ResultT: type) type {
 const ColorJson = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
 
 const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
+const IconBgJson = struct { handle: core.ImageHandle, scale: []const u8, h_align: []const u8, v_align: []const u8, max_w: ?u32 = null, max_h: ?u32 = null };
 
 const CellJson = struct {
     g: []const u8,
     fg: ColorJson,
     bg: ?ColorJson,
     bg_image: ?ImageBgJson = null,
-    bg_icon: ?core.ImageHandle = null,
+    bg_icon: ?IconBgJson = null,
 };
 
 const CellsResultJson = struct {
@@ -436,7 +469,7 @@ pub const RenderCell = struct {
     fg: core.Color,
     bg: ?core.Color,
     bg_image: ?core.ImageBg = null,
-    bg_icon: ?core.ImageHandle = null,
+    bg_icon: ?core.IconBg = null,
 };
 
 /// Owns the parsed JSON backing a `getCells` response; `deinit` frees it.
@@ -468,7 +501,14 @@ pub const CellsSnapshot = struct {
             .fg = .{ .r = c.fg.r, .g = c.fg.g, .b = c.fg.b, .a = c.fg.a },
             .bg = if (c.bg) |bg| .{ .r = bg.r, .g = bg.g, .b = bg.b, .a = bg.a } else null,
             .bg_image = if (c.bg_image) |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y } else null,
-            .bg_icon = c.bg_icon,
+            .bg_icon = if (c.bg_icon) |icon| .{
+                .handle = icon.handle,
+                .scale = std.meta.stringToEnum(core.IconScale, icon.scale) orelse .fit,
+                .h_align = std.meta.stringToEnum(core.HAlign, icon.h_align) orelse .center,
+                .v_align = std.meta.stringToEnum(core.VAlign, icon.v_align) orelse .center,
+                .max_w = icon.max_w,
+                .max_h = icon.max_h,
+            } else null,
         };
     }
 };

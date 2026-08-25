@@ -387,13 +387,52 @@ pub fn layerDrawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    layer.drawIcon(7, 1, 2);
+    layer.drawIcon(7, 1, 2, .{});
 
-    try testz.expectEqual(layer.cell(1, 2).style.bg.icon, 7);
+    try testz.expectEqual(layer.cell(1, 2).style.bg.icon.handle, 7);
     switch (layer.cell(1, 3).style.bg) {
         .color => {},
         .image, .icon => return error.TestUnexpectedResult,
     }
+}
+
+pub fn layerDrawIconDefaultsToFitAndCenterTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    layer.drawIcon(7, 1, 2, .{});
+
+    const icon = layer.cell(1, 2).style.bg.icon;
+    try testz.expectEqual(icon.scale, .fit);
+    try testz.expectEqual(icon.h_align, .center);
+    try testz.expectEqual(icon.v_align, .center);
+}
+
+pub fn layerDrawIconAppliesScaleAndAlignOptsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    layer.drawIcon(7, 1, 2, .{ .scale = .natural, .h_align = .start, .v_align = .end });
+
+    const icon = layer.cell(1, 2).style.bg.icon;
+    try testz.expectEqual(icon.handle, 7);
+    try testz.expectEqual(icon.scale, .natural);
+    try testz.expectEqual(icon.h_align, .start);
+    try testz.expectEqual(icon.v_align, .end);
+}
+
+pub fn layerDrawIconAppliesMaxWidthAndHeightTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    layer.drawIcon(7, 1, 2, .{ .scale = .natural, .max_w = 40, .max_h = 60 });
+
+    const icon = layer.cell(1, 2).style.bg.icon;
+    try testz.expectEqual(icon.max_w, 40);
+    try testz.expectEqual(icon.max_h, 60);
 }
 
 /// The same regression as setCursorPastBottomScrollsLikeWritingPastItWouldTest,
@@ -407,14 +446,14 @@ pub fn layerDrawIconPastBottomScrollsTest(io: std.Io, alloc: std.mem.Allocator) 
     var layer = try glyphwire.Layer.init(alloc, 5, 3, 10);
     defer layer.deinit();
 
-    layer.drawIcon(1, 2, 0); // valid, the last row (height=3, rows 0..2)
-    layer.drawIcon(2, 3, 0); // one past the bottom -- scrolls once, lands on row 2
+    layer.drawIcon(1, 2, 0, .{}); // valid, the last row (height=3, rows 0..2)
+    layer.drawIcon(2, 3, 0, .{}); // one past the bottom -- scrolls once, lands on row 2
 
     try testz.expectEqual(layer.history_len, 1);
     // The scroll shifted the first icon up into row 1 rather than losing
     // it, and the second landed on the freshly-scrolled-to row 2.
-    try testz.expectEqual(layer.cell(1, 0).style.bg.icon, 1);
-    try testz.expectEqual(layer.cell(2, 0).style.bg.icon, 2);
+    try testz.expectEqual(layer.cell(1, 0).style.bg.icon.handle, 1);
+    try testz.expectEqual(layer.cell(2, 0).style.bg.icon.handle, 2);
 }
 
 pub fn layerDrawIconColPastEdgeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -423,7 +462,7 @@ pub fn layerDrawIconColPastEdgeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) 
     defer layer.deinit();
     const revision_before = layer.revision;
 
-    layer.drawIcon(1, 0, 10);
+    layer.drawIcon(1, 0, 10, .{});
 
     try testz.expectEqual(layer.revision, revision_before);
 }
@@ -483,15 +522,21 @@ pub fn layerDrawBoxPlacesEachPieceByRoleTest(io: std.Io, alloc: std.mem.Allocato
     // A 4x5 box anchored at (1, 1): rows 1..4, cols 1..5.
     layer.drawBox(testBoxTiles(), 1, 1, 4, 5);
 
-    try testz.expectEqual(layer.cell(1, 1).style.bg.icon, 1); // tl
-    try testz.expectEqual(layer.cell(1, 3).style.bg.icon, 2); // t (interior top col)
-    try testz.expectEqual(layer.cell(1, 5).style.bg.icon, 3); // tr
-    try testz.expectEqual(layer.cell(2, 1).style.bg.icon, 4); // l
-    try testz.expectEqual(layer.cell(2, 3).style.bg.icon, 5); // fill
-    try testz.expectEqual(layer.cell(2, 5).style.bg.icon, 6); // r
-    try testz.expectEqual(layer.cell(4, 1).style.bg.icon, 7); // bl
-    try testz.expectEqual(layer.cell(4, 3).style.bg.icon, 8); // b
-    try testz.expectEqual(layer.cell(4, 5).style.bg.icon, 9); // br
+    try testz.expectEqual(layer.cell(1, 1).style.bg.icon.handle, 1); // tl
+    try testz.expectEqual(layer.cell(1, 3).style.bg.icon.handle, 2); // t (interior top col)
+    try testz.expectEqual(layer.cell(1, 5).style.bg.icon.handle, 3); // tr
+    try testz.expectEqual(layer.cell(2, 1).style.bg.icon.handle, 4); // l
+    try testz.expectEqual(layer.cell(2, 3).style.bg.icon.handle, 5); // fill
+    try testz.expectEqual(layer.cell(2, 5).style.bg.icon.handle, 6); // r
+    try testz.expectEqual(layer.cell(4, 1).style.bg.icon.handle, 7); // bl
+    try testz.expectEqual(layer.cell(4, 3).style.bg.icon.handle, 8); // b
+    try testz.expectEqual(layer.cell(4, 5).style.bg.icon.handle, 9); // br
+
+    // Every tile stretches to fill its cell exactly, not the aspect-
+    // preserved `.fit` a bare `drawIcon` call defaults to -- see
+    // `IconScale`'s doc comment on why tiles need this to stay gap-free.
+    try testz.expectEqual(layer.cell(1, 1).style.bg.icon.scale, .stretch);
+    try testz.expectEqual(layer.cell(2, 3).style.bg.icon.scale, .stretch);
 
     // Outside the box entirely: untouched.
     switch (layer.cell(0, 0).style.bg) {
@@ -509,8 +554,8 @@ pub fn layerDrawBoxClipsToLayerBoundsTest(io: std.Io, alloc: std.mem.Allocator) 
     // shouldn't panic or write out of bounds.
     layer.drawBox(testBoxTiles(), 3, 3, 10, 10);
 
-    try testz.expectEqual(layer.cell(3, 3).style.bg.icon, 1); // tl, still placed
-    try testz.expectEqual(layer.cell(4, 4).style.bg.icon, 5); // clamped corner lands as fill, not br
+    try testz.expectEqual(layer.cell(3, 3).style.bg.icon.handle, 1); // tl, still placed
+    try testz.expectEqual(layer.cell(4, 4).style.bg.icon.handle, 5); // clamped corner lands as fill, not br
 }
 
 pub fn layerDrawBoxZeroSizeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -540,7 +585,7 @@ pub fn layerClearResetsRegionToBlankTest(io: std.Io, alloc: std.mem.Allocator) !
 
     try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
     // Untouched region keeps its content.
-    try testz.expectEqual(layer.cell(1, 1).style.bg.icon, 1);
+    try testz.expectEqual(layer.cell(1, 1).style.bg.icon.handle, 1);
 }
 
 pub fn layerClearWholeLayerViaFullSpanTest(io: std.Io, alloc: std.mem.Allocator) !void {

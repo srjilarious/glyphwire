@@ -21,6 +21,7 @@ pub const DispatchError = error{
     UnknownImage,
     UnknownIcon,
     UnknownLayer,
+    InvalidIconOption,
 };
 
 const Envelope = struct {
@@ -87,6 +88,7 @@ const DestroyLayerParams = struct {
 const CellMetricsResult = struct { cell_px_w: u32, cell_px_h: u32 };
 
 const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
+const IconBgJson = struct { handle: core.ImageHandle, scale: []const u8, h_align: []const u8, v_align: []const u8, max_w: ?u32 = null, max_h: ?u32 = null };
 
 /// One flattened cell in a `get_cells` response, row-major starting at
 /// (0,0). Exactly one of `bg`/`bg_image`/`bg_icon` is non-null, per
@@ -96,7 +98,7 @@ const CellJson = struct {
     fg: ColorJson,
     bg: ?ColorJson,
     bg_image: ?ImageBgJson = null,
-    bg_icon: ?core.ImageHandle = null,
+    bg_icon: ?IconBgJson = null,
 };
 
 const CellsResult = struct {
@@ -155,7 +157,22 @@ const DrawIconParams = struct {
     row: ?usize = null,
     col: ?usize = null,
     name: []const u8,
+    /// "fit" (default), "natural", or "stretch" -- see `core.IconScale`.
+    scale: ?[]const u8 = null,
+    /// "start"/"center" (default)/"end" -- see `core.HAlign`/`core.VAlign`.
+    h_align: ?[]const u8 = null,
+    v_align: ?[]const u8 = null,
+    /// Only consulted when `scale == "natural"` -- see `core.IconBg`.
+    max_w: ?u32 = null,
+    max_h: ?u32 = null,
 };
+
+/// Parses `draw_icon`'s `scale`/`h_align`/`v_align` wire strings against
+/// their `core` enums. `null` (the field omitted) means `default`.
+fn parseIconOption(comptime E: type, value: ?[]const u8, default: E) !E {
+    const s = value orelse return default;
+    return std.meta.stringToEnum(E, s) orelse DispatchError.InvalidIconOption;
+}
 
 const DrawBoxParams = struct {
     layer: ?core.LayerHandle = null,
@@ -539,8 +556,15 @@ pub const Dispatcher = struct {
                     .image => |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y },
                     .color, .icon => null,
                 };
-                const bg_icon: ?core.ImageHandle = switch (cell.style.bg) {
-                    .icon => |icon_handle| icon_handle,
+                const bg_icon: ?IconBgJson = switch (cell.style.bg) {
+                    .icon => |icon| .{
+                        .handle = icon.handle,
+                        .scale = @tagName(icon.scale),
+                        .h_align = @tagName(icon.h_align),
+                        .v_align = @tagName(icon.v_align),
+                        .max_w = icon.max_w,
+                        .max_h = icon.max_h,
+                    },
                     .color, .image => null,
                 };
                 cells[row * layer.width + col] = .{
@@ -743,7 +767,13 @@ pub const Dispatcher = struct {
 
         const icon_handle = self.ctx.iconHandle(p.name) orelse return DispatchError.UnknownIcon;
         const anchor = resolveAnchor(layer, p.row, p.col);
-        layer.drawIcon(icon_handle, anchor.row, anchor.col);
+        layer.drawIcon(icon_handle, anchor.row, anchor.col, .{
+            .scale = try parseIconOption(core.IconScale, p.scale, .fit),
+            .h_align = try parseIconOption(core.HAlign, p.h_align, .center),
+            .v_align = try parseIconOption(core.VAlign, p.v_align, .center),
+            .max_w = p.max_w,
+            .max_h = p.max_h,
+        });
     }
 
     /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog

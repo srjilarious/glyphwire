@@ -25,20 +25,64 @@ pub const ImageBg = struct {
     offset_y: u32,
 };
 
+/// How an icon's source image is sized against its anchor cell:
+/// - `fit` (the original, still-default behavior): shrunk/grown uniformly
+///   (aspect preserved) to fit exactly within the cell.
+/// - `natural`: drawn at its own native pixel size, optionally capped by
+///   `IconBg.max_w`/`max_h` (uniform, aspect preserved, only ever shrinking
+///   -- never upscaled past native size). Bigger than the cell overflows
+///   into neighboring cells' *pixels* -- a pure rendering overlay, see
+///   `IconBg`'s doc comment, so it never marks/claims those cells.
+/// - `stretch`: fills the cell exactly on both axes, aspect *not*
+///   preserved. Used by `Layer.drawBox`'s tiles rather than `fit`: a
+///   non-square cell (this project's terminal cells usually are, since
+///   glyph advance and line height rarely match) leaves `fit`-and-center
+///   padding on whichever axis isn't the limiting one, breaking a
+///   multi-tile border into visibly gapped segments along that axis --
+///   `stretch` guarantees the tile always touches every edge of its cell,
+///   so adjacent tiles' border lines stay continuous regardless of the
+///   cell's aspect ratio.
+pub const IconScale = enum { fit, natural, stretch };
+
+/// Where a (possibly `natural`-sized, overflowing) icon sits relative to
+/// its anchor cell along one axis. `center` (the default, matching the
+/// pre-overflow behavior) grows the overflow symmetrically both ways;
+/// `start`/`end` instead grow it entirely to one side, keeping the edge
+/// on the anchor's `start`/`end` side flush with the cell.
+pub const HAlign = enum { start, center, end };
+pub const VAlign = enum { start, center, end };
+
+/// A cell's icon-backed background: which loaded icon, how it's scaled,
+/// and where it's aligned relative to its anchor cell. A `natural`-scaled
+/// icon bigger than one cell overflows into neighboring cells' *pixels*
+/// only -- deliberately not their data: this stays a single-cell anchor
+/// in the grid (unlike `ImageBg`'s per-cell offset tracking), so
+/// `get_cells`/clear/scroll on a neighboring cell know nothing about the
+/// overflow, and the host's render pass is responsible for drawing it on
+/// top of whatever those neighboring cells render. Kept deliberately
+/// simple over `draw_image`'s span-marking approach because an icon is
+/// meant to always read as one complete picture, not clipped/composed
+/// per cell -- see decisions.md's Icon section.
+pub const IconBg = struct {
+    handle: ImageHandle,
+    scale: IconScale = .fit,
+    h_align: HAlign = .center,
+    v_align: VAlign = .center,
+    /// Only consulted when `scale == .natural` -- `fit`'s box is always
+    /// exactly the cell, and `stretch` always fills it exactly, so neither
+    /// has anything left to cap.
+    max_w: ?u32 = null,
+    max_h: ?u32 = null,
+};
+
 /// A cell's background: a flat color, a reference to a loaded image tile
 /// (`draw_image`/`draw_box`, clipped rather than stretched -- see
-/// `ImageBg`), or a reference to a loaded icon (`draw_icon`, scaled to
-/// fit the cell aspect-correct -- see decisions.md's Icon section). Icons
-/// get their own variant rather than reusing `ImageBg` with a zero
-/// offset: unlike a clipped image, an icon always shows the *whole*
-/// source image scaled into the *whole* cell, so there's no offset (or
-/// image dimensions, or cell metrics) to track at all -- resolving a name
-/// to a handle and drawing it is the entire job. Mutually exclusive per
-/// decisions.md.
+/// `ImageBg`), or a reference to a loaded icon (`draw_icon`, see
+/// `IconBg`). Mutually exclusive per decisions.md.
 pub const Background = union(enum) {
     color: Color,
     image: ImageBg,
-    icon: ImageHandle,
+    icon: IconBg,
 };
 
 pub const ImageInfo = struct {
@@ -378,28 +422,43 @@ pub const Layer = struct {
         self.cell(row, col).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y } };
     }
 
+    /// `scale`/`h_align`/`v_align` default to the original fit-and-center
+    /// behavior -- see `IconBg`'s doc comment.
+    pub const IconDrawOpts = struct {
+        scale: IconScale = .fit,
+        h_align: HAlign = .center,
+        v_align: VAlign = .center,
+        max_w: ?u32 = null,
+        max_h: ?u32 = null,
+    };
+
     /// Marks exactly one cell as backed by `handle`, resolved server-side
     /// by name against the icon catalog (`Context.iconHandle`) --
-    /// dispatch.zig's job, not this method's. Unlike `drawImage`, there's
-    /// no offset/dimension tracking at all: an icon always shows the
-    /// whole source image scaled (aspect-correct) into the whole cell, so
-    /// the renderer just needs the handle -- see `Background`'s doc
-    /// comment for why icons get their own variant instead of reusing
-    /// `ImageBg`.
-    pub fn drawIcon(self: *Layer, handle: ImageHandle, row: usize, col: usize) void {
+    /// dispatch.zig's job, not this method's. Still just one anchor cell
+    /// even when `opts.scale == .natural` overflows beyond it -- see
+    /// `IconBg`'s doc comment for why the overflow isn't tracked here.
+    pub fn drawIcon(self: *Layer, handle: ImageHandle, row: usize, col: usize, opts: IconDrawOpts) void {
         const resolved_row = self.resolveRow(row);
         if (col >= self.width) return;
-        self.cell(resolved_row, col).style.bg = .{ .icon = handle };
+        self.cell(resolved_row, col).style.bg = .{ .icon = .{
+            .handle = handle,
+            .scale = opts.scale,
+            .h_align = opts.h_align,
+            .v_align = opts.v_align,
+            .max_w = opts.max_w,
+            .max_h = opts.max_h,
+        } };
         self.revision += 1;
     }
 
     /// The 9 resolved tiles a `draw_box` call needs -- corners, edges, and
     /// a fill, per decisions.md's Icon section / roadmap.md's Phase 3.6.
     /// Just handles, same as `draw_icon`: each tile is drawn with the
-    /// `.icon` Background variant (whole source image, scaled aspect-
-    /// correct into the whole cell -- see `drawIcon`'s doc comment), not
-    /// `.image`'s clip-and-offset scheme, so there's no per-tile
-    /// width/height to carry here either. Resolving these (by
+    /// `.icon` Background variant (`scale: .stretch` -- see `IconScale`'s
+    /// doc comment for why tiles stretch to fill their cell exactly rather
+    /// than `drawIcon`'s default aspect-preserved `fit`), not `.image`'s
+    /// clip-and-offset scheme, so there's no per-tile width/height to
+    /// carry here either. Resolving these (by
     /// `"{style}-tl"` etc. against the icon catalog) is dispatch.zig's
     /// job; `Layer.drawBox` just consumes the result, so it's testable
     /// headlessly without going through name resolution.
@@ -418,8 +477,8 @@ pub const Layer = struct {
     /// Draws a `rows x cols` box anchored at `(row, col)` (clamped to the
     /// layer's own bounds) using `tiles`: each cell gets exactly one tile,
     /// chosen by whether it's on the box's top/bottom row and/or
-    /// left/right column, drawn the same scale-to-fit way `drawIcon` draws
-    /// a single cell. The bundled tile art is drawn with its border line
+    /// left/right column, stretched to fill that cell exactly (`IconScale`'s
+    /// `.stretch`). The bundled tile art is drawn with its border line
     /// hugging the tile's own outer edge rather than centered, so a
     /// caller can still put a character in a border cell (`write_text`
     /// only touches `Cell.grapheme`/`fg`, independent of `bg`) without it
@@ -473,7 +532,7 @@ pub const Layer = struct {
                 else
                     tiles.fill;
 
-                self.cell(r, c).style.bg = .{ .icon = tile };
+                self.cell(r, c).style.bg = .{ .icon = .{ .handle = tile, .scale = .stretch } };
             }
         }
         self.revision += 1;

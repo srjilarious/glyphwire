@@ -276,20 +276,37 @@ fn formatTimestamp(buf: []u8, sec: i64) []const u8 {
 
 // ── glyphwire output ──────────────────────────────────────────────────────
 
-/// Icon column width: one cell for the icon plus one blank cell of
-/// spacing before the name starts.
-const icon_col_width = 2;
+/// Native pixel size of the bundled Oxygen icon set (decisions.md's Icon
+/// section: "kept at Oxygen's native 32x32") -- needed up front to reserve
+/// enough columns for a `.natural`-scaled icon before the name starts.
+const icon_native_px = 32;
 
 /// Writes one entry per row starting at the layer's current cursor row,
 /// leaving the cursor at the start of the row after the last entry --
 /// glyphwire-shell resyncs from `get_property(cursor)` after this process
 /// exits (see `Prompt.submitLine`), so there's no fixed row count it needs
 /// to guess. Each row gets a leading icon (`iconForEntry`) before the name,
-/// drawn at the cursor (`drawIcon(null, null, ...)`) rather than naming
-/// its row/col explicitly -- the loop always enters each iteration with
-/// the cursor already sitting at that row's start (see the trailing
-/// `setCursor(row + 1, 0)` below), so there's nothing to add by repeating
-/// it. With `-l`, size and modified time follow the name.
+/// drawn at the cursor rather than naming its row/col explicitly -- the
+/// loop always enters each iteration with the cursor already sitting at
+/// that row's start (see the trailing `setCursor(row + 2, 0)` below), so
+/// there's nothing to add by repeating it. With `-l`, size and modified
+/// time follow the name.
+///
+/// The icon is drawn `.natural` sized (capped to `max_icon_h`, computed
+/// below) instead of the default `.fit`-to-one-cell scale: at this font's
+/// actual cell size a `.fit`-shrunk 32x32 icon comes out only a few pixels
+/// tall, unrecognizable. `h_align = .start`/`v_align = .center` then place
+/// it flush against the row's left edge, vertically centered -- growing
+/// only rightward and vertically (never leftward off-grid, since the icon
+/// sits in column 0). `icon_col_width` (computed from the icon's own
+/// native width, not a fixed constant, since a smaller/larger cell size
+/// changes how many columns that native width actually spans) reserves
+/// enough room before the name starts that it doesn't collide with the
+/// wider icon. Vertically, `max_icon_h` -- two cell-heights -- combined
+/// with centered alignment puts a quarter of the icon above the entry's
+/// own row, half on it, and a quarter below, which is why the loop below
+/// skips an *extra* row per entry: without it, one entry's icon would
+/// overlap the next entry's text.
 ///
 /// Reads the cursor back before *each* entry rather than tracking a local
 /// row counter across the whole loop: the grid can scroll mid-listing
@@ -303,11 +320,23 @@ const icon_col_width = 2;
 /// a local socket.
 fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: bool) !void {
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+
+    const metrics = try client.getCellMetrics();
+    const cell_w: usize = metrics.w;
+    const cell_h: usize = metrics.h;
+    const icon_col_width = (icon_native_px + cell_w - 1) / cell_w + 1;
+    const max_icon_h: u32 = @intCast(2 * cell_h);
+
     for (entries) |entry| {
         const cur = try client.getCursor();
         const row = cur.row;
 
-        try client.drawIcon(null, null, iconForEntry(entry));
+        try client.drawIconStyled(null, null, iconForEntry(entry), .{
+            .scale = .natural,
+            .h_align = .start,
+            .v_align = .center,
+            .max_h = max_icon_h,
+        });
         try client.setCursor(row, icon_col_width);
         switch (entry.kind) {
             .directory => {
@@ -336,8 +365,11 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: b
         // set_property(cursor) scrolls-and-clamps a row at or past the
         // bottom (Layer.resolveRow), so it's always safe to just name the
         // next row directly here -- the *next* iteration's getCursor()
-        // reads back wherever that actually landed.
-        try client.setCursor(row + 1, 0);
+        // reads back wherever that actually landed. +2, not +1: leaves a
+        // blank row so this entry's icon (up to `max_icon_h` tall, see
+        // `writeGrid`'s doc comment) doesn't collide with the next entry's
+        // text.
+        try client.setCursor(row + 2, 0);
     }
 }
 

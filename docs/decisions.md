@@ -222,20 +222,50 @@ surface.
 **Icon**
 - A named reference to an image, resolved server-side rather than by raw
   handle — `draw_icon(row, col, name)` looks the name up against
-  `Context.icons` and draws it into exactly one cell (unlike `draw_image`,
-  no span — an icon is scoped to a single cell for now).
-- **Scaled, not clipped — deliberately different from `draw_image`/
-  `draw_box`.** An icon always shows the *whole* source image, scaled
-  uniformly (never stretched non-uniformly) to fit the cell and centered
-  — `Background.icon` is its own tagged-union variant (just an
-  `ImageHandle`, no offset or per-cell pixel bookkeeping at all), not
-  `ImageBg` with a zero offset. The reasoning cuts the other way from
-  `draw_image`'s clip-not-stretch rule: an icon is a small complete
-  picture meant to read correctly regardless of exactly how its native
-  pixel size relates to the cell's, where a clip would just as often lop
-  off part of it. `draw_image`/`draw_box` keep clipping — those are
-  either arbitrary content (clipping is the more honest default) or tiles
-  already built to fit the cell exactly.
+  `Context.icons` and draws it anchored at exactly one cell (unlike
+  `draw_image`, no span — an icon is scoped to a single anchor cell).
+- **Scaled, not clipped by default — deliberately different from
+  `draw_image`/`draw_box`.** An icon's default `scale: "fit"` shows the
+  *whole* source image, scaled uniformly (never stretched non-uniformly)
+  to fit the cell. The reasoning cuts the other way from `draw_image`'s
+  clip-not-stretch rule: an icon is a small complete picture meant to
+  read correctly regardless of exactly how its native pixel size relates
+  to the cell's, where a clip would just as often lop off part of it.
+  `draw_image`/`draw_box` keep clipping — those are either arbitrary
+  content (clipping is the more honest default) or tiles already built to
+  fit the cell exactly.
+- **`scale: "natural"` + `h_align`/`v_align` — overflow, deliberately a
+  pure rendering effect.** `"natural"` draws the icon at its own pixel
+  size instead of shrinking it, which can be bigger than the cell;
+  `h_align`/`v_align` (`"start"`/`"center"`/`"end"`, default `"center"`)
+  place it within/around the anchor cell, so e.g. `h_align: "end"` grows
+  the overflow entirely leftward from a right-flush edge. This is
+  deliberately *not* `draw_image`'s span-marking approach: overflow only
+  ever touches one cell's data (`Background.icon`, still just
+  `{handle, scale, h_align, v_align, max_w, max_h}`, no offset or per-cell
+  dimension bookkeeping — same reasoning as the plain-handle days), so
+  `get_cells`/clear/scroll on a neighboring cell know nothing about it.
+  The host's render pass draws it in a deferred second pass after the
+  whole grid so it always paints over whatever a covered neighbor cell
+  drew, regardless of row/col order — see `host/main.zig`'s
+  `DeferredIcon`. The tradeoff: clearing/redrawing a neighbor cell doesn't
+  erase the overflow painted over it; only clearing/moving the icon's own
+  anchor cell does. Chosen over claiming covered cells specifically to
+  keep `draw_icon` simple — reopening per-cell offset tracking for icons
+  was the exact complexity the original plain-handle design avoided.
+- **`max_w`/`max_h` cap `"natural"`'s size.** Uniform, aspect-preserved,
+  only ever shrinking (never upscaling past native size) — e.g.
+  `max_h: 36` on a 32x32 icon is a no-op (already smaller), but on a
+  64x64 icon shrinks it to 36x36. Ignored for `"fit"` (its box is always
+  exactly the cell, nothing left to cap) and `"stretch"` (always fills
+  the cell exactly). Added for `glyphwire-ls`'s per-entry icons
+  (`ls/main.zig`'s `writeGrid`): `"fit"` at this project's actual cell
+  sizes (glyph advance and line height, rarely square) shrinks a 32x32
+  icon down to a handful of pixels, unrecognizable — `"natural"` capped
+  to roughly two cell-heights instead reads as an actual picture, with
+  the overflow effect (a quarter above the entry's row, half on it, a
+  quarter below, via `v_align: "center"`) as a deliberate side effect
+  rather than an accident.
 - **v1 built:** a single flat, global catalog (`Context.registerIcon`/
   `iconHandle`), seeded at `glyphwire-host` startup from
   `core.default_icon_manifest` — 12 colorful icons from the KDE Oxygen
@@ -252,15 +282,27 @@ surface.
 
 **Box**
 - `draw_box` shares `Background.icon` with `draw_icon` (each of the 9
-  tiles is just an `ImageHandle`, stamped whole into its cell), not
-  `draw_image`'s clip-based `ImageBg` — **superseded from the original
-  clip-based tile design.** The bundled tile set was originally 12x12 and
-  clip-based to match the cell size at the time; once the host's cell size
-  moved (`host/main.zig`'s `cell_w`/`cell_h`), the tiles started clipping
+  tiles is an `IconBg`, stamped into its cell), not `draw_image`'s
+  clip-based `ImageBg` — **superseded from the original clip-based tile
+  design.** The bundled tile set was originally 12x12 and clip-based to
+  match the cell size at the time; once the host's cell size moved
+  (`host/main.zig`'s `cell_w`/`cell_h`), the tiles started clipping
   against the edge rather than filling the cell exactly. Scale-to-fit
   (regenerated at 32x32, same as the icon set) makes the tile set
   independent of whatever cell size a given host happens to run at, the
   same reasoning that already applies to icons.
+- **Superseded again: tiles use `scale: "stretch"`, not `"fit"`.**
+  `"fit"` (aspect-preserved) only fills whichever axis is the tighter
+  constraint; on a non-square cell (this project's actual cells almost
+  always are, since a monospace font's glyph advance and line height
+  rarely match) it leaves `"center"`-aligned padding on the other axis.
+  For a single icon that's a minor cosmetic gap; for a `draw_box` border,
+  stacking tiles whose art only fills the vertical-center third (say) of
+  each cell breaks a continuous line into dashed segments. `"stretch"`
+  fills the cell exactly on both axes (aspect not preserved), so a tile's
+  border line always touches every edge of its own cell and the whole
+  border reads as one continuous line/box regardless of the cell's aspect
+  ratio.
 - **Edge-hugging border, not centered.** A box's border lines are drawn
   against the outer boundary of each tile's cell rather than centered
   within it, so a bordered region reads as "a border around this area"
