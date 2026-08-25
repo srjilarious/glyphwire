@@ -185,6 +185,18 @@ const DrawImageParams = struct {
     col_span: usize,
 };
 
+const TagMetadataParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: usize,
+    col: usize,
+    /// Unlike `write_text`/`draw_icon`'s optional `metadata_id`, required
+    /// here -- there'd be no point to a `tag_metadata` call that tags
+    /// with nothing; a client wanting to *clear* a cell's tag can send
+    /// `write_text`/`draw_icon` with `metadata_id` omitted instead, same
+    /// as it already would to change what's drawn there anyway.
+    metadata_id: core.MetadataHandle,
+};
+
 const DrawIconParams = struct {
     layer: ?core.LayerHandle = null,
     row: ?usize = null,
@@ -402,6 +414,9 @@ pub const Dispatcher = struct {
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "draw_icon")) {
             try self.handleDrawIcon(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "tag_metadata")) {
+            try self.handleTagMetadata(alloc, envelope.params);
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "draw_box")) {
             try self.handleDrawBox(alloc, envelope.params);
@@ -899,6 +914,21 @@ pub const Dispatcher = struct {
             .max_h = p.max_h,
             .metadata_id = metadata_id,
         });
+    }
+
+    /// `tag_metadata`: sets exactly one cell's `metadata_id`, nothing else
+    /// -- see `Layer.tagMetadata`'s doc comment. `metadata_id` is
+    /// validated the same way `write_text`/`draw_icon`'s is
+    /// (`resolveMetadata`), erroring `UnknownMetadata` on a bad handle.
+    fn handleTagMetadata(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(TagMetadataParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const metadata_id = try self.resolveMetadata(p.metadata_id);
+        layer.tagMetadata(p.row, p.col, metadata_id);
     }
 
     /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog

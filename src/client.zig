@@ -289,6 +289,18 @@ pub const Client = struct {
         });
     }
 
+    /// `tag_metadata(layer?, row, col, metadata_id)` -- a notification.
+    /// Sets exactly one cell's metadata tag without touching its
+    /// background/text -- unlike `writeTextTagged`/`drawIconStyled`,
+    /// which tag as a side effect of drawing something. For a client that
+    /// needs a cell tagged without changing what's drawn there, e.g.
+    /// tagging the extra cells a `.natural`-scaled icon visually
+    /// overflows into (see `core.IconScale`'s doc comment on why that
+    /// overflow has no automatic data-model footprint on its own).
+    pub fn tagMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle) !void {
+        try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id });
+    }
+
     /// `draw_box(row?, col?, rows, cols, style)` -- a notification. Draws a
     /// `rows x cols` box using `style`'s 9 registered corner/edge/fill
     /// tiles (`"{style}-tl"`, ... -- see `core.default_box_manifest` for

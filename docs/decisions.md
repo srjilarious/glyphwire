@@ -381,6 +381,21 @@ surface.
   required there, not cursor-defaulted like `draw_icon`/`draw_image`'s
   `row?`/`col?` — a lookup always has a definite target (the clicked
   cell), unlike a draw that can reasonably mean "wherever the cursor is".
+- **`tag_metadata(layer?, row, col, metadata_id)` — a tag with no draw.**
+  `write_text`/`draw_icon`'s `metadata_id` param only ever tags as a side
+  effect of drawing something; there was no way to tag a cell without
+  also changing its background/grapheme. Needed once `glyphwire-ls`
+  started drawing `.natural`-scaled icons that overflow past their anchor
+  cell (see the Icon section's `max_w`/`max_h`): the overflow is
+  deliberately a pure rendering effect with no automatic data-model
+  footprint on the cells it visually spills into (draw_icon still only
+  ever tags its one anchor cell), so a client that wants those cells
+  tagged too — so browsing/hovering resolves correctly anywhere the icon
+  actually renders, not just its leftmost column — has to say so
+  explicitly, cell by cell. `tag_metadata` is that explicit opt-in: it
+  touches only `Cell.metadata_id`, nothing else, and takes a required (not
+  optional) `metadata_id` — there'd be no point calling it to tag with
+  nothing.
 
 ### Events
 - No separate wire-level "event" mechanism — events are just notifications

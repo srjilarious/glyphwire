@@ -168,6 +168,13 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     // every previous exit was a hard kill, so this never ran and the leak
     // never surfaced.
     defer prompt.deinit();
+
+    {
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+        prompt.grid_cols = snapshot.cols();
+    }
+
     try prompt.showPrompt();
 
     while (true) {
@@ -184,8 +191,18 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         const super = listener.isKeyDown("left_super") or listener.isKeyDown("right_super");
 
         if (std.mem.eql(u8, ev.key, "enter")) {
-            try prompt.submitLine();
-            if (prompt.should_exit) return; // "exit" was typed -- see submitLine
+            if (prompt.browse_pos != null) {
+                try prompt.browseEnter();
+            } else {
+                try prompt.submitLine();
+                if (prompt.should_exit) return; // "exit" was typed -- see submitLine
+            }
+        } else if (std.mem.eql(u8, ev.key, "escape")) {
+            // The explicit "never mind, back to typing" key -- everything
+            // else that snaps browsing back to the prompt (below) does so
+            // as a side effect of also doing something; this does nothing
+            // else.
+            try prompt.setCursorAt(prompt.cursor);
         } else if (std.mem.eql(u8, ev.key, "backspace")) {
             try prompt.deleteBackward();
         } else if (std.mem.eql(u8, ev.key, "delete")) {
@@ -206,6 +223,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             try prompt.historyUp();
         } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
             try prompt.historyDown();
+        } else if (std.mem.eql(u8, ev.key, "up")) {
+            try prompt.browseUp();
+        } else if (std.mem.eql(u8, ev.key, "down")) {
+            try prompt.browseDown();
         } else if (std.mem.eql(u8, ev.key, "left")) {
             // Not explicitly asked for, but needed alongside ctrl+left/
             // right: without plain single-character movement too, the
@@ -213,9 +234,20 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // sits) could wander away from `prompt.cursor` -- the offset
             // typing/backspace actually act on -- which would look
             // confusing (caret in one place, edits landing in another).
-            try prompt.moveCursorTo(prompt.cursor -| 1);
+            // While browsing (`browse_pos != null`), Left instead moves
+            // within whatever row is currently being browsed -- see
+            // `browseLeft`.
+            if (prompt.browse_pos != null) {
+                try prompt.browseLeft();
+            } else {
+                try prompt.moveCursorTo(prompt.cursor -| 1);
+            }
         } else if (std.mem.eql(u8, ev.key, "right")) {
-            try prompt.moveCursorTo(prompt.cursor + 1);
+            if (prompt.browse_pos != null) {
+                try prompt.browseRight();
+            } else {
+                try prompt.moveCursorTo(prompt.cursor + 1);
+            }
         } else if (!ctrl and !alt and !super) {
             // A ctrl/alt/super chord that isn't one of the explicit cases
             // above (e.g. ctrl+c, ctrl+z, alt+f) falls through to here too
@@ -266,6 +298,17 @@ const Prompt = struct {
     /// mirroring a real shell's "go back to what I was typing" behavior.
     /// Only meaningful while `history_index != null`.
     scratch: std.ArrayList(u8) = .empty,
+    /// The root layer's column count -- fetched once at startup (`runPrompt`)
+    /// to clamp browse-mode horizontal movement (`browseLeft`/`browseRight`);
+    /// there's no lighter-weight "get grid size" property yet (`size` is
+    /// still 🔶 in decisions.md), and it doesn't change over a session.
+    grid_cols: usize = 0,
+    /// Non-null while the cursor is browsing the grid instead of sitting on
+    /// the live prompt (`browseUp`/`browseDown`/`browseLeft`/`browseRight`,
+    /// entered by plain Up with nothing being typed) -- see those methods'
+    /// doc comments, and `setCursorAt`'s for how every ordinary editing
+    /// operation implicitly ends browsing just by moving the real cursor.
+    browse_pos: ?glyphwire.Cursor = null,
 
     fn deinit(self: *Prompt) void {
         const alloc = self.client.alloc;
@@ -422,6 +465,93 @@ const Prompt = struct {
         try self.setCursorAt(self.cursor);
     }
 
+    /// Plain Up: moves the cursor up into the scrollback above the prompt
+    /// instead of editing anything -- entering "browse" mode (`browse_pos`)
+    /// on the first press, starting directly above wherever the real
+    /// cursor currently sits so it reads as "look straight up from here"
+    /// rather than jumping to a fixed column. A no-op at row 0 (the very
+    /// first prompt): there's nothing above to browse.
+    fn browseUp(self: *Prompt) !void {
+        if (self.browse_pos) |*bp| {
+            if (bp.row == 0) return;
+            bp.row -= 1;
+        } else {
+            if (self.line_start_row == 0) return;
+            self.browse_pos = .{ .row = self.line_start_row - 1, .col = self.line_start_col + self.cursor };
+        }
+        try self.client.setCursor(self.browse_pos.?.row, self.browse_pos.?.col);
+    }
+
+    /// Plain Down while browsing: moves the browse cursor down a row, or --
+    /// once the *next* row down would be the prompt's own row -- ends
+    /// browsing and lands back on the real prompt cursor instead (rather
+    /// than "browsing" a row that's actually the live line). A no-op when
+    /// not currently browsing; Down has no other meaning at the prompt
+    /// (ctrl+down is history recall, handled separately).
+    fn browseDown(self: *Prompt) !void {
+        var bp = self.browse_pos orelse return;
+        if (bp.row + 1 >= self.line_start_row) {
+            try self.setCursorAt(self.cursor);
+            return;
+        }
+        bp.row += 1;
+        self.browse_pos = bp;
+        try self.client.setCursor(bp.row, bp.col);
+    }
+
+    /// Left/Right while browsing: move within whatever row the browse
+    /// cursor is currently on, clamped to the grid's width (`set_property`
+    /// doesn't clamp `col` itself -- see `Layer.setProperty` -- so an
+    /// unclamped move here could park the caret off-grid). No-ops when not
+    /// browsing; the caller is expected to check `browse_pos` first and
+    /// call `moveCursorTo` instead (plain line editing) when it's null.
+    fn browseLeft(self: *Prompt) !void {
+        var bp = self.browse_pos orelse return;
+        bp.col -|= 1;
+        self.browse_pos = bp;
+        try self.client.setCursor(bp.row, bp.col);
+    }
+
+    fn browseRight(self: *Prompt) !void {
+        var bp = self.browse_pos orelse return;
+        bp.col = @min(bp.col + 1, self.grid_cols -| 1);
+        self.browse_pos = bp;
+        try self.client.setCursor(bp.row, bp.col);
+    }
+
+    /// Enter while browsing: looks up whatever cell the browse cursor is
+    /// over (`get_metadata`) and, if it's tagged with `mimetype:
+    /// "directory"` (glyphwire-ls tags every entry it draws this way --
+    /// see `iconForEntry`'s caller in ls/main.zig), runs `cd <path>` as if
+    /// it had been typed -- `setLine` both echoes it and, via
+    /// `setCursorAt`, ends browsing before `submitLine` runs it. A no-op
+    /// for anything else (untagged, a file, empty space) per the "don't
+    /// guess" policy: nothing should happen on a browsed cell that isn't
+    /// unambiguously a directory to cd into. Doesn't handle a `path`
+    /// containing a space -- this shell doesn't support quoted arguments
+    /// anywhere yet (see `runCommand`'s doc comment), so neither does this.
+    fn browseEnter(self: *Prompt) !void {
+        const bp = self.browse_pos orelse return;
+        const alloc = self.client.alloc;
+
+        const lookup = self.client.getMetadata(null, bp.row, bp.col) catch return;
+        const json = lookup.json orelse return;
+        defer alloc.free(json);
+
+        const Meta = struct { mimetype: ?[]const u8 = null, path: ?[]const u8 = null };
+        const parsed = std.json.parseFromSlice(Meta, alloc, json, .{ .ignore_unknown_fields = true }) catch return;
+        defer parsed.deinit();
+
+        const mimetype = parsed.value.mimetype orelse return;
+        const path = parsed.value.path orelse return;
+        if (!std.mem.eql(u8, mimetype, "directory")) return;
+
+        var line_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "cd {s}", .{path}) catch return;
+        try self.setLine(line);
+        try self.submitLine();
+    }
+
     /// The offset ctrl+right lands on: past any whitespace right of the
     /// cursor, then past the following run of non-whitespace.
     fn wordRight(self: *const Prompt) usize {
@@ -444,7 +574,16 @@ const Prompt = struct {
 
     /// Positions the server-side cursor at buffer offset `offset` on the
     /// current line.
+    /// Every ordinary editing operation (`moveCursorTo`, `insertChar`,
+    /// `deleteBackward`/`deleteForward`, `killToStart`, `setLine`,
+    /// `clearScreen`) funnels through here to place the real, buffer-offset
+    /// cursor -- so clearing `browse_pos` here, unconditionally, is the
+    /// entire "snap back to the prompt" mechanism. Nothing else needs to
+    /// know browsing was happening: the moment any of those run, the grid
+    /// cursor lands back on the live prompt as a side effect of what it was
+    /// already going to do anyway.
     fn setCursorAt(self: *Prompt, offset: usize) !void {
+        self.browse_pos = null;
         try self.client.setCursor(self.line_start_row, self.line_start_col + offset);
     }
 

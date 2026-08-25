@@ -447,6 +447,38 @@ pub fn layerDrawIconTaggedSetsMetadataIdTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(layer.cell(1, 2).style.bg.icon.handle, 7);
 }
 
+pub fn layerTagMetadataSetsIdWithoutTouchingBgOrGraphemeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    layer.drawIcon(7, 1, 2, .{ .metadata_id = 42 });
+    layer.tagMetadata(1, 3, 42);
+
+    // The neighboring cell got tagged with the same id as the icon's
+    // anchor, but its background/grapheme are untouched -- still whatever
+    // the layer's default is, not a copy of the icon.
+    try testz.expectEqual(layer.cell(1, 3).metadata_id.?, 42);
+    switch (layer.cell(1, 3).style.bg) {
+        .color => {},
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+    try testz.expectEqual(layer.cell(1, 3).grapheme().len, 0);
+}
+
+pub fn layerTagMetadataOverwritesExistingTagTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    try layer.writeTextTagged("a", glyphwire.default_style, 1);
+    layer.tagMetadata(0, 0, 2);
+
+    try testz.expectEqual(layer.cell(0, 0).metadata_id.?, 2);
+    // The grapheme write_text put there is still untouched.
+    try testz.expectEqualStr(layer.cell(0, 0).grapheme(), "a");
+}
+
 pub fn layerWriteTextTaggedMarksEveryCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);

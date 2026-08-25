@@ -397,6 +397,175 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     }
 }
 
+/// Polls `get_property(cursor)` until its row matches `want_row` -- the
+/// same "poll real state, don't guess timing" philosophy `waitForCell`
+/// already uses, needed here because `browseUp`'s effect (moving the
+/// server-side cursor) isn't otherwise observable through `get_cells`.
+fn waitForCursorRow(client: *glyphwire.Client, want_row: usize) !void {
+    var attempts: usize = 0;
+    while (attempts < 1000) : (attempts += 1) {
+        const cur = try client.getCursor();
+        if (cur.row == want_row) return;
+        std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.TimedOutWaitingForCursorRow;
+}
+
+/// Same as `waitForCursorRow`, for the column.
+fn waitForCursorCol(client: *glyphwire.Client, want_col: usize) !void {
+    var attempts: usize = 0;
+    while (attempts < 1000) : (attempts += 1) {
+        const cur = try client.getCursor();
+        if (cur.col == want_col) return;
+        std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.TimedOutWaitingForCursorCol;
+}
+
+/// End-to-end proof of the browse-mode auto-cd feature (glyphwire-shell's
+/// `Prompt.browseUp`/`browseEnter`, driven by plain Up/Enter): types
+/// `ls <dir>` where `<dir>` contains one subdirectory, waits for the
+/// listing and the next prompt, presses Up enough times to land the browse
+/// cursor back on the subdirectory's row (deterministic here -- a single
+/// entry's icon lands at row 1, per `lsClientWritesEntriesOverRealSocketTest`'s
+/// row-math comment, and the next prompt three rows below that, at row 4,
+/// since `writeGrid` leaves the cursor at `entry_row + 2` and `submitLine`
+/// adds one more), then presses Enter and confirms the *next* prompt's cwd
+/// echo shows the subdirectory -- i.e. a real `cd` actually ran, not just
+/// that browsing moved a cursor around.
+///
+/// Shares `shellExpandsTildeInCommandArgsTest`'s known flakiness under
+/// load: it also spawns a real `glyphwire-shell` that spawns a real
+/// `glyphwire-ls` grandchild, so `waitForCell`/`waitForCursorRow`/
+/// `waitForCursorCol`'s polling budgets can occasionally not be enough --
+/// intermittent, not a logic bug (feature confirmed working manually
+/// against a real interactive session), but a real one; don't chase it as
+/// a regression.
+pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir_name = try std.fmt.allocPrint(alloc, "glyphwire-browse-cd-test-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(dir_name);
+    const dir_path = try std.fs.path.join(alloc, &.{ "/tmp", dir_name });
+    defer alloc.free(dir_path);
+
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io, dir_path) catch {};
+    var parent_dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{});
+    defer parent_dir.close(io);
+    try parent_dir.createDir(io, "target", .default_dir);
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-browse-cd-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    // serveForever, not a fixed accept-thread count -- see
+    // shellExpandsTildeInCommandArgsTest's comment on why: this test also
+    // spawns glyphwire-ls as a grandchild via the typed `ls` command.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    var cmd_buf: [128]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "ls {s}", .{dir_path});
+    try typeText(&reporter, cmd);
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // "target"'s row/col per lsClientWritesEntriesOverRealSocketTest's
+    // formula (default 12x12 cell metrics, one entry -> row 1, name at
+    // icon_col_width == 4).
+    try waitForCell(&reporter, 1, 4, "t");
+    // The next prompt: entry_row (1) + 2 (writeGrid's post-entry advance)
+    // + 1 (submitLine's own advance) == row 4, same cwd (nothing's cd'd
+    // yet) so the same arrow_col.
+    try waitForCell(&reporter, 4, arrow_col, ">");
+
+    var row_presses: usize = 0;
+    while (row_presses < 3) : (row_presses += 1) {
+        try reporter.reportKey("up", true);
+        try reporter.reportKey("up", false);
+    }
+    try waitForCursorRow(&reporter, 1);
+
+    // Up only ever changes the browse cursor's *row* -- its column starts
+    // (and, until Left/Right move it, stays) wherever the real cursor was
+    // on the prompt line, i.e. right after the "{cwd} > " prefix
+    // (`cwd_len + 3`: space, '>', space), nowhere near "target"'s tagged
+    // cells (icon at col 0, name at icon_col_width == 4). Left has to walk
+    // it back over there before Enter means anything.
+    const line_start_col = cwd_len + 3;
+    const icon_col_width = 4;
+    var col_presses: usize = 0;
+    while (col_presses < line_start_col - icon_col_width) : (col_presses += 1) {
+        try reporter.reportKey("left", true);
+        try reporter.reportKey("left", false);
+    }
+    try waitForCursorCol(&reporter, icon_col_width);
+
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // A real `cd` ran: the next prompt's cwd echo includes "target". Row
+    // 6, not 5 -- `doCd` writes nothing to the grid on success, so
+    // `submitLine`'s post-command `getCursor()` still reads back the row
+    // it set for itself (entry_row(1)+2, from browseEnter's synthesized
+    // "cd ..." line, then +1 again) before the final +1 for the new
+    // prompt.
+    var found = false;
+    var attempts: usize = 0;
+    while (attempts < 1000 and !found) : (attempts += 1) {
+        var snapshot = try reporter.getCells();
+        defer snapshot.deinit();
+        var col: usize = 0;
+        while (col + 6 <= snapshot.cols()) : (col += 1) {
+            var matched = true;
+            for ("target", 0..) |expected_ch, i| {
+                if (snapshot.cellAt(6, col + i).grapheme.len != 1 or snapshot.cellAt(6, col + i).grapheme[0] != expected_ch) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) std.Io.sleep(reporter.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    try testz.expectTrue(found);
+}
+
 /// Proves the real `glyphwire-ls` binary (see ls/main.zig, the first
 /// "ported real program" client, built on lsz's directory-scanning logic)
 /// connects, lists a directory, and writes the entries onto the grid --

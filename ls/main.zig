@@ -79,10 +79,25 @@ pub fn main(init: std.process.Init) !void {
     if (glyphwire.Client.connectFromEnv(io, alloc, init.environ_map)) |connected| {
         var client = connected;
         defer client.deinit();
-        try writeGrid(&client, entries, long_list);
+        const abs_dir_path = try resolveAbsolutePath(io, alloc, dir_path);
+        defer alloc.free(abs_dir_path);
+        try writeGrid(&client, entries, long_list, abs_dir_path);
     } else |_| {
         try writePlain(io, entries, long_list);
     }
+}
+
+/// `dir_path` as an absolute, `.`/`..`-normalized path -- resolved against
+/// the process's actual cwd if it wasn't already absolute. Every entry's
+/// metadata tag (`writeGrid`) embeds its full path this way rather than
+/// possibly-relative, since whatever reads it back later (glyphwire-shell's
+/// `browseEnter`, eventually other tools) can't be assumed to share this
+/// process's cwd.
+fn resolveAbsolutePath(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(dir_path)) return std.fs.path.resolve(alloc, &.{dir_path});
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    return std.fs.path.resolve(alloc, &.{ cwd_buf[0..cwd_len], dir_path });
 }
 
 const EntryKind = enum { file, directory, sym_link, other };
@@ -242,6 +257,97 @@ fn iconForExtension(name: []const u8) []const u8 {
     return "file";
 }
 
+/// Real MIME types, unlike `extension_icons`' coarser display buckets --
+/// this is the `mimetype` field every entry's metadata tag carries (see
+/// `writeGrid`), and `glyphwire-shell`'s `browseEnter` specifically checks
+/// for the literal string `"directory"` to decide whether Enter should
+/// auto-`cd`. Not exhaustive, just the same common types `extension_icons`
+/// already covers plus a handful of text/code extensions worth having a
+/// real type for.
+const extension_mimetypes = [_]struct { ext: []const u8, mime: []const u8 }{
+    .{ .ext = ".png", .mime = "image/png" },
+    .{ .ext = ".jpg", .mime = "image/jpeg" },
+    .{ .ext = ".jpeg", .mime = "image/jpeg" },
+    .{ .ext = ".gif", .mime = "image/gif" },
+    .{ .ext = ".bmp", .mime = "image/bmp" },
+    .{ .ext = ".svg", .mime = "image/svg+xml" },
+    .{ .ext = ".webp", .mime = "image/webp" },
+
+    .{ .ext = ".mp3", .mime = "audio/mpeg" },
+    .{ .ext = ".wav", .mime = "audio/wav" },
+    .{ .ext = ".flac", .mime = "audio/flac" },
+    .{ .ext = ".ogg", .mime = "audio/ogg" },
+    .{ .ext = ".m4a", .mime = "audio/mp4" },
+
+    .{ .ext = ".mp4", .mime = "video/mp4" },
+    .{ .ext = ".mkv", .mime = "video/x-matroska" },
+    .{ .ext = ".mov", .mime = "video/quicktime" },
+    .{ .ext = ".webm", .mime = "video/webm" },
+    .{ .ext = ".avi", .mime = "video/x-msvideo" },
+
+    .{ .ext = ".zip", .mime = "application/zip" },
+    .{ .ext = ".tar", .mime = "application/x-tar" },
+    .{ .ext = ".gz", .mime = "application/gzip" },
+    .{ .ext = ".tgz", .mime = "application/gzip" },
+    .{ .ext = ".xz", .mime = "application/x-xz" },
+    .{ .ext = ".bz2", .mime = "application/x-bzip2" },
+    .{ .ext = ".7z", .mime = "application/x-7z-compressed" },
+    .{ .ext = ".rar", .mime = "application/vnd.rar" },
+    .{ .ext = ".iso", .mime = "application/x-iso9660-image" },
+
+    .{ .ext = ".sh", .mime = "application/x-sh" },
+    .{ .ext = ".exe", .mime = "application/vnd.microsoft.portable-executable" },
+    .{ .ext = ".appimage", .mime = "application/x-executable" },
+    .{ .ext = ".bin", .mime = "application/octet-stream" },
+
+    .{ .ext = ".txt", .mime = "text/plain" },
+    .{ .ext = ".md", .mime = "text/markdown" },
+    .{ .ext = ".json", .mime = "application/json" },
+    .{ .ext = ".html", .mime = "text/html" },
+    .{ .ext = ".htm", .mime = "text/html" },
+    .{ .ext = ".css", .mime = "text/css" },
+    .{ .ext = ".js", .mime = "text/javascript" },
+    .{ .ext = ".xml", .mime = "application/xml" },
+    .{ .ext = ".pdf", .mime = "application/pdf" },
+    .{ .ext = ".csv", .mime = "text/csv" },
+    .{ .ext = ".yaml", .mime = "application/yaml" },
+    .{ .ext = ".yml", .mime = "application/yaml" },
+    .{ .ext = ".toml", .mime = "application/toml" },
+
+    .{ .ext = ".c", .mime = "text/x-c" },
+    .{ .ext = ".h", .mime = "text/x-c" },
+    .{ .ext = ".cpp", .mime = "text/x-c++" },
+    .{ .ext = ".py", .mime = "text/x-python" },
+    .{ .ext = ".zig", .mime = "text/plain" },
+    .{ .ext = ".rs", .mime = "text/rust" },
+    .{ .ext = ".go", .mime = "text/x-go" },
+};
+
+/// `"directory"` for directories -- the exact value `glyphwire-shell`'s
+/// `browseEnter` checks for auto-`cd` -- `"inode/symlink"` for symlinks
+/// (not resolved to the target's own type: same "treat uniformly, don't
+/// follow" choice `iconForEntry` already makes for symlinks), an
+/// extension-derived real MIME type for regular files
+/// (`extension_mimetypes`, falling back to `"application/octet-stream"`
+/// for an unrecognized extension), and that same generic fallback for
+/// anything else (device files, sockets, ...).
+fn mimetypeForEntry(entry: FileEntry) []const u8 {
+    return switch (entry.kind) {
+        .directory => "directory",
+        .sym_link => "inode/symlink",
+        .other => "application/octet-stream",
+        .file => mimetypeForExtension(entry.name),
+    };
+}
+
+fn mimetypeForExtension(name: []const u8) []const u8 {
+    const ext = std.fs.path.extension(name);
+    for (extension_mimetypes) |e| {
+        if (std.ascii.eqlIgnoreCase(ext, e.ext)) return e.mime;
+    }
+    return "application/octet-stream";
+}
+
 // ── Long-listing formatting ─────────────────────────────────────────────────
 
 const KBytes: u64 = 1024;
@@ -318,7 +424,14 @@ const icon_native_px = 32;
 /// the *name* one column over and to advance to the next row. Costs one
 /// extra request per entry; fine for what a directory listing needs over
 /// a local socket.
-fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: bool) !void {
+/// `abs_dir_path` is the absolute (resolved against cwd if `dir_path` was
+/// relative) form of whatever directory was listed -- see `main`'s
+/// `resolveAbsolutePath` call. Every entry's metadata tag (below) embeds
+/// its full path, and a relative one would be ambiguous the moment
+/// anything reading it back (glyphwire-shell's `browseEnter`, eventually
+/// other tools) has a different cwd than this process did.
+fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: bool, abs_dir_path: []const u8) !void {
+    const alloc = client.alloc;
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
 
     const metrics = try client.getCellMetrics();
@@ -326,40 +439,70 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: b
     const cell_h: usize = metrics.h;
     const icon_col_width = (icon_native_px + cell_w - 1) / cell_w + 1;
     const max_icon_h: u32 = @intCast(2 * cell_h);
+    // How many columns (from the anchor at col 0) the icon's rendered
+    // width actually reaches, so every cell it visually covers -- not
+    // just its anchor cell -- can be tagged below. `.natural` scale with
+    // only `max_h` set ties width to the same cap (square icons, uniform
+    // scale-down -- see `core.IconScale`'s doc comment), so the rendered
+    // pixel width is never more than `max_icon_h`, same as the height.
+    const icon_render_px: usize = @min(icon_native_px, max_icon_h);
+    const icon_cols_spanned = (icon_render_px + cell_w - 1) / cell_w;
 
     for (entries) |entry| {
         const cur = try client.getCursor();
         const row = cur.row;
+
+        // Every cell this entry's row touches (icon, name, and -l's
+        // size/time columns) shares one metadata id -- see
+        // decisions.md's Metadata section on tagging a whole run rather
+        // than copying the same blob per cell. `mimetype`/`path` are the
+        // two fields glyphwire-shell's `browseEnter` (word for word) and
+        // any future context-menu client are expected to read.
+        const full_path = try std.fs.path.join(alloc, &.{ abs_dir_path, entry.name });
+        defer alloc.free(full_path);
+        const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = full_path }, .{});
+        defer alloc.free(json);
+        const metadata_id = try client.createMetadata(json);
 
         try client.drawIconStyled(null, null, iconForEntry(entry), .{
             .scale = .natural,
             .h_align = .start,
             .v_align = .center,
             .max_h = max_icon_h,
+            .metadata_id = metadata_id,
         });
+        // draw_icon only ever tags its own anchor cell (col 0) -- see
+        // core.IconScale's doc comment on why overflow has no automatic
+        // data-model footprint. Tag the rest of the icon's own row here so
+        // browsing (glyphwire-shell's browseEnter) resolves correctly
+        // anywhere the icon actually renders, not just its leftmost cell.
+        var icon_col: usize = 1;
+        while (icon_col < icon_cols_spanned) : (icon_col += 1) {
+            try client.tagMetadata(null, row, icon_col, metadata_id);
+        }
         try client.setCursor(row, icon_col_width);
         switch (entry.kind) {
             .directory => {
                 const text = std.fmt.bufPrint(&buf, "{s}/", .{entry.name}) catch entry.name;
-                try client.writeText(text, dir_color, null);
+                try client.writeTextTagged(text, dir_color, null, metadata_id);
             },
             .sym_link => {
                 const text = if (entry.link_target) |tgt|
                     std.fmt.bufPrint(&buf, "{s} -> {s}", .{ entry.name, tgt }) catch entry.name
                 else
                     entry.name;
-                try client.writeText(text, symlink_color, null);
+                try client.writeTextTagged(text, symlink_color, null, metadata_id);
             },
-            else => try client.writeText(entry.name, file_color, null),
+            else => try client.writeTextTagged(entry.name, file_color, null, metadata_id),
         }
 
         if (long_list) {
             var size_buf: [16]u8 = undefined;
             var time_buf: [20]u8 = undefined;
             try client.writeText("  ", null, null);
-            try client.writeText(formatSize(&size_buf, entry.size), detail_color, null);
+            try client.writeTextTagged(formatSize(&size_buf, entry.size), detail_color, null, metadata_id);
             try client.writeText("  ", null, null);
-            try client.writeText(formatTimestamp(&time_buf, entry.mtime_sec), detail_color, null);
+            try client.writeTextTagged(formatTimestamp(&time_buf, entry.mtime_sec), detail_color, null, metadata_id);
         }
 
         // set_property(cursor) scrolls-and-clamps a row at or past the

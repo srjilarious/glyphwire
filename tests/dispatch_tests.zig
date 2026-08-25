@@ -602,6 +602,43 @@ pub fn destroyMetadataUnknownIdErrorsTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownMetadata);
 }
 
+pub fn tagMetadataSetsCellIdOverWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const create_message =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_metadata","params":{"json":"{}"}}
+    ;
+    const create_result = try d.handle(alloc, create_message);
+    defer if (create_result.response) |r| alloc.free(r);
+
+    const tag_message =
+        \\{"jsonrpc":"2.0","method":"tag_metadata","params":{"row":2,"col":3,"metadata_id":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, tag_message)).response == null);
+
+    try testz.expectEqual(ctx.root.cell(2, 3).metadata_id.?, 1);
+    // No grapheme/bg touched -- tag_metadata only ever sets the id.
+    switch (ctx.root.cell(2, 3).style.bg) {
+        .color => {},
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+}
+
+pub fn tagMetadataUnknownIdErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"tag_metadata","params":{"row":0,"col":0,"metadata_id":99}}
+    ;
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownMetadata);
+}
+
 pub fn getCellsIncludesMetadataIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

@@ -493,6 +493,21 @@ pub const Layer = struct {
         self.revision += 1;
     }
 
+    /// `tag_metadata`: sets exactly one cell's `metadata_id`, touching
+    /// nothing else -- unlike `writeTextTagged`/`drawIcon`, which tag as a
+    /// side effect of also drawing something. For a client that needs to
+    /// tag a cell without changing what's drawn there, e.g. `glyphwire-ls`
+    /// tagging the extra cells a `.natural`-scaled icon visually overflows
+    /// into (see `IconScale`'s doc comment on that overflow having no
+    /// automatic data-model footprint -- this is how a client opts into
+    /// giving it one anyway, deliberately, cell by cell).
+    pub fn tagMetadata(self: *Layer, row: usize, col: usize, metadata_id: ?MetadataHandle) void {
+        const resolved_row = self.resolveRow(row);
+        if (col >= self.width) return;
+        self.cell(resolved_row, col).metadata_id = metadata_id;
+        self.revision += 1;
+    }
+
     /// The 9 resolved tiles a `draw_box` call needs -- corners, edges, and
     /// a fill, per decisions.md's Icon section / roadmap.md's Phase 3.6.
     /// Just handles, same as `draw_icon`: each tile is drawn with the

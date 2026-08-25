@@ -97,10 +97,12 @@ dangling id isn't an error).
 | `create_metadata` | request | `json` | metadata handle | ✅ stores `json` verbatim — the server never parses it, only stores/returns it |
 | `destroy_metadata` | notification | `id` | — | ✅ frees `id`'s stored JSON; errors `UnknownMetadata` on an unknown id, same treatment `destroy_layer` gives an unknown layer handle. No reference counting — a cell still tagged with `id` afterward is left dangling, see `get_metadata` |
 | `get_metadata` | request | `layer?, row, col` | `{id, json}`, both nullable | ✅ resolves `(row, col)` to a cell and reports its `metadata_id` plus that id's stored JSON. `row`/`col` are required (unlike `draw_icon`/`draw_image`'s cursor-defaulted `row?`/`col?`) — this is a targeted lookup (e.g. resolving whatever cell a mouse click landed on), not a draw at "wherever the cursor is". `id` non-null with `json` null means a dangling tag (the id was `destroy_metadata`'d after the cell was tagged) — reported rather than treated as an error, so a caller can tell "untagged" apart from "tagged but the data's gone" |
+| `tag_metadata` | notification | `layer?, row, col, metadata_id` | — | ✅ sets exactly one cell's `metadata_id`, touching nothing else about it — unlike `write_text`/`draw_icon` below, which tag as a side effect of also drawing something. For a client that needs a cell tagged without changing what's drawn there, e.g. `glyphwire-ls` tagging the extra cells a `.natural`-scaled icon visually overflows into so browsing resolves correctly anywhere the icon actually renders, not just its anchor cell. `metadata_id` is required (there'd be no point tagging with nothing) and validated the same as `write_text`/`draw_icon`'s |
 
 `write_text`/`draw_icon` (above) both take an optional `metadata_id` —
-tagging is a side effect of drawing, not its own separate call. A bad id
-(unknown or already-destroyed) there errors `UnknownMetadata` immediately,
+tagging is a side effect of drawing, not its own separate call (`tag_metadata`
+above is the one exception, for tagging without drawing). A bad id
+(unknown or already-destroyed) errors `UnknownMetadata` immediately,
 same "fail loud on a bad handle at the point of use" treatment
 `UnknownImage`/`UnknownIcon`/`UnknownLayer` already get elsewhere.
 
