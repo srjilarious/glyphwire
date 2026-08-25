@@ -124,6 +124,28 @@ pub fn scrollingRetainsScrolledOffRowsAsHistoryTest(io: std.Io, alloc: std.mem.A
     try testz.expectTrue(layer.scrollbackRow(2) == null);
 }
 
+pub fn inputStateTracksKeyAndMouseButtonDownSetsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var input = glyphwire.InputState.init(alloc);
+    defer input.deinit();
+
+    try testz.expectTrue(!input.isKeyDown("a"));
+
+    try testz.expectTrue(try input.setKey("a", true));
+    try testz.expectTrue(input.isKeyDown("a"));
+    // Redundant press-while-down reports no change.
+    try testz.expectTrue(!try input.setKey("a", true));
+
+    try testz.expectTrue(try input.setKey("a", false));
+    try testz.expectTrue(!input.isKeyDown("a"));
+    // Redundant release-while-up reports no change.
+    try testz.expectTrue(!try input.setKey("a", false));
+
+    try testz.expectTrue(!input.isMouseButtonDown("left"));
+    try testz.expectTrue(try input.setMouseButton("left", true));
+    try testz.expectTrue(input.isMouseButtonDown("left"));
+}
+
 pub fn scrollingWithNoScrollbackKeepsNoHistoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     // A layer with scrollback_rows=0 (e.g. a small popup notification)

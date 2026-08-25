@@ -37,6 +37,7 @@ pub const App = struct {
     client: glyphwire.Client,
     last_revision: u64 = 0,
     snapshot: ?glyphwire.CellsSnapshot = null,
+    last_mouse_px: pixzig.Vec2F = .{ .x = -1, .y = -1 },
 
     pub fn init(alloc: std.mem.Allocator, eng: *AppRunner.Engine, io: std.Io, socket_path: []const u8) !*App {
         _ = eng;
@@ -58,6 +59,9 @@ pub const App = struct {
         _ = deltaTimeMs;
         if (eng.inputs.keyboard.pressed(.escape)) return false;
 
+        self.reportKeyEvents(eng);
+        self.reportMouseEvents(eng);
+
         // Cheap poll every frame; only pull the (much larger) full grid
         // when something actually changed since the last fetch.
         const revision = self.client.getRevision() catch |err| {
@@ -75,6 +79,55 @@ pub const App = struct {
         }
 
         return true;
+    }
+
+    /// Reports every key that changed down/up state this frame -- see
+    /// `Keyboard.pressed`/`.released`'s edge-detection doc comments in
+    /// pixzig. `report_key` is sent over the same connection used for
+    /// polling above: it's a fire-and-forget notification, so it can't be
+    /// confused with a pending request's response (see `Client`'s doc
+    /// comment on why that'd be a problem for anything that reads back).
+    fn reportKeyEvents(self: *App, eng: *AppRunner.Engine) void {
+        const fields = @typeInfo(pixzig.glfw.Key).@"enum".fields;
+        inline for (fields) |field| {
+            const key = @field(pixzig.glfw.Key, field.name);
+            if (eng.inputs.keyboard.pressed(key)) {
+                self.client.reportKey(field.name, true) catch |err| {
+                    std.log.err("report_key({s}, true) failed: {t}", .{ field.name, err });
+                };
+            } else if (eng.inputs.keyboard.released(key)) {
+                self.client.reportKey(field.name, false) catch |err| {
+                    std.log.err("report_key({s}, false) failed: {t}", .{ field.name, err });
+                };
+            }
+        }
+    }
+
+    fn reportMouseEvents(self: *App, eng: *AppRunner.Engine) void {
+        if (!eng.inputs.mouse_enabled) return;
+        const pos = eng.inputs.mouse.pos();
+        const cell = cellFromPixel(pos.x, pos.y);
+
+        if (pos.x != self.last_mouse_px.x or pos.y != self.last_mouse_px.y) {
+            self.last_mouse_px = pos;
+            self.client.reportMouseMove(.{ .x = pos.x, .y = pos.y }, cell) catch |err| {
+                std.log.err("report_mouse_move failed: {t}", .{err});
+            };
+        }
+
+        const fields = @typeInfo(pixzig.glfw.MouseButton).@"enum".fields;
+        inline for (fields) |field| {
+            const btn = @field(pixzig.glfw.MouseButton, field.name);
+            if (eng.inputs.mouse.pressed(btn)) {
+                self.client.reportMouseButton(field.name, true, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
+                    std.log.err("report_mouse_button({s}, true) failed: {t}", .{ field.name, err });
+                };
+            } else if (eng.inputs.mouse.released(btn)) {
+                self.client.reportMouseButton(field.name, false, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
+                    std.log.err("report_mouse_button({s}, false) failed: {t}", .{ field.name, err });
+                };
+            }
+        }
     }
 
     pub fn render(self: *App, eng: *AppRunner.Engine) void {
@@ -111,6 +164,19 @@ pub const App = struct {
         eng.renderer.end();
     }
 };
+
+/// Converts a pixel position (window-local, matching what
+/// `eng.inputs.mouse.pos()` reports since host doesn't set a scaled
+/// `logicalSize`) to a grid cell position, clamped to the grid bounds.
+fn cellFromPixel(x: f32, y: f32) glyphwire.CellPos {
+    const col_f = x / @as(f32, @floatFromInt(cell_w));
+    const row_f = y / @as(f32, @floatFromInt(cell_h));
+    const max_col: f32 = @floatFromInt(grid_cols - 1);
+    const max_row: f32 = @floatFromInt(grid_rows - 1);
+    const col: usize = @intFromFloat(std.math.clamp(col_f, 0, max_col));
+    const row: usize = @intFromFloat(std.math.clamp(row_f, 0, max_row));
+    return .{ .row = row, .col = col };
+}
 
 fn reapChild(io: std.Io, child_in: std.process.Child) void {
     var child = child_in;

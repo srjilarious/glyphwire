@@ -2,6 +2,16 @@ const std = @import("std");
 const core = @import("core.zig");
 const wire = @import("wire.zig");
 
+/// Pixel-space cursor position (framebuffer pixels, as glyphwire-host
+/// reports it).
+pub const PxPos = struct { x: f32, y: f32 };
+
+/// Cell-grid cursor position, derived from `PxPos` and the cell pixel
+/// size -- see decisions.md's Cell/Layer sections. Whoever reports it
+/// (glyphwire-host, which owns the font/cell metrics) computes this, not
+/// the headless server -- see core.zig's `InputState` doc comment.
+pub const CellPos = struct { row: usize, col: usize };
+
 /// A glyphwire client: wraps connecting to `GLYPHWIRE_SOCK`, JSON-RPC
 /// framing, and request/response correlation, so a program doesn't have to
 /// hand-build JSON strings to speak the protocol (as the early test clients
@@ -84,6 +94,50 @@ pub const Client = struct {
     /// caller must call `.deinit()` on the result.
     pub fn getCells(self: *Client) !CellsSnapshot {
         const parsed = try self.request(CellsResultJson, "get_cells", .{});
+        return .{ .parsed = parsed };
+    }
+
+    /// `report_key(key, pressed)` -- a notification. `key` is expected to
+    /// be a stable, portable name (glyphwire-host uses `@tagName` of
+    /// pixzig's GLFW key enum, e.g. "a", "left_shift", "escape"); this
+    /// type doesn't enforce a closed set.
+    pub fn reportKey(self: *Client, key: []const u8, pressed: bool) !void {
+        try self.notify("report_key", .{ .key = key, .pressed = pressed });
+    }
+
+    /// `report_mouse_button(button, pressed, px, cell)` -- a notification.
+    pub fn reportMouseButton(self: *Client, button: []const u8, pressed: bool, px: PxPos, cell: CellPos) !void {
+        try self.notify("report_mouse_button", .{
+            .button = button,
+            .pressed = pressed,
+            .px = px,
+            .cell = cell,
+        });
+    }
+
+    /// `report_mouse_move(px, cell)` -- a notification. Doesn't trigger a
+    /// broadcast server-side (no live move-event stream yet), just keeps
+    /// `get_input_state`'s cursor position current.
+    pub fn reportMouseMove(self: *Client, px: PxPos, cell: CellPos) !void {
+        try self.notify("report_mouse_move", .{ .px = px, .cell = cell });
+    }
+
+    /// `subscribe(events)` -- a request; per decisions.md's Input model,
+    /// synchronous so the caller has a clear point after which it's
+    /// guaranteed to start receiving notifications for `events` (e.g.
+    /// `"key"`, `"mouse_button"`) on this connection. See `InputListener`
+    /// for a ready-made subscribed connection with a background reader.
+    pub fn subscribe(self: *Client, events: []const []const u8) !void {
+        var parsed = try self.request(struct { subscribed: [][]const u8 }, "subscribe", .{ .events = events });
+        defer parsed.deinit();
+    }
+
+    /// `get_input_state` -- a request returning which keys/mouse buttons
+    /// are currently down and the last known cursor position. A one-time
+    /// bootstrap query; `InputListener` is the live-updating counterpart.
+    /// Owns its own parsed JSON arena; caller must call `.deinit()`.
+    pub fn getInputState(self: *Client) !InputStateSnapshot {
+        const parsed = try self.request(InputStateResultJson, "get_input_state", .{});
         return .{ .parsed = parsed };
     }
 
@@ -174,6 +228,13 @@ const CellsResultJson = struct {
     cells: []const CellJson,
 };
 
+const InputStateResultJson = struct {
+    keys_down: []const []const u8,
+    mouse_buttons_down: []const []const u8,
+    cursor_px: PxPos,
+    cursor_cell: CellPos,
+};
+
 /// A cell in renderer-friendly form: `core.Color` fields instead of raw
 /// JSON, `bg` null for "no background color" (the image-background case,
 /// unbuilt server-side -- see `dispatch.zig`'s `CellJson`).
@@ -212,5 +273,226 @@ pub const CellsSnapshot = struct {
             .fg = .{ .r = c.fg.r, .g = c.fg.g, .b = c.fg.b, .a = c.fg.a },
             .bg = if (c.bg) |bg| .{ .r = bg.r, .g = bg.g, .b = bg.b, .a = bg.a } else null,
         };
+    }
+};
+
+/// Owns the parsed JSON backing a `getInputState` response; `deinit`
+/// frees it. A one-time snapshot -- see `InputListener` for a
+/// live-updating equivalent.
+pub const InputStateSnapshot = struct {
+    parsed: std.json.Parsed(ResponseOf(InputStateResultJson)),
+
+    pub fn deinit(self: *InputStateSnapshot) void {
+        self.parsed.deinit();
+    }
+
+    pub fn keysDown(self: *const InputStateSnapshot) []const []const u8 {
+        return self.parsed.value.result.keys_down;
+    }
+
+    pub fn mouseButtonsDown(self: *const InputStateSnapshot) []const []const u8 {
+        return self.parsed.value.result.mouse_buttons_down;
+    }
+
+    pub fn isKeyDown(self: *const InputStateSnapshot, key: []const u8) bool {
+        for (self.keysDown()) |k| {
+            if (std.mem.eql(u8, k, key)) return true;
+        }
+        return false;
+    }
+
+    pub fn isMouseButtonDown(self: *const InputStateSnapshot, button: []const u8) bool {
+        for (self.mouseButtonsDown()) |b| {
+            if (std.mem.eql(u8, b, button)) return true;
+        }
+        return false;
+    }
+
+    pub fn cursorPixel(self: *const InputStateSnapshot) PxPos {
+        return self.parsed.value.result.cursor_px;
+    }
+
+    pub fn cursorCell(self: *const InputStateSnapshot) CellPos {
+        return self.parsed.value.result.cursor_cell;
+    }
+};
+
+/// A dedicated, subscribed connection: sends `subscribe(events)` once,
+/// then a background thread continuously reads pushed `key_down`/
+/// `key_up`/`mouse_button` notifications and updates a local,
+/// mutex-guarded cache -- so `isKeyDown`/`isMouseButtonDown`/
+/// `cursorPixel`/`cursorCell` are instant local reads, not a round trip
+/// per call.
+///
+/// Deliberately a separate connection from `Client`: interleaving
+/// unsolicited push notifications with synchronous request/response
+/// traffic on one connection would need demuxing this codebase doesn't
+/// build yet (see `Client`'s doc comment -- one request in flight at a
+/// time, assuming the next frame off the wire is always that request's
+/// response). A program that both polls (e.g. `getCells`) and listens
+/// for input -- glyphwire-host -- holds one of each.
+pub const InputListener = struct {
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    stream: std.Io.net.Stream,
+    listen_thread: std.Thread,
+    mutex: std.Io.Mutex = .init,
+    state: core.InputState,
+
+    /// Connects, subscribes to `events`, and waits for the subscribe ack
+    /// before spawning the background reader -- so by the time this
+    /// returns, the subscription is guaranteed to be in effect and the
+    /// only frames the reader thread will ever see on this connection are
+    /// genuine pushed notifications. Heap-allocated (returns a pointer)
+    /// since the background thread outlives this call's stack frame.
+    pub fn connect(
+        io: std.Io,
+        alloc: std.mem.Allocator,
+        socket_path: []const u8,
+        events: []const []const u8,
+    ) !*InputListener {
+        const addr = try std.Io.net.UnixAddress.init(socket_path);
+        const stream = try addr.connect(io);
+
+        const self = try alloc.create(InputListener);
+        errdefer alloc.destroy(self);
+        self.* = .{ .io = io, .alloc = alloc, .stream = stream, .listen_thread = undefined, .state = core.InputState.init(alloc) };
+        errdefer self.state.deinit();
+
+        try self.sendSubscribeAndWaitForAck(events);
+
+        // Joined by deinit, unlike most background threads in this
+        // codebase: `state`/`mutex` must outlive the last access this
+        // thread makes to them, so deinit needs to know the thread has
+        // actually stopped before it frees `self`.
+        self.listen_thread = try std.Thread.spawn(.{}, listenThread, .{self});
+
+        return self;
+    }
+
+    /// Shuts the connection down (unblocking the reader thread's current
+    /// or next read with an error/EOF -- unlike a bare `close`, this is
+    /// well-defined to do from a thread other than the one blocked in the
+    /// read, per POSIX shutdown(2)), waits for that thread to actually
+    /// exit, then closes the socket and frees the listener.
+    pub fn deinit(self: *InputListener) void {
+        self.stream.shutdown(self.io, .both) catch {};
+        self.listen_thread.join();
+        self.stream.close(self.io);
+        self.state.deinit();
+        self.alloc.destroy(self);
+    }
+
+    pub fn isKeyDown(self: *InputListener, key: []const u8) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.state.isKeyDown(key);
+    }
+
+    pub fn isMouseButtonDown(self: *InputListener, button: []const u8) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.state.isMouseButtonDown(button);
+    }
+
+    pub fn cursorPixel(self: *InputListener) PxPos {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return .{ .x = self.state.cursor_px.x, .y = self.state.cursor_px.y };
+    }
+
+    pub fn cursorCell(self: *InputListener) CellPos {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return .{ .row = self.state.cursor_cell.row, .col = self.state.cursor_cell.col };
+    }
+
+    fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8) !void {
+        const Msg = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: i64 = 1,
+            method: []const u8 = "subscribe",
+            params: struct { events: []const []const u8 },
+        };
+        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .params = .{ .events = events } }, .{});
+        defer self.alloc.free(body);
+
+        var write_buf: [1024]u8 = undefined;
+        var w = self.stream.writer(self.io, &write_buf);
+        try wire.writeFrame(&w.interface, body);
+        try w.interface.flush();
+
+        var decoder: wire.FrameDecoder = .{};
+        defer decoder.deinit(self.alloc);
+
+        var read_buf: [4096]u8 = undefined;
+        while (true) {
+            var data: [1][]u8 = .{&read_buf};
+            const n = try self.stream.read(self.io, &data);
+            if (n == 0) return error.ConnectionClosed;
+            try decoder.feed(self.alloc, read_buf[0..n]);
+            if (try decoder.next(self.alloc)) |ack| {
+                self.alloc.free(ack);
+                return;
+            }
+        }
+    }
+
+    fn listenThread(self: *InputListener) void {
+        self.listenLoop() catch |err| {
+            std.log.err("glyphwire InputListener stopped: {t}", .{err});
+        };
+    }
+
+    fn listenLoop(self: *InputListener) !void {
+        var decoder: wire.FrameDecoder = .{};
+        defer decoder.deinit(self.alloc);
+
+        var read_buf: [4096]u8 = undefined;
+        while (true) {
+            var data: [1][]u8 = .{&read_buf};
+            const n = try self.stream.read(self.io, &data);
+            if (n == 0) return;
+            try decoder.feed(self.alloc, read_buf[0..n]);
+
+            while (try decoder.next(self.alloc)) |body| {
+                defer self.alloc.free(body);
+                self.handleNotification(body) catch |err| {
+                    std.log.err("glyphwire InputListener: bad notification: {t}", .{err});
+                };
+            }
+        }
+    }
+
+    fn handleNotification(self: *InputListener, body: []const u8) !void {
+        const Envelope = struct { method: []const u8, params: std.json.Value = .null };
+        const parsed = try std.json.parseFromSlice(Envelope, self.alloc, body, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        if (std.mem.eql(u8, parsed.value.method, "key_down") or std.mem.eql(u8, parsed.value.method, "key_up")) {
+            const P = struct { key: []const u8 };
+            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            _ = try self.state.setKey(p.value.key, std.mem.eql(u8, parsed.value.method, "key_down"));
+        } else if (std.mem.eql(u8, parsed.value.method, "mouse_button")) {
+            const P = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos };
+            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
+            self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
+            _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
+        }
     }
 };

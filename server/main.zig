@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
     defer ctx.deinit();
 
     var srv = try glyphwire.server.Server.bind(init.io, &ctx, socket_path);
-    defer srv.deinit();
+    defer srv.deinit(init.gpa);
 
     std.debug.print("glyphwire server listening on {s}\n", .{socket_path});
     try srv.serveForever(init.gpa);

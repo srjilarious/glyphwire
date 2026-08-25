@@ -35,7 +35,7 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    defer srv.deinit();
+    defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
 

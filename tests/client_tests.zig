@@ -11,7 +11,7 @@ pub fn clientWriteTextThenGetCellsRoundTripTest(io: std.Io, alloc: std.mem.Alloc
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    defer srv.deinit();
+    defer srv.deinit(alloc);
 
     // One client connection makes every call below over the same socket,
     // so the server only needs to serve one connection to completion.
@@ -60,7 +60,7 @@ pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    defer srv.deinit();
+    defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
 
@@ -73,6 +73,64 @@ pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.
     // that and returns) is the write guaranteed to have been dispatched.
     thread.join();
     try testz.expectEqualStr("x", ctx.root.cell(1, 3).grapheme());
+}
+
+/// Exercises the full client-library path (not just the raw-socket
+/// dispatch-level version in server_tests.zig): a subscribed
+/// `InputListener` on one connection receives what a `Client` on another
+/// connection reports, via the real background reader thread.
+pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // See e2e_tests.zig's comment: testz's default Io (global_single_threaded)
+    // has deliberate limitations beyond just its failing allocator. This
+    // test needs a real Io backing genuine cross-thread synchronization
+    // (Io.Mutex contention between the broadcast and the connection
+    // threads), so it builds its own instead of reusing the one testz passed in.
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // Which of these two threads' acceptOne ends up serving the listener's
+    // connection vs the reporter's is a race (both just call accept() on
+    // the same listener) -- so both client-side connections must be
+    // closed before joining *either* thread, never in between.
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "mouse_button" });
+    try testz.expectTrue(!listener.isKeyDown("a"));
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    try reporter.reportKey("a", true);
+    try reporter.reportMouseButton("left", true, .{ .x = 12, .y = 34 }, .{ .row = 1, .col = 2 });
+    reporter.deinit();
+
+    // The listener's background thread updates asynchronously; poll
+    // briefly rather than assuming it's already landed.
+    var attempts: usize = 0;
+    while (!listener.isKeyDown("a") and attempts < 100) : (attempts += 1) {
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+
+    try testz.expectTrue(listener.isKeyDown("a"));
+    try testz.expectTrue(listener.isMouseButtonDown("left"));
+    try testz.expectEqual(listener.cursorCell().row, 1);
+    try testz.expectEqual(listener.cursorCell().col, 2);
+    try testz.expectEqual(listener.cursorPixel().x, 12);
+    try testz.expectEqual(listener.cursorPixel().y, 34);
+
+    listener.deinit();
+    thread1.join();
+    thread2.join();
 }
 
 fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {

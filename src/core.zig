@@ -202,6 +202,83 @@ pub const Layer = struct {
     }
 };
 
+/// Authoritative input state for a session: which keys/mouse buttons are
+/// currently down, and the last known cursor position. Belongs on
+/// `Context` rather than `Layer` since it's session-wide, not tied to any
+/// one layer's cell content -- see decisions.md's Object Model.
+///
+/// Pure logic, no I/O, headless-testable like everything else in this
+/// file: the actual GLFW capture happens in glyphwire-host, which reports
+/// changes here as `report_key`/`report_mouse_button`/`report_mouse_move`
+/// notifications (see dispatch.zig) rather than this type knowing
+/// anything about how input was captured.
+///
+/// Key/button names are whatever string the reporter used (glyphwire-host
+/// uses `@tagName` of pixzig's GLFW-backed key/button enums, e.g. "a",
+/// "left_shift", "left") -- not a closed set enforced here.
+pub const InputState = struct {
+    alloc: std.mem.Allocator,
+    keys_down: std.StringHashMap(void),
+    mouse_buttons_down: std.StringHashMap(void),
+    cursor_px: struct { x: f32 = 0, y: f32 = 0 } = .{},
+    cursor_cell: struct { row: usize = 0, col: usize = 0 } = .{},
+
+    pub fn init(alloc: std.mem.Allocator) InputState {
+        return .{
+            .alloc = alloc,
+            .keys_down = std.StringHashMap(void).init(alloc),
+            .mouse_buttons_down = std.StringHashMap(void).init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *InputState) void {
+        freeStringSet(self.alloc, &self.keys_down);
+        freeStringSet(self.alloc, &self.mouse_buttons_down);
+    }
+
+    fn freeStringSet(alloc: std.mem.Allocator, set: *std.StringHashMap(void)) void {
+        var it = set.keyIterator();
+        while (it.next()) |k| alloc.free(k.*);
+        set.deinit();
+    }
+
+    /// Records a key press/release. Returns true if this actually changed
+    /// the down-set (false for a redundant press-while-down or
+    /// release-while-up report), so callers can skip broadcasting a
+    /// no-op change.
+    pub fn setKey(self: *InputState, key: []const u8, down: bool) !bool {
+        return setInSet(self.alloc, &self.keys_down, key, down);
+    }
+
+    pub fn setMouseButton(self: *InputState, button: []const u8, down: bool) !bool {
+        return setInSet(self.alloc, &self.mouse_buttons_down, button, down);
+    }
+
+    fn setInSet(alloc: std.mem.Allocator, set: *std.StringHashMap(void), name: []const u8, down: bool) !bool {
+        if (down) {
+            if (set.contains(name)) return false;
+            const owned = try alloc.dupe(u8, name);
+            errdefer alloc.free(owned);
+            try set.put(owned, {});
+            return true;
+        } else {
+            if (set.fetchRemove(name)) |kv| {
+                alloc.free(kv.key);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    pub fn isKeyDown(self: *const InputState, key: []const u8) bool {
+        return self.keys_down.contains(key);
+    }
+
+    pub fn isMouseButtonDown(self: *const InputState, button: []const u8) bool {
+        return self.mouse_buttons_down.contains(button);
+    }
+};
+
 /// Fixed id for the single auto-created context this slice's server ever
 /// has. There's no `create_context` yet (decisions.md, Object Model), so
 /// server and clients just agree on this sentinel out of band rather than
@@ -211,12 +288,18 @@ pub const default_context_id = "0";
 pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
+    input: InputState,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Context {
-        return .{ .alloc = alloc, .root = try Layer.init(alloc, width, height, scrollback_rows) };
+        return .{
+            .alloc = alloc,
+            .root = try Layer.init(alloc, width, height, scrollback_rows),
+            .input = InputState.init(alloc),
+        };
     }
 
     pub fn deinit(self: *Context) void {
         self.root.deinit();
+        self.input.deinit();
     }
 };

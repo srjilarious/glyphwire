@@ -31,8 +31,8 @@ pub fn writeTextNotificationUpdatesCoreStateTest(io: std.Io, alloc: std.mem.Allo
     const decoded = try roundTripThroughWire(alloc, message);
     defer alloc.free(decoded);
 
-    const response = try d.handle(alloc, decoded);
-    try testz.expectTrue(response == null);
+    const result = try d.handle(alloc, decoded);
+    try testz.expectTrue(result.response == null);
 
     try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
     try testz.expectEqualStr("o", ctx.root.cell(0, 4).grapheme());
@@ -51,7 +51,7 @@ pub fn getPropertyRequestReturnsDecodedResponseTest(io: std.Io, alloc: std.mem.A
     ;
     const write_decoded = try roundTripThroughWire(alloc, write_msg);
     defer alloc.free(write_decoded);
-    try testz.expectTrue(try d.handle(alloc, write_decoded) == null);
+    try testz.expectTrue((try d.handle(alloc, write_decoded)).response == null);
 
     const get_msg =
         \\{"jsonrpc":"2.0","id":1,"method":"get_property","params":{"property":"cursor"}}
@@ -59,7 +59,7 @@ pub fn getPropertyRequestReturnsDecodedResponseTest(io: std.Io, alloc: std.mem.A
     const get_decoded = try roundTripThroughWire(alloc, get_msg);
     defer alloc.free(get_decoded);
 
-    const response_body = (try d.handle(alloc, get_decoded)).?;
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
     defer alloc.free(response_body);
 
     // Frame the response and decode it back, proving the response side of
@@ -93,7 +93,7 @@ pub fn setPropertyNotificationMovesCursorTest(io: std.Io, alloc: std.mem.Allocat
     const decoded = try roundTripThroughWire(alloc, message);
     defer alloc.free(decoded);
 
-    try testz.expectTrue(try d.handle(alloc, decoded) == null);
+    try testz.expectTrue((try d.handle(alloc, decoded)).response == null);
     try testz.expectEqual(ctx.root.cursor.row, 3);
     try testz.expectEqual(ctx.root.cursor.col, 7);
 }
@@ -108,7 +108,7 @@ pub fn revisionPropertyBumpsOnWriteTest(io: std.Io, alloc: std.mem.Allocator) !v
         \\{"jsonrpc":"2.0","id":1,"method":"get_property","params":{"property":"revision"}}
     ;
 
-    const before_body = (try d.handle(alloc, get_msg)).?;
+    const before_body = (try d.handle(alloc, get_msg)).response.?;
     defer alloc.free(before_body);
     const Response = struct { id: i64, result: struct { revision: u64 } };
     const before = try std.json.parseFromSlice(Response, alloc, before_body, .{ .ignore_unknown_fields = true });
@@ -118,9 +118,9 @@ pub fn revisionPropertyBumpsOnWriteTest(io: std.Io, alloc: std.mem.Allocator) !v
     const write_msg =
         \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi"}}
     ;
-    try testz.expectTrue(try d.handle(alloc, write_msg) == null);
+    try testz.expectTrue((try d.handle(alloc, write_msg)).response == null);
 
-    const after_body = (try d.handle(alloc, get_msg)).?;
+    const after_body = (try d.handle(alloc, get_msg)).response.?;
     defer alloc.free(after_body);
     const after = try std.json.parseFromSlice(Response, alloc, after_body, .{ .ignore_unknown_fields = true });
     defer after.deinit();
@@ -136,12 +136,12 @@ pub fn getCellsRequestReturnsGridSnapshotTest(io: std.Io, alloc: std.mem.Allocat
     const write_msg =
         \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi","fg":{"r":0,"g":255,"b":255},"bg":{"r":40,"g":40,"b":90}}}
     ;
-    try testz.expectTrue(try d.handle(alloc, write_msg) == null);
+    try testz.expectTrue((try d.handle(alloc, write_msg)).response == null);
 
     const get_cells_msg =
         \\{"jsonrpc":"2.0","id":1,"method":"get_cells","params":{}}
     ;
-    const response_body = (try d.handle(alloc, get_cells_msg)).?;
+    const response_body = (try d.handle(alloc, get_cells_msg)).response.?;
     defer alloc.free(response_body);
 
     const CellJson = struct { g: []const u8, fg: struct { r: u8, g: u8, b: u8, a: u8 }, bg: ?struct { r: u8, g: u8, b: u8, a: u8 } };
@@ -167,6 +167,91 @@ pub fn getCellsRequestReturnsGridSnapshotTest(io: std.Io, alloc: std.mem.Allocat
     // Untouched cell still reports the default style.
     const blank = parsed.value.result.cells[2];
     try testz.expectEqualStr("", blank.g);
+}
+
+pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const press_msg =
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"a","pressed":true}}
+    ;
+    const press_result = try d.handle(alloc, press_msg);
+    try testz.expectTrue(press_result.response == null);
+    try testz.expectTrue(ctx.input.isKeyDown("a"));
+
+    const broadcast = press_result.broadcast.?;
+    defer alloc.free(broadcast.body);
+    try testz.expectEqualStr("key", broadcast.event);
+    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "key_down") != null);
+
+    // A redundant press-while-down report changes nothing, so it queues
+    // no broadcast -- avoids spamming subscribers with no-op events.
+    const redundant_result = try d.handle(alloc, press_msg);
+    try testz.expectTrue(redundant_result.broadcast == null);
+
+    const release_msg =
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"a","pressed":false}}
+    ;
+    const release_result = try d.handle(alloc, release_msg);
+    try testz.expectTrue(!ctx.input.isKeyDown("a"));
+    const release_broadcast = release_result.broadcast.?;
+    defer alloc.free(release_broadcast.body);
+    try testz.expectTrue(std.mem.indexOf(u8, release_broadcast.body, "key_up") != null);
+}
+
+pub fn subscribeThenGetInputStateReflectsReportedInputTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const sub_msg =
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key","mouse_button"]}}
+    ;
+    const sub_result = try d.handle(alloc, sub_msg);
+    defer alloc.free(sub_result.response.?);
+    try testz.expectTrue(d.subscriptions.key);
+    try testz.expectTrue(d.subscriptions.mouse_button);
+
+    const key_msg =
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"space","pressed":true}}
+    ;
+    const key_result = try d.handle(alloc, key_msg);
+    alloc.free(key_result.broadcast.?.body);
+
+    const mouse_msg =
+        \\{"jsonrpc":"2.0","method":"report_mouse_button","params":{"button":"left","pressed":true,"px":{"x":12.5,"y":30.0},"cell":{"row":2,"col":1}}}
+    ;
+    const mouse_result = try d.handle(alloc, mouse_msg);
+    alloc.free(mouse_result.broadcast.?.body);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":2,"method":"get_input_state","params":{}}
+    ;
+    const get_result = try d.handle(alloc, get_msg);
+    defer alloc.free(get_result.response.?);
+
+    const Response = struct {
+        id: i64,
+        result: struct {
+            keys_down: [][]const u8,
+            mouse_buttons_down: [][]const u8,
+            cursor_px: struct { x: f32, y: f32 },
+            cursor_cell: struct { row: usize, col: usize },
+        },
+    };
+    const parsed = try std.json.parseFromSlice(Response, alloc, get_result.response.?, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try testz.expectEqual(parsed.value.result.keys_down.len, 1);
+    try testz.expectEqualStr("space", parsed.value.result.keys_down[0]);
+    try testz.expectEqual(parsed.value.result.mouse_buttons_down.len, 1);
+    try testz.expectEqualStr("left", parsed.value.result.mouse_buttons_down[0]);
+    try testz.expectEqual(parsed.value.result.cursor_cell.row, 2);
+    try testz.expectEqual(parsed.value.result.cursor_cell.col, 1);
 }
 
 pub fn unknownMethodErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {

@@ -38,6 +38,17 @@ fn requestMessage(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8,
     var decoder: wire.FrameDecoder = .{};
     defer decoder.deinit(alloc);
 
+    return try readOneFrame(io, alloc, &stream, &decoder);
+}
+
+/// Reads exactly one framed body off an already-connected `stream`, using
+/// (and potentially leaving buffered bytes in) a caller-owned `decoder` --
+/// unlike `requestMessage`, meant for a connection multiple frames are
+/// read from over its lifetime (e.g. a subscribe ack followed later by a
+/// broadcast notification on the same connection).
+fn readOneFrame(io: std.Io, alloc: std.mem.Allocator, stream: *std.Io.net.Stream, decoder: *wire.FrameDecoder) ![]u8 {
+    if (try decoder.next(alloc)) |body| return body;
+
     var read_buf: [4096]u8 = undefined;
     while (true) {
         var data: [1][]u8 = .{&read_buf};
@@ -45,8 +56,14 @@ fn requestMessage(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8,
         if (n == 0) return error.ConnectionClosedBeforeResponse;
 
         try decoder.feed(alloc, read_buf[0..n]);
-        if (try decoder.next(alloc)) |body_out| return body_out;
+        if (try decoder.next(alloc)) |body| return body;
     }
+}
+
+fn acceptOnce(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
+    server.acceptOne(alloc) catch |err| {
+        std.debug.print("test server connection failed: {t}\n", .{err});
+    };
 }
 
 pub fn socketWriteTextThenGetPropertyRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -58,7 +75,7 @@ pub fn socketWriteTextThenGetPropertyRoundTripTest(io: std.Io, alloc: std.mem.Al
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    defer srv.deinit();
+    defer srv.deinit(alloc);
 
     // Two client connections are expected: one to write "hello", a second
     // to inspect the resulting cursor. Both are served to completion
@@ -91,4 +108,71 @@ pub fn socketWriteTextThenGetPropertyRoundTripTest(io: std.Io, alloc: std.mem.Al
     // Confirm the actual core state, not just what the response claims.
     try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
     try testz.expectEqualStr("o", ctx.root.cell(0, 4).grapheme());
+}
+
+/// Proves concurrent connections and the subscribe/broadcast fan-out work
+/// together: connection A subscribes to "key" events and stays open;
+/// connection B (simulating glyphwire-host) reports a key press; A
+/// receives the resulting key_down notification on its still-open
+/// connection, not by polling.
+pub fn subscribedConnectionReceivesBroadcastKeyEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-broadcast-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // Two genuinely concurrent connections need two threads each blocked
+    // in their own acceptOne -- unlike serveConnections above, which
+    // serves connections to completion one at a time on a single thread.
+    const thread_a = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    const thread_b = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer thread_a.join();
+    defer thread_b.join();
+
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+
+    var stream_a = try addr.connect(io);
+    defer stream_a.close(io);
+    var decoder_a: wire.FrameDecoder = .{};
+    defer decoder_a.deinit(alloc);
+
+    var write_buf_a: [4096]u8 = undefined;
+    var wa = stream_a.writer(io, &write_buf_a);
+    try wire.writeFrame(&wa.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"]}}
+    );
+    try wa.interface.flush();
+
+    // Wait for the subscribe ack before B reports anything, so the
+    // subscription is guaranteed to be in effect first.
+    const ack = try readOneFrame(io, alloc, &stream_a, &decoder_a);
+    alloc.free(ack);
+
+    var stream_b = try addr.connect(io);
+    var write_buf_b: [4096]u8 = undefined;
+    var wb = stream_b.writer(io, &write_buf_b);
+    try wire.writeFrame(&wb.interface,
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"a","pressed":true}}
+    );
+    try wb.interface.flush();
+    stream_b.close(io);
+
+    const notif_body = try readOneFrame(io, alloc, &stream_a, &decoder_a);
+    defer alloc.free(notif_body);
+
+    const Notification = struct {
+        method: []const u8,
+        params: struct { key: []const u8 },
+    };
+    const parsed = try std.json.parseFromSlice(Notification, alloc, notif_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try testz.expectEqualStr("key_down", parsed.value.method);
+    try testz.expectEqualStr("a", parsed.value.params.key);
+    try testz.expectTrue(ctx.input.isKeyDown("a"));
 }

@@ -66,17 +66,99 @@ const CellsResult = struct {
     cells: []const CellJson,
 };
 
+const PxJson = struct { x: f32, y: f32 };
+const CellPosJson = struct { row: usize, col: usize };
+
+const ReportKeyParams = struct {
+    key: []const u8,
+    pressed: bool,
+};
+
+const ReportMouseButtonParams = struct {
+    button: []const u8,
+    pressed: bool,
+    px: PxJson,
+    cell: CellPosJson,
+};
+
+const ReportMouseMoveParams = struct {
+    px: PxJson,
+    cell: CellPosJson,
+};
+
+const SubscribeParams = struct {
+    events: []const []const u8,
+};
+
+const SubscribeResult = struct {
+    subscribed: []const []const u8,
+};
+
+const InputStateResult = struct {
+    keys_down: []const []const u8,
+    mouse_buttons_down: []const []const u8,
+    cursor_px: PxJson,
+    cursor_cell: CellPosJson,
+};
+
+/// Which input event categories a connection has opted into (see
+/// decisions.md's Input model: subscription is opt-in per event type,
+/// X11 event-mask precedent). Set via the `subscribe` request; consulted
+/// by server.zig when fanning out a `Broadcast` from `HandleResult` to
+/// other connections.
+pub const Subscriptions = struct {
+    key: bool = false,
+    mouse_button: bool = false,
+
+    pub fn has(self: Subscriptions, event: []const u8) bool {
+        if (std.mem.eql(u8, event, "key")) return self.key;
+        if (std.mem.eql(u8, event, "mouse_button")) return self.mouse_button;
+        return false;
+    }
+
+    fn setFromEvents(events: []const []const u8) Subscriptions {
+        var s: Subscriptions = .{};
+        for (events) |e| {
+            if (std.mem.eql(u8, e, "key")) s.key = true;
+            if (std.mem.eql(u8, e, "mouse_button")) s.mouse_button = true;
+        }
+        return s;
+    }
+};
+
+/// An owned notification body (caller frees with the same allocator
+/// passed to `handle`) to fan out to every *other* connection subscribed
+/// to `event`. `handle`'s caller (server.zig) owns actually doing that
+/// fan-out; `Dispatcher` itself has no knowledge of other connections, to
+/// keep it headless-testable -- see decisions.md's headless-first
+/// architecture note.
+pub const Broadcast = struct {
+    event: []const u8,
+    body: []u8,
+};
+
+pub const HandleResult = struct {
+    /// Owned response body for a request, freed by the caller. Null for a
+    /// notification (no response) or when nothing changed worth
+    /// broadcasting.
+    response: ?[]u8 = null,
+    broadcast: ?Broadcast = null,
+};
+
 pub const Dispatcher = struct {
     ctx: *core.Context,
+    /// This connection's current subscriptions; see `Subscriptions`. Not
+    /// persisted anywhere else -- server.zig mirrors it onto its own
+    /// per-connection record after each `handle` call so the fan-out
+    /// logic can consult it without this type knowing about connections.
+    subscriptions: Subscriptions = .{},
 
     pub fn init(ctx: *core.Context) Dispatcher {
         return .{ .ctx = ctx };
     }
 
-    /// Handles one decoded frame body. Returns an owned JSON response body
-    /// (caller frees with `alloc`) for a request, or null for a
-    /// notification, which has no response.
-    pub fn handle(self: *Dispatcher, alloc: std.mem.Allocator, body: []const u8) !?[]u8 {
+    /// Handles one decoded frame body. See `HandleResult`.
+    pub fn handle(self: *Dispatcher, alloc: std.mem.Allocator, body: []const u8) !HandleResult {
         const parsed = try std.json.parseFromSlice(Envelope, alloc, body, .{
             .ignore_unknown_fields = true,
         });
@@ -85,16 +167,29 @@ pub const Dispatcher = struct {
 
         if (std.mem.eql(u8, envelope.method, "write_text")) {
             try self.handleWriteText(alloc, envelope.params);
-            return null;
+            return .{};
         } else if (std.mem.eql(u8, envelope.method, "set_property")) {
             try self.handleSetProperty(alloc, envelope.params);
-            return null;
+            return .{};
         } else if (std.mem.eql(u8, envelope.method, "get_property")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
-            return try self.handleGetProperty(alloc, id, envelope.params);
+            return .{ .response = try self.handleGetProperty(alloc, id, envelope.params) };
         } else if (std.mem.eql(u8, envelope.method, "get_cells")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
-            return try self.handleGetCells(alloc, id);
+            return .{ .response = try self.handleGetCells(alloc, id) };
+        } else if (std.mem.eql(u8, envelope.method, "report_key")) {
+            return try self.handleReportKey(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "report_mouse_button")) {
+            return try self.handleReportMouseButton(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "report_mouse_move")) {
+            try self.handleReportMouseMove(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "subscribe")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleSubscribe(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "get_input_state")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetInputState(alloc, id) };
         }
         return DispatchError.UnknownMethod;
     }
@@ -192,6 +287,117 @@ pub const Dispatcher = struct {
         const response: Response = .{
             .id = id,
             .result = .{ .cols = layer.width, .rows = layer.height, .revision = layer.revision, .cells = cells },
+        };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
+    /// A notification from an input-capturing client (glyphwire-host, in
+    /// practice -- nothing here restricts it to a particular sender, see
+    /// decisions.md's stance on there being no auth model yet). Updates
+    /// the authoritative down-set and, if the key's state actually
+    /// changed, returns a `key_down`/`key_up` broadcast for other
+    /// connections subscribed to `"key"`.
+    fn handleReportKey(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(ReportKeyParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const changed = try self.ctx.input.setKey(p.key, p.pressed);
+        if (!changed) return .{};
+
+        const Notification = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8,
+            params: struct { key: []const u8 },
+        };
+        const notification: Notification = .{
+            .method = if (p.pressed) "key_down" else "key_up",
+            .params = .{ .key = p.key },
+        };
+        const notif_body = try std.json.Stringify.valueAlloc(alloc, notification, .{});
+        return .{ .broadcast = .{ .event = "key", .body = notif_body } };
+    }
+
+    fn handleReportMouseButton(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(ReportMouseButtonParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        self.ctx.input.cursor_px = .{ .x = p.px.x, .y = p.px.y };
+        self.ctx.input.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
+        const changed = try self.ctx.input.setMouseButton(p.button, p.pressed);
+        if (!changed) return .{};
+
+        const Notification = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8 = "mouse_button",
+            params: struct { button: []const u8, pressed: bool, px: PxJson, cell: CellPosJson },
+        };
+        const notification: Notification = .{
+            .params = .{ .button = p.button, .pressed = p.pressed, .px = p.px, .cell = p.cell },
+        };
+        const notif_body = try std.json.Stringify.valueAlloc(alloc, notification, .{});
+        return .{ .broadcast = .{ .event = "mouse_button", .body = notif_body } };
+    }
+
+    /// Updates the authoritative cursor position only -- no broadcast.
+    /// A live `mouse_move` notification stream isn't built yet (not asked
+    /// for); this just keeps `get_input_state`'s cursor fields current.
+    fn handleReportMouseMove(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(ReportMouseMoveParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        self.ctx.input.cursor_px = .{ .x = p.px.x, .y = p.px.y };
+        self.ctx.input.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
+    }
+
+    fn handleSubscribe(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(SubscribeParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.subscriptions = Subscriptions.setFromEvents(parsed.value.events);
+
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: SubscribeResult,
+        };
+        const response: Response = .{ .id = id, .result = .{ .subscribed = parsed.value.events } };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
+    fn handleGetInputState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        var keys = std.ArrayList([]const u8).empty;
+        defer keys.deinit(alloc);
+        var kit = self.ctx.input.keys_down.keyIterator();
+        while (kit.next()) |k| try keys.append(alloc, k.*);
+
+        var buttons = std.ArrayList([]const u8).empty;
+        defer buttons.deinit(alloc);
+        var bit = self.ctx.input.mouse_buttons_down.keyIterator();
+        while (bit.next()) |k| try buttons.append(alloc, k.*);
+
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: InputStateResult,
+        };
+        const response: Response = .{
+            .id = id,
+            .result = .{
+                .keys_down = keys.items,
+                .mouse_buttons_down = buttons.items,
+                .cursor_px = .{ .x = self.ctx.input.cursor_px.x, .y = self.ctx.input.cursor_px.y },
+                .cursor_cell = .{ .row = self.ctx.input.cursor_cell.row, .col = self.ctx.input.cursor_cell.col },
+            },
         };
         return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }
