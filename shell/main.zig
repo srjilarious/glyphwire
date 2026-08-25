@@ -181,18 +181,18 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         // Drains any pending mouse click before (possibly) blocking below
         // -- non-blocking, so this never delays key handling. A left
         // click resolves the same way Enter-while-browsing does
-        // (`cdIfDirectoryAt`), regardless of whether anything's currently
-        // being typed: a click is a deliberate, targeted action, not
-        // something that should be gated on browse state the way
-        // keyboard Enter is. Worst-case latency for a click that arrives
-        // with no keyboard activity at all is bounded by the 500ms
-        // fallback timeout below, same as this loop's general
+        // (`activateSelectionAt`), regardless of whether anything's
+        // currently being typed: a click is a deliberate, targeted
+        // action, not something that should be gated on browse state the
+        // way keyboard Enter is. Worst-case latency for a click that
+        // arrives with no keyboard activity at all is bounded by the
+        // 500ms fallback timeout below, same as this loop's general
         // responsiveness tradeoff -- there's no single wait that blocks
         // on both key and mouse events at once.
         if (listener.pollMouseButtonEvent()) |mev| {
             defer alloc.free(mev.button);
             if (mev.pressed and std.mem.eql(u8, mev.button, "left")) {
-                try prompt.cdIfDirectoryAt(mev.cell.row, mev.cell.col);
+                try prompt.activateSelectionAt(mev.cell.row, mev.cell.col);
             }
         }
 
@@ -564,27 +564,31 @@ const Prompt = struct {
     }
 
     /// Enter while browsing: looks up whatever cell the browse cursor is
-    /// over and, if it's a directory, cds into it -- see
-    /// `cdIfDirectoryAt`'s doc comment for the actual logic, shared with
-    /// `runPrompt`'s mouse-click handling.
+    /// over and acts on it -- see `activateSelectionAt`'s doc comment for
+    /// the actual logic, shared with `runPrompt`'s mouse-click handling.
     fn browseEnter(self: *Prompt) !void {
         const bp = self.browse_pos orelse return;
-        try self.cdIfDirectoryAt(bp.row, bp.col);
+        try self.activateSelectionAt(bp.row, bp.col);
     }
 
-    /// Looks up `(row, col)`'s metadata (`get_metadata`) and, if it's
-    /// tagged with `mimetype: "directory"` (glyphwire-ls tags every entry
-    /// it draws this way -- see `iconForEntry`'s caller in ls/main.zig),
-    /// runs `cd <path>` as if it had been typed -- `setLine` both echoes
-    /// it and, via `setCursorAt`, ends any in-progress browsing before
-    /// `submitLine` runs it. A no-op for anything else (untagged, a file,
-    /// empty space) per the "don't guess" policy: nothing should happen
-    /// on a cell that isn't unambiguously a directory to cd into. Doesn't
-    /// handle a `path` containing a space -- this shell doesn't support
-    /// quoted arguments anywhere yet (see `runCommand`'s doc comment), so
-    /// neither does this. Shared by `browseEnter` (Enter while browsing)
-    /// and `runPrompt`'s left-click handling.
-    fn cdIfDirectoryAt(self: *Prompt, row: usize, col: usize) !void {
+    /// Looks up `(row, col)`'s metadata (`get_metadata`) and, depending on
+    /// its `mimetype` (glyphwire-ls tags every entry it draws this way --
+    /// see `iconForEntry`'s caller in ls/main.zig), runs a command as if
+    /// it had been typed: `cd <path>` for `"directory"`, `glyphwire-view
+    /// <path>` for `"image/png"`. `setLine` both echoes the command and,
+    /// via `setCursorAt`, ends any in-progress browsing before
+    /// `submitLine` runs it -- same path a real typed command takes, so
+    /// e.g. `glyphwire-view`'s own "wait for a keypress before exiting"
+    /// behavior (see view/main.zig) just works, blocking the prompt loop
+    /// exactly like it would for a command the user typed themselves. A
+    /// no-op for anything else (untagged, an unrecognized mimetype, empty
+    /// space) per the "don't guess" policy: nothing should happen on a
+    /// cell that isn't unambiguously actionable. Doesn't handle a `path`
+    /// containing a space -- this shell doesn't support quoted arguments
+    /// anywhere yet (see `runCommand`'s doc comment), so neither does
+    /// this. Shared by `browseEnter` (Enter while browsing) and
+    /// `runPrompt`'s left-click handling.
+    fn activateSelectionAt(self: *Prompt, row: usize, col: usize) !void {
         const alloc = self.client.alloc;
 
         const lookup = self.client.getMetadata(null, row, col) catch return;
@@ -597,10 +601,15 @@ const Prompt = struct {
 
         const mimetype = parsed.value.mimetype orelse return;
         const path = parsed.value.path orelse return;
-        if (!std.mem.eql(u8, mimetype, "directory")) return;
 
-        var line_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "cd {s}", .{path}) catch return;
+        var line_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+        const line = if (std.mem.eql(u8, mimetype, "directory"))
+            std.fmt.bufPrint(&line_buf, "cd {s}", .{path}) catch return
+        else if (std.mem.eql(u8, mimetype, "image/png"))
+            std.fmt.bufPrint(&line_buf, "glyphwire-view {s}", .{path}) catch return
+        else
+            return;
+
         try self.setLine(line);
         try self.submitLine();
     }
