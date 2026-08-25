@@ -220,13 +220,10 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(alloc);
 
-    // With no explicit command, default to the styled-text demo client.
-    // Resolved to an absolute path since shell/main.zig requires an
-    // explicit command and zig-out/bin isn't on $PATH in dev mode.
-    const shell_child_argv: []const []const u8 = if (args.len >= 2)
-        args[1..]
-    else
-        &.{try resolveSibling(alloc, io, "glyphwire-demo")};
+    // With no explicit command, default to glyphwire-shell's own
+    // interactive prompt (its no-args mode) rather than exec'ing into a
+    // specific child.
+    const shell_child_argv: []const []const u8 = if (args.len >= 2) args[1..] else &.{};
 
     const socket_path = try socketPath(alloc, init.environ_map);
 

@@ -62,16 +62,32 @@ pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
+    // errdefer, not a plain trailing statement: an early `try` failure
+    // below (setCursor/writeText) must still join this thread, or it's
+    // left running against this function's about-to-be-invalid stack and
+    // per-test allocator -- see inputListenerReceivesReportedInputTest's
+    // doc comment for what that corrupts. On the success path this is
+    // joined explicitly instead (see below), deliberately before the
+    // assertion, so errdefer never fires there.
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    errdefer thread.join();
 
+    // Same reasoning, and registered after thread's errdefer so (LIFO) it
+    // unwinds first: the server thread's acceptOne only returns once this
+    // connection closes.
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    errdefer client.deinit();
+
     try client.setCursor(1, 3);
     try client.writeText("x", null, null);
-    client.deinit();
 
-    // Only after the connection closes (and the server thread observes
-    // that and returns) is the write guaranteed to have been dispatched.
+    // Explicit sequencing, not just eventual cleanup: the assertion below
+    // reads ctx directly rather than over the wire, so it must wait for
+    // the connection to actually close and the server thread to finish
+    // dispatching everything first.
+    client.deinit();
     thread.join();
+
     try testz.expectEqualStr("x", ctx.root.cell(1, 3).grapheme());
 }
 
@@ -101,18 +117,30 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
 
     // Which of these two threads' acceptOne ends up serving the listener's
     // connection vs the reporter's is a race (both just call accept() on
-    // the same listener) -- so both client-side connections must be
-    // closed before joining *either* thread, never in between.
+    // the same listener). All four of these are `defer`, not plain
+    // trailing statements: this test's remaining assertions read only
+    // `listener`'s mutex-guarded local cache (not `ctx` directly), so
+    // unlike clientSetCursorThenWriteTextPositionsAtCursorTest there's no
+    // ordering requirement forcing an explicit mid-function close/join --
+    // but an early `try` failure below still must not leave any of these
+    // running against this function's about-to-be-invalid stack and
+    // per-test allocator. That's exactly what happened before this was
+    // fixed: an assertion failure here left thread1/thread2 orphaned,
+    // and they went on to corrupt an unrelated *later* test's memory
+    // (segfaults/hangs that didn't point back to their real cause).
     const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
     const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
 
     const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "mouse_button" });
+    defer listener.deinit();
     try testz.expectTrue(!listener.isKeyDown("a"));
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
     try reporter.reportKey("a", true);
     try reporter.reportMouseButton("left", true, .{ .x = 12, .y = 34 }, .{ .row = 1, .col = 2 });
-    reporter.deinit();
 
     // The listener's background thread updates asynchronously; poll
     // briefly rather than assuming it's already landed.
@@ -127,10 +155,6 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(listener.cursorCell().col, 2);
     try testz.expectEqual(listener.cursorPixel().x, 12);
     try testz.expectEqual(listener.cursorPixel().y, 34);
-
-    listener.deinit();
-    thread1.join();
-    thread2.join();
 }
 
 fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {

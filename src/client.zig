@@ -331,6 +331,13 @@ pub const InputStateSnapshot = struct {
 /// time, assuming the next frame off the wire is always that request's
 /// response). A program that both polls (e.g. `getCells`) and listens
 /// for input -- glyphwire-host -- holds one of each.
+/// One queued, discrete key press/release, in arrival order -- unlike
+/// `InputState`'s down-set (a live cache, good for "is X held right
+/// now"), this is what a line editor needs ("the user just pressed
+/// enter", exactly once). `key` is owned; pop it via `pollKeyEvent` and
+/// free it with the same allocator passed to `InputListener.connect`.
+pub const KeyEvent = struct { key: []const u8, pressed: bool };
+
 pub const InputListener = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
@@ -338,6 +345,7 @@ pub const InputListener = struct {
     listen_thread: std.Thread,
     mutex: std.Io.Mutex = .init,
     state: core.InputState,
+    key_events: std.ArrayList(KeyEvent) = .empty,
 
     /// Connects, subscribes to `events`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
@@ -370,6 +378,17 @@ pub const InputListener = struct {
         return self;
     }
 
+    /// Discovery per decisions.md, same as `Client.connectFromEnv`.
+    pub fn connectFromEnv(
+        io: std.Io,
+        alloc: std.mem.Allocator,
+        environ_map: *const std.process.Environ.Map,
+        events: []const []const u8,
+    ) !*InputListener {
+        const socket_path = environ_map.get("GLYPHWIRE_SOCK") orelse return error.NoSession;
+        return connect(io, alloc, socket_path, events);
+    }
+
     /// Shuts the connection down (unblocking the reader thread's current
     /// or next read with an error/EOF -- unlike a bare `close`, this is
     /// well-defined to do from a thread other than the one blocked in the
@@ -380,6 +399,8 @@ pub const InputListener = struct {
         self.listen_thread.join();
         self.stream.close(self.io);
         self.state.deinit();
+        for (self.key_events.items) |ev| self.alloc.free(ev.key);
+        self.key_events.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -387,6 +408,17 @@ pub const InputListener = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.state.isKeyDown(key);
+    }
+
+    /// Pops the oldest queued key event, if any (non-blocking -- callers
+    /// wanting to block should poll this in a short sleep loop, same as
+    /// this file's own tests do). Caller must free `.key` with the same
+    /// allocator passed to `connect`.
+    pub fn pollKeyEvent(self: *InputListener) ?KeyEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.key_events.items.len == 0) return null;
+        return self.key_events.orderedRemove(0);
     }
 
     pub fn isMouseButtonDown(self: *InputListener, button: []const u8) bool {
@@ -478,9 +510,14 @@ pub const InputListener = struct {
             });
             defer p.deinit();
 
+            const pressed = std.mem.eql(u8, parsed.value.method, "key_down");
+            const owned_key = try self.alloc.dupe(u8, p.value.key);
+            errdefer self.alloc.free(owned_key);
+
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            _ = try self.state.setKey(p.value.key, std.mem.eql(u8, parsed.value.method, "key_down"));
+            _ = try self.state.setKey(p.value.key, pressed);
+            try self.key_events.append(self.alloc, .{ .key = owned_key, .pressed = pressed });
         } else if (std.mem.eql(u8, parsed.value.method, "mouse_button")) {
             const P = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos };
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
