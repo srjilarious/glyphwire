@@ -93,6 +93,19 @@ pub const IconBg = struct {
     /// has anything left to cap.
     max_w: ?u32 = null,
     max_h: ?u32 = null,
+    /// Normalized (0..1) sub-rectangle of the source image this cell
+    /// samples, defaulting to the whole image. A plain `draw_icon` never
+    /// sets these -- a single icon is always one complete picture (this
+    /// struct's own doc comment). The one caller that does is
+    /// `Layer.drawBox`'s `BoxMode.stretch`: it gives each cell along a
+    /// multi-cell edge/fill run its own slice of one logical tile image,
+    /// so the whole run (e.g. a vertical gradient) reads as that one image
+    /// scaled continuously across the run rather than repeated per cell
+    /// (`BoxMode.tile`'s behavior, which leaves these at the default).
+    src_l: f32 = 0,
+    src_t: f32 = 0,
+    src_r: f32 = 1,
+    src_b: f32 = 1,
 };
 
 /// A cell's background: a flat color, a reference to a loaded image tile
@@ -169,6 +182,16 @@ pub const Cell = struct {
     /// `grapheme`/`style` outright rather than merging with whatever was
     /// there before.
     metadata_id: ?MetadataHandle = null,
+    /// An icon drawn *over* `style.bg` and `grapheme` rather than replacing
+    /// either -- unlike the ordinary `draw_icon` (`style.bg`'s `.icon`
+    /// variant), which is itself one of `Background`'s mutually exclusive
+    /// cases and so necessarily replaces whatever background was there.
+    /// Set by `Layer.drawIconOver` (`draw_icon`'s `foreground: true`),
+    /// for content that needs to sit on top of an already-drawn background
+    /// -- e.g. `glyphwire-notify`'s type icon over its `"dialog"` 9-patch
+    /// panel, which `draw_icon`'s normal background-replacing behavior
+    /// would otherwise punch a flat hole through.
+    fg_icon: ?IconBg = null,
 
     pub fn setGrapheme(self: *Cell, bytes: []const u8) void {
         std.debug.assert(bytes.len <= grapheme_inline_len);
@@ -336,9 +359,15 @@ pub const Layer = struct {
     /// advancing and wrapping it at the layer edge. Naive UTF-8 codepoint
     /// splitting for now, not real grapheme segmentation (UAX #29) — see
     /// decisions.md; swapping in the real thing later shouldn't change this
-    /// shape.
-    pub fn writeText(self: *Layer, text: []const u8, style: Style) !void {
-        return self.writeTextTagged(text, style, null);
+    /// shape. `bg` is `null` for "leave whatever background is already on
+    /// each cell touched" (`write_text`'s `transparent_bg: true`) rather
+    /// than resetting it to `default_style.bg` -- see that field's doc
+    /// comment on `WriteTextParams` for why this needed splitting `fg`/`bg`
+    /// out of a single `Style` value instead of just making `Style.bg`
+    /// itself optional (`Cell.style` still always holds a concrete,
+    /// resolved `Style` -- only the *write* can decline to touch it).
+    pub fn writeText(self: *Layer, text: []const u8, fg: Color, bg: ?Background) !void {
+        return self.writeTextTagged(text, fg, bg, null);
     }
 
     /// Same as `writeText`, but every cell the text touches also gets
@@ -347,16 +376,16 @@ pub const Layer = struct {
     /// itself since Zig has no default parameter values, matching this
     /// codebase's existing convention for additive options (`drawIcon`'s
     /// `IconDrawOpts`).
-    pub fn writeTextTagged(self: *Layer, text: []const u8, style: Style, metadata_id: ?MetadataHandle) !void {
+    pub fn writeTextTagged(self: *Layer, text: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) !void {
         const view = try std.unicode.Utf8View.init(text);
         var it = view.iterator();
         while (it.nextCodepointSlice()) |cp_bytes| {
-            self.putAtCursor(cp_bytes, style, metadata_id);
+            self.putAtCursor(cp_bytes, fg, bg, metadata_id);
         }
         self.revision += 1;
     }
 
-    fn putAtCursor(self: *Layer, bytes: []const u8, style: Style, metadata_id: ?MetadataHandle) void {
+    fn putAtCursor(self: *Layer, bytes: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {
         if (self.cursor.col >= self.width) {
             self.cursor.col = 0;
             self.cursor.row += 1;
@@ -365,7 +394,8 @@ pub const Layer = struct {
 
         var c = self.cell(self.cursor.row, self.cursor.col);
         c.setGrapheme(bytes);
-        c.style = style;
+        c.style.fg = fg;
+        if (bg) |b| c.style.bg = b;
         c.metadata_id = metadata_id;
         self.cursor.col += 1;
     }
@@ -493,6 +523,27 @@ pub const Layer = struct {
         self.revision += 1;
     }
 
+    /// Same as `drawIcon`, but sets `Cell.fg_icon` instead of `style.bg`
+    /// -- see that field's doc comment. Leaves `style.bg` (and whatever
+    /// background is already there, e.g. a `drawBox` fill) untouched, so
+    /// the host's render pass draws this icon over it rather than instead
+    /// of it.
+    pub fn drawIconOver(self: *Layer, handle: ImageHandle, row: usize, col: usize, opts: IconDrawOpts) void {
+        const resolved_row = self.resolveRow(row);
+        if (col >= self.width) return;
+        const c = self.cell(resolved_row, col);
+        c.fg_icon = .{
+            .handle = handle,
+            .scale = opts.scale,
+            .h_align = opts.h_align,
+            .v_align = opts.v_align,
+            .max_w = opts.max_w,
+            .max_h = opts.max_h,
+        };
+        c.metadata_id = opts.metadata_id;
+        self.revision += 1;
+    }
+
     /// `tag_metadata`: sets exactly one cell's `metadata_id`, touching
     /// nothing else -- unlike `writeTextTagged`/`drawIcon`, which tag as a
     /// side effect of also drawing something. For a client that needs to
@@ -531,6 +582,24 @@ pub const Layer = struct {
         br: ImageHandle,
     };
 
+    /// How `drawBox` composes its 9 tiles across a rectangle bigger than
+    /// 3x3 cells:
+    /// - `tile` (the original, still-default behavior): every cell gets
+    ///   one full copy of its role's tile, independently stretched to fill
+    ///   just that cell -- fine for a border/fill that's meant to repeat,
+    ///   but a repeated slice of a gradient image bands rather than fades.
+    /// - `stretch`: corners are still one full tile each (they're always
+    ///   exactly one cell), but each edge/fill role's *single* source
+    ///   image is treated as one continuous picture spanning the whole
+    ///   run it appears in -- `t`/`b` across every interior column,
+    ///   `l`/`r` across every interior row, `fill` across the whole
+    ///   interior rectangle -- so a cell partway along the run gets that
+    ///   fraction of the image (`IconBg.src_l/src_t/src_r/src_b`)
+    ///   stretched to fill it, reassembling into one smooth image (e.g. a
+    ///   top-to-bottom gradient) across however many cells the box turns
+    ///   out to span.
+    pub const BoxMode = enum { tile, stretch };
+
     /// Draws a `rows x cols` box anchored at `(row, col)` (clamped to the
     /// layer's own bounds) using `tiles`: each cell gets exactly one tile,
     /// chosen by whether it's on the box's top/bottom row and/or
@@ -547,6 +616,7 @@ pub const Layer = struct {
     pub fn drawBox(
         self: *Layer,
         tiles: BoxTiles,
+        mode: BoxMode,
         row: usize,
         col: usize,
         rows: usize,
@@ -560,15 +630,25 @@ pub const Layer = struct {
         const last_row = anchor_row + rows - 1;
         const last_col = col + cols - 1;
 
+        // Interior span sizes, for `.stretch`'s per-cell fractions below --
+        // only ever consulted by a branch reached when there's at least
+        // one interior row/col on that axis (see the branches' comments),
+        // so this never divides by 0 despite looking unguarded.
+        const interior_h: f32 = @floatFromInt(last_col -| col -| 1);
+        const interior_v: f32 = @floatFromInt(last_row -| anchor_row -| 1);
+
         var r = anchor_row;
         while (r < row_end) : (r += 1) {
             const is_top = r == anchor_row;
             const is_bottom = r == last_row;
+            const v_index: f32 = @floatFromInt(r - anchor_row -| 1);
 
             var c = col;
             while (c < col_end) : (c += 1) {
                 const is_left = c == col;
                 const is_right = c == last_col;
+                const h_index: f32 = @floatFromInt(c - col -| 1);
+                const is_corner = (is_top or is_bottom) and (is_left or is_right);
 
                 const tile = if (is_top and is_left)
                     tiles.tl
@@ -589,7 +669,29 @@ pub const Layer = struct {
                 else
                     tiles.fill;
 
-                self.cell(r, c).style.bg = .{ .icon = .{ .handle = tile, .scale = .stretch } };
+                // A corner is always exactly one cell, so it never gets
+                // sliced regardless of mode. `t`/`b` (reached only when
+                // not a corner, i.e. `interior_h >= 1`) slice horizontally;
+                // `l`/`r` (only reached when `interior_v >= 1`) slice
+                // vertically; `fill` (only reached when both are `>= 1`)
+                // slices both.
+                const src: [4]f32 = if (mode == .tile or is_corner)
+                    .{ 0, 0, 1, 1 }
+                else if (is_top or is_bottom)
+                    .{ h_index / interior_h, 0, (h_index + 1) / interior_h, 1 }
+                else if (is_left or is_right)
+                    .{ 0, v_index / interior_v, 1, (v_index + 1) / interior_v }
+                else
+                    .{ h_index / interior_h, v_index / interior_v, (h_index + 1) / interior_h, (v_index + 1) / interior_v };
+
+                self.cell(r, c).style.bg = .{ .icon = .{
+                    .handle = tile,
+                    .scale = .stretch,
+                    .src_l = src[0],
+                    .src_t = src[1],
+                    .src_r = src[2],
+                    .src_b = src[3],
+                } };
             }
         }
         self.revision += 1;
@@ -767,6 +869,32 @@ pub const default_box_manifest = [_]IconManifestEntry{
     .{ .name = "box-bl", .path = "assets/icons/box/bl.png" },
     .{ .name = "box-b", .path = "assets/icons/box/b.png" },
     .{ .name = "box-br", .path = "assets/icons/box/br.png" },
+};
+
+/// A second bundled box style, `"dialog"`, meant for `draw_box`'s
+/// `BoxMode.stretch` -- a light-blue-to-dark-blue vertical gradient with a
+/// white border, e.g. `glyphwire-notify`'s popup. Registered the same way
+/// as `default_box_manifest` (its own `"dialog-"`-prefixed pieces in the
+/// same flat `icons` catalog), just a different prefix.
+pub const default_dialog_manifest = [_]IconManifestEntry{
+    .{ .name = "dialog-tl", .path = "assets/icons/dialog/tl.png" },
+    .{ .name = "dialog-t", .path = "assets/icons/dialog/t.png" },
+    .{ .name = "dialog-tr", .path = "assets/icons/dialog/tr.png" },
+    .{ .name = "dialog-l", .path = "assets/icons/dialog/l.png" },
+    .{ .name = "dialog-fill", .path = "assets/icons/dialog/fill.png" },
+    .{ .name = "dialog-r", .path = "assets/icons/dialog/r.png" },
+    .{ .name = "dialog-bl", .path = "assets/icons/dialog/bl.png" },
+    .{ .name = "dialog-b", .path = "assets/icons/dialog/b.png" },
+    .{ .name = "dialog-br", .path = "assets/icons/dialog/br.png" },
+};
+
+/// `glyphwire-notify`'s per-type icons (`draw_icon`, drawn over the
+/// `"dialog"` background), namespaced under `"notify-"` so they don't
+/// collide with unrelated future icons named e.g. "info" or "error".
+pub const default_notify_icon_manifest = [_]IconManifestEntry{
+    .{ .name = "notify-info", .path = "assets/icons/notify/info.png" },
+    .{ .name = "notify-warn", .path = "assets/icons/notify/warn.png" },
+    .{ .name = "notify-error", .path = "assets/icons/notify/error.png" },
 };
 
 pub const Context = struct {

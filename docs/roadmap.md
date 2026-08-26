@@ -507,6 +507,100 @@ gone unnoticed.
   assertion occasionally ran too early. Fixed by polling for both
   conditions together instead of just the first.
 
+## `draw_box`'s `BoxMode.stretch`, and `glyphwire-notify`'s `"dialog"` style
+
+Phase 3.6's `draw_box` only ever repeated each of the 9 tiles once per
+cell (`BoxMode.tile`, now named that in hindsight) — fine for a border
+that's meant to repeat, but a *gradient* tile repeated per cell bands
+instead of blending, since every cell shows the same full image again
+from the top. Built to give `glyphwire-notify` an actual reason to exist
+beyond a plain single-color box: a Final-Fantasy-style dialog panel (light
+blue fading to dark blue, white border) that has to look like one
+continuous picture no matter how tall or wide the notification ends up
+being.
+
+- `core.Layer.BoxMode` (`tile` | `stretch`) is a new required param on
+  `Layer.drawBox`, threaded through from `draw_box`'s new optional `mode`
+  wire field (`"tile"`/`"stretch"`, default `"tile"` — same
+  `InvalidIconOption` error `scale`/`h_align`/`v_align` already get for a
+  bad value). `.tile` is bit-for-bit the old behavior.
+- `.stretch` still resolves the same 9 `"{style}-*"` tiles (no protocol
+  change to `style` itself) but treats each edge/fill role's *one* source
+  image as a single logical picture spanning its whole run: `t`/`b` across
+  every interior column, `l`/`r` across every interior row, `fill` across
+  the whole interior rectangle. A cell partway along a run gets that
+  fraction of the image, stretched to fill just that cell — four new
+  fields on `core.IconBg` (`src_l/src_t/src_r/src_b`, normalized 0..1,
+  defaulting to the whole image) carry the slice, and
+  `host/main.zig`'s `drawIconCell` was one line away from supporting it:
+  the UV rect it already passed to `eng.renderer.draw` was hardcoded to
+  `{0,0,1,1}`, now it's `icon.src_l/src_t/src_r/src_b`. Corners never
+  slice (always exactly one cell), so this never divides by an
+  empty interior — see `Layer.drawBox`'s doc comment for why that's safe
+  without an explicit guard.
+- `Client.drawBoxStyled`/`drawBoxOnStyled` (opts struct with `mode`) are
+  new, additive methods alongside the existing `drawBox`/`drawBoxOn` —
+  same reason every other `*Styled`/`*On` split exists: Zig has no default
+  parameter values, and `drawBox`/`drawBoxOn`'s existing call sites
+  (`demo/main.zig`, tests) shouldn't have to pass a mode they don't care
+  about.
+- Bundled a second box style, `"dialog"` (`core.default_dialog_manifest`,
+  `assets/icons/dialog/*.png`), procedurally generated (no art pipeline
+  in this repo) rather than hand-drawn: flat corners/left/right edges in
+  their end's color, and `t`/`b`/`fill` each holding the *full*
+  left-to-right gradient so `.stretch` can slice whatever fraction of it a
+  given column needs. Gradient runs left-to-right rather than top-to-
+  bottom because `glyphwire-notify`'s box is wide and short (3 rows, one
+  interior row) — a vertical gradient only had one row of cells to spread
+  across and read as barely more than a flat band; horizontal is the axis
+  that actually spans most of the notification.
+- `glyphwire-notify` now takes an optional leading type keyword
+  (`info`/`warn`/`error`/`warning`/`err`, case-insensitive, default
+  `info` when omitted or when there'd be no message left over —
+  `glyphwire-notify error` with nothing else is treated as the message
+  "error", not a typeless notification) and draws a matching icon
+  (`core.default_notify_icon_manifest`, `"notify-info"`/`"notify-warn"`/
+  `"notify-error"`), `.natural`-scaled and vertically centered up to 2
+  cell-heights tall (`glyphwire-ls`'s own icon treatment), to the left of
+  the text. Needed `Client.drawIconOn`/`drawIconOnStyled` (`draw_icon` on
+  a non-root layer) as new additive methods too — nothing previously
+  needed to draw an icon anywhere but root.
+
+**Found while actually looking at the result:** both the type icon and the
+message text were blanking the gradient behind them instead of sitting on
+top of it.
+
+- **The icon.** `draw_icon` sets `Cell.style.bg`, one of `Background`'s
+  mutually exclusive cases (color/image/icon) — so drawing the type icon
+  at a cell the `"dialog"` fill had just painted didn't overlay it, it
+  *replaced* it outright, leaving a flat icon-shaped hole (transparent
+  PNG background showing through to whatever's behind the layer) instead
+  of the gradient the icon was supposed to sit on top of. Fixed with a new
+  `Cell.fg_icon` field and `draw_icon`'s `foreground: true` (see
+  decisions.md's Icon section and `Layer.drawIconOver`) — a second,
+  independent icon slot the host's render pass draws after that cell's
+  background *and* grapheme, so it composites over both instead of
+  competing with either. `glyphwire-notify`'s type icon now sets it.
+- **The text.** `write_text` always replaces a cell's whole `style`
+  outright — deliberately, per `Cell.metadata_id`'s doc comment, the same
+  way `draw_icon` used to — so leaving `bg` omitted didn't mean "keep
+  the gradient," it meant "reset to `default_style.bg`" (opaque black),
+  punching a black bar through the panel under the message. First pass
+  papered over this with an explicit `bg` approximating the `"dialog"`
+  gradient's midpoint color — a real but unsatisfying approximation, and
+  wrong the moment the panel's colors or the text row's height changed.
+  Fixed properly instead: `write_text`'s new `transparent_bg: true` (see
+  decisions.md's Wire operation: styled text runs section) leaves each
+  touched cell's existing background alone entirely, the text-side
+  counterpart of `draw_icon`'s `foreground: true` above. Required
+  splitting `Layer.writeText`/`writeTextTagged`'s single `style: Style`
+  param into `fg: Color` + `bg: ?Background`, since `null` needed a place
+  to mean "don't touch it" — `Cell.style` itself is unchanged (still
+  always a concrete, resolved `Style`); only the write call gained the
+  option to leave half of it alone. `glyphwire-notify`'s message now uses
+  `Client.writeTextOnTransparent` and shows the actual gradient through
+  the text, not an approximation of it.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

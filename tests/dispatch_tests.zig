@@ -169,6 +169,39 @@ pub fn getCellsRequestReturnsGridSnapshotTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr("", blank.g);
 }
 
+/// `write_text`'s `transparent_bg: true` leaves a cell's existing
+/// background alone instead of resetting it to `default_style.bg` -- the
+/// wire-level counterpart of core_tests.zig's
+/// `writeTextNullBgLeavesExistingBackgroundUntouchedTest`.
+pub fn writeTextTransparentBgLeavesExistingBackgroundUntouchedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(32, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+    try ctx.registerIcon("panel-fill", 1);
+
+    // draw_icon defaults to the cursor, same starting point (0, 0) a fresh
+    // context's cursor already sits at -- write_text (cursor-implicit,
+    // no row/col params of its own) then lands on the very cell draw_icon
+    // just painted.
+    const bg_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"name":"panel-fill"}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, bg_message)).response == null);
+
+    const write_msg =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"h","transparent_bg":true}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, write_msg)).response == null);
+
+    try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.icon.handle, 1);
+}
+
 pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
@@ -260,7 +293,7 @@ pub fn insertCellsNotificationShiftsRowTest(io: std.Io, alloc: std.mem.Allocator
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
 
-    try ctx.root.writeText("hello", glyphwire.default_style);
+    try ctx.root.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
     ctx.root.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
 
     const message =
@@ -279,7 +312,7 @@ pub fn deleteCellsNotificationShiftsRowTest(io: std.Io, alloc: std.mem.Allocator
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
 
-    try ctx.root.writeText("hello", glyphwire.default_style);
+    try ctx.root.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
     ctx.root.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
 
     const message =
@@ -575,7 +608,7 @@ pub fn destroyMetadataThenGetMetadataReportsDanglingTest(io: std.Io, alloc: std.
     var d = dispatch.Dispatcher.init(&ctx);
 
     const id = try ctx.createMetadata("{}");
-    try ctx.root.writeTextTagged("a", glyphwire.default_style, id);
+    try ctx.root.writeTextTagged("a", glyphwire.default_style.fg, glyphwire.default_style.bg, id);
 
     var msg_buf: [128]u8 = undefined;
     const destroy_message = try std.fmt.bufPrint(&msg_buf, "{{\"jsonrpc\":\"2.0\",\"method\":\"destroy_metadata\",\"params\":{{\"id\":{d}}}}}", .{id});
@@ -646,7 +679,7 @@ pub fn getCellsIncludesMetadataIdTest(io: std.Io, alloc: std.mem.Allocator) !voi
     var d = dispatch.Dispatcher.init(&ctx);
 
     const id = try ctx.createMetadata("{}");
-    try ctx.root.writeTextTagged("a", glyphwire.default_style, id);
+    try ctx.root.writeTextTagged("a", glyphwire.default_style.fg, glyphwire.default_style.bg, id);
 
     const message =
         \\{"jsonrpc":"2.0","id":1,"method":"get_cells","params":{}}
@@ -697,6 +730,39 @@ pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !vo
         .color => {},
         .image, .icon => return error.TestUnexpectedResult,
     }
+}
+
+/// `foreground: true` lands in `fg_icon`, not `style.bg` -- and leaves an
+/// already-drawn background (as `draw_box` would leave) alone, unlike a
+/// plain `draw_icon` at the same cell.
+pub fn drawIconForegroundSetsFgIconOverExistingBgTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const bg_png = fakePngBytes(32, 32);
+    const bg_load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = bg_png.len }, &bg_png);
+    alloc.free(bg_load_resp);
+    try ctx.registerIcon("panel-fill", 1);
+
+    const bg_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"panel-fill"}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, bg_message)).response == null);
+
+    const fg_png = fakePngBytes(32, 32);
+    const fg_load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 2 }, .bytes = fg_png.len }, &fg_png);
+    alloc.free(fg_load_resp);
+    try ctx.registerIcon("badge", 2);
+
+    const fg_message =
+        \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"badge","foreground":true}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, fg_message)).response == null);
+
+    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.icon.handle, 1);
+    try testz.expectEqual(ctx.root.cell(2, 3).fg_icon.?.handle, 2);
 }
 
 /// Reproduces the actual glyphwire-ls regression end to end at the
@@ -848,6 +914,44 @@ pub fn drawBoxUnknownStyleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownIcon);
 }
 
+/// `mode: "stretch"` reaches `Layer.drawBox` -- role-correctness of the
+/// resulting per-cell UV slice is core_tests.zig's job
+/// (`layerDrawBoxStretchModeSlicesFillAcrossInteriorTest`); this just
+/// proves the wire string parses into `core.Layer.BoxMode` and flows
+/// through, unlike the default (omitted `mode`, "tile") which never
+/// slices.
+pub fn drawBoxStretchModeFlowsThroughTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try registerTestBoxStyle(&d, alloc, &ctx, "box");
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"draw_box","params":{"row":0,"col":0,"rows":6,"cols":6,"style":"box","mode":"stretch"}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, message)).response == null);
+
+    // The fill cell in the middle of a 4x4 interior gets a quarter-slice,
+    // not the full 0..1 a "tile"-mode (or omitted-mode) draw would give it.
+    const fill_mid = ctx.root.cell(2, 2).style.bg.icon;
+    try testz.expectEqual(fill_mid.src_l, 0.25);
+    try testz.expectEqual(fill_mid.src_r, 0.5);
+}
+
+pub fn drawBoxInvalidModeErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try registerTestBoxStyle(&d, alloc, &ctx, "box");
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"draw_box","params":{"row":0,"col":0,"rows":3,"cols":3,"style":"box","mode":"not-a-mode"}}
+    ;
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.InvalidIconOption);
+}
+
 pub fn getCellMetricsReturnsSessionDefaultsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
@@ -868,7 +972,7 @@ pub fn clearWithExplicitRegionOnlyTouchesThatRegionTest(io: std.Io, alloc: std.m
     var ctx = try glyphwire.Context.init(alloc, 10, 5, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
-    try ctx.root.writeText("hello", glyphwire.default_style);
+    try ctx.root.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     const message =
         \\{"jsonrpc":"2.0","method":"clear","params":{"row":0,"col":0,"rows":1,"cols":3}}
@@ -886,7 +990,7 @@ pub fn clearWithNoParamsWipesWholeLayerTest(io: std.Io, alloc: std.mem.Allocator
     var ctx = try glyphwire.Context.init(alloc, 10, 5, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
-    try ctx.root.writeText("hello", glyphwire.default_style);
+    try ctx.root.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     const message =
         \\{"jsonrpc":"2.0","method":"clear","params":{}}

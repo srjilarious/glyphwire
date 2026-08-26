@@ -45,6 +45,14 @@ const WriteTextParams = struct {
     bg: ?ColorJson = null,
     /// See `core.Cell.metadata_id`'s doc comment.
     metadata_id: ?core.MetadataHandle = null,
+    /// `false` (default): `bg` omitted means "reset to
+    /// `core.default_style.bg`" -- the original, still-default behavior.
+    /// `true`: leaves each touched cell's existing background untouched
+    /// instead (`bg` is ignored either way when this is set), for writing
+    /// text over a background drawn some other way -- e.g. `draw_box`'s
+    /// fill -- that needs to stay visible through it rather than being
+    /// approximated with a matching flat color.
+    transparent_bg: bool = false,
 };
 
 /// Params shared by `insert_cells`/`delete_cells` -- also cursor-implicit
@@ -212,6 +220,12 @@ const DrawIconParams = struct {
     max_h: ?u32 = null,
     /// See `core.Cell.metadata_id`'s doc comment.
     metadata_id: ?core.MetadataHandle = null,
+    /// `false` (default): draws into `Cell.style.bg`, replacing whatever
+    /// background was there, same as always. `true`: draws into
+    /// `Cell.fg_icon` instead -- see that field's doc comment -- so it
+    /// composites over an existing background (e.g. a `draw_box` fill)
+    /// rather than replacing it.
+    foreground: bool = false,
 };
 
 /// Parses `draw_icon`'s `scale`/`h_align`/`v_align` wire strings against
@@ -228,6 +242,8 @@ const DrawBoxParams = struct {
     rows: usize,
     cols: usize,
     style: []const u8,
+    /// "tile" (default) or "stretch" -- see `core.Layer.BoxMode`.
+    mode: ?[]const u8 = null,
 };
 
 /// `rows`/`cols` are optional: omitted means "the rest of the layer from
@@ -486,12 +502,15 @@ pub const Dispatcher = struct {
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
 
-        const style: core.Style = .{
-            .fg = if (p.fg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else core.default_style.fg,
-            .bg = if (p.bg) |c| .{ .color = .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } } else core.default_style.bg,
-        };
+        const fg: core.Color = if (p.fg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else core.default_style.fg;
+        const bg: ?core.Background = if (p.transparent_bg)
+            null
+        else if (p.bg) |c|
+            .{ .color = .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } }
+        else
+            core.default_style.bg;
         const metadata_id = try self.resolveMetadata(p.metadata_id);
-        try layer.writeTextTagged(p.text, style, metadata_id);
+        try layer.writeTextTagged(p.text, fg, bg, metadata_id);
     }
 
     fn handleInsertCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
@@ -906,14 +925,19 @@ pub const Dispatcher = struct {
         const icon_handle = self.ctx.iconHandle(p.name) orelse return DispatchError.UnknownIcon;
         const anchor = resolveAnchor(layer, p.row, p.col);
         const metadata_id = try self.resolveMetadata(p.metadata_id);
-        layer.drawIcon(icon_handle, anchor.row, anchor.col, .{
+        const opts: core.Layer.IconDrawOpts = .{
             .scale = try parseIconOption(core.IconScale, p.scale, .fit),
             .h_align = try parseIconOption(core.HAlign, p.h_align, .center),
             .v_align = try parseIconOption(core.VAlign, p.v_align, .center),
             .max_w = p.max_w,
             .max_h = p.max_h,
             .metadata_id = metadata_id,
-        });
+        };
+        if (p.foreground) {
+            layer.drawIconOver(icon_handle, anchor.row, anchor.col, opts);
+        } else {
+            layer.drawIcon(icon_handle, anchor.row, anchor.col, opts);
+        }
     }
 
     /// `tag_metadata`: sets exactly one cell's `metadata_id`, nothing else
@@ -937,6 +961,9 @@ pub const Dispatcher = struct {
     /// `Layer.drawBox`. Errors (missing name, or a registered name that
     /// somehow isn't in `ctx.images`) abort before drawing anything,
     /// rather than leaving a box half-drawn with some pieces missing.
+    /// `mode` ("tile"/"stretch", default "tile") selects `core.Layer.BoxMode`
+    /// -- reuses the same `InvalidIconOption` error `scale`/`h_align`/
+    /// `v_align` already get for a bad value.
     fn handleDrawBox(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
         const parsed = try std.json.parseFromValue(DrawBoxParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
@@ -965,8 +992,9 @@ pub const Dispatcher = struct {
             .b = pieces[7],
             .br = pieces[8],
         };
+        const mode = try parseIconOption(core.Layer.BoxMode, p.mode, .tile);
         const anchor = resolveAnchor(layer, p.row, p.col);
-        layer.drawBox(tiles, anchor.row, anchor.col, p.rows, p.cols);
+        layer.drawBox(tiles, mode, anchor.row, anchor.col, p.rows, p.cols);
     }
 
     /// `clear`: resets a region of the given layer's (default: root's)

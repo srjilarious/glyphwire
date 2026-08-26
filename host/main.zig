@@ -249,7 +249,7 @@ pub const App = struct {
         eng.renderer.draw(
             tex,
             pixzig.RectF{ .l = dest_x, .t = dest_y, .r = dest_x + dest_w, .b = dest_y + dest_h },
-            pixzig.RectF{ .l = 0, .t = 0, .r = 1, .b = 1 },
+            pixzig.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b },
         );
     }
 
@@ -454,6 +454,18 @@ pub const App = struct {
                 if (g.len > 0) {
                     _ = eng.renderer.drawStringColored(g, pos, pixzig.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
                 }
+
+                // `fg_icon` (`draw_icon`'s `foreground: true` -- see
+                // `core.Cell.fg_icon`'s doc comment) draws over whatever
+                // this cell's own background/glyph just drew, same
+                // tile/natural-defer split as `style.bg`'s `.icon` above.
+                if (c.fg_icon) |icon| {
+                    if (icon.scale == .natural) {
+                        self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos }) catch {};
+                    } else {
+                        self.drawIconCell(eng, icon, pos);
+                    }
+                }
             }
         }
 
@@ -590,6 +602,8 @@ pub fn main(init: std.process.Init) !void {
     ctx.cell_px_h = @intCast(cell_h);
     loadIconManifest(io, alloc, &ctx, &glyphwire.default_icon_manifest);
     loadIconManifest(io, alloc, &ctx, &glyphwire.default_box_manifest);
+    loadIconManifest(io, alloc, &ctx, &glyphwire.default_dialog_manifest);
+    loadIconManifest(io, alloc, &ctx, &glyphwire.default_notify_icon_manifest);
 
     // `.listen()` inside `bind` is synchronous -- the socket is already
     // accept-ready (kernel-queued, even before `serveForever`'s thread

@@ -7,7 +7,7 @@ pub fn writeTextAdvancesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
-    try layer.writeText("hello", glyphwire.default_style);
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
     try testz.expectEqualStr("e", layer.cell(0, 1).grapheme());
@@ -28,7 +28,7 @@ pub fn writeTextAppliesStyleTest(io: std.Io, alloc: std.mem.Allocator) !void {
         .fg = .{ .r = 10, .g = 20, .b = 30 },
         .bg = .{ .color = .{ .r = 1, .g = 2, .b = 3 } },
     };
-    try layer.writeText("h", style);
+    try layer.writeText("h", style.fg, style.bg);
 
     const c = layer.cell(0, 0);
     try testz.expectEqual(c.style.fg.r, 10);
@@ -44,12 +44,31 @@ pub fn writeTextAppliesStyleTest(io: std.Io, alloc: std.mem.Allocator) !void {
     }
 }
 
+pub fn writeTextNullBgLeavesExistingBackgroundUntouchedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // As `drawBox`'s fill would leave a cell -- `write_text`'s
+    // `transparent_bg: true` (a `null` `bg` at this layer) has to survive
+    // it, not reset it to `default_style.bg` the way omitting `bg`
+    // otherwise does (`writeTextAppliesStyleTest`'s sibling case).
+    layer.drawIcon(9, 0, 0, .{});
+
+    try layer.writeText("h", .{ .r = 10, .g = 20, .b = 30 }, null);
+
+    const c = layer.cell(0, 0);
+    try testz.expectEqualStr("h", c.grapheme());
+    try testz.expectEqual(c.style.fg.r, 10);
+    try testz.expectEqual(c.style.bg.icon.handle, 9);
+}
+
 pub fn writeTextWrapsAtLayerEdgeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 3, 2, 0);
     defer layer.deinit();
 
-    try layer.writeText("hello", glyphwire.default_style);
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
     try testz.expectEqualStr("e", layer.cell(0, 1).grapheme());
@@ -66,7 +85,7 @@ pub fn getSetCursorPropertyTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
-    try layer.writeText("hello", glyphwire.default_style);
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     const before = layer.getProperty(.cursor);
     try testz.expectEqual(before.cursor.row, 0);
@@ -89,7 +108,7 @@ pub fn setCursorPastBottomScrollsLikeWritingPastItWouldTest(io: std.Io, alloc: s
     var layer = try glyphwire.Layer.init(alloc, 5, 3, 10);
     defer layer.deinit();
 
-    try layer.writeText("a", glyphwire.default_style);
+    try layer.writeText("a", glyphwire.default_style.fg, glyphwire.default_style.bg);
     try testz.expectEqual(layer.cursor.row, 0);
 
     // Row 3 is one past the last valid row (0..2) -- should scroll once
@@ -138,7 +157,7 @@ pub fn scrollingRetainsScrolledOffRowsAsHistoryTest(io: std.Io, alloc: std.mem.A
     var layer = try glyphwire.Layer.init(alloc, 3, 2, 2);
     defer layer.deinit();
 
-    try layer.writeText("abcdefghij", glyphwire.default_style);
+    try layer.writeText("abcdefghij", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     // Viewport now shows the last two rows written.
     try testz.expectEqualStr("g", layer.cell(0, 0).grapheme());
@@ -193,7 +212,7 @@ pub fn scrollingWithNoScrollbackKeepsNoHistoryTest(io: std.Io, alloc: std.mem.Al
     var layer = try glyphwire.Layer.init(alloc, 3, 2, 0);
     defer layer.deinit();
 
-    try layer.writeText("abcdefghij", glyphwire.default_style);
+    try layer.writeText("abcdefghij", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     try testz.expectEqualStr("g", layer.cell(0, 0).grapheme());
     try testz.expectEqualStr("j", layer.cell(1, 0).grapheme());
@@ -205,7 +224,7 @@ pub fn insertCellsShiftsRowRightTest(io: std.Io, alloc: std.mem.Allocator) !void
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
     defer layer.deinit();
 
-    try layer.writeText("hello", glyphwire.default_style);
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
     layer.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
 
     layer.insertCells(1);
@@ -228,7 +247,7 @@ pub fn insertCellsDiscardsCellsPastRowEdgeTest(io: std.Io, alloc: std.mem.Alloca
     var layer = try glyphwire.Layer.init(alloc, 5, 2, 0);
     defer layer.deinit();
 
-    try layer.writeText("abcde", glyphwire.default_style);
+    try layer.writeText("abcde", glyphwire.default_style.fg, glyphwire.default_style.bg);
     layer.setProperty(.{ .cursor = .{ .row = 0, .col = 0 } });
 
     layer.insertCells(2);
@@ -246,7 +265,7 @@ pub fn deleteCellsShiftsRowLeftAndBlanksTailTest(io: std.Io, alloc: std.mem.Allo
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
     defer layer.deinit();
 
-    try layer.writeText("hello", glyphwire.default_style);
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
     layer.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
 
     layer.deleteCells(1);
@@ -267,7 +286,7 @@ pub fn insertAndDeleteCellsAreNoOpsPastRowEdgeTest(io: std.Io, alloc: std.mem.Al
     var layer = try glyphwire.Layer.init(alloc, 5, 2, 0);
     defer layer.deinit();
 
-    try layer.writeText("abcde", glyphwire.default_style);
+    try layer.writeText("abcde", glyphwire.default_style.fg, glyphwire.default_style.bg);
     const revision_before = layer.revision;
     // Cursor is now at (0, 5) -- one past the row's last column.
 
@@ -396,6 +415,31 @@ pub fn layerDrawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator
     }
 }
 
+pub fn layerDrawIconOverSetsFgIconWithoutTouchingBgTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // An existing background (as `drawBox`'s fill would leave) survives a
+    // `drawIconOver` call on top of it -- the whole point of `fg_icon`
+    // over `draw_icon`'s ordinary background-replacing behavior.
+    layer.drawIcon(3, 1, 2, .{});
+    layer.drawIconOver(7, 1, 2, .{});
+
+    try testz.expectEqual(layer.cell(1, 2).style.bg.icon.handle, 3);
+    try testz.expectEqual(layer.cell(1, 2).fg_icon.?.handle, 7);
+}
+
+pub fn layerDrawIconOverPastEdgeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    layer.drawIconOver(7, 1, 10, .{});
+
+    try testz.expectTrue(layer.cell(1, 4).fg_icon == null);
+}
+
 pub fn layerDrawIconDefaultsToFitAndCenterTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
@@ -471,7 +515,7 @@ pub fn layerTagMetadataOverwritesExistingTagTest(io: std.Io, alloc: std.mem.Allo
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    try layer.writeTextTagged("a", glyphwire.default_style, 1);
+    try layer.writeTextTagged("a", glyphwire.default_style.fg, glyphwire.default_style.bg, 1);
     layer.tagMetadata(0, 0, 2);
 
     try testz.expectEqual(layer.cell(0, 0).metadata_id.?, 2);
@@ -484,7 +528,7 @@ pub fn layerWriteTextTaggedMarksEveryCellTest(io: std.Io, alloc: std.mem.Allocat
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
     defer layer.deinit();
 
-    try layer.writeTextTagged("abc", glyphwire.default_style, 7);
+    try layer.writeTextTagged("abc", glyphwire.default_style.fg, glyphwire.default_style.bg, 7);
 
     try testz.expectEqual(layer.cell(0, 0).metadata_id.?, 7);
     try testz.expectEqual(layer.cell(0, 1).metadata_id.?, 7);
@@ -498,7 +542,7 @@ pub fn layerWriteTextLeavesMetadataUntaggedTest(io: std.Io, alloc: std.mem.Alloc
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
     defer layer.deinit();
 
-    try layer.writeText("abc", glyphwire.default_style);
+    try layer.writeText("abc", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     try testz.expectTrue(layer.cell(0, 0).metadata_id == null);
 }
@@ -615,7 +659,7 @@ pub fn layerDrawBoxPlacesEachPieceByRoleTest(io: std.Io, alloc: std.mem.Allocato
     defer layer.deinit();
 
     // A 4x5 box anchored at (1, 1): rows 1..4, cols 1..5.
-    layer.drawBox(testBoxTiles(), 1, 1, 4, 5);
+    layer.drawBox(testBoxTiles(), .tile, 1, 1, 4, 5);
 
     try testz.expectEqual(layer.cell(1, 1).style.bg.icon.handle, 1); // tl
     try testz.expectEqual(layer.cell(1, 3).style.bg.icon.handle, 2); // t (interior top col)
@@ -640,6 +684,51 @@ pub fn layerDrawBoxPlacesEachPieceByRoleTest(io: std.Io, alloc: std.mem.Allocato
     }
 }
 
+pub fn layerDrawBoxStretchModeSlicesFillAcrossInteriorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 10, 0);
+    defer layer.deinit();
+
+    // A 6x6 box anchored at (0, 0): a 4x4 interior (rows 1..4, cols 1..4)
+    // -- quarter fractions land on exact f32 values, so this can compare
+    // with plain equality instead of an epsilon.
+    layer.drawBox(testBoxTiles(), .stretch, 0, 0, 6, 6);
+
+    // Corners never slice, `.stretch` or not.
+    const tl = layer.cell(0, 0).style.bg.icon;
+    try testz.expectEqual(tl.src_l, 0);
+    try testz.expectEqual(tl.src_t, 0);
+    try testz.expectEqual(tl.src_r, 1);
+    try testz.expectEqual(tl.src_b, 1);
+
+    // Fill's interior is 4x4 (rows 1..4, cols 1..4) -- cell (2, 2) is
+    // index (1, 1) of 4 on both axes, so it gets the second quarter of
+    // the source image both horizontally and vertically.
+    const fill_mid = layer.cell(2, 2).style.bg.icon;
+    try testz.expectEqual(fill_mid.src_l, 0.25);
+    try testz.expectEqual(fill_mid.src_r, 0.5);
+    try testz.expectEqual(fill_mid.src_t, 0.25);
+    try testz.expectEqual(fill_mid.src_b, 0.5);
+
+    // Top edge only slices horizontally -- full height regardless of
+    // position along the run. Cell (0, 1) is the first interior column,
+    // index 0 of 4.
+    const top_first = layer.cell(0, 1).style.bg.icon;
+    try testz.expectEqual(top_first.src_l, 0);
+    try testz.expectEqual(top_first.src_r, 0.25);
+    try testz.expectEqual(top_first.src_t, 0);
+    try testz.expectEqual(top_first.src_b, 1);
+
+    // Left edge only slices vertically -- full width regardless of
+    // position along the run. Cell (4, 0) is the last interior row,
+    // index 3 of 4.
+    const left_last = layer.cell(4, 0).style.bg.icon;
+    try testz.expectEqual(left_last.src_l, 0);
+    try testz.expectEqual(left_last.src_r, 1);
+    try testz.expectEqual(left_last.src_t, 0.75);
+    try testz.expectEqual(left_last.src_b, 1);
+}
+
 pub fn layerDrawBoxClipsToLayerBoundsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
@@ -647,7 +736,7 @@ pub fn layerDrawBoxClipsToLayerBoundsTest(io: std.Io, alloc: std.mem.Allocator) 
 
     // A box requesting more rows/cols than the layer has past its anchor
     // shouldn't panic or write out of bounds.
-    layer.drawBox(testBoxTiles(), 3, 3, 10, 10);
+    layer.drawBox(testBoxTiles(), .tile, 3, 3, 10, 10);
 
     try testz.expectEqual(layer.cell(3, 3).style.bg.icon.handle, 1); // tl, still placed
     try testz.expectEqual(layer.cell(4, 4).style.bg.icon.handle, 5); // clamped corner lands as fill, not br
@@ -659,8 +748,8 @@ pub fn layerDrawBoxZeroSizeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !voi
     defer layer.deinit();
     const revision_before = layer.revision;
 
-    layer.drawBox(testBoxTiles(), 0, 0, 0, 5);
-    layer.drawBox(testBoxTiles(), 0, 0, 5, 0);
+    layer.drawBox(testBoxTiles(), .tile, 0, 0, 0, 5);
+    layer.drawBox(testBoxTiles(), .tile, 0, 0, 5, 0);
 
     try testz.expectEqual(layer.revision, revision_before);
     switch (layer.cell(0, 0).style.bg) {
@@ -673,8 +762,8 @@ pub fn layerClearResetsRegionToBlankTest(io: std.Io, alloc: std.mem.Allocator) !
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
-    try layer.writeText("hello", glyphwire.default_style);
-    layer.drawBox(testBoxTiles(), 1, 1, 3, 3);
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.drawBox(testBoxTiles(), .tile, 1, 1, 3, 3);
 
     layer.clear(0, 0, 1, 5);
 
@@ -687,8 +776,8 @@ pub fn layerClearWholeLayerViaFullSpanTest(io: std.Io, alloc: std.mem.Allocator)
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
-    try layer.writeText("hello", glyphwire.default_style);
-    layer.drawBox(testBoxTiles(), 2, 2, 3, 3);
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.drawBox(testBoxTiles(), .tile, 2, 2, 3, 3);
 
     layer.clear(0, 0, layer.height, layer.width);
 

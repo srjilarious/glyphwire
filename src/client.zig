@@ -97,6 +97,22 @@ pub const Client = struct {
         });
     }
 
+    /// `write_text(text, fg?, transparent_bg: true)` -- like `writeText`,
+    /// but leaves whatever background is already on each cell touched
+    /// untouched instead of resetting it to `core.default_style.bg` -- for
+    /// writing text over a background drawn some other way (e.g.
+    /// `drawBoxStyled`'s fill) that needs to stay visible through it,
+    /// rather than approximating it with a matching flat color. A separate
+    /// method rather than a third `?bool` param on `writeText` since Zig
+    /// has no default parameter values.
+    pub fn writeTextTransparent(self: *Client, text: []const u8, fg: ?core.Color) !void {
+        try self.notify("write_text", .{
+            .text = text,
+            .fg = colorToJson(fg),
+            .transparent_bg = true,
+        });
+    }
+
     /// `set_property(layer, "cursor", {row, col})` -- a notification.
     pub fn setCursor(self: *Client, row: usize, col: usize) !void {
         try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
@@ -270,6 +286,11 @@ pub const Client = struct {
         max_h: ?u32 = null,
         /// See `core.Cell.metadata_id`'s doc comment.
         metadata_id: ?core.MetadataHandle = null,
+        /// `true` draws into `core.Cell.fg_icon` instead of `style.bg` --
+        /// see that field's doc comment. For content meant to sit over an
+        /// already-drawn background (e.g. a `drawBoxStyled` fill) rather
+        /// than replace it.
+        foreground: bool = false,
     };
 
     /// `draw_icon(row?, col?, name, scale?, h_align?, v_align?, max_w?,
@@ -292,6 +313,32 @@ pub const Client = struct {
             .max_w = opts.max_w,
             .max_h = opts.max_h,
             .metadata_id = opts.metadata_id,
+            .foreground = opts.foreground,
+        });
+    }
+
+    /// `draw_icon(layer, row?, col?, name)` on a non-root layer -- see
+    /// `drawIcon` for the root-layer version.
+    pub fn drawIconOn(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8) !void {
+        try self.notify("draw_icon", .{ .layer = layer, .row = row, .col = col, .name = name });
+    }
+
+    /// `draw_icon(layer, row?, col?, name, scale?, h_align?, v_align?,
+    /// max_w?, max_h?, metadata_id?)` on a non-root layer -- see
+    /// `drawIconStyled` for the root-layer version.
+    pub fn drawIconOnStyled(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
+        try self.notify("draw_icon", .{
+            .layer = layer,
+            .row = row,
+            .col = col,
+            .name = name,
+            .scale = @tagName(opts.scale),
+            .h_align = @tagName(opts.h_align),
+            .v_align = @tagName(opts.v_align),
+            .max_w = opts.max_w,
+            .max_h = opts.max_h,
+            .metadata_id = opts.metadata_id,
+            .foreground = opts.foreground,
         });
     }
 
@@ -315,6 +362,30 @@ pub const Client = struct {
     /// omitted.
     pub fn drawBox(self: *Client, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
         try self.notify("draw_box", .{ .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
+    }
+
+    /// `mode` for `drawBoxStyled`/`drawBoxOnStyled` -- see
+    /// `core.Layer.BoxMode`. Defaults match `drawBox`'s behavior.
+    pub const DrawBoxOpts = struct {
+        mode: core.Layer.BoxMode = .tile,
+    };
+
+    /// `draw_box(row?, col?, rows, cols, style, mode)` -- like `drawBox`,
+    /// but lets the 9 pieces be composed with `opts.mode = .stretch`
+    /// (each edge/fill role's single tile stretched continuously across
+    /// however many cells it spans, rather than repeated per cell) instead
+    /// of the default `.tile`. A separate method rather than an extra
+    /// param on `drawBox` itself since Zig has no default parameter
+    /// values.
+    pub fn drawBoxStyled(self: *Client, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
+        try self.notify("draw_box", .{
+            .row = row,
+            .col = col,
+            .rows = rows,
+            .cols = cols,
+            .style = style,
+            .mode = @tagName(opts.mode),
+        });
     }
 
     /// `clear(row?, col?, rows?, cols?)` -- a notification. Resets cells in
@@ -374,10 +445,35 @@ pub const Client = struct {
         });
     }
 
+    /// `write_text(layer, text, fg?, transparent_bg: true)` on a non-root
+    /// layer -- see `writeTextTransparent` for the root-layer version.
+    pub fn writeTextOnTransparent(self: *Client, layer: core.LayerHandle, text: []const u8, fg: ?core.Color) !void {
+        try self.notify("write_text", .{
+            .layer = layer,
+            .text = text,
+            .fg = colorToJson(fg),
+            .transparent_bg = true,
+        });
+    }
+
     /// `draw_box(layer, row?, col?, rows, cols, style)` on a non-root
     /// layer -- see `drawBox` for the root-layer version.
     pub fn drawBoxOn(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
         try self.notify("draw_box", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
+    }
+
+    /// `draw_box(layer, row?, col?, rows, cols, style, mode)` on a
+    /// non-root layer -- see `drawBoxStyled` for the root-layer version.
+    pub fn drawBoxOnStyled(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
+        try self.notify("draw_box", .{
+            .layer = layer,
+            .row = row,
+            .col = col,
+            .rows = rows,
+            .cols = cols,
+            .style = style,
+            .mode = @tagName(opts.mode),
+        });
     }
 
     /// `get_cell_metrics` -- a request returning the session's fixed cell

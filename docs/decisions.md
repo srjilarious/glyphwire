@@ -282,6 +282,21 @@ surface.
   without any client needing to know or reload anything) and a way to
   query the catalog's contents over the wire (a client currently just has
   to know the names from `default_icon_manifest`).
+- **`foreground: true` composites over the background instead of
+  replacing it.** An ordinary `draw_icon` sets `Cell.style.bg`'s `.icon`
+  variant — one of `Background`'s mutually exclusive cases, so it
+  necessarily replaces whatever background (color/image/icon) was already
+  on that cell, the same "overwrite outright" behavior `write_text`
+  already has. That's the right default (an icon usually *is* the cell's
+  content), but breaks down the moment something else already drew a
+  meaningful background there on purpose — e.g. `glyphwire-notify`'s type
+  icon over its `"dialog"` panel, where a plain `draw_icon` would punch a
+  flat, icon-shaped hole through the gradient instead of sitting on top of
+  it. `foreground: true` draws into a new, separate `Cell.fg_icon` field
+  instead, left untouched by everything else that writes `style.bg` —
+  the host's render pass draws it after that cell's background *and*
+  grapheme, so it's always on top, with the same tile-vs-defer split
+  `style.bg`'s `.icon` case already uses for `.natural`'s overflow.
 
 **Box**
 - `draw_box` shares `Background.icon` with `draw_icon` (each of the 9
@@ -313,6 +328,23 @@ surface.
   the border eating a visible margin on all sides. This is what makes a
   box usable as a tight background/panel frame, not just a standalone
   decorative box.
+- **`BoxMode.stretch`: one image spans a whole run, not one copy per
+  cell.** The tiling above (now `BoxMode.tile`, still the default) always
+  draws one full copy of a role's tile into each cell it appears in —
+  right for a border meant to repeat, wrong for e.g. a gradient fill,
+  which just bands (light-dark-light-dark...) instead of blending.
+  `"stretch"` keeps the same 9-name resolution but treats each edge/fill
+  role's *one* source image as a single logical picture spanning its
+  whole run (`t`/`b` horizontally across the interior, `l`/`r` vertically,
+  `fill` across both), giving each cell along that run the matching
+  fraction of the image (`IconBg.src_l/src_t/src_r/src_b`) stretched to
+  fill it — reassembling into one continuous image no matter how many
+  cells the box ends up spanning. Corners are excluded (always exactly
+  one cell, so never sliced) rather than special-cased away from a
+  division that would otherwise be by zero. Motivated by
+  `glyphwire-notify`'s `"dialog"` style, a Final-Fantasy-esque gradient
+  panel that has to look right at any notification width/height, not just
+  the one size a hand-tiled asset happened to be tuned for.
 
 **Metadata**
 - Motivating use case: tagging a cell (or a whole run of them, e.g. every
@@ -622,6 +654,27 @@ typed," so there's no obvious single cursor position to land on
 afterward the way there is after writing N characters) — a caller
 chaining a draw with more content on the same row still positions
 explicitly for what comes next.
+
+**Decision:** `write_text` always replaces a cell's whole style outright
+(fg *and* bg together, per-cell — same "overwrite outright" behavior
+`draw_icon` used to have before `foreground: true`, see the Icon section)
+— matching how a real terminal's plain `print` resets a cell's background
+rather than layering text onto whatever was drawn there before, and
+simpler than merging styles cell by cell. Omitting `bg` means "reset to
+`core.default_style.bg`," not "leave it alone." **`transparent_bg: true`
+is the explicit opt-out**, added once `glyphwire-notify`'s message needed
+to sit on top of its `"dialog"` panel's gradient (`draw_box`'s
+`BoxMode.stretch`): it leaves each touched cell's existing background
+untouched instead, so text can be written over a background drawn some
+other way without erasing it — deliberately a new, additive flag rather
+than redefining what an omitted `bg` means, since the reset-on-omit
+behavior is relied on elsewhere (e.g. `glyphwire-shell`'s prompt,
+`glyphwire-ls`'s columns) and shouldn't silently change underneath them.
+`Layer.writeText`/`writeTextTagged` reflect this at the `core` level too:
+`bg` is `?Background`, split out from `fg: Color` rather than bundled
+into one `Style` value, precisely so `null` can mean "don't touch it" —
+`Cell.style` itself still always holds a concrete, resolved `Style`; only
+the *write* can decline to touch its `bg` half.
 
 **Decision:** cursor position, layer position, clip rect, size, and
 scroll offset are all exposed through one generic mechanism —
