@@ -14,39 +14,19 @@ fn fakePngBytes(width: u32, height: u32) [24]u8 {
     return bytes;
 }
 
-/// Loads a distinct fake image per piece, in `pieces` order, and registers
-/// each as `"{style}-{piece}"` directly on `ctx` -- mirrors
-/// dispatch_tests.zig's `registerTestBoxStyle`, but goes through a real
-/// `Client.loadImage` call (over the same socket the table itself draws
-/// through) since this file drives everything through `Client`, not the
-/// `Dispatcher` directly. Handles come back 1..9 in `pieces` order, since
-/// this is the only connection loading images on a fresh `Context` --
-/// callers rely on that fixed numbering instead of re-deriving it.
-const pieces = [_][]const u8{ "tl", "t", "tr", "l", "fill", "r", "bl", "b", "br" };
-
-fn registerTestBoxStyle(client: *glyphwire.Client, ctx: *glyphwire.Context, style: []const u8) !void {
-    for (pieces) |piece| {
-        const png = fakePngBytes(12, 12);
-        const handle = try client.loadImage("png", &png);
-
-        var name_buf: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "{s}-{s}", .{ style, piece });
-        try ctx.registerIcon(name, handle);
-    }
-}
-
 fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
     server.acceptOne(alloc) catch |err| {
         std.debug.print("test server connection failed: {t}\n", .{err});
     };
 }
 
-/// End-to-end proof of `Client.startTable`'s streaming shape: a 2-column
-/// (widths 8 and 4), bordered, striped table with two body rows, checked
-/// cell-by-cell against `getCells`. Layout: column 0 is `[1, 9)`, a gap at
-/// col 9, column 1 is `[10, 14)`, border tiles at cols 0 and 14 -- 15 cells
-/// wide (`table.total_width`) in total.
-pub fn startTableDrawsBorderedStripedTableTest(io: std.Io, alloc: std.mem.Allocator) !void {
+/// `create_table` + `table_set_rows` compiling structured data into
+/// ordinary cells -- see core.zig's Table section. A 2-column, borderless,
+/// unruled table with 2 body rows: header at row 0, body rows 1-2 (no
+/// header separator line), both columns start-aligned so padding math
+/// stays simple (right-alignment is covered by
+/// `tableColumnHAlignEndRightAlignsTextTest` instead).
+pub fn createTableAndSetRowsPaintsHeaderAndBodyTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 30, 10, 0);
     defer ctx.deinit();
 
@@ -63,73 +43,47 @@ pub fn startTableDrawsBorderedStripedTableTest(io: std.Io, alloc: std.mem.Alloca
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
 
-    try registerTestBoxStyle(&client, &ctx, "box");
-    // Handles per registerTestBoxStyle's fixed 1..9 numbering, in `pieces`
-    // order: tl=1, t=2, tr=3, l=4, fill=5, r=6, bl=7, b=8, br=9.
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 8 },
+        .{ .name = "Num", .width = 4 },
+    }, .{ .borders = false, .header_separator = false });
 
-    var table = try client.startTable(.{
-        .row = 0,
-        .col = 0,
-        .columns = &.{
-            .{ .name = "Name", .width = 8 },
-            .{ .name = "Size", .width = 4, .h_align = .end },
-        },
-        .style = .{ .alt_row_bg = .{ .r = 20, .g = 20, .b = 20 } },
+    try client.tableSetRows(null, table, &.{
+        &.{ .{ .display = "alpha" }, .{ .display = "3" } },
+        &.{ .{ .display = "bravo" }, .{ .display = "9" } },
     });
-    try testz.expectEqual(table.total_width, 15);
-
-    try table.row();
-    try table.cell("main.zig");
-    try table.cell("42");
-    try table.endRow();
-
-    try table.row();
-    try table.cell("a_very_long_filename.zig");
-    try table.cell("7");
-    try table.endRow();
-
-    try table.end();
 
     var snapshot = try client.getCells();
     defer snapshot.deinit();
 
-    // Row 0: top border.
-    try testz.expectEqual(snapshot.cellAt(0, 0).bg_icon.?.handle, 1); // tl
-    try testz.expectEqual(snapshot.cellAt(0, 7).bg_icon.?.handle, 2); // t
-    try testz.expectEqual(snapshot.cellAt(0, 14).bg_icon.?.handle, 3); // tr
+    // Header row.
+    try testz.expectEqualStr("N", snapshot.cellAt(0, 0).grapheme);
+    try testz.expectEqualStr("e", snapshot.cellAt(0, 3).grapheme);
+    try testz.expectEqualStr("N", snapshot.cellAt(0, 9).grapheme);
 
-    // Row 1: header text, left-aligned in column 0's 8 cells, side border tiles present.
-    try testz.expectEqualStr("N", snapshot.cellAt(1, 1).grapheme);
-    try testz.expectEqualStr("a", snapshot.cellAt(1, 2).grapheme);
-    try testz.expectEqualStr(" ", snapshot.cellAt(1, 5).grapheme); // trailing pad
-    try testz.expectEqual(snapshot.cellAt(1, 0).bg_icon.?.handle, 4); // l
-    try testz.expectEqual(snapshot.cellAt(1, 14).bg_icon.?.handle, 6); // r
+    // Body row 0: "alpha" start-padded to 8, gap, "3" start-padded to 4.
+    try testz.expectEqualStr("a", snapshot.cellAt(1, 0).grapheme);
+    try testz.expectEqualStr("a", snapshot.cellAt(1, 4).grapheme);
+    try testz.expectEqualStr(" ", snapshot.cellAt(1, 5).grapheme);
+    // Column 0's own trailing pad (cols 5-7) is written by writeBodyRow;
+    // col 8 is the inter-column gap, left untouched (still the blank
+    // `clearExtent` left it -- see `Table.render`) on an unstriped row,
+    // unlike the header row's own gap, which `writeHeaderRow` always
+    // writes a literal space into.
+    try testz.expectEqualStr("", snapshot.cellAt(1, 8).grapheme);
+    try testz.expectEqualStr("3", snapshot.cellAt(1, 9).grapheme);
+    try testz.expectEqualStr(" ", snapshot.cellAt(1, 10).grapheme);
 
-    // Row 2: header separator -- horizontal "t" tiles across the interior only.
-    try testz.expectEqual(snapshot.cellAt(2, 5).bg_icon.?.handle, 2); // t
-
-    // Row 3: first body row -- "main.zig" fills column 0 exactly (8 chars,
-    // 8-wide), "42" right-aligned into column 1's 4 cells (cols 10-13).
-    try testz.expectEqualStr("m", snapshot.cellAt(3, 1).grapheme);
-    try testz.expectEqualStr("g", snapshot.cellAt(3, 8).grapheme);
-    try testz.expectEqualStr("4", snapshot.cellAt(3, 12).grapheme);
-    try testz.expectEqualStr("2", snapshot.cellAt(3, 13).grapheme);
-
-    // Row 4: second body row (row_index == 1) is striped, and its long
-    // filename is truncated with a trailing ellipsis to fit column 0's 8 cells.
-    try testz.expectEqualStr("a", snapshot.cellAt(4, 1).grapheme);
-    try testz.expectEqualStr("\u{2026}", snapshot.cellAt(4, 8).grapheme);
-    try testz.expectEqual(snapshot.cellAt(4, 1).bg.?.r, 20);
-    try testz.expectEqual(snapshot.cellAt(4, 9).bg.?.r, 20); // gap cell between columns is striped too
-
-    // Row 5: bottom border.
-    try testz.expectEqual(snapshot.cellAt(5, 0).bg_icon.?.handle, 7); // bl
-    try testz.expectEqual(snapshot.cellAt(5, 7).bg_icon.?.handle, 8); // b
-    try testz.expectEqual(snapshot.cellAt(5, 14).bg_icon.?.handle, 9); // br
+    // Body row 1.
+    try testz.expectEqualStr("b", snapshot.cellAt(2, 0).grapheme);
+    try testz.expectEqualStr("9", snapshot.cellAt(2, 9).grapheme);
 }
 
-pub fn startTableWithoutBordersStartsContentAtColumnZeroTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+/// A `h_align: .end` column right-aligns its (padded) text within its
+/// width -- a 6-wide column holding `"9"` should land that digit at the
+/// column's last cell, not its first.
+pub fn tableColumnHAlignEndRightAlignsTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
     defer ctx.deinit();
 
     const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
@@ -145,168 +99,27 @@ pub fn startTableWithoutBordersStartsContentAtColumnZeroTest(io: std.Io, alloc: 
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
 
-    var table = try client.startTable(.{
-        .row = 0,
-        .col = 0,
-        .columns = &.{
-            .{ .name = "A", .width = 3 },
-            .{ .name = "B", .width = 3 },
-        },
-        .style = .{ .borders = false, .header_separator = false },
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Size", .width = 6, .h_align = .end },
+    }, .{ .borders = false, .header_separator = false });
+
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "9" }},
     });
-
-    try table.row();
-    try table.cell("x");
-    try table.cell("y");
-    try table.endRow();
-    try table.end();
-
-    // No border columns at all: content_width == total_width, and the
-    // header starts at column 0, not column 1.
-    try testz.expectEqual(table.total_width, table.content_width);
-    try testz.expectEqual(table.content_start_col, 0);
-
-    var snapshot = try client.getCells();
-    defer snapshot.deinit();
-    try testz.expectEqualStr("A", snapshot.cellAt(0, 0).grapheme);
-    try testz.expectEqualStr("x", snapshot.cellAt(1, 0).grapheme);
-}
-
-/// `header_separator` is independent of `borders`: a borderless table can
-/// still draw the header/body rule (no side "l"/"r" endpoints, since there
-/// are no border columns to anchor them to -- just "t" tiles across the
-/// full content width), and stripe body rows same as a bordered one.
-pub fn startTableWithHeaderSeparatorButNoBordersDrawsRuleAcrossContentWidthTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    var ctx = try glyphwire.Context.init(alloc, 20, 6, 0);
-    defer ctx.deinit();
-
-    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
-    defer alloc.free(socket_path);
-    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
-
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    defer srv.deinit(alloc);
-
-    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread.join();
-
-    var client = try glyphwire.Client.connect(io, alloc, socket_path);
-    defer client.deinit();
-
-    try registerTestBoxStyle(&client, &ctx, "box");
-    // t=2, per registerTestBoxStyle's fixed pieces-order numbering.
-
-    var table = try client.startTable(.{
-        .row = 0,
-        .col = 0,
-        .columns = &.{
-            .{ .name = "A", .width = 3 },
-            .{ .name = "B", .width = 3 },
-        },
-        .style = .{ .borders = false, .alt_row_bg = .{ .r = 20, .g = 20, .b = 20 } },
-    });
-
-    try table.row();
-    try table.cell("x");
-    try table.cell("y");
-    try table.endRow();
-    try table.row();
-    try table.cell("z");
-    try table.cell("w");
-    try table.endRow();
-    try table.end();
 
     var snapshot = try client.getCells();
     defer snapshot.deinit();
 
-    // Row 0: header. Row 1: the rule, spanning content_width == 7
-    // (3 + 1 gap + 3), no border tiles anywhere in it.
-    try testz.expectEqualStr("A", snapshot.cellAt(0, 0).grapheme);
-    try testz.expectEqual(snapshot.cellAt(1, 0).bg_icon.?.handle, 2); // t
-    try testz.expectEqual(snapshot.cellAt(1, 6).bg_icon.?.handle, 2); // t, last content column
-    try testz.expectTrue(snapshot.cellAt(1, 0).bg_icon.?.scale == .stretch);
-
-    // Row 2: first body row, unstriped. Row 3: second body row (row_index
-    // == 1), striped -- same alternating rule a bordered table uses.
-    try testz.expectEqualStr("z", snapshot.cellAt(3, 0).grapheme);
-    try testz.expectEqual(snapshot.cellAt(3, 0).bg.?.r, 20);
+    try testz.expectEqualStr(" ", snapshot.cellAt(1, 0).grapheme);
+    try testz.expectEqualStr("9", snapshot.cellAt(1, 5).grapheme);
 }
 
-/// `iconCellStyled`/`cellStyled` -- added for glyphwire-ls's `-l` table
-/// (icon + colored name column, both tagged for click-to-activate) -- draw
-/// into their own column in order same as plain `cell`/`iconCell`, apply
-/// the given fg (`cellStyled`) instead of the default, and tag every cell
-/// they touch with `metadata_id` when given, same as `Client.writeTextTagged`.
-pub fn iconCellAndCellStyledApplyColorAndMetadataTagTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
-    defer ctx.deinit();
-
-    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
-    defer alloc.free(socket_path);
-    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
-
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    defer srv.deinit(alloc);
-
-    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread.join();
-
-    var client = try glyphwire.Client.connect(io, alloc, socket_path);
-    defer client.deinit();
-
-    const png = fakePngBytes(12, 12);
-    const folder_handle = try client.loadImage("png", &png);
-    try ctx.registerIcon("folder", folder_handle);
-
-    const metadata_id = try client.createMetadata("{\"kind\":\"dir\"}");
-
-    var table = try client.startTable(.{
-        .row = 0,
-        .col = 0,
-        .columns = &.{
-            .{ .name = "", .width = 1 },
-            .{ .name = "Name", .width = 6 },
-        },
-        .style = .{ .borders = false, .header_separator = false },
-    });
-
-    try table.row();
-    try table.iconCellStyled("folder", .{ .metadata_id = metadata_id });
-    try table.cellStyled("src", .{ .fg = .{ .r = 98, .g = 114, .b = 164, .a = 255 }, .metadata_id = metadata_id });
-    try table.endRow();
-    try table.end();
-
-    var snapshot = try client.getCells();
-    defer snapshot.deinit();
-
-    // Row 0 is the header (its icon column's name is "", but the header
-    // row itself is always drawn regardless of `header_separator` -- only
-    // the divider *line* is skipped -- so the body row `row`/`iconCellStyled`/
-    // `cellStyled` wrote is row 1, not row 0.
-    const icon_cell = snapshot.cellAt(1, 0);
-    try testz.expectEqual(icon_cell.bg_icon.?.handle, folder_handle);
-    try testz.expectTrue(icon_cell.bg_icon.?.scale == .fit);
-    try testz.expectEqual(icon_cell.metadata_id.?, metadata_id);
-
-    const name_cell = snapshot.cellAt(1, 2);
-    try testz.expectEqualStr("s", name_cell.grapheme);
-    try testz.expectEqual(name_cell.fg.r, 98);
-    try testz.expectEqual(name_cell.fg.b, 164);
-    try testz.expectEqual(name_cell.metadata_id.?, metadata_id);
-}
-
-/// A table anchored at/past a small layer's bottom row must scroll
-/// *once* per body row, not once per cell/tile it draws for that row --
-/// `Layer.resolveRow` (core.zig) scrolls relative to whatever's currently
-/// at the top every time it's called with an out-of-bounds row, so
-/// `row`/`cell`/`endRow` calling it with the same nominal row number more
-/// than once per logical row (one for the icon, one per text cell) would
-/// otherwise compound into runaway extra scrolling, scattering one row's
-/// cells across several different physical rows instead of landing them
-/// on the same one. Regression test for exactly that bug, fixed by
-/// `Table.resolveCurRow`.
-pub fn startTableScrollsExactlyOncePerRowNearLayerBottomTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    var ctx = try glyphwire.Context.init(alloc, 40, 10, 200);
+/// A cell's `icon` (an icon-registry name, resolved server-side)
+/// reserves exactly one cell at the column's start when `row_height == 1`
+/// (`.fit`-scaled into it), with the cell's `display` text starting right
+/// after -- see `core.Table.writeBodyRow`'s doc comment.
+pub fn tableCellIconReservesOneColumnAtDefaultRowHeightTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
     defer ctx.deinit();
 
     const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
@@ -326,53 +139,218 @@ pub fn startTableScrollsExactlyOncePerRowNearLayerBottomTest(io: std.Io, alloc: 
     const file_handle = try client.loadImage("png", &png);
     try ctx.registerIcon("file", file_handle);
 
-    // Row 8 of a 10-row layer: only 2 rows of headroom before every body
-    // row after the first needs a scroll.
-    try client.setCursor(8, 0);
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "", .width = 6 },
+    }, .{ .borders = false, .header_separator = false });
 
-    var table = try client.startTable(.{
-        .columns = &.{
-            .{ .name = "", .width = 1 },
-            .{ .name = "Name", .width = 10 },
-            .{ .name = "Size", .width = 5, .h_align = .end },
-        },
-        .style = .{ .borders = false, .header_separator = false },
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "x", .icon = "file" }},
     });
-
-    var name_buf: [16]u8 = undefined;
-    var i: usize = 0;
-    while (i < 12) : (i += 1) {
-        const name = std.fmt.bufPrint(&name_buf, "entry{d}", .{i}) catch "entry";
-        try table.row();
-        try table.iconCell("file");
-        try table.cell(name);
-        try table.cell("1K");
-        try table.endRow();
-    }
-    try table.end();
 
     var snapshot = try client.getCells();
     defer snapshot.deinit();
 
-    // 13 lines total (1 header + 12 entries) into a viewport with 2 rows
-    // of headroom (started at row 8 of 10): the last 10 lines fill the
-    // viewport exactly, so entry2..entry11 are visible, one per row, each
-    // with its icon, name, and (right-aligned in a 5-wide column starting
-    // at col 13, so "1K" lands at cols 16-17) size all landing together on
-    // the same physical row -- not scattered across several, which is
-    // what this test guards against.
-    var expected: usize = 2;
-    var row: usize = 0;
-    while (row < 10) : ({
-        row += 1;
-        expected += 1;
-    }) {
-        var expected_buf: [16]u8 = undefined;
-        const expected_name = try std.fmt.bufPrint(&expected_buf, "entry{d}", .{expected});
+    const icon_cell = snapshot.cellAt(1, 0);
+    try testz.expectEqual(icon_cell.bg_icon.?.handle, file_handle);
+    try testz.expectTrue(icon_cell.bg_icon.?.scale == .fit);
+    try testz.expectEqualStr("x", snapshot.cellAt(1, 1).grapheme);
+}
 
-        try testz.expectEqual(snapshot.cellAt(row, 0).bg_icon.?.handle, file_handle);
-        try testz.expectEqualStr(expected_name[0..1], snapshot.cellAt(row, 2).grapheme);
-        try testz.expectEqualStr("1", snapshot.cellAt(row, 16).grapheme);
-        try testz.expectEqualStr("K", snapshot.cellAt(row, 17).grapheme);
+/// `table_set_sort` reorders the *display* order (via `SortKey.number`,
+/// not the display text -- `"9"` sorting after `"10"` lexically would be
+/// the wrong answer here) without touching the underlying row data.
+/// Ascending then descending on the same table, since a real client
+/// toggling a column's sort would do exactly that.
+pub fn tableSetSortReordersRowsByNumericSortKeyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 4 },
+        .{ .name = "Num", .width = 4, .kind = .number, .sortable = true },
+    }, .{ .borders = false, .header_separator = false });
+
+    try client.tableSetRows(null, table, &.{
+        &.{ .{ .display = "c" }, .{ .display = "30", .sort_key = .{ .number = 30 } } },
+        &.{ .{ .display = "a" }, .{ .display = "10", .sort_key = .{ .number = 10 } } },
+        &.{ .{ .display = "b" }, .{ .display = "20", .sort_key = .{ .number = 20 } } },
+    });
+
+    {
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+        // Unsorted: insertion order.
+        try testz.expectEqualStr("c", snapshot.cellAt(1, 0).grapheme);
+        try testz.expectEqualStr("a", snapshot.cellAt(2, 0).grapheme);
+        try testz.expectEqualStr("b", snapshot.cellAt(3, 0).grapheme);
     }
+
+    try client.tableSetSort(null, table, 1, .ascending);
+    {
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+        try testz.expectEqualStr("a", snapshot.cellAt(1, 0).grapheme);
+        try testz.expectEqualStr("b", snapshot.cellAt(2, 0).grapheme);
+        try testz.expectEqualStr("c", snapshot.cellAt(3, 0).grapheme);
+    }
+
+    try client.tableSetSort(null, table, 1, .descending);
+    {
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+        try testz.expectEqualStr("c", snapshot.cellAt(1, 0).grapheme);
+        try testz.expectEqualStr("b", snapshot.cellAt(2, 0).grapheme);
+        try testz.expectEqualStr("a", snapshot.cellAt(3, 0).grapheme);
+    }
+}
+
+/// `table_set_style` replaces the whole style (e.g. toggling `alt_row_bg`
+/// on) and repaints immediately -- the message a future "checkbox for
+/// alternating row colors" UI would call.
+pub fn tableSetStyleTogglesAltRowBgTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 4 },
+    }, .{ .borders = false, .header_separator = false });
+
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "a" }},
+        &.{.{ .display = "b" }},
+    });
+
+    {
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+        // No striping yet: second row's background is still default.
+        try testz.expectEqual(snapshot.cellAt(2, 0).bg.?.r, 0);
+    }
+
+    try client.tableSetStyle(null, table, .{
+        .borders = false,
+        .header_separator = false,
+        .alt_row_bg = .{ .r = 30, .g = 30, .b = 30, .a = 255 },
+    });
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+    try testz.expectEqual(snapshot.cellAt(1, 0).bg.?.r, 0);
+    try testz.expectEqual(snapshot.cellAt(2, 0).bg.?.r, 30);
+}
+
+/// `destroy_table` blanks whatever the table last painted -- a client
+/// checking `get_cells` afterward should see that region back to a
+/// default, untagged cell, not stale content.
+pub fn destroyTableBlanksItsRegionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 4 },
+    }, .{ .borders = false, .header_separator = false });
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "a" }},
+    });
+
+    {
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+        try testz.expectEqualStr("N", snapshot.cellAt(0, 0).grapheme);
+        try testz.expectEqualStr("a", snapshot.cellAt(1, 0).grapheme);
+    }
+
+    try client.destroyTable(null, table);
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+    try testz.expectEqualStr("", snapshot.cellAt(0, 0).grapheme);
+    try testz.expectEqualStr("", snapshot.cellAt(1, 0).grapheme);
+}
+
+/// A table pinned near a layer's bottom edge that doesn't fully fit
+/// clips rather than scrolling the layer -- unlike the client-composited
+/// prototype this replaced (which drove the layer's cursor and could
+/// trigger `Layer.resolveRow`'s scrolling), `Table.render` writes cells
+/// directly and never scrolls at all (see that method's doc comment).
+/// Regression-shaped proof: a sentinel character written above the
+/// table's anchor stays exactly where it was -- if painting the
+/// off-the-bottom body row had scrolled the layer instead of clipping,
+/// the sentinel would have moved (or vanished).
+pub fn tableNearLayerBottomClipsWithoutScrollingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    try client.setCursor(0, 0);
+    try client.writeText("!", .{ .r = 255, .g = 255, .b = 255 }, null);
+
+    // Anchored at row 3 of a 5-row layer: header lands on row 3, the
+    // first body row on row 4 (both fit), but a second body row would
+    // need row 5, which doesn't exist.
+    const table = try client.createTable(null, 3, 0, &.{
+        .{ .name = "Name", .width = 4 },
+    }, .{ .borders = false, .header_separator = false });
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "a" }},
+        &.{.{ .display = "b" }},
+    });
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+
+    try testz.expectEqualStr("!", snapshot.cellAt(0, 0).grapheme);
+    try testz.expectEqualStr("N", snapshot.cellAt(3, 0).grapheme);
+    try testz.expectEqualStr("a", snapshot.cellAt(4, 0).grapheme);
 }

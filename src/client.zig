@@ -1,12 +1,6 @@
 const std = @import("std");
 const core = @import("core.zig");
 const wire = @import("wire.zig");
-const table = @import("table.zig");
-
-pub const Table = table.Table;
-pub const TableColumn = table.ColumnDef;
-pub const TableStyle = table.TableStyle;
-pub const TableStartOptions = table.StartOptions;
 
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
@@ -485,15 +479,188 @@ pub const Client = struct {
         return .{ .w = parsed.value.result.cell_px_w, .h = parsed.value.result.cell_px_h };
     }
 
-    /// Starts a table widget anchored at `opts.row`/`opts.col` (default:
-    /// the layer's current cursor) -- draws the header row (and border, if
-    /// `opts.style.borders`) immediately and returns a `Table` ready for
-    /// `row`/`cell`/`endRow`/`end`. Client-side composition only, built
-    /// entirely out of `writeText`/`drawIcon`/`setCursor` -- see
-    /// `table.zig`'s `Table` doc comment for the full shape; there is no
-    /// `table` message on the wire.
-    pub fn startTable(self: *Client, opts: TableStartOptions) !Table {
-        return Table.start(self, opts);
+    // ─── Table ───────────────────────────────────────────────────────────
+    //
+    // Unlike every draw call above, a table is real server-side state
+    // (`core.Table`, a component of the layer it's drawn on) that persists
+    // after this client disconnects -- see decisions.md's Table section.
+    // These methods are thin, ergonomic wrappers around the
+    // `create_table`/`table_set_rows`/`table_set_sort`/`table_set_style`/
+    // `destroy_table`/`table_get_state` wire messages: a caller (e.g.
+    // glyphwire-ls's `-l`) builds `TableColumnInput`/`TableCellInput`
+    // values with plain borrowed slices, no allocation or ownership
+    // bookkeeping of its own -- these methods handle serializing them into
+    // one request/notification and, for `tableSetRows`, freeing the small
+    // temporary array built to shape that request.
+
+    /// A column's shape for `createTable` -- see `core.TableColumn`'s doc
+    /// comment for what each field means server-side. `name`/`width` are
+    /// the only two fields the whole table.zig prototype's callers ever
+    /// needed to think about; everything else defaults to the plain,
+    /// unsorted, left-aligned original behavior.
+    pub const TableColumnInput = struct {
+        name: []const u8,
+        kind: core.ColumnKind = .text,
+        sortable: bool = false,
+        width: usize,
+        min_width: usize = 1,
+        h_align: core.HAlign = .start,
+    };
+
+    pub const TableStyleInput = struct {
+        borders: bool = true,
+        header_separator: bool = true,
+        box_style: []const u8 = "box",
+        alt_row_bg: ?core.Color = null,
+        header_fg: ?core.Color = null,
+        header_bg: ?core.Color = null,
+        row_height: usize = 1,
+    };
+
+    /// A cell's sort value -- see `core.SortKey`'s doc comment on why a
+    /// column needs one distinct from its display text (a Size column
+    /// displays `"1.2 KB"` but should sort on the raw byte count).
+    /// Omitted (`TableCellInput.sort_key: null`) falls back to a copy of
+    /// `display` server-side.
+    pub const SortKeyInput = union(enum) {
+        text: []const u8,
+        number: f64,
+    };
+
+    pub const TableCellInput = struct {
+        display: []const u8,
+        sort_key: ?SortKeyInput = null,
+        /// An icon-registry name (`draw_icon`'s `name` convention) --
+        /// resolved server-side, same "fail loud on an unknown name"
+        /// treatment `draw_icon` already gets.
+        icon: ?[]const u8 = null,
+        fg: ?core.Color = null,
+        metadata_id: ?core.MetadataHandle = null,
+    };
+
+    /// `create_table(layer?, row?, col?, columns, style?)` -- a request.
+    /// `row`/`col` default to the layer's current cursor, same convention
+    /// `drawBoxStyled`/`drawIconStyled` already use. Returns a fresh
+    /// handle for `tableSetRows`/`tableSetSort`/`tableSetStyle`/
+    /// `destroyTable`/`tableGetState` -- the table has no rows yet, so
+    /// nothing is painted until `tableSetRows`.
+    pub fn createTable(
+        self: *Client,
+        layer: ?core.LayerHandle,
+        row: ?usize,
+        col: ?usize,
+        columns: []const TableColumnInput,
+        style: TableStyleInput,
+    ) !core.TableHandle {
+        const wire_columns = try self.alloc.alloc(TableColumnJson, columns.len);
+        defer self.alloc.free(wire_columns);
+        for (columns, 0..) |c, i| {
+            wire_columns[i] = .{
+                .name = c.name,
+                .kind = @tagName(c.kind),
+                .sortable = c.sortable,
+                .width = c.width,
+                .min_width = c.min_width,
+                .h_align = @tagName(c.h_align),
+            };
+        }
+
+        var parsed = try self.request(struct { handle: core.TableHandle }, "create_table", .{
+            .layer = layer,
+            .row = row,
+            .col = col,
+            .columns = wire_columns,
+            .style = tableStyleToJson(style),
+        });
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    /// `destroy_table(layer?, table)` -- a notification. Blanks whatever
+    /// the table last painted and frees it server-side.
+    pub fn destroyTable(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle) !void {
+        try self.notify("destroy_table", .{ .layer = layer, .table = table });
+    }
+
+    fn sortKeyToJson(key: ?SortKeyInput) ?std.json.Value {
+        const k = key orelse return null;
+        return switch (k) {
+            .text => |t| .{ .string = t },
+            .number => |n| .{ .float = n },
+        };
+    }
+
+    /// `table_set_rows(layer?, table, rows)` -- a notification. Replaces
+    /// every row wholesale, re-sorts per the table's current sort state,
+    /// and repaints -- see `core.Table.render`. `rows` is a plain matrix
+    /// of borrowed values (`[row][col]`); this only needs a small
+    /// temporary array to reshape it into wire JSON, freed before
+    /// returning.
+    pub fn tableSetRows(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle, rows: []const []const TableCellInput) !void {
+        const wire_rows = try self.alloc.alloc([]TableCellJson, rows.len);
+        defer {
+            for (wire_rows) |r| self.alloc.free(r);
+            self.alloc.free(wire_rows);
+        }
+        for (rows, 0..) |row, ri| {
+            const wire_row = try self.alloc.alloc(TableCellJson, row.len);
+            wire_rows[ri] = wire_row;
+            for (row, 0..) |c, ci| {
+                wire_row[ci] = .{
+                    .display = c.display,
+                    .sort_key = sortKeyToJson(c.sort_key),
+                    .icon = c.icon,
+                    .fg = colorToJson(c.fg),
+                    .metadata_id = c.metadata_id,
+                };
+            }
+        }
+        try self.notify("table_set_rows", .{ .layer = layer, .table = table, .rows = wire_rows });
+    }
+
+    /// `table_set_sort(layer?, table, column?, direction?)` -- a
+    /// notification. `column: null` or `direction: .none` both mean "back
+    /// to insertion order". Repaints immediately -- this is the message a
+    /// future sort-aware `glyphwire-shell` click handler would call.
+    pub fn tableSetSort(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle, column: ?usize, direction: core.SortDirection) !void {
+        try self.notify("table_set_sort", .{
+            .layer = layer,
+            .table = table,
+            .column = column,
+            .direction = @tagName(direction),
+        });
+    }
+
+    /// `table_set_style(layer?, table, style)` -- a notification. Replaces
+    /// the table's whole style (e.g. toggling `alt_row_bg` on/off) and
+    /// repaints.
+    pub fn tableSetStyle(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle, style: TableStyleInput) !void {
+        try self.notify("table_set_style", .{ .layer = layer, .table = table, .style = tableStyleToJson(style) });
+    }
+
+    pub const TableState = struct {
+        row_count: usize,
+        sort_column: ?usize,
+        sort_direction: []const u8,
+        row_height: usize,
+        revision: u64,
+    };
+
+    /// `table_get_state(layer?, table)` -- a request. Reads back a
+    /// table's row count, sort state, `row_height`, and revision -- not
+    /// its rendered cells, already readable through the owning layer's
+    /// normal `getCells` (a table paints into ordinary cells).
+    pub fn tableGetState(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle) !TableState {
+        var parsed = try self.request(TableStateResultJson, "table_get_state", .{ .layer = layer, .table = table });
+        defer parsed.deinit();
+        const r = parsed.value.result;
+        return .{
+            .row_count = r.row_count,
+            .sort_column = r.sort_column,
+            .sort_direction = r.sort_direction,
+            .row_height = r.style.row_height,
+            .revision = r.revision,
+        };
     }
 
     /// `create_metadata(json)` -- a request. Stores `json` verbatim (the
@@ -613,6 +780,63 @@ fn ResponseOf(comptime ResultT: type) type {
 }
 
 const ColorJson = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
+
+const TableColumnJson = struct {
+    name: []const u8,
+    kind: []const u8,
+    sortable: bool,
+    width: usize,
+    min_width: usize,
+    h_align: []const u8,
+};
+
+const TableStyleJson = struct {
+    borders: bool,
+    header_separator: bool,
+    box_style: []const u8,
+    alt_row_bg: ?ColorJson,
+    header_fg: ?ColorJson,
+    header_bg: ?ColorJson,
+    row_height: usize,
+};
+
+fn tableStyleToJson(s: Client.TableStyleInput) TableStyleJson {
+    return .{
+        .borders = s.borders,
+        .header_separator = s.header_separator,
+        .box_style = s.box_style,
+        .alt_row_bg = Client.colorToJson(s.alt_row_bg),
+        .header_fg = Client.colorToJson(s.header_fg),
+        .header_bg = Client.colorToJson(s.header_bg),
+        .row_height = s.row_height,
+    };
+}
+
+const TableCellJson = struct {
+    display: []const u8,
+    sort_key: ?std.json.Value = null,
+    icon: ?[]const u8 = null,
+    fg: ?ColorJson = null,
+    metadata_id: ?core.MetadataHandle = null,
+};
+
+const TableColumnStateJson = struct {
+    name: []const u8,
+    kind: []const u8,
+    sortable: bool,
+    width: usize,
+    min_width: usize,
+    h_align: []const u8,
+};
+
+const TableStateResultJson = struct {
+    columns: []const TableColumnStateJson,
+    row_count: usize,
+    sort_column: ?usize,
+    sort_direction: []const u8,
+    style: TableStyleJson,
+    revision: u64,
+};
 
 const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
 const IconBgJson = struct { handle: core.ImageHandle, scale: []const u8, h_align: []const u8, v_align: []const u8, max_w: ?u32 = null, max_h: ?u32 = null };

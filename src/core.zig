@@ -271,6 +271,20 @@ pub const Layer = struct {
     /// wire path that moves it) and for a freshly created layer until its
     /// creator calls `set_property(layer, "position", ...)`.
     pos: PxPos = .{},
+    /// Tables painted onto this layer (`create_table`), keyed by handle --
+    /// decisions.md's Table section: a table is a component of a layer,
+    /// not a parallel object tree like `Context.layers` is. A table's
+    /// handle is still allocated from `Context.next_table_handle` (a
+    /// single counter shared across every layer), but the `Table` value
+    /// itself lives here, on whichever layer it was created on.
+    tables: std.AutoHashMap(TableHandle, Table),
+    /// Creation order of `tables`' entries, for repaint/compositing order
+    /// -- same reasoning `Context.layer_order` already has for
+    /// `Context.layers` (`AutoHashMap` iteration order is unspecified).
+    /// Not consulted by rendering yet (a table paints its own cells once,
+    /// at mutation time, not per frame -- see `Table.render`), but kept
+    /// for a future "which table's border wins where two overlap" rule.
+    table_order: std.ArrayList(TableHandle) = .empty,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Layer {
         const total_rows = height + scrollback_rows;
@@ -281,6 +295,7 @@ pub const Layer = struct {
             .alloc = alloc,
             .width = width,
             .height = height,
+            .tables = std.AutoHashMap(TableHandle, Table).init(alloc),
             .scrollback_rows = scrollback_rows,
             .buf = buf,
         };
@@ -288,6 +303,10 @@ pub const Layer = struct {
 
     pub fn deinit(self: *Layer) void {
         self.alloc.free(self.buf);
+        var table_it = self.tables.valueIterator();
+        while (table_it.next()) |t| t.deinit();
+        self.tables.deinit();
+        self.table_order.deinit(self.alloc);
     }
 
     pub fn capacity(self: *const Layer) usize {
@@ -734,6 +753,515 @@ pub const Layer = struct {
     }
 };
 
+// ─── Table ───────────────────────────────────────────────────────────────
+//
+// A table is structured, server-owned data (columns, rows of typed cells,
+// sort state, style) that *compiles* into ordinary cells on its owning
+// layer whenever it changes -- not a live per-frame render path of its
+// own. This is the whole reason adding tables needed no changes to
+// glyphwire-host's render loop at all: that loop already draws whatever's
+// sitting in a layer's cell buffer, regardless of what put it there
+// (`write_text`, `draw_icon`, or now `Table.render`). It's also why a
+// table survives the process that created it (e.g. `glyphwire-ls -l`)
+// exiting, and why re-sorting later is just re-deriving row order from
+// the same stored typed values and repainting -- no client needs to be
+// running for either.
+//
+// A table is a component of the layer it's drawn on (`Layer.tables`),
+// not a parallel object tree the way `Layer` itself is under `Context` --
+// see decisions.md's Table section.
+
+/// Server-generated handle for a table created via `create_table`.
+/// Allocated from `Context.next_table_handle`, a single counter shared
+/// across every layer -- same numbering convention `LayerHandle`/
+/// `ImageHandle`/`MetadataHandle` already use -- even though the `Table`
+/// value itself is stored on whichever `Layer` it was created on, not on
+/// `Context` directly.
+pub const TableHandle = u32;
+
+pub const TableError = error{
+    UnknownTable,
+    /// `table_set_rows`: a row's cell count didn't match the table's
+    /// column count.
+    TableRowShapeMismatch,
+};
+
+/// How a column's cells compare when sorted -- `.text` compares
+/// `SortKey.text` lexically, `.number` compares `SortKey.number`
+/// numerically. Decided over sorting on display text alone specifically
+/// so e.g. a Size column sorts `900 B` before `1.2 KB` correctly instead
+/// of lexically ("1" before "9").
+pub const ColumnKind = enum { text, number };
+
+pub const SortDirection = enum { none, ascending, descending };
+
+/// One column's shape -- display name (the header cell's text),
+/// sortability, and sizing. `width` is the column's content width in
+/// cells; `min_width` is a floor, same as the client-composited table
+/// prototype's `ColumnDef` (`src/table.zig`, which this supersedes as
+/// the source of table layout -- see decisions.md's Table section).
+pub const TableColumn = struct {
+    name: []u8,
+    kind: ColumnKind = .text,
+    sortable: bool = false,
+    width: usize,
+    min_width: usize = 1,
+    h_align: HAlign = .start,
+
+    pub fn deinit(self: TableColumn, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+    }
+};
+
+/// A cell's value to compare against another cell in the same column
+/// when sorting -- distinct from `TableCell.display` (what's actually
+/// drawn): a Size column might display `"1.2 KB"` but needs to sort on
+/// the raw byte count. Every cell has one (`handleTableSetRows` defaults
+/// it to a copy of `display` when the wire omits an explicit `sort_key`),
+/// so sorting never needs a "what do I compare when there's nothing to
+/// compare" fallback.
+pub const SortKey = union(enum) {
+    text: []u8,
+    number: f64,
+
+    pub fn deinit(self: SortKey, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .text => |t| alloc.free(t),
+            .number => {},
+        }
+    }
+};
+
+/// One cell of one row. `icon` is a resolved image handle (looked up by
+/// name against the icon catalog at `table_set_rows` time -- see
+/// `handleTableSetRows` -- same "fail loud on an unknown name at the
+/// point of use" treatment `draw_icon`'s `name` already gets), drawn
+/// alongside `display` within the column's own width rather than
+/// needing a dedicated icon-only column -- e.g. glyphwire-ls's Name
+/// column carries both a per-entry icon and the filename in one cell.
+/// `fg` is per-cell (`null` means `default_style.fg`) since a table has
+/// no notion of "kind" of its own -- glyphwire-ls's directory/symlink/
+/// file coloring is caller data, same as it always was.
+pub const TableCell = struct {
+    display: []u8,
+    sort_key: SortKey,
+    icon: ?ImageHandle = null,
+    fg: ?Color = null,
+    metadata_id: ?MetadataHandle = null,
+
+    pub fn deinit(self: TableCell, alloc: std.mem.Allocator) void {
+        alloc.free(self.display);
+        self.sort_key.deinit(alloc);
+    }
+};
+
+pub const TableRow = struct {
+    cells: []TableCell,
+
+    pub fn deinit(self: TableRow, alloc: std.mem.Allocator) void {
+        for (self.cells) |c| c.deinit(alloc);
+        alloc.free(self.cells);
+    }
+};
+
+/// Rendering knobs for a table that aren't per-column -- same shape (and
+/// same box-tile-catalog reuse for borders) `src/table.zig`'s
+/// `TableStyle` had client-side. `row_height` (cells per body row, `1`
+/// the default) is the "large format" option added mid-development of
+/// the client-composited prototype, carried forward here -- a
+/// server-painted table sidesteps the scrolling bug class that
+/// prototype hit near a layer's bottom edge entirely, since `Table.render`
+/// never advances a cursor or triggers `Layer.resolveRow`'s scrolling at
+/// all (see that method's doc comment).
+pub const TableStyle = struct {
+    borders: bool = true,
+    header_separator: bool = true,
+    /// Always an owned copy (defaulted to a duped `"box"` by whoever
+    /// constructs a `TableStyle`, e.g. `handleCreateTable`/
+    /// `handleTableSetStyle`, if the wire omits it) so `deinit` can
+    /// always safely free it.
+    box_style: []u8,
+    alt_row_bg: ?Color = null,
+    header_fg: ?Color = null,
+    header_bg: ?Color = null,
+    row_height: usize = 1,
+
+    pub fn deinit(self: TableStyle, alloc: std.mem.Allocator) void {
+        alloc.free(self.box_style);
+    }
+};
+
+/// Where a table last painted -- used to blank that whole region before
+/// repainting a possibly-smaller one (fewer rows, a narrower style, ...)
+/// so a shrinking table doesn't leave stale cells behind past its new
+/// content's edge.
+const TablePaintedExtent = struct {
+    row: usize = 0,
+    col: usize = 0,
+    rows: usize = 0,
+    cols: usize = 0,
+};
+
+pub const Table = struct {
+    alloc: std.mem.Allocator,
+    row: usize,
+    col: usize,
+    columns: []TableColumn,
+    rows: []TableRow = &.{},
+    style: TableStyle,
+    sort_column: ?usize = null,
+    sort_dir: SortDirection = .none,
+    revision: u64 = 0,
+    painted: TablePaintedExtent = .{},
+
+    /// Takes ownership of `columns` and `style` outright (the caller,
+    /// `handleCreateTable`, built them specifically to hand off) -- same
+    /// "caller hands over a fully-built value" shape `Context.loadImage`'s
+    /// `bytes` param has.
+    pub fn init(alloc: std.mem.Allocator, row: usize, col: usize, columns: []TableColumn, style: TableStyle) Table {
+        return .{ .alloc = alloc, .row = row, .col = col, .columns = columns, .style = style };
+    }
+
+    pub fn deinit(self: *Table) void {
+        for (self.columns) |c| c.deinit(self.alloc);
+        self.alloc.free(self.columns);
+        self.freeRows();
+        self.style.deinit(self.alloc);
+    }
+
+    fn freeRows(self: *Table) void {
+        for (self.rows) |r| r.deinit(self.alloc);
+        self.alloc.free(self.rows);
+        self.rows = &.{};
+    }
+
+    /// `table_set_rows`: replaces every row wholesale, taking ownership
+    /// of `new_rows` the same way `init` takes `columns`/`style`. Errors
+    /// (freeing `new_rows` itself first) if any row's cell count doesn't
+    /// match the column count -- a shape mismatch, not something to
+    /// silently pad/truncate around. Doesn't touch `sort_column`/
+    /// `sort_dir` -- a caller replacing a table's data while a sort is
+    /// active (e.g. glyphwire-ls re-listing a directory into an existing
+    /// table) keeps that sort applied to the new rows, same as a real
+    /// spreadsheet would.
+    pub fn setRows(self: *Table, new_rows: []TableRow) error{TableRowShapeMismatch}!void {
+        for (new_rows) |r| {
+            if (r.cells.len != self.columns.len) {
+                for (new_rows) |rr| rr.deinit(self.alloc);
+                self.alloc.free(new_rows);
+                return error.TableRowShapeMismatch;
+            }
+        }
+        self.freeRows();
+        self.rows = new_rows;
+    }
+
+    /// `table_set_sort`: `column: null` or `dir: .none` both mean
+    /// "unsorted, original insertion order" -- see `sortedIndices`.
+    pub fn setSort(self: *Table, column: ?usize, dir: SortDirection) void {
+        self.sort_column = column;
+        self.sort_dir = dir;
+    }
+
+    /// `table_set_style`: takes ownership of `new_style` the same way
+    /// `init` takes its `style` param, freeing the previous one first.
+    pub fn setStyle(self: *Table, new_style: TableStyle) void {
+        self.style.deinit(self.alloc);
+        self.style = new_style;
+    }
+
+    /// Row indices in current display order: identity order (`0, 1, 2,
+    /// ...`) when unsorted or `sort_column` is out of range, otherwise
+    /// sorted on that column's `SortKey` (`.text` lexically, `.number`
+    /// numerically -- comparing a `.text` key against a `.number` one,
+    /// which shouldn't happen since a column's cells are all built the
+    /// same way by whatever sent `table_set_rows`, treats them as equal
+    /// rather than erroring). Caller-owned, freed by the caller.
+    pub fn sortedIndices(self: *const Table, alloc: std.mem.Allocator) ![]usize {
+        const indices = try alloc.alloc(usize, self.rows.len);
+        for (indices, 0..) |*idx, i| idx.* = i;
+
+        const col = self.sort_column orelse return indices;
+        if (self.sort_dir == .none or col >= self.columns.len) return indices;
+
+        const SortCtx = struct {
+            rows: []const TableRow,
+            col: usize,
+            ascending: bool,
+
+            fn order(ctx: @This(), a: usize, b: usize) std.math.Order {
+                const ka = ctx.rows[a].cells[ctx.col].sort_key;
+                const kb = ctx.rows[b].cells[ctx.col].sort_key;
+                return switch (ka) {
+                    .text => |ta| switch (kb) {
+                        .text => |tb| std.mem.order(u8, ta, tb),
+                        .number => .eq,
+                    },
+                    .number => |na| switch (kb) {
+                        .number => |nb| std.math.order(na, nb),
+                        .text => .eq,
+                    },
+                };
+            }
+
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                const ord = ctx.order(a, b);
+                return if (ctx.ascending) ord == .lt else ord == .gt;
+            }
+        };
+        std.mem.sort(usize, indices, SortCtx{
+            .rows = self.rows,
+            .col = col,
+            .ascending = self.sort_dir == .ascending,
+        }, SortCtx.lessThan);
+        return indices;
+    }
+
+    /// Repaints this table's current (sorted) view directly into `layer`'s
+    /// cells at `(self.row, self.col)` -- the "compile structured data
+    /// into ordinary cells" step. Runs once per mutation
+    /// (`table_set_rows`/`table_set_sort`/`table_set_style`, each via
+    /// their dispatch handler), not per frame -- there's no per-frame
+    /// table-specific work at all, since glyphwire-host's existing render
+    /// pass already draws whatever's in the cell buffer.
+    ///
+    /// Writes cells directly (`layer.cell(r, c)`), never through
+    /// `Layer.writeText`/`drawIcon`'s cursor-implicit, `resolveRow`-based
+    /// helpers: those exist for a real terminal cursor that scrolls the
+    /// *whole layer* when it advances past the bottom, which is the
+    /// wrong model for a table pinned at a fixed anchor -- a table that
+    /// doesn't fit clips, the same way `drawBox`/`drawImage` already
+    /// clamp their own rectangles to the layer's bounds rather than
+    /// scrolling. This also sidesteps entirely the bug class the
+    /// client-composited table prototype hit near a layer's bottom edge
+    /// (multiple cursor-based writes into the same still-unresolved row
+    /// independently triggering their own scrolls) -- moot here, since
+    /// nothing in this method ever calls `resolveRow`.
+    pub fn render(self: *Table, layer: *Layer, ctx: *const Context) !void {
+        clearExtent(layer, self.painted);
+
+        var content_width: usize = 0;
+        for (self.columns, 0..) |column, i| {
+            if (i > 0) content_width += 1;
+            content_width += @max(column.width, column.min_width);
+        }
+        const border_pad: usize = if (self.style.borders) 1 else 0;
+        const content_start_col = self.col + border_pad;
+        var cur_row = self.row;
+
+        if (self.style.borders) {
+            self.drawBorderEdge(layer, ctx, cur_row, content_width, .top);
+            cur_row += 1;
+        }
+
+        self.writeHeaderRow(layer, cur_row, content_start_col);
+        if (self.style.borders) self.drawSideBorders(layer, ctx, cur_row, content_width);
+        cur_row += 1;
+
+        if (self.style.header_separator) {
+            self.drawSeparatorRow(layer, ctx, cur_row, content_start_col, content_width);
+            cur_row += 1;
+        }
+
+        const row_height = @max(self.style.row_height, 1);
+        const indices = try self.sortedIndices(self.alloc);
+        defer self.alloc.free(indices);
+
+        for (indices, 0..) |row_idx, display_i| {
+            const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
+            if (row_bg) |bg| fillRowBg(layer, cur_row, content_start_col, content_width, row_height, bg);
+            if (self.style.borders) {
+                var line: usize = 0;
+                while (line < row_height) : (line += 1) self.drawSideBorders(layer, ctx, cur_row + line, content_width);
+            }
+            self.writeBodyRow(layer, ctx, self.rows[row_idx], cur_row, content_start_col, row_height, row_bg);
+            cur_row += row_height;
+        }
+
+        if (self.style.borders) {
+            self.drawBorderEdge(layer, ctx, cur_row, content_width, .bottom);
+            cur_row += 1;
+        }
+
+        self.painted = .{
+            .row = self.row,
+            .col = self.col,
+            .rows = cur_row - self.row,
+            .cols = content_width + 2 * border_pad,
+        };
+        self.revision += 1;
+    }
+
+    fn writeHeaderRow(self: *const Table, layer: *Layer, row: usize, content_start_col: usize) void {
+        var col = content_start_col;
+        for (self.columns, 0..) |column, i| {
+            if (i > 0) {
+                writeCellRun(layer, row, col, "", 1, .start, self.style.header_fg orelse default_style.fg, self.style.header_bg, null);
+                col += 1;
+            }
+            const width = @max(column.width, column.min_width);
+            writeCellRun(layer, row, col, column.name, width, column.h_align, self.style.header_fg orelse default_style.fg, self.style.header_bg, null);
+            col += width;
+        }
+    }
+
+    /// One column's icon (if any) plus display text, on the row block's
+    /// middle line (`top_row + row_height / 2` -- `row_height == 1`
+    /// lands on the block's only line). An icon reserves enough leading
+    /// columns that the text after it doesn't collide: exactly 1 cell at
+    /// `row_height == 1` (`.fit`-scaled to fill it), or -- for a
+    /// `row_height > 1` "large format" row -- enough columns to fit the
+    /// icon's own natural pixel width (`ctx.imageInfo`, read from the
+    /// actually-loaded image rather than a hardcoded constant, unlike
+    /// the client-composited prototype's fixed `icon_native_px`),
+    /// `.natural`-scaled and capped to `row_height` cell-heights tall,
+    /// same as `writeGrid`'s icons in glyphwire-ls's non-table listing.
+    fn writeBodyRow(self: *const Table, layer: *Layer, ctx: *const Context, row: TableRow, top_row: usize, content_start_col: usize, row_height: usize, row_bg: ?Color) void {
+        const mid_row = top_row + row_height / 2;
+        var col = content_start_col;
+        for (self.columns, 0..) |column, i| {
+            const width = @max(column.width, column.min_width);
+            const cell = row.cells[i];
+            var icon_reserve: usize = 0;
+
+            if (cell.icon) |icon_handle| {
+                if (row_height > 1) {
+                    const info = ctx.imageInfo(icon_handle) orelse ImageInfo{ .width = 0, .height = 0 };
+                    const max_h: u32 = @intCast(row_height * ctx.cell_px_h);
+                    const render_px = @min(info.width, max_h);
+                    icon_reserve = if (ctx.cell_px_w > 0) (render_px + ctx.cell_px_w - 1) / ctx.cell_px_w + 1 else 1;
+                    setCellIcon(layer, mid_row, col, icon_handle, .natural, .start, .center, max_h, cell.metadata_id);
+                } else {
+                    icon_reserve = 1;
+                    setCellIcon(layer, mid_row, col, icon_handle, .fit, .center, .center, null, cell.metadata_id);
+                }
+            }
+
+            const text_col = col + icon_reserve;
+            const text_width = width -| icon_reserve;
+            const fg = cell.fg orelse default_style.fg;
+            writeCellRun(layer, mid_row, text_col, cell.display, text_width, column.h_align, fg, row_bg, cell.metadata_id);
+
+            col += width + 1;
+        }
+    }
+
+    fn drawBorderEdge(self: *const Table, layer: *Layer, ctx: *const Context, row: usize, content_width: usize, edge: enum { top, bottom }) void {
+        const corner_l = if (edge == .top) "tl" else "bl";
+        const mid = if (edge == .top) "t" else "b";
+        const corner_r = if (edge == .top) "tr" else "br";
+        const total_width = content_width + 2;
+
+        drawBorderTile(layer, ctx, row, self.col, self.style.box_style, corner_l);
+        var c = self.col + 1;
+        while (c < self.col + total_width - 1) : (c += 1) drawBorderTile(layer, ctx, row, c, self.style.box_style, mid);
+        drawBorderTile(layer, ctx, row, self.col + total_width - 1, self.style.box_style, corner_r);
+    }
+
+    fn drawSideBorders(self: *const Table, layer: *Layer, ctx: *const Context, row: usize, content_width: usize) void {
+        drawBorderTile(layer, ctx, row, self.col, self.style.box_style, "l");
+        drawBorderTile(layer, ctx, row, self.col + content_width + 1, self.style.box_style, "r");
+    }
+
+    fn drawSeparatorRow(self: *const Table, layer: *Layer, ctx: *const Context, row: usize, content_start_col: usize, content_width: usize) void {
+        if (self.style.borders) drawBorderTile(layer, ctx, row, self.col, self.style.box_style, "l");
+        var c = content_start_col;
+        while (c < content_start_col + content_width) : (c += 1) drawBorderTile(layer, ctx, row, c, self.style.box_style, "t");
+        if (self.style.borders) drawBorderTile(layer, ctx, row, self.col + content_width + 1, self.style.box_style, "r");
+    }
+};
+
+fn clearExtent(layer: *Layer, extent: TablePaintedExtent) void {
+    if (extent.rows == 0 or extent.cols == 0) return;
+    layer.clear(extent.row, extent.col, extent.rows, extent.cols);
+}
+
+fn setCellText(layer: *Layer, row: usize, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+    if (row >= layer.height or col >= layer.width) return;
+    const c = layer.cell(row, col);
+    c.setGrapheme(grapheme);
+    c.style.fg = fg;
+    c.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
+    c.metadata_id = metadata_id;
+}
+
+fn setCellIcon(layer: *Layer, row: usize, col: usize, handle: ImageHandle, scale: IconScale, h_align: HAlign, v_align: VAlign, max_h: ?u32, metadata_id: ?MetadataHandle) void {
+    if (row >= layer.height or col >= layer.width) return;
+    const c = layer.cell(row, col);
+    c.style.bg = .{ .icon = .{ .handle = handle, .scale = scale, .h_align = h_align, .v_align = v_align, .max_h = max_h } };
+    c.metadata_id = metadata_id;
+}
+
+fn fillRowBg(layer: *Layer, top_row: usize, content_start_col: usize, content_width: usize, row_height: usize, bg: Color) void {
+    var line: usize = 0;
+    while (line < row_height) : (line += 1) {
+        const r = top_row + line;
+        if (r >= layer.height) break;
+        var c = content_start_col;
+        const end = @min(content_start_col + content_width, layer.width);
+        while (c < end) : (c += 1) setCellText(layer, r, c, "", default_style.fg, bg, null);
+    }
+}
+
+fn borderTileHandle(ctx: *const Context, box_style: []const u8, piece: []const u8, name_buf: []u8) ?ImageHandle {
+    const name = std.fmt.bufPrint(name_buf, "{s}-{s}", .{ box_style, piece }) catch return null;
+    return ctx.iconHandle(name);
+}
+
+fn drawBorderTile(layer: *Layer, ctx: *const Context, row: usize, col: usize, box_style: []const u8, piece: []const u8) void {
+    var buf: [64]u8 = undefined;
+    const handle = borderTileHandle(ctx, box_style, piece, &buf) orelse return;
+    setCellIcon(layer, row, col, handle, .stretch, .center, .center, null, null);
+}
+
+/// Writes `text`'s codepoints into `layer` starting at `(row, col)`,
+/// truncated (with a trailing "…", keeping the first `width - 1`
+/// codepoints) if longer than `width` cells, or left/center/right-padded
+/// with spaces (per `h_align`) if shorter -- same shape the
+/// client-composited table prototype's `formatCell` had, just writing
+/// straight into cells instead of building an intermediate string first.
+/// Clipped to the layer's own bounds and to `width` cells -- a column
+/// that runs off the layer's right edge just loses its tail, matching
+/// `Table.render`'s "clip, don't scroll" doc comment. A no-op if `width`
+/// is 0 (e.g. an icon already claimed the column's whole reserved width).
+fn writeCellRun(layer: *Layer, row: usize, col: usize, text: []const u8, width: usize, h_align: HAlign, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+    if (row >= layer.height or width == 0 or col >= layer.width) return;
+    const end_col = @min(col + width, layer.width);
+
+    const text_width = std.unicode.utf8CountCodepoints(text) catch text.len;
+    const truncate = text_width > width;
+    const keep: usize = if (truncate) width -| 1 else text_width;
+    const pad: usize = if (truncate) 0 else width - text_width;
+    const lead: usize = if (truncate) 0 else switch (h_align) {
+        .start => 0,
+        .end => pad,
+        .center => pad / 2,
+    };
+
+    var c = col;
+    var n: usize = 0;
+    while (n < lead and c < end_col) : (n += 1) {
+        setCellText(layer, row, c, " ", fg, bg, metadata_id);
+        c += 1;
+    }
+
+    const view = std.unicode.Utf8View.init(text) catch (std.unicode.Utf8View.init("") catch unreachable);
+    var it = view.iterator();
+    n = 0;
+    while (n < keep and c < end_col) : (n += 1) {
+        const cp = it.nextCodepointSlice() orelse break;
+        setCellText(layer, row, c, cp, fg, bg, metadata_id);
+        c += 1;
+    }
+
+    if (truncate and c < end_col) {
+        setCellText(layer, row, c, "\u{2026}", fg, bg, metadata_id);
+        c += 1;
+    }
+
+    while (c < end_col) : (c += 1) setCellText(layer, row, c, " ", fg, bg, metadata_id);
+}
+
 /// Pixel-space cursor position (framebuffer pixels, as glyphwire-host
 /// reports it).
 pub const PxPos = struct { x: f32 = 0, y: f32 = 0 };
@@ -932,6 +1460,9 @@ pub const Context = struct {
     /// with different metrics should overwrite these right after `init`.
     cell_px_w: u32 = 12,
     cell_px_h: u32 = 12,
+    /// Shared across every layer's `tables` map -- see `TableHandle`'s
+    /// doc comment.
+    next_table_handle: TableHandle = 1,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Context {
         return .{
@@ -1040,6 +1571,42 @@ pub const Context = struct {
         const h = handle orelse root_layer_handle;
         if (h == root_layer_handle) return &self.root;
         return self.layers.getPtr(h);
+    }
+
+    /// `create_table`: builds a `Table` (taking ownership of `columns`/
+    /// `style`, see `Table.init`) and stores it on the resolved layer's
+    /// `tables` map, allocating a fresh handle from `next_table_handle`.
+    /// Doesn't paint anything yet -- a freshly created table has no rows,
+    /// so there's nothing to render until `table_set_rows`. `row`/`col`
+    /// are the resolved anchor (cursor-defaulted by the caller,
+    /// `handleCreateTable`, same convention `resolveAnchor` already gives
+    /// `draw_icon`/`draw_box`), not optional here.
+    pub fn createTable(self: *Context, layer_handle: ?LayerHandle, row: usize, col: usize, columns: []TableColumn, style: TableStyle) !TableHandle {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+
+        const handle = self.next_table_handle;
+        try layer.tables.put(handle, Table.init(self.alloc, row, col, columns, style));
+        errdefer _ = layer.tables.remove(handle);
+        try layer.table_order.append(self.alloc, handle);
+        self.next_table_handle += 1;
+        return handle;
+    }
+
+    /// `destroy_table`: blanks whatever the table last painted (see
+    /// `Table.painted`), frees it, and drops it from its layer's
+    /// compositing order. Errors on an unknown layer or table handle,
+    /// same treatment `destroyLayer` gives an unknown layer handle.
+    pub fn destroyTable(self: *Context, layer_handle: ?LayerHandle, handle: TableHandle) !void {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+        var removed = layer.tables.fetchRemove(handle) orelse return TableError.UnknownTable;
+        clearExtent(layer, removed.value.painted);
+        removed.value.deinit();
+        for (layer.table_order.items, 0..) |h, i| {
+            if (h == handle) {
+                _ = layer.table_order.orderedRemove(i);
+                break;
+            }
+        }
     }
 
     /// Registers `handle` under `name` in the icon catalog, for `draw_icon`
