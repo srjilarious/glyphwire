@@ -638,18 +638,33 @@ pub const Client = struct {
         try self.notify("table_set_style", .{ .layer = layer, .table = table, .style = tableStyleToJson(style) });
     }
 
+    /// Where a table last painted, relative to its own layer -- see
+    /// `core.Table.painted`'s doc comment. `row + rows` is the first row
+    /// below the whole table (border and all, if bordered), for a caller
+    /// that wants to place its own next content there instead of
+    /// overwriting the table -- e.g. `glyphwire-ls -l`'s next shell
+    /// prompt.
+    pub const TablePainted = struct {
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+    };
+
     pub const TableState = struct {
         row_count: usize,
         sort_column: ?usize,
         sort_direction: []const u8,
         row_height: usize,
+        painted: TablePainted,
         revision: u64,
     };
 
     /// `table_get_state(layer?, table)` -- a request. Reads back a
-    /// table's row count, sort state, `row_height`, and revision -- not
-    /// its rendered cells, already readable through the owning layer's
-    /// normal `getCells` (a table paints into ordinary cells).
+    /// table's row count, sort state, `row_height`, painted extent, and
+    /// revision -- not its rendered cells, already readable through the
+    /// owning layer's normal `getCells` (a table paints into ordinary
+    /// cells).
     pub fn tableGetState(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle) !TableState {
         var parsed = try self.request(TableStateResultJson, "table_get_state", .{ .layer = layer, .table = table });
         defer parsed.deinit();
@@ -659,6 +674,7 @@ pub const Client = struct {
             .sort_column = r.sort_column,
             .sort_direction = r.sort_direction,
             .row_height = r.style.row_height,
+            .painted = .{ .row = r.painted.row, .col = r.painted.col, .rows = r.painted.rows, .cols = r.painted.cols },
             .revision = r.revision,
         };
     }
@@ -829,12 +845,20 @@ const TableColumnStateJson = struct {
     h_align: []const u8,
 };
 
+const TablePaintedJson = struct {
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+};
+
 const TableStateResultJson = struct {
     columns: []const TableColumnStateJson,
     row_count: usize,
     sort_column: ?usize,
     sort_direction: []const u8,
     style: TableStyleJson,
+    painted: TablePaintedJson,
     revision: u64,
 };
 

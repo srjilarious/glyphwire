@@ -48,6 +48,8 @@ pub fn main(init: std.process.Init) !void {
         .opts = &.{
             .{ .longName = "hidden", .shortName = "a", .description = "Show hidden files and directories", .maxNumParams = 0 },
             .{ .longName = "long", .shortName = "l", .description = "Long listing: adds size and modified time", .maxNumParams = 0 },
+            .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger, naturally-scaled icons (3-line-tall rows in a long listing). Wins over -S if both are given", .maxNumParams = 0 },
+            .{ .longName = "small", .shortName = "S", .description = "Small format: icons fit into one cell/line, in both the normal and long (-l) listing", .maxNumParams = 0 },
             .{ .longName = "help", .description = "Print help" },
         },
     });
@@ -71,6 +73,8 @@ pub fn main(init: std.process.Init) !void {
 
     const show_hidden = args.hasOption("hidden");
     const long_list = args.hasOption("long");
+    const large_flag = args.hasOption("large");
+    const small_flag = args.hasOption("small");
     const dir_path: []const u8 = if (args.positional.items.len > 0) args.positional.items[0] else ".";
 
     const entries = try listDir(io, alloc, dir_path, show_hidden, long_list);
@@ -81,10 +85,16 @@ pub fn main(init: std.process.Init) !void {
         defer client.deinit();
         const abs_dir_path = try resolveAbsolutePath(io, alloc, dir_path);
         defer alloc.free(abs_dir_path);
+        // Large icons by default in both views; `-S` opts into small ones
+        // (also in both); `-L` wins if both are given, so it can force
+        // large back on even under an inherited/aliased `-S`. Resolved
+        // here rather than threaded through as three-way state, so
+        // `writeGrid`/`writeLongTable` only ever see a plain `large: bool`.
+        const large = large_flag or !small_flag;
         if (long_list) {
-            try writeLongTable(&client, entries, abs_dir_path);
+            try writeLongTable(&client, entries, abs_dir_path, large);
         } else {
-            try writeGrid(&client, entries, abs_dir_path);
+            try writeGrid(&client, entries, abs_dir_path, large);
         }
     } else |_| {
         try writePlain(io, entries, long_list);
@@ -463,25 +473,30 @@ const icon_native_px = 32;
 /// Each row gets a leading icon (`iconForEntry`) before the name, drawn at
 /// the cursor rather than naming its row/col explicitly -- the loop always
 /// enters each iteration with the cursor already sitting at that row's
-/// start (see the trailing `setCursor(row + 2, 0)` below), so there's
-/// nothing to add by repeating it. See `writeLongTable` for `-l`, which
-/// renders as a `Table` instead of this per-row layout.
+/// start (see the trailing `setCursor` below), so there's nothing to add
+/// by repeating it. See `writeLongTable` for `-l`, which renders as a
+/// server-side `Table` instead of this per-row layout.
 ///
-/// The icon is drawn `.natural` sized (capped to `max_icon_h`, computed
-/// below) instead of the default `.fit`-to-one-cell scale: at this font's
-/// actual cell size a `.fit`-shrunk 32x32 icon comes out only a few pixels
-/// tall, unrecognizable. `h_align = .start`/`v_align = .center` then place
-/// it flush against the row's left edge, vertically centered -- growing
-/// only rightward and vertically (never leftward off-grid, since the icon
-/// sits in column 0). `icon_col_width` (computed from the icon's own
-/// native width, not a fixed constant, since a smaller/larger cell size
-/// changes how many columns that native width actually spans) reserves
-/// enough room before the name starts that it doesn't collide with the
-/// wider icon. Vertically, `max_icon_h` -- two cell-heights -- combined
-/// with centered alignment puts a quarter of the icon above the entry's
-/// own row, half on it, and a quarter below, which is why the loop below
-/// skips an *extra* row per entry: without it, one entry's icon would
-/// overlap the next entry's text.
+/// `large` (`-L`, see `main`) picks between two icon renderings:
+///
+/// - `false` (default): `.fit`-scaled into the icon's single anchor cell,
+///   same as a `-l` table's icon at its default `row_height`. One
+///   physical row per entry.
+/// - `true`: `.natural` sized (capped to `max_icon_h`, computed below)
+///   instead of `.fit`: at this font's actual cell size a `.fit`-shrunk
+///   32x32 icon comes out only a few pixels tall, unrecognizable.
+///   `h_align = .start`/`v_align = .center` then place it flush against
+///   the row's left edge, vertically centered -- growing only rightward
+///   and vertically (never leftward off-grid, since the icon sits in
+///   column 0). `icon_col_width` (computed from the icon's own native
+///   width, not a fixed constant, since a smaller/larger cell size
+///   changes how many columns that native width actually spans) reserves
+///   enough room before the name starts that it doesn't collide with the
+///   wider icon. Vertically, `max_icon_h` -- two cell-heights -- combined
+///   with centered alignment puts a quarter of the icon above the entry's
+///   own row, half on it, and a quarter below, which is why the loop
+///   below skips an *extra* row per entry in this mode: without it, one
+///   entry's icon would overlap the next entry's text.
 ///
 /// Reads the cursor back before *each* entry rather than tracking a local
 /// row counter across the whole loop: the grid can scroll mid-listing
@@ -499,23 +514,35 @@ const icon_native_px = 32;
 /// its full path, and a relative one would be ambiguous the moment
 /// anything reading it back (glyphwire-shell's `browseEnter`, eventually
 /// other tools) has a different cwd than this process did.
-fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8) !void {
+fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8, large: bool) !void {
     const alloc = client.alloc;
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
 
-    const metrics = try client.getCellMetrics();
-    const cell_w: usize = metrics.w;
-    const cell_h: usize = metrics.h;
-    const icon_col_width = (icon_native_px + cell_w - 1) / cell_w + 1;
-    const max_icon_h: u32 = @intCast(2 * cell_h);
-    // How many columns (from the anchor at col 0) the icon's rendered
-    // width actually reaches, so every cell it visually covers -- not
-    // just its anchor cell -- can be tagged below. `.natural` scale with
-    // only `max_h` set ties width to the same cap (square icons, uniform
-    // scale-down -- see `core.IconScale`'s doc comment), so the rendered
-    // pixel width is never more than `max_icon_h`, same as the height.
-    const icon_render_px: usize = @min(icon_native_px, max_icon_h);
-    const icon_cols_spanned = (icon_render_px + cell_w - 1) / cell_w;
+    // Small mode: the icon stays inside its one anchor cell, so the name
+    // just needs to start one column over (plus a one-column gap), and
+    // each entry only ever occupies its own single physical row.
+    var icon_col_width: usize = 2;
+    var max_icon_h: u32 = 0;
+    var icon_cols_spanned: usize = 1;
+    var row_step: usize = 1;
+
+    if (large) {
+        const metrics = try client.getCellMetrics();
+        const cell_w: usize = metrics.w;
+        const cell_h: usize = metrics.h;
+        icon_col_width = (icon_native_px + cell_w - 1) / cell_w + 1;
+        max_icon_h = @intCast(2 * cell_h);
+        // How many columns (from the anchor at col 0) the icon's rendered
+        // width actually reaches, so every cell it visually covers -- not
+        // just its anchor cell -- can be tagged below. `.natural` scale
+        // with only `max_h` set ties width to the same cap (square icons,
+        // uniform scale-down -- see `core.IconScale`'s doc comment), so
+        // the rendered pixel width is never more than `max_icon_h`, same
+        // as the height.
+        const icon_render_px: usize = @min(icon_native_px, max_icon_h);
+        icon_cols_spanned = (icon_render_px + cell_w - 1) / cell_w;
+        row_step = 2;
+    }
 
     for (entries) |entry| {
         const cur = try client.getCursor();
@@ -533,21 +560,26 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path
         defer alloc.free(json);
         const metadata_id = try client.createMetadata(json);
 
-        try client.drawIconStyled(null, null, iconForEntry(entry), .{
-            .scale = .natural,
-            .h_align = .start,
-            .v_align = .center,
-            .max_h = max_icon_h,
-            .metadata_id = metadata_id,
-        });
-        // draw_icon only ever tags its own anchor cell (col 0) -- see
-        // core.IconScale's doc comment on why overflow has no automatic
-        // data-model footprint. Tag the rest of the icon's own row here so
-        // browsing (glyphwire-shell's browseEnter) resolves correctly
-        // anywhere the icon actually renders, not just its leftmost cell.
-        var icon_col: usize = 1;
-        while (icon_col < icon_cols_spanned) : (icon_col += 1) {
-            try client.tagMetadata(null, row, icon_col, metadata_id);
+        if (large) {
+            try client.drawIconStyled(null, null, iconForEntry(entry), .{
+                .scale = .natural,
+                .h_align = .start,
+                .v_align = .center,
+                .max_h = max_icon_h,
+                .metadata_id = metadata_id,
+            });
+            // draw_icon only ever tags its own anchor cell (col 0) -- see
+            // core.IconScale's doc comment on why overflow has no
+            // automatic data-model footprint. Tag the rest of the icon's
+            // own row here so browsing (glyphwire-shell's browseEnter)
+            // resolves correctly anywhere the icon actually renders, not
+            // just its leftmost cell.
+            var icon_col: usize = 1;
+            while (icon_col < icon_cols_spanned) : (icon_col += 1) {
+                try client.tagMetadata(null, row, icon_col, metadata_id);
+            }
+        } else {
+            try client.drawIconStyled(null, null, iconForEntry(entry), .{ .metadata_id = metadata_id });
         }
         try client.setCursor(row, icon_col_width);
         switch (entry.kind) {
@@ -568,13 +600,21 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path
         // set_property(cursor) scrolls-and-clamps a row at or past the
         // bottom (Layer.resolveRow), so it's always safe to just name the
         // next row directly here -- the *next* iteration's getCursor()
-        // reads back wherever that actually landed. +2, not +1: leaves a
-        // blank row so this entry's icon (up to `max_icon_h` tall, see
-        // `writeGrid`'s doc comment) doesn't collide with the next entry's
-        // text.
-        try client.setCursor(row + 2, 0);
+        // reads back wherever that actually landed. `row_step` is 2, not
+        // 1, in large mode: leaves a blank row so this entry's icon (up
+        // to `max_icon_h` tall, see `writeGrid`'s doc comment) doesn't
+        // collide with the next entry's text.
+        try client.setCursor(row + row_step, 0);
     }
 }
+
+/// Body row height, in cells, `writeLongTable`'s `large` mode uses --
+/// same "give a `.natural`-scaled icon room to actually read as a
+/// picture" idea `writeGrid`'s `max_icon_h` gives its icons, just as a
+/// real fixed-height table row (`core.Table.render` centers and caps the
+/// icon to this many cell-heights, instead of `writeGrid`'s single-row
+/// anchor with overflow into neighboring rows).
+const large_table_row_height = 3;
 
 /// The `-l` listing: a real server-side table (`Client.createTable`/
 /// `tableSetRows`) instead of `writeGrid`'s per-row `write_text`/`draw_icon`
@@ -586,26 +626,61 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path
 /// shares one metadata tag, same `mimetype`/`path` shape `writeGrid`'s
 /// tags already have.
 ///
-/// Unlike that prototype's streaming `row`/`cell`/`endRow` calls (each
-/// sent over the wire immediately), every row here is built into one
-/// in-memory matrix and sent in a single `tableSetRows` call -- see
-/// decisions.md's Table section on why the table itself is now real
-/// server state rather than client-composited cells: it stays visible,
-/// and re-sortable, after this process exits, which a series of one-shot
-/// draw calls could never do. `scratch` tracks every heap-allocated
-/// display string built along the way (unlike the old streaming API, a
-/// batched `tableSetRows` call means those strings have to outlive the
-/// whole loop, not just one iteration) and is freed right after that
-/// call returns -- `tableSetRows` itself copies everything it needs into
-/// the outgoing JSON before returning.
-fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8) !void {
+/// `large` (`-L`, see `main`) sets the table's `row_height` to
+/// `large_table_row_height`: `core.Table.render` then draws each row's
+/// icon `.natural`-scaled and centered across the whole 3-line row block
+/// instead of `.fit`-scaled into one cell, same rendering `writeGrid`'s
+/// large mode gives its icons -- capped and column-widened using the
+/// icon's actual loaded pixel size server-side (see decisions.md's Table
+/// section), not a size this client has to guess. The Name column here
+/// still needs to be *wide enough* for that bigger icon, though -- same
+/// `icon_native_px`/cell-metrics estimate `writeGrid` uses for its own
+/// `icon_col_width` (capped to `large_table_row_height` cell-heights
+/// instead of `writeGrid`'s fixed two), since column widths are fixed
+/// once at `create_table` time.
+///
+/// Unlike the client-composited prototype's streaming `row`/`cell`/
+/// `endRow` calls (each sent over the wire immediately), every row here
+/// is built into one in-memory matrix and sent in a single
+/// `tableSetRows` call -- see decisions.md's Table section on why the
+/// table itself is now real server state rather than client-composited
+/// cells: it stays visible, and re-sortable, after this process exits,
+/// which a series of one-shot draw calls could never do. `scratch`
+/// tracks every heap-allocated display string built along the way
+/// (unlike the old streaming API, a batched `tableSetRows` call means
+/// those strings have to outlive the whole loop, not just one iteration)
+/// and is freed right after that call returns -- `tableSetRows` itself
+/// copies everything it needs into the outgoing JSON before returning.
+///
+/// Leaves the cursor on the row just below whatever the table actually
+/// painted (`tableGetState`'s `painted` extent, not a size this client
+/// computed itself -- see that field's doc comment on why: recomputing
+/// the same layout math `Table.render` already did would drift the
+/// moment that layout changes) -- without this, glyphwire-shell's next
+/// prompt would land back on the table's own last row and overwrite it,
+/// the same "leave the cursor after the last thing drawn" contract
+/// `writeGrid` already honors for the plain listing.
+fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8, large: bool) !void {
     const alloc = client.alloc;
 
+    var name_width: usize = 33;
+    if (large) {
+        const metrics = try client.getCellMetrics();
+        const max_icon_h: u32 = @intCast(large_table_row_height * metrics.h);
+        const icon_render_px: usize = @min(icon_native_px, max_icon_h);
+        const icon_col_width = (icon_render_px + metrics.w - 1) / metrics.w + 1;
+        name_width = icon_col_width + 32;
+    }
+
     const table = try client.createTable(null, null, null, &.{
-        .{ .name = "Name", .width = 33, .sortable = true },
+        .{ .name = "Name", .width = name_width, .sortable = true },
         .{ .name = "Size", .width = 8, .kind = .number, .h_align = .end, .sortable = true },
         .{ .name = "Perms", .width = 10, .sortable = true },
-    }, .{ .borders = false, .alt_row_bg = rgb(30, 30, 30) });
+    }, .{
+        .borders = false,
+        .alt_row_bg = rgb(30, 30, 30),
+        .row_height = if (large) large_table_row_height else 1,
+    });
 
     var scratch: std.ArrayList([]u8) = .empty;
     defer {
@@ -663,6 +738,9 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir
     }
 
     try client.tableSetRows(null, table, rows);
+
+    const state = try client.tableGetState(null, table);
+    try client.setCursor(state.painted.row + state.painted.rows, 0);
 }
 
 fn writePlain(io: std.Io, entries: []const FileEntry, long_list: bool) !void {

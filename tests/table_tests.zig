@@ -354,3 +354,54 @@ pub fn tableNearLayerBottomClipsWithoutScrollingTest(io: std.Io, alloc: std.mem.
     try testz.expectEqualStr("N", snapshot.cellAt(3, 0).grapheme);
     try testz.expectEqualStr("a", snapshot.cellAt(4, 0).grapheme);
 }
+
+/// `table_get_state`'s `painted` extent reports the table's *actual*
+/// on-screen footprint, not just its row count -- a caller placing its
+/// own next content below the table (`glyphwire-ls -l`'s next shell
+/// prompt; see ls/main.zig's `writeLongTable`) needs `painted.row +
+/// painted.rows`, not something it recomputed itself from row count
+/// alone, which would drift the moment `Table.render`'s layout changes.
+/// Two tables here: bordered/separated at `row_height == 1` (top border
+/// + header + separator + 2 body rows + bottom border == 6 lines) and
+/// borderless/unseparated at `row_height == 3` (header + 2 body rows of
+/// 3 lines each == 7 lines) -- both the "small" and "large format" shapes
+/// `glyphwire-ls -l`/`-l -L` actually produce.
+pub fn tableGetStateReportsPaintedExtentTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 20, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const bordered = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 4 },
+    }, .{ .borders = true, .header_separator = true });
+    try client.tableSetRows(null, bordered, &.{
+        &.{.{ .display = "a" }},
+        &.{.{ .display = "b" }},
+    });
+    const bordered_state = try client.tableGetState(null, bordered);
+    try testz.expectEqual(bordered_state.painted.row, 0);
+    try testz.expectEqual(bordered_state.painted.rows, 6);
+
+    const large = try client.createTable(null, 10, 0, &.{
+        .{ .name = "Name", .width = 4 },
+    }, .{ .borders = false, .header_separator = false, .row_height = 3 });
+    try client.tableSetRows(null, large, &.{
+        &.{.{ .display = "a" }},
+        &.{.{ .display = "b" }},
+    });
+    const large_state = try client.tableGetState(null, large);
+    try testz.expectEqual(large_state.painted.row, 10);
+    try testz.expectEqual(large_state.painted.rows, 7);
+}

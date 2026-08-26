@@ -367,12 +367,25 @@ const ColumnStateJson = struct {
     h_align: []const u8,
 };
 
+/// Where a table last painted (`core.Table.painted`) -- a client that
+/// wants to place something below the table (e.g. `glyphwire-ls -l`'s
+/// next shell prompt) needs this rather than recomputing the same layout
+/// math `Table.render` already did, which would drift the moment that
+/// layout changes.
+const TablePaintedJson = struct {
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+};
+
 const TableStateResult = struct {
     columns: []const ColumnStateJson,
     row_count: usize,
     sort_column: ?usize,
     sort_direction: []const u8,
     style: TableStyleJson,
+    painted: TablePaintedJson,
     revision: u64,
 };
 
@@ -1400,6 +1413,7 @@ pub const Dispatcher = struct {
         const table = layer.tables.getPtr(p.table) orelse return DispatchError.UnknownTable;
 
         const columns = try alloc.alloc(ColumnStateJson, table.columns.len);
+        defer alloc.free(columns);
         for (table.columns, 0..) |c, i| {
             columns[i] = .{
                 .name = c.name,
@@ -1431,6 +1445,12 @@ pub const Dispatcher = struct {
                     .header_fg = if (table.style.header_fg) |c| colorToJson(c) else null,
                     .header_bg = if (table.style.header_bg) |c| colorToJson(c) else null,
                     .row_height = table.style.row_height,
+                },
+                .painted = .{
+                    .row = table.painted.row,
+                    .col = table.painted.col,
+                    .rows = table.painted.rows,
+                    .cols = table.painted.cols,
                 },
                 .revision = table.revision,
             },
