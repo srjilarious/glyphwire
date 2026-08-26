@@ -149,6 +149,7 @@ const Prompt = struct {
     line_start_row: usize = 0,
     line_start_col: usize = 0,
     line_len: usize = 0,
+    buffer: std.ArrayList(u8) = std.ArrayList(u8).empty,
 
     fn showPrompt(self: *Prompt) !void {
         try self.client.writeText("> ", null, null);
@@ -156,10 +157,12 @@ const Prompt = struct {
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
         self.line_len = 0;
+        self.buffer.clearRetainingCapacity();
     }
 
     fn typeChar(self: *Prompt, ch: u8) !void {
         try self.client.writeText(&[_]u8{ch}, null, null);
+        try self.buffer.append(self.client.alloc, ch);
         self.line_len += 1;
     }
 
@@ -172,10 +175,14 @@ const Prompt = struct {
     }
 
     /// Leaves the just-typed line where it already is (it's been live-
-    /// echoed character by character) and starts a fresh prompt on the
-    /// next row.
+    /// echoed character by character), echoes it back on the row below
+    /// -- a stand-in for the command output `submitLine` will eventually
+    /// produce once it spawns a child process per line -- then starts a
+    /// fresh prompt on the row after that.
     fn submitLine(self: *Prompt) !void {
         try self.client.setCursor(self.line_start_row + 1, 0);
+        try self.client.writeText(self.buffer.items, .{ .r = 128, .g = 128, .b = 128 }, null);
+        try self.client.setCursor(self.line_start_row + 2, 0);
         try self.showPrompt();
     }
 };
