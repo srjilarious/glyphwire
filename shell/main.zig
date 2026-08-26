@@ -164,12 +164,13 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) !voi
 }
 
 /// The prompt's line-editing state. Tracks where the current line started
-/// and, unlike the append-only version this grew from, the actual buffer
-/// text plus a cursor *offset* into it -- needed the moment editing can
+/// and a cursor *offset* into the line -- needed the moment editing can
 /// happen anywhere but the end (ctrl+a/e/u, ctrl+arrow word jumps, plain
-/// arrow movement). The server still holds the authoritative on-screen
-/// cells; `buffer` exists so edits away from the end (insert, delete,
-/// kill) know what text is where without reading it back over the wire.
+/// arrow movement). `buffer` mirrors the line's text locally: the server
+/// holds the authoritative cells, but word-jump math (`wordLeft`/
+/// `wordRight`) needs to inspect characters, and `submitLine` echoes the
+/// full line to scrollback, neither of which is worth a round trip to
+/// read back over the wire.
 const Prompt = struct {
     client: *glyphwire.Client,
     line_start_row: usize = 0,
@@ -188,24 +189,25 @@ const Prompt = struct {
         self.buffer.clearRetainingCapacity();
     }
 
-    /// Inserts `ch` at the cursor (append, if the cursor's at the end) and
-    /// redraws everything from the insertion point onward, since the wire
-    /// protocol has no "shift cells right" primitive to insert into an
-    /// already-drawn line.
+    /// Inserts `ch` at the cursor (append, if the cursor's at the end):
+    /// `insert_cells` opens a blank cell there (see `Client.insertCells`),
+    /// then `ch` is written into it -- no retransmitting the rest of the
+    /// line, unlike shifting it around client-side would need.
     fn insertChar(self: *Prompt, ch: u8) !void {
-        const old_len = self.buffer.items.len;
         try self.buffer.insert(self.client.alloc, self.cursor, ch);
+        try self.setCursorAt(self.cursor);
+        try self.client.insertCells(1);
+        try self.client.writeText(&[_]u8{ch}, null, null);
         self.cursor += 1;
-        try self.redrawTail(self.cursor - 1, old_len);
     }
 
     /// Deletes the character before the cursor (backspace).
     fn deleteBackward(self: *Prompt) !void {
         if (self.cursor == 0) return;
-        const old_len = self.buffer.items.len;
         _ = self.buffer.orderedRemove(self.cursor - 1);
         self.cursor -= 1;
-        try self.redrawTail(self.cursor, old_len);
+        try self.setCursorAt(self.cursor);
+        try self.client.deleteCells(1);
     }
 
     /// Deletes the character at the cursor (forward delete) -- distinct
@@ -213,25 +215,26 @@ const Prompt = struct {
     /// the end of the line.
     fn deleteForward(self: *Prompt) !void {
         if (self.cursor >= self.buffer.items.len) return;
-        const old_len = self.buffer.items.len;
         _ = self.buffer.orderedRemove(self.cursor);
-        try self.redrawTail(self.cursor, old_len);
+        try self.setCursorAt(self.cursor);
+        try self.client.deleteCells(1);
     }
 
     /// ctrl+u: deletes from the start of the line through the cursor.
     fn killToStart(self: *Prompt) !void {
         if (self.cursor == 0) return;
-        const old_len = self.buffer.items.len;
+        const count = self.cursor;
         try self.buffer.replaceRange(self.client.alloc, 0, self.cursor, &.{});
         self.cursor = 0;
-        try self.redrawTail(0, old_len);
+        try self.setCursorAt(0);
+        try self.client.deleteCells(count);
     }
 
     /// Moves the cursor without changing the buffer -- ctrl+a/ctrl+e,
     /// ctrl+arrow word jumps, and plain arrow movement all end here.
     fn moveCursorTo(self: *Prompt, offset: usize) !void {
         self.cursor = std.math.clamp(offset, 0, self.buffer.items.len);
-        try self.client.setCursor(self.line_start_row, self.line_start_col + self.cursor);
+        try self.setCursorAt(self.cursor);
     }
 
     /// The offset ctrl+right lands on: past any whitespace right of the
@@ -254,24 +257,10 @@ const Prompt = struct {
         return i;
     }
 
-    /// Rewrites the line from `from` (a buffer offset) through the end of
-    /// the *new* buffer, then blanks any cells left over from a longer
-    /// `old_len` (a delete/kill shrank the buffer -- insert never needs
-    /// this, since `old_len` is always the shorter one already covered by
-    /// the first write), and finally restores the cursor to its real
-    /// position. `writeText` advances the cursor as it writes, so the two
-    /// writes below chain correctly with no `setCursor` between them.
-    fn redrawTail(self: *Prompt, from: usize, old_len: usize) !void {
-        try self.client.setCursor(self.line_start_row, self.line_start_col + from);
-        try self.client.writeText(self.buffer.items[from..], null, null);
-
-        const new_len = self.buffer.items.len;
-        if (old_len > new_len) {
-            var i: usize = new_len;
-            while (i < old_len) : (i += 1) try self.client.writeText(" ", null, null);
-        }
-
-        try self.client.setCursor(self.line_start_row, self.line_start_col + self.cursor);
+    /// Positions the server-side cursor at buffer offset `offset` on the
+    /// current line.
+    fn setCursorAt(self: *Prompt, offset: usize) !void {
+        try self.client.setCursor(self.line_start_row, self.line_start_col + offset);
     }
 
     /// Leaves the just-typed line where it already is (it's been live-

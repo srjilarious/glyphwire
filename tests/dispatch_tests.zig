@@ -254,6 +254,46 @@ pub fn subscribeThenGetInputStateReflectsReportedInputTest(io: std.Io, alloc: st
     try testz.expectEqual(parsed.value.result.cursor_cell.col, 1);
 }
 
+pub fn insertCellsNotificationShiftsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try ctx.root.writeText("hello", glyphwire.default_style);
+    ctx.root.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"insert_cells","params":{"count":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, message)).response == null);
+
+    try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqual(ctx.root.cell(0, 1).grapheme().len, 0);
+    try testz.expectEqualStr("e", ctx.root.cell(0, 2).grapheme());
+}
+
+pub fn deleteCellsNotificationShiftsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try ctx.root.writeText("hello", glyphwire.default_style);
+    ctx.root.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"delete_cells","params":{"count":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, message)).response == null);
+
+    try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("l", ctx.root.cell(0, 1).grapheme());
+    try testz.expectEqualStr("l", ctx.root.cell(0, 2).grapheme());
+    try testz.expectEqualStr("o", ctx.root.cell(0, 3).grapheme());
+    try testz.expectEqual(ctx.root.cell(0, 4).grapheme().len, 0);
+}
+
 pub fn unknownMethodErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

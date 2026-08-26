@@ -66,6 +66,22 @@ pub const Client = struct {
         try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
     }
 
+    /// `insert_cells(count)` -- a notification. ECMA-48's ICH: shifts
+    /// cells at and after the cursor rightward by `count` within its row,
+    /// opening `count` blank cells at the cursor without moving it -- the
+    /// primitive a line editor needs to insert into already-drawn text
+    /// without retransmitting everything after the insertion point.
+    pub fn insertCells(self: *Client, count: usize) !void {
+        try self.notify("insert_cells", .{ .count = count });
+    }
+
+    /// `delete_cells(count)` -- a notification. ECMA-48's DCH: removes
+    /// `count` cells at and after the cursor, shifting the row's
+    /// remainder left and blanking `count` cells at the row's tail.
+    pub fn deleteCells(self: *Client, count: usize) !void {
+        try self.notify("delete_cells", .{ .count = count });
+    }
+
     /// `get_property(layer, "cursor")` -- a request.
     pub fn getCursor(self: *Client) !core.Cursor {
         var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .property = "cursor" });

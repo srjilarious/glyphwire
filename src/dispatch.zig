@@ -37,6 +37,12 @@ const WriteTextParams = struct {
     bg: ?ColorJson = null,
 };
 
+/// Params shared by `insert_cells`/`delete_cells` -- also cursor-implicit
+/// like `write_text`, see `WriteTextParams`.
+const CellCountParams = struct {
+    count: usize,
+};
+
 const CursorPropertyParams = struct {
     property: []const u8,
     row: usize = 0,
@@ -168,6 +174,12 @@ pub const Dispatcher = struct {
         if (std.mem.eql(u8, envelope.method, "write_text")) {
             try self.handleWriteText(alloc, envelope.params);
             return .{};
+        } else if (std.mem.eql(u8, envelope.method, "insert_cells")) {
+            try self.handleInsertCells(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "delete_cells")) {
+            try self.handleDeleteCells(alloc, envelope.params);
+            return .{};
         } else if (std.mem.eql(u8, envelope.method, "set_property")) {
             try self.handleSetProperty(alloc, envelope.params);
             return .{};
@@ -206,6 +218,22 @@ pub const Dispatcher = struct {
             .bg = if (p.bg) |c| .{ .color = .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } } else core.default_style.bg,
         };
         try self.ctx.root.writeText(p.text, style);
+    }
+
+    fn handleInsertCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(CellCountParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.root.insertCells(parsed.value.count);
+    }
+
+    fn handleDeleteCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(CellCountParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.root.deleteCells(parsed.value.count);
     }
 
     fn handleSetProperty(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {

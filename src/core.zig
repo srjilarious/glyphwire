@@ -187,6 +187,44 @@ pub const Layer = struct {
         self.cursor.col += 1;
     }
 
+    /// Shifts cells at and after the cursor's column rightward by `count`
+    /// within the cursor's row, opening `count` blank cells at the cursor
+    /// -- ECMA-48's ICH (Insert Character), the primitive a line editor
+    /// needs to insert into already-drawn text without retransmitting
+    /// everything after the insertion point. Cells shifted past the row's
+    /// right edge are discarded, matching ICH. Doesn't move the cursor or
+    /// touch other rows -- a caller editing a display-wrapped logical line
+    /// would need to call this per physical row itself. `count` is
+    /// clamped to the cells remaining in the row; a cursor already at or
+    /// past the row's right edge is a no-op.
+    pub fn insertCells(self: *Layer, count: usize) void {
+        if (count == 0 or self.cursor.col >= self.width) return;
+        const row = self.rowSlice(self.physicalRow(self.cursor.row));
+        const col = self.cursor.col;
+        const n = @min(count, self.width - col);
+        const tail_len = self.width - col - n;
+        std.mem.copyBackwards(Cell, row[col + n ..][0..tail_len], row[col..][0..tail_len]);
+        for (row[col..][0..n]) |*c| c.* = .{};
+        self.revision += 1;
+    }
+
+    /// Removes `count` cells at and after the cursor's column, shifting
+    /// the row's remainder leftward and filling `count` blank cells at
+    /// the row's tail -- ECMA-48's DCH (Delete Character), the mirror of
+    /// `insertCells`. Doesn't move the cursor. `count` is clamped to the
+    /// cells remaining in the row; a cursor already at or past the row's
+    /// right edge is a no-op.
+    pub fn deleteCells(self: *Layer, count: usize) void {
+        if (count == 0 or self.cursor.col >= self.width) return;
+        const row = self.rowSlice(self.physicalRow(self.cursor.row));
+        const col = self.cursor.col;
+        const n = @min(count, self.width - col);
+        const tail_len = self.width - col - n;
+        std.mem.copyForwards(Cell, row[col..][0..tail_len], row[col + n ..][0..tail_len]);
+        for (row[col + tail_len ..][0..n]) |*c| c.* = .{};
+        self.revision += 1;
+    }
+
     pub fn getProperty(self: *const Layer, name: PropertyName) PropertyValue {
         return switch (name) {
             .cursor => .{ .cursor = self.cursor },

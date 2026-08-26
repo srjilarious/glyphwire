@@ -159,3 +159,84 @@ pub fn scrollingWithNoScrollbackKeepsNoHistoryTest(io: std.Io, alloc: std.mem.Al
     try testz.expectEqualStr("j", layer.cell(1, 0).grapheme());
     try testz.expectTrue(layer.scrollbackRow(0) == null);
 }
+
+pub fn insertCellsShiftsRowRightTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
+    defer layer.deinit();
+
+    try layer.writeText("hello", glyphwire.default_style);
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
+
+    layer.insertCells(1);
+
+    try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cell(0, 1).grapheme().len, 0);
+    try testz.expectEqualStr("e", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("l", layer.cell(0, 3).grapheme());
+    try testz.expectEqualStr("l", layer.cell(0, 4).grapheme());
+    try testz.expectEqualStr("o", layer.cell(0, 5).grapheme());
+    try testz.expectEqual(layer.cell(0, 6).grapheme().len, 0);
+
+    // insertCells doesn't move the cursor -- matches ECMA-48's ICH.
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqual(layer.cursor.col, 1);
+}
+
+pub fn insertCellsDiscardsCellsPastRowEdgeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 2, 0);
+    defer layer.deinit();
+
+    try layer.writeText("abcde", glyphwire.default_style);
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 0 } });
+
+    layer.insertCells(2);
+
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(0, 1).grapheme().len, 0);
+    try testz.expectEqualStr("a", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("b", layer.cell(0, 3).grapheme());
+    try testz.expectEqualStr("c", layer.cell(0, 4).grapheme());
+    // "d" and "e" were shifted past the row's right edge and discarded.
+}
+
+pub fn deleteCellsShiftsRowLeftAndBlanksTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
+    defer layer.deinit();
+
+    try layer.writeText("hello", glyphwire.default_style);
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
+
+    layer.deleteCells(1);
+
+    try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("l", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("l", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("o", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cell(0, 4).grapheme().len, 0);
+
+    // deleteCells doesn't move the cursor -- matches ECMA-48's DCH.
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqual(layer.cursor.col, 1);
+}
+
+pub fn insertAndDeleteCellsAreNoOpsPastRowEdgeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 2, 0);
+    defer layer.deinit();
+
+    try layer.writeText("abcde", glyphwire.default_style);
+    const revision_before = layer.revision;
+    // Cursor is now at (0, 5) -- one past the row's last column.
+
+    layer.insertCells(1);
+    layer.deleteCells(1);
+    layer.insertCells(0);
+    layer.deleteCells(0);
+
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("e", layer.cell(0, 4).grapheme());
+    try testz.expectEqual(layer.revision, revision_before);
+}
