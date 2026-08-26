@@ -33,10 +33,20 @@ pub const Connection = struct {
 /// A Unix-domain socket server serving one `Context` to any number of
 /// concurrently connected clients, each on its own thread (Milestone 4
 /// added the socket; concurrent connections were added once input events
-/// needed one client -- glyphwire-host -- reporting input while others
-/// stay connected to receive it). Fans out `key_down`/`key_up`/
-/// `mouse_button` notifications to whichever connections subscribed --
-/// see dispatch.zig's `Subscriptions`/`Broadcast`.
+/// needed one process reporting input while others stay connected to
+/// receive it). Fans out `key_down`/`key_up`/`mouse_button` notifications
+/// to whichever connections subscribed -- see dispatch.zig's
+/// `Subscriptions`/`Broadcast`.
+///
+/// Meant to be embedded, not just run standalone: whatever process owns
+/// `ctx` can bind a `Server` alongside it and read/write `ctx` directly
+/// (see `reportKey`/`reportMouseButton`/`reportMouseMove`, and `ctx`/
+/// `ctx_mutex` below) while still serving other, separate client processes
+/// over the socket the normal way -- glyphwire-host does exactly this: it
+/// owns the `Context` and renders it directly, but glyphwire-shell (a
+/// separate process, no pixzig dependency) still only ever sees it through
+/// this wire protocol. `server/main.zig` is the headless case: a `Server`
+/// with no in-process owner at all, just serving connections.
 pub const Server = struct {
     io: std.Io,
     ctx: *core.Context,
@@ -124,7 +134,7 @@ pub const Server = struct {
                 }
                 if (result.broadcast) |b| {
                     defer alloc.free(b.body);
-                    self.broadcastToOthers(&conn, b.event, b.body);
+                    self.broadcast(&conn, b.event, b.body);
                 }
             }
         }
@@ -144,16 +154,83 @@ pub const Server = struct {
         }
     }
 
-    fn broadcastToOthers(self: *Server, sender: *Connection, event: []const u8, body: []const u8) void {
+    /// Fans `body` out to every connection subscribed to `event`, except
+    /// `sender` (null when the caller isn't itself a connection -- see
+    /// `reportKey`/`reportMouseButton`, called by whatever process owns
+    /// this `Server` in-process and captures input directly, e.g.
+    /// glyphwire-host reading its own window's keyboard).
+    fn broadcast(self: *Server, sender: ?*Connection, event: []const u8, body: []const u8) void {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
 
         for (self.connections.items) |other| {
-            if (other == sender) continue;
+            if (sender != null and other == sender.?) continue;
             if (!other.subscriptions.has(event)) continue;
             other.send(self.io, body) catch |err| {
                 std.log.err("glyphwire broadcast to a connection failed: {t}", .{err});
             };
         }
+    }
+
+    /// In-process equivalent of a connected client's `report_key` request
+    /// (see dispatch.zig's `handleReportKey`) -- for whatever process owns
+    /// this `Server` and its `Context` directly (glyphwire-host) to report
+    /// input it captured itself, without a loopback connection to its own
+    /// socket. Updates `ctx.input`'s down-set and, if that's a real
+    /// change, broadcasts `key_down`/`key_up` to every subscribed
+    /// connection.
+    pub fn reportKey(self: *Server, alloc: std.mem.Allocator, key: []const u8, pressed: bool) !void {
+        const changed = changed: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            break :changed try self.ctx.input.setKey(key, pressed);
+        };
+        if (!changed) return;
+
+        const Notification = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8,
+            params: struct { key: []const u8 },
+        };
+        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
+            .method = if (pressed) "key_down" else "key_up",
+            .params = .{ .key = key },
+        }, .{});
+        defer alloc.free(body);
+        self.broadcast(null, "key", body);
+    }
+
+    /// In-process equivalent of `report_mouse_button` -- see `reportKey`.
+    pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos) !void {
+        const changed = changed: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            self.ctx.input.cursor_px = px;
+            self.ctx.input.cursor_cell = cell;
+            break :changed try self.ctx.input.setMouseButton(button, pressed);
+        };
+        if (!changed) return;
+
+        const Notification = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8 = "mouse_button",
+            params: struct { button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos },
+        };
+        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
+            .params = .{ .button = button, .pressed = pressed, .px = px, .cell = cell },
+        }, .{});
+        defer alloc.free(body);
+        self.broadcast(null, "mouse_button", body);
+    }
+
+    /// In-process equivalent of `report_mouse_move` -- see `reportKey`.
+    /// Doesn't broadcast (no live move-event stream, matching
+    /// `handleReportMouseMove`), just keeps `get_input_state`'s cursor
+    /// fields current.
+    pub fn reportMouseMove(self: *Server, px: core.PxPos, cell: core.CellPos) void {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        self.ctx.input.cursor_px = px;
+        self.ctx.input.cursor_cell = cell;
     }
 };

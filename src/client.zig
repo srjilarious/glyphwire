@@ -2,15 +2,8 @@ const std = @import("std");
 const core = @import("core.zig");
 const wire = @import("wire.zig");
 
-/// Pixel-space cursor position (framebuffer pixels, as glyphwire-host
-/// reports it).
-pub const PxPos = struct { x: f32, y: f32 };
-
-/// Cell-grid cursor position, derived from `PxPos` and the cell pixel
-/// size -- see decisions.md's Cell/Layer sections. Whoever reports it
-/// (glyphwire-host, which owns the font/cell metrics) computes this, not
-/// the headless server -- see core.zig's `InputState` doc comment.
-pub const CellPos = struct { row: usize, col: usize };
+pub const PxPos = core.PxPos;
+pub const CellPos = core.CellPos;
 
 /// A glyphwire client: wraps connecting to `GLYPHWIRE_SOCK`, JSON-RPC
 /// framing, and request/response correlation, so a program doesn't have to
@@ -346,6 +339,13 @@ pub const InputListener = struct {
     mutex: std.Io.Mutex = .init,
     state: core.InputState,
     key_events: std.ArrayList(KeyEvent) = .empty,
+    /// Posted once per key event appended to `key_events`, so `waitKeyEvent`
+    /// can block until one arrives instead of polling on a timer. Not kept
+    /// in exact sync with `key_events.len` (`pollKeyEvent` drains the queue
+    /// without touching this) -- a stale permit just means a caller of
+    /// `waitKeyEvent` wakes once to an empty queue, no worse than a spurious
+    /// poll.
+    key_sem: std.Io.Semaphore = .{},
 
     /// Connects, subscribes to `events`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
@@ -419,6 +419,18 @@ pub const InputListener = struct {
         defer self.mutex.unlock(self.io);
         if (self.key_events.items.len == 0) return null;
         return self.key_events.orderedRemove(0);
+    }
+
+    /// Blocks until a key event is queued or `timeout` elapses (`null` on
+    /// timeout), instead of `pollKeyEvent`'s non-blocking check -- for a
+    /// consumer loop that wants to react immediately rather than re-polling
+    /// on a fixed interval.
+    pub fn waitKeyEvent(self: *InputListener, timeout: std.Io.Timeout) !?KeyEvent {
+        self.key_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
+            error.Timeout => return null,
+            error.Canceled => |e| return e,
+        };
+        return self.pollKeyEvent();
     }
 
     pub fn isMouseButtonDown(self: *InputListener, button: []const u8) bool {
@@ -518,6 +530,7 @@ pub const InputListener = struct {
             defer self.mutex.unlock(self.io);
             _ = try self.state.setKey(p.value.key, pressed);
             try self.key_events.append(self.alloc, .{ .key = owned_key, .pressed = pressed });
+            self.key_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "mouse_button")) {
             const P = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos };
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{

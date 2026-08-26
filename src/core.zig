@@ -202,6 +202,16 @@ pub const Layer = struct {
     }
 };
 
+/// Pixel-space cursor position (framebuffer pixels, as glyphwire-host
+/// reports it).
+pub const PxPos = struct { x: f32 = 0, y: f32 = 0 };
+
+/// Cell-grid cursor position, derived from `PxPos` and the cell pixel
+/// size -- see decisions.md's Cell/Layer sections. Whoever reports it
+/// (glyphwire-host, which owns the font/cell metrics) computes this, not
+/// the headless server -- see `InputState`'s doc comment.
+pub const CellPos = struct { row: usize = 0, col: usize = 0 };
+
 /// Authoritative input state for a session: which keys/mouse buttons are
 /// currently down, and the last known cursor position. Belongs on
 /// `Context` rather than `Layer` since it's session-wide, not tied to any
@@ -210,8 +220,9 @@ pub const Layer = struct {
 /// Pure logic, no I/O, headless-testable like everything else in this
 /// file: the actual GLFW capture happens in glyphwire-host, which reports
 /// changes here as `report_key`/`report_mouse_button`/`report_mouse_move`
-/// notifications (see dispatch.zig) rather than this type knowing
-/// anything about how input was captured.
+/// notifications (see dispatch.zig, or `Server`'s in-process equivalents
+/// for a caller that owns the `Context` directly) rather than this type
+/// knowing anything about how input was captured.
 ///
 /// Key/button names are whatever string the reporter used (glyphwire-host
 /// uses `@tagName` of pixzig's GLFW-backed key/button enums, e.g. "a",
@@ -220,8 +231,8 @@ pub const InputState = struct {
     alloc: std.mem.Allocator,
     keys_down: std.StringHashMap(void),
     mouse_buttons_down: std.StringHashMap(void),
-    cursor_px: struct { x: f32 = 0, y: f32 = 0 } = .{},
-    cursor_cell: struct { row: usize = 0, col: usize = 0 } = .{},
+    cursor_px: PxPos = .{},
+    cursor_cell: CellPos = .{},
 
     pub fn init(alloc: std.mem.Allocator) InputState {
         return .{

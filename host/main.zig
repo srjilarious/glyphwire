@@ -6,14 +6,15 @@ pub const panic = pixzig.system.panic;
 pub const std_options = pixzig.system.std_options;
 
 /// glyphwire-host: the pixzig-windowed glyphwire renderer (Milestone 8 --
-/// see docs/slice_plan.md). Starts glyphwire-server, spawns glyphwire-shell
-/// as its child with discovery already set up, and renders the grid every
-/// frame by polling the server over the socket like any other client --
-/// see src/client.zig. Deliberately does *not* touch the Context directly
-/// (that was an earlier, since-reverted design): the graphics portion of
-/// pixzig and the shell/launcher are separate processes, related only
-/// through the wire protocol, so either can be swapped or driven
-/// independently.
+/// see docs/slice_plan.md). Owns the `Context` and `Server` in-process --
+/// it's the graphical front end, not just another client of a separately
+/// spawned server -- and reads/writes the grid directly (see `App.render`,
+/// `Server.reportKey`/`reportMouseButton`/`reportMouseMove`), with no wire
+/// round trip for its own state. glyphwire-shell is still a separate
+/// process (no pixzig dependency, so it can't own an in-process `Context`
+/// itself) and only ever sees the grid through the socket, exactly like
+/// any other client would -- `Server.serveForever` runs on a background
+/// thread the whole time so that connection keeps working normally.
 const grid_cols = 120;
 const grid_rows = 50;
 const scrollback_rows = 1000;
@@ -34,24 +35,17 @@ const AppRunner = pixzig.PixzigAppRunner(App, EngOptions);
 
 pub const App = struct {
     alloc: std.mem.Allocator,
-    client: glyphwire.Client,
-    last_revision: u64 = 0,
-    snapshot: ?glyphwire.CellsSnapshot = null,
+    server: *glyphwire.server.Server,
     last_mouse_px: pixzig.Vec2F = .{ .x = -1, .y = -1 },
 
-    pub fn init(alloc: std.mem.Allocator, eng: *AppRunner.Engine, io: std.Io, socket_path: []const u8) !*App {
+    pub fn init(alloc: std.mem.Allocator, eng: *AppRunner.Engine, server: *glyphwire.server.Server) !*App {
         _ = eng;
-        var client = try glyphwire.Client.connect(io, alloc, socket_path);
-        errdefer client.deinit();
-
         const app = try alloc.create(App);
-        app.* = .{ .alloc = alloc, .client = client };
+        app.* = .{ .alloc = alloc, .server = server };
         return app;
     }
 
     pub fn deinit(self: *App) void {
-        if (self.snapshot) |*s| s.deinit();
-        self.client.deinit();
         self.alloc.destroy(self);
     }
 
@@ -62,42 +56,24 @@ pub const App = struct {
         self.reportKeyEvents(eng);
         self.reportMouseEvents(eng);
 
-        // Cheap poll every frame; only pull the (much larger) full grid
-        // when something actually changed since the last fetch.
-        const revision = self.client.getRevision() catch |err| {
-            std.log.err("get_property(revision) failed: {t}", .{err});
-            return true;
-        };
-        if (self.snapshot == null or revision != self.last_revision) {
-            const new_snapshot = self.client.getCells() catch |err| {
-                std.log.err("get_cells failed: {t}", .{err});
-                return true;
-            };
-            if (self.snapshot) |*s| s.deinit();
-            self.snapshot = new_snapshot;
-            self.last_revision = revision;
-        }
-
         return true;
     }
 
     /// Reports every key that changed down/up state this frame -- see
     /// `Keyboard.pressed`/`.released`'s edge-detection doc comments in
-    /// pixzig. `report_key` is sent over the same connection used for
-    /// polling above: it's a fire-and-forget notification, so it can't be
-    /// confused with a pending request's response (see `Client`'s doc
-    /// comment on why that'd be a problem for anything that reads back).
+    /// pixzig -- directly against the in-process `Server` (see
+    /// `Server.reportKey`), not over a socket connection to itself.
     fn reportKeyEvents(self: *App, eng: *AppRunner.Engine) void {
         const fields = @typeInfo(pixzig.glfw.Key).@"enum".fields;
         inline for (fields) |field| {
             const key = @field(pixzig.glfw.Key, field.name);
             if (eng.inputs.keyboard.pressed(key)) {
-                self.client.reportKey(field.name, true) catch |err| {
-                    std.log.err("report_key({s}, true) failed: {t}", .{ field.name, err });
+                self.server.reportKey(self.alloc, field.name, true) catch |err| {
+                    std.log.err("reportKey({s}, true) failed: {t}", .{ field.name, err });
                 };
             } else if (eng.inputs.keyboard.released(key)) {
-                self.client.reportKey(field.name, false) catch |err| {
-                    std.log.err("report_key({s}, false) failed: {t}", .{ field.name, err });
+                self.server.reportKey(self.alloc, field.name, false) catch |err| {
+                    std.log.err("reportKey({s}, false) failed: {t}", .{ field.name, err });
                 };
             }
         }
@@ -110,53 +86,63 @@ pub const App = struct {
 
         if (pos.x != self.last_mouse_px.x or pos.y != self.last_mouse_px.y) {
             self.last_mouse_px = pos;
-            self.client.reportMouseMove(.{ .x = pos.x, .y = pos.y }, cell) catch |err| {
-                std.log.err("report_mouse_move failed: {t}", .{err});
-            };
+            self.server.reportMouseMove(.{ .x = pos.x, .y = pos.y }, cell);
         }
 
         const fields = @typeInfo(pixzig.glfw.MouseButton).@"enum".fields;
         inline for (fields) |field| {
             const btn = @field(pixzig.glfw.MouseButton, field.name);
             if (eng.inputs.mouse.pressed(btn)) {
-                self.client.reportMouseButton(field.name, true, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
-                    std.log.err("report_mouse_button({s}, true) failed: {t}", .{ field.name, err });
+                self.server.reportMouseButton(self.alloc, field.name, true, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
+                    std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field.name, err });
                 };
             } else if (eng.inputs.mouse.released(btn)) {
-                self.client.reportMouseButton(field.name, false, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
-                    std.log.err("report_mouse_button({s}, false) failed: {t}", .{ field.name, err });
+                self.server.reportMouseButton(self.alloc, field.name, false, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
+                    std.log.err("reportMouseButton({s}, false) failed: {t}", .{ field.name, err });
                 };
             }
         }
     }
 
+    /// Reads the root layer's cells straight out of the in-process
+    /// `Context` -- no `get_property`/`get_cells` round trip, and nothing
+    /// to skip-if-unchanged: a direct read is cheap enough to just do every
+    /// frame. `ctx_mutex` is the same lock `Server` takes around dispatch
+    /// for connected clients (e.g. glyphwire-shell's `write_text` calls),
+    /// so this can't race a concurrent write.
     pub fn render(self: *App, eng: *AppRunner.Engine) void {
         eng.renderer.clear(0.0, 0.0, 0.0, 1.0);
         eng.renderer.begin(eng.projMat);
 
-        if (self.snapshot) |*snap| {
-            var row: usize = 0;
-            while (row < snap.rows()) : (row += 1) {
-                var col: usize = 0;
-                while (col < snap.cols()) : (col += 1) {
-                    const rc = snap.cellAt(row, col);
-                    const pos = pixzig.Vec2I{
-                        .x = @as(i32, @intCast(col)) * cell_w,
-                        .y = @as(i32, @intCast(row)) * cell_h,
-                    };
+        self.server.ctx_mutex.lockUncancelable(self.server.io);
+        defer self.server.ctx_mutex.unlock(self.server.io);
 
-                    if (rc.bg) |bg| {
+        const layer = &self.server.ctx.root;
+        var row: usize = 0;
+        while (row < layer.height) : (row += 1) {
+            var col: usize = 0;
+            while (col < layer.width) : (col += 1) {
+                const c = layer.cell(row, col);
+                const pos = pixzig.Vec2I{
+                    .x = @as(i32, @intCast(col)) * cell_w,
+                    .y = @as(i32, @intCast(row)) * cell_h,
+                };
+
+                switch (c.style.bg) {
+                    .color => |bg| {
                         if (bg.r != 0 or bg.g != 0 or bg.b != 0) {
                             eng.renderer.drawFilledRect(
                                 pixzig.RectF.fromPosSize(pos.x, pos.y, cell_w, cell_h),
                                 pixzig.Color.from(bg.r, bg.g, bg.b, bg.a),
                             );
                         }
-                    }
+                    },
+                    .image => {}, // unbuilt, see core.zig's Background
+                }
 
-                    if (rc.grapheme.len > 0) {
-                        _ = eng.renderer.drawStringColored(rc.grapheme, pos, pixzig.Color.from(rc.fg.r, rc.fg.g, rc.fg.b, rc.fg.a));
-                    }
+                const g = c.grapheme();
+                if (g.len > 0) {
+                    _ = eng.renderer.drawStringColored(g, pos, pixzig.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
                 }
             }
         }
@@ -183,25 +169,21 @@ fn reapChild(io: std.Io, child_in: std.process.Child) void {
     _ = child.wait(io) catch {};
 }
 
+/// Runs `Server.serveForever` for the lifetime of the process, on its own
+/// thread -- not joined, same as the reaped child processes below: it
+/// keeps serving glyphwire-shell (and any other socket client) for as long
+/// as the process runs, and there's nothing to hand its result to once the
+/// window/render loop below is what actually keeps the process alive.
+fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
+    server.serveForever(alloc) catch |err| {
+        std.log.err("glyphwire server stopped: {t}", .{err});
+    };
+}
+
 fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
     const dir = environ_map.get("XDG_RUNTIME_DIR") orelse "/tmp";
     const pid = std.os.linux.getpid();
     return std.fmt.allocPrint(alloc, "{s}/glyphwire-{d}.sock", .{ dir, pid });
-}
-
-fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
-    const addr = try std.Io.net.UnixAddress.init(socket_path);
-    var attempt: usize = 0;
-    while (attempt < 100) : (attempt += 1) {
-        if (addr.connect(io)) |stream| {
-            var s = stream;
-            s.close(io);
-            return;
-        } else |_| {
-            try std.Io.sleep(io, .fromMilliseconds(10), .awake);
-        }
-    }
-    return error.ServerNeverCameUp;
 }
 
 /// Resolves a sibling binary built alongside this one (zig-out/bin/<name>)
@@ -227,19 +209,17 @@ pub fn main(init: std.process.Init) !void {
 
     const socket_path = try socketPath(alloc, init.environ_map);
 
-    const server_path = try resolveSibling(alloc, io, "glyphwire-server");
-    var server_child = try std.process.spawn(io, .{
-        .argv = &.{
-            server_path,
-            socket_path,
-            std.fmt.comptimePrint("{d}", .{grid_cols}),
-            std.fmt.comptimePrint("{d}", .{grid_rows}),
-        },
-    });
-    _ = try std.Thread.spawn(.{}, reapChild, .{ io, server_child });
-    _ = &server_child;
+    var ctx = try glyphwire.Context.init(alloc, grid_cols, grid_rows, scrollback_rows);
+    defer ctx.deinit();
 
-    try waitForSocketReady(io, socket_path);
+    // `.listen()` inside `bind` is synchronous -- the socket is already
+    // accept-ready (kernel-queued, even before `serveForever`'s thread
+    // starts calling `accept`) by the time this returns, so unlike the
+    // old separate-process design, glyphwire-shell can be spawned right
+    // below with no wait-for-socket-ready polling loop needed.
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var shell_env = try init.environ_map.clone(alloc);
     defer shell_env.deinit();
@@ -264,7 +244,7 @@ pub fn main(init: std.process.Init) !void {
         .resizable = false,
         .renderInitOpts = .{ .font = .{ .path = .{ .face = "assets/JetBrainsMono-Regular.ttf", .size = font_size } } },
     });
-    const app = try App.init(alloc, appRunner.engine, io, socket_path);
+    const app = try App.init(alloc, appRunner.engine, &srv);
 
     appRunner.run(app);
 }

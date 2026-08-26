@@ -116,10 +116,11 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) !voi
     try prompt.showPrompt();
 
     while (true) {
-        const ev = listener.pollKeyEvent() orelse {
-            std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
-            continue;
-        };
+        // Blocks until a key event is queued rather than polling on a fixed
+        // interval, so a keystroke gets picked up immediately instead of
+        // waiting out however much of the poll interval was left; the
+        // timeout is just a fallback heartbeat, not load-bearing.
+        const ev = (try listener.waitKeyEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
         defer alloc.free(ev.key);
         if (!ev.pressed) continue; // only key-down drives the prompt
 
