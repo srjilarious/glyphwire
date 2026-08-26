@@ -465,6 +465,42 @@ fn formatTimestamp(buf: []u8, sec: i64) []const u8 {
 /// enough columns for a `.natural`-scaled icon before the name starts.
 const icon_native_px = 32;
 
+/// Floor/cap `writeLongTable`'s Name column is clamped to after sizing it
+/// from the actual listing (`maxDisplayLen`) -- the floor keeps a listing
+/// of all-short names from squeezing the "Name" header itself; the cap
+/// keeps one absurdly long symlink target from stretching the whole
+/// table (and pushing Size/Perms toward or past the layer's right edge)
+/// well past anything a directory listing needs -- `writeCellRun`
+/// already truncates-with-ellipsis past this anyway, same as it would
+/// for a wider column.
+const min_name_width = 8;
+const max_name_width = 40;
+
+/// The widest an entry's `-l` Name-column content (filename plus its
+/// `/`/` -> target` suffix) actually is, in codepoints -- matching
+/// `writeCellRun`'s own codepoint-based width model, not bytes, so this
+/// agrees with the truncation math that eventually runs against it. Used
+/// to size that column to the *real* data instead of a blind constant
+/// (see `min_name_width`/`max_name_width`'s doc comment) -- a fixed
+/// width wide enough for a rare long name otherwise either clips shorter
+/// ones' siblings (Size/Perms pushed past the layer's edge) or wastes
+/// width when every name in this particular listing is short.
+fn maxDisplayLen(entries: []const FileEntry) usize {
+    var max_len: usize = 0;
+    for (entries) |entry| {
+        var len = std.unicode.utf8CountCodepoints(entry.name) catch entry.name.len;
+        switch (entry.kind) {
+            .directory => len += 1, // trailing "/"
+            .sym_link => if (entry.link_target) |tgt| {
+                len += 4 + (std.unicode.utf8CountCodepoints(tgt) catch tgt.len); // " -> "
+            },
+            else => {},
+        }
+        max_len = @max(max_len, len);
+    }
+    return max_len;
+}
+
 /// The plain (non `-l`) listing: writes one entry per row starting at the
 /// layer's current cursor row, leaving the cursor at the start of the row
 /// after the last entry -- glyphwire-shell resyncs from
@@ -652,6 +688,16 @@ const large_table_row_height = 3;
 /// and is freed right after that call returns -- `tableSetRows` itself
 /// copies everything it needs into the outgoing JSON before returning.
 ///
+/// Anchored explicitly at the layer's current cursor (`client.getCursor()`,
+/// read once up front and passed as `create_table`'s `row`/`col`) rather
+/// than relying on that call's own cursor-implicit defaulting (omitted
+/// `row`/`col` -- see dispatch.zig's `resolveAnchor`) -- functionally the
+/// same anchor either way, but explicit here to match `writeGrid`'s own
+/// style (which always reads the cursor back itself rather than leaning
+/// on server-side defaults) and to make it visually obvious at the call
+/// site that this table starts wherever glyphwire-shell's prompt left
+/// off, not at the layer's origin.
+///
 /// Leaves the cursor on the row just below whatever the table actually
 /// painted (`tableGetState`'s `painted` extent, not a size this client
 /// computed itself -- see that field's doc comment on why: recomputing
@@ -662,17 +708,24 @@ const large_table_row_height = 3;
 /// `writeGrid` already honors for the plain listing.
 fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8, large: bool) !void {
     const alloc = client.alloc;
+    const cur = try client.getCursor();
 
-    var name_width: usize = 33;
+    // Size the Name column to what this listing actually contains
+    // (clamped, see `min_name_width`/`max_name_width`) rather than a
+    // blind constant -- a fixed width wide enough for a rare long name
+    // otherwise pushes Size/Perms toward (or past) the layer's right
+    // edge for every *other*, normally-short-named listing too.
+    const name_text_width = std.math.clamp(maxDisplayLen(entries), min_name_width, max_name_width);
+    var icon_reserve: usize = 1;
     if (large) {
         const metrics = try client.getCellMetrics();
         const max_icon_h: u32 = @intCast(large_table_row_height * metrics.h);
         const icon_render_px: usize = @min(icon_native_px, max_icon_h);
-        const icon_col_width = (icon_render_px + metrics.w - 1) / metrics.w + 1;
-        name_width = icon_col_width + 32;
+        icon_reserve = (icon_render_px + metrics.w - 1) / metrics.w + 1;
     }
+    const name_width = icon_reserve + name_text_width;
 
-    const table = try client.createTable(null, null, null, &.{
+    const table = try client.createTable(null, cur.row, cur.col, &.{
         .{ .name = "Name", .width = name_width, .sortable = true },
         .{ .name = "Size", .width = 8, .kind = .number, .h_align = .end, .sortable = true },
         .{ .name = "Perms", .width = 10, .sortable = true },

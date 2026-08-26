@@ -405,3 +405,58 @@ pub fn tableGetStateReportsPaintedExtentTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(large_state.painted.row, 10);
     try testz.expectEqual(large_state.painted.rows, 7);
 }
+
+fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
+    server.serveForever(alloc) catch |err| {
+        std.log.err("test server stopped: {t}", .{err});
+    };
+}
+
+/// `create_table` with `row`/`col` omitted anchors at the layer's
+/// *current* cursor, same convention `draw_box`/`draw_icon` already use
+/// (`resolveAnchor` in dispatch.zig) -- exercised here across two
+/// separate connections, not just one, since that's the shape
+/// `glyphwire-shell` + `glyphwire-ls` actually have: the shell positions
+/// the cursor (`Prompt.submitLine`, before spawning `ls` as a grandchild)
+/// on *its* connection, then `ls` calls `create_table` on a *different*
+/// connection. Both still share the same root `Layer.cursor` server-side
+/// (cursor isn't connection-scoped), so this should behave identically to
+/// the single-connection case -- this test is the proof that it actually
+/// does, not just that the single-connection path works.
+pub fn createTableOnAnotherConnectionDefaultsToFirstConnectionsCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 20, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-cursor-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    // Connection A: the "shell" -- positions the cursor, same as
+    // `Prompt.submitLine` does before spawning a command.
+    var shell_conn = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer shell_conn.deinit();
+    try shell_conn.setCursor(5, 3);
+
+    // Connection B: the "ls" -- a separate connection, deliberately not
+    // reusing shell_conn, so this can't accidentally pass by relying on
+    // some connection-local cursor cache that wouldn't exist in the real
+    // shell/ls split.
+    var ls_conn = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer ls_conn.deinit();
+
+    const table = try ls_conn.createTable(null, null, null, &.{
+        .{ .name = "Name", .width = 4 },
+    }, .{ .borders = false, .header_separator = false });
+    try ls_conn.tableSetRows(null, table, &.{
+        &.{.{ .display = "a" }},
+    });
+
+    const state = try ls_conn.tableGetState(null, table);
+    try testz.expectEqual(state.painted.row, 5);
+    try testz.expectEqual(state.painted.col, 3);
+}
