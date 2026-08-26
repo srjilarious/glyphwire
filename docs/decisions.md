@@ -475,21 +475,32 @@ surface.
   `sort_key` on the wire is a bare JSON number or string (not a wrapper
   object) — its own type already disambiguates which `SortKey` variant it
   means.
-- **Writes cells directly, never through the cursor-based helpers —
-  clips instead of scrolling.** `Layer.writeText`/`drawIcon`/etc. are
-  built around a real terminal cursor that scrolls the *whole layer*
-  when it advances past the bottom (`Layer.resolveRow`); a table pinned
-  at a fixed anchor is the wrong shape for that model — content that
-  doesn't fit should clip, the same way `draw_box`/`draw_image` already
-  clamp their own rectangles to the layer's bounds rather than
-  triggering a scroll. `Table.render` writes `layer.cell(r, c)` directly
-  and never calls `resolveRow` at all, which incidentally also sidesteps
-  entirely a real scrolling bug the `row_height > 1` ("large format")
-  variant of the client-composited prototype hit near a layer's bottom
-  edge (multiple cursor-based writes into one still-unresolved row
-  independently triggering their own scrolls, scattering that row's
-  content across several physical rows) — moot here, since nothing in
-  the new design ever advances or resolves a cursor.
+- **Scrolls the layer (once) to fit vertically, but writes cells
+  directly rather than through the cursor-based helpers otherwise.**
+  First tried "clip instead of scroll," on the reasoning that a table
+  pinned at a fixed anchor is like `draw_box`/`draw_image`, which clamp
+  their own rectangles to the layer's bounds rather than triggering a
+  scroll — wrong in practice: a table is usually a *command's output*
+  (`glyphwire-ls -l`, printed wherever the shell's prompt happened to
+  leave the cursor, not necessarily near the top of the screen), and
+  most of it silently never becoming visible at all (because nothing
+  made room the way typing more text would) reads as "the table doesn't
+  render," not "the table clipped." `Table.render` now resolves its
+  anchor against `Layer.resolveRow` exactly once per render call —
+  against the table's *bottom* row, then walked back to get the new
+  top — before writing anything, so the whole table always ends up
+  visible if it can be (scrolling earlier content, including whatever
+  isn't this table, out of view exactly like new terminal output would).
+  Once that one resolution lands, every actual cell write still goes
+  through `layer.cell(r, c)` directly, not `Layer.writeText`/`drawIcon`'s
+  cursor-implicit helpers, and horizontal overflow still just clips
+  (there's no horizontal-scroll concept for a cell grid) — this is also
+  why the resolution has to happen exactly once, up front, rather than
+  emerging from many small per-cell writes: `Layer.resolveRow` scrolls
+  *relative to whatever's currently at the top* on every out-of-bounds
+  call, so resolving the same block's rows independently, one cell at a
+  time, is exactly the compounding-scroll bug the `row_height > 1`
+  variant of the client-composited prototype this replaced hit first.
 - **No icon-only column — an icon lives on any cell, alongside its
   text.** The client-composited prototype needed a dedicated
   zero-content icon column (`.fit`-scaled into its own cell) plus a

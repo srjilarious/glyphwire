@@ -1025,18 +1025,30 @@ pub const Table = struct {
     /// table-specific work at all, since glyphwire-host's existing render
     /// pass already draws whatever's in the cell buffer.
     ///
-    /// Writes cells directly (`layer.cell(r, c)`), never through
-    /// `Layer.writeText`/`drawIcon`'s cursor-implicit, `resolveRow`-based
-    /// helpers: those exist for a real terminal cursor that scrolls the
-    /// *whole layer* when it advances past the bottom, which is the
-    /// wrong model for a table pinned at a fixed anchor -- a table that
-    /// doesn't fit clips, the same way `drawBox`/`drawImage` already
-    /// clamp their own rectangles to the layer's bounds rather than
-    /// scrolling. This also sidesteps entirely the bug class the
-    /// client-composited table prototype hit near a layer's bottom edge
-    /// (multiple cursor-based writes into the same still-unresolved row
-    /// independently triggering their own scrolls) -- moot here, since
-    /// nothing in this method ever calls `resolveRow`.
+    /// Scrolls the layer first if the table's full height wouldn't
+    /// otherwise fit below `self.row` -- a table drawn as a command's
+    /// output (`glyphwire-ls -l`, printed wherever the shell's prompt
+    /// happened to leave the cursor, not necessarily near the top of the
+    /// screen) needs the same "make room for new output" behavior a real
+    /// terminal gives any other command, or most of it silently never
+    /// becomes visible at all. Resolved via `Layer.resolveRow` against
+    /// the table's *bottom* row (`self.row + total_height - 1`), then
+    /// walked back to get the new top -- exactly once per `render` call,
+    /// not once per cell/tile the way the client-composited prototype
+    /// this replaced first got wrong (see its own historical bug: `resolveRow`
+    /// scrolls *relative to whatever's currently at the top* on every
+    /// out-of-bounds call, so resolving the same block's rows
+    /// independently, one cell at a time, compounds into runaway extra
+    /// scrolling). One resolution up front avoids that entirely.
+    ///
+    /// Writes every cell directly (`layer.cell(r, c)`) after that,
+    /// **not** through `Layer.writeText`/`drawIcon`'s cursor-implicit
+    /// helpers -- this method already did the one scroll resolution a
+    /// table needs itself, so nothing past this point should trigger
+    /// another. Horizontal overflow still just clips (`self.col` never
+    /// moves) -- there's no horizontal-scroll concept for a cell grid,
+    /// same as `drawBox`/`drawImage` clamping their own rectangles to the
+    /// layer's width.
     pub fn render(self: *Table, layer: *Layer, ctx: *const Context) !void {
         clearExtent(layer, self.painted);
 
@@ -1046,6 +1058,15 @@ pub const Table = struct {
             content_width += @max(column.width, column.min_width);
         }
         const border_pad: usize = if (self.style.borders) 1 else 0;
+        const row_height = @max(self.style.row_height, 1);
+        const separator_lines: usize = if (self.style.header_separator) 1 else 0;
+        const total_height = border_pad + 1 + separator_lines + self.rows.len * row_height + border_pad;
+        if (total_height > 0) {
+            const bottom = self.row + total_height - 1;
+            const resolved_bottom = layer.resolveRow(bottom);
+            self.row = resolved_bottom - (total_height - 1);
+        }
+
         const content_start_col = self.col + border_pad;
         var cur_row = self.row;
 
@@ -1063,7 +1084,6 @@ pub const Table = struct {
             cur_row += 1;
         }
 
-        const row_height = @max(self.style.row_height, 1);
         const indices = try self.sortedIndices(self.alloc);
         defer self.alloc.free(indices);
 

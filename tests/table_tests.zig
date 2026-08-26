@@ -308,15 +308,22 @@ pub fn destroyTableBlanksItsRegionTest(io: std.Io, alloc: std.mem.Allocator) !vo
 }
 
 /// A table pinned near a layer's bottom edge that doesn't fully fit
-/// clips rather than scrolling the layer -- unlike the client-composited
-/// prototype this replaced (which drove the layer's cursor and could
-/// trigger `Layer.resolveRow`'s scrolling), `Table.render` writes cells
-/// directly and never scrolls at all (see that method's doc comment).
-/// Regression-shaped proof: a sentinel character written above the
-/// table's anchor stays exactly where it was -- if painting the
-/// off-the-bottom body row had scrolled the layer instead of clipping,
-/// the sentinel would have moved (or vanished).
-pub fn tableNearLayerBottomClipsWithoutScrollingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+/// *scrolls* the layer first so its whole height ends up visible, the
+/// same "make room for new output" a real terminal gives anything else
+/// drawn near the bottom -- not the fixed-anchor "clip whatever falls
+/// off the edge" behavior a `draw_box`/`draw_image` rectangle gets.
+/// Table.render` resolves this once per render (`Layer.resolveRow`
+/// against the table's *bottom* row, see that method's doc comment), not
+/// once per cell the way the client-composited prototype this replaced
+/// first got wrong.
+///
+/// 5-row layer, no scrollback (`scrollback_rows: 0`): a sentinel written
+/// at row 0 before the table exists proves the scroll actually happened
+/// (and, with no scrollback to catch it, was evicted) -- if the table
+/// had clipped instead of scrolling per the prototype's now-obsolete
+/// behavior, the sentinel would still be exactly where it was and the
+/// table's second body row would be missing instead.
+pub fn tableNearLayerBottomScrollsToFitInsteadOfClippingTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
     defer ctx.deinit();
 
@@ -336,9 +343,10 @@ pub fn tableNearLayerBottomClipsWithoutScrollingTest(io: std.Io, alloc: std.mem.
     try client.setCursor(0, 0);
     try client.writeText("!", .{ .r = 255, .g = 255, .b = 255 }, null);
 
-    // Anchored at row 3 of a 5-row layer: header lands on row 3, the
-    // first body row on row 4 (both fit), but a second body row would
-    // need row 5, which doesn't exist.
+    // Anchored at row 3 of a 5-row layer wanting 3 total lines (header +
+    // 2 body rows, no separator): only 2 lines of headroom exist there
+    // (rows 3-4), one short -- exactly one scroll is needed to fit the
+    // whole table, landing it at rows 2-4 instead.
     const table = try client.createTable(null, 3, 0, &.{
         .{ .name = "Name", .width = 4 },
     }, .{ .borders = false, .header_separator = false });
@@ -350,9 +358,16 @@ pub fn tableNearLayerBottomClipsWithoutScrollingTest(io: std.Io, alloc: std.mem.
     var snapshot = try client.getCells();
     defer snapshot.deinit();
 
-    try testz.expectEqualStr("!", snapshot.cellAt(0, 0).grapheme);
-    try testz.expectEqualStr("N", snapshot.cellAt(3, 0).grapheme);
-    try testz.expectEqualStr("a", snapshot.cellAt(4, 0).grapheme);
+    // The sentinel was scrolled off (evicted -- no scrollback configured).
+    try testz.expectEqualStr("", snapshot.cellAt(0, 0).grapheme);
+    // The whole table is now visible, shifted up by exactly one row.
+    try testz.expectEqualStr("N", snapshot.cellAt(2, 0).grapheme);
+    try testz.expectEqualStr("a", snapshot.cellAt(3, 0).grapheme);
+    try testz.expectEqualStr("b", snapshot.cellAt(4, 0).grapheme);
+
+    const state = try client.tableGetState(null, table);
+    try testz.expectEqual(state.painted.row, 2);
+    try testz.expectEqual(state.painted.rows, 3);
 }
 
 /// `table_get_state`'s `painted` extent reports the table's *actual*
