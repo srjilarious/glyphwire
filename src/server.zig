@@ -200,6 +200,28 @@ pub const Server = struct {
         self.broadcast(null, "key", body);
     }
 
+    /// Re-broadcasts `key_down` for an already-held `key`, for a caller
+    /// driving its own typematic repeat (glyphwire-host's `App`, on an
+    /// arrow key held past the initial delay). Deliberately doesn't touch
+    /// `ctx.input`'s down-set: the key's already marked down from the
+    /// original press, so routing this through `reportKey`/`setKey` would
+    /// see no state change and silently swallow the repeat. Every
+    /// subscriber just sees another `key_down` for the same key, same as
+    /// `reportKey`'s -- no separate "this was a repeat" signal, since
+    /// nothing here needs to tell the difference from a fresh press.
+    pub fn reportKeyRepeat(self: *Server, alloc: std.mem.Allocator, key: []const u8) !void {
+        const Notification = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8 = "key_down",
+            params: struct { key: []const u8 },
+        };
+        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
+            .params = .{ .key = key },
+        }, .{});
+        defer alloc.free(body);
+        self.broadcast(null, "key", body);
+    }
+
     /// In-process equivalent of `report_mouse_button` -- see `reportKey`.
     pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos) !void {
         const changed = changed: {

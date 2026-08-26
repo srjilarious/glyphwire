@@ -27,16 +27,54 @@ const font_size: f32 = 18.0;
 // AppRunner.init below.
 const cell_w = 12;
 const cell_h = 12;
+const cursor_width = 2;
+
+// Typematic repeat timing for arrow keys -- how long a key must be held
+// before it starts repeating, and how often it repeats after that. Typical
+// OS keyboard-repeat values; tune here if they feel off.
+const arrow_repeat_delay_ms: f64 = 500;
+const arrow_repeat_interval_ms: f64 = 40;
 
 const EngOptions: pixzig.PixzigEngineOptions = .{
     .rendererOpts = .{ .textRendering = true },
 };
 const AppRunner = pixzig.PixzigAppRunner(App, EngOptions);
 
+/// Tracks how long one arrow key has been continuously held, to drive its
+/// typematic repeat -- pixzig's `Keyboard` only edge-detects `pressed`/
+/// `released`, no built-in hold-duration, so `App` has to track this
+/// itself.
+const ArrowRepeatState = struct {
+    held_ms: f64 = 0,
+    next_repeat_ms: f64 = arrow_repeat_delay_ms,
+
+    fn reset(self: *ArrowRepeatState) void {
+        self.held_ms = 0;
+        self.next_repeat_ms = arrow_repeat_delay_ms;
+    }
+
+    /// Call once per tick while the key is physically down (not on the
+    /// initial press -- that edge already moves the cursor once, handled
+    /// separately). Returns true once held_ms crosses the next scheduled
+    /// repeat threshold.
+    fn tick(self: *ArrowRepeatState, delta_ms: f64) bool {
+        self.held_ms += delta_ms;
+        if (self.held_ms < self.next_repeat_ms) return false;
+        self.next_repeat_ms += arrow_repeat_interval_ms;
+        return true;
+    }
+};
+
 pub const App = struct {
     alloc: std.mem.Allocator,
     server: *glyphwire.server.Server,
     last_mouse_px: pixzig.Vec2F = .{ .x = -1, .y = -1 },
+    arrow_repeat: struct {
+        up: ArrowRepeatState = .{},
+        down: ArrowRepeatState = .{},
+        left: ArrowRepeatState = .{},
+        right: ArrowRepeatState = .{},
+    } = .{},
 
     pub fn init(alloc: std.mem.Allocator, eng: *AppRunner.Engine, server: *glyphwire.server.Server) !*App {
         _ = eng;
@@ -50,13 +88,70 @@ pub const App = struct {
     }
 
     pub fn update(self: *App, eng: *AppRunner.Engine, deltaTimeMs: f64) bool {
-        _ = deltaTimeMs;
         if (eng.inputs.keyboard.pressed(.escape)) return false;
 
         self.reportKeyEvents(eng);
         self.reportMouseEvents(eng);
+        self.handleArrowKeys(eng, deltaTimeMs);
 
         return true;
+    }
+
+    /// Moves the grid cursor for each arrow key, clamped to the grid --
+    /// generic terminal-style cursor addressing, independent of
+    /// glyphwire-shell's line editor (which repositions the cursor itself
+    /// on every character it writes, so it isn't thrown off by wherever an
+    /// arrow key last left the cursor). The initial press already reached
+    /// `ctx.input`'s down-set and got broadcast via `reportKeyEvents`
+    /// above; held-down repeats move the cursor again here and separately
+    /// re-broadcast via `reportKeyRepeat`, since `reportKey`/`setKey`
+    /// would see no state change on a key that's already down and drop it.
+    fn handleArrowKeys(self: *App, eng: *AppRunner.Engine, delta_ms: f64) void {
+        self.handleArrowKey(eng, .up, "up", &self.arrow_repeat.up, 0, -1, delta_ms);
+        self.handleArrowKey(eng, .down, "down", &self.arrow_repeat.down, 0, 1, delta_ms);
+        self.handleArrowKey(eng, .left, "left", &self.arrow_repeat.left, -1, 0, delta_ms);
+        self.handleArrowKey(eng, .right, "right", &self.arrow_repeat.right, 1, 0, delta_ms);
+    }
+
+    fn handleArrowKey(
+        self: *App,
+        eng: *AppRunner.Engine,
+        key: pixzig.glfw.Key,
+        name: []const u8,
+        state: *ArrowRepeatState,
+        dcol: i32,
+        drow: i32,
+        delta_ms: f64,
+    ) void {
+        if (eng.inputs.keyboard.pressed(key)) {
+            state.reset();
+            self.moveCursor(dcol, drow);
+        } else if (eng.inputs.keyboard.down(key)) {
+            if (state.tick(delta_ms)) {
+                self.moveCursor(dcol, drow);
+                self.server.reportKeyRepeat(self.alloc, name) catch |err| {
+                    std.log.err("reportKeyRepeat({s}) failed: {t}", .{ name, err });
+                };
+            }
+        } else {
+            state.reset();
+        }
+    }
+
+    /// Moves `ctx.root`'s cursor by one cell, clamped to the grid.
+    /// `ctx_mutex`-guarded like `render`'s read, since this runs on the
+    /// same thread as everything else in `update`/`render` but still
+    /// shares `ctx` with connected clients' dispatch threads (e.g.
+    /// glyphwire-shell's own `set_property cursor` calls).
+    fn moveCursor(self: *App, dcol: i32, drow: i32) void {
+        self.server.ctx_mutex.lockUncancelable(self.server.io);
+        defer self.server.ctx_mutex.unlock(self.server.io);
+
+        const layer = &self.server.ctx.root;
+        const col: i32 = @as(i32, @intCast(layer.cursor.col)) + dcol;
+        const row: i32 = @as(i32, @intCast(layer.cursor.row)) + drow;
+        layer.cursor.col = @intCast(std.math.clamp(col, 0, @as(i32, @intCast(layer.width - 1))));
+        layer.cursor.row = @intCast(std.math.clamp(row, 0, @as(i32, @intCast(layer.height - 1))));
     }
 
     /// Reports every key that changed down/up state this frame -- see
@@ -145,6 +240,18 @@ pub const App = struct {
                     _ = eng.renderer.drawStringColored(g, pos, pixzig.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
                 }
             }
+        }
+
+        // Cursor caret: a solid bar at the start (left edge) of the
+        // cursor's cell, drawn last so it sits on top of that cell's own
+        // background/glyph.
+        if (layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
+            const cx = @as(i32, @intCast(layer.cursor.col)) * cell_w;
+            const cy = @as(i32, @intCast(layer.cursor.row)) * cell_h;
+            eng.renderer.drawFilledRect(
+                pixzig.RectF.fromPosSize(cx, cy, cursor_width, cell_h),
+                pixzig.Color.from(255, 255, 255, 255),
+            );
         }
 
         eng.renderer.end();
