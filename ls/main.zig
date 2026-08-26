@@ -81,7 +81,11 @@ pub fn main(init: std.process.Init) !void {
         defer client.deinit();
         const abs_dir_path = try resolveAbsolutePath(io, alloc, dir_path);
         defer alloc.free(abs_dir_path);
-        try writeGrid(&client, entries, long_list, abs_dir_path);
+        if (long_list) {
+            try writeLongTable(&client, entries, abs_dir_path);
+        } else {
+            try writeGrid(&client, entries, abs_dir_path);
+        }
     } else |_| {
         try writePlain(io, entries, long_list);
     }
@@ -108,6 +112,9 @@ const FileEntry = struct {
     link_target: ?[]const u8, // non-null for symlinks; caller owns memory
     size: u64 = 0,
     mtime_sec: i64 = 0,
+    /// Raw POSIX mode bits (file type nibble + setuid/setgid/sticky +
+    /// user/group/all rwx), only populated with `-l` -- see `FileMode`.
+    mode: u16 = 0,
 };
 
 fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidden: bool, long_list: bool) ![]FileEntry {
@@ -141,13 +148,21 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
         errdefer if (link_target) |t| alloc.free(t);
 
         // Only stat when -l actually needs it -- a plain listing has no
-        // use for size/mtime, and stat is a syscall per entry.
+        // use for size/mtime/mode, and stat is a syscall per entry.
         var size: u64 = 0;
         var mtime_sec: i64 = 0;
+        var mode: u16 = 0;
         if (long_list) {
             if (dir.statFile(io, entry.name, .{ .follow_symlinks = false })) |st| {
                 size = st.size;
                 mtime_sec = st.mtime.toSeconds();
+                // `Stat.permissions` wraps the same raw POSIX mode bits
+                // `fstatat`'s `st_mode` gives (see `std.Io.File.statFromPosix`
+                // in std's Threaded.zig backend) -- no libc/manual `fstatat`
+                // binding needed just for permission bits, unlike lsz's
+                // getpwuid/getgrgid (owner/group *names*, not asked for
+                // here), which do need libc.
+                mode = @truncate(st.permissions.toMode());
             } else |_| {}
         }
 
@@ -158,6 +173,7 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
             .link_target = link_target,
             .size = size,
             .mtime_sec = mtime_sec,
+            .mode = mode,
         });
     }
 
@@ -354,6 +370,58 @@ const KBytes: u64 = 1024;
 const MBytes: u64 = 1024 * KBytes;
 const GBytes: u64 = 1024 * MBytes;
 
+/// Bitfield view of `FileEntry.mode`'s raw POSIX mode bits -- lifted from
+/// lsz's identical `FileMode` (/home/jeffdw/code/lsz/src/main.zig), same
+/// field layout (LSB first: all/other bits, then group, then user, then
+/// setuid/setgid/sticky, then the file-type nibble in the top 4 bits,
+/// matching `st_mode`'s standard POSIX layout).
+const FileMode = packed struct(u16) {
+    all_x: bool,
+    all_w: bool,
+    all_r: bool,
+    group_x: bool,
+    group_w: bool,
+    group_r: bool,
+    user_x: bool,
+    user_w: bool,
+    user_r: bool,
+    sticky: bool,
+    setgid: bool,
+    setuid: bool,
+    type: u4,
+};
+
+/// `-l`'s permission column: a type character (`d`/`l`/`-`/... , same
+/// mapping lsz's `printLongEntry` uses) followed by the classic 9-character
+/// `rwxrwxrwx` triad (user, group, all -- `-` for an unset bit). Unlike
+/// lsz's version, this doesn't color each flag individually: a table cell
+/// carries one foreground color for its whole text (see `Table.cellStyled`),
+/// not per-character styling, and the type-character-plus-string shape
+/// reads clearly enough in the table's default color already.
+fn formatPermBits(buf: *[10]u8, mode: u16) []const u8 {
+    const fm: FileMode = @bitCast(mode);
+    buf[0] = switch (fm.type) {
+        4 => 'd',
+        8 => '-',
+        10 => 'l',
+        1 => 'p',
+        2 => 'c',
+        6 => 'b',
+        12 => 's',
+        else => '?',
+    };
+    buf[1] = if (fm.user_r) 'r' else '-';
+    buf[2] = if (fm.user_w) 'w' else '-';
+    buf[3] = if (fm.user_x) 'x' else '-';
+    buf[4] = if (fm.group_r) 'r' else '-';
+    buf[5] = if (fm.group_w) 'w' else '-';
+    buf[6] = if (fm.group_x) 'x' else '-';
+    buf[7] = if (fm.all_r) 'r' else '-';
+    buf[8] = if (fm.all_w) 'w' else '-';
+    buf[9] = if (fm.all_x) 'x' else '-';
+    return buf;
+}
+
 /// Human-readable size, right-padded to a fixed width so the timestamp
 /// that follows lines up across rows -- e.g. `  512 B`, ` 12.3 KB`.
 fn formatSize(buf: []u8, size: u64) []const u8 {
@@ -387,16 +455,17 @@ fn formatTimestamp(buf: []u8, sec: i64) []const u8 {
 /// enough columns for a `.natural`-scaled icon before the name starts.
 const icon_native_px = 32;
 
-/// Writes one entry per row starting at the layer's current cursor row,
-/// leaving the cursor at the start of the row after the last entry --
-/// glyphwire-shell resyncs from `get_property(cursor)` after this process
-/// exits (see `Prompt.submitLine`), so there's no fixed row count it needs
-/// to guess. Each row gets a leading icon (`iconForEntry`) before the name,
-/// drawn at the cursor rather than naming its row/col explicitly -- the
-/// loop always enters each iteration with the cursor already sitting at
-/// that row's start (see the trailing `setCursor(row + 2, 0)` below), so
-/// there's nothing to add by repeating it. With `-l`, size and modified
-/// time follow the name.
+/// The plain (non `-l`) listing: writes one entry per row starting at the
+/// layer's current cursor row, leaving the cursor at the start of the row
+/// after the last entry -- glyphwire-shell resyncs from
+/// `get_property(cursor)` after this process exits (see
+/// `Prompt.submitLine`), so there's no fixed row count it needs to guess.
+/// Each row gets a leading icon (`iconForEntry`) before the name, drawn at
+/// the cursor rather than naming its row/col explicitly -- the loop always
+/// enters each iteration with the cursor already sitting at that row's
+/// start (see the trailing `setCursor(row + 2, 0)` below), so there's
+/// nothing to add by repeating it. See `writeLongTable` for `-l`, which
+/// renders as a `Table` instead of this per-row layout.
 ///
 /// The icon is drawn `.natural` sized (capped to `max_icon_h`, computed
 /// below) instead of the default `.fit`-to-one-cell scale: at this font's
@@ -430,7 +499,7 @@ const icon_native_px = 32;
 /// its full path, and a relative one would be ambiguous the moment
 /// anything reading it back (glyphwire-shell's `browseEnter`, eventually
 /// other tools) has a different cwd than this process did.
-fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: bool, abs_dir_path: []const u8) !void {
+fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8) !void {
     const alloc = client.alloc;
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
 
@@ -496,15 +565,6 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: b
             else => try client.writeTextTagged(entry.name, file_color, null, metadata_id),
         }
 
-        if (long_list) {
-            var size_buf: [16]u8 = undefined;
-            var time_buf: [20]u8 = undefined;
-            try client.writeText("  ", null, null);
-            try client.writeTextTagged(formatSize(&size_buf, entry.size), detail_color, null, metadata_id);
-            try client.writeText("  ", null, null);
-            try client.writeTextTagged(formatTimestamp(&time_buf, entry.mtime_sec), detail_color, null, metadata_id);
-        }
-
         // set_property(cursor) scrolls-and-clamps a row at or past the
         // bottom (Layer.resolveRow), so it's always safe to just name the
         // next row directly here -- the *next* iteration's getCursor()
@@ -514,6 +574,69 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, long_list: b
         // text.
         try client.setCursor(row + 2, 0);
     }
+}
+
+/// The `-l` listing: one `Client.startTable` row per entry -- icon, name
+/// (colored by kind, same as the plain listing), size, and permission
+/// bits -- instead of `writeGrid`'s per-row layout. A table's fixed-width
+/// grid needs the icon `.fit`-scaled into its own single cell rather than
+/// `writeGrid`'s `.natural`-sized, row-spilling icon (see `Table.iconCell`'s
+/// doc comment), so there's no icon-overflow row-skipping/tagging to do
+/// here the way `writeGrid` needs -- one physical row per entry, not two.
+///
+/// Every cell in an entry's row shares one metadata tag, same reasoning
+/// (and same `mimetype`/`path` shape) as `writeGrid`'s -- `Table.cellStyled`/
+/// `iconCellStyled` take it directly rather than a separate `tagMetadata`
+/// pass.
+fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8) !void {
+    const alloc = client.alloc;
+
+    var table = try client.startTable(.{
+        .columns = &.{
+            .{ .name = "", .width = 1 },
+            .{ .name = "Name", .width = 32 },
+            .{ .name = "Size", .width = 8, .h_align = .end },
+            .{ .name = "Perms", .width = 10 },
+        },
+        .style = .{ .borders = false, .alt_row_bg = rgb(30, 30, 30) },
+    });
+
+    for (entries) |entry| {
+        const full_path = try std.fs.path.join(alloc, &.{ abs_dir_path, entry.name });
+        defer alloc.free(full_path);
+        const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = full_path }, .{});
+        defer alloc.free(json);
+        const metadata_id = try client.createMetadata(json);
+
+        try table.row();
+        try table.iconCellStyled(iconForEntry(entry), .{ .metadata_id = metadata_id });
+
+        var name_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        switch (entry.kind) {
+            .directory => {
+                const text = std.fmt.bufPrint(&name_buf, "{s}/", .{entry.name}) catch entry.name;
+                try table.cellStyled(text, .{ .fg = dir_color, .metadata_id = metadata_id });
+            },
+            .sym_link => {
+                const text = if (entry.link_target) |tgt|
+                    std.fmt.bufPrint(&name_buf, "{s} -> {s}", .{ entry.name, tgt }) catch entry.name
+                else
+                    entry.name;
+                try table.cellStyled(text, .{ .fg = symlink_color, .metadata_id = metadata_id });
+            },
+            else => try table.cellStyled(entry.name, .{ .fg = file_color, .metadata_id = metadata_id }),
+        }
+
+        var size_buf: [16]u8 = undefined;
+        try table.cellStyled(formatSize(&size_buf, entry.size), .{ .fg = detail_color, .metadata_id = metadata_id });
+
+        var perm_buf: [10]u8 = undefined;
+        try table.cellStyled(formatPermBits(&perm_buf, entry.mode), .{ .fg = detail_color, .metadata_id = metadata_id });
+
+        try table.endRow();
+    }
+
+    try table.end();
 }
 
 fn writePlain(io: std.Io, entries: []const FileEntry, long_list: bool) !void {

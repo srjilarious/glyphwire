@@ -231,3 +231,148 @@ pub fn startTableWithHeaderSeparatorButNoBordersDrawsRuleAcrossContentWidthTest(
     try testz.expectEqualStr("z", snapshot.cellAt(3, 0).grapheme);
     try testz.expectEqual(snapshot.cellAt(3, 0).bg.?.r, 20);
 }
+
+/// `iconCellStyled`/`cellStyled` -- added for glyphwire-ls's `-l` table
+/// (icon + colored name column, both tagged for click-to-activate) -- draw
+/// into their own column in order same as plain `cell`/`iconCell`, apply
+/// the given fg (`cellStyled`) instead of the default, and tag every cell
+/// they touch with `metadata_id` when given, same as `Client.writeTextTagged`.
+pub fn iconCellAndCellStyledApplyColorAndMetadataTagTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const png = fakePngBytes(12, 12);
+    const folder_handle = try client.loadImage("png", &png);
+    try ctx.registerIcon("folder", folder_handle);
+
+    const metadata_id = try client.createMetadata("{\"kind\":\"dir\"}");
+
+    var table = try client.startTable(.{
+        .row = 0,
+        .col = 0,
+        .columns = &.{
+            .{ .name = "", .width = 1 },
+            .{ .name = "Name", .width = 6 },
+        },
+        .style = .{ .borders = false, .header_separator = false },
+    });
+
+    try table.row();
+    try table.iconCellStyled("folder", .{ .metadata_id = metadata_id });
+    try table.cellStyled("src", .{ .fg = .{ .r = 98, .g = 114, .b = 164, .a = 255 }, .metadata_id = metadata_id });
+    try table.endRow();
+    try table.end();
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+
+    // Row 0 is the header (its icon column's name is "", but the header
+    // row itself is always drawn regardless of `header_separator` -- only
+    // the divider *line* is skipped -- so the body row `row`/`iconCellStyled`/
+    // `cellStyled` wrote is row 1, not row 0.
+    const icon_cell = snapshot.cellAt(1, 0);
+    try testz.expectEqual(icon_cell.bg_icon.?.handle, folder_handle);
+    try testz.expectTrue(icon_cell.bg_icon.?.scale == .fit);
+    try testz.expectEqual(icon_cell.metadata_id.?, metadata_id);
+
+    const name_cell = snapshot.cellAt(1, 2);
+    try testz.expectEqualStr("s", name_cell.grapheme);
+    try testz.expectEqual(name_cell.fg.r, 98);
+    try testz.expectEqual(name_cell.fg.b, 164);
+    try testz.expectEqual(name_cell.metadata_id.?, metadata_id);
+}
+
+/// A table anchored at/past a small layer's bottom row must scroll
+/// *once* per body row, not once per cell/tile it draws for that row --
+/// `Layer.resolveRow` (core.zig) scrolls relative to whatever's currently
+/// at the top every time it's called with an out-of-bounds row, so
+/// `row`/`cell`/`endRow` calling it with the same nominal row number more
+/// than once per logical row (one for the icon, one per text cell) would
+/// otherwise compound into runaway extra scrolling, scattering one row's
+/// cells across several different physical rows instead of landing them
+/// on the same one. Regression test for exactly that bug, fixed by
+/// `Table.resolveCurRow`.
+pub fn startTableScrollsExactlyOncePerRowNearLayerBottomTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 200);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const png = fakePngBytes(12, 12);
+    const file_handle = try client.loadImage("png", &png);
+    try ctx.registerIcon("file", file_handle);
+
+    // Row 8 of a 10-row layer: only 2 rows of headroom before every body
+    // row after the first needs a scroll.
+    try client.setCursor(8, 0);
+
+    var table = try client.startTable(.{
+        .columns = &.{
+            .{ .name = "", .width = 1 },
+            .{ .name = "Name", .width = 10 },
+            .{ .name = "Size", .width = 5, .h_align = .end },
+        },
+        .style = .{ .borders = false, .header_separator = false },
+    });
+
+    var name_buf: [16]u8 = undefined;
+    var i: usize = 0;
+    while (i < 12) : (i += 1) {
+        const name = std.fmt.bufPrint(&name_buf, "entry{d}", .{i}) catch "entry";
+        try table.row();
+        try table.iconCell("file");
+        try table.cell(name);
+        try table.cell("1K");
+        try table.endRow();
+    }
+    try table.end();
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+
+    // 13 lines total (1 header + 12 entries) into a viewport with 2 rows
+    // of headroom (started at row 8 of 10): the last 10 lines fill the
+    // viewport exactly, so entry2..entry11 are visible, one per row, each
+    // with its icon, name, and (right-aligned in a 5-wide column starting
+    // at col 13, so "1K" lands at cols 16-17) size all landing together on
+    // the same physical row -- not scattered across several, which is
+    // what this test guards against.
+    var expected: usize = 2;
+    var row: usize = 0;
+    while (row < 10) : ({
+        row += 1;
+        expected += 1;
+    }) {
+        var expected_buf: [16]u8 = undefined;
+        const expected_name = try std.fmt.bufPrint(&expected_buf, "entry{d}", .{expected});
+
+        try testz.expectEqual(snapshot.cellAt(row, 0).bg_icon.?.handle, file_handle);
+        try testz.expectEqualStr(expected_name[0..1], snapshot.cellAt(row, 2).grapheme);
+        try testz.expectEqualStr("1", snapshot.cellAt(row, 16).grapheme);
+        try testz.expectEqualStr("K", snapshot.cellAt(row, 17).grapheme);
+    }
+}

@@ -133,15 +133,18 @@ pub const Table = struct {
         };
 
         if (self.borders) {
+            try self.resolveCurRow();
             try self.drawBorderEdge(self.cur_row, .top);
             self.cur_row += 1;
         }
 
+        try self.resolveCurRow();
         try self.writeHeaderRow(self.cur_row);
         if (self.borders) try self.drawSideBorders(self.cur_row);
         self.cur_row += 1;
 
         if (opts.style.header_separator) {
+            try self.resolveCurRow();
             try self.drawSeparatorRow(self.cur_row);
             self.cur_row += 1;
         }
@@ -149,13 +152,38 @@ pub const Table = struct {
         return self;
     }
 
-    /// Opens a new body row: draws its side border tiles (if enabled) and,
-    /// on a striped row (odd `row_index`, when `style.alt_row_bg` is set),
-    /// pre-fills the whole interior width with that background so the gap
-    /// cells between columns pick up the stripe too, not just the text
-    /// cells `cell` writes afterward.
+    /// Resolves `self.cur_row` against the layer's actual current state
+    /// (scrolling it, and every cell already drawn along with it, if
+    /// `self.cur_row` is at or past the bottom) via one `set_property`/
+    /// `get_property(cursor)` round trip, then updates `self.cur_row` to
+    /// match. Must run exactly once per logical row, before the first
+    /// draw call that targets it -- `Layer.resolveRow` (core.zig) scrolls
+    /// *relative to whatever's currently at the top* every time it's
+    /// called with an out-of-bounds row, so calling it repeatedly with the
+    /// same nominal row number -- which every multi-cell row here would
+    /// otherwise do, once per cell/border tile -- compounds into runaway
+    /// extra scrolling instead of landing everything on one physical row.
+    /// This is the same reason `glyphwire-ls`'s `writeGrid` re-reads
+    /// `get_property(cursor)` fresh before each entry rather than tracking
+    /// a local row counter (see its doc comment) -- generalized here to
+    /// every row-drawing entry point in this file (`start`'s border/header/
+    /// separator rows, `row`'s body row, `end`'s bottom border).
+    fn resolveCurRow(self: *Table) !void {
+        try self.client.setCursor(self.cur_row, self.content_start_col);
+        const cur = try self.client.getCursor();
+        self.cur_row = cur.row;
+    }
+
+    /// Opens a new body row: resolves `self.cur_row` (see `resolveCurRow`),
+    /// draws its side border tiles (if enabled), and, on a striped row
+    /// (odd `row_index`, when `style.alt_row_bg` is set), pre-fills the
+    /// whole interior width with that background so the gap cells between
+    /// columns pick up the stripe too, not just the text cells `cell`
+    /// writes afterward.
     pub fn row(self: *Table) !void {
         if (self.in_row) return error.RowAlreadyOpen;
+
+        try self.resolveCurRow();
 
         if (self.borders) try self.drawSideBorders(self.cur_row);
 
@@ -165,7 +193,9 @@ pub const Table = struct {
                 const fill = try alloc.alloc(u8, self.content_width);
                 defer alloc.free(fill);
                 @memset(fill, ' ');
-                try self.client.setCursor(self.cur_row, self.content_start_col);
+                // `resolveCurRow` already parked the cursor at
+                // `(self.cur_row, self.content_start_col)` -- no need to
+                // set it again.
                 try self.client.writeText(fill, null, bg);
             }
         }
@@ -179,6 +209,27 @@ pub const Table = struct {
     /// column's `h_align` if it's longer than the column's width, padded
     /// with spaces otherwise. Must be called between `row` and `endRow`.
     pub fn cell(self: *Table, text: []const u8) !void {
+        return self.cellStyled(text, .{});
+    }
+
+    /// `fg`/`metadata_id` for `cellStyled` -- see `Client.DrawIconOpts` for
+    /// the same "a separate `*Styled` method/opts struct rather than extra
+    /// params on the plain one" pattern, used here for the same reason
+    /// (Zig has no default parameter values).
+    pub const CellStyleOpts = struct {
+        fg: ?core.Color = null,
+        /// See `core.Cell.metadata_id`'s doc comment. Tags every cell this
+        /// call writes to, same as `Client.writeTextTagged`.
+        metadata_id: ?core.MetadataHandle = null,
+    };
+
+    /// Like `cell`, but with an explicit foreground color and/or metadata
+    /// tag -- for a column whose per-row color carries meaning independent
+    /// of striping (e.g. glyphwire-ls's directory/symlink/file name
+    /// coloring), or that needs the same click-to-activate metadata
+    /// tagging `glyphwire-ls`'s plain (non-table) listing already gives
+    /// every cell an entry's row touches.
+    pub fn cellStyled(self: *Table, text: []const u8, opts: CellStyleOpts) !void {
         if (!self.in_row) return error.NoActiveRow;
         if (self.cur_col_idx >= self.columns.len) return error.TooManyCells;
 
@@ -192,7 +243,43 @@ pub const Table = struct {
 
         const bg = if (self.row_index % 2 == 1) self.style.alt_row_bg else null;
         try self.client.setCursor(self.cur_row, col);
-        try self.client.writeText(formatted, null, bg);
+        if (opts.metadata_id) |mid| {
+            try self.client.writeTextTagged(formatted, opts.fg, bg, mid);
+        } else {
+            try self.client.writeText(formatted, opts.fg, bg);
+        }
+
+        self.cur_col_idx += 1;
+    }
+
+    pub const IconCellOpts = struct {
+        metadata_id: ?core.MetadataHandle = null,
+    };
+
+    /// Draws `name` (an icon-registry name, see `core.default_icon_manifest`)
+    /// into the current row's next column, `.fit`-scaled to exactly that
+    /// one cell. Unlike `glyphwire-ls`'s own icon rendering outside a
+    /// table (`.natural` sized and capped, deliberately overflowing past
+    /// its anchor cell for legibility -- see `core.IconScale`'s doc
+    /// comment), a table's fixed-width grid model has no room for an icon
+    /// to spill into a neighboring cell it doesn't own, so this stays
+    /// inside its own cell like every other column does.
+    ///
+    /// A striped row's background (`row`'s pre-fill, see its doc comment)
+    /// doesn't show through an icon cell: `Cell.style.bg` is a tagged
+    /// union (flat color vs. image/icon reference, see decisions.md's Cell
+    /// section), so drawing the icon here overwrites that one cell's color
+    /// back to none, same as `draw_icon` would anywhere else.
+    pub fn iconCell(self: *Table, name: []const u8) !void {
+        return self.iconCellStyled(name, .{});
+    }
+
+    pub fn iconCellStyled(self: *Table, name: []const u8, opts: IconCellOpts) !void {
+        if (!self.in_row) return error.NoActiveRow;
+        if (self.cur_col_idx >= self.columns.len) return error.TooManyCells;
+
+        const col = self.columnStartCol(self.cur_col_idx);
+        try self.client.drawIconStyled(self.cur_row, col, name, .{ .metadata_id = opts.metadata_id });
 
         self.cur_col_idx += 1;
     }
@@ -215,7 +302,10 @@ pub const Table = struct {
     /// to write something below the table positions explicitly.
     pub fn end(self: *Table) !void {
         if (self.in_row) return error.RowStillOpen;
-        if (self.borders) try self.drawBorderEdge(self.cur_row, .bottom);
+        if (self.borders) {
+            try self.resolveCurRow();
+            try self.drawBorderEdge(self.cur_row, .bottom);
+        }
     }
 
     fn columnStartCol(self: *const Table, index: usize) usize {
