@@ -306,15 +306,22 @@ fn resolveSibling(alloc: std.mem.Allocator, io: std.Io, name: []const u8) ![]con
 pub fn main(init: std.process.Init) !void {
     std.log.info("glyphwire host starting", .{});
     const alloc = init.gpa;
+    // Process-lifetime setup values (args, paths, the shell's argv/environ)
+    // that are never freed -- deliberately, they're needed until the
+    // process exits below -- so they're allocated from `init.arena`
+    // (reclaimed automatically on exit) rather than `alloc`, whose
+    // DebugAllocator would otherwise flag every one of them as a leak.
+    // Mirrors `server/main.zig`'s `args` allocation.
+    const arena = init.arena.allocator();
     const io = init.io;
-    const args = try init.minimal.args.toSlice(alloc);
+    const args = try init.minimal.args.toSlice(arena);
 
     // With no explicit command, default to glyphwire-shell's own
     // interactive prompt (its no-args mode) rather than exec'ing into a
     // specific child.
     const shell_child_argv: []const []const u8 = if (args.len >= 2) args[1..] else &.{};
 
-    const socket_path = try socketPath(alloc, init.environ_map);
+    const socket_path = try socketPath(arena, init.environ_map);
 
     var ctx = try glyphwire.Context.init(alloc, grid_cols, grid_rows, scrollback_rows);
     defer ctx.deinit();
@@ -328,13 +335,12 @@ pub fn main(init: std.process.Init) !void {
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
-    var shell_env = try init.environ_map.clone(alloc);
-    defer shell_env.deinit();
+    var shell_env = try init.environ_map.clone(arena);
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
     try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
 
-    const shell_path = try resolveSibling(alloc, io, "glyphwire-shell");
-    const shell_argv = try std.mem.concat(alloc, []const u8, &.{ &.{shell_path}, shell_child_argv });
+    const shell_path = try resolveSibling(arena, io, "glyphwire-shell");
+    const shell_argv = try std.mem.concat(arena, []const u8, &.{ &.{shell_path}, shell_child_argv });
 
     if (std.process.spawn(io, .{ .argv = shell_argv, .environ_map = &shell_env })) |shell_child| {
         _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child });
@@ -354,4 +360,17 @@ pub fn main(init: std.process.Init) !void {
     const app = try App.init(alloc, appRunner.engine, &srv);
 
     appRunner.run(app);
+
+    // `appRunner.run` only returns once the window closes, but
+    // `serveForever`'s thread and any live per-connection threads (e.g.
+    // the glyphwire-shell child, which is normally still connected) are
+    // never joined -- see their own doc comments. Falling through to the
+    // `ctx.deinit()`/`srv.deinit()` defers above would free `ctx` and the
+    // listener out from under whichever of those threads is still
+    // running, racing a live dispatch against `ctx` (unsynchronized: that
+    // free doesn't take `srv.ctx_mutex`) and leaking each open
+    // connection's still-alive `FrameDecoder` buffer. Exiting immediately
+    // sidesteps all of that and lets the OS reclaim everything at once,
+    // the same as how `server/main.zig` is only ever stopped externally.
+    std.process.exit(0);
 }
