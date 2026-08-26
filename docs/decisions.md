@@ -429,6 +429,107 @@ surface.
   optional) `metadata_id` — there'd be no point calling it to tag with
   nothing.
 
+### Table
+- **Superseded: real server-side state, not client-composited cells.** A
+  first prototype (`src/table.zig`, `Client.startTable`) built a table
+  entirely out of existing primitives (`write_text`/`draw_icon`/
+  `set_property("cursor")`) with no wire message of its own — simple, but
+  meant a table was only ever whatever cells it happened to have written;
+  the moment the producing process exited (`glyphwire-ls -l`, in
+  particular), there was nothing left holding "this is a table" as a
+  concept — no re-sorting, no toggling a display option, nothing but the
+  frozen cells already on screen. Replaced with a real object
+  (`core.Table`) and a message set (`create_table`/`destroy_table`/
+  `table_set_rows`/`table_set_sort`/`table_set_style`/`table_get_state`)
+  so the structured data — columns, typed cell values, sort state, style
+  — lives server-side and survives the client that sent it.
+- **A component of the layer it's drawn on, not a parallel object tree.**
+  Unlike `Layer` (owned by `Context`, in its own `layers`/`layer_order`),
+  a `Table` is owned by whichever `Layer` it was created on
+  (`Layer.tables`, keyed by handle, plus `Layer.table_order` for
+  compositing order among a layer's own tables) — simpler than a second
+  tree, and a table has no need for the deeper nesting/nesting-independent
+  positioning a layer does. Its handle (`TableHandle`) is still allocated
+  from a single `Context`-wide counter, same numbering convention every
+  other handle kind already uses, even though the value itself lives on
+  the layer. Resizing a table after creation (more columns, a wider one)
+  isn't built yet, but the object model doesn't foreclose it.
+- **Compiles into ordinary cells; no host/rendering changes needed at
+  all.** `Table.render` — called once per mutation
+  (`table_set_rows`/`table_set_sort`/`table_set_style`), never per frame —
+  writes the table's current (sorted) view directly into its owning
+  layer's cells, the same `Cell` values `write_text`/`draw_icon` already
+  produce. `glyphwire-host`'s render loop already draws whatever's in a
+  layer's cell buffer regardless of what put it there, so this needed
+  zero changes there — the entire feature landed without touching
+  `host/main.zig`. This is also why a table survives its producing
+  process exiting: the painted cells are just layer state, same as
+  anything else drawn on it.
+- **Typed cell values, not display text, for sorting.** A `TableCell` in
+  a `table_set_rows` row carries both `display` (what's drawn) and a
+  `SortKey` (`.text` or `.number`) it's compared on — distinct fields, so
+  a Size column can display `"1.2 KB"` but sort correctly on the raw byte
+  count instead of comparing that formatted string lexically (`"1"` before
+  `"9"`, wrong). A cell with no explicit `sort_key` defaults to a copy of
+  `display`, so sorting never needs a "nothing to compare" fallback.
+  `sort_key` on the wire is a bare JSON number or string (not a wrapper
+  object) — its own type already disambiguates which `SortKey` variant it
+  means.
+- **Writes cells directly, never through the cursor-based helpers —
+  clips instead of scrolling.** `Layer.writeText`/`drawIcon`/etc. are
+  built around a real terminal cursor that scrolls the *whole layer*
+  when it advances past the bottom (`Layer.resolveRow`); a table pinned
+  at a fixed anchor is the wrong shape for that model — content that
+  doesn't fit should clip, the same way `draw_box`/`draw_image` already
+  clamp their own rectangles to the layer's bounds rather than
+  triggering a scroll. `Table.render` writes `layer.cell(r, c)` directly
+  and never calls `resolveRow` at all, which incidentally also sidesteps
+  entirely a real scrolling bug the `row_height > 1` ("large format")
+  variant of the client-composited prototype hit near a layer's bottom
+  edge (multiple cursor-based writes into one still-unresolved row
+  independently triggering their own scrolls, scattering that row's
+  content across several physical rows) — moot here, since nothing in
+  the new design ever advances or resolves a cursor.
+- **No icon-only column — an icon lives on any cell, alongside its
+  text.** The client-composited prototype needed a dedicated
+  zero-content icon column (`.fit`-scaled into its own cell) plus a
+  separate `tag_metadata` pass for a `.natural`-scaled icon's overflow.
+  `TableCell.icon` (a resolved image handle, looked up by name against
+  the icon catalog at `table_set_rows` time, same "fail loud on an
+  unknown name" treatment `draw_icon`'s `name` already gets) draws
+  alongside that same cell's `display` text instead — e.g.
+  `glyphwire-ls`'s Name column carries both a per-entry icon and the
+  filename in one cell, one column, not two.
+- **`row_height` carried forward from the prototype, minus its bug.**
+  `TableStyle.row_height` (cells per body row, `1` the default) is the
+  "large format" option added mid-development of the client-composited
+  version — kept here since the underlying need (a bigger, legible,
+  `.natural`-scaled icon per row) didn't go away, just without the
+  scrolling bug noted above. A `row_height > 1` row's icon is capped to
+  `row_height` cell-heights tall, sized from the icon's *actual* loaded
+  pixel width (`Context.imageInfo`) rather than a hardcoded constant the
+  prototype used.
+- **Interactivity (sort-on-click, a style toggle) is deliberately
+  server-data-only for now, not server-autonomous.** The server doesn't
+  hit-test mouse clicks against a table's header itself — that stays
+  consistent with how every other click-driven behavior in this codebase
+  already works (`glyphwire-shell`'s `activateSelectionAt`: a client
+  subscribes to `mouse_button`, resolves the clicked cell via
+  `get_metadata`, and decides what to do). What's built now is the
+  *mutation* API a click handler would eventually call
+  (`table_set_sort`/`table_set_style`) and the data model it acts on;
+  wiring an actual header-click-to-sort/checkbox-toggle handler into
+  `glyphwire-shell` (almost certainly via a `metadata_id` on header cells
+  identifying them as sort/style triggers, mirroring how
+  `glyphwire-ls`'s own cells already carry click-actionable metadata) is
+  deliberately left as a follow-up.
+- **`table_get_state` reports structure, not rendered cells.** Row count,
+  sort state, style, and revision — not the cells themselves, which are
+  already readable through the owning layer's ordinary `get_cells` (a
+  table paints into ordinary cells, per above). For a future client that
+  needs to know e.g. which columns are sortable before deciding what a
+  header click should do.
+
 ### Events
 - No separate wire-level "event" mechanism — events are just notifications
   (method name + payload), same as everything else. The actual design work

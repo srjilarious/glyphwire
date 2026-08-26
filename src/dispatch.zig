@@ -23,6 +23,9 @@ pub const DispatchError = error{
     UnknownLayer,
     InvalidIconOption,
     UnknownMetadata,
+    UnknownTable,
+    InvalidTableOption,
+    TableRowShapeMismatch,
 };
 
 const Envelope = struct {
@@ -246,6 +249,133 @@ const DrawBoxParams = struct {
     mode: ?[]const u8 = null,
 };
 
+// ─── Table ───────────────────────────────────────────────────────────────
+//
+// See core.zig's Table section for the object model. Every message here
+// (`create_table`/`destroy_table`/`table_set_rows`/`table_set_sort`/
+// `table_set_style`/`table_get_state`) takes a required `table` handle
+// (except `create_table`, which returns one) alongside the usual optional
+// `layer` -- a table's handle alone doesn't say which layer it's on
+// (unlike a layer handle, which is globally meaningful), since it's
+// stored in that layer's own `tables` map.
+
+fn colorFromJson(c: ColorJson) core.Color {
+    return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
+}
+
+fn colorToJson(c: core.Color) ColorJson {
+    return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
+}
+
+/// Parses a table-related wire string against enum `E` -- same shape
+/// `parseIconOption` already has for `draw_icon`'s `scale`/`h_align`/
+/// `v_align`, split out under its own error (`InvalidTableOption` rather
+/// than `InvalidIconOption`) since a bad `column.kind`/`h_align` or
+/// `table_set_sort`'s `direction` isn't an icon problem.
+fn parseTableOption(comptime E: type, value: ?[]const u8, default: E) !E {
+    const s = value orelse return default;
+    return std.meta.stringToEnum(E, s) orelse DispatchError.InvalidTableOption;
+}
+
+const ColumnJson = struct {
+    name: []const u8,
+    /// "text" (default) or "number" -- see `core.ColumnKind`.
+    kind: ?[]const u8 = null,
+    sortable: bool = false,
+    width: usize,
+    min_width: usize = 1,
+    /// "start" (default), "center", or "end".
+    h_align: ?[]const u8 = null,
+};
+
+/// Shared by `create_table`'s `style` and `table_set_style`'s -- and
+/// reused as the output shape `table_get_state`'s `style` field reports
+/// back, since the wire and read-back shapes are identical.
+const TableStyleJson = struct {
+    borders: bool = true,
+    header_separator: bool = true,
+    box_style: ?[]const u8 = null,
+    alt_row_bg: ?ColorJson = null,
+    header_fg: ?ColorJson = null,
+    header_bg: ?ColorJson = null,
+    row_height: usize = 1,
+};
+
+const CreateTableParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: ?usize = null,
+    col: ?usize = null,
+    columns: []const ColumnJson,
+    style: TableStyleJson = .{},
+};
+
+const CreateTableResult = struct { handle: core.TableHandle };
+
+const DestroyTableParams = struct {
+    layer: ?core.LayerHandle = null,
+    table: core.TableHandle,
+};
+
+/// One row's cell, as sent to `table_set_rows`. `sort_key` (see
+/// `core.SortKey`'s doc comment) is left as a raw `std.json.Value` rather
+/// than a typed field, since it's naturally either a JSON number or a
+/// JSON string depending on the column -- no wrapper object needed to
+/// disambiguate; a number parses as `.number`, a string as `.text`,
+/// anything else (or the field omitted) falls back to a copy of
+/// `display`, same as a column with no explicit sort key at all.
+const TableCellJson = struct {
+    display: []const u8,
+    sort_key: ?std.json.Value = null,
+    /// An icon-registry name, resolved the same way `draw_icon`'s `name`
+    /// already is (`Context.iconHandle`) -- see `buildTableCell`.
+    icon: ?[]const u8 = null,
+    fg: ?ColorJson = null,
+    metadata_id: ?core.MetadataHandle = null,
+};
+
+const TableSetRowsParams = struct {
+    layer: ?core.LayerHandle = null,
+    table: core.TableHandle,
+    rows: []const []const TableCellJson,
+};
+
+const TableSetSortParams = struct {
+    layer: ?core.LayerHandle = null,
+    table: core.TableHandle,
+    column: ?usize = null,
+    /// "none" (default), "ascending", or "descending".
+    direction: ?[]const u8 = null,
+};
+
+const TableSetStyleParams = struct {
+    layer: ?core.LayerHandle = null,
+    table: core.TableHandle,
+    style: TableStyleJson,
+};
+
+const TableGetStateParams = struct {
+    layer: ?core.LayerHandle = null,
+    table: core.TableHandle,
+};
+
+const ColumnStateJson = struct {
+    name: []const u8,
+    kind: []const u8,
+    sortable: bool,
+    width: usize,
+    min_width: usize,
+    h_align: []const u8,
+};
+
+const TableStateResult = struct {
+    columns: []const ColumnStateJson,
+    row_count: usize,
+    sort_column: ?usize,
+    sort_direction: []const u8,
+    style: TableStyleJson,
+    revision: u64,
+};
+
 /// `rows`/`cols` are optional: omitted means "the rest of the layer from
 /// `row`/`col`", so a bare `clear()` (every field defaulted) wipes the
 /// whole layer -- see `handleClear`.
@@ -452,6 +582,24 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "get_metadata")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleGetMetadata(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "create_table")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleCreateTable(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "destroy_table")) {
+            try self.handleDestroyTable(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "table_set_rows")) {
+            try self.handleTableSetRows(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "table_set_sort")) {
+            try self.handleTableSetSort(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "table_set_style")) {
+            try self.handleTableSetStyle(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "table_get_state")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleTableGetState(alloc, id, envelope.params) };
         }
         return DispatchError.UnknownMethod;
     }
@@ -1029,6 +1177,263 @@ pub const Dispatcher = struct {
         const response: Response = .{
             .id = id,
             .result = .{ .cell_px_w = self.ctx.cell_px_w, .cell_px_h = self.ctx.cell_px_h },
+        };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
+    /// Builds an owned `core.TableStyle` from wire JSON -- `box_style`
+    /// always ends up an owned copy (defaulted to a duped `"box"` when
+    /// omitted) so `TableStyle.deinit` can always safely free it. Shared
+    /// by `handleCreateTable` and `handleTableSetStyle`.
+    fn resolveTableStyle(alloc: std.mem.Allocator, s: TableStyleJson) !core.TableStyle {
+        const box_style = try alloc.dupe(u8, s.box_style orelse "box");
+        return .{
+            .borders = s.borders,
+            .header_separator = s.header_separator,
+            .box_style = box_style,
+            .alt_row_bg = if (s.alt_row_bg) |c| colorFromJson(c) else null,
+            .header_fg = if (s.header_fg) |c| colorFromJson(c) else null,
+            .header_bg = if (s.header_bg) |c| colorFromJson(c) else null,
+            .row_height = @max(s.row_height, 1),
+        };
+    }
+
+    /// `create_table`: builds the table's columns and style, then
+    /// `Context.createTable` stores it on the resolved layer (root when
+    /// omitted) at the resolved anchor (cursor-defaulted, same convention
+    /// `draw_box`/`draw_icon` already use). No rows yet -- nothing to
+    /// paint until `table_set_rows`.
+    fn handleCreateTable(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(CreateTableParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const anchor = resolveAnchor(layer, p.row, p.col);
+
+        const talloc = self.ctx.alloc;
+        const columns = try talloc.alloc(core.TableColumn, p.columns.len);
+        var built: usize = 0;
+        errdefer {
+            for (columns[0..built]) |c| c.deinit(talloc);
+            talloc.free(columns);
+        }
+        for (p.columns, 0..) |cj, i| {
+            columns[i] = .{
+                .name = try talloc.dupe(u8, cj.name),
+                .kind = try parseTableOption(core.ColumnKind, cj.kind, .text),
+                .sortable = cj.sortable,
+                .width = cj.width,
+                .min_width = cj.min_width,
+                .h_align = try parseTableOption(core.HAlign, cj.h_align, .start),
+            };
+            built = i + 1;
+        }
+
+        const style = try resolveTableStyle(talloc, p.style);
+        const table_handle = try self.ctx.createTable(p.layer, anchor.row, anchor.col, columns, style);
+
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: CreateTableResult,
+        };
+        const response: Response = .{ .id = id, .result = .{ .handle = table_handle } };
+        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+    }
+
+    /// `destroy_table`: blanks the table's painted region and frees it
+    /// (`Context.destroyTable`).
+    fn handleDestroyTable(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DestroyTableParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        self.ctx.destroyTable(p.layer, p.table) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
+            error.UnknownTable => return DispatchError.UnknownTable,
+            else => return err,
+        };
+    }
+
+    /// One `table_set_rows` cell: dupes `display`, resolves `sort_key`
+    /// (a raw JSON number/string -- see `TableCellJson`'s doc comment,
+    /// falling back to a copy of `display` for anything else or when
+    /// omitted), resolves `icon`'s name against the icon catalog (erroring
+    /// `UnknownIcon` immediately, same "fail loud at the point of use"
+    /// treatment `draw_icon`'s `name` already gets), and validates
+    /// `metadata_id` the same way `write_text`/`draw_icon`'s already is.
+    fn buildTableCell(self: *Dispatcher, alloc: std.mem.Allocator, cj: TableCellJson) !core.TableCell {
+        const display = try alloc.dupe(u8, cj.display);
+        errdefer alloc.free(display);
+
+        const sort_key: core.SortKey = if (cj.sort_key) |v| switch (v) {
+            .integer => |n| .{ .number = @floatFromInt(n) },
+            .float => |n| .{ .number = n },
+            .string => |s| .{ .text = try alloc.dupe(u8, s) },
+            else => .{ .text = try alloc.dupe(u8, cj.display) },
+        } else .{ .text = try alloc.dupe(u8, cj.display) };
+        errdefer sort_key.deinit(alloc);
+
+        const icon_handle: ?core.ImageHandle = if (cj.icon) |name|
+            self.ctx.iconHandle(name) orelse return DispatchError.UnknownIcon
+        else
+            null;
+
+        const metadata_id = try self.resolveMetadata(cj.metadata_id);
+
+        return .{
+            .display = display,
+            .sort_key = sort_key,
+            .icon = icon_handle,
+            .fg = if (cj.fg) |c| colorFromJson(c) else null,
+            .metadata_id = metadata_id,
+        };
+    }
+
+    fn buildTableRow(self: *Dispatcher, alloc: std.mem.Allocator, row_json: []const TableCellJson) !core.TableRow {
+        const cells = try alloc.alloc(core.TableCell, row_json.len);
+        var built: usize = 0;
+        errdefer {
+            for (cells[0..built]) |c| c.deinit(alloc);
+            alloc.free(cells);
+        }
+        for (row_json, 0..) |cj, ci| {
+            cells[ci] = try self.buildTableCell(alloc, cj);
+            built = ci + 1;
+        }
+        return .{ .cells = cells };
+    }
+
+    /// Builds every row `table_set_rows` sent, fully independent of
+    /// `core.Table.setRows` (which takes ownership of the result and
+    /// handles a shape mismatch itself) -- kept as its own self-contained
+    /// `errdefer` scope so a failure partway through building doesn't
+    /// leave a dangling `errdefer` active around the later `setRows` call
+    /// in `handleTableSetRows`, which already frees `rows` itself on its
+    /// own error path.
+    fn buildTableRows(self: *Dispatcher, alloc: std.mem.Allocator, rows_json: []const []const TableCellJson) ![]core.TableRow {
+        const rows = try alloc.alloc(core.TableRow, rows_json.len);
+        var built: usize = 0;
+        errdefer {
+            for (rows[0..built]) |r| r.deinit(alloc);
+            alloc.free(rows);
+        }
+        for (rows_json, 0..) |row_json, ri| {
+            rows[ri] = try self.buildTableRow(alloc, row_json);
+            built = ri + 1;
+        }
+        return rows;
+    }
+
+    /// `table_set_rows`: replaces every row, re-sorts per the table's
+    /// current sort state, and repaints (`Table.render`) -- see
+    /// core.zig's Table section on why this needs no host/main.zig
+    /// changes to actually show up.
+    fn handleTableSetRows(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(TableSetRowsParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const table = layer.tables.getPtr(p.table) orelse return DispatchError.UnknownTable;
+
+        const rows = try self.buildTableRows(self.ctx.alloc, p.rows);
+        table.setRows(rows) catch |err| switch (err) {
+            error.TableRowShapeMismatch => return DispatchError.TableRowShapeMismatch,
+        };
+        try table.render(layer, self.ctx);
+    }
+
+    /// `table_set_sort`: `column`/`direction` both defaulted (`null`/
+    /// `"none"`) mean "back to insertion order" -- see
+    /// `core.Table.sortedIndices`. Repaints immediately, same as
+    /// `table_set_rows` -- this is the message a future sort-aware
+    /// `glyphwire-shell` click handler would call.
+    fn handleTableSetSort(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(TableSetSortParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const table = layer.tables.getPtr(p.table) orelse return DispatchError.UnknownTable;
+
+        const dir = try parseTableOption(core.SortDirection, p.direction, .none);
+        table.setSort(p.column, dir);
+        try table.render(layer, self.ctx);
+    }
+
+    /// `table_set_style`: replaces the table's whole style (e.g. toggling
+    /// `alt_row_bg` on/off) and repaints.
+    fn handleTableSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(TableSetStyleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const table = layer.tables.getPtr(p.table) orelse return DispatchError.UnknownTable;
+
+        const style = try resolveTableStyle(self.ctx.alloc, p.style);
+        table.setStyle(style);
+        try table.render(layer, self.ctx);
+    }
+
+    /// `table_get_state`: reads back a table's structured config (columns,
+    /// sort, style, row count, revision) -- not its rendered cells, which
+    /// are already readable through the owning layer's normal `get_cells`
+    /// (a table paints into ordinary cells, see core.zig's Table
+    /// section), so there's no separate "get rendered table" message.
+    /// For a future client that needs to know e.g. which columns are
+    /// sortable before deciding what a header click should do.
+    fn handleTableGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(TableGetStateParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const table = layer.tables.getPtr(p.table) orelse return DispatchError.UnknownTable;
+
+        const columns = try alloc.alloc(ColumnStateJson, table.columns.len);
+        for (table.columns, 0..) |c, i| {
+            columns[i] = .{
+                .name = c.name,
+                .kind = @tagName(c.kind),
+                .sortable = c.sortable,
+                .width = c.width,
+                .min_width = c.min_width,
+                .h_align = @tagName(c.h_align),
+            };
+        }
+
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: TableStateResult,
+        };
+        const response: Response = .{
+            .id = id,
+            .result = .{
+                .columns = columns,
+                .row_count = table.rows.len,
+                .sort_column = table.sort_column,
+                .sort_direction = @tagName(table.sort_dir),
+                .style = .{
+                    .borders = table.style.borders,
+                    .header_separator = table.style.header_separator,
+                    .box_style = table.style.box_style,
+                    .alt_row_bg = if (table.style.alt_row_bg) |c| colorToJson(c) else null,
+                    .header_fg = if (table.style.header_fg) |c| colorToJson(c) else null,
+                    .header_bg = if (table.style.header_bg) |c| colorToJson(c) else null,
+                    .row_height = table.style.row_height,
+                },
+                .revision = table.revision,
+            },
         };
         return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }

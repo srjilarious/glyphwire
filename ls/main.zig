@@ -576,67 +576,93 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path
     }
 }
 
-/// The `-l` listing: one `Client.startTable` row per entry -- icon, name
-/// (colored by kind, same as the plain listing), size, and permission
-/// bits -- instead of `writeGrid`'s per-row layout. A table's fixed-width
-/// grid needs the icon `.fit`-scaled into its own single cell rather than
-/// `writeGrid`'s `.natural`-sized, row-spilling icon (see `Table.iconCell`'s
-/// doc comment), so there's no icon-overflow row-skipping/tagging to do
-/// here the way `writeGrid` needs -- one physical row per entry, not two.
+/// The `-l` listing: a real server-side table (`Client.createTable`/
+/// `tableSetRows`) instead of `writeGrid`'s per-row `write_text`/`draw_icon`
+/// layout -- Name (icon plus colored filename in one cell, per `TableCell`'s
+/// doc comment -- no separate icon column needed the way the client-
+/// composited prototype this replaced had), Size (typed numerically via
+/// `sort_key`, so a future sort-by-size actually orders by byte count, not
+/// lexically on `"1.2 KB"`), and Perms. Every cell in an entry's row
+/// shares one metadata tag, same `mimetype`/`path` shape `writeGrid`'s
+/// tags already have.
 ///
-/// Every cell in an entry's row shares one metadata tag, same reasoning
-/// (and same `mimetype`/`path` shape) as `writeGrid`'s -- `Table.cellStyled`/
-/// `iconCellStyled` take it directly rather than a separate `tagMetadata`
-/// pass.
+/// Unlike that prototype's streaming `row`/`cell`/`endRow` calls (each
+/// sent over the wire immediately), every row here is built into one
+/// in-memory matrix and sent in a single `tableSetRows` call -- see
+/// decisions.md's Table section on why the table itself is now real
+/// server state rather than client-composited cells: it stays visible,
+/// and re-sortable, after this process exits, which a series of one-shot
+/// draw calls could never do. `scratch` tracks every heap-allocated
+/// display string built along the way (unlike the old streaming API, a
+/// batched `tableSetRows` call means those strings have to outlive the
+/// whole loop, not just one iteration) and is freed right after that
+/// call returns -- `tableSetRows` itself copies everything it needs into
+/// the outgoing JSON before returning.
 fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8) !void {
     const alloc = client.alloc;
 
-    var table = try client.startTable(.{
-        .columns = &.{
-            .{ .name = "", .width = 1 },
-            .{ .name = "Name", .width = 32 },
-            .{ .name = "Size", .width = 8, .h_align = .end },
-            .{ .name = "Perms", .width = 10 },
-        },
-        .style = .{ .borders = false, .alt_row_bg = rgb(30, 30, 30) },
-    });
+    const table = try client.createTable(null, null, null, &.{
+        .{ .name = "Name", .width = 33, .sortable = true },
+        .{ .name = "Size", .width = 8, .kind = .number, .h_align = .end, .sortable = true },
+        .{ .name = "Perms", .width = 10, .sortable = true },
+    }, .{ .borders = false, .alt_row_bg = rgb(30, 30, 30) });
 
-    for (entries) |entry| {
+    var scratch: std.ArrayList([]u8) = .empty;
+    defer {
+        for (scratch.items) |s| alloc.free(s);
+        scratch.deinit(alloc);
+    }
+
+    const rows = try alloc.alloc([]glyphwire.Client.TableCellInput, entries.len);
+    defer {
+        for (rows) |r| alloc.free(r);
+        alloc.free(rows);
+    }
+
+    for (entries, 0..) |entry, i| {
         const full_path = try std.fs.path.join(alloc, &.{ abs_dir_path, entry.name });
         defer alloc.free(full_path);
         const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = full_path }, .{});
         defer alloc.free(json);
         const metadata_id = try client.createMetadata(json);
 
-        try table.row();
-        try table.iconCellStyled(iconForEntry(entry), .{ .metadata_id = metadata_id });
-
-        var name_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        var name_text: []u8 = undefined;
+        var name_fg: glyphwire.Color = undefined;
         switch (entry.kind) {
             .directory => {
-                const text = std.fmt.bufPrint(&name_buf, "{s}/", .{entry.name}) catch entry.name;
-                try table.cellStyled(text, .{ .fg = dir_color, .metadata_id = metadata_id });
+                name_text = try std.fmt.allocPrint(alloc, "{s}/", .{entry.name});
+                name_fg = dir_color;
             },
             .sym_link => {
-                const text = if (entry.link_target) |tgt|
-                    std.fmt.bufPrint(&name_buf, "{s} -> {s}", .{ entry.name, tgt }) catch entry.name
+                name_text = if (entry.link_target) |tgt|
+                    try std.fmt.allocPrint(alloc, "{s} -> {s}", .{ entry.name, tgt })
                 else
-                    entry.name;
-                try table.cellStyled(text, .{ .fg = symlink_color, .metadata_id = metadata_id });
+                    try alloc.dupe(u8, entry.name);
+                name_fg = symlink_color;
             },
-            else => try table.cellStyled(entry.name, .{ .fg = file_color, .metadata_id = metadata_id }),
+            else => {
+                name_text = try alloc.dupe(u8, entry.name);
+                name_fg = file_color;
+            },
         }
+        try scratch.append(alloc, name_text);
 
         var size_buf: [16]u8 = undefined;
-        try table.cellStyled(formatSize(&size_buf, entry.size), .{ .fg = detail_color, .metadata_id = metadata_id });
+        const size_text = try alloc.dupe(u8, formatSize(&size_buf, entry.size));
+        try scratch.append(alloc, size_text);
 
         var perm_buf: [10]u8 = undefined;
-        try table.cellStyled(formatPermBits(&perm_buf, entry.mode), .{ .fg = detail_color, .metadata_id = metadata_id });
+        const perm_text = try alloc.dupe(u8, formatPermBits(&perm_buf, entry.mode));
+        try scratch.append(alloc, perm_text);
 
-        try table.endRow();
+        const row = try alloc.alloc(glyphwire.Client.TableCellInput, 3);
+        row[0] = .{ .display = name_text, .icon = iconForEntry(entry), .fg = name_fg, .metadata_id = metadata_id };
+        row[1] = .{ .display = size_text, .sort_key = .{ .number = @floatFromInt(entry.size) }, .fg = detail_color, .metadata_id = metadata_id };
+        row[2] = .{ .display = perm_text, .fg = detail_color, .metadata_id = metadata_id };
+        rows[i] = row;
     }
 
-    try table.end();
+    try client.tableSetRows(null, table, rows);
 }
 
 fn writePlain(io: std.Io, entries: []const FileEntry, long_list: bool) !void {

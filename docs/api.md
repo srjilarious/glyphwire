@@ -106,6 +106,35 @@ above is the one exception, for tagging without drawing). A bad id
 same "fail loud on a bad handle at the point of use" treatment
 `UnknownImage`/`UnknownIcon`/`UnknownLayer` already get elsewhere.
 
+## Table
+
+Real server-side state (`core.Table`), not client-composited cells — see
+decisions.md's Table section for the full reasoning, including why this
+superseded an earlier client-only prototype. A table is a component of
+whichever layer it's drawn on (`layer?` defaults to root, same convention
+as every other layer-scoped message), addressed afterward by the `table`
+handle `create_table` returns. `table_set_rows`/`table_set_sort`/
+`table_set_style` each repaint immediately (`Table.render`, compiling the
+table's current data into ordinary cells on its layer) — there is no
+separate "table changed" notification a reader needs to poll for; the
+owning layer's `get_cells`/`revision` already covers that, same as any
+other draw call.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `create_table` | request | `layer?, row?, col?, columns: [{name, kind?, sortable?, width, min_width?, h_align?}], style?` | table handle | ✅ `row`/`col` default to the layer's cursor, same convention `draw_box`/`draw_icon` use. `columns[].kind` is `"text"` (default) or `"number"` (which `SortKey` variant that column's cells are expected to sort on); `h_align` is `"start"` (default)/`"center"`/`"end"`. No rows yet — nothing is painted until `table_set_rows` |
+| `destroy_table` | notification | `layer?, table` | — | ✅ blanks whatever the table last painted, then frees it and drops it from its layer's `table_order` |
+| `table_set_rows` | notification | `layer?, table, rows: [[{display, sort_key?, icon?, fg?, metadata_id?}]]` | — | ✅ replaces every row wholesale, re-sorts per the table's current sort state, and repaints. `sort_key` is a bare JSON number or string (see decisions.md), defaulting to a copy of `display` when omitted. `icon` is an icon-registry name, resolved the same way `draw_icon`'s `name` is (errors `UnknownIcon` immediately on an unrecognized one) — drawn alongside that cell's `display` text, not in a separate column. A row's cell count must match the table's column count, or this errors `TableRowShapeMismatch` |
+| `table_set_sort` | notification | `layer?, table, column?, direction?` | — | ✅ `column: null` or `direction: "none"` (the default) both mean "back to insertion order"; otherwise `"ascending"`/`"descending"` on that column's `SortKey`. Repaints immediately — the message a future header-click handler would call |
+| `table_set_style` | notification | `layer?, table, style` | — | ✅ replaces the table's whole style (`borders`, `header_separator`, `box_style`, `alt_row_bg`, `header_fg`, `header_bg`, `row_height`) and repaints — e.g. the message a future "checkbox for alternating row colors" UI would call |
+| `table_get_state` | request | `layer?, table` | `{columns, row_count, sort_column, sort_direction, style, revision}` | ✅ structured config, not rendered cells — those are already readable through the owning layer's `get_cells` (a table paints into ordinary cells). For a future client that needs to know e.g. which columns are sortable before deciding what a header click should do |
+
+Interactivity (a header click toggling sort, a checkbox toggling
+`alt_row_bg`) isn't wired up yet — the mutation messages above exist for
+a future client (almost certainly `glyphwire-shell`, following the same
+`get_metadata`-driven click-resolution pattern `activateSelectionAt`
+already uses) to call once that lands. See decisions.md's Table section.
+
 ## Animation
 
 | Message | Kind | Params | Result | Status |
