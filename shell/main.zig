@@ -14,11 +14,12 @@ const c = struct {
 /// src/client.zig's `InputListener`), captured by glyphwire-host and
 /// relayed through the server, not read directly.
 ///
-/// The prompt is intentionally minimal for now: echo, Enter, Backspace/
-/// Delete, no command parsing or execution yet. That'll turn
-/// `Prompt.submitLine` into something that spawns a child process per
-/// line -- closer to a real shell -- without needing to restructure
-/// what's built here; ctrl+c/ctrl+v are ignored for now too.
+/// The prompt is intentionally minimal for now: echo, Enter, real cursor
+/// movement and interior insert/delete (arrow keys, ctrl+a/e/u, ctrl+
+/// arrow word jumps -- see `Prompt`), but no command parsing or execution
+/// yet. That'll turn `Prompt.submitLine` into something that spawns a
+/// child process per line -- closer to a real shell -- without needing to
+/// restructure what's built here; ctrl+c/ctrl+v are ignored for now too.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const arena = init.arena.allocator();
@@ -96,9 +97,10 @@ fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
 }
 
 /// Prints `> `, echoes typed characters live, Enter commits the line and
-/// starts a new prompt row below it, Backspace/Delete erase the last
-/// typed character. Runs forever (killed along with the rest of the
-/// process tree, same as any other long-lived child in this codebase).
+/// starts a new prompt row below it. See `Prompt` for the rest of the line
+/// editing (cursor movement, interior insert/delete). Runs forever (killed
+/// along with the rest of the process tree, same as any other long-lived
+/// child in this codebase).
 fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) !void {
     var client = glyphwire.Client.connect(io, alloc, socket_path) catch |err| {
         std.log.err("prompt: failed to connect: {t}", .{err});
@@ -124,55 +126,152 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) !voi
         defer alloc.free(ev.key);
         if (!ev.pressed) continue; // only key-down drives the prompt
 
+        const ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
+
         if (std.mem.eql(u8, ev.key, "enter")) {
             try prompt.submitLine();
-        } else if (std.mem.eql(u8, ev.key, "backspace") or std.mem.eql(u8, ev.key, "delete")) {
-            // Without cursor movement (no left/right arrow support yet),
-            // the cursor is always at the end of the line, so "delete"
-            // (erase after cursor) and "backspace" (erase before cursor)
-            // aren't distinguishable -- both just erase the last char.
-            try prompt.eraseLast();
+        } else if (std.mem.eql(u8, ev.key, "backspace")) {
+            try prompt.deleteBackward();
+        } else if (std.mem.eql(u8, ev.key, "delete")) {
+            try prompt.deleteForward();
+        } else if (ctrl and std.mem.eql(u8, ev.key, "a")) {
+            try prompt.moveCursorTo(0);
+        } else if (ctrl and std.mem.eql(u8, ev.key, "e")) {
+            try prompt.moveCursorTo(prompt.buffer.items.len);
+        } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
+            try prompt.killToStart();
+        } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
+            try prompt.moveCursorTo(prompt.wordLeft());
+        } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
+            try prompt.moveCursorTo(prompt.wordRight());
+        } else if (std.mem.eql(u8, ev.key, "left")) {
+            // Not explicitly asked for, but needed alongside ctrl+left/
+            // right: without plain single-character movement too, the
+            // caret (drawn by glyphwire-host wherever the raw grid cursor
+            // sits) could wander away from `prompt.cursor` -- the offset
+            // typing/backspace actually act on -- which would look
+            // confusing (caret in one place, edits landing in another).
+            try prompt.moveCursorTo(prompt.cursor -| 1);
+        } else if (std.mem.eql(u8, ev.key, "right")) {
+            try prompt.moveCursorTo(prompt.cursor + 1);
         } else {
             const shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift");
             if (charFromKeyName(ev.key, shift)) |ch| {
-                try prompt.typeChar(ch);
+                try prompt.insertChar(ch);
             }
         }
     }
 }
 
-/// The prompt's line-editing state. Tracks only where the current line
-/// started and how long it is -- not its actual text -- since the server
-/// already holds the real characters in its cell grid; that's enough to
-/// know where to move the cursor for editing.
+/// The prompt's line-editing state. Tracks where the current line started
+/// and, unlike the append-only version this grew from, the actual buffer
+/// text plus a cursor *offset* into it -- needed the moment editing can
+/// happen anywhere but the end (ctrl+a/e/u, ctrl+arrow word jumps, plain
+/// arrow movement). The server still holds the authoritative on-screen
+/// cells; `buffer` exists so edits away from the end (insert, delete,
+/// kill) know what text is where without reading it back over the wire.
 const Prompt = struct {
     client: *glyphwire.Client,
     line_start_row: usize = 0,
     line_start_col: usize = 0,
-    line_len: usize = 0,
     buffer: std.ArrayList(u8) = std.ArrayList(u8).empty,
+    /// Offset into `buffer`, 0..=buffer.items.len, where the next
+    /// insert/delete acts and where the on-screen cursor should sit.
+    cursor: usize = 0,
 
     fn showPrompt(self: *Prompt) !void {
         try self.client.writeText("> ", null, null);
         const cur = try self.client.getCursor();
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
-        self.line_len = 0;
+        self.cursor = 0;
         self.buffer.clearRetainingCapacity();
     }
 
-    fn typeChar(self: *Prompt, ch: u8) !void {
-        try self.client.writeText(&[_]u8{ch}, null, null);
-        try self.buffer.append(self.client.alloc, ch);
-        self.line_len += 1;
+    /// Inserts `ch` at the cursor (append, if the cursor's at the end) and
+    /// redraws everything from the insertion point onward, since the wire
+    /// protocol has no "shift cells right" primitive to insert into an
+    /// already-drawn line.
+    fn insertChar(self: *Prompt, ch: u8) !void {
+        const old_len = self.buffer.items.len;
+        try self.buffer.insert(self.client.alloc, self.cursor, ch);
+        self.cursor += 1;
+        try self.redrawTail(self.cursor - 1, old_len);
     }
 
-    fn eraseLast(self: *Prompt) !void {
-        if (self.line_len == 0) return;
-        self.line_len -= 1;
-        try self.client.setCursor(self.line_start_row, self.line_start_col + self.line_len);
-        try self.client.writeText(" ", null, null);
-        try self.client.setCursor(self.line_start_row, self.line_start_col + self.line_len);
+    /// Deletes the character before the cursor (backspace).
+    fn deleteBackward(self: *Prompt) !void {
+        if (self.cursor == 0) return;
+        const old_len = self.buffer.items.len;
+        _ = self.buffer.orderedRemove(self.cursor - 1);
+        self.cursor -= 1;
+        try self.redrawTail(self.cursor, old_len);
+    }
+
+    /// Deletes the character at the cursor (forward delete) -- distinct
+    /// from `deleteBackward` now that the cursor isn't always pinned to
+    /// the end of the line.
+    fn deleteForward(self: *Prompt) !void {
+        if (self.cursor >= self.buffer.items.len) return;
+        const old_len = self.buffer.items.len;
+        _ = self.buffer.orderedRemove(self.cursor);
+        try self.redrawTail(self.cursor, old_len);
+    }
+
+    /// ctrl+u: deletes from the start of the line through the cursor.
+    fn killToStart(self: *Prompt) !void {
+        if (self.cursor == 0) return;
+        const old_len = self.buffer.items.len;
+        try self.buffer.replaceRange(self.client.alloc, 0, self.cursor, &.{});
+        self.cursor = 0;
+        try self.redrawTail(0, old_len);
+    }
+
+    /// Moves the cursor without changing the buffer -- ctrl+a/ctrl+e,
+    /// ctrl+arrow word jumps, and plain arrow movement all end here.
+    fn moveCursorTo(self: *Prompt, offset: usize) !void {
+        self.cursor = std.math.clamp(offset, 0, self.buffer.items.len);
+        try self.client.setCursor(self.line_start_row, self.line_start_col + self.cursor);
+    }
+
+    /// The offset ctrl+right lands on: past any whitespace right of the
+    /// cursor, then past the following run of non-whitespace.
+    fn wordRight(self: *const Prompt) usize {
+        const buf = self.buffer.items;
+        var i = self.cursor;
+        while (i < buf.len and buf[i] == ' ') : (i += 1) {}
+        while (i < buf.len and buf[i] != ' ') : (i += 1) {}
+        return i;
+    }
+
+    /// The offset ctrl+left lands on: back past any whitespace left of the
+    /// cursor, then back past the preceding run of non-whitespace.
+    fn wordLeft(self: *const Prompt) usize {
+        const buf = self.buffer.items;
+        var i = self.cursor;
+        while (i > 0 and buf[i - 1] == ' ') : (i -= 1) {}
+        while (i > 0 and buf[i - 1] != ' ') : (i -= 1) {}
+        return i;
+    }
+
+    /// Rewrites the line from `from` (a buffer offset) through the end of
+    /// the *new* buffer, then blanks any cells left over from a longer
+    /// `old_len` (a delete/kill shrank the buffer -- insert never needs
+    /// this, since `old_len` is always the shorter one already covered by
+    /// the first write), and finally restores the cursor to its real
+    /// position. `writeText` advances the cursor as it writes, so the two
+    /// writes below chain correctly with no `setCursor` between them.
+    fn redrawTail(self: *Prompt, from: usize, old_len: usize) !void {
+        try self.client.setCursor(self.line_start_row, self.line_start_col + from);
+        try self.client.writeText(self.buffer.items[from..], null, null);
+
+        const new_len = self.buffer.items.len;
+        if (old_len > new_len) {
+            var i: usize = new_len;
+            while (i < old_len) : (i += 1) try self.client.writeText(" ", null, null);
+        }
+
+        try self.client.setCursor(self.line_start_row, self.line_start_col + self.cursor);
     }
 
     /// Leaves the just-typed line where it already is (it's been live-
