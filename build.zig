@@ -108,6 +108,24 @@ pub fn build(b: *std.Build) void {
     const demo_step = b.step("demo", "Run the glyphwire styled-text demo client");
     demo_step.dependOn(&run_demo.step);
 
+    const table_demo_exe = b.addExecutable(.{
+        .name = "glyphwire-table-demo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("table-demo/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    table_demo_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    b.installArtifact(table_demo_exe);
+
+    const run_table_demo = b.addRunArtifact(table_demo_exe);
+    run_table_demo.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_table_demo.addArgs(args);
+
+    const table_demo_step = b.step("table_demo", "Run the glyphwire table widget demo client");
+    table_demo_step.dependOn(&run_table_demo.step);
+
     const host_exe = b.addExecutable(.{
         .name = "glyphwire-host",
         .root_module = b.createModule(.{

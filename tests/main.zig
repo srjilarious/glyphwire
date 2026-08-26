@@ -7,6 +7,7 @@ const Tests = testz.discoverTests(.{
     testz.Group{ .name = "Dispatch Tests", .tag = "dispatch", .mod = @import("./dispatch_tests.zig") },
     testz.Group{ .name = "Server Tests", .tag = "server", .mod = @import("./server_tests.zig") },
     testz.Group{ .name = "Client Tests", .tag = "client", .mod = @import("./client_tests.zig") },
+    testz.Group{ .name = "Table Tests", .tag = "table", .mod = @import("./table_tests.zig") },
     testz.Group{ .name = "End-to-end Tests", .tag = "e2e", .mod = @import("./e2e_tests.zig") },
 }, .{});
 

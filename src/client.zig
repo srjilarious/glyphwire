@@ -1,6 +1,12 @@
 const std = @import("std");
 const core = @import("core.zig");
 const wire = @import("wire.zig");
+const table = @import("table.zig");
+
+pub const Table = table.Table;
+pub const TableColumn = table.ColumnDef;
+pub const TableStyle = table.TableStyle;
+pub const TableStartOptions = table.StartOptions;
 
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
@@ -381,6 +387,17 @@ pub const Client = struct {
         var parsed = try self.request(struct { cell_px_w: u32, cell_px_h: u32 }, "get_cell_metrics", .{});
         defer parsed.deinit();
         return .{ .w = parsed.value.result.cell_px_w, .h = parsed.value.result.cell_px_h };
+    }
+
+    /// Starts a table widget anchored at `opts.row`/`opts.col` (default:
+    /// the layer's current cursor) -- draws the header row (and border, if
+    /// `opts.style.borders`) immediately and returns a `Table` ready for
+    /// `row`/`cell`/`endRow`/`end`. Client-side composition only, built
+    /// entirely out of `writeText`/`drawIcon`/`setCursor` -- see
+    /// `table.zig`'s `Table` doc comment for the full shape; there is no
+    /// `table` message on the wire.
+    pub fn startTable(self: *Client, opts: TableStartOptions) !Table {
+        return Table.start(self, opts);
     }
 
     /// `create_metadata(json)` -- a request. Stores `json` verbatim (the

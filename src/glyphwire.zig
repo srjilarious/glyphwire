@@ -11,6 +11,10 @@ pub const InputListener = client.InputListener;
 pub const InputStateSnapshot = client.InputStateSnapshot;
 pub const PxPos = client.PxPos;
 pub const CellPos = client.CellPos;
+pub const Table = client.Table;
+pub const TableColumn = client.TableColumn;
+pub const TableStyle = client.TableStyle;
+pub const TableStartOptions = client.TableStartOptions;
 
 pub const Color = core.Color;
 pub const ImageHandle = core.ImageHandle;
