@@ -1064,7 +1064,17 @@ pub const Table = struct {
         if (total_height > 0) {
             const bottom = self.row + total_height - 1;
             const resolved_bottom = layer.resolveRow(bottom);
-            self.row = resolved_bottom - (total_height - 1);
+            // Saturating, not plain, subtraction: `resolveRow` only ever
+            // scrolls up to `layer.capacity()` times (its own overshoot
+            // cap), so `resolved_bottom` can land smaller than
+            // `total_height - 1` when the table's own height exceeds the
+            // whole layer (more rows than the viewport, or than there's
+            // scrollback to hold) -- a plain `-` there panics on the
+            // underflow. Saturating to 0 in that case just anchors the
+            // table at the very top, same "show as much as will ever
+            // fit" degradation `resolveRow` itself already accepts by
+            // capping its own scroll count.
+            self.row = resolved_bottom -| (total_height - 1);
         }
 
         const content_start_col = self.col + border_pad;

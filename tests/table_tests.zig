@@ -475,3 +475,53 @@ pub fn createTableOnAnotherConnectionDefaultsToFirstConnectionsCursorTest(io: st
     try testz.expectEqual(state.painted.row, 5);
     try testz.expectEqual(state.painted.col, 3);
 }
+
+/// A table taller than the whole layer (more rows, at a given
+/// `row_height`, than the viewport has -- easy to hit with
+/// `glyphwire-ls -l -L`'s 3-line rows on an ordinarily-sized directory
+/// listing and a modest window) must not crash. `Layer.resolveRow` only
+/// ever scrolls up to `layer.capacity()` times (its own overshoot cap),
+/// so the table's *resolved* bottom row can land smaller than its own
+/// height once that height exceeds what the layer could ever show --
+/// `Table.render`'s anchor math has to saturate there instead of
+/// underflowing (a plain `usize` subtraction panics on that in debug
+/// builds, and silently wraps to a huge row number otherwise, either way
+/// a real crash this test guards against, not just a cosmetic one).
+/// Anchoring at row 0 (as much of the table as will ever fit, starting
+/// from the top) is the expected degraded result, not a specific row
+/// count -- there's no "right answer" once the content is simply taller
+/// than the screen.
+pub fn tableTallerThanLayerDoesNotCrashTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    // 1 (header) + 10 rows * row_height 3 == 31 lines, needed in a
+    // 10-row layer -- can never fit no matter how much this scrolls.
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 4 },
+    }, .{ .borders = false, .header_separator = false, .row_height = 3 });
+
+    var rows: [10][1]glyphwire.Client.TableCellInput = undefined;
+    var row_slices: [10][]const glyphwire.Client.TableCellInput = undefined;
+    for (&rows, 0..) |*row, i| {
+        row[0] = .{ .display = "x" };
+        row_slices[i] = row;
+    }
+    try client.tableSetRows(null, table, &row_slices);
+
+    const state = try client.tableGetState(null, table);
+    try testz.expectEqual(state.painted.row, 0);
+}
