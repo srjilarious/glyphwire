@@ -5,6 +5,7 @@ pub const server = @import("server.zig");
 pub const client = @import("client.zig");
 
 pub const Client = client.Client;
+pub const handshake_marker = client.handshake_marker;
 pub const RenderCell = client.RenderCell;
 pub const CellsSnapshot = client.CellsSnapshot;
 pub const InputListener = client.InputListener;

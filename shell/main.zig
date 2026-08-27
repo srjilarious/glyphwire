@@ -17,13 +17,16 @@ const c = struct {
 /// The prompt supports echo, Enter, real cursor movement and interior
 /// insert/delete (arrow keys, ctrl+a/e/u, ctrl+arrow word jumps, ctrl+up/
 /// down history recall -- see `Prompt`), and now launches a child process
-/// per submitted line (see `Prompt.runCommand`). Every child is assumed
-/// "glyphwire compatible": it inherits `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX`
-/// from this process and writes to the grid itself over its own
-/// connection, the same way `glyphwire-demo` or `glyphwire-ls` do -- the
-/// shell just spawns it and waits, no stdout/stderr capture. Capturing
-/// output from a plain, non-glyphwire-aware program is separate, later
-/// work. `cd` is a builtin (see `Prompt.doCd`) rather than spawned, since
+/// per submitted line (see `Prompt.runCommand`). Every child's
+/// stdout/stderr is piped and mirrored onto the grid via `write_text` by
+/// default -- the assumption for any spawned command is "plain program
+/// writing to a terminal" until proven otherwise. A child that's actually
+/// "glyphwire compatible" (inherits `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` and
+/// draws to the grid itself over its own connection, the same way
+/// `glyphwire-demo` or `glyphwire-ls` do) opts out of the mirroring
+/// automatically: `Client.connect` signals the handshake as part of
+/// connecting, with no separate call for a glyphwire-aware program to
+/// remember -- see `Prompt.pumpChildOutput`. `cd` is a builtin (see `Prompt.doCd`) rather than spawned, since
 /// changing directory in a child process wouldn't affect this one; the
 /// prompt shows the current directory before `> ` so a `cd` actually
 /// taking effect is visible. `exit` is a builtin too -- typing it is the
@@ -693,16 +696,29 @@ const Prompt = struct {
         try self.showPrompt();
     }
 
-    /// Spawns `argv` and waits for it to exit. No stdout/stderr capture,
-    /// no argument quoting -- the child is expected to be a
-    /// glyphwire-aware program that draws to the grid itself over its own
-    /// connection (inheriting `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX`
-    /// automatically, since child processes inherit the environment by
-    /// default). `argv[0]` resolution (including the `zig-out/bin` dev
-    /// convenience) is `std.process.spawn`'s own `$PATH` search -- see
+    /// Spawns `argv` and waits for it to exit, treating its stdout/stderr
+    /// as the default output mechanism -- mirrored onto the grid via
+    /// `write_text`, terminal-style -- until it performs the handshake
+    /// documented on `glyphwire.handshake_marker`: a glyphwire-aware
+    /// program's `Client.connect` writes that marker to its own stdout as
+    /// part of connecting, this launcher's cue that the process is
+    /// drawing to the grid itself over its own connection (inheriting
+    /// `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` automatically, since child
+    /// processes inherit the environment by default) rather than
+    /// expecting its stdio echoed there. Once that's
+    /// resolved either way (see `pumpChildOutput`), the rest of that
+    /// stream is either kept mirroring to the grid (never handshaken) or
+    /// passed straight through to this process's own real stdio (already
+    /// handshaken) -- stdio keeps working either way, only the mirroring
+    /// stops, per decisions.md's Discovery & connection section. `argv[0]`
+    /// resolution (including the `zig-out/bin` dev convenience) is
+    /// `std.process.spawn`'s own `$PATH` search -- see
     /// `prependZigOutBinToPath`. A spawn failure (e.g. unknown command) is
     /// reported onto the grid rather than propagated, so a typo doesn't
-    /// take down the prompt.
+    /// take down the prompt. Stdin is deliberately not connected
+    /// (`.ignore`): this handles commands that only produce output, not
+    /// ones that read input interactively -- see this file's top doc
+    /// comment.
     ///
     /// Every argument gets the same leading `~`/`~/...` expansion `cd`
     /// already gives its target (see `expandTilde`) -- most spawned
@@ -730,15 +746,148 @@ const Prompt = struct {
             try expanded.append(alloc, exp);
         }
 
-        var child = std.process.spawn(self.client.io, .{ .argv = expanded.items }) catch |err| {
+        var child = std.process.spawn(self.client.io, .{
+            .argv = expanded.items,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        }) catch |err| {
             var buf: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "{s}: command not found ({t})", .{ argv[0], err }) catch "command not found";
             try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
             return;
         };
+        // Safe to run after the explicit `wait` below too -- `Child.kill`
+        // is documented idempotent and a no-op once `wait` has already
+        // reaped the child; this is only here to reap it if
+        // `pumpChildOutput` returns early on an error.
+        defer child.kill(self.client.io);
+
+        self.pumpChildOutput(child.stdout.?, child.stderr.?) catch |err| {
+            std.log.err("runCommand: output capture failed for {s}: {t}", .{ argv[0], err });
+        };
+
         _ = child.wait(self.client.io) catch |err| {
             std.log.err("runCommand: wait({s}) failed: {t}", .{ argv[0], err });
         };
+    }
+
+    /// Reads `stdout`/`stderr` concurrently via `std.Io.File.MultiReader`
+    /// -- the same mechanism `std.process.run` uses to avoid deadlocking
+    /// if both pipes fill up at once -- forwarding each chunk as it
+    /// arrives rather than buffering the whole run, so a long-running
+    /// command's output appears incrementally instead of all at once at
+    /// the end. `stdout`'s very first bytes are checked against
+    /// `glyphwire.handshake_marker` as soon as enough of them have
+    /// arrived; everything read before that resolves (or all of it, if
+    /// total output before EOF never reaches the marker's length) is
+    /// still routed to the grid, since "not yet handshaken" is exactly
+    /// the default this whole mechanism exists for.
+    fn pumpChildOutput(self: *Prompt, stdout_file: std.Io.File, stderr_file: std.Io.File) !void {
+        const io = self.client.io;
+        const gpa = self.client.alloc;
+
+        var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
+        var mr: std.Io.File.MultiReader = undefined;
+        mr.init(gpa, io, mr_buf.toStreams(), &.{ stdout_file, stderr_file });
+        defer mr.deinit();
+
+        // Only opened lazily in spirit but declared up front since Zig has
+        // no default-initialized-on-first-use locals -- cheap either way,
+        // and only ever written to once a child has already handshaken.
+        var passthrough_out_buf: [256]u8 = undefined;
+        var passthrough_out = std.Io.File.stdout().writer(io, &passthrough_out_buf);
+        var passthrough_err_buf: [256]u8 = undefined;
+        var passthrough_err = std.Io.File.stderr().writer(io, &passthrough_err_buf);
+
+        var capture: CapturedOutput = .{
+            .row = (self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 }).row,
+        };
+        var handshake: ?bool = null;
+
+        while (true) {
+            mr.fill(64, .none) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => |e| return e,
+            };
+
+            if (handshake == null and mr.reader(0).bufferedLen() >= glyphwire.handshake_marker.len) {
+                const seen = std.mem.eql(u8, mr.reader(0).buffered()[0..glyphwire.handshake_marker.len], glyphwire.handshake_marker);
+                if (seen) mr.reader(0).toss(glyphwire.handshake_marker.len);
+                handshake = seen;
+            }
+
+            // Nothing is drained from either stream until the handshake
+            // question resolves -- `MultiReader` grows its buffers to
+            // hold whatever arrives meanwhile, same as it would while
+            // waiting on the other stream in `std.process.run`.
+            if (handshake) |aware| {
+                try self.flushCapturedStream(mr.reader(0), aware, &capture, null, &passthrough_out.interface);
+                try self.flushCapturedStream(mr.reader(1), aware, &capture, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
+            }
+        }
+
+        // Covers the case where the handshake question never resolved
+        // inside the loop (e.g. a plain command whose entire stdout, if
+        // any, is shorter than the marker) -- treated as "not handshaken"
+        // and flushed to the grid like everything else this mechanism
+        // defaults to.
+        const aware = handshake orelse false;
+        try self.flushCapturedStream(mr.reader(0), aware, &capture, null, &passthrough_out.interface);
+        try self.flushCapturedStream(mr.reader(1), aware, &capture, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
+
+        try mr.checkAnyError();
+    }
+
+    /// `writeCapturedText`'s running "next row" cursor for a single
+    /// `runCommand` invocation, kept locally rather than re-querying
+    /// `get_cursor` per line: this process is the only writer while the
+    /// command runs, so the row only ever changes via its own explicit
+    /// `setCursor` calls below.
+    const CapturedOutput = struct { row: usize };
+
+    /// Drains whatever `r` currently has buffered: onto the grid (`fg`,
+    /// `capture`) as plain text if `aware` is false, or straight through
+    /// to this process's own real stdio (`passthrough`) if it's true --
+    /// see `runCommand`'s doc comment for what `aware` means. A no-op when
+    /// nothing is buffered, so it's safe to call speculatively before the
+    /// handshake question is even resolved (see `pumpChildOutput`).
+    fn flushCapturedStream(self: *Prompt, r: *std.Io.Reader, aware: bool, capture: *CapturedOutput, fg: ?glyphwire.Color, passthrough: *std.Io.Writer) !void {
+        const chunk = r.buffered();
+        if (chunk.len == 0) return;
+        defer r.toss(chunk.len);
+
+        if (aware) {
+            try passthrough.writeAll(chunk);
+            try passthrough.flush();
+            return;
+        }
+
+        try self.writeCapturedText(chunk, fg, capture);
+    }
+
+    /// Writes `text` (a chunk of a plain command's stdout/stderr) onto the
+    /// grid at the cursor, splitting on `\n` and advancing `capture.row`
+    /// itself between lines -- `write_text` has no newline handling of
+    /// its own (a literal `\n` byte would just be drawn as its own
+    /// grapheme, see core.zig's `Layer.writeText`), so this is the
+    /// minimal terminal-style line wrapping a plain program's output
+    /// needs to stay legible. A line split across two chunks (the pipe
+    /// delivered them separately) needs no special handling here: each
+    /// half is written with a plain `write_text` and no intervening
+    /// `setCursor` in between, so the second half lands right after the
+    /// first exactly like one call would have.
+    fn writeCapturedText(self: *Prompt, text: []const u8, fg: ?glyphwire.Color, capture: *CapturedOutput) !void {
+        var it = std.mem.splitScalar(u8, text, '\n');
+        var first = true;
+        while (it.next()) |line| {
+            if (!first) {
+                capture.row += 1;
+                try self.client.setCursor(capture.row, 0);
+            }
+            first = false;
+            if (line.len > 0) try self.client.writeText(line, fg, null);
+        }
     }
 
     /// `cd` is a shell builtin, not a spawned program -- unlike
