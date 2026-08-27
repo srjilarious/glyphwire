@@ -282,6 +282,99 @@ fn typeText(reporter: *glyphwire.Client, text: []const u8) !void {
     }
 }
 
+/// Proves `Prompt.runCommand` captures a plain (non-glyphwire-aware)
+/// command's real stdout and mirrors it onto the grid via `write_text`,
+/// the default behavior `pumpChildOutput` gives any spawned command that
+/// never connects (`Client.connect` is what writes
+/// `glyphwire.handshake_marker`) -- see shell/main.zig's top doc comment.
+/// `/usr/bin/echo` is about as plain as a program gets: it
+/// never touches `GLYPHWIRE_SOCK`, so this only passes if the shell
+/// itself is putting its stdout on the grid, not `echo` doing it.
+/// `shellExpandsTildeInCommandArgsTest`/`lsClientWritesEntriesOverRealSocketTest`
+/// cover the opposite case (a real `glyphwire-ls` handshaking and drawing
+/// structured output itself, not raw stdout bytes) implicitly, by still
+/// passing under this same capture path.
+pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-echo-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // Three connections, same as shellPromptEchoesTypedInputTest: the
+    // shell's own Client and InputListener, plus this test's reporter.
+    // `echo` itself never connects -- it's a plain program, the whole
+    // point of this test.
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread3.join();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // `/usr/bin/echo` isn't under `zig-out/bin`, so the real inherited
+    // PATH has to be forwarded explicitly -- an explicit `environ_map`
+    // replaces the child's whole environment rather than layering on top
+    // of it, same reasoning as shellExpandsTildeInCommandArgsTest.
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    try typeText(&reporter, "echo hello");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // "echo hello"'s stdout ("hello\n") lands on row 1 starting at col 0,
+    // same placement `runCommand`'s "command not found" report uses for
+    // an unrecognized command -- both are written before any prompt
+    // prefix. Waiting for the final "o" (rather than the first "h")
+    // proves the whole word made it across, not just that capture started.
+    try waitForCell(&reporter, 1, 4, "o");
+
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+    for ("hello", 0..) |expected_ch, i| {
+        var expected_buf: [1]u8 = .{expected_ch};
+        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, i).grapheme);
+    }
+
+    // The next prompt lands two rows below the captured line: one for the
+    // trailing newline `writeCapturedText` already advanced past, one
+    // more for `submitLine`'s own resync -- proving the shell picked its
+    // cursor back up correctly after a captured command ran, not just
+    // that the capture itself worked.
+    try waitForCell(&reporter, 3, arrow_col, ">");
+}
+
 /// Proves `Prompt.runCommand` actually expands a leading `~/` in a
 /// command's arguments before spawning, the same way `doCd` already did
 /// for `cd`'s target -- see shell/main.zig. Types `ls ~/<marker dir>` at

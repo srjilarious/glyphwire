@@ -52,13 +52,13 @@ of it. `docs/decisions.md` stays the place for *why*.
   line as a child process (`Prompt.runCommand`) instead of just echoing
   it: `argv[0]` resolves against `zig-out/bin/` first (a dev-mode
   convenience mirroring `host/main.zig`'s sibling-binary resolution),
-  falling back to `$PATH`. The child is assumed glyphwire-compatible — it
-  inherits `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` and draws to the grid itself
-  over its own connection — the shell just spawns it, waits, and resyncs
-  its own cursor from `get_property(cursor)` before drawing the next
-  prompt rather than assuming a fixed row offset. Capturing stdout/stderr
-  from a plain, non-glyphwire-aware program is still open — see Further
-  out.
+  falling back to `$PATH`. The shell spawns it, waits, and resyncs its own
+  cursor from `get_property(cursor)` before drawing the next prompt rather
+  than assuming a fixed row offset. Whether the child is glyphwire-
+  compatible (inherits `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` and draws to the
+  grid itself over its own connection) or a plain program writing to a
+  terminal is no longer assumed either way — see the stdout/stderr
+  capture bullet below.
 - **`glyphwire-ls`** (`ls/main.zig`) is the first program built to be
   launched this way: `lsz`'s directory-scanning core re-targeted to write
   through `Client` instead of ANSI escapes (one entry per row,
@@ -78,6 +78,25 @@ of it. `docs/decisions.md` stays the place for *why*.
   fixed once, in the library, for every `Client`-based program, not
   something each client has to remember. See Open questions for the case
   this doesn't cover.
+- **Capturing stdout/stderr from plain, non-glyphwire-aware commands.**
+  `Prompt.runCommand` now pipes every spawned command's stdout/stderr
+  instead of inheriting them, and `Prompt.pumpChildOutput` mirrors them
+  onto the grid via `write_text` (terminal-style, with its own `\n`
+  handling since `write_text` has none) by default — the assumption for
+  any spawned command is "plain program writing to a terminal" until
+  proven otherwise. A glyphwire-aware command opts out automatically:
+  `Client.connect` writes `glyphwire.handshake_marker` to the process's
+  own stdout as part of connecting, no separate call needed since only a
+  glyphwire-aware program ever calls `connect` in the first place.
+  `pumpChildOutput` checks for the marker before mirroring anything,
+  switching to passing the rest of that command's stdio straight through
+  to `glyphwire-shell`'s own real stdio instead (still working, just not
+  mirrored — see decisions.md's Discovery & connection section). Every
+  current glyphwire-aware program (`demo`, `table-demo`, `notify`, `view`,
+  `ls`, `client`, and `glyphwire-shell`'s own prompt connection) gets it
+  for free just by calling `connect`/`connectFromEnv`. Stdin is
+  deliberately left disconnected (`.ignore`) — this only covers commands
+  that produce output, not ones that read input interactively.
 - 34 tests green as of this writing (one long-standing flaky mouse-button
   race in `inputListenerReceivesReportedInputTest`, unrelated to any of
   the above, not yet fixed).

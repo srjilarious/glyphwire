@@ -47,6 +47,39 @@ final.
 - The grid socket is an out-of-band side channel, not a replacement for
   stdio. Normal stdin/stdout/stderr and pipes (`cmd1 | cmd2`) keep working
   untouched for every program, grid-aware or not.
+- **Stdout/stderr handshake for launcher-spawned commands.** A launcher
+  that spawns arbitrary commands (`glyphwire-shell`'s `Prompt.runCommand`)
+  can't know in advance whether a given command is glyphwire-aware, so it
+  defaults to "plain program writing to a terminal": it pipes the child's
+  stdout/stderr and mirrors them onto the grid via `write_text`
+  (`Prompt.pumpChildOutput`/`writeCapturedText` — a small amount of
+  terminal-style `\n` handling of its own, since `write_text` has none).
+  A glyphwire-aware child opts out automatically: `Client.connect` writes
+  `glyphwire.handshake_marker` (a leading-NUL-byte sentinel, vanishingly
+  unlikely to collide with a plain program's real output) to the child's
+  own stdout as part of connecting, not a separate call a caller has to
+  remember — only a glyphwire-aware program ever calls `connect` in the
+  first place, so the handshake is entirely an implementation detail of
+  what connecting means, invisible from the call site. The launcher
+  checks for the marker before mirroring anything. Once resolved, whichever
+  answer applies sticks for the rest of that command's run — the
+  launcher never re-checks mid-stream. This is deliberately a side
+  channel on the child's own stdout, not a wire-protocol message: the
+  launcher would otherwise need to correlate a spawned PID with a
+  possibly-unrelated later socket connection (the `SO_PEERCRED`-based
+  capability cache below was considered and deferred for the same
+  reason), and the discovery env vars already establish that *this*
+  specific child is the one whose stdio the launcher is holding a pipe
+  to. Stdio itself is never swallowed either way, matching the "side
+  channel, not a replacement for stdio" principle above: a handshaken
+  child's remaining stdout/stderr are passed straight through to the
+  launcher's own real stdio rather than dropped, so its own diagnostics
+  (`std.log.err` and similar) still land somewhere. A known limitation:
+  since the launcher must pick the piped-vs-inherited spawn behavior
+  before it knows the answer, this only covers commands that don't need
+  real interactive stdin (piped as `.ignore`) — not yet a problem, since
+  no glyphwire-aware program reads stdin today, but worth revisiting if
+  one ever does.
 
 ### Transport & wire format
 - Primary transport: a Unix domain socket. An inherited-fd variant (à la

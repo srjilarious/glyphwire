@@ -5,6 +5,28 @@ const wire = @import("wire.zig");
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
 
+/// Byte sequence `Client.connect` writes to the process's own real stdout
+/// the moment it successfully connects, to tell a launcher that captures
+/// its stdout/stderr by default (`glyphwire-shell`'s `Prompt.runCommand`,
+/// which otherwise assumes any spawned command is a plain,
+/// non-glyphwire-aware program echoing to a terminal) that this process
+/// is drawing to the grid itself over its own wire connection instead --
+/// see `connect`'s doc comment and docs/decisions.md's Discovery &
+/// connection section. A leading NUL byte makes it vanishingly unlikely a
+/// plain program's real output would ever start with this exact sequence.
+pub const handshake_marker = "\x00glyphwire-handshake-v1\x00";
+
+/// Writes `handshake_marker` to the real process stdout and flushes it
+/// immediately -- see its doc comment. Private: `Client.connect` is the
+/// only caller, since folding the handshake into connecting itself is the
+/// whole point (see `connect`'s doc comment).
+fn signalHandshake(io: std.Io) !void {
+    var buf: [handshake_marker.len]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    try w.interface.writeAll(handshake_marker);
+    try w.interface.flush();
+}
+
 /// A glyphwire client: wraps connecting to `GLYPHWIRE_SOCK`, JSON-RPC
 /// framing, and request/response correlation, so a program doesn't have to
 /// hand-build JSON strings to speak the protocol (as the early test clients
@@ -26,9 +48,21 @@ pub const Client = struct {
     pub const ConnectError = std.Io.net.UnixAddress.InitError || std.Io.net.UnixAddress.ConnectError;
     pub const NoSessionError = error{NoSession};
 
+    /// Connects and signals the handshake (`handshake_marker`, see its doc
+    /// comment) in the same step -- only a glyphwire-aware program ever
+    /// calls `connect` in the first place, so there's no case where a
+    /// caller would want one without the other; folding it in here means
+    /// every current and future caller gets it automatically instead of
+    /// having to remember a separate call. Also the natural place to grow
+    /// an options-carrying variant later (e.g. requesting a dedicated
+    /// fullscreen layer at connect time) without every call site needing
+    /// to change again. Handshake failures are swallowed rather than
+    /// propagated: a hiccup writing to stdout shouldn't take down the
+    /// actual wire connection this call exists to establish.
     pub fn connect(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) ConnectError!Client {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
         const stream = try addr.connect(io);
+        signalHandshake(io) catch {};
         return .{ .io = io, .alloc = alloc, .stream = stream };
     }
 
