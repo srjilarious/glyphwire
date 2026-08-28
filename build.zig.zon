@@ -15,6 +15,18 @@
             .url = "https://github.com/srjilarious/zargunaught/archive/refs/tags/v1.2.1.tar.gz",
             .hash = "zargunaught-1.2.1-aoeNIzTpAAArdAo7Hjp1FfdI6BYKPlZMRL2YRP6kc2UN",
         },
+        // Vendored from pixzig/libs/ziglua so glyphwire-shell can embed a
+        // Lua 5.3 state for ~/.config/glyphwire/shell.conf without pulling
+        // in the whole pixzig engine (GLFW/OpenGL). `lua53` is ziglua's
+        // own lazy dependency, listed here so `zig build --fetch` grabs
+        // the Lua source tarball too -- mirrors pixzig's build.zig.zon.
+        .ziglua = .{
+            .path = "libs/ziglua",
+        },
+        .lua53 = .{
+            .url = "https://www.lua.org/ftp/lua-5.3.6.tar.gz",
+            .hash = "N-V-__8AALihEACTeiI1Me9rP-qPZT3BNTELDoSAXn76FIhw",
+        },
     },
     .paths = .{
         "build.zig",
@@ -29,5 +41,6 @@
         "ls",
         "view",
         "assets",
+        "libs",
     },
 }

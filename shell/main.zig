@@ -4,6 +4,8 @@ const wordsplit = @import("shell_support").wordsplit;
 const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
 const hs = @import("shell_support").handshake;
+const config = @import("shell_support").config;
+const history = @import("shell_support").history;
 
 comptime {
     // The captured-child marker detector keeps its own copy of the
@@ -159,6 +161,20 @@ fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
     return error.ServerNeverCameUp;
 }
 
+/// Owned absolute path to glyphwire's config directory:
+/// `$XDG_CONFIG_HOME/glyphwire` when that variable is set and non-empty,
+/// otherwise `$HOME/.config/glyphwire`. `error.NoConfigHome` when neither
+/// variable is set -- there's then nowhere to read `shell.conf` from or
+/// persist history to, and the shell just runs without either.
+fn configDirPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]u8 {
+    if (environ_map.get("XDG_CONFIG_HOME")) |xdg| {
+        if (xdg.len > 0) return std.fs.path.join(alloc, &.{ xdg, "glyphwire" });
+    }
+    const home = environ_map.get("HOME") orelse return error.NoConfigHome;
+    if (home.len == 0) return error.NoConfigHome;
+    return std.fs.path.join(alloc, &.{ home, ".config", "glyphwire" });
+}
+
 /// Prints the current directory followed by `> `, echoes typed characters
 /// live, Enter commits the line and starts a new prompt row below it. See
 /// `Prompt` for the rest of the line editing (cursor movement, interior
@@ -189,6 +205,16 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         defer snapshot.deinit();
         prompt.grid_cols = snapshot.cols();
     }
+
+    // Startup config + persistent history, both under
+    // `$XDG_CONFIG_HOME/glyphwire` (or `$HOME/.config/glyphwire`). A
+    // missing config directory or file is not an error -- the shell just
+    // starts with no configured aliases and an empty history.
+    if (configDirPath(alloc, environ_map)) |config_dir| {
+        defer alloc.free(config_dir);
+        try prompt.loadStartupConfig(config_dir);
+        try prompt.loadHistory(config_dir);
+    } else |_| {}
 
     try prompt.showPrompt();
 
@@ -346,10 +372,12 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
 /// unique match and the `/` shown in a listing.
 const CompletionCandidate = struct { name: []const u8, is_dir: bool };
 
-/// Session-only alias store backing the prompt's `alias`/`unalias`
-/// builtins. There's no config file yet (a Lua-backed startup config is a
-/// planned next step), so nothing here survives `exit`. Keys and values
-/// are owned dups; `Prompt.deinit` frees the whole table.
+/// Alias store backing the prompt's `alias`/`unalias` builtins. Seeded at
+/// startup from `~/.config/glyphwire/shell.conf`'s `alias(name, value)`
+/// calls (see `Prompt.loadStartupConfig`), then mutated for the rest of
+/// the session by the builtins; nothing here is written back to disk, so
+/// a session-only `alias` doesn't survive `exit`. Keys and values are
+/// owned dups; `Prompt.deinit` frees the whole table.
 const AliasTable = struct {
     map: std.StringHashMapUnmanaged([]const u8) = .empty,
 
@@ -454,6 +482,12 @@ const Prompt = struct {
     /// wheel/scrollbar moves it, and reset to 0 by `setCursorAt` so
     /// starting to type snaps back to the live prompt.
     view_scroll: usize = 0,
+    /// Absolute path to `~/.config/glyphwire/history`, set by
+    /// `loadHistory` once it knows the config directory exists. `null`
+    /// when there's no `$HOME`/`$XDG_CONFIG_HOME` to derive it from, or
+    /// the directory couldn't be created -- history just isn't persisted
+    /// then. Owned; freed in `deinit`.
+    history_path: ?[]const u8 = null,
 
     fn deinit(self: *Prompt) void {
         const alloc = self.client.alloc;
@@ -462,6 +496,7 @@ const Prompt = struct {
         self.scratch.deinit(alloc);
         self.buffer.deinit(alloc);
         self.aliases.deinit(alloc);
+        if (self.history_path) |p| alloc.free(p);
     }
 
     /// Writes the current directory followed by `> ` at the cursor's
@@ -837,11 +872,20 @@ const Prompt = struct {
 
         // Record into history before `showPrompt` clears `buffer` below --
         // an owned dupe, since `buffer`'s own storage gets reused for the
-        // next line. Blank lines aren't worth recalling, so they're not
-        // recorded, matching a real shell. Submitting always leaves the
-        // next prompt on the not-recalling line, `historyUp` included.
-        if (self.buffer.items.len > 0) {
-            try self.history.append(alloc, try alloc.dupe(u8, self.buffer.items));
+        // next line. Blank lines and a line identical to the previous
+        // entry aren't worth recalling, so they're skipped (bash
+        // `ignoredups`); `history.shouldRecord` is the same rule the
+        // persisted file uses. Submitting always leaves the next prompt on
+        // the not-recalling line, `historyUp` included.
+        {
+            const prev: ?[]const u8 = if (self.history.items.len > 0)
+                self.history.items[self.history.items.len - 1]
+            else
+                null;
+            if (history.shouldRecord(prev, self.buffer.items)) {
+                try self.history.append(alloc, try alloc.dupe(u8, self.buffer.items));
+                self.persistHistory();
+            }
         }
         self.history_index = null;
 
@@ -1177,6 +1221,104 @@ const Prompt = struct {
                 try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
             }
         }
+    }
+
+    /// Runs `~/.config/glyphwire/shell.conf` (if it exists) through the
+    /// Lua config loader and folds what it declares into the live prompt.
+    /// Right now that's the `alias(name, value)` bindings, applied into
+    /// the same `AliasTable` the `alias` builtin writes to -- later
+    /// bindings for the same name win, matching a shell rc file read
+    /// top-to-bottom. A missing file is silently fine; a Lua syntax or
+    /// runtime error in the file is reported onto the grid and whatever
+    /// parsed before the error is still applied. Only a real allocation
+    /// failure propagates.
+    fn loadStartupConfig(self: *Prompt, config_dir: []const u8) !void {
+        const alloc = self.client.alloc;
+        const io = self.client.io;
+
+        const path = try std.fs.path.join(alloc, &.{ config_dir, "shell.conf" });
+        defer alloc.free(path);
+
+        const source = std.Io.Dir.cwd().readFileAllocOptions(io, path, alloc, .limited(1 << 20), .of(u8), 0) catch |err| switch (err) {
+            error.FileNotFound => return,
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                std.log.warn("shell.conf: could not read {s}: {t}", .{ path, err });
+                return;
+            },
+        };
+        defer alloc.free(source);
+
+        var result = try config.load(alloc, source);
+        defer result.deinit();
+
+        for (result.config.aliases.items) |a| {
+            try self.aliases.set(alloc, a.name, a.value);
+        }
+
+        if (result.err) |msg| {
+            var buf: [512]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "shell.conf: {s}\n", .{msg}) catch "shell.conf: error\n";
+            try self.client.writeText(line, .{ .r = 255, .g = 85, .b = 85 }, null);
+        }
+    }
+
+    /// Loads `~/.config/glyphwire/history` into `self.history` so ctrl+up
+    /// recall picks up where the last session left off, then records the
+    /// file path in `self.history_path` and rewrites the file once
+    /// (trimmed to the last `history.max_entries`, consecutive duplicates
+    /// dropped) so it stays bounded. Creates the config directory if it's
+    /// missing. Any IO failure just leaves `history_path` null -- the
+    /// session runs with in-memory-only history rather than failing.
+    fn loadHistory(self: *Prompt, config_dir: []const u8) !void {
+        const alloc = self.client.alloc;
+        const io = self.client.io;
+
+        std.Io.Dir.cwd().createDirPath(io, config_dir) catch |err| {
+            std.log.warn("history: could not create {s}: {t}", .{ config_dir, err });
+            return;
+        };
+
+        const path = try std.fs.path.join(alloc, &.{ config_dir, "history" });
+        errdefer alloc.free(path);
+
+        if (std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20))) |bytes| {
+            defer alloc.free(bytes);
+            const entries = try history.parse(alloc, bytes);
+            defer history.freeEntries(alloc, entries);
+            for (entries) |e| try self.history.append(alloc, try alloc.dupe(u8, e));
+        } else |err| switch (err) {
+            error.FileNotFound => {}, // first run -- nothing to load
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                std.log.warn("history: could not read {s}: {t}", .{ path, err });
+                alloc.free(path);
+                return;
+            },
+        }
+
+        self.history_path = path;
+        self.persistHistory();
+    }
+
+    /// Rewrites the whole history file from `self.history` (trimmed to the
+    /// last `history.max_entries`). Called after every recorded line --
+    /// the file is small and interactive commands are human-slow, so a
+    /// full rewrite each time is simpler than an append + periodic
+    /// compaction, and it means the file survives this process being
+    /// killed rather than exited (the usual way an interactive session
+    /// ends here). A no-op when there's no `history_path`; an IO failure
+    /// is logged, not propagated.
+    fn persistHistory(self: *Prompt) void {
+        const path = self.history_path orelse return;
+        const alloc = self.client.alloc;
+
+        const bytes = history.serialize(alloc, self.history.items) catch return;
+        defer alloc.free(bytes);
+
+        std.Io.Dir.cwd().writeFile(self.client.io, .{ .sub_path = path, .data = bytes }) catch |err| {
+            std.log.warn("history: could not write {s}: {t}", .{ path, err });
+        };
     }
 
     /// Expands a leading alias in `words` into a fresh owned `Arg` list.

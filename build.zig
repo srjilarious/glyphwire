@@ -20,6 +20,18 @@ pub fn build(b: *std.Build) void {
 
     const zargunaught_mod = b.dependency("zargunaught", .{}).module("zargunaught");
 
+    // Vendored Lua 5.3 (libs/ziglua) -- glyphwire-shell embeds a Lua state
+    // to run ~/.config/glyphwire/shell.conf. `zlua` already links the Lua
+    // C library into itself in ziglua's own build.zig; `lua_lib` is linked
+    // onto each consuming executable explicitly, mirroring pixzig.
+    const ziglua = b.dependency("ziglua", .{ .target = target, .optimize = optimize, .lang = .lua53 });
+    const ziglua_mod = ziglua.module("zlua");
+    const lua_lib = ziglua.artifact("lua");
+
+    // shell/config.zig lives in this module and imports ziglua; both
+    // glyphwire-shell and the test runner pull it in transitively.
+    shell_support_mod.addImport("ziglua", ziglua_mod);
+
     const tests_exe = b.addExecutable(.{
         .name = "tests",
         .root_module = b.createModule(.{
@@ -30,6 +42,10 @@ pub fn build(b: *std.Build) void {
     });
     tests_exe.root_module.addImport("glyphwire", glyphwire_mod);
     tests_exe.root_module.addImport("shell_support", shell_support_mod);
+    // shell_support -> shell/config.zig -> ziglua: the Lua C library and
+    // libc have to be linked into the final test binary.
+    tests_exe.root_module.linkLibrary(lua_lib);
+    tests_exe.root_module.link_libc = true;
 
     const testz_dep = b.dependency("testz", .{});
     tests_exe.root_module.addImport("testz", testz_dep.module("testz"));
@@ -71,6 +87,8 @@ pub fn build(b: *std.Build) void {
     });
     shell_exe.root_module.addImport("glyphwire", glyphwire_mod);
     shell_exe.root_module.addImport("shell_support", shell_support_mod);
+    shell_exe.root_module.addImport("ziglua", ziglua_mod);
+    shell_exe.root_module.linkLibrary(lua_lib);
     shell_exe.root_module.link_libc = true;
     b.installArtifact(shell_exe);
 

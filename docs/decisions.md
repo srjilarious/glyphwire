@@ -741,10 +741,12 @@ surface.
   quotes. This is the minimum needed for filenames with spaces (`cat 'my
   file.txt'`) and is the shared front end for alias bodies and (later)
   glob tokens.
-- **`alias` / `unalias` are builtins**, session-only — there's no config
-  file yet (a Lua-backed startup config is the planned next step), so
-  nothing survives `exit`. `alias NAME=VALUE` uses **rest-of-line value
-  semantics**: everything after the first `=` is the body, with one
+- **`alias` / `unalias` are builtins.** The `alias` table is seeded at
+  startup from `shell.conf` (see below) and then mutated for the rest of
+  the session by the builtins; a binding made or removed with the builtin
+  is not written back, so it doesn't survive `exit`. `alias NAME=VALUE`
+  uses **rest-of-line value semantics**: everything after the first `=`
+  is the body, with one
   wrapping quote pair stripped. So `alias ll=ls -l` and `alias ll='ls
   -l'` are equivalent. This was chosen over bash's per-argument
   `name=value` splitting (which would let `alias a=1 b=2` define two at
@@ -808,6 +810,52 @@ surface.
   with a literal `.` (`Prompt.expandGlobs` enforces this; the matcher in
   `shell/glob.zig` is otherwise plain `*`/`?`/`[...]` string matching
   with `!`/`^` negation and `a-z` ranges).
+
+#### Startup config: `~/.config/glyphwire/shell.conf`
+- **The config is a Lua script**, run once at prompt startup. The Lua
+  library is vendored from pixzig (`libs/ziglua`, Lua 5.3) so
+  glyphwire-shell can embed an interpreter without depending on the whole
+  pixzig engine (GLFW/OpenGL) — only `glyphwire-host` links pixzig.
+- **Directory:** `$XDG_CONFIG_HOME/glyphwire` when that variable is set
+  and non-empty, else `$HOME/.config/glyphwire`. A missing file is not an
+  error — the shell just starts with nothing configured.
+- **The conf declares data, it doesn't touch the live prompt.** Running
+  it produces a `config.ShellConfig` struct (`shell/config.zig`); the Lua
+  bindings append into that, and `Prompt.loadStartupConfig` folds the
+  result into the prompt afterwards. This keeps the apply step in one
+  place and makes the parser unit-testable without a running shell —
+  mirrors how pixzig parses a Lua config into a Zig structure. New
+  bindings add a field to `ShellConfig` and a collector in `config.load`.
+- **First binding: `alias(name, value)`.** Both arguments are strings
+  (numbers coerce, like stock Lua; other types raise). Each call is
+  appended to `ShellConfig.aliases` in order; `loadStartupConfig` replays
+  them into the same `AliasTable` the `alias` builtin uses, so a repeated
+  name is last-write-wins and a conf alias can later be overridden or
+  `unalias`ed in the session. The standard Lua libraries are open, so a
+  conf can use loops / `..` / `pairs` to build its alias list.
+- **Errors don't abort startup.** A Lua syntax or runtime error is
+  written to the grid in red; whatever the interpreter accepted before
+  the failing line is still applied (Lua stops at the error point).
+
+#### Persistent command history: `~/.config/glyphwire/history`
+- **Plain text, one command per line, oldest first** — same directory
+  resolution as `shell.conf`. Loaded into `Prompt.history` at startup so
+  ctrl+up recall resumes the previous session.
+- **Written after every recorded line, not on exit.** An interactive
+  session here is almost always *killed* (the host reaps the process;
+  `exit` is the only clean path), so buffering until exit would lose the
+  session. The file is small and commands are human-paced, so each
+  recorded line triggers a full rewrite of the file from `Prompt.history`
+  rather than an append + periodic compaction.
+- **Recording rule (`history.shouldRecord`):** non-blank, and not
+  identical to the entry right before it (bash `ignoredups`). This is now
+  also applied to the *in-memory* history, so ctrl+up no longer walks
+  through a run of the same command. The file is capped to the last
+  `history.max_entries` (5000) on every load and every write.
+- Pure parse/serialize/dedup/cap helpers live in `shell/history.zig`
+  (unit-tested); the file read/write and directory creation stay in
+  `Prompt.loadHistory` / `persistHistory`. An IO failure just leaves
+  history in-memory-only for the session rather than failing the shell.
 
 ### Server architecture
 - **Headless-first.** Core state — the layer tree, positions, clip rects,

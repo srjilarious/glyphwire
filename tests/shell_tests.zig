@@ -8,6 +8,7 @@ const wordsplit = @import("shell_support").wordsplit;
 const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
 const handshake = @import("shell_support").handshake;
+const history = @import("shell_support").history;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -263,4 +264,72 @@ pub fn handshakeAwareIsUndecidedOnPartialMarkerPrefixTest(_: std.Io, _: std.mem.
     try testz.expectEqual(handshake.aware(handshake.marker[0..10]), null);
     // One byte short is still undecided.
     try testz.expectEqual(handshake.aware(handshake.marker[0 .. handshake.marker.len - 1]), null);
+}
+
+// ─── history (persistent command history file) ──────────────────────────
+
+pub fn historyParseSplitsLinesSkippingBlanksTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const entries = try history.parse(alloc, "ls\n\ncd /tmp\n\n\ngit status\n");
+    defer history.freeEntries(alloc, entries);
+    try testz.expectEqual(entries.len, 3);
+    try testz.expectEqualStr("ls", entries[0]);
+    try testz.expectEqualStr("cd /tmp", entries[1]);
+    try testz.expectEqualStr("git status", entries[2]);
+}
+
+pub fn historyParseHandlesNoTrailingNewlineAndCarriageReturnsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const entries = try history.parse(alloc, "one\r\ntwo\r\nthree");
+    defer history.freeEntries(alloc, entries);
+    try testz.expectEqual(entries.len, 3);
+    try testz.expectEqualStr("one", entries[0]);
+    try testz.expectEqualStr("two", entries[1]);
+    try testz.expectEqualStr("three", entries[2]);
+}
+
+pub fn historyParseCollapsesConsecutiveDuplicatesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const entries = try history.parse(alloc, "ls\nls\nls\ncd\nls\n");
+    defer history.freeEntries(alloc, entries);
+    // Runs collapse, but a repeat that isn't back-to-back is kept.
+    try testz.expectEqual(entries.len, 3);
+    try testz.expectEqualStr("ls", entries[0]);
+    try testz.expectEqualStr("cd", entries[1]);
+    try testz.expectEqualStr("ls", entries[2]);
+}
+
+pub fn historyParseTrimsToMaxEntriesKeepingNewestTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    // max_entries + 10 distinct lines; only the last max_entries survive.
+    var i: usize = 0;
+    while (i < history.max_entries + 10) : (i += 1) {
+        var line: [16]u8 = undefined;
+        try buf.appendSlice(alloc, try std.fmt.bufPrint(&line, "cmd{d}\n", .{i}));
+    }
+
+    const entries = try history.parse(alloc, buf.items);
+    defer history.freeEntries(alloc, entries);
+    try testz.expectEqual(entries.len, history.max_entries);
+    try testz.expectEqualStr("cmd10", entries[0]);
+    var last: [16]u8 = undefined;
+    const want = try std.fmt.bufPrint(&last, "cmd{d}", .{history.max_entries + 9});
+    try testz.expectEqualStr(want, entries[entries.len - 1]);
+}
+
+pub fn historyShouldRecordRejectsBlankAndConsecutiveDupeTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(history.shouldRecord(null, ""), false);
+    try testz.expectEqual(history.shouldRecord(null, "ls"), true);
+    try testz.expectEqual(history.shouldRecord("ls", "ls"), false);
+    try testz.expectEqual(history.shouldRecord("ls", "ls -l"), true);
+}
+
+pub fn historySerializeRoundTripsThroughParseTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src = [_][]const u8{ "ls", "cd /tmp", "git commit -m 'x y'" };
+    const bytes = try history.serialize(alloc, &src);
+    defer alloc.free(bytes);
+    try testz.expectEqualStr("ls\ncd /tmp\ngit commit -m 'x y'\n", bytes);
+
+    const entries = try history.parse(alloc, bytes);
+    defer history.freeEntries(alloc, entries);
+    try testz.expectEqual(entries.len, 3);
+    try testz.expectEqualStr("git commit -m 'x y'", entries[2]);
 }
