@@ -920,19 +920,21 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
 
     thread.join();
 
-    // Each row starts with a `.natural`-scaled icon, reserving enough
-    // columns for its native 32px width before the name starts -- see
-    // ls/main.zig's `writeGrid` doc comment for the `icon_col_width`
-    // formula. This ctx uses `Context.init`'s default 12x12 cell metrics
-    // (unset by anything host-specific here), giving
-    // `(32 + 12 - 1) / 12 + 1 == 4`. Entries also land two rows apart, not
-    // one (`row + 2`, room for the icon's vertical overflow), so
-    // "bdir"/"clink" are at rows 2/4, not 1/2.
-    try testz.expectEqualStr("a", ctx.root.cell(0, 4).grapheme());
-    try testz.expectEqualStr("b", ctx.root.cell(2, 4).grapheme());
-    try testz.expectEqualStr("/", ctx.root.cell(2, 8).grapheme()); // "bdir/"
-    try testz.expectEqualStr("c", ctx.root.cell(4, 4).grapheme());
-    try testz.expectEqualStr(">", ctx.root.cell(4, 11).grapheme()); // "clink -> afile.txt"
+    // `writeGrid` now packs entries into columns across the layer width
+    // (column-major, like `ls -C`) instead of one per row. Each entry's
+    // block is `icon_cols + name_cols + gap` wide: the `.natural` icon
+    // reserves columns for its native 32px width (`(32 + 12 - 1) / 12 + 1
+    // == 4` at this ctx's default 12x12 cell metrics), the name area is
+    // the longest display string clamped to [8, 40] ("clink -> afile.txt"
+    // == 18), and the gap is 2 -- so `block_cols == 24`. An 80-wide layer
+    // fits 3 such blocks, and with only 3 entries that's one row of three
+    // columns at base columns 0, 24, 48; names start `icon_cols == 4`
+    // past each. Everything lands on row 0 (nothing pushed the cursor).
+    try testz.expectEqualStr("a", ctx.root.cell(0, 4).grapheme()); // "afile.txt"
+    try testz.expectEqualStr("b", ctx.root.cell(0, 28).grapheme());
+    try testz.expectEqualStr("/", ctx.root.cell(0, 32).grapheme()); // "bdir/"
+    try testz.expectEqualStr("c", ctx.root.cell(0, 52).grapheme());
+    try testz.expectEqualStr(">", ctx.root.cell(0, 59).grapheme()); // "clink -> afile.txt"
 }
 
 /// Polls get_cells (briefly) until `cell(row,col)`'s grapheme matches, so

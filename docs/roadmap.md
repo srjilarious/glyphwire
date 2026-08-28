@@ -630,6 +630,48 @@ top of it.
   `Client.writeTextOnTransparent` and shows the actual gradient through
   the text, not an approximation of it.
 
+## `glyphwire-ls` grid columns, size colors, perms padding
+
+Three display refinements to `glyphwire-ls`, all client-local (no wire
+protocol change — `docs/api.md` and `docs/decisions.md` untouched):
+
+- **The plain (non `-l`) listing packs into columns.** It used to write
+  one entry per row; the original doc comment even called out "no
+  terminal-width grid packing (doesn't mean anything over a fixed-size
+  cell grid)" — which stopped being true once `get_property("size")`
+  exposed the layer width. New pure module `ls/gridlayout.zig` (the
+  `ls_support` build module, same cross-directory-`@import` dodge
+  `shell_support` uses so `tests/ls_tests.zig` can reach it): given the
+  entry count, the longest entry's display width, and the layer width, it
+  picks how many entry columns fit and returns a `Grid` (columns, rows
+  per column, cell stride between blocks, name-area width). `writeGrid`
+  fills the grid **column-major** (down the first column, then the next,
+  like `ls -C`), one physical "band" of `block_rows` cells at a time,
+  re-reading the cursor per band so a mid-listing scroll doesn't desync
+  the row — same reason the old code re-read it per entry. Works in both
+  icon modes: `block_rows` is 1 for `-S`'s single-cell icons, 2 for the
+  default `.natural`-scaled icons that overflow into the next row. A
+  listing whose longest name leaves no room for a second column comes out
+  single-column and, in that case only, names are left un-truncated (long
+  symlink targets included); a multi-column grid clips each name to its
+  column with a trailing `…`, the same shape `core.writeCellRun` already
+  uses server-side.
+- **`-l` Size column is colored by magnitude** (`sizeColor`): sub-KB
+  stays the dim detail-gray, KB-range green, MB-range amber, GB-and-up
+  red — so a big file stands out without reading digits. One color per
+  cell (a table cell has a single fg), picked from the raw byte count,
+  not the formatted string.
+- **`-l` Perms column widened 10 → 11.** The perm string is exactly 10
+  chars and left-aligned, so the extra cell is a trailing blank; Perms is
+  the last column, so it reads as a right margin on every row (the
+  `alt_row_bg` stripe included).
+
+Not done (candidate next steps): sort flags (by mtime / size / reversed —
+note `-S` is already taken for "small format", so a size sort needs a
+different letter or a `--sort=` option), `-d` (list the directory entry
+itself, not its contents), multiple path operands, a total/summary line,
+recursive `-R`, and a real `-h`/`--bytes` toggle for the size format.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

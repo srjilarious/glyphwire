@@ -15,6 +15,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("shell/support.zig"),
     });
 
+    // Pure column-packing math shared by glyphwire-ls and its test runner,
+    // same cross-directory-module reason as `shell_support` above.
+    const ls_support_mod = b.addModule("ls_support", .{
+        .root_source_file = b.path("ls/gridlayout.zig"),
+    });
+
     const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });
     const pixzig_mod = pixzig_dep.module("pixzig");
 
@@ -42,6 +48,7 @@ pub fn build(b: *std.Build) void {
     });
     tests_exe.root_module.addImport("glyphwire", glyphwire_mod);
     tests_exe.root_module.addImport("shell_support", shell_support_mod);
+    tests_exe.root_module.addImport("ls_support", ls_support_mod);
     // shell_support -> shell/config.zig -> ziglua: the Lua C library and
     // libc have to be linked into the final test binary.
     tests_exe.root_module.linkLibrary(lua_lib);
@@ -182,6 +189,7 @@ pub fn build(b: *std.Build) void {
     });
     ls_exe.root_module.addImport("glyphwire", glyphwire_mod);
     ls_exe.root_module.addImport("zargunaught", zargunaught_mod);
+    ls_exe.root_module.addImport("ls_support", ls_support_mod);
     ls_exe.root_module.link_libc = true;
     b.installArtifact(ls_exe);
 

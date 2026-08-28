@@ -17,6 +17,7 @@ const Tests = blk: {
         testz.Group{ .name = "End-to-end Tests", .tag = "e2e", .mod = @import("./e2e_tests.zig") },
         testz.Group{ .name = "Shell Tests", .tag = "shell", .mod = @import("./shell_tests.zig") },
         testz.Group{ .name = "Shell Config Tests", .tag = "shell-config", .mod = @import("./shell_config_tests.zig") },
+        testz.Group{ .name = "Ls Tests", .tag = "ls", .mod = @import("./ls_tests.zig") },
     }, .{});
 };
 

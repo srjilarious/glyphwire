@@ -1,6 +1,7 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
+const gridlayout = @import("ls_support");
 
 /// glyphwire-ls: a directory listing built on `lsz`'s core scanning logic
 /// (see /home/jeffdw/code/lsz/src/main.zig) but re-targeted to draw over a
@@ -12,8 +13,7 @@ const zargs = @import("zargunaught");
 /// non-glyphwire `ls` would produce) when no session is available, per
 /// decisions.md's Discovery & Connection.
 ///
-/// Deliberately narrower than lsz: no terminal-width grid packing (doesn't
-/// mean anything over a fixed-size cell grid), no full permission-bit/
+/// Deliberately narrower than lsz: no full permission-bit/
 /// owner/group columns (would need the same raw `fstatat`/`getpwuid`/
 /// `getgrgid` C bindings lsz uses -- `-l` here sticks to what
 /// `std.Io.Dir.statFile`'s cross-platform `Stat` already gives: size and
@@ -21,6 +21,13 @@ const zargs = @import("zargunaught");
 /// or ` -> target` covers the rest of what lsz's coloring conveys. lsz
 /// itself stays the terminal tool; this is a demonstration client, not a
 /// replacement.
+///
+/// The plain (non `-l`) listing *does* now pack into columns like a
+/// terminal `ls`: `get_property("size")` exposes the layer's width in
+/// cells (it didn't when this was first written), so `writeGrid` fits as
+/// many entry columns across it as the longest name allows and fills
+/// them column-major (see `ls_support`/`gridlayout.zig`). The `-l`
+/// listing stays a single server-side `Table`.
 ///
 /// Each entry does get a per-type icon (`draw_icon`, see `iconForEntry`):
 /// a real Nerd-Font-style per-extension glyph set was ruled out for lsz's
@@ -214,6 +221,20 @@ const dir_color = rgb(98, 114, 164);
 const symlink_color = rgb(139, 233, 253);
 const file_color = rgb(220, 220, 220);
 const detail_color = rgb(120, 120, 120);
+
+/// Foreground color for a `-l` Size cell, ramped by magnitude so a large
+/// file stands out without reading the digits: sub-KB stays the same dim
+/// gray the other detail columns use, KB-range is green, MB-range amber,
+/// GB-and-up red. A table cell carries one foreground color for its whole
+/// text (see `writeLongTable`'s `TableCellInput`), so this is chosen once
+/// per entry, not per digit -- the same reason `formatPermBits` doesn't
+/// color its flags individually.
+fn sizeColor(size: u64) glyphwire.Color {
+    if (size < KBytes) return detail_color;
+    if (size < MBytes) return rgb(120, 190, 120);
+    if (size < GBytes) return rgb(220, 180, 100);
+    return rgb(225, 120, 110);
+}
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 
@@ -501,49 +522,52 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
     return max_len;
 }
 
-/// The plain (non `-l`) listing: writes one entry per row starting at the
-/// layer's current cursor row, leaving the cursor at the start of the row
-/// after the last entry -- glyphwire-shell resyncs from
-/// `get_property(cursor)` after this process exits (see
-/// `Prompt.submitLine`), so there's no fixed row count it needs to guess.
-/// Each row gets a leading icon (`iconForEntry`) before the name, drawn at
-/// the cursor rather than naming its row/col explicitly -- the loop always
-/// enters each iteration with the cursor already sitting at that row's
-/// start (see the trailing `setCursor` below), so there's nothing to add
-/// by repeating it. See `writeLongTable` for `-l`, which renders as a
-/// server-side `Table` instead of this per-row layout.
+/// The plain (non `-l`) listing: packs entries into columns across the
+/// layer's width like a terminal `ls -C`, starting at the layer's current
+/// cursor row and leaving the cursor at the start of the row after the
+/// last band -- glyphwire-shell resyncs from `get_property(cursor)` after
+/// this process exits (see `Prompt.submitLine`), so there's no fixed row
+/// count it needs to guess. Each entry gets a leading icon (`iconForEntry`)
+/// before its (possibly truncated) name. See `writeLongTable` for `-l`,
+/// which renders as a server-side `Table` instead.
 ///
-/// `large` (`-L`, see `main`) picks between two icon renderings:
+/// **Column packing.** `get_property("size")` gives the layer width in
+/// cells; `gridlayout.compute` (the pure `ls_support` module) turns that
+/// plus the longest entry's display width into a `Grid` -- how many entry
+/// columns fit, how many rows per column, and the cell stride between
+/// blocks. Fill is **column-major**: entry 0,1,2... run down the first
+/// column, then continue in the second, matching `ls -C`. A listing whose
+/// longest name doesn't leave room for a second column just comes out
+/// single-column, same as before this packing existed (and in that case
+/// names are left un-truncated, long symlink targets included).
 ///
-/// - `false` (default): `.fit`-scaled into the icon's single anchor cell,
+/// `large` (`-L`, see `main`) picks between two icon renderings, and the
+/// block height (`Grid.block_rows`) follows:
+///
+/// - `false` (`-S`): `.fit`-scaled into the icon's single anchor cell,
 ///   same as a `-l` table's icon at its default `row_height`. One
-///   physical row per entry.
-/// - `true`: `.natural` sized (capped to `max_icon_h`, computed below)
-///   instead of `.fit`: at this font's actual cell size a `.fit`-shrunk
-///   32x32 icon comes out only a few pixels tall, unrecognizable.
-///   `h_align = .start`/`v_align = .center` then place it flush against
-///   the row's left edge, vertically centered -- growing only rightward
-///   and vertically (never leftward off-grid, since the icon sits in
-///   column 0). `icon_col_width` (computed from the icon's own native
-///   width, not a fixed constant, since a smaller/larger cell size
-///   changes how many columns that native width actually spans) reserves
-///   enough room before the name starts that it doesn't collide with the
-///   wider icon. Vertically, `max_icon_h` -- two cell-heights -- combined
-///   with centered alignment puts a quarter of the icon above the entry's
-///   own row, half on it, and a quarter below, which is why the loop
-///   below skips an *extra* row per entry in this mode: without it, one
-///   entry's icon would overlap the next entry's text.
+///   physical row per entry (`block_rows == 1`).
+/// - `true` (default): `.natural` sized (capped to `max_icon_h`) instead
+///   of `.fit`: at this font's actual cell size a `.fit`-shrunk 32x32
+///   icon comes out only a few pixels tall, unrecognizable.
+///   `h_align = .start`/`v_align = .center` place it flush against the
+///   block's left edge, vertically centered -- growing rightward and
+///   vertically. `icon_col_width` (from the icon's own native width, not
+///   a fixed constant) reserves room before the name so they don't
+///   collide. `max_icon_h` -- two cell-heights -- with centered
+///   alignment puts a quarter of the icon above the entry's own row,
+///   half on it, a quarter below, so `block_rows == 2` leaves a blank
+///   row between bands and one band's icon doesn't overlap the next's
+///   text.
 ///
-/// Reads the cursor back before *each* entry rather than tracking a local
+/// Reads the cursor back before *each band* rather than tracking a local
 /// row counter across the whole loop: the grid can scroll mid-listing
-/// (once enough entries have pushed the cursor to the bottom), and only
-/// the server knows the post-scroll row. A local counter drifts out of
-/// sync the moment that happens -- `write_text`'s cursor-based
-/// positioning self-corrects for it, and now `draw_icon` does too by
-/// drawing at the cursor, but the row is still needed below to position
-/// the *name* one column over and to advance to the next row. Costs one
-/// extra request per entry; fine for what a directory listing needs over
-/// a local socket.
+/// (once enough bands have pushed past the bottom), and only the server
+/// knows the post-scroll row. Within a band every column's entry is
+/// written at that one known row, so no scroll happens until the band is
+/// complete and `setCursor` advances past it. Costs one extra request
+/// per band; fine over a local socket.
+///
 /// `abs_dir_path` is the absolute (resolved against cwd if `dir_path` was
 /// relative) form of whatever directory was listed -- see `main`'s
 /// `resolveAbsolutePath` call. Every entry's metadata tag (below) embeds
@@ -551,8 +575,10 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 /// anything reading it back (glyphwire-shell's `browseEnter`, eventually
 /// other tools) has a different cwd than this process did.
 fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8, large: bool) !void {
+    if (entries.len == 0) return;
     const alloc = client.alloc;
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    var name_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
 
     // Small mode: the icon stays inside its one anchor cell, so the name
     // just needs to start one column over (plus a one-column gap), and
@@ -560,7 +586,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path
     var icon_col_width: usize = 2;
     var max_icon_h: u32 = 0;
     var icon_cols_spanned: usize = 1;
-    var row_step: usize = 1;
+    var block_rows: usize = 1;
 
     if (large) {
         const metrics = try client.getCellMetrics();
@@ -568,79 +594,103 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path
         const cell_h: usize = metrics.h;
         icon_col_width = (icon_native_px + cell_w - 1) / cell_w + 1;
         max_icon_h = @intCast(2 * cell_h);
-        // How many columns (from the anchor at col 0) the icon's rendered
-        // width actually reaches, so every cell it visually covers -- not
-        // just its anchor cell -- can be tagged below. `.natural` scale
-        // with only `max_h` set ties width to the same cap (square icons,
+        // How many columns (from the anchor) the icon's rendered width
+        // actually reaches, so every cell it visually covers -- not just
+        // its anchor cell -- can be tagged below. `.natural` scale with
+        // only `max_h` set ties width to the same cap (square icons,
         // uniform scale-down -- see `core.IconScale`'s doc comment), so
-        // the rendered pixel width is never more than `max_icon_h`, same
-        // as the height.
+        // the rendered pixel width is never more than `max_icon_h`.
         const icon_render_px: usize = @min(icon_native_px, max_icon_h);
         icon_cols_spanned = (icon_render_px + cell_w - 1) / cell_w;
-        row_step = 2;
+        block_rows = 2;
     }
 
-    for (entries) |entry| {
+    // Fit as many entry columns across the layer as the longest name
+    // allows (single-column if it doesn't fit two), then fill them
+    // column-major.
+    const layer = try client.getSize();
+    const grid = gridlayout.compute(entries.len, maxDisplayLen(entries), layer.cols, .{
+        .icon_cols = icon_col_width,
+        .block_rows = block_rows,
+    });
+
+    var band: usize = 0;
+    while (band < grid.rows) : (band += 1) {
         const cur = try client.getCursor();
         const row = cur.row;
 
-        // Every cell this entry's row touches (icon, name, and -l's
-        // size/time columns) shares one metadata id -- see
-        // decisions.md's Metadata section on tagging a whole run rather
-        // than copying the same blob per cell. `mimetype`/`path` are the
-        // two fields glyphwire-shell's `browseEnter` (word for word) and
-        // any future context-menu client are expected to read.
-        const full_path = try std.fs.path.join(alloc, &.{ abs_dir_path, entry.name });
-        defer alloc.free(full_path);
-        const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = full_path }, .{});
-        defer alloc.free(json);
-        const metadata_id = try client.createMetadata(json);
+        var gcol: usize = 0;
+        while (gcol < grid.cols) : (gcol += 1) {
+            const index = gcol * grid.rows + band; // column-major
+            if (index >= entries.len) break;
+            const entry = entries[index];
+            const base_col = gcol * grid.block_cols;
 
-        if (large) {
-            try client.drawIconStyled(null, null, iconForEntry(entry), .{
-                .scale = .natural,
-                .h_align = .start,
-                .v_align = .center,
-                .max_h = max_icon_h,
-                .metadata_id = metadata_id,
-            });
-            // draw_icon only ever tags its own anchor cell (col 0) -- see
-            // core.IconScale's doc comment on why overflow has no
-            // automatic data-model footprint. Tag the rest of the icon's
-            // own row here so browsing (glyphwire-shell's browseEnter)
-            // resolves correctly anywhere the icon actually renders, not
-            // just its leftmost cell.
-            var icon_col: usize = 1;
-            while (icon_col < icon_cols_spanned) : (icon_col += 1) {
-                try client.tagMetadata(null, row, icon_col, metadata_id);
+            // Every cell this entry's block touches (icon and name)
+            // shares one metadata id -- see decisions.md's Metadata
+            // section on tagging a whole run rather than copying the same
+            // blob per cell. `mimetype`/`path` are the two fields
+            // glyphwire-shell's `browseEnter` (word for word) and any
+            // future context-menu client are expected to read.
+            const full_path = try std.fs.path.join(alloc, &.{ abs_dir_path, entry.name });
+            defer alloc.free(full_path);
+            const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = full_path }, .{});
+            defer alloc.free(json);
+            const metadata_id = try client.createMetadata(json);
+
+            if (large) {
+                try client.drawIconStyled(row, base_col, iconForEntry(entry), .{
+                    .scale = .natural,
+                    .h_align = .start,
+                    .v_align = .center,
+                    .max_h = max_icon_h,
+                    .metadata_id = metadata_id,
+                });
+                // draw_icon only ever tags its own anchor cell -- see
+                // core.IconScale's doc comment on why overflow has no
+                // automatic data-model footprint. Tag the rest of the
+                // icon's row here so browsing resolves correctly anywhere
+                // the icon actually renders, not just its leftmost cell.
+                var icon_col: usize = 1;
+                while (icon_col < icon_cols_spanned) : (icon_col += 1) {
+                    try client.tagMetadata(null, row, base_col + icon_col, metadata_id);
+                }
+            } else {
+                try client.drawIconStyled(row, base_col, iconForEntry(entry), .{ .metadata_id = metadata_id });
             }
-        } else {
-            try client.drawIconStyled(null, null, iconForEntry(entry), .{ .metadata_id = metadata_id });
-        }
-        try client.setCursor(row, icon_col_width);
-        switch (entry.kind) {
-            .directory => {
-                const text = std.fmt.bufPrint(&buf, "{s}/", .{entry.name}) catch entry.name;
-                try client.writeTextTagged(text, dir_color, null, metadata_id);
-            },
-            .sym_link => {
-                const text = if (entry.link_target) |tgt|
+
+            try client.setCursor(row, base_col + icon_col_width);
+            const raw_name = switch (entry.kind) {
+                .directory => std.fmt.bufPrint(&buf, "{s}/", .{entry.name}) catch entry.name,
+                .sym_link => if (entry.link_target) |tgt|
                     std.fmt.bufPrint(&buf, "{s} -> {s}", .{ entry.name, tgt }) catch entry.name
                 else
-                    entry.name;
-                try client.writeTextTagged(text, symlink_color, null, metadata_id);
-            },
-            else => try client.writeTextTagged(entry.name, file_color, null, metadata_id),
+                    entry.name,
+                else => entry.name,
+            };
+            // A multi-column grid clips names to the column's name area
+            // (`gridlayout.truncateToCols`, same trailing-`…` shape the
+            // server-side table cells use) so a long name doesn't spill
+            // into the next column. A single-column listing keeps the
+            // full name -- nothing to collide with.
+            const name_text = if (grid.cols > 1)
+                gridlayout.truncateToCols(&name_buf, raw_name, grid.name_cols)
+            else
+                raw_name;
+            const name_fg: glyphwire.Color = switch (entry.kind) {
+                .directory => dir_color,
+                .sym_link => symlink_color,
+                else => file_color,
+            };
+            try client.writeTextTagged(name_text, name_fg, null, metadata_id);
         }
 
         // set_property(cursor) scrolls-and-clamps a row at or past the
-        // bottom (Layer.resolveRow), so it's always safe to just name the
-        // next row directly here -- the *next* iteration's getCursor()
-        // reads back wherever that actually landed. `row_step` is 2, not
-        // 1, in large mode: leaves a blank row so this entry's icon (up
-        // to `max_icon_h` tall, see `writeGrid`'s doc comment) doesn't
-        // collide with the next entry's text.
-        try client.setCursor(row + row_step, 0);
+        // bottom (Layer.resolveRow), so naming the next band's row
+        // directly is safe -- the next iteration's getCursor() reads back
+        // wherever it landed. `block_rows` is 2 in large mode: the blank
+        // row keeps this band's icons off the next band's text.
+        try client.setCursor(row + grid.block_rows, 0);
     }
 }
 
@@ -658,9 +708,11 @@ const large_table_row_height = 3;
 /// doc comment -- no separate icon column needed the way the client-
 /// composited prototype this replaced had), Size (typed numerically via
 /// `sort_key`, so a future sort-by-size actually orders by byte count, not
-/// lexically on `"1.2 KB"`), and Perms. Every cell in an entry's row
-/// shares one metadata tag, same `mimetype`/`path` shape `writeGrid`'s
-/// tags already have.
+/// lexically on `"1.2 KB"`, and colored by magnitude -- see `sizeColor`),
+/// and Perms (one blank cell wider than the perm string, for a little
+/// right-margin padding). Every cell in an entry's row shares one
+/// metadata tag, same `mimetype`/`path` shape `writeGrid`'s tags already
+/// have.
 ///
 /// `large` (`-L`, see `main`) sets the table's `row_height` to
 /// `large_table_row_height`: `core.Table.render` then draws each row's
@@ -728,7 +780,11 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir
     const table = try client.createTable(null, cur.row, cur.col, &.{
         .{ .name = "Name", .width = name_width, .sortable = true },
         .{ .name = "Size", .width = 8, .kind = .number, .h_align = .end, .sortable = true },
-        .{ .name = "Perms", .width = 10, .sortable = true },
+        // 11, not 10: the perm string (`formatPermBits`) is exactly 10
+        // chars and left-aligned, so the extra cell is a trailing blank.
+        // Perms is the last column, so this reads as a right margin on
+        // every row (the `alt_row_bg` stripe included).
+        .{ .name = "Perms", .width = 11, .sortable = true },
     }, .{
         .borders = false,
         .alt_row_bg = rgb(30, 30, 30),
@@ -785,7 +841,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir
 
         const row = try alloc.alloc(glyphwire.Client.TableCellInput, 3);
         row[0] = .{ .display = name_text, .icon = iconForEntry(entry), .fg = name_fg, .metadata_id = metadata_id };
-        row[1] = .{ .display = size_text, .sort_key = .{ .number = @floatFromInt(entry.size) }, .fg = detail_color, .metadata_id = metadata_id };
+        row[1] = .{ .display = size_text, .sort_key = .{ .number = @floatFromInt(entry.size) }, .fg = sizeColor(entry.size), .metadata_id = metadata_id };
         row[2] = .{ .display = perm_text, .fg = detail_color, .metadata_id = metadata_id };
         rows[i] = row;
     }
