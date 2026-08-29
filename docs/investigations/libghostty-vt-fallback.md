@@ -30,14 +30,14 @@ existing `EscState` machine was grown from a *stripper* into a small
   erase. Every other CSI final and all `ESC ]`/`P`/`X`/`^`/`_ …` still
   recognized-and-discarded.
 - Everything folds into the concrete `Cell.style` colours at write time:
-  **no `Style` field added, no wire message changed, no `glyphwire-host`
-  change.** The one wire-visible shift: `write_text` with `fg` omitted
-  now inherits the layer's SGR pen (then `default_style.fg`). The pen
-  persists across calls only on the mirrored-stdout path (`fg` null); an
-  explicit `fg` resets it so a leaked colour can't reach the next prompt.
+  **no `Style` field added, no `write_text` param changed, no
+  `glyphwire-host` change.** The SGR pen is **call-local** — reset at the
+  start of every `write_text`, so a colour is honoured only within the
+  chunk that set it and can never bleed into the next prompt or listing
+  (a cross-call persistence attempt was reverted for exactly that bug).
 - Tests in `tests/core_tests.zig` (SGR colour/256/truecolor/bold/dim/
-  inverse/pen-persistence, `ESC [ K`/`J`, cursor moves, private-sequence
-  discard).
+  inverse, colour-not-carrying-across-calls, `ESC [ K`/`J`, cursor
+  moves, private-sequence discard).
 
 The rest of this document is the original investigation. Where §2, §6
 (Path a) and §9 below describe Phase A as using the installed
@@ -45,6 +45,17 @@ The rest of this document is the original investigation. Where §2, §6
 them against this Update — the shipped implementation is hand-rolled and
 colour-only with no `Style`/wire change. The Phase B material is
 unaffected and still governs.
+
+**Not fixed by Phase A (it's a Phase B thing):** a plain command's stdout
+often appears only when the command *exits*, not incrementally. `glyphwire
+-shell` forwards each chunk the moment it arrives (`pumpChildOutput` —
+`std.Io.File.MultiReader.fill` returns on the first byte), so this is not
+a shell bug: it's the child's C runtime **block-buffering stdout because
+it's a pipe, not a tty** (glibc uses a ~4-8 KB buffer and only `write()`s
+on flush/exit). `stdbuf -oL <cmd>` / `PYTHONUNBUFFERED=1` work around it
+per-command; programs that write to stderr (unbuffered) or line-buffer
+their output already stream today. The real fix is Phase B's PTY — a tty
+slave makes the child line-buffer.
 
 ---
 

@@ -1425,35 +1425,24 @@ pub fn writeTextSgrDimDarkensForegroundTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqual(layer.cell(0, 0).style.fg.r, 140);
 }
 
-pub fn writeTextSgrPenPersistsAcrossNullFgCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn writeTextSgrColourDoesNotCarryAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
     defer layer.deinit();
 
-    // The mirrored-stdout path: `fg == null`. An SGR set in one call
-    // carries into the next (a program's colour state spanning writes),
-    // until `ESC [ 0 m` clears it.
-    try layer.writeTextTagged("\x1b[34m", null, null, null);
-    try layer.writeTextTagged("blue", null, null, null);
-    try testz.expectEqual(layer.cell(0, 0).style.fg.b, 238); // ANSI 34
-    try layer.writeTextTagged("\x1b[0mplain", null, null, null);
-    try testz.expectEqual(layer.cell(0, 4).style.fg.r, glyphwire.default_style.fg.r);
-}
+    // An SGR colour set in one call and left un-reset (no `ESC [ 0 m`,
+    // as a `cat`'d file of raw escapes or an interrupted program would
+    // leave it) must NOT bleed into the next call -- otherwise every
+    // shell prompt / `ls` listing after such a command renders in that
+    // colour. The pen is call-local.
+    try layer.writeText("\x1b[31mred", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 205); // "red" is red
 
-pub fn writeTextExplicitFgResetsLeakedSgrPenTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
-    defer layer.deinit();
-
-    // A plain command leaves the pen red without resetting it...
-    try layer.writeTextTagged("\x1b[31mred", null, null, null);
-    // ...then a structured write (non-null fg -- the shell prompt,
-    // glyphwire-ls) must not inherit it: the explicit fg wins and the
-    // pen is cleared.
     layer.cursor = .{ .row = 1, .col = 0 };
-    try layer.writeText("prompt", .{ .r = 1, .g = 2, .b = 3 }, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cell(1, 0).style.fg.r, 1);
-    try testz.expectEqual(layer.cell(1, 0).style.fg.g, 2);
+    try layer.writeText("plain", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.r, glyphwire.default_style.fg.r);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.g, glyphwire.default_style.fg.g);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.b, glyphwire.default_style.fg.b);
 }
 
 // --- CSI cursor / erase interpretation --------------------------------------

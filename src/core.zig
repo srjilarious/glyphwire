@@ -328,8 +328,8 @@ pub const SgrPen = struct {
     /// per `write_text`'s `transparent_bg`). The pen overrides the
     /// arguments where it has an opinion; `bold`/`dim`/`inverse` are then
     /// folded into the result.
-    pub fn resolve(self: SgrPen, arg_fg: ?Color, arg_bg: ?Background) struct { fg: Color, bg: ?Background } {
-        var fg: Color = self.fg orelse (arg_fg orelse default_style.fg);
+    pub fn resolve(self: SgrPen, arg_fg: Color, arg_bg: ?Background) struct { fg: Color, bg: ?Background } {
+        var fg: Color = self.fg orelse arg_fg;
         if (self.bold) {
             if (self.fg_basic) |idx| fg = ansi16[8 + @as(usize, idx)];
         }
@@ -487,17 +487,17 @@ pub const tab_width: usize = 8;
 ///    sequence, same as the old stripper -- recognized well enough to
 ///    find the end, then dropped.
 ///
-/// The machine is reset to `.ground` (and the CSI parameter buffer
-/// cleared) at the end of every `writeText` call (see `writeTextTagged`):
-/// a sequence still open when a chunk ends never carries into the next
-/// call. This deliberately gives up on a sequence a pipe split across two
-/// `write_text` chunks (its tail then draws as literal text) in exchange
-/// for never letting a lone trailing `ESC`, a truncated `ESC [ ...`, or
-/// an unterminated `ESC ] ...` (OSC) silently swallow everything written
-/// afterward -- including glyphwire-shell's own prompt. In practice a
-/// plain program emits each escape sequence in a single `write`, so it
-/// arrives whole in one chunk anyway. The `pen` (SGR colour state) *does*
-/// persist across calls for the mirrored-stdout path -- see `Layer.pen`.
+/// Nothing carries across `writeText` calls. The machine is reset to
+/// `.ground` (and the CSI parameter buffer cleared) at the end of every
+/// call, and the SGR `pen` (colour state) is reset at the *start* of
+/// every call -- a sequence, or a colour, is scoped entirely to the
+/// chunk that carried it. This deliberately gives up on a sequence or an
+/// SGR colour a pipe split across two `write_text` chunks (rare -- a
+/// plain program emits each escape in one `write`, and its colour
+/// usually with the text it colours) in exchange for never letting a
+/// lone trailing `ESC`, a truncated `ESC [ ...`, an unterminated
+/// `ESC ] ...` (OSC), or an un-reset `ESC [ 31 m` silently affect
+/// anything written afterward -- glyphwire-shell's own prompt included.
 pub const EscState = enum {
     /// Not inside a sequence -- the normal case.
     ground,
@@ -559,15 +559,14 @@ pub const Layer = struct {
     /// alongside `esc_state` at the end of every `writeText` call.
     csi_buf: [48]u8 = undefined,
     csi_len: usize = 0,
-    /// Current SGR "pen" built up from `ESC [ ... m` sequences in
-    /// mirrored plain-command output -- see `SgrPen`. Persists across
-    /// `writeText` calls whose `fg` argument is `null` (the
-    /// mirrored-stdout path: a program's colour state legitimately spans
-    /// multiple `write()`s). A call with a non-null `fg` argument (every
-    /// structured caller -- the shell prompt, `glyphwire-ls`, tables --
-    /// and the mirrored *stderr* path) resets the pen first, so a colour
-    /// a plain command left un-reset can't bleed into the next prompt or
-    /// listing. `ESC [ 0 m` resets it regardless.
+    /// Scratch SGR "pen" built up from `ESC [ ... m` sequences while a
+    /// single `writeText` call runs -- see `SgrPen`. Reset to `.{}` at
+    /// the *start* of every `writeTextTagged` call, so a colour is
+    /// honoured only for the rest of the chunk that set it and never
+    /// bleeds into a later call (the shell's prompt, the next command's
+    /// output). Lives on the `Layer` only because the `ESC [` machine
+    /// (`consumeControl` -> `stepEscape` -> `execCsi`) needs somewhere to
+    /// accumulate it mid-call.
     pen: SgrPen = .{},
     /// See `PropertyName.revision`.
     revision: u64 = 0,
@@ -825,15 +824,15 @@ pub const Layer = struct {
     /// itself since Zig has no default parameter values, matching this
     /// codebase's existing convention for additive options (`drawIcon`'s
     /// `IconDrawOpts`).
-    /// `fg` is `?Color`: `null` means "no explicit foreground -- fall
-    /// back to the SGR pen, then `default_style.fg`", and, crucially,
-    /// leaves `Layer.pen` intact so a mirrored program's colour state
-    /// carries across `write()` boundaries. A non-null `fg` resets the
-    /// pen first (see `Layer.pen`). Callers wanting a concrete colour
-    /// pass one; the wire path passes `null` when `write_text`'s `fg`
-    /// field was omitted.
-    pub fn writeTextTagged(self: *Layer, text: []const u8, fg: ?Color, bg: ?Background, metadata_id: ?MetadataHandle) !void {
-        if (fg != null) self.pen = .{};
+    pub fn writeTextTagged(self: *Layer, text: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) !void {
+        // The SGR pen is call-local: an `ESC [ ... m` colour is honoured
+        // only for the rest of *this* `write_text`, never carried into
+        // the next call. Cross-call persistence was tried and reverted --
+        // every `glyphwire-shell` prompt/echo write passes the default
+        // fg, so a colour a mirrored program left un-reset (a `cat`'d
+        // file with raw escapes, an interrupted program) would poison the
+        // prompt and everything after it. See `EscState` / `Layer.pen`.
+        self.pen = .{};
 
         const view = try std.unicode.Utf8View.init(text);
         var it = view.iterator();
@@ -847,7 +846,6 @@ pub const Layer = struct {
         // unterminated `ESC ] ...` (OSC) would otherwise leave the
         // machine armed and eat the start of whatever is written next
         // (glyphwire-shell's prompt, the following command's output).
-        // The `pen` (SGR colour state) is deliberately NOT reset here.
         // See `EscState`.
         self.esc_state = .ground;
         self.csi_len = 0;

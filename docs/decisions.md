@@ -1176,15 +1176,12 @@ intended form instead of losing all colour. This is deliberately the
   attribute bitflags and font/renderer work (still the separate
   "style attributes beyond fg/bg" roadmap item), and none of the Phase A
   target programs depend on them for legibility.
-- **No new data-model or wire surface.** Everything resolves to the
-  concrete `Cell.style.fg`/`.bg` colours the renderer and `get_cells`
+- **No new data-model or wire surface at all.** Everything resolves to
+  the concrete `Cell.style.fg`/`.bg` colours the renderer and `get_cells`
   already handle — `bold`→bright, `dim`→darker, `inverse`→swapped are
-  folded in *at write time*. `Style` grew no fields; `glyphwire-host` and
-  `protocol.zig` were untouched. The one wire-visible shift: `write_text`
-  with `fg` **omitted** now means "use the layer's SGR pen, then
-  `default_style.fg`" rather than "force `default_style.fg`". Every
-  structured client passes `fg` explicitly, so this is invisible except
-  on the mirrored path.
+  folded in *at write time*. `Style` grew no fields; `write_text`'s
+  params, `glyphwire-host`, and `protocol.zig` were all untouched.
+  `fg`/`bg` omitted still means `default_style`'s, exactly as before.
 - **A small set of `ESC [ …` cursor/erase finals is interpreted:**
   `A`/`B`/`C`/`D` (cursor up/down/right/left), `G` (column), `d` (row),
   `H`/`f` (row;col), `J` (erase in display), `K` (erase in line) — enough
@@ -1195,16 +1192,17 @@ intended form instead of losing all colour. This is deliberately the
   friends), is still recognized-and-discarded exactly as before —
   including `ESC [ ? … ` private-use sequences, which are matched so
   their parameter bytes are never misread as a numeric list.
-- **The colour "pen" persists across `write_text` calls, but only for
-  the mirrored-stdout path.** `Layer.pen` (an `SgrPen`) carries SGR
-  colour state between calls whose `fg` argument is `null` — a program's
-  colour legitimately spans several `write()`s. A call with a non-null
-  `fg` (every structured caller *and* the mirrored *stderr* path, which
-  passes its red tint as a fallback) resets the pen first, so a colour a
-  plain command left un-reset can't leak into the next shell prompt or
-  `glyphwire-ls` listing. `ESC [ 0 m` resets it regardless. The
-  *machine* state (a half-parsed sequence) still never crosses a call
-  boundary — that guarantee from the previous decision is unchanged.
+- **The colour "pen" is call-local — nothing carries across `write_text`
+  calls.** `Layer.pen` (an `SgrPen`) is reset at the *start* of every
+  `writeText`, so an SGR colour is honoured only for the rest of the
+  chunk that set it. Cross-call persistence was tried (keyed on `fg`
+  being omitted) and reverted: every `glyphwire-shell` prompt and echo
+  write passes the default `fg`, so a colour a mirrored program left
+  un-reset — a `cat`'d file full of raw escapes, a program killed
+  mid-output — poisoned the prompt and everything drawn after it. The
+  trade is that an SGR colour a pipe splits from the text it colours
+  (rare) loses the tail, the same trade the half-parsed-sequence reset
+  already makes. `ESC [ 0 m` also resets it, mid-chunk.
 - **Why not libghostty here.** libghostty-vt's released 0.1.0 C API
   exposes only parsers (SGR/OSC/key), not a terminal state machine, and
   is not distributed as a standalone package — pulling it via
