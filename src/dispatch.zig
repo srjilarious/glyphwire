@@ -920,6 +920,11 @@ pub const Dispatcher = struct {
                     .bg_icon = bg_icon,
                     .fg_icon = fg_icon,
                     .metadata_id = cell.metadata_id,
+                    .wide = switch (cell.wide) {
+                        .narrow => null,
+                        .wide_lead => "lead",
+                        .wide_spacer => "spacer",
+                    },
                 };
             }
         }

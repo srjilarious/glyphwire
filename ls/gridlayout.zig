@@ -1,13 +1,36 @@
-//! Pure, dependency-free column-packing math for glyphwire-ls's plain
-//! (non `-l`) listing. Given the entry count, the widest entry's display
-//! width in codepoints, and the layer width in cells, it decides how many
-//! entry columns fit and where each entry lands (column-major, like
-//! `ls -C`). Kept in its own file -- no glyphwire/IO imports -- and
-//! exposed as the `ls_support` build module so both `ls/main.zig` and the
-//! test runner (`tests/ls_tests.zig`) can import it; a Zig module can't
-//! reach across directories with a relative `@import`.
+//! Column-packing math for glyphwire-ls's plain (non `-l`) listing. Given
+//! the entry count, the widest entry's display width in *cells*, and the
+//! layer width in cells, it decides how many entry columns fit and where
+//! each entry lands (column-major, like `ls -C`). Kept in its own file --
+//! only `glyphwire.codepointWidth` (East Asian Width) is imported, no
+//! IO/client/server -- and exposed as the `ls_support` build module so
+//! both `ls/main.zig` and the test runner (`tests/ls_tests.zig`) can
+//! import it; a Zig module can't reach across directories with a relative
+//! `@import`.
 
 const std = @import("std");
+const glyphwire = @import("glyphwire");
+
+/// Display width of `text` in terminal cells: each codepoint counts 1,
+/// except East Asian Wide/Fullwidth ones (CJK, kana, ...) which count 2 --
+/// the same width model `core.writeText` advances the cursor by. Invalid
+/// UTF-8 falls back to a byte count.
+pub fn displayWidth(text: []const u8) usize {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch return text.len;
+        if (i + len > text.len) break;
+        const cp = std.unicode.utf8Decode(text[i .. i + len]) catch {
+            i += len;
+            w += 1;
+            continue;
+        };
+        w += glyphwire.codepointWidth(cp);
+        i += len;
+    }
+    return w;
+}
 
 /// The parts of the layout that don't depend on the particular listing:
 /// how wide the icon area before a name is, how many cell-rows one
@@ -90,29 +113,36 @@ pub fn compute(entry_count: usize, longest_name_cols: usize, layer_cols: usize, 
     };
 }
 
-/// `text` limited to at most `max_cols` codepoints. Returns `text`
-/// unchanged when it already fits; otherwise copies the first
-/// `max_cols - 1` codepoints into `buf` followed by a `…` and returns
-/// that slice -- same truncation shape the server-side table cells use
-/// (`core.writeCellRun`). `buf` must hold at least `text.len + 3` bytes.
+/// `text` limited to at most `max_cols` display cells (East Asian wide
+/// codepoints count 2 -- see `displayWidth`). Returns `text` unchanged
+/// when it already fits; otherwise copies whole codepoints into `buf`
+/// until adding the next would leave no room for a trailing `…`, appends
+/// the `…`, and returns that slice -- same trailing-ellipsis shape the
+/// server-side table cells use (`core.writeCellRun`). A wide codepoint is
+/// never split; the result can therefore be `max_cols - 2` wide when the
+/// cut lands just before one. `buf` must hold at least `text.len + 3`
+/// bytes.
 pub fn truncateToCols(buf: []u8, text: []const u8, max_cols: usize) []const u8 {
     if (max_cols == 0) return text[0..0];
-    const total = std.unicode.utf8CountCodepoints(text) catch {
+    if (!std.unicode.utf8ValidateSlice(text)) {
         // Invalid UTF-8: fall back to a plain byte clamp.
         return text[0..@min(text.len, max_cols)];
-    };
-    if (total <= max_cols) return text;
+    }
+    if (displayWidth(text) <= max_cols) return text;
 
-    const ellipsis = "\u{2026}";
+    const ellipsis = "\u{2026}"; // one display cell
     var out: usize = 0;
-    var seen: usize = 0;
+    var used: usize = 0; // display cells written so far
     var i: usize = 0;
-    while (i < text.len and seen + 1 < max_cols) {
+    while (i < text.len) {
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const cp = std.unicode.utf8Decode(text[i .. i + len]) catch 0xFFFD;
+        const cw = glyphwire.codepointWidth(cp);
+        if (used + cw + 1 > max_cols) break; // +1 leaves room for the ellipsis
         @memcpy(buf[out..][0..len], text[i..][0..len]);
         out += len;
+        used += cw;
         i += len;
-        seen += 1;
     }
     @memcpy(buf[out..][0..ellipsis.len], ellipsis);
     return buf[0 .. out + ellipsis.len];

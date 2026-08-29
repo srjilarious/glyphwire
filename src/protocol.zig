@@ -57,6 +57,11 @@ pub const WireCell = struct {
     /// treatment `bg_image`/`bg_icon` already give image/icon handles.
     /// `get_metadata` resolves an id to its actual content.
     metadata_id: ?core.MetadataHandle = null,
+    /// East Asian Width role of the cell: `"lead"` = left half of a
+    /// 2-cell wide character (holds the grapheme), `"spacer"` = its right
+    /// half (renders nothing, carries the lead's bg + metadata), absent =
+    /// an ordinary 1-cell character. See decisions.md, Cell content.
+    wide: ?[]const u8 = null,
 };
 
 /// The `get_cells` response body: the layer's visible viewport as a

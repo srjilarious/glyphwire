@@ -1139,6 +1139,10 @@ pub const RenderCell = struct {
     bg_icon: ?core.IconBg = null,
     fg_icon: ?core.IconBg = null,
     metadata_id: ?core.MetadataHandle = null,
+    /// `.wide_lead` = left half of a 2-cell wide character (holds the
+    /// grapheme), `.wide_spacer` = its blank right half, `.narrow` = an
+    /// ordinary 1-cell character.
+    wide: core.CellWidth = .narrow,
 };
 
 /// Owns the parsed JSON backing a `getCells` response; `deinit` frees it.
@@ -1187,6 +1191,12 @@ pub const CellsSnapshot = struct {
                 .max_h = icon.max_h,
             } else null,
             .metadata_id = c.metadata_id,
+            .wide = blk: {
+                const w = c.wide orelse break :blk .narrow;
+                if (std.mem.eql(u8, w, "lead")) break :blk .wide_lead;
+                if (std.mem.eql(u8, w, "spacer")) break :blk .wide_spacer;
+                break :blk .narrow;
+            },
         };
     }
 };

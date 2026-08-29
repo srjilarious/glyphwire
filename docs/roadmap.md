@@ -817,13 +817,30 @@ Latin + Greek + Cyrillic + CJK from one monospaced face;
 `assets/JetBrainsMono-Regular.ttf` is registered as a fallback via
 `renderer.addDefaultFontFallback` mostly to keep the fallback path
 exercised (user-selectable fonts are coming). `demo/main.zig` writes
-"hello world" in Greek, Russian and Japanese. `glyphwire-ls` needed no
-change — names now just render, and click-to-`cd` already resolved
-through the raw metadata path bytes.
+"hello world" in Greek, Russian and Japanese.
 
-No wire protocol change; `api.md` / `decisions.md` untouched. The bundled
-`.ttc` is ~19 MB — a JIS-X-0208 subset would cut that to a few MB at the
-cost of tofu for rare kanji; deferred.
+**East Asian wide characters** (follow-up in the same branch, after the
+first render showed CJK glyphs overlapping): CJK/kana/Hangul are
+full-width and were being packed into one grid cell each, so every glyph
+overran its neighbour. Now `core.codepointWidth` (a compact hand-baked
+Unicode 16.0.0 East Asian Width `W`/`F` range table, `A` = narrow)
+drives a 2-cell model — `Cell.wide` = `narrow`/`wide_lead`/`wide_spacer`,
+`writeText` places the grapheme in the lead + a blank spacer and advances
+the cursor by 2 (wrapping a wide glyph off the right edge), and
+`writeCellRun` (server-side table cells) does the same. `get_cells` gains
+a `wide` field (`"lead"`/`"spacer"`) — **this is a wire change**, so
+`api.md` + `decisions.md` are updated (the wide-char item there moves
+from Open to Built). `glyphwire-ls` lays its columns out with the same
+width model (`gridlayout.displayWidth` / width-aware `truncateToCols`).
+The host renderer needs no change: a wide glyph's bitmap is naturally
+~2 cells wide and the spacer draws nothing. `mono CJK` fonts give Latin a
+0.5 em advance and CJK a 1.0 em advance, which is exactly this 1:2 cell
+ratio.
+
+The bundled `.ttc` is ~19 MB — a JIS-X-0208 subset would cut that to a
+few MB at the cost of tofu for rare kanji; deferred. Grapheme
+segmentation (UAX #29) is still open — width is measured per base
+codepoint, so ZWJ emoji / combining clusters aren't handled as one unit.
 
 ## Further out (sequencing noted, not detailed yet)
 

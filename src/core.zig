@@ -366,9 +366,101 @@ pub const SgrPen = struct {
 /// upgrade this alongside real UAX #29 segmentation.
 pub const grapheme_inline_len = 8;
 
+/// East Asian Width "Wide" (W) and "Fullwidth" (F) codepoint ranges,
+/// sorted and non-overlapping, generated from Unicode 16.0.0 by walking
+/// every codepoint's `unicodedata.east_asian_width` and coalescing the
+/// W/F runs. Ambiguous (A) is deliberately excluded -- treated as narrow,
+/// the wcwidth / non-CJK-locale default (see decisions.md, Cell content).
+/// Regenerate the same way against a newer Unicode when bumping.
+const wide_ranges = [_][2]u21{
+    .{ 0x1100, 0x115F },   .{ 0x231A, 0x231B },   .{ 0x2329, 0x232A },
+    .{ 0x23E9, 0x23EC },   .{ 0x23F0, 0x23F0 },   .{ 0x23F3, 0x23F3 },
+    .{ 0x25FD, 0x25FE },   .{ 0x2614, 0x2615 },   .{ 0x2630, 0x2637 },
+    .{ 0x2648, 0x2653 },   .{ 0x267F, 0x267F },   .{ 0x268A, 0x268F },
+    .{ 0x2693, 0x2693 },   .{ 0x26A1, 0x26A1 },   .{ 0x26AA, 0x26AB },
+    .{ 0x26BD, 0x26BE },   .{ 0x26C4, 0x26C5 },   .{ 0x26CE, 0x26CE },
+    .{ 0x26D4, 0x26D4 },   .{ 0x26EA, 0x26EA },   .{ 0x26F2, 0x26F3 },
+    .{ 0x26F5, 0x26F5 },   .{ 0x26FA, 0x26FA },   .{ 0x26FD, 0x26FD },
+    .{ 0x2705, 0x2705 },   .{ 0x270A, 0x270B },   .{ 0x2728, 0x2728 },
+    .{ 0x274C, 0x274C },   .{ 0x274E, 0x274E },   .{ 0x2753, 0x2755 },
+    .{ 0x2757, 0x2757 },   .{ 0x2795, 0x2797 },   .{ 0x27B0, 0x27B0 },
+    .{ 0x27BF, 0x27BF },   .{ 0x2B1B, 0x2B1C },   .{ 0x2B50, 0x2B50 },
+    .{ 0x2B55, 0x2B55 },   .{ 0x2E80, 0x2E99 },   .{ 0x2E9B, 0x2EF3 },
+    .{ 0x2F00, 0x2FD5 },   .{ 0x2FF0, 0x303E },   .{ 0x3041, 0x3096 },
+    .{ 0x3099, 0x30FF },   .{ 0x3105, 0x312F },   .{ 0x3131, 0x318E },
+    .{ 0x3190, 0x31E5 },   .{ 0x31EF, 0x321E },   .{ 0x3220, 0x3247 },
+    .{ 0x3250, 0xA48C },   .{ 0xA490, 0xA4C6 },   .{ 0xA960, 0xA97C },
+    .{ 0xAC00, 0xD7A3 },   .{ 0xF900, 0xFAFF },   .{ 0xFE10, 0xFE19 },
+    .{ 0xFE30, 0xFE52 },   .{ 0xFE54, 0xFE66 },   .{ 0xFE68, 0xFE6B },
+    .{ 0xFF01, 0xFF60 },   .{ 0xFFE0, 0xFFE6 },   .{ 0x16FE0, 0x16FE4 },
+    .{ 0x16FF0, 0x16FF1 }, .{ 0x17000, 0x187F7 }, .{ 0x18800, 0x18CD5 },
+    .{ 0x18CFF, 0x18D08 }, .{ 0x1AFF0, 0x1AFF3 }, .{ 0x1AFF5, 0x1AFFB },
+    .{ 0x1AFFD, 0x1AFFE }, .{ 0x1B000, 0x1B122 }, .{ 0x1B132, 0x1B132 },
+    .{ 0x1B150, 0x1B152 }, .{ 0x1B155, 0x1B155 }, .{ 0x1B164, 0x1B167 },
+    .{ 0x1B170, 0x1B2FB }, .{ 0x1D300, 0x1D356 }, .{ 0x1D360, 0x1D376 },
+    .{ 0x1F004, 0x1F004 }, .{ 0x1F0CF, 0x1F0CF }, .{ 0x1F18E, 0x1F18E },
+    .{ 0x1F191, 0x1F19A }, .{ 0x1F200, 0x1F202 }, .{ 0x1F210, 0x1F23B },
+    .{ 0x1F240, 0x1F248 }, .{ 0x1F250, 0x1F251 }, .{ 0x1F260, 0x1F265 },
+    .{ 0x1F300, 0x1F320 }, .{ 0x1F32D, 0x1F335 }, .{ 0x1F337, 0x1F37C },
+    .{ 0x1F37E, 0x1F393 }, .{ 0x1F3A0, 0x1F3CA }, .{ 0x1F3CF, 0x1F3D3 },
+    .{ 0x1F3E0, 0x1F3F0 }, .{ 0x1F3F4, 0x1F3F4 }, .{ 0x1F3F8, 0x1F43E },
+    .{ 0x1F440, 0x1F440 }, .{ 0x1F442, 0x1F4FC }, .{ 0x1F4FF, 0x1F53D },
+    .{ 0x1F54B, 0x1F54E }, .{ 0x1F550, 0x1F567 }, .{ 0x1F57A, 0x1F57A },
+    .{ 0x1F595, 0x1F596 }, .{ 0x1F5A4, 0x1F5A4 }, .{ 0x1F5FB, 0x1F64F },
+    .{ 0x1F680, 0x1F6C5 }, .{ 0x1F6CC, 0x1F6CC }, .{ 0x1F6D0, 0x1F6D2 },
+    .{ 0x1F6D5, 0x1F6D7 }, .{ 0x1F6DC, 0x1F6DF }, .{ 0x1F6EB, 0x1F6EC },
+    .{ 0x1F6F4, 0x1F6FC }, .{ 0x1F7E0, 0x1F7EB }, .{ 0x1F7F0, 0x1F7F0 },
+    .{ 0x1F90C, 0x1F93A }, .{ 0x1F93C, 0x1F945 }, .{ 0x1F947, 0x1F9FF },
+    .{ 0x1FA70, 0x1FA7C }, .{ 0x1FA80, 0x1FA89 }, .{ 0x1FA8F, 0x1FAC6 },
+    .{ 0x1FACE, 0x1FADC }, .{ 0x1FADF, 0x1FAE9 }, .{ 0x1FAF0, 0x1FAF8 },
+    .{ 0x20000, 0x2FFFD }, .{ 0x30000, 0x3FFFD },
+};
+
+/// Display width, in terminal cells, of a single codepoint: 2 for East
+/// Asian Wide/Fullwidth, 1 otherwise. Not grapheme-aware -- a cluster's
+/// width is taken from its base codepoint (combining marks and ZWJ emoji
+/// sequences are still an open item, see decisions.md / UAX #29). Control
+/// bytes never reach here; `writeText` strips them first.
+pub fn codepointWidth(cp: u21) u2 {
+    var lo: usize = 0;
+    var hi: usize = wide_ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (cp < wide_ranges[mid][0]) {
+            hi = mid;
+        } else if (cp > wide_ranges[mid][1]) {
+            lo = mid + 1;
+        } else {
+            return 2;
+        }
+    }
+    return 1;
+}
+
+/// Total display width of `text` in terminal cells (sum of
+/// `codepointWidth` over its codepoints). Invalid UTF-8 falls back to the
+/// byte length.
+pub fn stringWidth(text: []const u8) usize {
+    const view = std.unicode.Utf8View.init(text) catch return text.len;
+    var it = view.iterator();
+    var w: usize = 0;
+    while (it.nextCodepointSlice()) |s| {
+        w += codepointWidth(std.unicode.utf8Decode(s) catch 0xFFFD);
+    }
+    return w;
+}
+
+/// A cell's role in East Asian Width terms: an ordinary 1-cell character,
+/// the left ("primary") cell of a 2-cell wide character that holds the
+/// grapheme, or the right cell of such a pair which renders nothing of
+/// its own (it carries the lead's background + `metadata_id` so a click
+/// on either half resolves the same). See decisions.md, Cell content.
+pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
+
 pub const Cell = struct {
     grapheme_bytes: [grapheme_inline_len]u8 = [_]u8{0} ** grapheme_inline_len,
     grapheme_len: u8 = 0,
+    wide: CellWidth = .narrow,
     style: Style = default_style,
     /// Sibling of `style.bg`, not part of it -- a cell can be tagged
     /// regardless of whether its background is a color/image/icon. Set (or
@@ -838,8 +930,9 @@ pub const Layer = struct {
         var it = view.iterator();
         while (it.nextCodepointSlice()) |cp_bytes| {
             if (cp_bytes.len == 1 and self.consumeControl(cp_bytes[0])) continue;
+            const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
             const eff = self.pen.resolve(fg, bg);
-            self.putAtCursor(cp_bytes, eff.fg, eff.bg, metadata_id);
+            self.putAtCursor(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, metadata_id);
         }
         // Don't carry a half-consumed `ESC ...` sequence into the next
         // call: a lone trailing `ESC`, a truncated `ESC [ ...`, or an
@@ -1014,19 +1107,91 @@ pub const Layer = struct {
         }
     }
 
-    fn putAtCursor(self: *Layer, bytes: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {
-        if (self.cursor.col >= self.width) {
+    /// Places one grapheme cluster at the cursor. `w` is its East Asian
+    /// display width in cells (1 or 2). A width-2 cluster occupies a
+    /// `.wide_lead` cell holding the grapheme plus a blank `.wide_spacer`
+    /// to its right; the spacer copies the lead's fg/bg and `metadata_id`
+    /// so a background spans the pair and a hit-test on either half
+    /// resolves the same. A width-2 cluster that would straddle the right
+    /// edge wraps to the next row first. Overwriting either half of an
+    /// existing wide pair blanks its orphaned partner.
+    fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {
+        if (self.cursor.col + w > self.width) {
             self.cursor.col = 0;
             self.cursor.row += 1;
         }
         self.cursor.row = self.resolveRow(self.cursor.row);
 
-        var c = self.cell(self.cursor.row, self.cursor.col);
+        const row = self.cursor.row;
+        const col = self.cursor.col;
+
+        // Clear any wide pair we're about to land on top of, so no orphan
+        // half-glyph is left behind.
+        self.clearWidePartner(row, col);
+        if (w == 2) self.clearWidePartner(row, col + 1);
+
+        // Narrow write keeps the existing cell untouched except for what a
+        // write sets, so `bg == null` (write_text's `transparent_bg`)
+        // still leaves the prior background in place.
+        var c = self.cell(row, col);
         c.setGrapheme(bytes);
         c.style.fg = fg;
         if (bg) |b| c.style.bg = b;
         c.metadata_id = metadata_id;
-        self.cursor.col += 1;
+        c.fg_icon = null;
+        c.wide = if (w == 2) .wide_lead else .narrow;
+
+        if (w == 2) {
+            // The spacer renders nothing of its own; give it the lead's
+            // fully resolved style so the background spans the pair, and
+            // the lead's `metadata_id` so a hit-test on either half maps
+            // to the same entry.
+            const s = self.cell(row, col + 1);
+            s.* = .{ .style = c.style, .metadata_id = metadata_id, .wide = .wide_spacer };
+        }
+
+        self.cursor.col += w;
+    }
+
+    /// If `(row, col)` is one half of a 2-cell wide character, blank its
+    /// other half. A no-op for a narrow cell.
+    fn clearWidePartner(self: *Layer, row: usize, col: usize) void {
+        if (col >= self.width) return;
+        const c = self.cell(row, col);
+        switch (c.wide) {
+            .narrow => {},
+            .wide_lead => if (col + 1 < self.width) {
+                const p = self.cell(row, col + 1);
+                if (p.wide == .wide_spacer) p.* = .{};
+            },
+            .wide_spacer => if (col > 0) {
+                const p = self.cell(row, col - 1);
+                if (p.wide == .wide_lead) p.* = .{};
+            },
+        }
+    }
+
+    /// Repairs any wide pair left inconsistent by an in-row cell shift
+    /// (`insertCells` / `deleteCells`): a `.wide_lead` with no `.wide_spacer`
+    /// to its right (or sitting on the last column), or a `.wide_spacer`
+    /// with no `.wide_lead` to its left, is downgraded to a blank narrow
+    /// cell. Keeps a line editor from painting half a wide glyph.
+    fn sanitizeWidePairs(self: *Layer, row: usize) void {
+        var col: usize = 0;
+        while (col < self.width) : (col += 1) {
+            const c = self.cell(row, col);
+            switch (c.wide) {
+                .narrow => {},
+                .wide_lead => {
+                    const ok = col + 1 < self.width and self.cell(row, col + 1).wide == .wide_spacer;
+                    if (!ok) c.* = .{};
+                },
+                .wide_spacer => {
+                    const ok = col > 0 and self.cell(row, col - 1).wide == .wide_lead;
+                    if (!ok) c.* = .{};
+                },
+            }
+        }
     }
 
     /// Shifts cells at and after the cursor's column rightward by `count`
@@ -1047,6 +1212,7 @@ pub const Layer = struct {
         const tail_len = self.width - col - n;
         std.mem.copyBackwards(Cell, row[col + n ..][0..tail_len], row[col..][0..tail_len]);
         for (row[col..][0..n]) |*c| c.* = .{};
+        self.sanitizeWidePairs(self.cursor.row);
         self.revision += 1;
     }
 
@@ -1064,6 +1230,7 @@ pub const Layer = struct {
         const tail_len = self.width - col - n;
         std.mem.copyForwards(Cell, row[col..][0..tail_len], row[col + n ..][0..tail_len]);
         for (row[col + tail_len ..][0..n]) |*c| c.* = .{};
+        self.sanitizeWidePairs(self.cursor.row);
         self.revision += 1;
     }
 
@@ -1850,6 +2017,23 @@ fn setCellText(layer: *Layer, row: usize, col: usize, grapheme: []const u8, fg: 
     c.style.fg = fg;
     c.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
     c.metadata_id = metadata_id;
+    c.wide = .narrow;
+}
+
+/// Writes a 2-cell wide grapheme: the lead cell at `(row, col)` holds it,
+/// `(row, col + 1)` becomes a blank spacer carrying the lead's resolved
+/// style + `metadata_id`. Caller guarantees `col + 1` is in range. Used
+/// by `writeCellRun` so table cells advance the same way `writeText` does.
+fn setCellWide(layer: *Layer, row: usize, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+    if (row >= layer.height or col + 1 >= layer.width) return;
+    const lead = layer.cell(row, col);
+    lead.setGrapheme(grapheme);
+    lead.style.fg = fg;
+    lead.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
+    lead.metadata_id = metadata_id;
+    lead.wide = .wide_lead;
+    const sp = layer.cell(row, col + 1);
+    sp.* = .{ .style = lead.style, .metadata_id = metadata_id, .wide = .wide_spacer };
 }
 
 fn setCellIcon(layer: *Layer, row: usize, col: usize, handle: ImageHandle, scale: IconScale, h_align: HAlign, v_align: VAlign, max_h: ?u32, metadata_id: ?MetadataHandle) void {
@@ -1898,21 +2082,22 @@ fn drawBorderTile(layer: *Layer, ctx: *const Context, row: usize, col: usize, bo
     setCellIcon(layer, row, col, handle, .stretch, .center, .center, null, null);
 }
 
-/// Writes `text`'s codepoints into `layer` starting at `(row, col)`,
-/// truncated (with a trailing "…", keeping the first `width - 1`
-/// codepoints) if longer than `width` cells, or left/center/right-padded
-/// with spaces (per `h_align`) if shorter -- same shape the
-/// client-composited table prototype's `formatCell` had, just writing
-/// straight into cells instead of building an intermediate string first.
-/// Clipped to the layer's own bounds and to `width` cells -- a column
-/// that runs off the layer's right edge just loses its tail, matching
-/// `Table.render`'s "clip, don't scroll" doc comment. A no-op if `width`
-/// is 0 (e.g. an icon already claimed the column's whole reserved width).
+/// Writes `text` into `layer` starting at `(row, col)`, measured in
+/// **display cells** (East Asian wide codepoints take 2 -- see
+/// `stringWidth`): truncated with a trailing "…" if wider than `width`,
+/// or left/center/right-padded with spaces (per `h_align`) if narrower --
+/// same shape the client-composited table prototype's `formatCell` had,
+/// just writing straight into cells. A wide codepoint is never split
+/// across the column edge; if one won't fit the remaining space the run
+/// stops there (and the "…" / padding fills the gap). Clipped to the
+/// layer's bounds and to `width` cells -- a column running off the right
+/// edge loses its tail, matching `Table.render`'s "clip, don't scroll".
+/// A no-op if `width` is 0.
 fn writeCellRun(layer: *Layer, row: usize, col: usize, text: []const u8, width: usize, h_align: HAlign, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
     if (row >= layer.height or width == 0 or col >= layer.width) return;
     const end_col = @min(col + width, layer.width);
 
-    const text_width = std.unicode.utf8CountCodepoints(text) catch text.len;
+    const text_width = stringWidth(text);
     const truncate = text_width > width;
     const keep: usize = if (truncate) width -| 1 else text_width;
     const pad: usize = if (truncate) 0 else width - text_width;
@@ -1931,11 +2116,20 @@ fn writeCellRun(layer: *Layer, row: usize, col: usize, text: []const u8, width: 
 
     const view = std.unicode.Utf8View.init(text) catch (std.unicode.Utf8View.init("") catch unreachable);
     var it = view.iterator();
-    n = 0;
-    while (n < keep and c < end_col) : (n += 1) {
-        const cp = it.nextCodepointSlice() orelse break;
-        setCellText(layer, row, c, cp, fg, bg, metadata_id);
-        c += 1;
+    var written: usize = 0; // display cells of the body written so far
+    while (written < keep and c < end_col) {
+        const cp_bytes = it.nextCodepointSlice() orelse break;
+        const w = codepointWidth(std.unicode.utf8Decode(cp_bytes) catch 0xFFFD);
+        if (written + w > keep) break;
+        if (w == 2) {
+            if (c + 1 >= end_col) break; // wide glyph won't fit the column tail
+            setCellWide(layer, row, c, cp_bytes, fg, bg, metadata_id);
+            c += 2;
+        } else {
+            setCellText(layer, row, c, cp_bytes, fg, bg, metadata_id);
+            c += 1;
+        }
+        written += w;
     }
 
     if (truncate and c < end_col) {

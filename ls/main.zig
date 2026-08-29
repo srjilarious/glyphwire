@@ -596,23 +596,24 @@ const icon_native_px = 32;
 const min_name_width = 8;
 const max_name_width = 40;
 
-/// The widest an entry's `-l` Name-column content (filename plus its
-/// `/`/` -> target` suffix) actually is, in codepoints -- matching
-/// `writeCellRun`'s own codepoint-based width model, not bytes, so this
-/// agrees with the truncation math that eventually runs against it. Used
-/// to size that column to the *real* data instead of a blind constant
-/// (see `min_name_width`/`max_name_width`'s doc comment) -- a fixed
-/// width wide enough for a rare long name otherwise either clips shorter
-/// ones' siblings (Size/Perms pushed past the layer's edge) or wastes
-/// width when every name in this particular listing is short.
+/// The widest an entry's Name-column content (filename plus its
+/// `/`/` -> target` suffix) actually is, in **display cells** -- East
+/// Asian wide codepoints count 2, matching how `core.writeText` advances
+/// the cursor and `gridlayout.truncateToCols` trims, so this agrees with
+/// the truncation math that eventually runs against it. Used to size that
+/// column to the *real* data instead of a blind constant (see
+/// `min_name_width`/`max_name_width`'s doc comment) -- a fixed width wide
+/// enough for a rare long name otherwise either clips shorter ones'
+/// siblings (Size/Perms pushed past the layer's edge) or wastes width
+/// when every name in this particular listing is short.
 fn maxDisplayLen(entries: []const FileEntry) usize {
     var max_len: usize = 0;
     for (entries) |entry| {
-        var len = std.unicode.utf8CountCodepoints(entry.name) catch entry.name.len;
+        var len = gridlayout.displayWidth(entry.name);
         switch (entry.kind) {
             .directory => len += 1, // trailing "/"
             .sym_link => if (entry.link_target) |tgt| {
-                len += 4 + (std.unicode.utf8CountCodepoints(tgt) catch tgt.len); // " -> "
+                len += 4 + gridlayout.displayWidth(tgt); // " -> "
             },
             else => {},
         }

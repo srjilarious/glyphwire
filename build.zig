@@ -15,11 +15,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("shell/support.zig"),
     });
 
-    // Pure column-packing math shared by glyphwire-ls and its test runner,
-    // same cross-directory-module reason as `shell_support` above.
+    // Column-packing math shared by glyphwire-ls and its test runner,
+    // same cross-directory-module reason as `shell_support` above. Imports
+    // `glyphwire` only for `codepointWidth` (East Asian Width lookup) --
+    // still no IO / client / server pulled in for the math itself.
     const ls_support_mod = b.addModule("ls_support", .{
         .root_source_file = b.path("ls/support.zig"),
     });
+    ls_support_mod.addImport("glyphwire", glyphwire_mod);
 
     const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });
     const pixzig_mod = pixzig_dep.module("pixzig");

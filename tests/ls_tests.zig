@@ -106,6 +106,30 @@ pub fn truncateCountsCodepointsNotBytesTest(_: std.Io, _: std.mem.Allocator) !vo
     try testz.expectEqualStr(out, "éééé\u{2026}");
 }
 
+pub fn displayWidthCountsWideCodepointsAsTwoTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(gridlayout.displayWidth("abc"), @as(usize, 3));
+    // "日本語" -- three wide CJK codepoints.
+    try testz.expectEqual(gridlayout.displayWidth("\u{65E5}\u{672C}\u{8A9E}"), @as(usize, 6));
+    // Mixed: "a世b" -> 1 + 2 + 1.
+    try testz.expectEqual(gridlayout.displayWidth("a\u{4E16}b"), @as(usize, 4));
+}
+
+pub fn truncateCountsWideCodepointsAsTwoCellsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    // "日本語ドキュメント" = 9 wide codepoints = 18 cells.
+    const name = "\u{65E5}\u{672C}\u{8A9E}\u{30C9}\u{30AD}\u{30E5}\u{30E1}\u{30F3}\u{30C8}";
+    // Fits when the budget is its full display width.
+    try testz.expectEqualStr(gridlayout.truncateToCols(&buf, name, gridlayout.displayWidth(name)), name);
+    // Budget 7: room for 3 wide chars (6 cells) + the 1-cell ellipsis.
+    const out = gridlayout.truncateToCols(&buf, name, 7);
+    try testz.expectEqualStr(out, "\u{65E5}\u{672C}\u{8A9E}\u{2026}");
+    try testz.expectEqual(gridlayout.displayWidth(out), @as(usize, 7));
+    // Budget 6: a wide char would overshoot 6-1=5, so only 2 fit (4 cells)
+    // before the ellipsis -- a wide glyph is never split.
+    const out6 = gridlayout.truncateToCols(&buf, name, 6);
+    try testz.expectEqualStr(out6, "\u{65E5}\u{672C}\u{2026}");
+}
+
 // ─── lsfmt.formatSize ───────────────────────────────────────────────────
 
 pub fn formatSizeRawIsExactByteCountTest(_: std.Io, _: std.mem.Allocator) !void {

@@ -198,6 +198,43 @@ pub fn getCellsRequestReturnsGridSnapshotTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr("", blank.g);
 }
 
+/// `get_cells` tags the two halves of a wide character: `"lead"` on the
+/// cell holding the grapheme, `"spacer"` on its blank right neighbour;
+/// an ordinary cell has no `wide` field.
+pub fn getCellsMarksWideCharacterHalvesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // "aあ" -- one narrow, one wide.
+    const write_msg =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"a\u3042","fg":{"r":255,"g":255,"b":255}}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, write_msg)).response == null);
+
+    const response_body = (try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"get_cells","params":{}}
+    )).response.?;
+    defer alloc.free(response_body);
+
+    const CellJson = struct { g: []const u8, wide: ?[]const u8 = null };
+    const Response = struct {
+        result: struct { cells: []CellJson },
+    };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    const cells = parsed.value.result.cells;
+    try testz.expectEqualStr("a", cells[0].g);
+    try testz.expectTrue(cells[0].wide == null);
+    try testz.expectEqualStr("\u{3042}", cells[1].g);
+    try testz.expectEqualStr("lead", cells[1].wide.?);
+    try testz.expectEqualStr("", cells[2].g);
+    try testz.expectEqualStr("spacer", cells[2].wide.?);
+    try testz.expectTrue(cells[3].wide == null);
+}
+
 /// `write_text`'s `transparent_bg: true` leaves a cell's existing
 /// background alone instead of resetting it to `default_style.bg` -- the
 /// wire-level counterpart of core_tests.zig's

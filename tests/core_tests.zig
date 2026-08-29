@@ -1527,3 +1527,76 @@ pub fn writeTextNewlineScrollsAtBottomRowTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqual(layer.history_len, 1);
     try testz.expectEqualStr("t", layer.scrollbackRow(0).?[0].grapheme());
 }
+
+// --- East Asian wide characters -----------------------------------------
+
+pub fn codepointWidthClassifiesWideAndNarrowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    try testz.expectEqual(glyphwire.codepointWidth('A'), @as(u2, 1));
+    try testz.expectEqual(glyphwire.codepointWidth(' '), @as(u2, 1));
+    try testz.expectEqual(glyphwire.codepointWidth(0x3042), @as(u2, 2)); // HIRAGANA A
+    try testz.expectEqual(glyphwire.codepointWidth(0x4E16), @as(u2, 2)); // CJK 世
+    try testz.expectEqual(glyphwire.codepointWidth(0x30AB), @as(u2, 2)); // KATAKANA KA
+    try testz.expectEqual(glyphwire.codepointWidth(0xAC00), @as(u2, 2)); // Hangul GA
+    // Ambiguous width is treated as narrow.
+    try testz.expectEqual(glyphwire.codepointWidth(0x041F), @as(u2, 1)); // CYRILLIC PE
+    try testz.expectEqual(glyphwire.codepointWidth(0x0393), @as(u2, 1)); // GREEK GAMMA
+}
+
+pub fn writeTextWideCharTakesTwoCellsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // "あい" -- two wide characters.
+    try layer.writeText("\u{3042}\u{3044}", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("\u{3042}", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cell(0, 0).wide, glyphwire.CellWidth.wide_lead);
+    try testz.expectEqual(layer.cell(0, 1).grapheme().len, @as(usize, 0));
+    try testz.expectEqual(layer.cell(0, 1).wide, glyphwire.CellWidth.wide_spacer);
+    try testz.expectEqualStr("\u{3044}", layer.cell(0, 2).grapheme());
+    try testz.expectEqual(layer.cell(0, 2).wide, glyphwire.CellWidth.wide_lead);
+    try testz.expectEqual(layer.cell(0, 3).wide, glyphwire.CellWidth.wide_spacer);
+
+    try testz.expectEqual(layer.cursor.col, @as(usize, 4));
+}
+
+pub fn writeTextWideCharWrapsWhenItWontFitTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 2, 2, 0);
+    defer layer.deinit();
+
+    // 'a' fills column 0; the wide "あ" needs two cells, can't fit column 1
+    // alone, so it wraps to the next row.
+    try layer.writeText("a\u{3042}", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("\u{3042}", layer.cell(1, 0).grapheme());
+    try testz.expectEqual(layer.cell(1, 0).wide, glyphwire.CellWidth.wide_lead);
+    try testz.expectEqual(layer.cell(1, 1).wide, glyphwire.CellWidth.wide_spacer);
+    try testz.expectEqual(layer.cursor.row, @as(usize, 1));
+    try testz.expectEqual(layer.cursor.col, @as(usize, 2));
+}
+
+pub fn writeTextOverwritingHalfAWideCharBlanksItsPartnerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    try layer.writeText("\u{3042}\u{3044}", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Overwrite the spacer half of the first wide char with a narrow 'x'.
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 1 } });
+    try layer.writeText("x", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // The lead it belonged to is now a blank narrow cell, no orphan glyph.
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, @as(usize, 0));
+    try testz.expectEqual(layer.cell(0, 0).wide, glyphwire.CellWidth.narrow);
+    try testz.expectEqualStr("x", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cell(0, 1).wide, glyphwire.CellWidth.narrow);
+    // The second wide char is untouched.
+    try testz.expectEqualStr("\u{3044}", layer.cell(0, 2).grapheme());
+    try testz.expectEqual(layer.cell(0, 2).wide, glyphwire.CellWidth.wide_lead);
+}
