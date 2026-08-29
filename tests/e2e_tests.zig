@@ -3,6 +3,22 @@ const testz = @import("testz");
 const glyphwire = @import("glyphwire");
 const wire = glyphwire.wire;
 
+/// Every test here that spawns the real `glyphwire-shell` binary with an
+/// interactive prompt runs it through this first. The prompt now reads
+/// `~/.config/glyphwire/shell.conf` and persists command history to
+/// `~/.config/glyphwire/history` (see shell/main.zig) -- without this a
+/// test that threads a real `$HOME` (e.g. the `~/` expansion test) would
+/// write its typed commands into the developer's actual history file and
+/// could pick up a stray real `shell.conf`. `GLYPHWIRE_NO_HISTORY`
+/// disables history entirely; `GLYPHWIRE_CONFIG_DIR` points `shell.conf`
+/// lookup at a throwaway path that won't exist.
+fn sandboxShellConfig(env: *std.process.Environ.Map, alloc: std.mem.Allocator) !void {
+    try env.put("GLYPHWIRE_NO_HISTORY", "1");
+    const cfg_dir = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-e2e-cfg-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(cfg_dir);
+    try env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
+}
+
 /// Proves real inter-process discovery still works end to end: a separately
 /// spawned OS process (the real `glyphwire-demo` binary, not a library call)
 /// finds a socket purely via the `GLYPHWIRE_SOCK` env var and writes several
@@ -173,6 +189,7 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
 
     // No args: triggers the interactive prompt rather than exec'ing into
     // a given command -- see shell/main.zig.
@@ -284,6 +301,7 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
 
     var shell_child = try std.process.spawn(io, .{
         .argv = &.{shell_path},
@@ -357,6 +375,7 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
     // `echo` lives on the system PATH, not under zig-out/bin -- forward
     // it explicitly, same as shellCapturesPlainCommandStdoutTest.
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
@@ -479,6 +498,7 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
     // `/usr/bin/echo` isn't under `zig-out/bin`, so the real inherited
     // PATH has to be forwarded explicitly -- an explicit `environ_map`
     // replaces the child's whole environment rather than layering on top
@@ -595,6 +615,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
     // Explicit environ_map replaces the child's whole environment (unlike
     // a plain inherited spawn), so HOME has to be threaded through by
     // hand for the shell's own expandTilde to resolve against the same
@@ -750,6 +771,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
     const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
     defer alloc.free(new_path);

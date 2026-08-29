@@ -161,12 +161,18 @@ fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
     return error.ServerNeverCameUp;
 }
 
-/// Owned absolute path to glyphwire's config directory:
-/// `$XDG_CONFIG_HOME/glyphwire` when that variable is set and non-empty,
-/// otherwise `$HOME/.config/glyphwire`. `error.NoConfigHome` when neither
-/// variable is set -- there's then nowhere to read `shell.conf` from or
-/// persist history to, and the shell just runs without either.
+/// Owned path to glyphwire's config directory (holds `shell.conf` and
+/// `history`): `$GLYPHWIRE_CONFIG_DIR` verbatim when set, else
+/// `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`.
+/// `error.NoConfigHome` when none of those are set -- there's then
+/// nowhere to read `shell.conf` from or persist history to, and the
+/// shell just runs without either. `$GLYPHWIRE_CONFIG_DIR` is the
+/// override the e2e tests use to keep the real config directory out of
+/// their way.
 fn configDirPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]u8 {
+    if (environ_map.get("GLYPHWIRE_CONFIG_DIR")) |dir| {
+        if (dir.len > 0) return alloc.dupe(u8, dir);
+    }
     if (environ_map.get("XDG_CONFIG_HOME")) |xdg| {
         if (xdg.len > 0) return std.fs.path.join(alloc, &.{ xdg, "glyphwire" });
     }
@@ -1270,9 +1276,19 @@ const Prompt = struct {
     /// dropped) so it stays bounded. Creates the config directory if it's
     /// missing. Any IO failure just leaves `history_path` null -- the
     /// session runs with in-memory-only history rather than failing.
+    ///
+    /// Setting `$GLYPHWIRE_NO_HISTORY` (to any non-empty value) skips all
+    /// of this: no file is read or written and `history_path` stays null,
+    /// so recall works within the session but nothing is persisted. The
+    /// e2e tests set it so driving the real shell binary doesn't touch
+    /// the developer's own history file.
     fn loadHistory(self: *Prompt, config_dir: []const u8) !void {
         const alloc = self.client.alloc;
         const io = self.client.io;
+
+        if (self.environ_map.get("GLYPHWIRE_NO_HISTORY")) |v| {
+            if (v.len > 0) return;
+        }
 
         std.Io.Dir.cwd().createDirPath(io, config_dir) catch |err| {
             std.log.warn("history: could not create {s}: {t}", .{ config_dir, err });

@@ -816,9 +816,11 @@ surface.
   library is vendored from pixzig (`libs/ziglua`, Lua 5.3) so
   glyphwire-shell can embed an interpreter without depending on the whole
   pixzig engine (GLFW/OpenGL) — only `glyphwire-host` links pixzig.
-- **Directory:** `$XDG_CONFIG_HOME/glyphwire` when that variable is set
-  and non-empty, else `$HOME/.config/glyphwire`. A missing file is not an
-  error — the shell just starts with nothing configured.
+- **Directory:** `$GLYPHWIRE_CONFIG_DIR` verbatim when set, else
+  `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`. A missing
+  file is not an error — the shell just starts with nothing configured.
+  `$GLYPHWIRE_CONFIG_DIR` is the override the e2e tests use so driving
+  the real shell binary can't read a developer's actual `shell.conf`.
 - **The conf declares data, it doesn't touch the live prompt.** Running
   it produces a `config.ShellConfig` struct (`shell/config.zig`); the Lua
   bindings append into that, and `Prompt.loadStartupConfig` folds the
@@ -856,6 +858,10 @@ surface.
   (unit-tested); the file read/write and directory creation stay in
   `Prompt.loadHistory` / `persistHistory`. An IO failure just leaves
   history in-memory-only for the session rather than failing the shell.
+- **`$GLYPHWIRE_NO_HISTORY`** (any non-empty value) skips the file
+  entirely: nothing is read or written, though in-session recall still
+  works. The e2e tests set it so driving the real `glyphwire-shell`
+  binary doesn't append test commands to the developer's history.
 
 ### Server architecture
 - **Headless-first.** Core state — the layer tree, positions, clip rects,
