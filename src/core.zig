@@ -165,6 +165,201 @@ pub const default_style: Style = .{
     .bg = .{ .color = .{ .r = 0, .g = 0, .b = 0 } },
 };
 
+/// The "current pen" a `Layer` builds up from SGR (`ESC [ ... m`) sequences
+/// seen in mirrored plain-command output -- glyphwire's small, deliberate
+/// step toward honouring the escape codes a non-glyphwire-aware program
+/// emits (compiler diagnostics in colour, `pip`/`npm` progress bars),
+/// rather than the full VT model a real terminal library would bring (see
+/// `docs/investigations/libghostty-vt-fallback.md`, Phase A).
+///
+/// **Colour only.** `bold` maps a basic (30-37) foreground to its bright
+/// (90-97) variant; `dim` darkens the resolved foreground; `inverse` swaps
+/// foreground and background. All three are folded into the concrete
+/// `Cell.style` at write time -- no attribute bitflags on `Style`, no
+/// renderer changes. Italic / underline / strikethrough are *parsed and
+/// ignored* (they need a `Style` bitfield + font/renderer work -- the
+/// separate "style attributes beyond fg/bg" roadmap item).
+///
+/// A `null` `fg` / `bg` override means "fall back to the `write_text`
+/// call's own `fg`/`bg` argument (and then `default_style`)". `ESC [ 0 m`
+/// (or `ESC [ m`) resets the whole pen. See `Layer.pen` for the
+/// cross-call persistence rule.
+pub const SgrPen = struct {
+    /// Resolved foreground override, or null for "use the call's fg arg".
+    fg: ?Color = null,
+    /// Resolved background override, or null for "use the call's bg arg".
+    bg: ?Color = null,
+    /// Palette index 0-7 when `fg` was set by a basic `30`-`37` code, so a
+    /// later `bold` can promote it to bright. Null once `fg` is bright,
+    /// 256-indexed, truecolor, or default.
+    fg_basic: ?u3 = null,
+    bold: bool = false,
+    dim: bool = false,
+    inverse: bool = false,
+
+    /// The 16 base ANSI colours (xterm's default palette). Index 0-7 are
+    /// the normal set, 8-15 the bright set.
+    pub const ansi16 = [16]Color{
+        .{ .r = 0, .g = 0, .b = 0 },       .{ .r = 205, .g = 0, .b = 0 },
+        .{ .r = 0, .g = 205, .b = 0 },     .{ .r = 205, .g = 205, .b = 0 },
+        .{ .r = 0, .g = 0, .b = 238 },     .{ .r = 205, .g = 0, .b = 205 },
+        .{ .r = 0, .g = 205, .b = 205 },   .{ .r = 229, .g = 229, .b = 229 },
+        .{ .r = 127, .g = 127, .b = 127 }, .{ .r = 255, .g = 0, .b = 0 },
+        .{ .r = 0, .g = 255, .b = 0 },     .{ .r = 255, .g = 255, .b = 0 },
+        .{ .r = 92, .g = 92, .b = 255 },   .{ .r = 255, .g = 0, .b = 255 },
+        .{ .r = 0, .g = 255, .b = 255 },   .{ .r = 255, .g = 255, .b = 255 },
+    };
+
+    /// Maps an xterm 256-colour index to RGB: 0-15 the base palette,
+    /// 16-231 the 6x6x6 cube, 232-255 the 24-step grey ramp.
+    pub fn xterm256(idx: u8) Color {
+        if (idx < 16) return ansi16[idx];
+        if (idx < 232) {
+            const levels = [6]u8{ 0, 95, 135, 175, 215, 255 };
+            const c = idx - 16;
+            return .{
+                .r = levels[(c / 36) % 6],
+                .g = levels[(c / 6) % 6],
+                .b = levels[c % 6],
+            };
+        }
+        const v: u8 = @intCast(8 + 10 * @as(u16, idx - 232));
+        return .{ .r = v, .g = v, .b = v };
+    }
+
+    /// Applies one SGR parameter list (the bytes between `ESC [` and the
+    /// `m`, e.g. `"1;38;5;208"`) to the pen. Tolerant: unknown or
+    /// malformed parameters are skipped, never an error -- matching the
+    /// "recognize and don't choke" spirit of the old escape *stripper*
+    /// this replaces. `:` sub-parameter separators (`38:2:...`) are
+    /// accepted as equivalent to `;`.
+    pub fn applySgr(self: *SgrPen, params: []const u8) void {
+        // At most a handful of numeric params in any real SGR sequence;
+        // a longer/garbled one is truncated rather than grown. `null` =
+        // an empty field -- a standalone empty param means 0 (reset), and
+        // an empty colour-space id in the colon form `38:2::r:g:b` is
+        // skipped over (see below).
+        var nums: [24]?u16 = undefined;
+        var n: usize = 0;
+        var it = std.mem.splitAny(u8, params, ";:");
+        while (it.next()) |tok| {
+            if (n == nums.len) break;
+            nums[n] = if (tok.len == 0) null else (std.fmt.parseInt(u16, tok, 10) catch null);
+            n += 1;
+        }
+        if (n == 0) {
+            self.* = .{}; // bare `ESC [ m` is `ESC [ 0 m`
+            return;
+        }
+
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const code = nums[i] orelse 0; // empty standalone param == 0
+            switch (code) {
+                0 => self.* = .{},
+                1 => self.bold = true,
+                2 => self.dim = true,
+                22 => {
+                    self.bold = false;
+                    self.dim = false;
+                },
+                7 => self.inverse = true,
+                27 => self.inverse = false,
+                // Parsed and ignored: italic (3/23), underline (4/24),
+                // blink (5/25), strikethrough (9/29). Colour-only for now.
+                3, 4, 5, 9, 23, 24, 25, 29 => {},
+                30...37 => {
+                    self.fg_basic = @intCast(code - 30);
+                    self.fg = ansi16[code - 30];
+                },
+                39 => {
+                    self.fg = null;
+                    self.fg_basic = null;
+                },
+                40...47 => self.bg = ansi16[code - 40],
+                49 => self.bg = null,
+                90...97 => {
+                    self.fg_basic = null;
+                    self.fg = ansi16[8 + (code - 90)];
+                },
+                100...107 => self.bg = ansi16[8 + (code - 100)],
+                38, 48 => {
+                    // `38;5;N` (256) / `38;2;R;G;B` (truecolor), with the
+                    // colon variants `38:5:N` and `38:2[:cs]:R:G:B`. Skip
+                    // the params consumed so the outer loop doesn't re-read
+                    // them as standalone codes.
+                    const target_fg = code == 38;
+                    if (i + 1 >= n) break;
+                    const mode = nums[i + 1] orelse 0;
+                    if (mode == 5) {
+                        if (i + 2 >= n) break;
+                        const col = xterm256(@intCast((nums[i + 2] orelse 0) & 0xff));
+                        if (target_fg) {
+                            self.fg = col;
+                            self.fg_basic = null;
+                        } else self.bg = col;
+                        i += 2;
+                    } else if (mode == 2) {
+                        // The colon form may carry an empty colour-space
+                        // id right after the `2` -- step past it.
+                        var base = i + 2;
+                        if (base < n and nums[base] == null) base += 1;
+                        if (base + 2 >= n) break;
+                        const col = Color{
+                            .r = @intCast((nums[base] orelse 0) & 0xff),
+                            .g = @intCast((nums[base + 1] orelse 0) & 0xff),
+                            .b = @intCast((nums[base + 2] orelse 0) & 0xff),
+                        };
+                        if (target_fg) {
+                            self.fg = col;
+                            self.fg_basic = null;
+                        } else self.bg = col;
+                        i = base + 2;
+                    } else break;
+                },
+                else => {}, // unknown SGR code -- ignore
+            }
+        }
+    }
+
+    /// Resolves the concrete `(fg, bg)` a printed cell gets, given the
+    /// pen and the `write_text` call's own `fg`/`bg` arguments (`bg` is a
+    /// `?Background`: `null` = "leave the cell's existing background",
+    /// per `write_text`'s `transparent_bg`). The pen overrides the
+    /// arguments where it has an opinion; `bold`/`dim`/`inverse` are then
+    /// folded into the result.
+    pub fn resolve(self: SgrPen, arg_fg: ?Color, arg_bg: ?Background) struct { fg: Color, bg: ?Background } {
+        var fg: Color = self.fg orelse (arg_fg orelse default_style.fg);
+        if (self.bold) {
+            if (self.fg_basic) |idx| fg = ansi16[8 + @as(usize, idx)];
+        }
+        if (self.dim) {
+            fg = .{
+                .r = @intCast(@as(u16, fg.r) * 55 / 100),
+                .g = @intCast(@as(u16, fg.g) * 55 / 100),
+                .b = @intCast(@as(u16, fg.b) * 55 / 100),
+                .a = fg.a,
+            };
+        }
+
+        var bg: ?Background = if (self.bg) |c| .{ .color = c } else arg_bg;
+
+        if (self.inverse) {
+            const bg_color: Color = switch (bg orelse Background{ .color = default_style.bg.color }) {
+                .color => |c| c,
+                // An image/icon background can't be swapped into the fg;
+                // fall back to the default bg colour for the inverse.
+                else => default_style.bg.color,
+            };
+            const new_bg = fg;
+            fg = bg_color;
+            bg = .{ .color = new_bg };
+        }
+
+        return .{ .fg = fg, .bg = bg };
+    }
+};
+
 /// Inline byte capacity for a cell's grapheme cluster. This is a plain
 /// fixed buffer for the slice, not the small-string-optimized
 /// inline+overflow representation decisions.md settles on long term —
@@ -272,26 +467,37 @@ pub const LayerError = error{UnknownLayer};
 /// terminal default; not yet a per-layer or per-session setting.
 pub const tab_width: usize = 8;
 
-/// State of `Layer`'s tiny escape-sequence *stripper* (see
-/// `Layer.consumeControl` / `Layer.stepEscape`). glyphwire has no
-/// VT100/ANSI interpreter -- it replaces that model, per decisions.md --
-/// but a plain program mirrored onto the grid still sometimes emits a
-/// stray color code or cursor-move sequence. Rather than draw the raw
-/// bytes (`[31m` etc.) as garbage graphemes, `writeText` recognizes the
-/// common `ESC [ ... ` (CSI) and `ESC ] ... ` / `ESC P|X|^|_ ... ` (OSC
-/// and other string-terminated) shapes and *discards* them without
-/// acting on them.
+/// State of `Layer`'s small escape-sequence machine (see
+/// `Layer.consumeControl` / `Layer.stepEscape`). glyphwire has no full
+/// VT100/ANSI model -- it replaces that, per decisions.md -- but a plain
+/// program mirrored onto the grid emits colour codes and simple
+/// cursor-move sequences, and drawing the raw bytes (`[31m` etc.) as
+/// garbage graphemes reads worse than acting on the common ones. So
+/// `writeText`:
 ///
-/// The stripper is reset to `.ground` at the end of every `writeText`
-/// call (see `writeTextTagged`): an unterminated sequence never carries
-/// into the next call. This deliberately gives up cleanly stripping a
-/// sequence a pipe split across two `write_text` chunks (its tail then
-/// draws as literal text) in exchange for never letting a lone trailing
-/// `ESC`, a truncated `ESC [ ...`, or an unterminated `ESC ] ...` (OSC)
-/// silently swallow everything written afterward -- including
-/// glyphwire-shell's own prompt. In practice a plain program emits each
-/// escape sequence in a single `write`, so it arrives whole in one
-/// chunk anyway.
+///  - **interprets** `ESC [ ... m` (SGR): colours + bold/dim/inverse are
+///    folded into `Layer.pen` and thence into each printed cell's
+///    `Style` -- see `SgrPen`. Italic/underline/strikethrough are parsed
+///    and ignored (colour-only for now).
+///  - **interprets** a handful of `ESC [ ...` cursor/erase finals:
+///    `A`/`B`/`C`/`D` (cursor up/down/right/left), `G` (column),
+///    `H`/`f` (row;col), `J` (erase in display), `K` (erase in line).
+///  - **discards** every other `ESC [ ...` (CSI) final and every
+///    `ESC ] ... ` / `ESC P|X|^|_ ... ` (OSC and other string-terminated)
+///    sequence, same as the old stripper -- recognized well enough to
+///    find the end, then dropped.
+///
+/// The machine is reset to `.ground` (and the CSI parameter buffer
+/// cleared) at the end of every `writeText` call (see `writeTextTagged`):
+/// a sequence still open when a chunk ends never carries into the next
+/// call. This deliberately gives up on a sequence a pipe split across two
+/// `write_text` chunks (its tail then draws as literal text) in exchange
+/// for never letting a lone trailing `ESC`, a truncated `ESC [ ...`, or
+/// an unterminated `ESC ] ...` (OSC) silently swallow everything written
+/// afterward -- including glyphwire-shell's own prompt. In practice a
+/// plain program emits each escape sequence in a single `write`, so it
+/// arrives whole in one chunk anyway. The `pen` (SGR colour state) *does*
+/// persist across calls for the mirrored-stdout path -- see `Layer.pen`.
 pub const EscState = enum {
     /// Not inside a sequence -- the normal case.
     ground,
@@ -339,11 +545,30 @@ pub const Layer = struct {
     /// until history eviction forces a drift. See `PropertyName.scroll`.
     view_scroll: usize = 0,
     cursor: Cursor = .{},
-    /// Escape-sequence stripper state (see `EscState`). `.ground` except
-    /// partway through a single `writeText` call that is discarding an
-    /// `ESC ...` sequence -- reset back to `.ground` before that call
-    /// returns, so an unterminated sequence never leaks into the next one.
+    /// Escape-sequence machine state (see `EscState`). `.ground` except
+    /// partway through a single `writeText` call that is
+    /// interpreting/discarding an `ESC ...` sequence -- reset back to
+    /// `.ground` before that call returns, so an unterminated sequence
+    /// never leaks into the next one.
     esc_state: EscState = .ground,
+    /// Accumulates the parameter/intermediate bytes of the `ESC [ ...`
+    /// sequence currently being parsed (`esc_state == .csi`), up to its
+    /// final byte. Fixed-size: a sequence longer than this is abandoned
+    /// (`csi_len` stops growing and the final byte finds a truncated
+    /// buffer -- harmless, it just parses as far as it got). Cleared
+    /// alongside `esc_state` at the end of every `writeText` call.
+    csi_buf: [48]u8 = undefined,
+    csi_len: usize = 0,
+    /// Current SGR "pen" built up from `ESC [ ... m` sequences in
+    /// mirrored plain-command output -- see `SgrPen`. Persists across
+    /// `writeText` calls whose `fg` argument is `null` (the
+    /// mirrored-stdout path: a program's colour state legitimately spans
+    /// multiple `write()`s). A call with a non-null `fg` argument (every
+    /// structured caller -- the shell prompt, `glyphwire-ls`, tables --
+    /// and the mirrored *stderr* path) resets the pen first, so a colour
+    /// a plain command left un-reset can't bleed into the next prompt or
+    /// listing. `ESC [ 0 m` resets it regardless.
+    pen: SgrPen = .{},
     /// See `PropertyName.revision`.
     revision: u64 = 0,
     /// See `PropertyName.position`. Zero for the root layer (there's no
@@ -600,20 +825,32 @@ pub const Layer = struct {
     /// itself since Zig has no default parameter values, matching this
     /// codebase's existing convention for additive options (`drawIcon`'s
     /// `IconDrawOpts`).
-    pub fn writeTextTagged(self: *Layer, text: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) !void {
+    /// `fg` is `?Color`: `null` means "no explicit foreground -- fall
+    /// back to the SGR pen, then `default_style.fg`", and, crucially,
+    /// leaves `Layer.pen` intact so a mirrored program's colour state
+    /// carries across `write()` boundaries. A non-null `fg` resets the
+    /// pen first (see `Layer.pen`). Callers wanting a concrete colour
+    /// pass one; the wire path passes `null` when `write_text`'s `fg`
+    /// field was omitted.
+    pub fn writeTextTagged(self: *Layer, text: []const u8, fg: ?Color, bg: ?Background, metadata_id: ?MetadataHandle) !void {
+        if (fg != null) self.pen = .{};
+
         const view = try std.unicode.Utf8View.init(text);
         var it = view.iterator();
         while (it.nextCodepointSlice()) |cp_bytes| {
             if (cp_bytes.len == 1 and self.consumeControl(cp_bytes[0])) continue;
-            self.putAtCursor(cp_bytes, fg, bg, metadata_id);
+            const eff = self.pen.resolve(fg, bg);
+            self.putAtCursor(cp_bytes, eff.fg, eff.bg, metadata_id);
         }
         // Don't carry a half-consumed `ESC ...` sequence into the next
         // call: a lone trailing `ESC`, a truncated `ESC [ ...`, or an
         // unterminated `ESC ] ...` (OSC) would otherwise leave the
-        // stripper armed and eat the start of whatever is written next
+        // machine armed and eat the start of whatever is written next
         // (glyphwire-shell's prompt, the following command's output).
+        // The `pen` (SGR colour state) is deliberately NOT reset here.
         // See `EscState`.
         self.esc_state = .ground;
+        self.csi_len = 0;
         self.revision += 1;
     }
 
@@ -649,15 +886,19 @@ pub const Layer = struct {
         return true;
     }
 
-    /// Advances the escape-sequence stripper by one byte while
-    /// `esc_state != .ground`. Discards every byte it sees -- this only
-    /// decides *when the sequence ends*, never acts on its contents. See
-    /// `EscState`.
+    /// Advances the escape-sequence machine by one byte while
+    /// `esc_state != .ground`. For `ESC [ ...` (CSI) it buffers the
+    /// parameter bytes and, on the final byte, either interprets the
+    /// sequence (`execCsi`) or drops it; for `ESC ] ...` and friends it
+    /// just finds the terminator and discards. See `EscState`.
     fn stepEscape(self: *Layer, byte: u8) void {
         switch (self.esc_state) {
             .ground => unreachable,
             .esc => switch (byte) {
-                '[' => self.esc_state = .csi,
+                '[' => {
+                    self.esc_state = .csi;
+                    self.csi_len = 0;
+                },
                 ']', 'P', 'X', '^', '_' => self.esc_state = .string,
                 0x1b => {}, // ESC ESC -- stay armed for the real sequence
                 // Anything else is a short two-byte escape (or the ST
@@ -667,15 +908,111 @@ pub const Layer = struct {
                 else => self.esc_state = .ground,
             },
             .csi => {
-                // Parameter/intermediate bytes stay in .csi; a final byte
-                // (0x40..0x7e) ends the sequence.
-                if (byte >= 0x40 and byte <= 0x7e) self.esc_state = .ground;
+                if (byte >= 0x40 and byte <= 0x7e) {
+                    // Final byte: act on it, then done.
+                    self.execCsi(byte);
+                    self.esc_state = .ground;
+                    self.csi_len = 0;
+                } else if (self.csi_len < self.csi_buf.len) {
+                    // Parameter (0x30-0x3f) / intermediate (0x20-0x2f)
+                    // byte -- accumulate for `execCsi`.
+                    self.csi_buf[self.csi_len] = byte;
+                    self.csi_len += 1;
+                }
             },
             .string => switch (byte) {
                 0x07 => self.esc_state = .ground, // BEL terminator
                 0x1b => self.esc_state = .esc, // ESC of an `ESC \` (ST) terminator
                 else => {},
             },
+        }
+    }
+
+    /// Acts on a completed `ESC [ <params> <final>` sequence --
+    /// `csi_buf[0..csi_len]` holds the parameter/intermediate bytes.
+    /// Only the finals glyphwire interprets are handled; every other
+    /// final returns without effect (the sequence's bytes were already
+    /// kept off the grid by `stepEscape`). See `EscState`.
+    fn execCsi(self: *Layer, final: u8) void {
+        const params = self.csi_buf[0..self.csi_len];
+        // Private-use / device sequences (`ESC [ ? ...` DECTCEM,
+        // `ESC [ > ...` / `ESC [ = ...` device attributes): recognized
+        // and skipped, never misread as a numeric parameter list.
+        if (params.len > 0 and (params[0] == '?' or params[0] == '>' or params[0] == '=')) return;
+
+        switch (final) {
+            'm' => self.pen.applySgr(params),
+            'A', 'B', 'C', 'D', 'G', 'H', 'f', 'd' => self.csiCursor(final, params),
+            'J' => self.csiEraseDisplay(csiParam(params, 0, 0)),
+            'K' => self.csiEraseLine(csiParam(params, 0, 0)),
+            else => {}, // discarded, same as the old stripper
+        }
+    }
+
+    /// Reads the `index`-th `;`-separated numeric parameter from a CSI
+    /// parameter string, returning `default_val` for a missing or empty
+    /// field (VT convention: an omitted parameter takes its default).
+    fn csiParam(params: []const u8, index: usize, default_val: usize) usize {
+        var it = std.mem.splitScalar(u8, params, ';');
+        var i: usize = 0;
+        while (it.next()) |tok| : (i += 1) {
+            if (i == index) {
+                if (tok.len == 0) return default_val;
+                return std.fmt.parseInt(usize, tok, 10) catch default_val;
+            }
+        }
+        return default_val;
+    }
+
+    /// Cursor-movement CSI finals. All clamp to the layer's bounds;
+    /// downward moves resolve through `resolveRow` (scrolling if needed),
+    /// upward moves never scroll -- matching how a real terminal treats
+    /// these versus a line feed.
+    fn csiCursor(self: *Layer, final: u8, params: []const u8) void {
+        switch (final) {
+            'A' => self.cursor.row -|= @max(csiParam(params, 0, 1), 1),
+            'B' => self.cursor.row = self.resolveRow(self.cursor.row + @max(csiParam(params, 0, 1), 1)),
+            'C' => self.cursor.col = @min(self.cursor.col + @max(csiParam(params, 0, 1), 1), self.width - 1),
+            'D' => self.cursor.col -|= @max(csiParam(params, 0, 1), 1),
+            'G' => self.cursor.col = @min(@max(csiParam(params, 0, 1), 1) - 1, self.width - 1),
+            'd' => self.cursor.row = self.resolveRow(@max(csiParam(params, 0, 1), 1) - 1),
+            'H', 'f' => {
+                self.cursor.row = self.resolveRow(@max(csiParam(params, 0, 1), 1) - 1);
+                self.cursor.col = @min(@max(csiParam(params, 1, 1), 1) - 1, self.width - 1);
+            },
+            else => unreachable,
+        }
+    }
+
+    /// `ESC [ <n> K` -- erase in line: 0 = cursor to end of line
+    /// (default), 1 = start of line to cursor, 2 = whole line. Blanks
+    /// cells in the cursor's row only; doesn't move the cursor.
+    fn csiEraseLine(self: *Layer, mode: usize) void {
+        switch (mode) {
+            0 => self.clear(self.cursor.row, self.cursor.col, 1, self.width),
+            1 => self.clear(self.cursor.row, 0, 1, self.cursor.col + 1),
+            2 => self.clear(self.cursor.row, 0, 1, self.width),
+            else => {},
+        }
+    }
+
+    /// `ESC [ <n> J` -- erase in display: 0 = cursor to end of screen
+    /// (default), 1 = start of screen to cursor, 2/3 = whole screen.
+    /// Blanks cells; doesn't move the cursor (a program that wants the
+    /// cursor homed sends `ESC [ H` too, which `csiCursor` handles).
+    fn csiEraseDisplay(self: *Layer, mode: usize) void {
+        switch (mode) {
+            0 => {
+                self.clear(self.cursor.row, self.cursor.col, 1, self.width);
+                if (self.cursor.row + 1 < self.height)
+                    self.clear(self.cursor.row + 1, 0, self.height, self.width);
+            },
+            1 => {
+                if (self.cursor.row > 0) self.clear(0, 0, self.cursor.row, self.width);
+                self.clear(self.cursor.row, 0, 1, self.cursor.col + 1);
+            },
+            2, 3 => self.clear(0, 0, self.height, self.width),
+            else => {},
         }
     }
 

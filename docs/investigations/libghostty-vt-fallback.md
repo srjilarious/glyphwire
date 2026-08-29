@@ -1,15 +1,50 @@
 # Investigation: a VT100/PTY-capable fallback via libghostty
 
-Status: **investigation only.** Nothing here is built or committed as
-behaviour. This document exists to answer "what would it take, and what
-should the first step be" for running ANSI-emitting programs and
-old-school full-screen TUIs (vim, less, htop, `ncurses` apps) under
-glyphwire. It records the shape of the problem, what `libghostty` can and
-can't do for us today, three candidate paths, and a recommended phasing.
+Status: **Phase A built** (this branch — hand-rolled, not libghostty; see
+§7 and the "Update" note below). **Phase B: investigation only.** This
+document records the shape of the problem, what `libghostty` can and
+can't do for us today, three candidate paths, and a recommended phasing
+for running ANSI-emitting programs and old-school full-screen TUIs (vim,
+less, htop, `ncurses` apps) under glyphwire.
 
-Decisions here are provisional. When a phase actually gets built, the
-"why" moves to `decisions.md` and any wire change to `api.md`, per the
-project's own convention.
+Decisions here are provisional. Phase A's "why" now also lives in
+`decisions.md` (In Progress: Text Writing & Styling → the "Phase A VT
+fallback" decision); Phase B remains unbuilt.
+
+---
+
+## Update — Phase A landed (colour interpreter, hand-rolled)
+
+After this investigation, the decision was to **not** take on a
+libghostty dependency for Phase A (the `build.zig.zon` route pulls the
+whole ghostty monorepo, pinned to a Zig version glyphwire is past; a
+vendored source snippet is a hand-synced fork). Instead, `Layer`'s
+existing `EscState` machine was grown from a *stripper* into a small
+*interpreter*:
+
+- `core.SgrPen` — SGR colour state (16/bright/256/truecolor fg+bg via
+  both `;` and `:` forms; `0` reset; `1` bold → basic fg promoted to
+  bright; `2` dim → fg darkened; `7`/`27` inverse → fg/bg swapped).
+  Italic/underline/blink/strikethrough parsed and ignored.
+- `Layer.execCsi` — `A`/`B`/`C`/`D`/`G`/`d`/`H`/`f` cursor moves, `J`/`K`
+  erase. Every other CSI final and all `ESC ]`/`P`/`X`/`^`/`_ …` still
+  recognized-and-discarded.
+- Everything folds into the concrete `Cell.style` colours at write time:
+  **no `Style` field added, no wire message changed, no `glyphwire-host`
+  change.** The one wire-visible shift: `write_text` with `fg` omitted
+  now inherits the layer's SGR pen (then `default_style.fg`). The pen
+  persists across calls only on the mirrored-stdout path (`fg` null); an
+  explicit `fg` resets it so a leaked colour can't reach the next prompt.
+- Tests in `tests/core_tests.zig` (SGR colour/256/truecolor/bold/dim/
+  inverse/pen-persistence, `ESC [ K`/`J`, cursor moves, private-sequence
+  discard).
+
+The rest of this document is the original investigation. Where §2, §6
+(Path a) and §9 below describe Phase A as using the installed
+`libghostty-vt` SGR parser and adding a `Style` attribute field, read
+them against this Update — the shipped implementation is hand-rolled and
+colour-only with no `Style`/wire change. The Phase B material is
+unaffected and still governs.
 
 ---
 

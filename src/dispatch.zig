@@ -708,7 +708,11 @@ pub const Dispatcher = struct {
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
 
-        const fg: core.Color = if (p.fg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else core.default_style.fg;
+        // `null` when `fg` was omitted -- `Layer.writeTextTagged` then
+        // falls back to its SGR pen (and thence `default_style.fg`) and
+        // leaves that pen intact across calls, the mirrored plain-command
+        // output path. An explicit `fg` resets the pen. See `core.SgrPen`.
+        const fg: ?core.Color = if (p.fg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else null;
         const bg: ?core.Background = if (p.transparent_bg)
             null
         else if (p.bg) |c|

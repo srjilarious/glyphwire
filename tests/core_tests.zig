@@ -1265,13 +1265,14 @@ pub fn writeTextDropsOtherC0AndDelBytesTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqual(layer.cursor.col, 4);
 }
 
-pub fn writeTextStripsCsiSequenceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn writeTextInterpretsSgrColourSequenceTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
-    // A SGR colour sequence is recognized and discarded whole -- the "m"
-    // final byte ends it, and none of "[31m" / "[0m" is drawn.
+    // An SGR colour sequence's bytes are still kept off the grid (none of
+    // "[31m" / "[0m" is drawn), but the colour is now applied: "RED" is
+    // red, "!" after the reset is back to default.
     try layer.writeText("\x1b[31mRED\x1b[0m!", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     try testz.expectEqualStr("R", layer.cell(0, 0).grapheme());
@@ -1280,6 +1281,13 @@ pub fn writeTextStripsCsiSequenceTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqualStr("!", layer.cell(0, 3).grapheme());
     try testz.expectEqual(layer.cursor.col, 4);
     try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+
+    // ANSI 31 == palette index 1 == {205, 0, 0}.
+    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 205);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.g, 0);
+    try testz.expectEqual(layer.cell(0, 2).style.fg.r, 205);
+    // "!" is drawn after `ESC [ 0 m` reset it to the call's fg argument.
+    try testz.expectEqual(layer.cell(0, 3).style.fg.r, glyphwire.default_style.fg.r);
 }
 
 pub fn writeTextStripsOscSequenceTerminatedByBelTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1349,6 +1357,170 @@ pub fn writeTextUnterminatedEscSequenceDoesNotSwallowNextCallTest(io: std.Io, al
     try layer.writeText("next", glyphwire.default_style.fg, glyphwire.default_style.bg);
     try testz.expectEqualStr("n", layer.cell(3, 0).grapheme());
     try testz.expectEqualStr("t", layer.cell(3, 3).grapheme());
+}
+
+// --- SGR interpretation (the Phase A "VT fallback" pen) -----------------------
+
+pub fn writeTextSgr256AndTruecolorForegroundTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+
+    // 256-colour cube: index 208 -> {255, 135, 0}.
+    try layer.writeText("\x1b[38;5;208mX", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 255);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.g, 135);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.b, 0);
+
+    // Truecolor, colon-separated form.
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("\x1b[38:2::12:34:56mY", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.r, 12);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.g, 34);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.b, 56);
+}
+
+pub fn writeTextSgrBackgroundAndInverseTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+
+    // Green background (42), then inverse (7) swaps it onto the foreground.
+    try layer.writeText("\x1b[42mA\x1b[7mB", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // "A": default fg on green bg. ANSI 32 (green) == {0, 205, 0}.
+    try testz.expectEqual(layer.cell(0, 0).style.fg.r, glyphwire.default_style.fg.r);
+    try testz.expectEqual(layer.cell(0, 0).style.bg.color.g, 205);
+    // "B": inverse -> fg is the former bg (green), bg is the former fg.
+    try testz.expectEqual(layer.cell(0, 1).style.fg.g, 205);
+    try testz.expectEqual(layer.cell(0, 1).style.bg.color.r, glyphwire.default_style.fg.r);
+}
+
+pub fn writeTextSgrBoldPromotesBasicForegroundToBrightTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+
+    // `ESC [ 1 ; 31 m` -- bold + red. Bold promotes basic red (index 1,
+    // {205,0,0}) to bright red (index 9, {255,0,0}), a common terminal
+    // behaviour and the whole of Phase A's "bold" support.
+    try layer.writeText("\x1b[1;31mERR", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 255);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.g, 0);
+
+    // Bold with a non-basic (truecolor) fg is left as-is.
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("\x1b[1;38;2;10;20;30mZ", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.r, 10);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.b, 30);
+}
+
+pub fn writeTextSgrDimDarkensForegroundTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+
+    // Dim (2) scales the resolved fg to 55%. White default fg (255) -> 140.
+    try layer.writeText("\x1b[2md", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 140);
+}
+
+pub fn writeTextSgrPenPersistsAcrossNullFgCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+
+    // The mirrored-stdout path: `fg == null`. An SGR set in one call
+    // carries into the next (a program's colour state spanning writes),
+    // until `ESC [ 0 m` clears it.
+    try layer.writeTextTagged("\x1b[34m", null, null, null);
+    try layer.writeTextTagged("blue", null, null, null);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.b, 238); // ANSI 34
+    try layer.writeTextTagged("\x1b[0mplain", null, null, null);
+    try testz.expectEqual(layer.cell(0, 4).style.fg.r, glyphwire.default_style.fg.r);
+}
+
+pub fn writeTextExplicitFgResetsLeakedSgrPenTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+
+    // A plain command leaves the pen red without resetting it...
+    try layer.writeTextTagged("\x1b[31mred", null, null, null);
+    // ...then a structured write (non-null fg -- the shell prompt,
+    // glyphwire-ls) must not inherit it: the explicit fg wins and the
+    // pen is cleared.
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("prompt", .{ .r = 1, .g = 2, .b = 3 }, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.r, 1);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.g, 2);
+}
+
+// --- CSI cursor / erase interpretation --------------------------------------
+
+pub fn writeTextInterpretsCsiEraseInLineTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 0);
+    defer layer.deinit();
+
+    // Progress-bar shape: draw, carriage-return, erase-to-end-of-line,
+    // redraw shorter.
+    try layer.writeText("1234567890\r", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try layer.writeText("\x1b[Kabc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("c", layer.cell(0, 2).grapheme());
+    // The rest of the line was cleared, not left as "4567890".
+    try testz.expectEqual(layer.cell(0, 3).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(0, 9).grapheme().len, 0);
+}
+
+pub fn writeTextInterpretsCsiCursorMovesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 5, 0);
+    defer layer.deinit();
+
+    // Absolute position (1-based), then relative nudges.
+    try layer.writeText("\x1b[3;5HX", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("X", layer.cell(2, 4).grapheme());
+    try testz.expectEqual(layer.cursor.row, 2);
+    try testz.expectEqual(layer.cursor.col, 5);
+
+    // Up 2, back 3, then draw.
+    try layer.writeText("\x1b[2A\x1b[3DY", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("Y", layer.cell(0, 2).grapheme());
+
+    // Column-absolute (CHA), 1-based.
+    try layer.writeText("\x1b[10GZ", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("Z", layer.cell(0, 9).grapheme());
+}
+
+pub fn writeTextInterpretsCsiEraseInDisplayTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 6, 3, 0);
+    defer layer.deinit();
+
+    try layer.writeText("aaaaaabbbbbbcccccc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    // Home, then erase whole display (`ESC [ 2 J`).
+    try layer.writeText("\x1b[H\x1b[2J", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(1, 3).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(2, 5).grapheme().len, 0);
+}
+
+pub fn writeTextDiscardsUnhandledCsiAndPrivateSequencesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+
+    // `ESC [ ? 25 l` (hide cursor) and `ESC [ 6 n` (device status report)
+    // are recognized as sequences and dropped -- none of their bytes are
+    // drawn, and they don't disturb the cursor.
+    try layer.writeText("\x1b[?25lA\x1b[6nB", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("A", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("B", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cursor.col, 2);
 }
 
 pub fn writeTextNewlineScrollsAtBottomRowTest(io: std.Io, alloc: std.mem.Allocator) !void {

@@ -45,6 +45,7 @@ pub const Cell = core.Cell;
 pub const Cursor = core.Cursor;
 pub const tab_width = core.tab_width;
 pub const EscState = core.EscState;
+pub const SgrPen = core.SgrPen;
 pub const InputState = core.InputState;
 pub const PropertyName = core.PropertyName;
 pub const PropertyValue = core.PropertyValue;

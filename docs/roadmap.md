@@ -787,19 +787,24 @@ change; `api.md` untouched.
   anyway.
 - **Style attributes beyond fg/bg** (bold, italic, underline,
   strikethrough, dim) — needs both a `Style` bitflag field and renderer
-  support. Also the prerequisite for Phase A of the libghostty
-  investigation below.
-- **VT100/PTY-capable fallback via libghostty** — investigation written
-  up in `docs/investigations/libghostty-vt-fallback.md` (not yet a
-  committed plan). Two sizes: Phase A grows `Layer`'s escape *stripper*
-  into an SGR + basic-CSI *interpreter* for the mirrored plain-command
-  output path (uses the already-installed `libghostty-vt` 0.1.0 SGR
-  parser; no pty, no stdin), Phase B is the full-screen-TUI fallback (a
-  pty inside `glyphwire-shell`, a full VT model, screen-diff transpiled
-  to existing `write_text`/`set_property`/`clear` messages). Phase B's VT
-  model waits on `libghostty-vt` tagging its Terminal C API (unreleased),
-  with vendoring ghostty's Zig `terminal` module as the escalation valve.
-  See the doc for the three paths and the recommended phasing.
+  support. The Phase A VT fallback (below) folds SGR bold/dim/inverse
+  into the resolved colour at write time, but italic/underline/
+  strikethrough are parsed and dropped until this lands.
+- **VT100/PTY-capable fallback via libghostty** — investigated in
+  `docs/investigations/libghostty-vt-fallback.md`. Two sizes:
+  - **Phase A — done** (this branch): `Layer`'s escape *stripper* is now
+    an SGR + limited-CSI *interpreter* (`core.SgrPen`, `Layer.execCsi`).
+    Colour only — 16/bright/256/truecolor fg+bg, `0`/`1`/`2`/`7` folded
+    into the concrete cell colour at write time; `A/B/C/D/G/d/H/f/J/K`
+    cursor/erase finals; everything else still recognized-and-discarded.
+    No `Style`/wire/renderer change. Hand-rolled, not libghostty (see the
+    doc and decisions.md for why).
+  - **Phase B — not started:** the full-screen-TUI fallback (a pty inside
+    `glyphwire-shell`, a full VT model, screen-diff transpiled to
+    existing `write_text`/`set_property`/`clear` messages). Its VT model
+    waits on `libghostty-vt` tagging its Terminal C API (unreleased),
+    with vendoring ghostty's Zig `terminal` module as the escalation
+    valve.
 - **Capability negotiation (`initialize`/`initialized`).** Should land
   before or alongside Phase 3 — decisions.md explicitly calls out image
   formats as something the server *advertises*, which needs the

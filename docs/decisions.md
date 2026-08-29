@@ -1155,6 +1155,68 @@ Before this, `glyphwire-shell` split piped child output on `\n` itself
 that arose from doing so); moving the handling into `core` let that go
 back to a single `write_text` of each raw chunk.
 
+**Decision (revised — Phase A VT fallback):** the "strip, don't
+interpret" line above is now partly walked back. `Layer.writeText`
+*interprets* the escape sequences a plain, non-glyphwire-aware program
+most commonly emits, so `gcc`/`clang` diagnostics, `git` output, and
+`pip`/`npm`/`cargo` progress bars render in something close to their
+intended form instead of losing all colour. This is deliberately the
+*small* half of a two-phase plan — see
+`docs/investigations/libghostty-vt-fallback.md`; the *large* half
+(a real PTY + full VT model for `vim`/`less`/`htop`) is still unbuilt.
+
+- **SGR (`ESC [ … m`) is interpreted, colour only.** 16-colour,
+  bright, xterm-256, and truecolor foreground/background (both the `;`
+  and the `:` sub-parameter forms), plus `0` reset. `1` bold promotes a
+  *basic* (30-37) foreground to its bright (90-97) variant — the common
+  "bold is bright" terminal behaviour and the entire extent of bold
+  support; `2` dim darkens the resolved foreground; `7`/`27` inverse
+  swaps foreground and background. Italic, underline, blink, and
+  strikethrough are *parsed and ignored* — they need real `Style`
+  attribute bitflags and font/renderer work (still the separate
+  "style attributes beyond fg/bg" roadmap item), and none of the Phase A
+  target programs depend on them for legibility.
+- **No new data-model or wire surface.** Everything resolves to the
+  concrete `Cell.style.fg`/`.bg` colours the renderer and `get_cells`
+  already handle — `bold`→bright, `dim`→darker, `inverse`→swapped are
+  folded in *at write time*. `Style` grew no fields; `glyphwire-host` and
+  `protocol.zig` were untouched. The one wire-visible shift: `write_text`
+  with `fg` **omitted** now means "use the layer's SGR pen, then
+  `default_style.fg`" rather than "force `default_style.fg`". Every
+  structured client passes `fg` explicitly, so this is invisible except
+  on the mirrored path.
+- **A small set of `ESC [ …` cursor/erase finals is interpreted:**
+  `A`/`B`/`C`/`D` (cursor up/down/right/left), `G` (column), `d` (row),
+  `H`/`f` (row;col), `J` (erase in display), `K` (erase in line) — enough
+  for a `\r` + `ESC [ K` progress-bar repaint and simple repositioning.
+  Downward/absolute-row moves resolve through `Layer.resolveRow`
+  (scrolling like a line feed); upward moves clamp without scrolling.
+  Every *other* CSI final, and every `ESC ]`/`P`/`X`/`^`/`_ …` (OSC and
+  friends), is still recognized-and-discarded exactly as before —
+  including `ESC [ ? … ` private-use sequences, which are matched so
+  their parameter bytes are never misread as a numeric list.
+- **The colour "pen" persists across `write_text` calls, but only for
+  the mirrored-stdout path.** `Layer.pen` (an `SgrPen`) carries SGR
+  colour state between calls whose `fg` argument is `null` — a program's
+  colour legitimately spans several `write()`s. A call with a non-null
+  `fg` (every structured caller *and* the mirrored *stderr* path, which
+  passes its red tint as a fallback) resets the pen first, so a colour a
+  plain command left un-reset can't leak into the next shell prompt or
+  `glyphwire-ls` listing. `ESC [ 0 m` resets it regardless. The
+  *machine* state (a half-parsed sequence) still never crosses a call
+  boundary — that guarantee from the previous decision is unchanged.
+- **Why not libghostty here.** libghostty-vt's released 0.1.0 C API
+  exposes only parsers (SGR/OSC/key), not a terminal state machine, and
+  is not distributed as a standalone package — pulling it via
+  `build.zig.zon` means vendoring the whole ghostty monorepo (30+ deps,
+  pinned to a Zig version glyphwire is already ahead of). For Phase A's
+  narrow scope, extending the hand-rolled `EscState` machine that was
+  already here is less code than adapting and hand-syncing a vendored
+  ghostty source snippet, and matches glyphwire's "replace VT, don't
+  embed a VT library" stance. Real libghostty is reserved for Phase B,
+  where the terminal *state machine* — the genuinely hard part — is what
+  it would buy. See the investigation doc for the full rationale.
+
 **Decision:** `write_text` always replaces a cell's whole style outright
 (fg *and* bg together, per-cell — same "overwrite outright" behavior
 `draw_icon` used to have before `foreground: true`, see the Icon section)
@@ -1191,7 +1253,9 @@ message pair per property.
   table sourcing — needs a concrete library/data choice.
 - Final `Style` struct layout and full attribute bitflag list, now
   including the cell background tagged union (color vs. image/icon
-  reference — see Object Model above).
+  reference — see Object Model above). The Phase A VT fallback wants this
+  too: SGR italic / underline / strikethrough are currently parsed and
+  dropped for lack of a `Style` bitfield and renderer support.
 - Full property name list/enum for `get_property`/`set_property`
   (`cursor`, `position`, `size`, `clip`, `scroll`, `visibility`, ...) —
   not finalized.
