@@ -88,12 +88,25 @@ fn run(init: std.process.Init) !void {
         try client.drawIcon(panel_row + 3, panel_col + 2 + i * 2, name);
     }
 
-    // Leaves the cursor a couple of blank rows below the panel: none of
+    // Non-Latin "Hello World" runs: exercises the host font atlas's
+    // dynamic-codepoint path (Greek and Cyrillic from the primary Noto
+    // Sans Mono CJK face, Japanese kana + kanji from the same face). Any
+    // codepoint no face provides would show as a tofu box.
+    const intl_row = panel_row + panel_rows + 1;
+    try client.setCursor(intl_row, 0);
+    try client.writeText("hello world, in more scripts:", rgb(200, 200, 200), null);
+    try client.setCursor(intl_row + 1, 2);
+    try client.writeText("Greek:   \u{0393}\u{03B5}\u{03B9}\u{03B1} \u{03C3}\u{03BF}\u{03C5} \u{039A}\u{03CC}\u{03C3}\u{03BC}\u{03B5}", rgb(126, 200, 255), null);
+    try client.setCursor(intl_row + 2, 2);
+    try client.writeText("Russian: \u{041F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442}, \u{043C}\u{0438}\u{0440}", rgb(255, 184, 108), null);
+    try client.setCursor(intl_row + 3, 2);
+    try client.writeText("Japanese: \u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\u{4E16}\u{754C}", rgb(80, 250, 123), null);
+
+    // Leaves the cursor a couple of blank rows below the last text: none of
     // draw_box/draw_icon move the cursor, so without this it would still
-    // sit wherever the last write_text call ("icons + box tiles") left
-    // it -- inside the panel. glyphwire-shell draws its next prompt one
-    // row below wherever the cursor ends up after a child runs (see
-    // Prompt.submitLine), so leaving it inside the panel made the next
-    // prompt overwrite the icon row.
-    try client.setCursor(panel_row + panel_rows + 2, 0);
+    // sit wherever the last write_text call left it. glyphwire-shell draws
+    // its next prompt one row below wherever the cursor ends up after a
+    // child runs (see Prompt.submitLine), so leaving it higher up made the
+    // next prompt overwrite this output.
+    try client.setCursor(intl_row + 5, 0);
 }

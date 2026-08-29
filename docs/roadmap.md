@@ -778,6 +778,53 @@ widened `u16` → `u32` to allow it) so a whole large grid of solid
 backgrounds still fits one draw call per category. No wire protocol
 change; `api.md` untouched.
 
+## All codepoints in the host font atlas (dynamic glyphs + fallback)
+
+`glyphwire-host` used to draw text through pixzig's fixed ASCII-only font
+atlas: `FontAtlas` packed codepoints 32-126 once at startup, and
+`TextRenderer.drawString*` walked the byte slice looking each byte up as a
+`u8` — so a Greek/Cyrillic/CJK filename from `ls` decoded to nothing. The
+grid model was already fine (`core.Cell` stores an 8-byte UTF-8 grapheme
+cluster; `Layer.writeText` splits on codepoints; metadata stores the raw
+path bytes), so this was purely a rasterization + render-loop gap.
+
+Fixed entirely on the pixzig side, consumed here:
+
+- **`FontAtlas` is now a growing, on-demand atlas.** It keeps the font
+  bytes + a `stb_truetype` handle, a CPU copy of a single square
+  grayscale texture (starts 1024², **doubles on overflow** up to 8192²,
+  Ghostty-style), a shelf packer, and a `codepoint → Character` cache.
+  Glyphs load **eagerly per 256-codepoint block**: the first time any
+  codepoint in a block is drawn, the whole block is rasterized and the
+  texture re-uploaded. A grow copies existing rows into the wider buffer
+  at the same pixel offsets (no re-raster) and re-normalizes every UV;
+  `TextRenderer` flushes any queued quads before committing a grown
+  texture so in-flight glyphs aren't sampled against the wrong size.
+- **Fallback faces + tofu.** `FontAtlas.faces` is an ordered list —
+  primary first, `addFallbackFace*` appends. A codepoint the primary
+  lacks is filled from the first fallback that has it; a codepoint **no**
+  face has renders the atlas's `.notdef` box (rasterized from the primary
+  face's glyph 0 at init, so tofu is always in the base glyph set).
+  `pixzig.renderer.findFaceIndexByName` + `initFromTtfFileIndexed` /
+  `measureFontFileIndexed` / `RendererInitOpts.font.path.face_index` add
+  `.ttc` collection support.
+- **`TextRenderer` decodes UTF-8 codepoints**, not bytes, in every
+  draw/measure path; malformed bytes render as U+FFFD.
+
+Host wiring: the primary font is now `assets/NotoSansCJK-Regular.ttc`
+(face "Noto Sans Mono CJK JP", found by name at startup), which covers
+Latin + Greek + Cyrillic + CJK from one monospaced face;
+`assets/JetBrainsMono-Regular.ttf` is registered as a fallback via
+`renderer.addDefaultFontFallback` mostly to keep the fallback path
+exercised (user-selectable fonts are coming). `demo/main.zig` writes
+"hello world" in Greek, Russian and Japanese. `glyphwire-ls` needed no
+change — names now just render, and click-to-`cd` already resolved
+through the raw metadata path bytes.
+
+No wire protocol change; `api.md` / `decisions.md` untouched. The bundled
+`.ttc` is ~19 MB — a JIS-X-0208 subset would cut that to a few MB at the
+cost of tofu for rare kanji; deferred.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

@@ -29,8 +29,18 @@ var grid_rows: usize = initial_grid_rows;
 const min_grid_cols = 16;
 const min_grid_rows = 4;
 const scrollback_rows = 1000;
-const font_path = "assets/JetBrainsMono-Regular.ttf";
-const font_size: f32 = 18.0;
+// Primary font: Noto Sans Mono CJK covers Latin, Greek, Cyrillic and CJK
+// from one monospaced face, so `ls` of files with Greek/Russian/Japanese
+// names renders without tofu. It's a `.ttc` collection; `font_face_name`
+// picks the Japanese monospaced face out of it at startup (see `main`).
+const font_path = "assets/NotoSansCJK-Regular.ttc";
+const font_face_name = "Mono CJK JP";
+// A fallback face, tried for any codepoint the primary lacks before the
+// atlas falls back to its `.notdef` (tofu) box. Kept mostly to exercise
+// the fallback chain end to end -- users will be able to pick their own
+// primary font soon, and a Latin-only pick still needs CJK from somewhere.
+const font_fallback_path = "assets/JetBrainsMono-Regular.ttf";
+const font_size: f32 = 20.0;
 const cursor_width = 2;
 // Blank margin, in pixels, kept on both sides of the composited layers:
 // one strip against the window's left border, and one between the grid's
@@ -933,13 +943,26 @@ pub fn main(init: std.process.Init) !void {
 
     const socket_path = try socketPath(arena, init.environ_map);
 
+    // The primary font is a `.ttc` collection; find the index of the
+    // Japanese monospaced face inside it so both the metrics measured here
+    // and the atlas packed later (in AppRunner.init) use the same face. A
+    // plain `.ttf` would just be face 0.
+    const font_face_index: i32 = blk: {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, font_path, alloc, .limited(64 * 1024 * 1024)) catch |err| {
+            std.log.err("failed to read font '{s}': {t}", .{ font_path, err });
+            return err;
+        };
+        defer alloc.free(bytes);
+        break :blk pixzig.renderer.findFaceIndexByName(bytes, font_face_name) orelse 0;
+    };
+
     // Measuring metrics needs only the font's own bytes (stb_truetype's
     // InitFont/GetFontVMetrics/GetCodepointHMetrics), not a GL context, so
     // this can run before the window exists -- unlike packing the font into
     // an atlas texture, which does need one (see AppRunner.init below).
     // That means the window can be sized correctly for whatever font is
     // configured instead of a size tuned by hand for one specific font.
-    const metrics = try pixzig.renderer.measureFontFile(font_path, font_size, alloc);
+    const metrics = try pixzig.renderer.measureFontFileIndexed(font_path, font_face_index, font_size, alloc);
     cell_w = metrics.advance;
     cell_h = metrics.line_height;
 
@@ -993,8 +1016,16 @@ pub fn main(init: std.process.Init) !void {
             .y = @as(i32, @intCast(grid_rows)) * cell_h,
         },
         .resizable = true,
-        .renderInitOpts = .{ .font = .{ .path = .{ .face = font_path, .size = font_size } } },
+        .renderInitOpts = .{ .font = .{ .path = .{ .face = font_path, .size = font_size, .face_index = font_face_index } } },
     });
+
+    // Register the fallback face: codepoints the primary lacks are drawn
+    // from it, and anything neither face has renders as the atlas's tofu
+    // box. Non-fatal -- text still works from the primary alone.
+    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, font_fallback_path, 0) catch |err| {
+        std.log.warn("could not add fallback font '{s}': {t}", .{ font_fallback_path, err });
+    };
+
     const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited);
 
     appRunner.run(app);
