@@ -9,6 +9,7 @@ const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
 const handshake = @import("shell_support").handshake;
 const history = @import("shell_support").history;
+const keyencode = @import("shell_support").keyencode;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -332,4 +333,45 @@ pub fn historySerializeRoundTripsThroughParseTest(_: std.Io, alloc: std.mem.Allo
     defer history.freeEntries(alloc, entries);
     try testz.expectEqual(entries.len, 3);
     try testz.expectEqualStr("git commit -m 'x y'", entries[2]);
+}
+
+// ─── keyencode.toPtyBytes ──────────────────────────────────────────────
+
+pub fn keyencodePlainAndShiftedCharsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [8]u8 = undefined;
+    try testz.expectEqualStr("a", keyencode.toPtyBytes("a", .{}, &buf).?);
+    try testz.expectEqualStr("A", keyencode.toPtyBytes("a", .{ .shift = true }, &buf).?);
+    try testz.expectEqualStr("7", keyencode.toPtyBytes("seven", .{}, &buf).?);
+    try testz.expectEqualStr("&", keyencode.toPtyBytes("seven", .{ .shift = true }, &buf).?);
+    try testz.expectEqualStr(" ", keyencode.toPtyBytes("space", .{}, &buf).?);
+}
+
+pub fn keyencodeNamedKeysMapToSequencesTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [8]u8 = undefined;
+    try testz.expectEqualStr("\r", keyencode.toPtyBytes("enter", .{}, &buf).?);
+    try testz.expectEqualStr("\x7f", keyencode.toPtyBytes("backspace", .{}, &buf).?);
+    try testz.expectEqualStr("\t", keyencode.toPtyBytes("tab", .{}, &buf).?);
+    try testz.expectEqualStr("\x1b", keyencode.toPtyBytes("escape", .{}, &buf).?);
+    try testz.expectEqualStr("\x1b[A", keyencode.toPtyBytes("up", .{}, &buf).?);
+    try testz.expectEqualStr("\x1b[D", keyencode.toPtyBytes("left", .{}, &buf).?);
+    try testz.expectEqualStr("\x1b[3~", keyencode.toPtyBytes("delete", .{}, &buf).?);
+}
+
+pub fn keyencodeCtrlAndAltTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [8]u8 = undefined;
+    // Ctrl-C / Ctrl-D / Ctrl-Z as their C0 control bytes.
+    try testz.expectEqualStr("\x03", keyencode.toPtyBytes("c", .{ .ctrl = true }, &buf).?);
+    try testz.expectEqualStr("\x04", keyencode.toPtyBytes("d", .{ .ctrl = true }, &buf).?);
+    try testz.expectEqualStr("\x1a", keyencode.toPtyBytes("z", .{ .ctrl = true }, &buf).?);
+    // Alt-x = ESC prefix + the char.
+    try testz.expectEqualStr("\x1bx", keyencode.toPtyBytes("x", .{ .alt = true }, &buf).?);
+}
+
+pub fn keyencodeReturnsNullForNonPrintableTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [8]u8 = undefined;
+    // Bare modifiers / unknown function keys -- nothing to send.
+    try testz.expectEqual(keyencode.toPtyBytes("left_shift", .{}, &buf), null);
+    try testz.expectEqual(keyencode.toPtyBytes("f5", .{}, &buf), null);
+    // Ctrl with a key that has no control-byte mapping is swallowed.
+    try testz.expectEqual(keyencode.toPtyBytes("f5", .{ .ctrl = true }, &buf), null);
 }

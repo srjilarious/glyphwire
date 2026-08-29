@@ -14,3 +14,4 @@ pub const glob = @import("glob.zig");
 pub const handshake = @import("handshake.zig");
 pub const history = @import("history.zig");
 pub const config = @import("config.zig");
+pub const keyencode = @import("keyencode.zig");

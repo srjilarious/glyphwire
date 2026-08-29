@@ -46,16 +46,12 @@ them against this Update — the shipped implementation is hand-rolled and
 colour-only with no `Style`/wire change. The Phase B material is
 unaffected and still governs.
 
-**Not fixed by Phase A (it's a Phase B thing):** a plain command's stdout
-often appears only when the command *exits*, not incrementally. `glyphwire
--shell` forwards each chunk the moment it arrives (`pumpChildOutput` —
-`std.Io.File.MultiReader.fill` returns on the first byte), so this is not
-a shell bug: it's the child's C runtime **block-buffering stdout because
-it's a pipe, not a tty** (glibc uses a ~4-8 KB buffer and only `write()`s
-on flush/exit). `stdbuf -oL <cmd>` / `PYTHONUNBUFFERED=1` work around it
-per-command; programs that write to stderr (unbuffered) or line-buffer
-their output already stream today. The real fix is Phase B's PTY — a tty
-slave makes the child line-buffer.
+**"stdout only appears at exit" — fixed by B0 (below).** Before B0 a
+plain command's stdout often appeared only when the command *exited*:
+`glyphwire-shell` forwarded each chunk the moment it arrived, so it was
+never a shell bug — the child's C runtime **block-buffers stdout when
+it's a pipe, not a tty** (~4-8 KB, flushed on exit). B0 runs the child on
+a pty, so libc line-buffers and output streams as it happens.
 
 ---
 
@@ -407,21 +403,24 @@ The PTY and the VT model are independent, and a **dumb PTY passthrough
 with no VT work beyond Phase A** already buys most of the day-to-day
 value:
 
-- **B0 — dumb PTY passthrough (~170-220 LOC, one `shell/pty.zig`).**
-  Replace `runCommand`'s `stdin=.ignore, stdout=.pipe, stderr=.pipe`
-  spawn with a pty: child gets the slave as all three fds in a new
-  session (`forkpty` from libc — glyphwire-shell already links libc for
-  Lua — is ~1 call; or manual `posix_openpt`/`grantpt`/`unlockpt`/
-  `fork`/`setsid`/`TIOCSCTTY`/`dup2`/`execvpe`, ~60-80 lines). Read the
-  master → `write_text` exactly as `flushCapturedStream` does now (a pty
-  merges stdout+stderr onto one fd, so the two-stream split goes away).
-  Encode `InputListener` key events to bytes → write to master
-  (printable byte; Enter=`\r`; Backspace=`0x7f`; arrows=`ESC [ A..D`;
-  Ctrl-C/D/Z; ~50 lines). `ioctl(master, TIOCSWINSZ)` on spawn and on
-  every `resize` event (~20 lines). Run the read loop on a thread; the
-  main loop pumps `InputListener` → master; join on child exit.
+- **B0 — dumb PTY passthrough — BUILT** (`shell/pty.zig` +
+  `shell/keyencode.zig`, ~260 LOC incl. the exec-status pipe and key
+  encoder; `runCommand` rewritten). `runCommand`'s old
+  `stdin=.ignore, stdout=.pipe, stderr=.pipe` spawn is replaced by
+  `Pty.spawn`: `openpty` (libc, glyphwire-shell already links it for
+  Lua), `fork`, and in the child `setsid` + `TIOCSCTTY` + `dup2` +
+  `execvp`. A close-on-exec pipe carries `execvp` failure back to the
+  parent (so an unknown command is still `error.CommandNotFound`, not a
+  silent 127 exit). `ptyReaderThread` reads the master →
+  `client.writeText` (same handshake sniff as before; a pty merges
+  stdout+stderr onto the one fd). The foreground key loop encodes
+  `InputListener` events (`keyencode.toPtyBytes`: text, `CR`/`DEL`/`Tab`,
+  arrows + nav as `CSI`, `Ctrl`-letter → C0, `Alt` → `ESC` prefix) and
+  writes them to the master; it exits when `waitpid(WNOHANG)` reaps the
+  child. Initial `TIOCSWINSZ` from `get_property("size")`; live resize
+  (`Pty.resize`) is wired but not yet fed events — a B0 follow-up.
 
-  What B0 gets, *with zero new escape-sequence work*:
+  What B0 gets, *with zero new escape-sequence work* (all confirmed):
   - **Immediate output.** The child sees `isatty(1)` → libc switches
     stdout from full-buffering to line-buffering. This is the single
     biggest fix and it is automatic. `pip`/`git`/`python`/`cargo`/`apt`

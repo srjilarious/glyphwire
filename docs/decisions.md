@@ -50,11 +50,16 @@ final.
 - **Stdout/stderr handshake for launcher-spawned commands.** A launcher
   that spawns arbitrary commands (`glyphwire-shell`'s `Prompt.runCommand`)
   can't know in advance whether a given command is glyphwire-aware, so it
-  defaults to "plain program writing to a terminal": it pipes the child's
-  stdout/stderr and forwards each chunk onto the grid via a single
-  `write_text` (`Prompt.pumpChildOutput`/`flushCapturedStream`), letting
-  `Layer.writeText`'s own C0 handling (see the styled-text section) take
-  care of `\n`/`\r`/`\t` and stray escape sequences.
+  defaults to "plain program writing to a terminal": it runs the child on
+  a **pseudo-terminal** (B0, `shell/pty.zig` — see roadmap.md) and
+  forwards each chunk of the master onto the grid via a single
+  `write_text` (`Prompt.ptyReaderThread`), letting `Layer.writeText`'s own
+  C0 handling and SGR/CSI interpretation (see the styled-text section)
+  take care of `\n`/`\r`/`\t` and escape sequences. (Before B0 the child
+  was spawned with piped stdout/stderr and no stdin; the pty gets the
+  child to line-buffer instead of block-buffer, makes `isatty()` true,
+  and lets keystrokes flow in — see roadmap.md's B0 entry and
+  `docs/investigations/libghostty-vt-fallback.md` §7a.)
   A glyphwire-aware child opts out automatically: `Client.connect` writes
   `glyphwire.handshake_marker` (a leading-NUL-byte sentinel, vanishingly
   unlikely to collide with a plain program's real output) to the child's
@@ -81,12 +86,15 @@ final.
   channel, not a replacement for stdio" principle above: a handshaken
   child's remaining stdout/stderr are passed straight through to the
   launcher's own real stdio rather than dropped, so its own diagnostics
-  (`std.log.err` and similar) still land somewhere. A known limitation:
-  since the launcher must pick the piped-vs-inherited spawn behavior
-  before it knows the answer, this only covers commands that don't need
-  real interactive stdin (piped as `.ignore`) — not yet a problem, since
-  no glyphwire-aware program reads stdin today, but worth revisiting if
-  one ever does.
+  (`std.log.err` and similar) still land somewhere. Since B0 the child
+  always runs on a pty (stdout *and* stderr merged onto the one master,
+  as a real tty does) and interactive stdin works, so the earlier
+  "commands that don't need real stdin only" limitation is gone. An
+  unknown command is still reported the same way — `execvp` failing
+  inside the forked child is signalled back to the parent over a
+  close-on-exec pipe (`Pty.spawn`), which turns it into
+  `error.CommandNotFound` and a red `"<cmd>: command not found"` on the
+  grid.
 
 ### Transport & wire format
 - Primary transport: a Unix domain socket. An inherited-fd variant (à la

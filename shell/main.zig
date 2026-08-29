@@ -6,6 +6,8 @@ const glob = @import("shell_support").glob;
 const hs = @import("shell_support").handshake;
 const config = @import("shell_support").config;
 const history = @import("shell_support").history;
+const keyencode = @import("shell_support").keyencode;
+const Pty = @import("pty.zig").Pty;
 
 comptime {
     // The captured-child marker detector keeps its own copy of the
@@ -200,7 +202,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     };
     defer listener.deinit();
 
-    var prompt: Prompt = .{ .client = &client, .environ_map = environ_map };
+    var prompt: Prompt = .{ .client = &client, .environ_map = environ_map, .listener = listener };
     // Unreachable before `exit` gave this loop a clean return path --
     // every previous exit was a hard kill, so this never ran and the leak
     // never surfaced.
@@ -366,7 +368,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // its plain character into the line instead of being
             // swallowed like a real terminal does.
             const shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift");
-            if (charFromKeyName(ev.key, shift)) |ch| {
+            if (keyencode.charFromKeyName(ev.key, shift)) |ch| {
                 try prompt.insertChar(ch);
             }
         }
@@ -438,6 +440,10 @@ const AliasTable = struct {
 const Prompt = struct {
     client: *glyphwire.Client,
     environ_map: *const std.process.Environ.Map,
+    /// The prompt's key/mouse/scroll feed. Set by `runPrompt` after
+    /// connecting; `runCommand`'s pty input loop reads keystrokes from it
+    /// while a command holds the foreground.
+    listener: ?*glyphwire.InputListener = null,
     line_start_row: usize = 0,
     line_start_col: usize = 0,
     buffer: std.ArrayList(u8) = std.ArrayList(u8).empty,
@@ -951,43 +957,37 @@ const Prompt = struct {
         }
     }
 
-    /// Spawns `argv` and waits for it to exit, treating its stdout/stderr
-    /// as the default output mechanism -- mirrored onto the grid via
-    /// `write_text`, terminal-style -- until it performs the handshake
-    /// documented on `glyphwire.handshake_marker`: a glyphwire-aware
-    /// program's `Client.connect` writes that marker to its own stdout as
-    /// part of connecting, this launcher's cue that the process is
-    /// drawing to the grid itself over its own connection (inheriting
-    /// `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` automatically, since child
-    /// processes inherit the environment by default) rather than
-    /// expecting its stdio echoed there. Once that's
-    /// resolved either way (see `pumpChildOutput`), the rest of that
-    /// stream is either kept mirroring to the grid (never handshaken) or
-    /// passed straight through to this process's own real stdio (already
-    /// handshaken) -- stdio keeps working either way, only the mirroring
-    /// stops, per decisions.md's Discovery & connection section. `argv[0]`
-    /// resolution (including the `zig-out/bin` dev convenience) is
-    /// `std.process.spawn`'s own `$PATH` search -- see
-    /// `prependZigOutBinToPath`. A spawn failure (e.g. unknown command) is
-    /// reported onto the grid rather than propagated, so a typo doesn't
-    /// take down the prompt. Stdin is deliberately not connected
-    /// (`.ignore`): this handles commands that only produce output, not
-    /// ones that read input interactively -- see this file's top doc
-    /// comment.
+    /// Runs `argv` under a B0 "dumb PTY" (`shell/pty.zig`): the child's
+    /// stdin/stdout/stderr are a pseudo-terminal. A background thread
+    /// (`ptyReaderThread`) mirrors the master onto the grid via
+    /// `write_text` -- `Layer.writeText` interprets the child's own SGR
+    /// colour + simple cursor/erase (Phase A) -- and the key loop below
+    /// encodes `InputListener` keystrokes (`keyencode.toPtyBytes`) back
+    /// into the master. Versus the previous piped, stdin-less spawn this
+    /// gets: output as it happens (a child on a tty line-buffers instead
+    /// of block-buffering into a pipe), working stdin, `isatty()`-gated
+    /// colour/progress, and Ctrl-C as a real SIGINT via the tty line
+    /// discipline. Full-screen apps (alternate screen, scroll regions)
+    /// still need more -- see `docs/investigations/libghostty-vt-
+    /// fallback.md` §7a.
+    ///
+    /// The handshake (`glyphwire.handshake_marker`) is unchanged: a
+    /// glyphwire-aware child writes the marker to its stdout (= pty
+    /// slave), the reader thread detects it and stops mirroring, passing
+    /// the rest through to this process's own real stdio instead -- the
+    /// child is drawing over its own wire connection. `argv[0]` is
+    /// PATH-resolved by libc `execvp` (`PATH` already has `zig-out/bin`
+    /// prepended -- see `prependZigOutBinToPath`). A spawn failure is
+    /// reported onto the grid, not propagated.
     ///
     /// Every argument gets the same leading `~`/`~/...` expansion `cd`
-    /// already gives its target (see `expandTilde`) -- most spawned
-    /// programs don't do their own tilde expansion (that's normally the
-    /// shell's job), so `cat ~/notes.txt` would otherwise hand the child a
-    /// literal `~` it has no way to resolve.
+    /// already gives its target (see `expandTilde`).
     fn runCommand(self: *Prompt, argv: []const []const u8) !void {
         const alloc = self.client.alloc;
         var expanded: std.ArrayList([]const u8) = .empty;
         defer {
             // Only the prefix actually appended before an early return
-            // (the HOME-not-set case below) needs freeing -- zip against
-            // that same prefix of argv, not the full slice, or this would
-            // walk past the end of `expanded.items`.
+            // (the HOME-not-set case below) needs freeing.
             for (expanded.items, argv[0..expanded.items.len]) |exp, raw| {
                 if (exp.ptr != raw.ptr) alloc.free(exp);
             }
@@ -1001,139 +1001,139 @@ const Prompt = struct {
             try expanded.append(alloc, exp);
         }
 
-        var child = std.process.spawn(self.client.io, .{
-            .argv = expanded.items,
-            .stdin = .ignore,
-            .stdout = .pipe,
-            .stderr = .pipe,
-        }) catch |err| {
+        // NUL-terminated, NULL-terminated argv for libc `execvp`.
+        var argv_bufs: std.ArrayList([:0]u8) = .empty;
+        defer {
+            for (argv_bufs.items) |b| alloc.free(b);
+            argv_bufs.deinit(alloc);
+        }
+        for (expanded.items) |a| try argv_bufs.append(alloc, try alloc.dupeZ(u8, a));
+        const argv_z = try alloc.allocSentinel(?[*:0]const u8, argv_bufs.items.len, null);
+        defer alloc.free(argv_z);
+        for (argv_bufs.items, 0..) |b, i| argv_z[i] = b.ptr;
+
+        // Size the pty from the grid so a curses-ish child lays out right.
+        const size = self.client.getSize() catch glyphwire.LayerSize{ .cols = self.grid_cols, .rows = 24 };
+
+        var pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows)) catch |err| {
             var buf: [160]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "{s}: command not found ({t})", .{ argv[0], err }) catch "command not found";
+            const msg = switch (err) {
+                error.CommandNotFound => std.fmt.bufPrint(&buf, "{s}: command not found", .{argv[0]}) catch "command not found",
+                else => std.fmt.bufPrint(&buf, "{s}: {t}", .{ argv[0], err }) catch "failed to start command",
+            };
             try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
             return;
         };
-        // Safe to run after the explicit `wait` below too -- `Child.kill`
-        // is documented idempotent and a no-op once `wait` has already
-        // reaped the child; this is only here to reap it if
-        // `pumpChildOutput` returns early on an error.
-        defer child.kill(self.client.io);
+        defer pty.deinit();
 
-        self.pumpChildOutput(child.stdout.?, child.stderr.?) catch |err| {
-            std.log.err("runCommand: output capture failed for {s}: {t}", .{ argv[0], err });
+        var reader_ctx = PtyReaderCtx{ .prompt = self, .master = pty.master };
+        const reader = std.Thread.spawn(.{}, ptyReaderThread, .{&reader_ctx}) catch |err| {
+            // Can't mirror output -- tear the child down rather than leak it.
+            pty.signalGroup(std.posix.SIG.KILL);
+            pty.wait();
+            return err;
         };
 
-        _ = child.wait(self.client.io) catch |err| {
-            std.log.err("runCommand: wait({s}) failed: {t}", .{ argv[0], err });
-        };
-    }
-
-    /// Reads `stdout`/`stderr` concurrently via `std.Io.File.MultiReader`
-    /// -- the same mechanism `std.process.run` uses to avoid deadlocking
-    /// if both pipes fill up at once -- forwarding each chunk as it
-    /// arrives rather than buffering the whole run, so a long-running
-    /// command's output appears incrementally instead of all at once at
-    /// the end. `stdout`'s very first bytes are checked against
-    /// `glyphwire.handshake_marker` as soon as enough of them have
-    /// arrived; everything read before that resolves (or all of it, if
-    /// total output before EOF never reaches the marker's length) is
-    /// still routed to the grid, since "not yet handshaken" is exactly
-    /// the default this whole mechanism exists for.
-    fn pumpChildOutput(self: *Prompt, stdout_file: std.Io.File, stderr_file: std.Io.File) !void {
-        const io = self.client.io;
-        const gpa = self.client.alloc;
-
-        var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
-        var mr: std.Io.File.MultiReader = undefined;
-        mr.init(gpa, io, mr_buf.toStreams(), &.{ stdout_file, stderr_file });
-        defer mr.deinit();
-
-        // Only opened lazily in spirit but declared up front since Zig has
-        // no default-initialized-on-first-use locals -- cheap either way,
-        // and only ever written to once a child has already handshaken.
-        var passthrough_out_buf: [256]u8 = undefined;
-        var passthrough_out = std.Io.File.stdout().writer(io, &passthrough_out_buf);
-        var passthrough_err_buf: [256]u8 = undefined;
-        var passthrough_err = std.Io.File.stderr().writer(io, &passthrough_err_buf);
-
-        var handshake: ?bool = null;
-
-        while (true) {
-            mr.fill(64, .none) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => |e| return e,
-            };
-
-            handshake = handshake orelse resolveHandshake(mr.reader(0));
-
-            // Nothing is drained from either stream until the handshake
-            // question resolves -- `MultiReader` grows its buffers to
-            // hold whatever arrives meanwhile, same as it would while
-            // waiting on the other stream in `std.process.run`.
-            if (handshake) |aware| {
-                try self.flushCapturedStream(mr.reader(0), aware, &passthrough_out.interface);
-                try self.flushCapturedStream(mr.reader(1), aware, &passthrough_err.interface);
-            }
-        }
-
-        // The loop above breaks the moment `mr.fill` hits EOF, so a
-        // glyphwire-aware child that writes only the marker to stdout and
-        // then draws entirely over its own wire connection
-        // (`glyphwire-ls` is exactly this) never has its handshake
-        // resolved inside the loop -- the marker is still sitting unread
-        // in the buffer. Resolve it here before the final flush, or that
-        // raw marker is mirrored onto the grid as the text
-        // "glyphwire-handshake-v1". Still `null` afterward (stdout
-        // shorter than the marker, or empty) settles as "not aware" --
-        // the plain-program default this whole mechanism exists for.
-        handshake = handshake orelse resolveHandshake(mr.reader(0));
-        const aware = handshake orelse false;
-        try self.flushCapturedStream(mr.reader(0), aware, &passthrough_out.interface);
-        try self.flushCapturedStream(mr.reader(1), aware, &passthrough_err.interface);
-
-        try mr.checkAnyError();
-    }
-
-    /// Runs `handshake.aware` against `r`'s buffered head and, on a
-    /// definite match, tosses the marker bytes so they reach neither the
-    /// grid nor the child's passthrough stdio. `null` (undecided -- what
-    /// little is buffered is still a prefix of the marker) leaves the
-    /// buffer intact for the next read to extend. See `pumpChildOutput`.
-    fn resolveHandshake(r: *std.Io.Reader) ?bool {
-        const seen = hs.aware(r.buffered()) orelse return null;
-        if (seen) r.toss(hs.marker.len);
-        return seen;
-    }
-
-    /// Drains whatever `r` currently has buffered: onto the grid as plain
-    /// text if `aware` is false, or straight through to this process's own
-    /// real stdio (`passthrough`) if it's true -- see `runCommand`'s doc
-    /// comment for what `aware` means. A no-op when nothing is buffered,
-    /// so it's safe to call speculatively before the handshake question is
-    /// even resolved (see `pumpChildOutput`).
-    ///
-    /// The grid path is a single `write_text` of the raw chunk with the
-    /// default foreground: `Layer.writeText` handles `\n`/`\r`/`\t`/`\b`
-    /// and now *interprets* SGR colour + simple cursor/erase sequences
-    /// (see core.zig), so there's no line-splitting or cursor bookkeeping
-    /// here and a program's own colours come through. **Both** stdout and
-    /// stderr go through as the default colour -- stderr was tinted red
-    /// before, but that overwrote the colours a program sets on its own
-    /// stderr (compiler diagnostics, pixzig's logger, ...), which nearly
-    /// always emits the message text in a separate `write` from its
-    /// colour prefix and so inherited the tint. Distinguishing streams
-    /// visually is left to the program.
-    fn flushCapturedStream(self: *Prompt, r: *std.Io.Reader, aware: bool, passthrough: *std.Io.Writer) !void {
-        const chunk = r.buffered();
-        if (chunk.len == 0) return;
-        defer r.toss(chunk.len);
-
-        if (aware) {
-            try passthrough.writeAll(chunk);
-            try passthrough.flush();
+        // No listener means this isn't the interactive prompt (shouldn't
+        // happen -- the exec path in `main` never calls here). Just wait.
+        const listener = self.listener orelse {
+            pty.wait();
+            reader.join();
             return;
+        };
+
+        // Foreground: forward keystrokes to the pty until the child exits.
+        // `pty.reaped()` polls (WNOHANG) once per loop; `waitKeyEvent`'s
+        // short timeout bounds how long an exit-with-no-keypress waits.
+        while (!pty.reaped()) {
+            const ev = (listener.waitKeyEvent(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
+            defer alloc.free(ev.key);
+            if (!ev.pressed) continue;
+            const mods = keyencode.Mods{
+                .ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control"),
+                .shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift"),
+                .alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt"),
+            };
+            var kb: [8]u8 = undefined;
+            if (keyencode.toPtyBytes(ev.key, mods, &kb)) |seq| pty.writeAll(seq);
         }
 
-        try self.client.writeText(chunk, null, null);
+        // Child reaped -> its slave is closed -> the reader's next master
+        // read returns EOF/EIO and the thread exits on its own.
+        reader.join();
+    }
+
+    /// Context for `ptyReaderThread`. `master` is owned by `runCommand`
+    /// (which closes it after the thread joins); the thread only reads it.
+    const PtyReaderCtx = struct {
+        prompt: *Prompt,
+        master: std.c.fd_t,
+    };
+
+    /// Reads the pty master and mirrors it onto the grid via `write_text`
+    /// with the default foreground -- `Layer.writeText` interprets the
+    /// child's own SGR colour + simple cursor/erase sequences (Phase A),
+    /// so no line-splitting or cursor bookkeeping is needed here (a pty
+    /// also merges the child's stdout and stderr onto the one fd).
+    ///
+    /// The first bytes are sniffed for `glyphwire.handshake_marker`: once
+    /// a definite answer is in, an aware child's remaining output goes to
+    /// this process's real stdout instead (it's drawing over its own wire
+    /// connection), a plain child's keeps mirroring. Runs until the master
+    /// hits EOF/EIO, which happens right after the child exits. Errors are
+    /// logged at worst, never propagated -- there's no caller waiting.
+    fn ptyReaderThread(ctx: *PtyReaderCtx) void {
+        const self = ctx.prompt;
+        const alloc = self.client.alloc;
+        const io = self.client.io;
+
+        var pending: std.ArrayList(u8) = .empty; // held until the handshake resolves
+        defer pending.deinit(alloc);
+        var aware: ?bool = null;
+
+        var out_buf: [512]u8 = undefined;
+        var real_out = std.Io.File.stdout().writer(io, &out_buf);
+
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            var pfd = [_]std.posix.pollfd{.{ .fd = ctx.master, .events = std.posix.POLL.IN, .revents = 0 }};
+            _ = std.posix.poll(&pfd, 1000) catch break;
+            if (pfd[0].revents == 0) continue; // timeout, nothing ready
+
+            const n = std.c.read(ctx.master, &buf, buf.len);
+            if (n <= 0) break; // EOF, or EIO once the slave is fully closed
+            const chunk = buf[0..@intCast(n)];
+
+            if (aware == null) {
+                pending.appendSlice(alloc, chunk) catch break;
+                aware = hs.aware(pending.items);
+                if (aware == null) continue; // still a prefix of the marker
+                const body = if (aware.?) pending.items[hs.marker.len..] else pending.items;
+                emitChunk(self, &real_out, aware.?, body);
+                pending.clearRetainingCapacity();
+                continue;
+            }
+            emitChunk(self, &real_out, aware.?, chunk);
+        }
+
+        // EOF before the handshake could resolve (total output shorter
+        // than the marker) -> treat as a plain child, flush what we held.
+        if (aware == null and pending.items.len > 0) {
+            emitChunk(self, &real_out, false, pending.items);
+        }
+    }
+
+    /// One chunk from `ptyReaderThread`: onto the grid (plain child) or to
+    /// this process's real stdout (aware child). Best-effort -- a write
+    /// failure here has nowhere useful to go.
+    fn emitChunk(self: *Prompt, real_out: *std.Io.File.Writer, aware: bool, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        if (aware) {
+            real_out.interface.writeAll(bytes) catch {};
+            real_out.interface.flush() catch {};
+        } else {
+            self.client.writeText(bytes, null, null) catch {};
+        }
     }
 
     /// `cd` is a shell builtin, not a spawned program -- unlike
@@ -1597,44 +1597,3 @@ const Prompt = struct {
     }
 };
 
-/// Resolves a wire-level key name (see `client.zig`'s doc comment --
-/// `@tagName` of pixzig's GLFW-backed key enum, e.g. "a", "left_bracket")
-/// to the character it types, mirroring pixzig's own `charFromKey` table
-/// without depending on pixzig (shell has no such dependency -- see this
-/// file's top doc comment). Returns null for non-printable keys.
-fn charFromKeyName(key: []const u8, shift: bool) ?u8 {
-    if (key.len == 1) {
-        const ch = key[0];
-        if (ch >= 'a' and ch <= 'z') return if (shift) ch - 32 else ch;
-    }
-
-    const Entry = struct { name: []const u8, plain: u8, shifted: u8 };
-    const table = [_]Entry{
-        .{ .name = "zero", .plain = '0', .shifted = ')' },
-        .{ .name = "one", .plain = '1', .shifted = '!' },
-        .{ .name = "two", .plain = '2', .shifted = '@' },
-        .{ .name = "three", .plain = '3', .shifted = '#' },
-        .{ .name = "four", .plain = '4', .shifted = '$' },
-        .{ .name = "five", .plain = '5', .shifted = '%' },
-        .{ .name = "six", .plain = '6', .shifted = '^' },
-        .{ .name = "seven", .plain = '7', .shifted = '&' },
-        .{ .name = "eight", .plain = '8', .shifted = '*' },
-        .{ .name = "nine", .plain = '9', .shifted = '(' },
-        .{ .name = "space", .plain = ' ', .shifted = ' ' },
-        .{ .name = "apostrophe", .plain = '\'', .shifted = '"' },
-        .{ .name = "comma", .plain = ',', .shifted = '<' },
-        .{ .name = "minus", .plain = '-', .shifted = '_' },
-        .{ .name = "period", .plain = '.', .shifted = '>' },
-        .{ .name = "slash", .plain = '/', .shifted = '?' },
-        .{ .name = "semicolon", .plain = ';', .shifted = ':' },
-        .{ .name = "equal", .plain = '=', .shifted = '+' },
-        .{ .name = "left_bracket", .plain = '[', .shifted = '{' },
-        .{ .name = "backslash", .plain = '\\', .shifted = '|' },
-        .{ .name = "right_bracket", .plain = ']', .shifted = '}' },
-        .{ .name = "grave_accent", .plain = '`', .shifted = '~' },
-    };
-    for (table) |e| {
-        if (std.mem.eql(u8, key, e.name)) return if (shift) e.shifted else e.plain;
-    }
-    return null;
-}
