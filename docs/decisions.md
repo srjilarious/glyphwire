@@ -330,6 +330,22 @@ surface.
   the host's render pass draws it after that cell's background *and*
   grapheme, so it's always on top, with the same tile-vs-defer split
   `style.bg`'s `.icon` case already uses for `.natural`'s overflow.
+- **`fg_icon` renders through the overlay batch, not the sprite batch.**
+  `pixzig.Renderer` buffers each frame's draw calls into per-kind
+  batches and flushes them in a fixed order at `end()` — sprites, then
+  shapes (`drawFilledRect`), then overlays, then text — so painter's
+  order between a sprite and a `drawFilledRect` is *not* the call order:
+  a plain sprite always ends up under every fill that frame. A color
+  background (`style.bg`'s `.color` case, e.g. a table's `alt_row_bg`
+  stripe) is such a fill, so a `fg_icon` drawn as an ordinary sprite is
+  hidden by it completely — which is exactly what happened to
+  `glyphwire-ls -l`'s row icons once they moved to `fg_icon`. The host
+  draws `fg_icon`s (immediate *and* deferred-for-`.natural`) via
+  `drawOverlayTexture`, whose batch flushes after shapes, so the icon's
+  alpha blends over the fill and the background color still shows
+  through the icon's transparent pixels. `style.bg`'s `.icon` case stays
+  on the plain sprite batch: it replaces the background outright, so
+  nothing is fill-drawn for that cell to cover it.
 
 **Box**
 - `draw_box` shares `Background.icon` with `draw_icon` (each of the 9

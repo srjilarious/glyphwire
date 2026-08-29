@@ -209,7 +209,22 @@ pub const App = struct {
     /// (there's no leftover space to align within), but still apply to
     /// `.fit`/`.natural` to place the (possibly smaller, possibly bigger)
     /// result within the cell's bounds.
-    fn drawIconCell(self: *App, eng: *AppRunner.Engine, icon: glyphwire.IconBg, pos: pixzig.Vec2I) void {
+    ///
+    /// `foreground` picks the batch this icon's quad goes into.
+    /// `pixzig.Renderer` flushes its batches in a fixed order at
+    /// `end()` -- sprites, then shapes (`drawFilledRect`), then overlays,
+    /// then text -- so a plain sprite draw (`foreground == false`) always
+    /// ends up *under* every `drawFilledRect` this frame, regardless of
+    /// call order. A cell whose background is a color (`style.bg`'s
+    /// `.color` case, e.g. a table's `alt_row_bg` stripe) is exactly such
+    /// a `drawFilledRect`; an icon that has to sit on top of it -- every
+    /// `Cell.fg_icon`, per that field's doc comment -- must go through the
+    /// overlay batch instead (`foreground == true`), which flushes after
+    /// shapes, so its alpha blends over the fill rather than being hidden
+    /// by it. `style.bg`'s own `.icon` case replaces the background
+    /// outright (no fill is drawn for that cell), so it stays on the
+    /// plain sprite batch.
+    fn drawIconCell(self: *App, eng: *AppRunner.Engine, icon: glyphwire.IconBg, pos: pixzig.Vec2I, foreground: bool) void {
         const entry = self.server.ctx.images.get(icon.handle) orelse return;
         const tex = self.textureForImage(eng, icon.handle) orelse return;
         if (entry.width == 0 or entry.height == 0) return;
@@ -246,18 +261,24 @@ pub const App = struct {
             .end => cell_h_f - dest_h,
         };
 
-        eng.renderer.draw(
-            tex,
-            pixzig.RectF{ .l = dest_x, .t = dest_y, .r = dest_x + dest_w, .b = dest_y + dest_h },
-            pixzig.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b },
-        );
+        const dest = pixzig.RectF{ .l = dest_x, .t = dest_y, .r = dest_x + dest_w, .b = dest_y + dest_h };
+        const src = pixzig.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b };
+        if (foreground) {
+            eng.renderer.drawOverlayTexture(tex, dest, src);
+        } else {
+            eng.renderer.draw(tex, dest, src);
+        }
     }
 
     /// One `.natural`-scale icon whose draw is deferred past the rest of
     /// `renderLayer`'s grid -- see `drawIconCell`'s doc comment.
+    /// `foreground` is carried through to `drawIconCell` so a deferred
+    /// `Cell.fg_icon` still lands in the overlay batch (on top of row
+    /// backgrounds), not the plain sprite batch.
     const DeferredIcon = struct {
         icon: glyphwire.IconBg,
         pos: pixzig.Vec2I,
+        foreground: bool,
     };
 
     pub fn update(self: *App, eng: *AppRunner.Engine, deltaTimeMs: f64) bool {
@@ -443,9 +464,9 @@ pub const App = struct {
                         // hasn't reached yet, so it's deferred past the
                         // whole grid -- see `drawIconCell`'s doc comment.
                         if (icon.scale == .natural) {
-                            self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos }) catch {};
+                            self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos, .foreground = false }) catch {};
                         } else {
-                            self.drawIconCell(eng, icon, pos);
+                            self.drawIconCell(eng, icon, pos, false);
                         }
                     },
                 }
@@ -455,15 +476,19 @@ pub const App = struct {
                     _ = eng.renderer.drawStringColored(g, pos, pixzig.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
                 }
 
-                // `fg_icon` (`draw_icon`'s `foreground: true` -- see
-                // `core.Cell.fg_icon`'s doc comment) draws over whatever
-                // this cell's own background/glyph just drew, same
-                // tile/natural-defer split as `style.bg`'s `.icon` above.
+                // `fg_icon` (`draw_icon`'s `foreground: true`, and every
+                // table body icon -- see `core.Cell.fg_icon`'s doc
+                // comment) draws over whatever this cell's own
+                // background/glyph just drew, same tile/natural-defer
+                // split as `style.bg`'s `.icon` above. It goes through the
+                // overlay batch (`foreground = true`) so it lands on top
+                // of any `drawFilledRect` row background, not under it --
+                // see `drawIconCell`'s doc comment.
                 if (c.fg_icon) |icon| {
                     if (icon.scale == .natural) {
-                        self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos }) catch {};
+                        self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos, .foreground = true }) catch {};
                     } else {
-                        self.drawIconCell(eng, icon, pos);
+                        self.drawIconCell(eng, icon, pos, true);
                     }
                 }
             }
@@ -472,9 +497,11 @@ pub const App = struct {
         // `.natural`-scale icons deferred above: drawn now, after the
         // whole grid, so an icon's overflow always paints over every
         // cell's own background/glyph regardless of row/col draw order --
-        // see `drawIconCell`'s doc comment.
+        // see `drawIconCell`'s doc comment. `d.foreground` routes each to
+        // the same batch (sprite vs overlay) its immediate-draw
+        // counterpart would have used.
         for (self.deferred_icons.items) |d| {
-            self.drawIconCell(eng, d.icon, d.pos);
+            self.drawIconCell(eng, d.icon, d.pos, d.foreground);
         }
 
         // Cursor caret: a solid bar at the start (left edge) of the
