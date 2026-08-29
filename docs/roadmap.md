@@ -787,7 +787,19 @@ change; `api.md` untouched.
   anyway.
 - **Style attributes beyond fg/bg** (bold, italic, underline,
   strikethrough, dim) — needs both a `Style` bitflag field and renderer
-  support.
+  support. Also the prerequisite for Phase A of the libghostty
+  investigation below.
+- **VT100/PTY-capable fallback via libghostty** — investigation written
+  up in `docs/investigations/libghostty-vt-fallback.md` (not yet a
+  committed plan). Two sizes: Phase A grows `Layer`'s escape *stripper*
+  into an SGR + basic-CSI *interpreter* for the mirrored plain-command
+  output path (uses the already-installed `libghostty-vt` 0.1.0 SGR
+  parser; no pty, no stdin), Phase B is the full-screen-TUI fallback (a
+  pty inside `glyphwire-shell`, a full VT model, screen-diff transpiled
+  to existing `write_text`/`set_property`/`clear` messages). Phase B's VT
+  model waits on `libghostty-vt` tagging its Terminal C API (unreleased),
+  with vendoring ghostty's Zig `terminal` module as the escalation valve.
+  See the doc for the three paths and the recommended phasing.
 - **Capability negotiation (`initialize`/`initialized`).** Should land
   before or alongside Phase 3 — decisions.md explicitly calls out image
   formats as something the server *advertises*, which needs the
