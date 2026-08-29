@@ -630,17 +630,21 @@ top of it.
   `Client.writeTextOnTransparent` and shows the actual gradient through
   the text, not an approximation of it.
 
-## `glyphwire-ls` grid columns, size colors, perms padding
+## `glyphwire-ls` grid columns, size colors, perms padding, multi-operand + file operands
 
-Three display refinements to `glyphwire-ls`, all client-local (no wire
-protocol change — `docs/api.md` and `docs/decisions.md` untouched):
+A batch of `glyphwire-ls` improvements, all client-local (no wire
+protocol change — `docs/api.md` and `docs/decisions.md` untouched). The
+pure helpers now live under the `ls_support` module: `ls/support.zig`
+re-exports `ls/gridlayout.zig` (column-packing math) and `ls/format.zig`
+(size / permission-bit / timestamp formatting), so `tests/ls_tests.zig`
+can exercise them directly — same split `shell/support.zig` has.
 
 - **The plain (non `-l`) listing packs into columns.** It used to write
   one entry per row; the original doc comment even called out "no
   terminal-width grid packing (doesn't mean anything over a fixed-size
   cell grid)" — which stopped being true once `get_property("size")`
-  exposed the layer width. New pure module `ls/gridlayout.zig` (the
-  `ls_support` build module, same cross-directory-`@import` dodge
+  exposed the layer width. New pure module `ls/gridlayout.zig` (under the
+  `ls_support` module, same cross-directory-`@import` dodge
   `shell_support` uses so `tests/ls_tests.zig` can reach it): given the
   entry count, the longest entry's display width, and the layer width, it
   picks how many entry columns fit and returns a `Grid` (columns, rows
@@ -665,12 +669,33 @@ protocol change — `docs/api.md` and `docs/decisions.md` untouched):
   chars and left-aligned, so the extra cell is a trailing blank; Perms is
   the last column, so it reads as a right margin on every row (the
   `alt_row_bg` stripe included).
+- **Multiple operands, and file (not just directory) operands.**
+  `classifyAndList` splits the command-line operands (default `["."]`)
+  into the coreutils render layout: one headerless block for every
+  non-directory operand (collected together, name-sorted), then one block
+  per directory operand, each under an `<operand>:` header — headers only
+  appear when there's more than one block, so a lone `ls` / `ls somedir`
+  is unchanged. Blocks are separated by a blank row. A file operand is
+  stat'd without following symlinks (a symlink operand shows as
+  `name -> target`, not expanded), and `FileEntry` grew an `abs_path`
+  field so a block that mixes directories still tags each entry's
+  metadata with its own real path (`writeGrid`/`writeLongTable` dropped
+  their single `abs_dir_path` param).
+- **`-l` total line.** Each `-l` block gets a coreutils-style `total`
+  line above it. coreutils counts 512-byte disk blocks; no cross-platform
+  block count is available (`std.Io.File.Stat` is byte size only), so
+  this sums the entries' byte sizes and formats them like the Size
+  column (`--bytes` included).
+- **`-h` / `--bytes` size format.** `--bytes` prints raw integer byte
+  counts instead of KB/MB/GB (and widens the `-l` Size column to fit);
+  `-h` / `--human` is the explicit opposite and wins if both are passed.
+  The human form stays the default, so plain `glyphwire-ls -l` is
+  unchanged.
 
 Not done (candidate next steps): sort flags (by mtime / size / reversed —
 note `-S` is already taken for "small format", so a size sort needs a
 different letter or a `--sort=` option), `-d` (list the directory entry
-itself, not its contents), multiple path operands, a total/summary line,
-recursive `-R`, and a real `-h`/`--bytes` toggle for the size format.
+itself, not its contents), and recursive `-R`.
 
 ## Further out (sequencing noted, not detailed yet)
 

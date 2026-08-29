@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     // Pure column-packing math shared by glyphwire-ls and its test runner,
     // same cross-directory-module reason as `shell_support` above.
     const ls_support_mod = b.addModule("ls_support", .{
-        .root_source_file = b.path("ls/gridlayout.zig"),
+        .root_source_file = b.path("ls/support.zig"),
     });
 
     const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });

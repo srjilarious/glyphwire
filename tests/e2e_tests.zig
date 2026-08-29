@@ -937,6 +937,97 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr(">", ctx.root.cell(0, 59).grapheme()); // "clink -> afile.txt"
 }
 
+/// Proves the multi-operand + file-operand path (`classifyAndList` in
+/// ls/main.zig): a non-directory operand and a directory operand
+/// together produce the coreutils layout -- the loose file first with no
+/// header, then the directory under an `<operand>:` header, on a later
+/// row. Uses the real binary like `lsClientWritesEntriesOverRealSocketTest`.
+pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tmp_name = try std.fmt.allocPrint(alloc, "glyphwire-ls-multi-e2e-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(tmp_name);
+    try std.Io.Dir.cwd().createDirPath(io, tmp_name);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_name) catch {};
+    var tmp_dir = try std.Io.Dir.cwd().openDir(io, tmp_name, .{ .iterate = true });
+    defer tmp_dir.close(io);
+
+    (try tmp_dir.createFile(io, "zeta.txt", .{})).close(io);
+    try tmp_dir.createDir(io, "sub", .default_dir);
+    var sub_dir = try tmp_dir.openDir(io, "sub", .{});
+    defer sub_dir.close(io);
+    (try sub_dir.createFile(io, "inner.txt", .{})).close(io);
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-ls-multi-e2e-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    errdefer thread.join();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const ls_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/ls", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(ls_path);
+
+    const file_operand = try std.fmt.allocPrint(alloc, "{s}/zeta.txt", .{tmp_name});
+    defer alloc.free(file_operand);
+    const dir_operand = try std.fmt.allocPrint(alloc, "{s}/sub", .{tmp_name});
+    defer alloc.free(dir_operand);
+
+    var environ_map = std.process.Environ.Map.init(alloc);
+    defer environ_map.deinit();
+    try environ_map.put("GLYPHWIRE_SOCK", socket_path);
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ ls_path, file_operand, dir_operand },
+        .environ_map = &environ_map,
+    });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| try testz.expectEqual(code, 0),
+        else => return error.TestUnexpectedResult,
+    }
+    thread.join();
+
+    // The loose file block is first, headerless, on row 0: its name is
+    // the operand string as typed ("<tmp>/zeta.txt"), drawn after the
+    // icon reserve (col 4). `tmp_name` starts with 'g'.
+    try testz.expectEqualStr("g", ctx.root.cell(0, 4).grapheme());
+
+    // Find the row where "inner.txt" was written (col 4 onward), and
+    // assert the row above it is the "<tmp>/sub:" header -- starts with
+    // 'g', ends in ':'.
+    var inner_row: ?usize = null;
+    var r: usize = 1;
+    while (r < 24) : (r += 1) {
+        if (ctx.root.cell(r, 4).grapheme().len == 1 and ctx.root.cell(r, 4).grapheme()[0] == 'i' and
+            ctx.root.cell(r, 5).grapheme().len == 1 and ctx.root.cell(r, 5).grapheme()[0] == 'n')
+        {
+            inner_row = r;
+            break;
+        }
+    }
+    try testz.expectTrue(inner_row != null);
+    const header_row = inner_row.? - 1;
+    try testz.expectEqualStr("g", ctx.root.cell(header_row, 0).grapheme());
+    var saw_colon = false;
+    var c: usize = 0;
+    while (c < 60) : (c += 1) {
+        const g = ctx.root.cell(header_row, c).grapheme();
+        if (g.len == 1 and g[0] == ':') saw_colon = true;
+    }
+    try testz.expectTrue(saw_colon);
+}
+
 /// Polls get_cells (briefly) until `cell(row,col)`'s grapheme matches, so
 /// this test doesn't race the shell's own asynchronous processing with a
 /// guessed fixed delay. 1000 attempts (~10s worst case) rather than a

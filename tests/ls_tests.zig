@@ -2,9 +2,10 @@ const std = @import("std");
 const testz = @import("testz");
 
 // glyphwire-ls is an executable (no importable module), but its pure
-// column-packing math is gathered into the `ls_support` module (see
-// build.zig) precisely so it can be exercised here.
-const gridlayout = @import("ls_support");
+// helpers are gathered into the `ls_support` module (see build.zig)
+// precisely so they can be exercised here.
+const gridlayout = @import("ls_support").gridlayout;
+const lsfmt = @import("ls_support").format;
 
 const small_opts: gridlayout.Options = .{ .icon_cols = 2, .block_rows = 1 };
 
@@ -103,4 +104,48 @@ pub fn truncateCountsCodepointsNotBytesTest(_: std.Io, _: std.mem.Allocator) !vo
     const out = gridlayout.truncateToCols(&buf, six, 5);
     try testz.expectEqual(std.unicode.utf8CountCodepoints(out) catch 0, 5);
     try testz.expectEqualStr(out, "éééé\u{2026}");
+}
+
+// ─── lsfmt.formatSize ───────────────────────────────────────────────────
+
+pub fn formatSizeRawIsExactByteCountTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [24]u8 = undefined;
+    try testz.expectEqualStr(lsfmt.formatSize(&buf, 0, true), "0");
+    try testz.expectEqualStr(lsfmt.formatSize(&buf, 1536, true), "1536");
+    try testz.expectEqualStr(lsfmt.formatSize(&buf, 18446744073709551615, true), "18446744073709551615");
+}
+
+pub fn formatSizeHumanBucketsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [24]u8 = undefined;
+    try testz.expectEqualStr(lsfmt.formatSize(&buf, 512, false), " 512 B ");
+    try testz.expectEqualStr(lsfmt.formatSize(&buf, 1536, false), "  1.5 KB");
+    try testz.expectEqualStr(lsfmt.formatSize(&buf, 5 * 1024 * 1024, false), "  5.0 MB");
+    try testz.expectEqualStr(lsfmt.formatSize(&buf, 3 * 1024 * 1024 * 1024, false), "  3.0 GB");
+}
+
+// ─── lsfmt.formatPermBits ──────────────────────────────────────────────
+
+pub fn formatPermBitsRegularFileTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [10]u8 = undefined;
+    // S_IFREG (type nibble 8) | 0o644
+    try testz.expectEqualStr(lsfmt.formatPermBits(&buf, (8 << 12) | 0o644), "-rw-r--r--");
+}
+
+pub fn formatPermBitsDirectoryAndSymlinkTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [10]u8 = undefined;
+    // S_IFDIR (type nibble 4) | 0o755
+    try testz.expectEqualStr(lsfmt.formatPermBits(&buf, (4 << 12) | 0o755), "drwxr-xr-x");
+    // S_IFLNK (type nibble 10) | 0o777
+    try testz.expectEqualStr(lsfmt.formatPermBits(&buf, (10 << 12) | 0o777), "lrwxrwxrwx");
+}
+
+// ─── lsfmt.formatTimestamp ─────────────────────────────────────────────
+
+pub fn formatTimestampEpochAndNegativeTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [20]u8 = undefined;
+    try testz.expectEqualStr(lsfmt.formatTimestamp(&buf, 0), "1970-01-01 00:00");
+    // 2021-01-01 00:00:00 UTC
+    try testz.expectEqualStr(lsfmt.formatTimestamp(&buf, 1609459200), "2021-01-01 00:00");
+    // Negative (pre-epoch / unset) yields an empty string.
+    try testz.expectEqual(lsfmt.formatTimestamp(&buf, -1).len, 0);
 }

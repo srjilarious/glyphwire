@@ -1,7 +1,8 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
-const gridlayout = @import("ls_support");
+const gridlayout = @import("ls_support").gridlayout;
+const lsfmt = @import("ls_support").format;
 
 /// glyphwire-ls: a directory listing built on `lsz`'s core scanning logic
 /// (see /home/jeffdw/code/lsz/src/main.zig) but re-targeted to draw over a
@@ -57,6 +58,8 @@ pub fn main(init: std.process.Init) !void {
             .{ .longName = "long", .shortName = "l", .description = "Long listing: adds size and modified time", .maxNumParams = 0 },
             .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger, naturally-scaled icons (3-line-tall rows in a long listing). Wins over -S if both are given", .maxNumParams = 0 },
             .{ .longName = "small", .shortName = "S", .description = "Small format: icons fit into one cell/line, in both the normal and long (-l) listing", .maxNumParams = 0 },
+            .{ .longName = "human", .shortName = "h", .description = "Human-readable sizes (KB/MB/GB) -- the default; the explicit opposite of --bytes", .maxNumParams = 0 },
+            .{ .longName = "bytes", .description = "Show sizes as a raw byte count instead of KB/MB/GB (wins unless -h is also given)", .maxNumParams = 0 },
             .{ .longName = "help", .description = "Print help" },
         },
     });
@@ -82,29 +85,48 @@ pub fn main(init: std.process.Init) !void {
     const long_list = args.hasOption("long");
     const large_flag = args.hasOption("large");
     const small_flag = args.hasOption("small");
-    const dir_path: []const u8 = if (args.positional.items.len > 0) args.positional.items[0] else ".";
+    // `--bytes` shows raw byte counts; `-h`/`--human` is the explicit
+    // opposite and wins if both are passed (so `ls -h` under an aliased
+    // `--bytes` still gets the readable format).
+    const raw_bytes = args.hasOption("bytes") and !args.hasOption("human");
 
-    const entries = try listDir(io, alloc, dir_path, show_hidden, long_list);
-    defer freeEntries(alloc, entries);
+    const default_operand = [_][]const u8{"."};
+    const operands: []const []const u8 = if (args.positional.items.len > 0) args.positional.items else &default_operand;
+
+    const listings = try classifyAndList(io, alloc, operands, show_hidden, long_list);
+    defer freeListings(alloc, listings);
 
     if (glyphwire.Client.connectFromEnv(io, alloc, init.environ_map)) |connected| {
         var client = connected;
         defer client.deinit();
-        const abs_dir_path = try resolveAbsolutePath(io, alloc, dir_path);
-        defer alloc.free(abs_dir_path);
         // Large icons by default in both views; `-S` opts into small ones
         // (also in both); `-L` wins if both are given, so it can force
         // large back on even under an inherited/aliased `-S`. Resolved
         // here rather than threaded through as three-way state, so
         // `writeGrid`/`writeLongTable` only ever see a plain `large: bool`.
         const large = large_flag or !small_flag;
-        if (long_list) {
-            try writeLongTable(&client, entries, abs_dir_path, large);
-        } else {
-            try writeGrid(&client, entries, abs_dir_path, large);
+        for (listings, 0..) |listing, i| {
+            // A blank separator row between blocks (only when there's more
+            // than one).
+            if (i > 0) {
+                const c = try client.getCursor();
+                try client.setCursor(c.row + 1, 0);
+            }
+            if (listing.header) |h| {
+                const c = try client.getCursor();
+                try client.setCursor(c.row, 0);
+                try client.writeText(h, header_color, null);
+                const c2 = try client.getCursor();
+                try client.setCursor(c2.row + 1, 0);
+            }
+            if (long_list) {
+                try writeLongTable(&client, listing.entries, large, raw_bytes);
+            } else {
+                try writeGrid(&client, listing.entries, large);
+            }
         }
     } else |_| {
-        try writePlain(io, entries, long_list);
+        try writePlain(io, listings, long_list, raw_bytes);
     }
 }
 
@@ -127,11 +149,30 @@ const FileEntry = struct {
     name: []const u8,
     kind: EntryKind,
     link_target: ?[]const u8, // non-null for symlinks; caller owns memory
+    /// Absolute, `.`/`..`-normalized path to this entry -- what the
+    /// metadata tag's `path` field carries for `glyphwire-shell`'s
+    /// `browseEnter`. Stored per entry rather than joined on the fly in
+    /// `writeGrid`/`writeLongTable` because a single listing can now mix
+    /// entries from different directories (the "loose files" block a
+    /// multi-operand run builds -- see `classifyAndList`). Caller owns.
+    abs_path: []const u8,
     size: u64 = 0,
     mtime_sec: i64 = 0,
     /// Raw POSIX mode bits (file type nibble + setuid/setgid/sticky +
     /// user/group/all rwx), only populated with `-l` -- see `FileMode`.
     mode: u16 = 0,
+};
+
+/// One rendered block: a group of entries under an optional header. A
+/// single-operand run produces exactly one (headerless) `Listing`;
+/// multiple operands produce the coreutils layout -- one headerless block
+/// for all the non-directory operands, then one headed block per
+/// directory operand (see `classifyAndList`).
+const Listing = struct {
+    /// `"<operand>:"` printed above the entries, or null for a lone
+    /// unlabeled block.
+    header: ?[]const u8,
+    entries: []FileEntry,
 };
 
 fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidden: bool, long_list: bool) ![]FileEntry {
@@ -143,6 +184,11 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
         return entries.toOwnedSlice(alloc);
     };
     defer dir.close(io);
+
+    // Resolved once here; each entry's `abs_path` is this joined with the
+    // entry name (see `FileEntry.abs_path`).
+    const dir_abs = try resolveAbsolutePath(io, alloc, dir_path);
+    defer alloc.free(dir_abs);
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
@@ -184,31 +230,159 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
         }
 
         const name_copy = try alloc.dupe(u8, entry.name);
+        errdefer alloc.free(name_copy);
+        const abs_path = try std.fs.path.join(alloc, &.{ dir_abs, entry.name });
+        errdefer alloc.free(abs_path);
         try entries.append(alloc, .{
             .name = name_copy,
             .kind = kind,
             .link_target = link_target,
+            .abs_path = abs_path,
             .size = size,
             .mtime_sec = mtime_sec,
             .mode = mode,
         });
     }
 
-    std.mem.sort(FileEntry, entries.items, {}, struct {
+    sortEntries(entries.items);
+    return entries.toOwnedSlice(alloc);
+}
+
+fn sortEntries(entries: []FileEntry) void {
+    std.mem.sort(FileEntry, entries, {}, struct {
         fn lessThan(_: void, a: FileEntry, b: FileEntry) bool {
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);
+}
 
-    return entries.toOwnedSlice(alloc);
+/// Build a `FileEntry` for a single path named directly on the command
+/// line that isn't a directory (a file, a symlink, a device node). Stats
+/// it without following symlinks -- a symlink operand shows as
+/// `name -> target`, same "don't follow" choice `listDir` makes for a
+/// directory's contents -- so a symlink that happens to point at a
+/// directory is listed as the link itself, not expanded. Returns null
+/// (after logging) if the path can't be stat'd. Caller owns every slice
+/// in the result, same as `listDir`'s entries.
+fn statOperand(io: std.Io, alloc: std.mem.Allocator, path: []const u8, long_list: bool) !?FileEntry {
+    const st = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| {
+        std.log.err("glyphwire-ls: cannot access {s}: {t}", .{ path, err });
+        return null;
+    };
+
+    const kind: EntryKind = switch (st.kind) {
+        .directory => .directory,
+        .file => .file,
+        .sym_link => .sym_link,
+        else => .other,
+    };
+
+    var link_target: ?[]const u8 = null;
+    if (kind == .sym_link) {
+        var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        if (std.Io.Dir.cwd().readLink(io, path, &target_buf)) |len| {
+            link_target = try alloc.dupe(u8, target_buf[0..len]);
+        } else |_| {}
+    }
+    errdefer if (link_target) |t| alloc.free(t);
+
+    const name_copy = try alloc.dupe(u8, path);
+    errdefer alloc.free(name_copy);
+    const abs_path = try resolveAbsolutePath(io, alloc, path);
+
+    return .{
+        .name = name_copy,
+        .kind = kind,
+        .link_target = link_target,
+        .abs_path = abs_path,
+        .size = if (long_list) st.size else 0,
+        .mtime_sec = if (long_list) st.mtime.toSeconds() else 0,
+        .mode = if (long_list) @truncate(st.permissions.toMode()) else 0,
+    };
+}
+
+/// Split the command-line operands (default `["."]`) into the coreutils
+/// render layout: one headerless `Listing` for every non-directory
+/// operand (collected together, name-sorted), followed by one `Listing`
+/// per directory operand holding that directory's contents. Headers
+/// (`"<operand>:"`) are attached only when there's more than one block to
+/// draw -- a lone directory (the common `ls` / `ls somedir` case) stays
+/// unlabeled. Directory operands are listed in the order given.
+fn classifyAndList(io: std.Io, alloc: std.mem.Allocator, operands: []const []const u8, show_hidden: bool, long_list: bool) ![]Listing {
+    var listings: std.ArrayList(Listing) = .empty;
+    errdefer {
+        for (listings.items) |l| {
+            if (l.header) |h| alloc.free(h);
+            freeEntries(alloc, l.entries);
+        }
+        listings.deinit(alloc);
+    }
+
+    var loose: std.ArrayList(FileEntry) = .empty;
+    errdefer freeEntries(alloc, loose.items);
+    var dir_ops: std.ArrayList([]const u8) = .empty;
+    defer dir_ops.deinit(alloc);
+
+    for (operands) |op| {
+        const is_dir = blk: {
+            const st = std.Io.Dir.cwd().statFile(io, op, .{ .follow_symlinks = false }) catch break :blk false;
+            break :blk st.kind == .directory;
+        };
+        if (is_dir) {
+            try dir_ops.append(alloc, op);
+        } else if (try statOperand(io, alloc, op, long_list)) |entry| {
+            try loose.append(alloc, entry);
+        }
+    }
+    sortEntries(loose.items);
+
+    const block_count = dir_ops.items.len + @as(usize, if (loose.items.len > 0) 1 else 0);
+    const need_headers = block_count > 1;
+
+    if (loose.items.len > 0) {
+        const owned = try loose.toOwnedSlice(alloc); // `loose` is now empty
+        listings.append(alloc, .{ .header = null, .entries = owned }) catch |err| {
+            freeEntries(alloc, owned);
+            return err;
+        };
+    } else {
+        loose.clearAndFree(alloc); // leaves `loose` in the empty state
+    }
+
+    for (dir_ops.items) |dir_op| {
+        const entries = try listDir(io, alloc, dir_op, show_hidden, long_list);
+        const header: ?[]const u8 = if (need_headers)
+            std.fmt.allocPrint(alloc, "{s}:", .{dir_op}) catch |err| {
+                freeEntries(alloc, entries);
+                return err;
+            }
+        else
+            null;
+        listings.append(alloc, .{ .header = header, .entries = entries }) catch |err| {
+            if (header) |h| alloc.free(h);
+            freeEntries(alloc, entries);
+            return err;
+        };
+    }
+
+    return listings.toOwnedSlice(alloc);
 }
 
 fn freeEntries(alloc: std.mem.Allocator, entries: []const FileEntry) void {
     for (entries) |e| {
         alloc.free(e.name);
         if (e.link_target) |t| alloc.free(t);
+        alloc.free(e.abs_path);
     }
     alloc.free(entries);
+}
+
+fn freeListings(alloc: std.mem.Allocator, listings: []Listing) void {
+    for (listings) |l| {
+        if (l.header) |h| alloc.free(h);
+        freeEntries(alloc, l.entries);
+    }
+    alloc.free(listings);
 }
 
 // ── Styling ────────────────────────────────────────────────────────────────
@@ -221,6 +395,9 @@ const dir_color = rgb(98, 114, 164);
 const symlink_color = rgb(139, 233, 253);
 const file_color = rgb(220, 220, 220);
 const detail_color = rgb(120, 120, 120);
+/// The `<operand>:` header printed above each block in a multi-operand
+/// listing, and the `total ...` summary line (`-l`).
+const header_color = rgb(200, 200, 200);
 
 /// Foreground color for a `-l` Size cell, ramped by magnitude so a large
 /// file stands out without reading the digits: sub-KB stays the same dim
@@ -230,9 +407,9 @@ const detail_color = rgb(120, 120, 120);
 /// per entry, not per digit -- the same reason `formatPermBits` doesn't
 /// color its flags individually.
 fn sizeColor(size: u64) glyphwire.Color {
-    if (size < KBytes) return detail_color;
-    if (size < MBytes) return rgb(120, 190, 120);
-    if (size < GBytes) return rgb(220, 180, 100);
+    if (size < lsfmt.KBytes) return detail_color;
+    if (size < lsfmt.MBytes) return rgb(120, 190, 120);
+    if (size < lsfmt.GBytes) return rgb(220, 180, 100);
     return rgb(225, 120, 110);
 }
 
@@ -396,88 +573,10 @@ fn mimetypeForExtension(name: []const u8) []const u8 {
 }
 
 // ── Long-listing formatting ─────────────────────────────────────────────────
-
-const KBytes: u64 = 1024;
-const MBytes: u64 = 1024 * KBytes;
-const GBytes: u64 = 1024 * MBytes;
-
-/// Bitfield view of `FileEntry.mode`'s raw POSIX mode bits -- lifted from
-/// lsz's identical `FileMode` (/home/jeffdw/code/lsz/src/main.zig), same
-/// field layout (LSB first: all/other bits, then group, then user, then
-/// setuid/setgid/sticky, then the file-type nibble in the top 4 bits,
-/// matching `st_mode`'s standard POSIX layout).
-const FileMode = packed struct(u16) {
-    all_x: bool,
-    all_w: bool,
-    all_r: bool,
-    group_x: bool,
-    group_w: bool,
-    group_r: bool,
-    user_x: bool,
-    user_w: bool,
-    user_r: bool,
-    sticky: bool,
-    setgid: bool,
-    setuid: bool,
-    type: u4,
-};
-
-/// `-l`'s permission column: a type character (`d`/`l`/`-`/... , same
-/// mapping lsz's `printLongEntry` uses) followed by the classic 9-character
-/// `rwxrwxrwx` triad (user, group, all -- `-` for an unset bit). Unlike
-/// lsz's version, this doesn't color each flag individually: a table cell
-/// carries one foreground color for its whole text (see `Table.cellStyled`),
-/// not per-character styling, and the type-character-plus-string shape
-/// reads clearly enough in the table's default color already.
-fn formatPermBits(buf: *[10]u8, mode: u16) []const u8 {
-    const fm: FileMode = @bitCast(mode);
-    buf[0] = switch (fm.type) {
-        4 => 'd',
-        8 => '-',
-        10 => 'l',
-        1 => 'p',
-        2 => 'c',
-        6 => 'b',
-        12 => 's',
-        else => '?',
-    };
-    buf[1] = if (fm.user_r) 'r' else '-';
-    buf[2] = if (fm.user_w) 'w' else '-';
-    buf[3] = if (fm.user_x) 'x' else '-';
-    buf[4] = if (fm.group_r) 'r' else '-';
-    buf[5] = if (fm.group_w) 'w' else '-';
-    buf[6] = if (fm.group_x) 'x' else '-';
-    buf[7] = if (fm.all_r) 'r' else '-';
-    buf[8] = if (fm.all_w) 'w' else '-';
-    buf[9] = if (fm.all_x) 'x' else '-';
-    return buf;
-}
-
-/// Human-readable size, right-padded to a fixed width so the timestamp
-/// that follows lines up across rows -- e.g. `  512 B`, ` 12.3 KB`.
-fn formatSize(buf: []u8, size: u64) []const u8 {
-    if (size < KBytes) return std.fmt.bufPrint(buf, "{d:>4} B ", .{size}) catch buf[0..0];
-    if (size < MBytes) return std.fmt.bufPrint(buf, "{d:>5.1} KB", .{@as(f64, @floatFromInt(size)) / @as(f64, @floatFromInt(KBytes))}) catch buf[0..0];
-    if (size < GBytes) return std.fmt.bufPrint(buf, "{d:>5.1} MB", .{@as(f64, @floatFromInt(size)) / @as(f64, @floatFromInt(MBytes))}) catch buf[0..0];
-    return std.fmt.bufPrint(buf, "{d:>5.1} GB", .{@as(f64, @floatFromInt(size)) / @as(f64, @floatFromInt(GBytes))}) catch buf[0..0];
-}
-
-/// `YYYY-MM-DD HH:MM`, purely from `std.time.epoch` -- no libc needed.
-fn formatTimestamp(buf: []u8, sec: i64) []const u8 {
-    if (sec < 0) return "";
-    const epoch: std.time.epoch.EpochSeconds = .{ .secs = @intCast(sec) };
-    const epoch_day = epoch.getEpochDay();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day_secs = epoch.getDaySeconds();
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
-        year_day.year,
-        month_day.month.numeric(),
-        month_day.day_index + 1,
-        day_secs.getHoursIntoDay(),
-        day_secs.getMinutesIntoHour(),
-    }) catch buf[0..0];
-}
+//
+// The size / permission-bit / timestamp formatters live in the pure
+// `ls_support` module (`ls/format.zig`, re-exported here as `lsfmt`) so
+// `tests/ls_tests.zig` can exercise them directly.
 
 // ── glyphwire output ──────────────────────────────────────────────────────
 
@@ -568,13 +667,13 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 /// complete and `setCursor` advances past it. Costs one extra request
 /// per band; fine over a local socket.
 ///
-/// `abs_dir_path` is the absolute (resolved against cwd if `dir_path` was
-/// relative) form of whatever directory was listed -- see `main`'s
-/// `resolveAbsolutePath` call. Every entry's metadata tag (below) embeds
-/// its full path, and a relative one would be ambiguous the moment
-/// anything reading it back (glyphwire-shell's `browseEnter`, eventually
-/// other tools) has a different cwd than this process did.
-fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8, large: bool) !void {
+/// Every entry's metadata tag (below) embeds its `abs_path` -- resolved
+/// once when the entry was scanned (see `FileEntry.abs_path`) -- so
+/// whatever reads it back (glyphwire-shell's `browseEnter`, eventually
+/// other tools) doesn't have to share this process's cwd, and a listing
+/// that mixes directories (the multi-operand loose-files block) still
+/// tags each entry with its own real path.
+fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool) !void {
     if (entries.len == 0) return;
     const alloc = client.alloc;
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
@@ -632,9 +731,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path
             // blob per cell. `mimetype`/`path` are the two fields
             // glyphwire-shell's `browseEnter` (word for word) and any
             // future context-menu client are expected to read.
-            const full_path = try std.fs.path.join(alloc, &.{ abs_dir_path, entry.name });
-            defer alloc.free(full_path);
-            const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = full_path }, .{});
+            const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = entry.abs_path }, .{});
             defer alloc.free(json);
             const metadata_id = try client.createMetadata(json);
 
@@ -758,9 +855,26 @@ const large_table_row_height = 3;
 /// prompt would land back on the table's own last row and overwrite it,
 /// the same "leave the cursor after the last thing drawn" contract
 /// `writeGrid` already honors for the plain listing.
-fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir_path: []const u8, large: bool) !void {
+fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: bool, raw_bytes: bool) !void {
     const alloc = client.alloc;
     const cur = try client.getCursor();
+
+    // coreutils prints a `total` line above a `-l` listing (there, a
+    // count of 512-byte disk blocks). No cross-platform block count is
+    // available here -- `std.Io.File.Stat` only gives byte size -- so
+    // this sums the entries' byte sizes instead and formats them the
+    // same way the Size column does (`--bytes` included). Written at the
+    // prompt's cursor; the table starts one row below it.
+    var total_bytes: u64 = 0;
+    for (entries) |e| total_bytes +|= e.size;
+    var total_num_buf: [24]u8 = undefined;
+    var total_line_buf: [40]u8 = undefined;
+    const total_line = std.fmt.bufPrint(&total_line_buf, "total {s}", .{
+        std.mem.trim(u8, lsfmt.formatSize(&total_num_buf, total_bytes, raw_bytes), " "),
+    }) catch "total ?";
+    try client.setCursor(cur.row, cur.col);
+    try client.writeText(total_line, header_color, null);
+    const table_row = cur.row + 1;
 
     // Size the Name column to what this listing actually contains
     // (clamped, see `min_name_width`/`max_name_width`) rather than a
@@ -777,9 +891,10 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir
     }
     const name_width = icon_reserve + name_text_width;
 
-    const table = try client.createTable(null, cur.row, cur.col, &.{
+    const table = try client.createTable(null, table_row, cur.col, &.{
         .{ .name = "Name", .width = name_width, .sortable = true },
-        .{ .name = "Size", .width = 8, .kind = .number, .h_align = .end, .sortable = true },
+        // Raw byte counts run to 10+ digits; the human form never past ~8.
+        .{ .name = "Size", .width = if (raw_bytes) 14 else 8, .kind = .number, .h_align = .end, .sortable = true },
         // 11, not 10: the perm string (`formatPermBits`) is exactly 10
         // chars and left-aligned, so the extra cell is a trailing blank.
         // Perms is the last column, so this reads as a right margin on
@@ -804,9 +919,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir
     }
 
     for (entries, 0..) |entry, i| {
-        const full_path = try std.fs.path.join(alloc, &.{ abs_dir_path, entry.name });
-        defer alloc.free(full_path);
-        const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = full_path }, .{});
+        const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = entry.abs_path }, .{});
         defer alloc.free(json);
         const metadata_id = try client.createMetadata(json);
 
@@ -831,12 +944,12 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir
         }
         try scratch.append(alloc, name_text);
 
-        var size_buf: [16]u8 = undefined;
-        const size_text = try alloc.dupe(u8, formatSize(&size_buf, entry.size));
+        var size_buf: [24]u8 = undefined;
+        const size_text = try alloc.dupe(u8, lsfmt.formatSize(&size_buf, entry.size, raw_bytes));
         try scratch.append(alloc, size_text);
 
         var perm_buf: [10]u8 = undefined;
-        const perm_text = try alloc.dupe(u8, formatPermBits(&perm_buf, entry.mode));
+        const perm_text = try alloc.dupe(u8, lsfmt.formatPermBits(&perm_buf, entry.mode));
         try scratch.append(alloc, perm_text);
 
         const row = try alloc.alloc(glyphwire.Client.TableCellInput, 3);
@@ -862,24 +975,40 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir
     try client.setCursor(state.painted.row + state.painted.rows - trailing_blank, 0);
 }
 
-fn writePlain(io: std.Io, entries: []const FileEntry, long_list: bool) !void {
+/// The no-session fallback: the same content a non-glyphwire `ls` would
+/// print to stdout, one entry per line. Mirrors the glyphwire path's
+/// block layout -- a blank line between blocks, an `<operand>:` header
+/// before a block that has one, and a `total <size>` line before each
+/// `-l` block (see `writeLongTable` on why it's a summed byte size, not
+/// 512-byte blocks).
+fn writePlain(io: std.Io, listings: []const Listing, long_list: bool, raw_bytes: bool) !void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
-    for (entries) |entry| {
-        switch (entry.kind) {
-            .directory => try w.interface.print("{s}/", .{entry.name}),
-            .sym_link => if (entry.link_target) |tgt|
-                try w.interface.print("{s} -> {s}", .{ entry.name, tgt })
-            else
-                try w.interface.print("{s}", .{entry.name}),
-            else => try w.interface.print("{s}", .{entry.name}),
-        }
+    for (listings, 0..) |listing, li| {
+        if (li > 0) try w.interface.print("\n", .{});
+        if (listing.header) |h| try w.interface.print("{s}\n", .{h});
         if (long_list) {
-            var size_buf: [16]u8 = undefined;
-            var time_buf: [20]u8 = undefined;
-            try w.interface.print("  {s}  {s}", .{ formatSize(&size_buf, entry.size), formatTimestamp(&time_buf, entry.mtime_sec) });
+            var total_bytes: u64 = 0;
+            for (listing.entries) |e| total_bytes +|= e.size;
+            var total_buf: [24]u8 = undefined;
+            try w.interface.print("total {s}\n", .{std.mem.trim(u8, lsfmt.formatSize(&total_buf, total_bytes, raw_bytes), " ")});
         }
-        try w.interface.print("\n", .{});
+        for (listing.entries) |entry| {
+            switch (entry.kind) {
+                .directory => try w.interface.print("{s}/", .{entry.name}),
+                .sym_link => if (entry.link_target) |tgt|
+                    try w.interface.print("{s} -> {s}", .{ entry.name, tgt })
+                else
+                    try w.interface.print("{s}", .{entry.name}),
+                else => try w.interface.print("{s}", .{entry.name}),
+            }
+            if (long_list) {
+                var size_buf: [24]u8 = undefined;
+                var time_buf: [20]u8 = undefined;
+                try w.interface.print("  {s}  {s}", .{ lsfmt.formatSize(&size_buf, entry.size, raw_bytes), lsfmt.formatTimestamp(&time_buf, entry.mtime_sec) });
+            }
+            try w.interface.print("\n", .{});
+        }
     }
     try w.interface.flush();
 }
