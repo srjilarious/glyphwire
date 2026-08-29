@@ -133,12 +133,17 @@ const IconBgJson = struct { handle: core.ImageHandle, scale: []const u8, h_align
 /// One flattened cell in a `get_cells` response, row-major starting at
 /// (0,0). Exactly one of `bg`/`bg_image`/`bg_icon` is non-null, per
 /// `core.Background`'s tagged union — see decisions.md's Cell section.
+/// `fg_icon` is a sibling of that union, not part of it: an icon drawn
+/// *over* the background (`draw_icon`'s `foreground: true`, and every
+/// table body icon — see `core.Cell.fg_icon`), independent of which
+/// `bg*` case is set.
 const CellJson = struct {
     g: []const u8,
     fg: ColorJson,
     bg: ?ColorJson,
     bg_image: ?ImageBgJson = null,
     bg_icon: ?IconBgJson = null,
+    fg_icon: ?IconBgJson = null,
     /// Just the id, not the resolved JSON -- same "handle, not content"
     /// treatment `bg_image`/`bg_icon` already give image/icon handles.
     /// `get_metadata` resolves an id to its actual content.
@@ -884,12 +889,21 @@ pub const Dispatcher = struct {
                     },
                     .color, .image => null,
                 };
+                const fg_icon: ?IconBgJson = if (cell.fg_icon) |icon| .{
+                    .handle = icon.handle,
+                    .scale = @tagName(icon.scale),
+                    .h_align = @tagName(icon.h_align),
+                    .v_align = @tagName(icon.v_align),
+                    .max_w = icon.max_w,
+                    .max_h = icon.max_h,
+                } else null;
                 cells[row * layer.width + col] = .{
                     .g = cell.grapheme(),
                     .fg = .{ .r = cell.style.fg.r, .g = cell.style.fg.g, .b = cell.style.fg.b, .a = cell.style.fg.a },
                     .bg = bg,
                     .bg_image = bg_image,
                     .bg_icon = bg_icon,
+                    .fg_icon = fg_icon,
                     .metadata_id = cell.metadata_id,
                 };
             }

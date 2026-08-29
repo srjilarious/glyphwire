@@ -440,7 +440,11 @@ surface.
   already have: a full-grid snapshot is cheap to extend with just the id
   (a client doing a bulk render can tell which cells are tagged without
   probing each one), while resolving the actual JSON is a separate,
-  targeted request — the pair a future mouse-click handler needs
+  targeted request. The snapshot also carries `fg_icon` per cell (same
+  shape as `bg_icon`) — an icon composited over the background rather
+  than replacing it (`draw_icon`'s `foreground: true`, every table body
+  icon), so a client reconstructing the screen from `get_cells` alone
+  doesn't silently drop it — the pair a future mouse-click handler needs
   (`get_metadata` to resolve whatever cell the click landed on, reporting
   both the id and its content in one round trip). `row`/`col` are
   required there, not cursor-defaulted like `draw_icon`/`draw_image`'s
@@ -544,6 +548,21 @@ surface.
   alongside that same cell's `display` text instead — e.g.
   `glyphwire-ls`'s Name column carries both a per-entry icon and the
   filename in one cell, one column, not two.
+- **A body icon composites over the row background, not into it.** A
+  table body icon goes into the cell's `Cell.fg_icon` (via
+  `setCellIconOver`), the same "draw over whatever background is already
+  there" slot `draw_icon`'s `foreground: true` uses — not `style.bg`'s
+  `.icon` case, which would *replace* the background. `style.bg` is one
+  mutually exclusive `Background`, so an icon written there on a striped
+  row (`alt_row_bg`, filled first by `fillRowBg`) punched a flat,
+  icon-shaped hole straight through the stripe; and a `row_height > 1`
+  `.natural`-scaled icon that overflows past its anchor cell (see the
+  Icon section's `max_w`/`max_h`) would be drawn *under* the next row's
+  background, since the host paints backgrounds in grid order but defers
+  `.natural` icons — `style.bg` *and* `fg_icon` — past the whole grid.
+  Routing the icon through `fg_icon` fixes both: the stripe stays
+  unbroken behind the icon cell, and the deferred overflow lands on top
+  of every row's background regardless of draw order.
 - **`row_height` carried forward from the prototype, minus its bug.**
   `TableStyle.row_height` (cells per body row, `1` the default) is the
   "large format" option added mid-development of the client-composited

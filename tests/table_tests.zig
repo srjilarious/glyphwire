@@ -117,7 +117,10 @@ pub fn tableColumnHAlignEndRightAlignsTextTest(io: std.Io, alloc: std.mem.Alloca
 /// A cell's `icon` (an icon-registry name, resolved server-side)
 /// reserves exactly one cell at the column's start when `row_height == 1`
 /// (`.fit`-scaled into it), with the cell's `display` text starting right
-/// after -- see `core.Table.writeBodyRow`'s doc comment.
+/// after -- see `core.Table.writeBodyRow`'s doc comment. The icon lands in
+/// `fg_icon`, not `bg_icon`: table body icons always composite over the
+/// row's background rather than replacing it (see
+/// `core.setCellIconOver`).
 pub fn tableCellIconReservesOneColumnAtDefaultRowHeightTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
     defer ctx.deinit();
@@ -151,9 +154,84 @@ pub fn tableCellIconReservesOneColumnAtDefaultRowHeightTest(io: std.Io, alloc: s
     defer snapshot.deinit();
 
     const icon_cell = snapshot.cellAt(1, 0);
-    try testz.expectEqual(icon_cell.bg_icon.?.handle, file_handle);
-    try testz.expectTrue(icon_cell.bg_icon.?.scale == .fit);
+    try testz.expectTrue(icon_cell.bg_icon == null);
+    try testz.expectEqual(icon_cell.fg_icon.?.handle, file_handle);
+    try testz.expectTrue(icon_cell.fg_icon.?.scale == .fit);
     try testz.expectEqualStr("x", snapshot.cellAt(1, 1).grapheme);
+}
+
+/// A table body icon composites *over* its row's background: an
+/// `alt_row_bg` stripe stays intact behind the icon cell (the icon is in
+/// `fg_icon`, so `fillRowBg`'s color fill on that same cell survives),
+/// and the same holds for a `.natural`-scaled "large format" icon that
+/// overflows past its anchor cell. Regression guard for icons punching a
+/// flat hole through the row striping -- see `core.Table.writeBodyRow`.
+pub fn tableBodyIconCompositesOverAltRowBgTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 20, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const png = fakePngBytes(32, 32);
+    const file_handle = try client.loadImage("png", &png);
+    try ctx.registerIcon("file", file_handle);
+
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 10, .sortable = true },
+    }, .{ .borders = false, .header_separator = false, .alt_row_bg = .{ .r = 30, .g = 30, .b = 30, .a = 255 } });
+
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "a", .icon = "file" }},
+        &.{.{ .display = "b", .icon = "file" }},
+    });
+
+    {
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+
+        // Grid row 2 is the second data row (`display_i == 1`) -- the
+        // striped one. Its icon anchor cell keeps the stripe color *and*
+        // carries the icon on top.
+        const striped_icon_cell = snapshot.cellAt(2, 0);
+        try testz.expectEqual(striped_icon_cell.bg.?.r, 30);
+        try testz.expectEqual(striped_icon_cell.fg_icon.?.handle, file_handle);
+        try testz.expectTrue(striped_icon_cell.bg_icon == null);
+    }
+
+    // Same holds for a "large format" (`row_height > 1`) row, whose icon
+    // is `.natural`-scaled and overflows past its anchor cell -- the
+    // overflow paints over neighboring rows' backgrounds because it's a
+    // deferred `fg_icon`, and the anchor cell still keeps its stripe.
+    const large = try client.createTable(null, 10, 0, &.{
+        .{ .name = "Name", .width = 12, .sortable = true },
+    }, .{ .borders = false, .header_separator = false, .row_height = 3, .alt_row_bg = .{ .r = 30, .g = 30, .b = 30, .a = 255 } });
+    try client.tableSetRows(null, large, &.{
+        &.{.{ .display = "a", .icon = "file" }},
+        &.{.{ .display = "b", .icon = "file" }},
+    });
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+
+    // Header at grid row 10, first data-row block rows 11-13, second
+    // (striped) block rows 14-16; the icon sits on the block's middle
+    // line (row 15).
+    const large_icon_cell = snapshot.cellAt(15, 0);
+    try testz.expectEqual(large_icon_cell.bg.?.r, 30);
+    try testz.expectEqual(large_icon_cell.fg_icon.?.handle, file_handle);
+    try testz.expectTrue(large_icon_cell.fg_icon.?.scale == .natural);
+    try testz.expectTrue(large_icon_cell.bg_icon == null);
 }
 
 /// `table_set_sort` reorders the *display* order (via `SortKey.number`,

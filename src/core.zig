@@ -1146,6 +1146,13 @@ pub const Table = struct {
     /// the client-composited prototype's fixed `icon_native_px`),
     /// `.natural`-scaled and capped to `row_height` cell-heights tall,
     /// same as `writeGrid`'s icons in glyphwire-ls's non-table listing.
+    ///
+    /// The icon goes into `Cell.fg_icon` (`setCellIconOver`), not
+    /// `style.bg` -- it composites *over* the row's background rather than
+    /// replacing it, so an `alt_row_bg` stripe stays unbroken behind the
+    /// icon cell and a `.natural`-scaled icon that overflows into
+    /// neighboring rows/columns paints over their backgrounds too. See
+    /// `setCellIconOver`'s doc comment.
     fn writeBodyRow(self: *const Table, layer: *Layer, ctx: *const Context, row: TableRow, top_row: usize, content_start_col: usize, row_height: usize, row_bg: ?Color) void {
         const mid_row = top_row + row_height / 2;
         var col = content_start_col;
@@ -1160,10 +1167,10 @@ pub const Table = struct {
                     const max_h: u32 = @intCast(row_height * ctx.cell_px_h);
                     const render_px = @min(info.width, max_h);
                     icon_reserve = if (ctx.cell_px_w > 0) (render_px + ctx.cell_px_w - 1) / ctx.cell_px_w + 1 else 1;
-                    setCellIcon(layer, mid_row, col, icon_handle, .natural, .start, .center, max_h, cell.metadata_id);
+                    setCellIconOver(layer, mid_row, col, icon_handle, .natural, .start, .center, max_h, cell.metadata_id);
                 } else {
                     icon_reserve = 1;
-                    setCellIcon(layer, mid_row, col, icon_handle, .fit, .center, .center, null, cell.metadata_id);
+                    setCellIconOver(layer, mid_row, col, icon_handle, .fit, .center, .center, null, cell.metadata_id);
                 }
             }
 
@@ -1219,6 +1226,23 @@ fn setCellIcon(layer: *Layer, row: usize, col: usize, handle: ImageHandle, scale
     if (row >= layer.height or col >= layer.width) return;
     const c = layer.cell(row, col);
     c.style.bg = .{ .icon = .{ .handle = handle, .scale = scale, .h_align = h_align, .v_align = v_align, .max_h = max_h } };
+    c.metadata_id = metadata_id;
+}
+
+/// Like `setCellIcon`, but writes the icon into `Cell.fg_icon` instead of
+/// `style.bg` -- see that field's doc comment. Leaves whatever background
+/// the cell already carries (a `fillRowBg` `alt_row_bg` stripe, or the
+/// default) in place, so `glyphwire-host`'s render pass composites the
+/// icon *over* it rather than replacing it. Table body icons always take
+/// this path: an icon should sit above its row's background, and a
+/// `.natural`-scaled one that overflows past its anchor cell has to paint
+/// over the neighboring rows'/columns' backgrounds too -- the host defers
+/// `.natural` `fg_icon`s past the whole grid for exactly that, the same
+/// way it already does for `style.bg`'s `.icon` overflow.
+fn setCellIconOver(layer: *Layer, row: usize, col: usize, handle: ImageHandle, scale: IconScale, h_align: HAlign, v_align: VAlign, max_h: ?u32, metadata_id: ?MetadataHandle) void {
+    if (row >= layer.height or col >= layer.width) return;
+    const c = layer.cell(row, col);
+    c.fg_icon = .{ .handle = handle, .scale = scale, .h_align = h_align, .v_align = v_align, .max_h = max_h };
     c.metadata_id = metadata_id;
 }
 

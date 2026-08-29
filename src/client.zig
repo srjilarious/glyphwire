@@ -905,6 +905,7 @@ const CellJson = struct {
     bg: ?ColorJson,
     bg_image: ?ImageBgJson = null,
     bg_icon: ?IconBgJson = null,
+    fg_icon: ?IconBgJson = null,
     metadata_id: ?core.MetadataHandle = null,
 };
 
@@ -924,15 +925,17 @@ const InputStateResultJson = struct {
 
 /// A cell in renderer-friendly form: `core.Color`/`core.ImageBg` fields
 /// instead of raw JSON. Exactly one of `bg`/`bg_image`/`bg_icon` is
-/// non-null, mirroring `core.Background`'s tagged union. `metadata_id` is
-/// a sibling of those, not part of the union -- see `core.Cell`'s doc
-/// comment.
+/// non-null, mirroring `core.Background`'s tagged union. `fg_icon` (an
+/// icon composited over the background -- `draw_icon`'s `foreground: true`
+/// and every table body icon) and `metadata_id` are siblings of that
+/// union, not part of it -- see `core.Cell`'s doc comment.
 pub const RenderCell = struct {
     grapheme: []const u8,
     fg: core.Color,
     bg: ?core.Color,
     bg_image: ?core.ImageBg = null,
     bg_icon: ?core.IconBg = null,
+    fg_icon: ?core.IconBg = null,
     metadata_id: ?core.MetadataHandle = null,
 };
 
@@ -966,6 +969,14 @@ pub const CellsSnapshot = struct {
             .bg = if (c.bg) |bg| .{ .r = bg.r, .g = bg.g, .b = bg.b, .a = bg.a } else null,
             .bg_image = if (c.bg_image) |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y } else null,
             .bg_icon = if (c.bg_icon) |icon| .{
+                .handle = icon.handle,
+                .scale = std.meta.stringToEnum(core.IconScale, icon.scale) orelse .fit,
+                .h_align = std.meta.stringToEnum(core.HAlign, icon.h_align) orelse .center,
+                .v_align = std.meta.stringToEnum(core.VAlign, icon.v_align) orelse .center,
+                .max_w = icon.max_w,
+                .max_h = icon.max_h,
+            } else null,
+            .fg_icon = if (c.fg_icon) |icon| .{
                 .handle = icon.handle,
                 .scale = std.meta.stringToEnum(core.IconScale, icon.scale) orelse .fit,
                 .h_align = std.meta.stringToEnum(core.HAlign, icon.h_align) orelse .center,
