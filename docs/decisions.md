@@ -276,6 +276,50 @@ surface.
 - Noted for later, not designed now: video is expected to reuse this same
   span-based placement model, just with a streaming/updating source
   instead of a static bitmap.
+- **A `row_span` reaching past the layer's bottom scrolls to make room,
+  one row at a time, instead of clipping.** `Layer.drawImage` used to
+  resolve only its anchor row against `Layer.resolveRow` and then clamp
+  `row_end` to `self.height`, so an image anchored close enough to the
+  bottom that its full `row_span` didn't fit just lost its lower rows
+  silently — it read as the image clipping to whatever viewport happened
+  to be current, rather than interleaving into the flow the way `row_span`
+  lines of text would (each wrapping/scrolling as it's written). Fixed by
+  walking the image's rows one at a time, advancing the display row
+  in-place and calling `Layer.scrollOne` exactly when the next row would
+  land past `self.height` — the same relative-advance shape
+  `Layer.putAtCursor` already uses across a multi-character write, not an
+  independent-absolute-`resolveRow`-per-row shape (which would
+  double-scroll — see the next bullet for exactly that failure mode
+  showing up one layer up the stack). Column clipping at `self.width` is
+  unchanged — columns still don't scroll.
+- **glyphwire-view's post-`draw_image` cursor move clamps to the layer's
+  row count, to avoid double-counting scrolls `draw_image` already did.**
+  view/main.zig's get-cursor/draw/set-cursor shape (draw at the cursor,
+  then `set_property(cursor, cur.row + rows, 0)` so whatever runs next
+  continues below the image) computed that target row against the
+  *pre-draw* viewport. Once `draw_image` itself scrolls partway through a
+  tall image (the fix just above), `cur.row` no longer means what it did
+  when read — every scroll `draw_image` performed shifted its meaning up
+  by one along with everything else — but the un-adjusted sum was still
+  handed to `set_property(cursor, ...)`, which re-derives its own
+  overshoot from scratch against the *current*, already-scrolled viewport
+  (`Layer.resolveRow`'s contract, per its own doc comment, assumes each
+  caller's row is already expressed relative to "right now," not to
+  whatever the viewport was several scrolls ago). The result: for any
+  image tall enough to scroll, the follow-up cursor move scrolled *again*
+  by roughly however many rows the image itself already scrolled — visible
+  as a run of extra blank rows between the image and the next prompt,
+  worse for taller images. Fixed by clamping the target to the layer's own
+  row count (`@min(cur.row + rows, grid_rows)`, `grid_rows` read via
+  `get_cells` the same way `glyphwire-notify` already reads `grid_cols`) —
+  when the image fit without scrolling this is a no-op (the sum was
+  already ≤ `grid_rows`); when it didn't, it caps the request at exactly
+  one row past the layer's last row, asking for exactly the one further
+  scroll actually needed to open a fresh line below the image instead of
+  redoing the scrolling `draw_image` already finished. The same
+  stale-absolute-row shape, independently hit and fixed the same way, in
+  `writeCapturedText`'s plain-command-output path (`shell/main.zig`) —
+  see that fix's own commit for the sibling case.
 
 **Icon**
 - A named reference to an image, resolved server-side rather than by raw

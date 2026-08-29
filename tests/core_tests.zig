@@ -665,6 +665,34 @@ pub fn layerDrawImageLeavesCellsBeyondImageBoundsUntouchedTest(io: std.Io, alloc
     }
 }
 
+pub fn layerDrawImageScrollsInsteadOfClippingRowSpanPastBottomTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // 3x3 layer, anchored at row 1 with a row_span of 3: the image's last
+    // row (row 3) is one past `height`, so drawing it should scroll the
+    // viewport once -- interleaving the image into the flow the way a
+    // fourth line of text would -- rather than silently dropping that row
+    // the way clamping `row_end` to `self.height` used to.
+    var layer = try glyphwire.Layer.init(alloc, 3, 3, 5);
+    defer layer.deinit();
+
+    // Marker on the original top row, to confirm it got pushed into
+    // scrollback by the forced scroll rather than just being left in
+    // place (which would mean nothing actually scrolled).
+    layer.cell(0, 0).style.bg = .{ .color = .{ .r = 9, .g = 9, .b = 9 } };
+
+    layer.drawImage(1, 1, 0, 3, 1, 10, 30, 10, 10);
+
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_y, 0);
+    try testz.expectEqual(layer.cell(1, 0).style.bg.image.offset_y, 10);
+    try testz.expectEqual(layer.cell(2, 0).style.bg.image.offset_y, 20);
+
+    const history_top = layer.scrollbackRow(0) orelse return error.TestUnexpectedResult;
+    switch (history_top[0].style.bg) {
+        .color => |c| try testz.expectEqual(c.r, 9),
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+}
+
 pub fn layerDrawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);

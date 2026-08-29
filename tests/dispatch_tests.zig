@@ -477,6 +477,51 @@ pub fn drawImageOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqual(ctx.root.cell(4, 5).style.bg.image.handle, 1);
 }
 
+/// Regression test for the "extra blank space before the prompt" bug:
+/// glyphwire-view (view/main.zig) issues `draw_image` then a
+/// `set_property` cursor move to just past the image's bottom edge,
+/// computed as `@min(cur.row + rows, grid_rows)` -- clamped to the
+/// layer's own row count, so it asks for at most the one further scroll
+/// `Layer.drawImage` didn't already do itself. Before that clamp existed,
+/// the un-clamped `cur.row + rows` re-derived its own overshoot against
+/// the *already-scrolled* viewport from scratch, scrolling several rows
+/// further than necessary. This exercises the real `Dispatcher`/`Layer`
+/// code path with the corrected (clamped) value and checks it performs
+/// *no more* than the one additional scroll actually needed.
+pub fn setPropertyCursorAfterScrollingDrawImageScrollsExactlyOnceMoreTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 5, 5, 10);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    ctx.root.setProperty(.{ .cursor = .{ .row = 1, .col = 0 } });
+
+    // 1 cell wide, 8 cells tall at the default 12px cells -- taller than
+    // the 5-row layer, anchored at row 1, so drawing it has to scroll
+    // partway through (see `Layer.drawImage`'s doc comment).
+    const png = fakePngBytes(12, 96);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_image","params":{"handle":1,"row_span":8,"col_span":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, draw_message)).response == null);
+
+    const scrolls_from_draw = ctx.root.history_len;
+    try testz.expectTrue(scrolls_from_draw > 0);
+
+    // The fixed client-side formula: `@min(cur.row + rows, grid_rows)` --
+    // here that's `@min(1 + 8, 5) == 5`, one past the layer's last row.
+    const set_cursor_message =
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"property":"cursor","row":5,"col":0}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, set_cursor_message)).response == null);
+
+    try testz.expectEqual(ctx.root.history_len, scrolls_from_draw + 1);
+    try testz.expectEqual(ctx.root.cursor.row, 4);
+    try testz.expectEqual(ctx.root.cursor.col, 0);
+}
+
 pub fn drawIconAppliesScaleAndAlignParamsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);

@@ -575,6 +575,15 @@ pub const Layer = struct {
     /// the image actually covers. Cells the image *does* reach always get
     /// marked, even where the image only partially fills them at the
     /// image's bottom/right edge -- the renderer clips those, not this.
+    ///
+    /// Row span is resolved one row at a time, scrolling the viewport as
+    /// needed exactly like `putAtCursor` does for text -- an image whose
+    /// `row_span` reaches past the bottom shouldn't just lose its lower
+    /// rows the way clamping `row_end` to `self.height` used to (it read
+    /// as an image "clipping" to whatever viewport happened to be current
+    /// when it was drawn, instead of interleaving into the flowing output
+    /// the way multi-line text does). Only the column span still clips at
+    /// `self.width` -- columns never scroll.
     pub fn drawImage(
         self: *Layer,
         handle: ImageHandle,
@@ -587,21 +596,28 @@ pub const Layer = struct {
         cell_px_w: u32,
         cell_px_h: u32,
     ) void {
-        const anchor_row = self.resolveRow(row);
-        const row_end = @min(anchor_row + row_span, self.height);
         const col_end = @min(col + col_span, self.width);
+        var display_row = self.resolveRow(row);
 
-        var r = anchor_row;
-        while (r < row_end) : (r += 1) {
-            const offset_y = @as(u32, @intCast(r - anchor_row)) * cell_px_h;
-            if (offset_y >= img_h) continue;
+        var img_row: usize = 0;
+        while (img_row < row_span) : (img_row += 1) {
+            if (img_row > 0) {
+                if (display_row + 1 >= self.height) {
+                    self.scrollOne();
+                } else {
+                    display_row += 1;
+                }
+            }
+
+            const offset_y = @as(u32, @intCast(img_row)) * cell_px_h;
+            if (offset_y >= img_h) break;
 
             var c = col;
             while (c < col_end) : (c += 1) {
                 const offset_x = @as(u32, @intCast(c - col)) * cell_px_w;
                 if (offset_x >= img_w) continue;
 
-                self.setCellImage(r, c, handle, offset_x, offset_y);
+                self.setCellImage(display_row, c, handle, offset_x, offset_y);
             }
         }
         self.revision += 1;

@@ -55,7 +55,29 @@ pub fn main(init: std.process.Init) !void {
     // shape glyphwire-ls uses per entry -- see its writeGrid doc comment.
     const cur = try client.getCursor();
     try client.drawImage(handle, null, null, rows, cols);
-    try client.setCursor(cur.row + rows, 0);
+
+    // `cur.row + rows` is the target row *before* `drawImage` ran, but an
+    // image tall enough to reach the layer's bottom edge already scrolled
+    // the viewport once per row past that edge (see `Layer.drawImage`'s
+    // doc comment) -- every one of those rows shifted `cur.row`'s own
+    // meaning up by one along with everything else. Passing the
+    // un-adjusted sum straight to `set_property(cursor)` re-derives its
+    // own overshoot from scratch against the *current* (already-scrolled)
+    // viewport, scrolling past the image's real bottom edge by however
+    // many rows it just scrolled to fit -- readable as "a lot of extra
+    // blank space before the prompt" for a big enough image. Clamping to
+    // `grid_rows` caps the target at exactly one past the layer's last
+    // row -- the same row the image's own bottom edge actually resolved
+    // to once `drawImage` finished scrolling -- so this always requests
+    // at most the one further scroll needed to open a fresh line below
+    // it, matching `Layer.resolveRow`'s contract instead of double
+    // counting scrolls it already performed. Same fix shape
+    // `writeCapturedText` (shell/main.zig) already applies to plain
+    // captured command output.
+    var snapshot = try client.getCells();
+    const grid_rows = snapshot.rows();
+    snapshot.deinit();
+    try client.setCursor(@min(cur.row + rows, grid_rows), 0);
 
     // See the doc comment above: stay open until the user dismisses it
     // (any keypress) rather than returning immediately. Falls back to
