@@ -1070,8 +1070,8 @@ const Prompt = struct {
             // hold whatever arrives meanwhile, same as it would while
             // waiting on the other stream in `std.process.run`.
             if (handshake) |aware| {
-                try self.flushCapturedStream(mr.reader(0), aware, null, &passthrough_out.interface);
-                try self.flushCapturedStream(mr.reader(1), aware, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
+                try self.flushCapturedStream(mr.reader(0), aware, &passthrough_out.interface);
+                try self.flushCapturedStream(mr.reader(1), aware, &passthrough_err.interface);
             }
         }
 
@@ -1087,8 +1087,8 @@ const Prompt = struct {
         // the plain-program default this whole mechanism exists for.
         handshake = handshake orelse resolveHandshake(mr.reader(0));
         const aware = handshake orelse false;
-        try self.flushCapturedStream(mr.reader(0), aware, null, &passthrough_out.interface);
-        try self.flushCapturedStream(mr.reader(1), aware, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
+        try self.flushCapturedStream(mr.reader(0), aware, &passthrough_out.interface);
+        try self.flushCapturedStream(mr.reader(1), aware, &passthrough_err.interface);
 
         try mr.checkAnyError();
     }
@@ -1104,20 +1104,25 @@ const Prompt = struct {
         return seen;
     }
 
-    /// Drains whatever `r` currently has buffered: onto the grid (`fg`) as
-    /// plain text if `aware` is false, or straight through to this
-    /// process's own real stdio (`passthrough`) if it's true -- see
-    /// `runCommand`'s doc comment for what `aware` means. A no-op when
-    /// nothing is buffered, so it's safe to call speculatively before the
-    /// handshake question is even resolved (see `pumpChildOutput`).
+    /// Drains whatever `r` currently has buffered: onto the grid as plain
+    /// text if `aware` is false, or straight through to this process's own
+    /// real stdio (`passthrough`) if it's true -- see `runCommand`'s doc
+    /// comment for what `aware` means. A no-op when nothing is buffered,
+    /// so it's safe to call speculatively before the handshake question is
+    /// even resolved (see `pumpChildOutput`).
     ///
-    /// The grid path is a single `write_text` of the raw chunk:
-    /// `Layer.writeText` handles `\n` (and `\r`, `\t`, `\b`, and stripping
-    /// stray `ESC ...` sequences) itself now, so there's no line-splitting
-    /// or cursor bookkeeping to do here. A line straddling two chunks just
-    /// works -- the second `write_text` picks up exactly where the first
-    /// left the cursor.
-    fn flushCapturedStream(self: *Prompt, r: *std.Io.Reader, aware: bool, fg: ?glyphwire.Color, passthrough: *std.Io.Writer) !void {
+    /// The grid path is a single `write_text` of the raw chunk with the
+    /// default foreground: `Layer.writeText` handles `\n`/`\r`/`\t`/`\b`
+    /// and now *interprets* SGR colour + simple cursor/erase sequences
+    /// (see core.zig), so there's no line-splitting or cursor bookkeeping
+    /// here and a program's own colours come through. **Both** stdout and
+    /// stderr go through as the default colour -- stderr was tinted red
+    /// before, but that overwrote the colours a program sets on its own
+    /// stderr (compiler diagnostics, pixzig's logger, ...), which nearly
+    /// always emits the message text in a separate `write` from its
+    /// colour prefix and so inherited the tint. Distinguishing streams
+    /// visually is left to the program.
+    fn flushCapturedStream(self: *Prompt, r: *std.Io.Reader, aware: bool, passthrough: *std.Io.Writer) !void {
         const chunk = r.buffered();
         if (chunk.len == 0) return;
         defer r.toss(chunk.len);
@@ -1128,7 +1133,7 @@ const Prompt = struct {
             return;
         }
 
-        try self.client.writeText(chunk, fg, null);
+        try self.client.writeText(chunk, null, null);
     }
 
     /// `cd` is a shell builtin, not a spawned program -- unlike
