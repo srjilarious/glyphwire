@@ -32,9 +32,12 @@ of it. `docs/decisions.md` stays the place for *why*.
   `mouse_button` (server→subscribed clients), `subscribe`,
   `get_input_state`. Held-key typematic repeat exists for arrow keys
   (`Server.reportKeyRepeat` re-broadcasts `key_down` on a timer without
-  touching the down-set, so it doesn't get deduped away). `mouse_move`
-  streaming, `mouse_scroll`, gamepad, resize, and IME are all still open
-  — see Further out.
+  touching the down-set, so it doesn't get deduped away). `resize` is
+  wired too: the host window is resizable, `Server.reportResize` resizes
+  the root layer bottom-anchored and broadcasts `{cols, rows}` to
+  `"resize"` subscribers, `get_property("size")` reads it back.
+  `mouse_move` streaming, `mouse_scroll`, gamepad, and IME are all still
+  open — see Further out.
 - **Architecture reshaped since Milestone 8:** `glyphwire-host` (the
   pixzig-windowed renderer, formerly `glyphwire-shell`) now owns the
   `Context` and `Server` *in-process* directly — no wire round trip for
@@ -637,14 +640,18 @@ top of it.
 - **Input events, remaining pieces.** Key and mouse-button events are
   done (`subscribe`, `report_key`/`report_mouse_button` in,
   `key_down`/`key_up`/`mouse_button` out, `get_input_state`, plus
-  typematic repeat for arrows — see Current state). Still open:
-  `mouse_move` as a live push stream (today `report_mouse_move` only
-  updates state for `get_input_state`'s cursor fields, no broadcast —
-  see `handleReportMouseMove`'s own doc comment), `mouse_scroll`,
-  gamepad, `resize` (moot right now since `glyphwire-host`'s window is
-  `resizable = false`, but the message should still exist for whenever
-  that changes), IME/text composition (kept separate from raw key
-  events, still its own undesigned state machine), and action maps.
+  typematic repeat for arrows — see Current state). `resize` is also
+  done: `glyphwire-host`'s window is now `resizable = true`, its
+  per-frame `syncWindowSize` reports size changes via
+  `Server.reportResize`, the root layer (and every base-size-tracking
+  layer) is resized bottom-anchored, and a `resize` notification
+  (`{cols, rows}`) is broadcast to `"resize"` subscribers;
+  `get_property("size")` and `InputListener.pollResizeEvent`/`size` are
+  the read paths. Still open: `mouse_move` as a live push stream (today
+  `report_mouse_move` only updates state for `get_input_state`'s cursor
+  fields, no broadcast — see `handleReportMouseMove`'s own doc comment),
+  `mouse_scroll`, gamepad, IME/text composition (kept separate from raw
+  key events, still its own undesigned state machine), and action maps.
 - **Command history in `glyphwire-shell`'s prompt.** Up/down arrow
   currently only move `glyphwire-host`'s raw grid cursor (generic
   terminal-style addressing); there's no readline-style "browse previous

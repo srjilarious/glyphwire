@@ -15,8 +15,19 @@ pub const std_options = pixzig.system.std_options;
 /// itself) and only ever sees the grid through the socket, exactly like
 /// any other client would -- `Server.serveForever` runs on a background
 /// thread the whole time so that connection keeps working normally.
-const grid_cols = 120;
-const grid_rows = 50;
+// The grid's initial size in cells; the window opens at this many cells
+// times the measured cell pixel size. After that the window is
+// user-resizable and `grid_cols`/`grid_rows` track its live size (see
+// `App.syncWindowSize`) -- `var`, not `const`, for that reason.
+const initial_grid_cols = 120;
+const initial_grid_rows = 50;
+var grid_cols: usize = initial_grid_cols;
+var grid_rows: usize = initial_grid_rows;
+// Floor the live grid size at something a shell prompt stays usable in,
+// so dragging the window very small clips the render rather than
+// collapsing the root layer to a degenerate size.
+const min_grid_cols = 16;
+const min_grid_rows = 4;
 const scrollback_rows = 1000;
 const font_path = "assets/JetBrainsMono-Regular.ttf";
 const font_size: f32 = 18.0;
@@ -291,6 +302,7 @@ pub const App = struct {
     pub fn update(self: *App, eng: *AppRunner.Engine, deltaTimeMs: f64) bool {
         if (self.shell_exited.load(.monotonic)) return false;
 
+        self.syncWindowSize(eng);
         self.reportKeyEvents(eng);
         self.reportMouseEvents(eng);
         self.handleArrowKeys(eng, deltaTimeMs);
@@ -328,6 +340,31 @@ pub const App = struct {
             @as(i64, @intCast(history_len)),
         );
         self.scroll_offset = @intCast(new_offset);
+    }
+
+    /// Picks up a window resize: converts the current framebuffer size to
+    /// a whole-cell grid size (flooring any leftover fractional cell, and
+    /// clamping to `min_grid_*`) and, if that differs from the grid the
+    /// context currently has, pushes it through `Server.reportResize` --
+    /// which resizes the root layer (and every base-size-tracking layer)
+    /// bottom-anchored, then broadcasts a `resize` notification to any
+    /// subscribed client (e.g. glyphwire-shell). `pixzig`'s
+    /// `refreshWindowState` (called each frame by the app runner before
+    /// this) has already rebuilt the viewport/projection for the new
+    /// framebuffer, so `render` just draws the larger or smaller grid.
+    fn syncWindowSize(self: *App, eng: *AppRunner.Engine) void {
+        const fb = eng.window_state.framebuffer_size;
+        if (cell_w <= 0 or cell_h <= 0) return;
+        const cols: usize = @intCast(@max(@divTrunc(fb.x, cell_w), min_grid_cols));
+        const rows: usize = @intCast(@max(@divTrunc(fb.y, cell_h), min_grid_rows));
+        if (cols == grid_cols and rows == grid_rows) return;
+
+        self.server.reportResize(self.alloc, cols, rows) catch |err| {
+            std.log.err("glyphwire-host: reportResize({d}x{d}) failed: {t}", .{ cols, rows, err });
+            return;
+        };
+        grid_cols = cols;
+        grid_rows = rows;
     }
 
     /// Moves the grid cursor for each arrow key, clamped to the grid --
@@ -711,8 +748,11 @@ pub fn main(init: std.process.Init) !void {
     // Font atlas packing (unlike the metrics measured above) does need a GL
     // context, so it still happens here, after the window is created.
     const appRunner = try AppRunner.init("glyphwire", alloc, .{
-        .windowSize = .{ .x = grid_cols * cell_w, .y = grid_rows * cell_h },
-        .resizable = false,
+        .windowSize = .{
+            .x = @as(i32, @intCast(grid_cols)) * cell_w,
+            .y = @as(i32, @intCast(grid_rows)) * cell_h,
+        },
+        .resizable = true,
         .renderInitOpts = .{ .font = .{ .path = .{ .face = font_path, .size = font_size } } },
     });
     const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited);

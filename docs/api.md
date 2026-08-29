@@ -52,7 +52,7 @@ per property):
 |---|---|---|
 | `cursor` | `{row, col}` | ✅ |
 | `revision` | `{revision}` — get-only, bumped once per `write_text` call | ✅ |
-| `size` | `{cols, rows}` — this is what answers "get window size" for the root layer, since a Context's base size **is** its root layer's default size | 🔶 |
+| `size` | `{cols, rows}` — this is what answers "get window size" for the root layer, since a Context's base size **is** its root layer's default size. Get-only: a client reads it (or subscribes to `resize`, below) but can't set it — the host owns the window size | ✅ |
 | `position` | `{x, y}`, pixel-precise, relative to the layer's parent (the root layer for every `create_layer`-made layer today) | ✅ |
 | `clip` | clip rect | 🔶 |
 | `scroll` | scroll offset (pixel-precise; distinct from the cell-grid scrollback ring in core.zig) | 🔶 |
@@ -62,6 +62,18 @@ Live size changes arrive separately as a `resize` event (see Input
 below) rather than requiring the client to poll `get_property(layer,
 "size")` — polling still works, but a glyphwire-aware program that cares
 about resizes should subscribe instead.
+
+When the host window is resized, the root layer (and every
+`create_layer` layer made with no explicit size, which had been
+mirroring the root's dimensions) is resized with it. Content is
+**anchored to the bottom row**: growing the height pulls previously
+scrolled-off rows back down out of scrollback into the taller viewport
+(blank filler at the top only once scrollback is exhausted); shrinking
+pushes the top rows up into scrollback rather than discarding them, so a
+later grow restores them — only rows overflowing the layer's
+`height + scrollback_rows` capacity are evicted, oldest first. Width
+changes clip or blank-pad each row on the right with no reflow. A layer
+created at an explicit size (a notification popup, etc.) keeps its size.
 
 ## Text & Styling
 
@@ -147,8 +159,10 @@ already uses) to call once that lands. See decisions.md's Table section.
 Two independent, separately-subscribable streams (raw events and mapped
 actions) per decisions.md's Input model. Raw key/mouse-button events are
 implemented end to end (an input-capturing process reports what it sees;
-subscribers get it re-broadcast); mouse move as a live stream, scroll,
-gamepad, resize, IME, and action maps are all still open.
+subscribers get it re-broadcast); `resize` is implemented (the host
+reports its own window size changes in-process, subscribers get the new
+`{cols, rows}` re-broadcast); mouse move as a live stream, scroll,
+gamepad, IME, and action maps are all still open.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
@@ -162,7 +176,7 @@ gamepad, resize, IME, and action maps are all still open.
 | `mouse_move` | notification, server→client | position | — | 🔶 no live push stream yet — `report_mouse_move` only updates state, doesn't broadcast |
 | `mouse_scroll` | notification, server→client | delta | — | 🔶 |
 | `gamepad_*` | notification, server→client | — | — | 🔶 |
-| `resize` | notification, server→client | new `{cols, rows}` | — | 🔶 moot today since `glyphwire-host`'s window is fixed-size, but should exist for whenever that changes |
+| `resize` | notification, server→client | new `{cols, rows}` | — | ✅ sent when `glyphwire-host`'s (now user-resizable) window changes size, after the root layer and every base-size-tracking layer have been resized (see Property names' `size` above for the bottom-anchored content behavior). Reported in-process by the host via `Server.reportResize`, same path as `reportKey`; subscribe with `"resize"`. `InputListener` (`pollResizeEvent`/`waitResizeEvent`/`size`) is the client-side consumer |
 | *(text/IME composition)* | — | — | — | ⬜ own state machine, not detailed yet — kept distinct from raw key events |
 | `action` | notification, server→client | action name, phase | — | 🔶 sent alongside raw events, never instead of |
 

@@ -212,8 +212,30 @@ surface.
   pixel-precise position — `glyphwire-notify` (see notify/main.zig) is
   the first client to use it, sliding a notification layer on/off
   screen a step at a time.
+- **v1 built — resize:** `glyphwire-host`'s window is now user-resizable
+  (`resizable = true`), and its per-frame `syncWindowSize` converts the
+  framebuffer size to a whole-cell grid and, on a change, calls
+  `Server.reportResize` (same in-process path as `reportKey`). That
+  resizes the root layer plus every `create_layer` layer flagged
+  `tracks_context_size` (set true only when *both* dimensions were
+  omitted at creation, so it had been mirroring the root's size — an
+  explicitly-sized popup keeps its size), then broadcasts a `resize`
+  notification to `"resize"` subscribers. `get_property("size")` returns
+  `{cols, rows}` (get-only — the host owns the window size).
+  `Layer.resize` rebuilds the ring buffer **bottom-anchored**: the
+  newest row stays put; growing the height pulls scrolled-off rows back
+  down out of history (blank filler at the top only once history is
+  exhausted), shrinking pushes the top rows up into history rather than
+  discarding them (so a later grow restores them), evicting only what
+  overflows the new `height + scrollback_rows` capacity — oldest first,
+  same rule `scrollOne` already uses. Width changes clip/blank-pad each
+  row on the right, no reflow (matching `insert_cells`/`delete_cells`'s
+  row-scoped model). Chosen over the request's literal "discard on
+  shrink" because the ring buffer already models exactly this
+  non-destructive live-tail behavior — a shrink is just the viewport
+  window narrowing over content that's still there.
 - **Not built — still open:** `create_context`, non-root parenting,
-  `size`/`clip`/`scroll`/`visibility` properties.
+  `clip`/`scroll`/`visibility` properties.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline

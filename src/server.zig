@@ -319,4 +319,32 @@ pub const Server = struct {
         self.ctx.input.cursor_px = px;
         self.ctx.input.cursor_cell = cell;
     }
+
+    /// Applies a new window size, in cells, to the context (resizing the
+    /// root layer and every base-size-tracking layer -- see
+    /// `Context.resize`) and, if that was a real change, broadcasts a
+    /// `resize` notification (`{cols, rows}`) to every connection
+    /// subscribed to `"resize"`. For the process that owns this `Server`
+    /// and captures its own window events (glyphwire-host), same in-process
+    /// path as `reportKey`. No broadcast when the size is unchanged, so
+    /// this is cheap to call every frame.
+    pub fn reportResize(self: *Server, alloc: std.mem.Allocator, cols: usize, rows: usize) !void {
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            if (cols == self.ctx.root.width and rows == self.ctx.root.height) return;
+            try self.ctx.resize(cols, rows);
+        }
+
+        const Notification = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8 = "resize",
+            params: struct { cols: usize, rows: usize },
+        };
+        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
+            .params = .{ .cols = cols, .rows = rows },
+        }, .{});
+        defer alloc.free(body);
+        self.broadcast(null, "resize", body);
+    }
 };

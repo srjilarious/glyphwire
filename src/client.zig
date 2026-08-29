@@ -178,6 +178,17 @@ pub const Client = struct {
         return parsed.value.result.revision;
     }
 
+    /// `get_property(layer, "size")` -- a request returning the layer's
+    /// viewport size in cells. For the root layer this is the current
+    /// window size; `InputListener` subscribed to `"resize"` is the
+    /// live-updating counterpart for a client that wants to react to
+    /// window resizes rather than poll.
+    pub fn getSize(self: *Client) !core.LayerSize {
+        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .property = "size" });
+        defer parsed.deinit();
+        return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
+    }
+
     /// `get_cells(layer?)` -- a request returning a full row-major
     /// snapshot of the given layer's (default: root's) visible viewport.
     /// Owns its own parsed JSON arena; caller must call `.deinit()` on
@@ -1051,6 +1062,10 @@ pub const InputStateSnapshot = struct {
 /// free it with the same allocator passed to `InputListener.connect`.
 pub const KeyEvent = struct { key: []const u8, pressed: bool };
 pub const MouseButtonEvent = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos };
+/// One `resize` notification: the window's new size in cells. No owned
+/// memory (unlike `KeyEvent.key`), so `pollResizeEvent` hands it back by
+/// value with nothing for the caller to free.
+pub const ResizeEvent = struct { cols: usize, rows: usize };
 
 pub const InputListener = struct {
     io: std.Io,
@@ -1074,6 +1089,14 @@ pub const InputListener = struct {
     /// currently down.
     mouse_events: std.ArrayList(MouseButtonEvent) = .empty,
     mouse_sem: std.Io.Semaphore = .{},
+    /// Queued `resize` notifications (see `ResizeEvent`), same
+    /// drain-on-poll shape as `key_events`/`mouse_events`. `last_size`
+    /// caches the most recent one for `size()`'s instant read; it stays
+    /// null until the first `resize` arrives (a client that needs the
+    /// size before then should ask `Client.getSize` once).
+    resize_events: std.ArrayList(ResizeEvent) = .empty,
+    resize_sem: std.Io.Semaphore = .{},
+    last_size: ?ResizeEvent = null,
 
     /// Connects, subscribes to `events`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
@@ -1131,6 +1154,7 @@ pub const InputListener = struct {
         self.key_events.deinit(self.alloc);
         for (self.mouse_events.items) |ev| self.alloc.free(ev.button);
         self.mouse_events.deinit(self.alloc);
+        self.resize_events.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -1187,6 +1211,35 @@ pub const InputListener = struct {
             error.Canceled => |e| return e,
         };
         return self.pollMouseButtonEvent();
+    }
+
+    /// Pops the oldest queued `resize` event, if any (non-blocking) --
+    /// see `pollKeyEvent`, the same drain shape. Nothing to free.
+    pub fn pollResizeEvent(self: *InputListener) ?ResizeEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.resize_events.items.len == 0) return null;
+        return self.resize_events.orderedRemove(0);
+    }
+
+    /// Blocks until a `resize` event is queued or `timeout` elapses -- see
+    /// `waitKeyEvent`.
+    pub fn waitResizeEvent(self: *InputListener, timeout: std.Io.Timeout) !?ResizeEvent {
+        self.resize_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
+            error.Timeout => return null,
+            error.Canceled => |e| return e,
+        };
+        return self.pollResizeEvent();
+    }
+
+    /// The most recently pushed window size, or null if no `resize`
+    /// notification has arrived on this listener yet -- a live-cache read
+    /// (like `isKeyDown`), independent of whether `pollResizeEvent` has
+    /// drained the event queue.
+    pub fn size(self: *InputListener) ?ResizeEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.last_size;
     }
 
     pub fn cursorPixel(self: *InputListener) PxPos {
@@ -1298,6 +1351,19 @@ pub const InputListener = struct {
             _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
             try self.mouse_events.append(self.alloc, .{ .button = owned_button, .pressed = p.value.pressed, .px = p.value.px, .cell = p.value.cell });
             self.mouse_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "resize")) {
+            const P = struct { cols: usize, rows: usize };
+            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const ev: ResizeEvent = .{ .cols = p.value.cols, .rows = p.value.rows };
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.last_size = ev;
+            try self.resize_events.append(self.alloc, ev);
+            self.resize_sem.post(self.io);
         }
     }
 };

@@ -82,6 +82,7 @@ const PropertyParams = struct {
 const CursorResult = struct { row: usize, col: usize };
 const RevisionResult = struct { revision: u64 };
 const PositionResult = struct { x: f32, y: f32 };
+const SizeResult = struct { cols: usize, rows: usize };
 
 const GetCellsParams = struct {
     layer: ?core.LayerHandle = null,
@@ -432,10 +433,14 @@ const InputStateResult = struct {
 pub const Subscriptions = struct {
     key: bool = false,
     mouse_button: bool = false,
+    /// `resize` server->client notifications (`{cols, rows}`), sent when
+    /// the host window is resized -- see `Server.reportResize`.
+    resize: bool = false,
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
         if (std.mem.eql(u8, event, "mouse_button")) return self.mouse_button;
+        if (std.mem.eql(u8, event, "resize")) return self.resize;
         return false;
     }
 
@@ -444,6 +449,7 @@ pub const Subscriptions = struct {
         for (events) |e| {
             if (std.mem.eql(u8, e, "key")) s.key = true;
             if (std.mem.eql(u8, e, "mouse_button")) s.mouse_button = true;
+            if (std.mem.eql(u8, e, "resize")) s.resize = true;
         }
         return s;
     }
@@ -753,6 +759,15 @@ pub const Dispatcher = struct {
                 result: PositionResult,
             };
             const response: Response = .{ .id = id, .result = .{ .x = pos.x, .y = pos.y } };
+            return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        } else if (std.mem.eql(u8, p.property, "size")) {
+            const sz = layer.getProperty(.size).size;
+            const Response = struct {
+                jsonrpc: []const u8 = "2.0",
+                id: std.json.Value,
+                result: SizeResult,
+            };
+            const response: Response = .{ .id = id, .result = .{ .cols = sz.cols, .rows = sz.rows } };
             return try std.json.Stringify.valueAlloc(alloc, response, .{});
         }
         return DispatchError.UnknownProperty;

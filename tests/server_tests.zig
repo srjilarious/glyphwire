@@ -177,6 +177,60 @@ pub fn subscribedConnectionReceivesBroadcastKeyEventTest(io: std.Io, alloc: std.
     try testz.expectTrue(ctx.input.isKeyDown("a"));
 }
 
+/// `Server.reportResize` (the in-process path glyphwire-host calls when
+/// its window changes size) resizes the context's root layer and pushes
+/// a `resize` notification to a connection subscribed to `"resize"`.
+pub fn reportResizeResizesRootAndBroadcastsToSubscribersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-resize-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer accept_thread.join();
+
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["resize"]}}
+    );
+    try w.interface.flush();
+
+    // Wait for the subscribe ack so the subscription is in effect before
+    // the resize is reported.
+    const ack = try readOneFrame(io, alloc, &stream, &decoder);
+    alloc.free(ack);
+
+    try srv.reportResize(alloc, 100, 30);
+
+    const notif_body = try readOneFrame(io, alloc, &stream, &decoder);
+    defer alloc.free(notif_body);
+
+    const Notification = struct {
+        method: []const u8,
+        params: struct { cols: usize, rows: usize },
+    };
+    const parsed = try std.json.parseFromSlice(Notification, alloc, notif_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try testz.expectEqualStr("resize", parsed.value.method);
+    try testz.expectEqual(parsed.value.params.cols, 100);
+    try testz.expectEqual(parsed.value.params.rows, 30);
+    try testz.expectEqual(ctx.root.width, 100);
+    try testz.expectEqual(ctx.root.height, 30);
+}
+
 /// A notification whose dispatch fails server-side (here: draw_icon
 /// naming an icon nothing registered) has no response channel to report
 /// the error on anyway -- should just be logged, not sever the whole

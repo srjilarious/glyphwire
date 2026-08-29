@@ -209,6 +209,11 @@ pub const Cursor = struct {
     col: usize = 0,
 };
 
+/// A layer's viewport size in cells -- what `get_property(layer, "size")`
+/// reports. For the root layer this is the context's base size, i.e. the
+/// answer to "how big is the window right now" (see `Context.resize`).
+pub const LayerSize = struct { cols: usize, rows: usize };
+
 pub const PropertyName = enum {
     cursor,
     /// Bumped once per `writeText` call; a cheap poll a renderer client can
@@ -222,12 +227,18 @@ pub const PropertyName = enum {
     /// rather than cell-snapped: smooth animation, e.g. sliding a
     /// notification layer on/off screen, needs sub-cell steps).
     position,
+    /// Viewport size in cells (`{cols, rows}`). Get-only: a client reads
+    /// it (and, if subscribed, gets a `resize` notification when it
+    /// changes) but can't set it -- the host owns the window size, see
+    /// `Context.resize`.
+    size,
 };
 
 pub const PropertyValue = union(PropertyName) {
     cursor: Cursor,
     revision: u64,
     position: PxPos,
+    size: LayerSize,
 };
 
 pub const PropertyError = error{UnknownProperty};
@@ -285,6 +296,13 @@ pub const Layer = struct {
     /// at mutation time, not per frame -- see `Table.render`), but kept
     /// for a future "which table's border wins where two overlap" rule.
     table_order: std.ArrayList(TableHandle) = .empty,
+    /// Whether this layer's size should follow the context's base size on
+    /// a window resize -- true for the root layer and for any
+    /// `create_layer` layer made without an explicit `width`/`height` (so
+    /// it was already mirroring root's dimensions). A layer created at an
+    /// explicit size (e.g. a 45x3 notification popup) keeps that size.
+    /// See `Context.resize`.
+    tracks_context_size: bool = false,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Layer {
         const total_rows = height + scrollback_rows;
@@ -391,6 +409,71 @@ pub const Layer = struct {
         var i: usize = 0;
         while (i < overshoot) : (i += 1) self.scrollOne();
         return self.height - 1;
+    }
+
+    /// Resizes the viewport to `new_width` x `new_height`, keeping
+    /// `scrollback_rows` unchanged and anchoring content to the bottom
+    /// (newest) row -- the model the host wants when its window is
+    /// resized (`Context.resize` / `Server.reportResize`):
+    ///
+    /// - **Grow height:** rows that had scrolled off the top come back
+    ///   down out of history into the now-taller viewport; blank filler
+    ///   rows appear at the top only once history is exhausted.
+    /// - **Shrink height:** the top rows are pushed up into history
+    ///   rather than discarded, so a later grow brings them back. Only
+    ///   rows that overflow the new `height + scrollback_rows` capacity
+    ///   are evicted, oldest first -- the same eviction `scrollOne` does.
+    /// - **Width:** each row is clipped (shrink) or blank-padded on the
+    ///   right (grow). No reflow, matching `insertCells`/`deleteCells`'s
+    ///   row-scoped model.
+    ///
+    /// The cursor is clamped back into the new bounds. A no-op if the
+    /// size is unchanged. Rebuilds the ring buffer from scratch; the only
+    /// failure mode is the new allocation itself.
+    pub fn resize(self: *Layer, new_width: usize, new_height: usize) !void {
+        std.debug.assert(new_width > 0 and new_height > 0);
+        if (new_width == self.width and new_height == self.height) return;
+
+        const old_cap = self.capacity();
+        // Meaningful rows in oldest -> newest logical order: `history_len`
+        // history rows followed by `height` viewport rows. `oldest_phys`
+        // is the physical index of the first (oldest) one; logical row
+        // `l` is physical `(oldest_phys + l) % old_cap`.
+        const meaningful = self.history_len + self.height;
+        const oldest_phys = (self.viewport_start + old_cap - self.history_len) % old_cap;
+
+        const new_cap = new_height + self.scrollback_rows;
+        const new_buf = try self.alloc.alloc(Cell, new_width * new_cap);
+        for (new_buf) |*c| c.* = .{};
+
+        // Keep the newest `keep` logical rows; anything older overflows
+        // the new capacity and is dropped. The new buffer is laid out
+        // un-wrapped -- history in physical rows [0, scrollback_rows),
+        // viewport in [scrollback_rows, scrollback_rows + new_height) --
+        // so the new `viewport_start` is just `scrollback_rows`.
+        const keep = @min(meaningful, new_cap);
+        const copy_w = @min(self.width, new_width);
+        var kept: usize = 0;
+        while (kept < keep) : (kept += 1) {
+            const l = meaningful - keep + kept; // logical row, oldest kept first
+            const src_phys = (oldest_phys + l) % old_cap;
+            // Newest kept row (l == meaningful-1) lands on the last
+            // viewport row; earlier rows fill upward from there.
+            const dst_phys = self.scrollback_rows + new_height - keep + kept;
+            const src_row = self.buf[src_phys * self.width ..][0..copy_w];
+            const dst_row = new_buf[dst_phys * new_width ..][0..copy_w];
+            @memcpy(dst_row, src_row);
+        }
+
+        self.alloc.free(self.buf);
+        self.buf = new_buf;
+        self.width = new_width;
+        self.height = new_height;
+        self.viewport_start = self.scrollback_rows;
+        self.history_len = if (keep > new_height) keep - new_height else 0;
+
+        if (self.cursor.row >= new_height) self.cursor.row = new_height - 1;
+        if (self.cursor.col >= new_width) self.cursor.col = new_width - 1;
     }
 
     /// Appends `text` as grapheme clusters starting at the layer's cursor,
@@ -760,6 +843,7 @@ pub const Layer = struct {
             .cursor => .{ .cursor = self.cursor },
             .revision => .{ .revision = self.revision },
             .position => .{ .position = self.pos },
+            .size => .{ .size = .{ .cols = self.width, .rows = self.height } },
         };
     }
 
@@ -768,6 +852,7 @@ pub const Layer = struct {
             .cursor => |c| self.cursor = .{ .row = self.resolveRow(c.row), .col = c.col },
             .revision => unreachable, // get-only; see PropertyName.revision
             .position => |p| self.pos = p,
+            .size => unreachable, // get-only; window size is host-driven, see Context.resize
         }
     }
 };
@@ -1605,9 +1690,13 @@ pub const Context = struct {
     /// `create_layer`: allocates a fresh layer parented to the root,
     /// defaulting to the context's base size (the root layer's own
     /// width/height) when `width`/`height` is omitted -- decisions.md's
-    /// Layer section. Returns its handle.
+    /// Layer section. Returns its handle. A layer created with *both*
+    /// dimensions omitted tracks the context's base size on a later
+    /// window resize (`Layer.tracks_context_size` / `Context.resize`);
+    /// one created with an explicit size keeps that size.
     pub fn createLayer(self: *Context, width: ?usize, height: ?usize, scrollback_rows: usize) !LayerHandle {
         var layer = try Layer.init(self.alloc, width orelse self.root.width, height orelse self.root.height, scrollback_rows);
+        layer.tracks_context_size = (width == null and height == null);
         errdefer layer.deinit();
 
         const handle = self.next_layer_handle;
@@ -1632,6 +1721,29 @@ pub const Context = struct {
                 _ = self.layer_order.orderedRemove(i);
                 break;
             }
+        }
+    }
+
+    /// Changes the context's base size -- the width/height a
+    /// `create_layer` with no explicit dimensions inherits, and what
+    /// `get_property(root, "size")` reports. Resizes the root layer plus
+    /// every `create_layer` layer that was tracking the base size
+    /// (`Layer.tracks_context_size`); layers created at an explicit size
+    /// (notification popups, etc.) are left alone. Content in each
+    /// resized layer is anchored to its bottom row -- see `Layer.resize`.
+    ///
+    /// Driven by the host when its window is resized
+    /// (`Server.reportResize`); there is no wire message a client can use
+    /// to set this. A no-op if the base size is unchanged. On an
+    /// allocation failure partway through, the root may have resized
+    /// while some tracking layers have not -- acceptable for an OOM path,
+    /// which the host treats as fatal anyway.
+    pub fn resize(self: *Context, width: usize, height: usize) !void {
+        if (width == self.root.width and height == self.root.height) return;
+        try self.root.resize(width, height);
+        var it = self.layers.valueIterator();
+        while (it.next()) |layer| {
+            if (layer.tracks_context_size) try layer.resize(width, height);
         }
     }
 

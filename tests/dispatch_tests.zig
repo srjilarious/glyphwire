@@ -81,6 +81,35 @@ pub fn getPropertyRequestReturnsDecodedResponseTest(io: std.Io, alloc: std.mem.A
     try testz.expectEqual(parsed.value.result.col, 5);
 }
 
+pub fn getPropertySizeReturnsLayerDimensionsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 96, 40, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":7,"method":"get_property","params":{"property":"size"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+
+    const Response = struct {
+        id: i64,
+        result: struct { cols: usize, rows: usize },
+    };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try testz.expectEqual(parsed.value.id, 7);
+    try testz.expectEqual(parsed.value.result.cols, 96);
+    try testz.expectEqual(parsed.value.result.rows, 40);
+}
+
 pub fn setPropertyNotificationMovesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

@@ -347,6 +347,142 @@ pub fn scrollingWithNoScrollbackKeepsNoHistoryTest(io: std.Io, alloc: std.mem.Al
     try testz.expectTrue(layer.scrollbackRow(0) == null);
 }
 
+pub fn layerResizeGrowHeightPullsScrolledOffRowsBackIntoViewportTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // width=3, height=2, scrollback=4. "abcdefghij" wraps to four rows
+    // (abc/def/ghi/j..); the viewport shows the last two, with abc/def
+    // retained as history.
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 4);
+    defer layer.deinit();
+    try layer.writeText("abcdefghij", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("g", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("j", layer.cell(1, 0).grapheme());
+
+    // Growing to height 4 brings both history rows back down into the
+    // now-taller viewport, newest still at the bottom.
+    try layer.resize(3, 4);
+    try testz.expectEqual(layer.height, 4);
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("d", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("g", layer.cell(2, 0).grapheme());
+    try testz.expectEqualStr("j", layer.cell(3, 0).grapheme());
+    // History is now exhausted -- every retained row is back on screen.
+    try testz.expectTrue(layer.scrollbackRow(0) == null);
+}
+
+pub fn layerResizeGrowHeightBeyondContentBlankPadsAtTopTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // Only two rows of content and no scrollback: growing the viewport
+    // past what history can fill leaves blank rows at the top, content
+    // still anchored to the bottom.
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 0);
+    defer layer.deinit();
+    try layer.writeText("abcdef", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try layer.resize(3, 4);
+    try testz.expectEqual(layer.height, 4);
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(1, 0).grapheme().len, 0);
+    try testz.expectEqualStr("a", layer.cell(2, 0).grapheme());
+    try testz.expectEqualStr("d", layer.cell(3, 0).grapheme());
+}
+
+pub fn layerResizeShrinkHeightPushesTopRowsIntoHistoryNonDestructivelyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // width=3, height=4, scrollback=4. "abcdefghijkl" exactly fills the
+    // four viewport rows (abc/def/ghi/jkl), no history yet.
+    var layer = try glyphwire.Layer.init(alloc, 3, 4, 4);
+    defer layer.deinit();
+    try layer.writeText("abcdefghijkl", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Shrinking to height 2 keeps the bottom two rows visible and pushes
+    // the top two up into history rather than discarding them.
+    try layer.resize(3, 2);
+    try testz.expectEqual(layer.height, 2);
+    try testz.expectEqualStr("g", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("j", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("d", layer.scrollbackRow(0).?[0].grapheme());
+    try testz.expectEqualStr("a", layer.scrollbackRow(1).?[0].grapheme());
+    try testz.expectTrue(layer.scrollbackRow(2) == null);
+
+    // Growing back restores every row into the viewport -- proof the
+    // shrink lost nothing.
+    try layer.resize(3, 4);
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("d", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("g", layer.cell(2, 0).grapheme());
+    try testz.expectEqualStr("j", layer.cell(3, 0).grapheme());
+}
+
+pub fn layerResizeWidthClipsAndBlankPadsRowsWithoutReflowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 2, 0);
+    defer layer.deinit();
+    try layer.writeText("abcdefgh", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("d", layer.cell(0, 3).grapheme());
+    try testz.expectEqualStr("e", layer.cell(1, 0).grapheme());
+
+    // Wider: each row keeps its cells and gains blank ones on the right
+    // (no reflow -- "efgh" does not pull up onto row 0).
+    try layer.resize(6, 2);
+    try testz.expectEqual(layer.width, 6);
+    try testz.expectEqualStr("d", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cell(0, 4).grapheme().len, 0);
+    try testz.expectEqualStr("e", layer.cell(1, 0).grapheme());
+
+    // Narrower: each row is clipped on the right.
+    try layer.resize(2, 2);
+    try testz.expectEqual(layer.width, 2);
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("b", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("e", layer.cell(1, 0).grapheme());
+}
+
+pub fn layerResizeClampsCursorIntoNewBoundsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .cursor = .{ .row = 4, .col = 9 } });
+
+    try layer.resize(4, 2);
+    try testz.expectEqual(layer.cursor.row, 1);
+    try testz.expectEqual(layer.cursor.col, 3);
+}
+
+pub fn layerResizeToSameSizeIsANoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 8, 4, 2);
+    defer layer.deinit();
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try layer.resize(8, 4);
+    try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cursor.col, 5);
+}
+
+pub fn contextResizeResizesRootAndBaseSizeTrackingLayersOnlyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    // A layer created with no explicit size tracks the context; one
+    // created at an explicit size (a popup) does not.
+    const tracking = try ctx.createLayer(null, null, 0);
+    const popup = try ctx.createLayer(45, 3, 0);
+
+    try ctx.resize(30, 12);
+    try testz.expectEqual(ctx.root.width, 30);
+    try testz.expectEqual(ctx.root.height, 12);
+
+    const tracking_layer = ctx.layerPtr(tracking).?;
+    try testz.expectEqual(tracking_layer.width, 30);
+    try testz.expectEqual(tracking_layer.height, 12);
+
+    const popup_layer = ctx.layerPtr(popup).?;
+    try testz.expectEqual(popup_layer.width, 45);
+    try testz.expectEqual(popup_layer.height, 3);
+}
+
 pub fn insertCellsShiftsRowRightTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
