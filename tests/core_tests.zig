@@ -183,6 +183,82 @@ pub fn scrollingRetainsScrolledOffRowsAsHistoryTest(io: std.Io, alloc: std.mem.A
     try testz.expectTrue(layer.scrollbackRow(2) == null);
 }
 
+/// Regression test for glyphwire-host: `cat`ing anything longer than the
+/// window used to blast straight past with no way to scroll back, because
+/// nothing read the scrollback the ring buffer was already retaining.
+/// `viewRow` is the pure row-mapping logic the fix (mouse wheel ->
+/// `App.scroll_offset` -> `renderLayer`) is built on -- same layer/write
+/// as `scrollingRetainsScrolledOffRowsAsHistoryTest` above.
+pub fn viewRowAtZeroOffsetMatchesLiveViewportTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 2);
+    defer layer.deinit();
+    try layer.writeText("abcdefghij", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const row0 = layer.viewRow(0, 0);
+    try testz.expectEqualStr("g", row0[0].grapheme());
+    try testz.expectEqualStr("h", row0[1].grapheme());
+    try testz.expectEqualStr("i", row0[2].grapheme());
+
+    const row1 = layer.viewRow(0, 1);
+    try testz.expectEqualStr("j", row1[0].grapheme());
+}
+
+pub fn viewRowScrolledBackShowsHistoryAboveLiveRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 2);
+    defer layer.deinit();
+    try layer.writeText("abcdefghij", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Scrolled back 1 row: top row reveals the most recently scrolled-off
+    // history row ("def"), bottom row shows the live top row ("ghi") --
+    // the live bottom row ("j") has scrolled below the visible window.
+    const row0 = layer.viewRow(1, 0);
+    try testz.expectEqualStr("d", row0[0].grapheme());
+    try testz.expectEqualStr("e", row0[1].grapheme());
+    try testz.expectEqualStr("f", row0[2].grapheme());
+
+    const row1 = layer.viewRow(1, 1);
+    try testz.expectEqualStr("g", row1[0].grapheme());
+    try testz.expectEqualStr("h", row1[1].grapheme());
+    try testz.expectEqualStr("i", row1[2].grapheme());
+}
+
+pub fn viewRowScrolledToTopOfHistoryShowsOldestRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 2);
+    defer layer.deinit();
+    try layer.writeText("abcdefghij", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Scrolled back the full retained history (history_len == 2): shows
+    // the two oldest rows still retained, "abc" then "def".
+    const row0 = layer.viewRow(2, 0);
+    try testz.expectEqualStr("a", row0[0].grapheme());
+    try testz.expectEqualStr("b", row0[1].grapheme());
+    try testz.expectEqualStr("c", row0[2].grapheme());
+
+    const row1 = layer.viewRow(2, 1);
+    try testz.expectEqualStr("d", row1[0].grapheme());
+    try testz.expectEqualStr("e", row1[1].grapheme());
+    try testz.expectEqualStr("f", row1[2].grapheme());
+}
+
+/// An offset past what's actually retained clamps to `history_len` rather
+/// than panicking -- guards against a stale `App.scroll_offset` (e.g. if
+/// scrollback were ever trimmed) reading past `scrollbackRow`'s range.
+pub fn viewRowClampsOffsetPastRetainedHistoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 2);
+    defer layer.deinit();
+    try layer.writeText("abcdefghij", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const row0 = layer.viewRow(100, 0);
+    try testz.expectEqualStr("a", row0[0].grapheme());
+
+    const row1 = layer.viewRow(100, 1);
+    try testz.expectEqualStr("d", row1[0].grapheme());
+}
+
 pub fn inputStateTracksKeyAndMouseButtonDownSetsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var input = glyphwire.InputState.init(alloc);

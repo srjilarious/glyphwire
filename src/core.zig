@@ -337,6 +337,25 @@ pub const Layer = struct {
         return self.rowSlice(physical);
     }
 
+    /// Row of cells to display at viewport row `row` (0..height) when the
+    /// on-screen view has been scrolled back by `offset` rows of history --
+    /// `offset` 0 is the live viewport (same content `cell()` reads),
+    /// `offset` `history_len` shows the oldest retained history at the top.
+    /// This is display-only: it never touches `viewport_start` or
+    /// `history_len` the way `scrollOne` does, so scrolling the view back
+    /// to look at output doesn't disturb where new writes land.
+    ///
+    /// `offset` is clamped to `history_len` internally so a caller-tracked
+    /// scroll position doesn't have to be re-clamped on every call (and
+    /// can't read past what's actually retained even if it's stale).
+    pub fn viewRow(self: *const Layer, offset: usize, row: usize) []const Cell {
+        const clamped_offset = @min(offset, self.history_len);
+        if (row < clamped_offset) {
+            return self.scrollbackRow(clamped_offset - 1 - row).?;
+        }
+        return self.rowSlice(self.physicalRow(row - clamped_offset));
+    }
+
     /// Scrolls the viewport down by one row: the current top row becomes
     /// history (evicting the oldest history row once `scrollback_rows`
     /// is full), and a fresh blank row appears at the bottom.

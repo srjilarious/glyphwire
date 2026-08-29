@@ -98,6 +98,13 @@ pub const App = struct {
     /// session out from under whatever's running in it.
     shell_exited: *std.atomic.Value(bool),
     last_mouse_px: pixzig.Vec2F = .{ .x = -1, .y = -1 },
+    /// How many rows of history the root layer's view is currently
+    /// scrolled back by -- 0 is the live viewport. Display-only (see
+    /// `glyphwire.Layer.viewRow`); doesn't touch the layer itself, so
+    /// glyphwire-shell keeps writing to the live buffer exactly as before
+    /// while the user is looking at scrollback. Driven by the mouse wheel
+    /// -- see `handleScroll`.
+    scroll_offset: usize = 0,
     arrow_repeat: struct {
         up: ArrowRepeatState = .{},
         down: ArrowRepeatState = .{},
@@ -287,8 +294,40 @@ pub const App = struct {
         self.reportKeyEvents(eng);
         self.reportMouseEvents(eng);
         self.handleArrowKeys(eng, deltaTimeMs);
+        self.handleScroll(eng);
 
         return true;
+    }
+
+    /// How many grid rows one full wheel "tick" (`scroll().y` of magnitude
+    /// 1) scrolls the view by -- picked to feel like a normal terminal
+    /// scrollback, not tied to any particular OS's wheel step size.
+    const scroll_rows_per_tick: f32 = 3.0;
+
+    /// Scrolls the root layer's view back into its scrollback on wheel-up,
+    /// forward toward the live tail on wheel-down -- the missing piece
+    /// that made `cat`ing anything longer than the window blast straight
+    /// past with no way to look back at it (the ring buffer already
+    /// retained the history via `Context.createLayer`'s `scrollback_rows`;
+    /// nothing ever read it for display). Purely a host-side view offset
+    /// (see `scroll_offset`'s doc comment) -- clamped to the root layer's
+    /// `history_len` so it can't scroll past what's actually retained.
+    fn handleScroll(self: *App, eng: *AppRunner.Engine) void {
+        if (!eng.inputs.mouse_enabled) return;
+        const dy = eng.inputs.mouse.scroll().y;
+        if (dy == 0) return;
+
+        self.server.ctx_mutex.lockUncancelable(self.server.io);
+        defer self.server.ctx_mutex.unlock(self.server.io);
+
+        const history_len = self.server.ctx.root.history_len;
+        const delta: i64 = @intFromFloat(@round(dy * scroll_rows_per_tick));
+        const new_offset = std.math.clamp(
+            @as(i64, @intCast(self.scroll_offset)) + delta,
+            0,
+            @as(i64, @intCast(history_len)),
+        );
+        self.scroll_offset = @intCast(new_offset);
     }
 
     /// Moves the grid cursor for each arrow key, clamped to the grid --
@@ -415,7 +454,7 @@ pub const App = struct {
         self.server.ctx_mutex.lockUncancelable(self.server.io);
         defer self.server.ctx_mutex.unlock(self.server.io);
 
-        self.renderLayer(eng, &self.server.ctx.root, 0, 0, true);
+        self.renderLayer(eng, &self.server.ctx.root, 0, 0, true, self.scroll_offset);
         for (self.server.ctx.layer_order.items) |handle| {
             const layer = self.server.ctx.layers.getPtr(handle) orelse continue;
             self.renderLayer(
@@ -424,6 +463,7 @@ pub const App = struct {
                 @intFromFloat(@round(layer.pos.x)),
                 @intFromFloat(@round(layer.pos.y)),
                 false,
+                0,
             );
         }
 
@@ -433,15 +473,19 @@ pub const App = struct {
     /// Draws one layer's visible viewport with its top-left cell at
     /// `(origin_x, origin_y)` in screen pixels -- shared by `render` for
     /// the root layer (origin `(0, 0)`) and every other layer (origin its
-    /// own `pos`, rounded to the nearest pixel).
-    fn renderLayer(self: *App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, draw_cursor: bool) void {
+    /// own `pos`, rounded to the nearest pixel). `view_offset` is the
+    /// scrollback view offset to render (see `scroll_offset`'s doc
+    /// comment) -- always 0 for non-root layers, which don't expose
+    /// scrollback viewing.
+    fn renderLayer(self: *App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, draw_cursor: bool, view_offset: usize) void {
         self.deferred_icons.clearRetainingCapacity();
 
         var row: usize = 0;
         while (row < layer.height) : (row += 1) {
+            const row_cells = layer.viewRow(view_offset, row);
             var col: usize = 0;
             while (col < layer.width) : (col += 1) {
-                const c = layer.cell(row, col);
+                const c = &row_cells[col];
                 const pos = pixzig.Vec2I{
                     .x = origin_x + @as(i32, @intCast(col)) * cell_w,
                     .y = origin_y + @as(i32, @intCast(row)) * cell_h,
@@ -508,7 +552,7 @@ pub const App = struct {
         // cursor's cell, drawn last so it sits on top of that cell's own
         // background/glyph (and any deferred icon overflow just drawn
         // above).
-        if (draw_cursor and layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
+        if (draw_cursor and view_offset == 0 and layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
             const cx = origin_x + @as(i32, @intCast(layer.cursor.col)) * cell_w;
             const cy = origin_y + @as(i32, @intCast(layer.cursor.row)) * cell_h;
             eng.renderer.drawFilledRect(
