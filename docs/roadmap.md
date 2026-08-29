@@ -799,12 +799,21 @@ change; `api.md` untouched.
     cursor/erase finals; everything else still recognized-and-discarded.
     No `Style`/wire/renderer change. Hand-rolled, not libghostty (see the
     doc and decisions.md for why).
-  - **Phase B — not started:** the full-screen-TUI fallback (a pty inside
-    `glyphwire-shell`, a full VT model, screen-diff transpiled to
-    existing `write_text`/`set_property`/`clear` messages). Its VT model
-    waits on `libghostty-vt` tagging its Terminal C API (unreleased),
-    with vendoring ghostty's Zig `terminal` module as the escalation
-    valve.
+  - **Phase B — not started, splits into tiers** (see the investigation
+    doc §7a):
+    - **B0 — dumb PTY passthrough** (~200 LOC, `shell/pty.zig`, no wire
+      or host change): swap `runCommand`'s pipe spawn for a pty, forward
+      the master to `write_text` as today, encode `InputListener` keys
+      back to the master, `TIOCSWINSZ` on resize. Buys immediate
+      (unbuffered) output, working stdin, `isatty` behaviour, tty
+      signals — with no new escape-sequence work. Recommended as the
+      next small feature after Phase A.
+    - **B1 — pagers / line TUIs** (~+200 LOC in `core.zig`): alternate
+      screen, scroll region, insert/delete line, save/restore cursor.
+      Makes `less` / `git log` / `man` / `nano` usable.
+    - **B2 — full-screen (`vim`/`htop`/`tmux`)**: wants a real VT model —
+      `libghostty-vt`'s Terminal C API once tagged (unreleased), or
+      vendoring ghostty's Zig `terminal` module.
 - **Capability negotiation (`initialize`/`initialized`).** Should land
   before or alongside Phase 3 — decisions.md explicitly calls out image
   formats as something the server *advertises*, which needs the

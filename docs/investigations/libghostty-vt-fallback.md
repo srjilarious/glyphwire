@@ -400,6 +400,73 @@ implementation detail of `glyphwire-shell`.** Neither `glyphwire-host`
 nor the wire protocol needs to know a terminal emulator exists. That's
 what keeps the dependency decision reversible.
 
+### 7a. Phase B splits into tiers — the first is small and worth doing alone
+
+Phase B was written above as one lump ("PTY + full VT model"). It isn't.
+The PTY and the VT model are independent, and a **dumb PTY passthrough
+with no VT work beyond Phase A** already buys most of the day-to-day
+value:
+
+- **B0 — dumb PTY passthrough (~170-220 LOC, one `shell/pty.zig`).**
+  Replace `runCommand`'s `stdin=.ignore, stdout=.pipe, stderr=.pipe`
+  spawn with a pty: child gets the slave as all three fds in a new
+  session (`forkpty` from libc — glyphwire-shell already links libc for
+  Lua — is ~1 call; or manual `posix_openpt`/`grantpt`/`unlockpt`/
+  `fork`/`setsid`/`TIOCSCTTY`/`dup2`/`execvpe`, ~60-80 lines). Read the
+  master → `write_text` exactly as `flushCapturedStream` does now (a pty
+  merges stdout+stderr onto one fd, so the two-stream split goes away).
+  Encode `InputListener` key events to bytes → write to master
+  (printable byte; Enter=`\r`; Backspace=`0x7f`; arrows=`ESC [ A..D`;
+  Ctrl-C/D/Z; ~50 lines). `ioctl(master, TIOCSWINSZ)` on spawn and on
+  every `resize` event (~20 lines). Run the read loop on a thread; the
+  main loop pumps `InputListener` → master; join on child exit.
+
+  What B0 gets, *with zero new escape-sequence work*:
+  - **Immediate output.** The child sees `isatty(1)` → libc switches
+    stdout from full-buffering to line-buffering. This is the single
+    biggest fix and it is automatic. `pip`/`git`/`python`/`cargo`/`apt`
+    start streaming.
+  - **`isatty` behaviour** — `ls`/`grep`/`git` auto-colour, progress
+    bars appear.
+  - **Working stdin** — currently `.ignore`, so nothing interactive runs
+    at all. `sudo` prompts, REPLs, `read`, `ssh`.
+  - **Job-control signals via the tty** — Ctrl-C → `0x03` → kernel sends
+    SIGINT to the foreground group; Ctrl-D → EOF.
+  - Colour + `\r`/`ESC [ K`/`ESC [ H` already handled by Phase A, so
+    line-oriented colourful output (a `make` build, `git status`) looks
+    right.
+
+  What B0 does **not** get: anything using the **alternate screen**
+  (`ESC [ ? 1049 h`), **scroll regions** (`ESC [ r`), **insert/delete
+  line** (`ESC [ L`/`M`), save/restore cursor, or mouse reporting — i.e.
+  `less`, `vim`, `htop`, `tmux`, `fzf`, `nano`. Phase A *discards*
+  `ESC [ ? 1049 h`, so `less` (and therefore a long `git log`, `man`,
+  `git diff`) draws over the existing grid instead of a clean screen and
+  doesn't restore on `q`. Keystrokes and paging would mostly work; it'd
+  be usable-but-ugly.
+
+- **B1 — pagers and line-oriented TUIs (+150-250 LOC in `core.zig`).**
+  Add alternate-screen handling (`ESC [ ? 1049 h` / `? 47 h`: save the
+  layer's cell buffer, clear; `l`: restore), `ESC [ r` scroll region,
+  `ESC [ L`/`M` insert/delete line, `ESC [ S`/`T` scroll, `ESC 7`/`ESC 8`
+  save/restore cursor. This is the "`less`, `git log`, `man`, `nano`,
+  simple `dialog` UIs feel right" tier. Still hand-rolled, still no
+  dependency.
+
+- **B2 — full-screen (`vim`, `htop`, `tmux`).** These lean hard on
+  DEC private modes, precise scroll-region redraw optimisation, tab-stop
+  management, and mouse protocols. This is the tier where hand-rolling
+  stops paying off and a real VT model (libghostty's Terminal API, Path
+  c; or the vendored Zig module, Path b) earns its keep. The B0 pty
+  work is unchanged underneath it — only "what interprets the master's
+  bytes" swaps.
+
+**Revised recommendation:** do **B0** as its own small feature after
+Phase A lands — it's self-contained, touches no wire protocol and no
+host code, and fixes the two most-felt gaps (buffered output, no stdin).
+Then decide B1 vs. waiting for a libghostty Terminal release based on how
+much the pager experience matters.
+
 ---
 
 ## 8. Architecture sketch for Phase B (for reference, not commitment)
