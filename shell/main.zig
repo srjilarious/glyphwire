@@ -226,6 +226,22 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
 
     try prompt.showPrompt();
 
+    // Scripted input for automated screenshots / smoke runs: if
+    // GLYPHWIRE_SHELL_SCRIPT names a readable file, each non-blank,
+    // non-`#`-comment line is played through the prompt exactly as if it
+    // had been typed and submitted, before the interactive key loop
+    // starts. The prompt then carries on normally (the window stays up so
+    // a screenshot tool -- see the host's `--screenshot` -- can capture
+    // the result), unless one of the scripted lines was `exit`.
+    if (environ_map.get("GLYPHWIRE_SHELL_SCRIPT")) |script_path| {
+        if (script_path.len > 0) {
+            runScriptFile(io, alloc, &prompt, script_path) catch |err| {
+                std.log.err("prompt: couldn't run GLYPHWIRE_SHELL_SCRIPT '{s}': {t}", .{ script_path, err });
+            };
+            if (prompt.should_exit) return;
+        }
+    }
+
     while (true) {
         // Drains any pending mouse click before (possibly) blocking below
         // -- non-blocking, so this never delays key handling. A left
@@ -372,6 +388,26 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
                 try prompt.insertChar(ch);
             }
         }
+    }
+}
+
+/// Plays a file of shell commands through `prompt`, one line at a time,
+/// each `setLine` + `submitLine` -- the exact path a typed-and-entered
+/// line takes, so a scripted `ls` blocks on its child and draws to the
+/// grid identically. Lines are trimmed; blank lines and `#` comments are
+/// skipped. Stops early if a line was `exit` (sets `prompt.should_exit`).
+/// See `runPrompt`'s GLYPHWIRE_SHELL_SCRIPT block for why this exists.
+fn runScriptFile(io: std.Io, alloc: std.mem.Allocator, prompt: *Prompt, path: []const u8) !void {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024));
+    defer alloc.free(bytes);
+
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        try prompt.setLine(line);
+        try prompt.submitLine();
+        if (prompt.should_exit) return;
     }
 }
 

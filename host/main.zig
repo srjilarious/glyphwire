@@ -145,8 +145,26 @@ pub const App = struct {
         left: ArrowRepeatState = .{},
         right: ArrowRepeatState = .{},
     } = .{},
+    /// Set from `--screenshot <path>`: once `screenshot_elapsed_ms` passes
+    /// `screenshot_delay_ms`, `render` writes the composited grid region to
+    /// this path (see `captureContentArea`) and `update` quits the next
+    /// frame. Null for a normal run. Used by
+    /// `scripts/regen-readme-assets.sh` together with the shell's
+    /// `GLYPHWIRE_SHELL_SCRIPT` (see shell/main.zig) to produce the README
+    /// screenshots without any keystroke injection.
+    screenshot_path: ?[]const u8 = null,
+    screenshot_delay_ms: f64 = 2500,
+    screenshot_elapsed_ms: f64 = 0,
+    screenshot_done: bool = false,
 
-    pub fn init(alloc: std.mem.Allocator, eng: *AppRunner.Engine, server: *glyphwire.server.Server, shell_exited: *std.atomic.Value(bool)) !*App {
+    pub fn init(
+        alloc: std.mem.Allocator,
+        eng: *AppRunner.Engine,
+        server: *glyphwire.server.Server,
+        shell_exited: *std.atomic.Value(bool),
+        screenshot_path: ?[]const u8,
+        screenshot_delay_ms: f64,
+    ) !*App {
         _ = eng;
         const app = try alloc.create(App);
         app.* = .{
@@ -154,6 +172,8 @@ pub const App = struct {
             .server = server,
             .image_textures = std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture).init(alloc),
             .shell_exited = shell_exited,
+            .screenshot_path = screenshot_path,
+            .screenshot_delay_ms = screenshot_delay_ms,
         };
         return app;
     }
@@ -321,6 +341,10 @@ pub const App = struct {
 
     pub fn update(self: *App, eng: *AppRunner.Engine, deltaTimeMs: f64) bool {
         if (self.shell_exited.load(.monotonic)) return false;
+        // A `--screenshot` run quits the frame after `render` has taken
+        // the capture, so an automated run terminates on its own.
+        if (self.screenshot_done) return false;
+        if (self.screenshot_path != null) self.screenshot_elapsed_ms += deltaTimeMs;
 
         self.syncWindowSize(eng);
         self.reportKeyEvents(eng);
@@ -672,6 +696,99 @@ pub const App = struct {
         eng.renderer.begin(eng.projMat);
         self.renderScrollbar(eng);
         eng.renderer.end();
+
+        // `--screenshot`: everything for this frame is drawn and flushed
+        // but the buffers haven't been swapped yet, so GL_BACK holds
+        // exactly what's about to be shown -- the right moment to read it
+        // back. `update` quits the next frame.
+        if (self.screenshot_path) |path| {
+            if (!self.screenshot_done and self.screenshot_elapsed_ms >= self.screenshot_delay_ms) {
+                self.captureContentArea(eng, path);
+                self.screenshot_done = true;
+            }
+        }
+    }
+
+    /// Reads back just the composited grid region -- the left/right
+    /// `content_pad_px` margins and the scrollbar excluded -- straight
+    /// from the GL framebuffer and writes it to `path` as a PNG. Called
+    /// from the end of `render` (see there) once `--screenshot`'s delay
+    /// has elapsed. Best-effort: any failure is logged and the host
+    /// carries on, still quitting the next frame so an automated capture
+    /// run always terminates.
+    fn captureContentArea(self: *App, eng: *AppRunner.Engine, path: []const u8) void {
+        const gl = pixzig.gl;
+        const fb = eng.window_state.framebuffer_size;
+        // The grid starts one margin in from the left; it fills the full
+        // window height. Clamp to the live framebuffer in case a resize
+        // made it smaller than the initial `grid_cols * cell_w`.
+        const x0: i32 = content_pad_px;
+        const w: i32 = @min(@as(i32, @intCast(grid_cols)) * cell_w, fb.x - App.scrollbar_width_px - 2 * content_pad_px);
+
+        // Crop the height to the rows actually written (root cursor row
+        // plus one trailing blank line), so a mostly-empty grid doesn't
+        // produce a screenshot that's mostly black. Floored so a very
+        // short result still has some breathing room.
+        var used_rows: usize = min_grid_rows;
+        {
+            self.server.ctx_mutex.lockUncancelable(self.server.io);
+            defer self.server.ctx_mutex.unlock(self.server.io);
+            used_rows = @max(min_grid_rows, self.server.ctx.root.cursor.row + 2);
+        }
+        used_rows = @min(used_rows, grid_rows);
+        const h: i32 = @min(@as(i32, @intCast(used_rows)) * cell_h, fb.y);
+        if (w <= 0 or h <= 0) {
+            std.log.warn("glyphwire-host: screenshot region is empty ({d}x{d}), skipping", .{ w, h });
+            return;
+        }
+
+        const uw: usize = @intCast(w);
+        const uh: usize = @intCast(h);
+        const row_bytes = uw * 4;
+
+        const pixels = self.alloc.alloc(u8, uh * row_bytes) catch |err| {
+            std.log.err("glyphwire-host: screenshot buffer alloc failed: {t}", .{err});
+            return;
+        };
+        defer self.alloc.free(pixels);
+
+        gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+        // glReadPixels' origin is the framebuffer's bottom-left, but the
+        // grid is drawn from the top down, so read the *top* `h` rows:
+        // start `h` pixels up from the bottom.
+        gl.readPixels(x0, fb.y - h, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels.ptr);
+
+        // GL returns rows bottom-to-top; flip so the PNG reads top-to-bottom
+        // (same swap `pixzig`'s own `captureScreenshot` does).
+        const tmp = self.alloc.alloc(u8, row_bytes) catch return;
+        defer self.alloc.free(tmp);
+        var top: usize = 0;
+        var bot: usize = uh - 1;
+        while (top < bot) : ({
+            top += 1;
+            bot -= 1;
+        }) {
+            @memcpy(tmp, pixels[top * row_bytes ..][0..row_bytes]);
+            @memcpy(pixels[top * row_bytes ..][0..row_bytes], pixels[bot * row_bytes ..][0..row_bytes]);
+            @memcpy(pixels[bot * row_bytes ..][0..row_bytes], tmp);
+        }
+
+        const img = pixzig.stbi.Image{
+            .data = pixels,
+            .width = @intCast(uw),
+            .height = @intCast(uh),
+            .num_components = 4,
+            .bytes_per_component = 1,
+            .bytes_per_row = @intCast(row_bytes),
+            .is_hdr = false,
+        };
+        const path_z = self.alloc.dupeZ(u8, path) catch return;
+        defer self.alloc.free(path_z);
+        img.writeToFile(path_z, .png) catch |err| {
+            std.log.err("glyphwire-host: screenshot write to '{s}' failed: {t}", .{ path, err });
+            return;
+        };
+        std.log.info("glyphwire-host: wrote screenshot {s} ({d}x{d})", .{ path, uw, uh });
     }
 
     /// Draws the always-on scrollbar over the right edge: a dark track the
@@ -936,10 +1053,39 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
 
-    // With no explicit command, default to glyphwire-shell's own
-    // interactive prompt (its no-args mode) rather than exec'ing into a
-    // specific child.
-    const shell_child_argv: []const []const u8 = if (args.len >= 2) args[1..] else &.{};
+    // Host-only options are pulled out here; everything else is forwarded
+    // to glyphwire-shell (an empty forward list = the shell's own
+    // interactive prompt, its no-args mode, rather than exec'ing a child).
+    //   --screenshot <path>          write the grid region to <path> (PNG) then quit
+    //   --screenshot-delay-ms <n>    wait n ms before capturing (default 2500)
+    //   --grid-cols <n> / --grid-rows <n>   open at a non-default grid size
+    //                                (handy for a screenshot whose output is
+    //                                taller/wider than the default 120x50)
+    var screenshot_path: ?[]const u8 = null;
+    var screenshot_delay_ms: f64 = 2500;
+    var forwarded: std.ArrayList([]const u8) = .empty;
+    {
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const a = args[i];
+            if (std.mem.eql(u8, a, "--screenshot") and i + 1 < args.len) {
+                i += 1;
+                screenshot_path = args[i];
+            } else if (std.mem.eql(u8, a, "--screenshot-delay-ms") and i + 1 < args.len) {
+                i += 1;
+                screenshot_delay_ms = std.fmt.parseFloat(f64, args[i]) catch screenshot_delay_ms;
+            } else if (std.mem.eql(u8, a, "--grid-cols") and i + 1 < args.len) {
+                i += 1;
+                grid_cols = @max(min_grid_cols, std.fmt.parseInt(usize, args[i], 10) catch grid_cols);
+            } else if (std.mem.eql(u8, a, "--grid-rows") and i + 1 < args.len) {
+                i += 1;
+                grid_rows = @max(min_grid_rows, std.fmt.parseInt(usize, args[i], 10) catch grid_rows);
+            } else {
+                try forwarded.append(arena, a);
+            }
+        }
+    }
+    const shell_child_argv: []const []const u8 = forwarded.items;
 
     const socket_path = try socketPath(arena, init.environ_map);
 
@@ -1026,7 +1172,7 @@ pub fn main(init: std.process.Init) !void {
         std.log.warn("could not add fallback font '{s}': {t}", .{ font_fallback_path, err });
     };
 
-    const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited);
+    const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited, screenshot_path, screenshot_delay_ms);
 
     appRunner.run(app);
 
