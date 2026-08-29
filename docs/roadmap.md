@@ -743,6 +743,41 @@ would let `glyphwire-ls` drop even the metadata round trip and send the
 entire listing in one notification frame; and letting `scroll_view` /
 input messages in a batch actually deliver their broadcasts.
 
+## Fixed: backgrounded rows lost their content while scrolling a large listing
+
+**Symptom:** scrolling a full-window `glyphwire-ls` icon table, the rows
+that have a background color would lose their text/icons — but only some
+of them, split at roughly a fixed height on screen (backgrounded rows
+above the split blank, below it fine, or the reverse), and the same cell
+would flip between showing and hiding as the view scrolled up and down.
+
+**Root cause:** host-side paint order, entirely in `App.renderLayer`. It
+walked the whole grid once, interleaving `drawFilledRect` (color
+backgrounds), `drawStringColored` (text), and the icon draws into a single
+`begin`/`end`. That relied on pixzig submitting a pass's batches in a
+fixed order (sprites, shapes, overlays, text) — but a pixzig batch also
+**auto-flushes when it fills past its quad capacity** (1000 by default). A
+big grid pushes the shape batch (one quad per backgrounded cell) past 1000
+partway down, so those early background rects get drawn immediately;
+meanwhile the text batch keeps filling and only flushes at `end()`, on top
+of them — except where the text batch *also* overflowed first, leaving the
+last backgrounds to flush over already-drawn glyphs. Which rows landed on
+which side of the overflow moved with the scroll position, hence the
+flicker.
+
+**Fix (host only):** `renderLayer` now draws each category in its own
+`begin`/`end`, fully flushed before the next: color backgrounds → image
+backgrounds → icons (`draw_icon` backgrounds + every foreground/table
+icon, `.natural` overflow still deferred to the end of that pass) → text
+→ cursor caret. The passes run per `Layer`, so a popup with an opaque
+background still fully covers the layer beneath it. Capacity overflow
+within a category now only costs an extra draw call, never a misorder.
+`glyphwire-host`'s renderer is also configured with `maxSprites = 30_000`
+(new `pixzig.RendererOptions` field — pixzig's batch element indices were
+widened `u16` → `u32` to allow it) so a whole large grid of solid
+backgrounds still fits one draw call per category. No wire protocol
+change; `api.md` untouched.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

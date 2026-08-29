@@ -54,7 +54,14 @@ const arrow_repeat_delay_ms: f64 = 500;
 const arrow_repeat_interval_ms: f64 = 40;
 
 const EngOptions: pixzig.PixzigEngineOptions = .{
-    .rendererOpts = .{ .textRendering = true },
+    // `maxSprites`: a full-window character grid draws far more than the
+    // 1000-quad default per category (background rects, glyphs, icons). The
+    // per-category flushed passes in `App.renderLayer` keep the paint order
+    // correct regardless, but sizing every batch queue to hold a whole
+    // large grid keeps each category to a single draw call. 30k covers a
+    // ~240x125 cell grid of solid backgrounds; pixzig's `u32` batch indices
+    // make it safe.
+    .rendererOpts = .{ .textRendering = true, .maxSprites = 30_000 },
 };
 const AppRunner = pixzig.PixzigAppRunner(App, EngOptions);
 
@@ -104,9 +111,9 @@ pub const App = struct {
     /// address for its full lifetime, so `&managed.get().?.val` stays
     /// valid through the whole frame.
     image_textures: std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture),
-    /// Scratch buffer for `renderLayer`'s deferred-overflow pass -- see
-    /// `DeferredIcon`. Cleared (not freed) at the start of each
-    /// `renderLayer` call and reused across frames/layers.
+    /// Scratch buffer for the `.natural`-icon overflow handled at the end
+    /// of `renderLayer`'s icons pass -- see `DeferredIcon`. Cleared (not
+    /// freed) at the start of that pass and reused across frames/layers.
     deferred_icons: std.ArrayList(DeferredIcon) = .empty,
     /// Set by `reapChild` once glyphwire-shell's process actually exits
     /// (normally from its `exit` builtin, but this covers a crash or
@@ -226,7 +233,7 @@ pub const App = struct {
     /// visually spills into (this function draws into exactly the rect
     /// it's given; the caller -- `renderLayer` -- decides whether that
     /// means drawing immediately in grid order, for `.fit`/`.stretch`,
-    /// which never overflow, or deferring to a second pass so the
+    /// which never overflow, or deferring past the rest of the grid so the
     /// overflow paints over already-drawn neighbors, for `.natural`).
     /// `.stretch` fills the cell exactly on both axes (see `IconScale`'s
     /// doc comment) -- `icon.h_align`/`icon.v_align` are no-ops for it
@@ -234,20 +241,17 @@ pub const App = struct {
     /// `.fit`/`.natural` to place the (possibly smaller, possibly bigger)
     /// result within the cell's bounds.
     ///
-    /// `foreground` picks the batch this icon's quad goes into.
-    /// `pixzig.Renderer` flushes its batches in a fixed order at
-    /// `end()` -- sprites, then shapes (`drawFilledRect`), then overlays,
-    /// then text -- so a plain sprite draw (`foreground == false`) always
-    /// ends up *under* every `drawFilledRect` this frame, regardless of
-    /// call order. A cell whose background is a color (`style.bg`'s
-    /// `.color` case, e.g. a table's `alt_row_bg` stripe) is exactly such
-    /// a `drawFilledRect`; an icon that has to sit on top of it -- every
-    /// `Cell.fg_icon`, per that field's doc comment -- must go through the
-    /// overlay batch instead (`foreground == true`), which flushes after
-    /// shapes, so its alpha blends over the fill rather than being hidden
-    /// by it. `style.bg`'s own `.icon` case replaces the background
-    /// outright (no fill is drawn for that cell), so it stays on the
-    /// plain sprite batch.
+    /// `foreground` picks the batch this icon's quad goes into. Both cases
+    /// draw in `renderLayer`'s single icons pass, which is fully flushed
+    /// after the color- and image-background passes and before the text
+    /// pass (see `renderLayer`'s comment), so an icon is never hidden by a
+    /// row background and never hides a glyph. Within that one pass,
+    /// though, pixzig still submits the plain sprite batch before the
+    /// overlay batch, so `foreground == true` (every `Cell.fg_icon`, per
+    /// that field's doc comment) lands on top of a `foreground == false`
+    /// `style.bg` `.icon` drawn into the same cell; the `.icon` background
+    /// otherwise replaces that cell's fill outright (no rect is drawn for
+    /// it), so it has nothing of its own to sit above.
     fn drawIconCell(self: *App, eng: *AppRunner.Engine, icon: glyphwire.IconBg, pos: pixzig.Vec2I, foreground: bool) void {
         const entry = self.server.ctx.images.get(icon.handle) orelse return;
         const tex = self.textureForImage(eng, icon.handle) orelse return;
@@ -626,10 +630,14 @@ pub const App = struct {
     /// (glyphwire-shell's prompt), where a notification-style layer's own
     /// `cursor` is just bookkeeping `write_text` needs to know where to
     /// place its next character, not something a user is looking at.
+    ///
+    /// Each layer is drawn in full (all of `renderLayer`'s passes) before
+    /// the next one starts, so a popup with an opaque background still
+    /// fully covers the layer beneath it. The scrollbar is a final pass on
+    /// top of every layer.
     pub fn render(self: *App, eng: *AppRunner.Engine) void {
         eng.renderer.clear(0.0, 0.0, 0.0, 1.0);
 
-        eng.renderer.begin(eng.projMat);
         {
             self.server.ctx_mutex.lockUncancelable(self.server.io);
             defer self.server.ctx_mutex.unlock(self.server.io);
@@ -647,14 +655,10 @@ pub const App = struct {
                 );
             }
         }
-        eng.renderer.end();
 
-        // Second pass, entirely after the first `end()` flushes: the
-        // renderer submits its batches in a fixed order (sprites, shapes,
-        // overlays, text), so a `drawFilledRect` in the same pass as the
-        // grid would still land *under* every layer's text. Flushing a
-        // fresh pass here puts the scrollbar's GL draws after all of that,
-        // so it sits over everything -- text and all layers included.
+        // Scrollbar: its own begin/end, after every layer's passes have
+        // flushed, so its GL draws sit over everything -- text and all
+        // layers included.
         eng.renderer.begin(eng.projMat);
         self.renderScrollbar(eng);
         eng.renderer.end();
@@ -697,6 +701,11 @@ pub const App = struct {
         );
     }
 
+    /// Which category of a cell's contents one `renderLayer` pass draws.
+    /// The passes run in this declared order, each inside its own flushed
+    /// `begin`/`end` -- see `renderLayer`.
+    const Pass = enum { color_bg, image_bg, icons, text };
+
     /// Draws one layer's visible viewport with its top-left cell at
     /// `(origin_x, origin_y)` in screen pixels -- shared by `render` for
     /// the root layer (origin `(0, 0)`) and every other layer (origin its
@@ -705,87 +714,121 @@ pub const App = struct {
     /// -- always 0 for non-root layers, which don't expose scrollback
     /// viewing.
     fn renderLayer(self: *App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, draw_cursor: bool, view_offset: usize) void {
-        self.deferred_icons.clearRetainingCapacity();
+        // Draw the layer one category at a time, each category in its own
+        // `begin`/`end` so it is fully flushed to the framebuffer before
+        // the next category starts. Two things break a single interleaved
+        // pass: pixzig submits a pass's batches in a fixed order (sprites,
+        // shapes, overlays, text) rather than call order, AND it
+        // auto-flushes any batch that fills past its quad capacity
+        // mid-pass. A large grid -- a full-window `ls` icon table -- can
+        // cross that capacity partway down, so some rows' color
+        // backgrounds get flushed on top of text that was already drawn,
+        // making the content of every backgrounded row above (or below)
+        // that point vanish, differently at each scroll position.
+        // Separate flushed passes fix the paint order no matter how many
+        // quads a category needs; overflow then only costs an extra draw
+        // call within one category.
+        //
+        // Order, back to front: color backgrounds, image backgrounds,
+        // icons (`draw_icon` backgrounds and every foreground/table icon),
+        // then text on top, then the cursor caret above all of it.
+        for ([_]Pass{ .color_bg, .image_bg, .icons, .text }) |pass| {
+            if (pass == .icons) self.deferred_icons.clearRetainingCapacity();
 
-        var row: usize = 0;
-        while (row < layer.height) : (row += 1) {
-            const row_cells = layer.viewRow(view_offset, row);
-            var col: usize = 0;
-            while (col < layer.width) : (col += 1) {
-                const c = &row_cells[col];
-                const pos = pixzig.Vec2I{
-                    .x = origin_x + @as(i32, @intCast(col)) * cell_w,
-                    .y = origin_y + @as(i32, @intCast(row)) * cell_h,
-                };
+            eng.renderer.begin(eng.projMat);
 
-                switch (c.style.bg) {
-                    .color => |bg| {
-                        if (bg.r != 0 or bg.g != 0 or bg.b != 0) {
-                            eng.renderer.drawFilledRect(
-                                pixzig.RectF.fromPosSize(pos.x, pos.y, cell_w, cell_h),
-                                pixzig.Color.from(bg.r, bg.g, bg.b, bg.a),
-                            );
-                        }
-                    },
-                    .image => |img| self.drawImageCell(eng, img, pos),
-                    .icon => |icon| {
-                        // `.fit` never exceeds its cell, so it's safe (and
-                        // simplest) to draw immediately in grid order;
-                        // `.natural` can overflow into cells this loop
-                        // hasn't reached yet, so it's deferred past the
-                        // whole grid -- see `drawIconCell`'s doc comment.
-                        if (icon.scale == .natural) {
-                            self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos, .foreground = false }) catch {};
-                        } else {
-                            self.drawIconCell(eng, icon, pos, false);
-                        }
-                    },
-                }
-
-                const g = c.grapheme();
-                if (g.len > 0) {
-                    _ = eng.renderer.drawStringColored(g, pos, pixzig.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
-                }
-
-                // `fg_icon` (`draw_icon`'s `foreground: true`, and every
-                // table body icon -- see `core.Cell.fg_icon`'s doc
-                // comment) draws over whatever this cell's own
-                // background/glyph just drew, same tile/natural-defer
-                // split as `style.bg`'s `.icon` above. It goes through the
-                // overlay batch (`foreground = true`) so it lands on top
-                // of any `drawFilledRect` row background, not under it --
-                // see `drawIconCell`'s doc comment.
-                if (c.fg_icon) |icon| {
-                    if (icon.scale == .natural) {
-                        self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos, .foreground = true }) catch {};
-                    } else {
-                        self.drawIconCell(eng, icon, pos, true);
-                    }
+            var row: usize = 0;
+            while (row < layer.height) : (row += 1) {
+                const row_cells = layer.viewRow(view_offset, row);
+                var col: usize = 0;
+                while (col < layer.width) : (col += 1) {
+                    const pos = pixzig.Vec2I{
+                        .x = origin_x + @as(i32, @intCast(col)) * cell_w,
+                        .y = origin_y + @as(i32, @intCast(row)) * cell_h,
+                    };
+                    self.drawCell(eng, &row_cells[col], pos, pass);
                 }
             }
+
+            // `.natural`-scale icons overflow past their own cell, so the
+            // icons pass collects them and draws them after the grid, when
+            // an overflow paints over neighbors regardless of draw order.
+            // `d.foreground` keeps each in the sprite vs overlay batch its
+            // in-cell counterpart would have used.
+            if (pass == .icons) {
+                for (self.deferred_icons.items) |d| {
+                    self.drawIconCell(eng, d.icon, d.pos, d.foreground);
+                }
+            }
+
+            eng.renderer.end();
         }
 
-        // `.natural`-scale icons deferred above: drawn now, after the
-        // whole grid, so an icon's overflow always paints over every
-        // cell's own background/glyph regardless of row/col draw order --
-        // see `drawIconCell`'s doc comment. `d.foreground` routes each to
-        // the same batch (sprite vs overlay) its immediate-draw
-        // counterpart would have used.
-        for (self.deferred_icons.items) |d| {
-            self.drawIconCell(eng, d.icon, d.pos, d.foreground);
-        }
-
-        // Cursor caret: a solid bar at the start (left edge) of the
-        // cursor's cell, drawn last so it sits on top of that cell's own
-        // background/glyph (and any deferred icon overflow just drawn
-        // above).
+        // Cursor caret: a solid bar at the left edge of the cursor's
+        // cell, in its own flushed pass so it sits on top of the text
+        // just drawn (a filled rect in the text pass would be submitted
+        // before the text batch and hidden by it).
         if (draw_cursor and view_offset == 0 and layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
+            eng.renderer.begin(eng.projMat);
             const cx = origin_x + @as(i32, @intCast(layer.cursor.col)) * cell_w;
             const cy = origin_y + @as(i32, @intCast(layer.cursor.row)) * cell_h;
             eng.renderer.drawFilledRect(
                 pixzig.RectF.fromPosSize(cx, cy, cursor_width, cell_h),
                 pixzig.Color.from(255, 255, 255, 255),
             );
+            eng.renderer.end();
+        }
+    }
+
+    /// Draws the part of cell `c` (top-left corner at `pos`) that belongs
+    /// to render pass `pass`. Called once per cell per pass by
+    /// `renderLayer`; see that function for why the passes are separated.
+    fn drawCell(self: *App, eng: *AppRunner.Engine, c: *const glyphwire.Cell, pos: pixzig.Vec2I, pass: Pass) void {
+        switch (pass) {
+            .color_bg => switch (c.style.bg) {
+                .color => |bg| {
+                    if (bg.r != 0 or bg.g != 0 or bg.b != 0) {
+                        eng.renderer.drawFilledRect(
+                            pixzig.RectF.fromPosSize(pos.x, pos.y, cell_w, cell_h),
+                            pixzig.Color.from(bg.r, bg.g, bg.b, bg.a),
+                        );
+                    }
+                },
+                else => {},
+            },
+            .image_bg => switch (c.style.bg) {
+                .image => |img| self.drawImageCell(eng, img, pos),
+                else => {},
+            },
+            .icons => {
+                switch (c.style.bg) {
+                    .icon => |icon| self.queueOrDrawIcon(eng, icon, pos, false),
+                    else => {},
+                }
+                // `fg_icon` (`draw_icon`'s `foreground: true`, and every
+                // table body icon -- see `core.Cell.fg_icon`) sits over a
+                // same-cell `.icon` background; `drawIconCell`'s
+                // `foreground` routes it to the overlay batch for that.
+                if (c.fg_icon) |icon| self.queueOrDrawIcon(eng, icon, pos, true);
+            },
+            .text => {
+                const g = c.grapheme();
+                if (g.len > 0) {
+                    _ = eng.renderer.drawStringColored(g, pos, pixzig.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
+                }
+            },
+        }
+    }
+
+    /// Draws `icon` at `pos` now, or -- when `icon.scale == .natural`,
+    /// which can overflow past the cell into cells not yet reached --
+    /// defers it onto `deferred_icons` for `renderLayer` to draw after the
+    /// grid. `.fit`/`.stretch` never overflow, so they draw in place.
+    fn queueOrDrawIcon(self: *App, eng: *AppRunner.Engine, icon: glyphwire.IconBg, pos: pixzig.Vec2I, foreground: bool) void {
+        if (icon.scale == .natural) {
+            self.deferred_icons.append(self.alloc, .{ .icon = icon, .pos = pos, .foreground = foreground }) catch {};
+        } else {
+            self.drawIconCell(eng, icon, pos, foreground);
         }
     }
 };
