@@ -328,6 +328,16 @@ const ClearParams = struct {
     cols: ?usize = null,
 };
 
+/// `batch` params: an ordered list of sub-messages, each a normal
+/// JSON-RPC object (`{method, params, id?}`) -- the same shape `handle`
+/// parses from a standalone frame. See `handleBatch` for how they're
+/// applied (in order, under the one `ctx_mutex` hold server.zig already
+/// takes for the outer `batch` message) and how sub-message `id`s
+/// correlate to the entries in the response's `responses` array.
+const BatchParams = struct {
+    messages: []const std.json.Value,
+};
+
 /// The `load_image` request's JSON header, peeked out of a frame body
 /// before the binary side-channel payload it declares (`bytes` raw bytes,
 /// following directly on the wire) can be read — see `peekLoadImage` and
@@ -459,8 +469,15 @@ pub const Dispatcher = struct {
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
-        const envelope = parsed.value;
+        return self.dispatchEnvelope(alloc, parsed.value);
+    }
 
+    /// Dispatches an already-parsed envelope against the message catalog.
+    /// Split out from `handle` so `handleBatch` can route each of a
+    /// `batch`'s sub-messages through the exact same catalog without
+    /// re-serializing them into frame bodies first -- a batched
+    /// `write_text` and a standalone one hit precisely the same handler.
+    fn dispatchEnvelope(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
         if (std.mem.eql(u8, envelope.method, "write_text")) {
             try self.handleWriteText(alloc, envelope.params);
             return .{};
@@ -549,8 +566,106 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "table_get_state")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleTableGetState(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "batch")) {
+            return try self.handleBatch(alloc, envelope.id, envelope.params);
         }
         return DispatchError.UnknownMethod;
+    }
+
+    /// A `batch` sub-message method that can't run inside a batch,
+    /// regardless of params: another `batch` (nesting is disallowed) or
+    /// `load_image` (handled by its own pre-dispatch path in server.zig
+    /// because of the binary side-channel payload -- it has no branch in
+    /// `dispatchEnvelope` at all). Everything else in the catalog is
+    /// allowed; a sub-message that happens to produce a `broadcast`
+    /// (`report_key`, `scroll_view`, ...) still applies its state change,
+    /// but the broadcast is dropped -- see `handleBatch`.
+    fn batchSubMethodInvalid(method: []const u8) bool {
+        return std.mem.eql(u8, method, "batch") or std.mem.eql(u8, method, "load_image");
+    }
+
+    /// `batch`: applies an ordered list of sub-messages in one go. The
+    /// whole batch runs under the single `ctx_mutex` hold server.zig
+    /// already takes for this outer message, so nothing renders a
+    /// half-updated grid partway through -- the motivating fix for
+    /// glyphwire-ls's listing visibly painting itself one row at a time
+    /// (see decisions.md's Batch section).
+    ///
+    /// Best-effort, matching how server.zig already treats a standalone
+    /// notification's dispatch error: a sub-message that fails to parse,
+    /// names a batch-invalid method, or errors in its handler is logged
+    /// and skipped, and the rest of the batch still runs. The batch is
+    /// atomic only in the "one render" sense, not all-or-nothing -- core
+    /// has no transaction/rollback support.
+    ///
+    /// `outer_id` present (request form): the response is
+    /// `{responses: [<response object>, ...]}`, one element per
+    /// sub-message that carried an `id` and whose handler produced a
+    /// response, in order. Each element is a complete JSON-RPC response
+    /// object (`{jsonrpc, id, result}`) carrying that sub-message's own
+    /// `id`, so a caller correlates by matching ids (a missing id means
+    /// that sub-message was a notification, or it failed). `outer_id`
+    /// absent (notification form): no response at all; any response a
+    /// sub-request produced is dropped with a warning.
+    ///
+    /// The return set is spelled out (`ParseFromValueError`) rather than
+    /// inferred, to break the inferred-error-set cycle with
+    /// `dispatchEnvelope`: every error `dispatchEnvelope` can raise is
+    /// caught per sub-message below, so this function only ever surfaces
+    /// its own `BatchParams` parse / allocation failures.
+    fn handleBatch(self: *Dispatcher, alloc: std.mem.Allocator, outer_id: ?std.json.Value, params_value: std.json.Value) std.json.ParseFromValueError!HandleResult {
+        const parsed = try std.json.parseFromValue(BatchParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(alloc);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        var responses: std.ArrayList(std.json.Value) = .empty;
+
+        for (parsed.value.messages) |msg_value| {
+            const sub = std.json.parseFromValue(Envelope, alloc, msg_value, .{
+                .ignore_unknown_fields = true,
+            }) catch |err| {
+                std.log.warn("glyphwire: batch sub-message parse failed: {t}", .{err});
+                continue;
+            };
+            defer sub.deinit();
+
+            if (batchSubMethodInvalid(sub.value.method)) {
+                std.log.warn("glyphwire: batch sub-message '{s}' is not allowed in a batch, skipped", .{sub.value.method});
+                continue;
+            }
+
+            const result = self.dispatchEnvelope(alloc, sub.value) catch |err| {
+                std.log.warn("glyphwire: batch sub-message '{s}' failed: {t}", .{ sub.value.method, err });
+                continue;
+            };
+
+            if (result.broadcast) |b| {
+                alloc.free(b.body);
+                std.log.warn("glyphwire: broadcast from batched '{s}' dropped", .{sub.value.method});
+            }
+
+            if (result.response) |resp| {
+                defer alloc.free(resp);
+                if (outer_id == null) {
+                    std.log.warn("glyphwire: response from batched '{s}' dropped (notification-form batch)", .{sub.value.method});
+                    continue;
+                }
+                const v = std.json.parseFromSliceLeaky(std.json.Value, arena, resp, .{}) catch |err| {
+                    std.log.warn("glyphwire: re-parsing batched '{s}' response failed: {t}", .{ sub.value.method, err });
+                    continue;
+                };
+                try responses.append(arena, v);
+            }
+        }
+
+        const id = outer_id orelse return .{};
+        const BatchResult = struct { responses: []const std.json.Value };
+        return .{ .response = try rpc.response(alloc, id, BatchResult{ .responses = responses.items }) };
     }
 
     /// Handles the `load_image` request's JSON header once its binary

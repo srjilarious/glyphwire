@@ -150,6 +150,44 @@ a future client (almost certainly `glyphwire-shell`, following the same
 `get_metadata`-driven click-resolution pattern `activateSelectionAt`
 already uses) to call once that lands. See decisions.md's Table section.
 
+## Batch
+
+One `batch` message carries an ordered list of other messages, applied
+server-side in a single pass (under the one lock hold the server already
+takes per message) so nothing renders a half-updated grid partway
+through — the fix for `glyphwire-ls`'s listing visibly painting itself a
+band at a time. See decisions.md's Batch section for the reasoning.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `batch` | notification *or* request | `messages: [{method, params, id?}, ...]` | request form only: `{responses: [<response object>, ...]}` | ✅ |
+
+- **Notification form** (no outer `id`): every sub-message is applied in
+  order; no response. A sub-message carrying an `id` still runs, but its
+  response is dropped (with a server log line) — use the request form to
+  get results back.
+- **Request form** (outer `id` present): `responses` has one entry per
+  sub-message that carried an `id` *and* whose handler produced a result,
+  in sub-message order. Each entry is a complete JSON-RPC response object
+  (`{jsonrpc, id, result}`) tagged with that sub-message's own
+  batch-local `id` — correlate by matching ids. An id absent from
+  `responses` means that sub-message was a notification, or it failed.
+- **Sub-message `id`s are batch-local** — the caller's own numbering,
+  scoped to this `messages` array, unrelated to the outer request `id` or
+  any other frame's `id`.
+- **Best-effort, not atomic.** A sub-message that fails to parse, names a
+  batch-invalid method, or errors in its handler is logged and skipped;
+  the rest of the batch still runs. "Atomic" means only "one render", not
+  all-or-nothing — there is no rollback (core has no transaction
+  support), matching how a standalone notification's dispatch error is
+  already just logged rather than severing the connection.
+- **Disallowed sub-methods:** `batch` (no nesting) and `load_image` (its
+  binary side-channel payload can't be framed inside the array) — both
+  skipped with a log line. Input / subscription messages (`report_*`,
+  `subscribe`, `scroll_view`, …) are accepted but their server→client
+  broadcast is suppressed, so a batch is really for draw / layer / table
+  / metadata commands.
+
 ## Animation
 
 | Message | Kind | Params | Result | Status |

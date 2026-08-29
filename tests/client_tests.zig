@@ -309,6 +309,81 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(cursor.col, 1);
 }
 
+/// A request-form `Client.Batch` (it used a request adder) sends one
+/// frame, reads one response, and hands back each sub-request's result
+/// keyed by the slot it returned at add time.
+pub fn clientBatchRequestFormReturnsSlottedResultsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    var b = client.batch();
+    defer b.deinit();
+    const slot_a = try b.createMetadata("{\"path\":\"/a\"}");
+    try b.writeText("hi", null, null);
+    const slot_b = try b.createMetadata("{\"path\":\"/b\"}");
+    var results = try b.send();
+    defer results.deinit();
+
+    const handle_a = try results.metadataHandle(slot_a);
+    const handle_b = try results.metadataHandle(slot_b);
+    try testz.expectTrue(handle_a != handle_b);
+    try testz.expectEqualStr("{\"path\":\"/a\"}", ctx.metadataJson(handle_a).?);
+    try testz.expectEqualStr("{\"path\":\"/b\"}", ctx.metadataJson(handle_b).?);
+
+    // The batched `write_text` applied too.
+    try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
+}
+
+/// A notification-form `Client.Batch` (no request adders) sends one
+/// frame and returns immediately -- no response is read -- with every
+/// sub-message applied in order.
+pub fn clientBatchNotificationFormAppliesWithoutReplyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    {
+        var b = client.batch();
+        defer b.deinit();
+        try b.writeText("one", null, null);
+        try b.setCursor(2, 1);
+        try b.writeText("two", null, null);
+        var results = try b.send();
+        results.deinit();
+    }
+
+    // A following request on the same connection still round-trips, so
+    // `send` didn't leave an unread response frame on the socket.
+    const cursor = try client.getCursor();
+    try testz.expectEqual(cursor.row, 2);
+    try testz.expectEqual(cursor.col, 4);
+    try testz.expectEqualStr("o", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("t", ctx.root.cell(2, 1).grapheme());
+}
+
 fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
     server.acceptOne(alloc) catch |err| {
         std.debug.print("test server connection failed: {t}\n", .{err});

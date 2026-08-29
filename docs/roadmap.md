@@ -697,6 +697,52 @@ note `-S` is already taken for "small format", so a size sort needs a
 different letter or a `--sort=` option), `-d` (list the directory entry
 itself, not its contents), and recursive `-R`.
 
+## `batch` messages, and `glyphwire-ls`'s two-frame listing
+
+A `batch` message carries an ordered list of other messages, applied
+server-side in one pass under the single lock hold the server already
+takes per message — see decisions.md's Batch section for the *why* and
+api.md's Batch section for the wire shape. The motivating problem was
+`glyphwire-ls`: its listing arrives as dozens of separate draw
+notifications interleaved with per-entry `create_metadata` round trips,
+and glyphwire-host renders frames throughout, so the listing visibly
+paints itself a band at a time and scrolls as it goes.
+
+- **Wrapper method, not a JSON-RPC top-level array.** `{method: "batch",
+  params: {messages: [{method, params, id?}, ...]}}`. `dispatch.zig`'s
+  `handle` split into a parse step + a `dispatchEnvelope` step so each
+  sub-message routes through the identical catalog; one new handler, no
+  parser change, stays `jq`-inspectable.
+- **Notification form** (no outer `id`): fire-and-forget, no reply.
+  **Request form** (outer `id`): reply is `{responses: [<full JSON-RPC
+  response object>, ...]}`, one per sub-message that carried an `id` and
+  produced a result, tagged with that sub-message's batch-local id.
+- **Best-effort, not transactional** — a failing / parse-broken /
+  batch-invalid sub-message is logged and skipped, the rest still runs
+  (same treatment a standalone notification's dispatch error already
+  gets; core has no rollback). `batch` and `load_image` can't be nested;
+  other broadcast-producing messages are accepted but their broadcast is
+  dropped.
+- **Client helper:** `Client.batch()` returns a `Client.Batch` builder
+  (`notify` / `request` generic adders plus typed conveniences —
+  `writeText`, `setCursor`, `drawIconStyled`, `tagMetadata`,
+  `createMetadata`); `send` returns `BatchResults`, keyed by the `Slot`
+  each request adder returned. Every adder serializes immediately, so
+  caller buffers are reusable straight after.
+- **`glyphwire-ls` now:** `writeGrid` sends the whole listing as two
+  batches — one request creating every entry's metadata tag, then one
+  notification with every draw call — and tracks the draw row locally
+  (`@min(draw_row + block_rows, rows - 1)`, mirroring `Layer.resolveRow`'s
+  scroll-and-clamp) instead of a per-band `get_property("cursor")` round
+  trip. `writeLongTable` batches just its per-entry `create_metadata`
+  calls; its drawing was already a single `table_set_rows`.
+
+Not done (candidate next steps): intra-batch handle references (a
+sub-message referencing an earlier sub-message's returned handle), which
+would let `glyphwire-ls` drop even the metadata round trip and send the
+entire listing in one notification frame; and letting `scroll_view` /
+input messages in a batch actually deliver their broadcasts.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

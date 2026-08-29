@@ -1193,3 +1193,168 @@ pub fn isNotificationFalseForMessageWithIdTest(io: std.Io, alloc: std.mem.Alloca
     ;
     try testz.expectTrue(!try dispatch.isNotification(alloc, message));
 }
+
+// ─── Batch ───────────────────────────────────────────────────────────────
+
+/// A notification-form `batch` (no outer `id`) applies every sub-message
+/// in order, exactly as if each had arrived as its own frame, and
+/// produces no response.
+pub fn batchNotificationFormAppliesSubMessagesInOrderTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"batch","params":{"messages":[
+        \\  {"method":"write_text","params":{"text":"one"}},
+        \\  {"method":"set_property","params":{"property":"cursor","row":2,"col":0}},
+        \\  {"method":"write_text","params":{"text":"two"}}
+        \\]}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, message);
+    defer alloc.free(decoded);
+
+    const result = try d.handle(alloc, decoded);
+    try testz.expectTrue(result.response == null);
+    try testz.expectTrue(result.broadcast == null);
+
+    try testz.expectEqualStr("o", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("e", ctx.root.cell(0, 2).grapheme());
+    try testz.expectEqualStr("t", ctx.root.cell(2, 0).grapheme());
+    try testz.expectEqualStr("o", ctx.root.cell(2, 2).grapheme());
+    try testz.expectEqual(ctx.root.cursor.row, 2);
+    try testz.expectEqual(ctx.root.cursor.col, 3);
+}
+
+const BatchResponseJson = struct {
+    id: i64,
+    result: struct {
+        responses: []struct { id: i64, result: std.json.Value },
+    },
+};
+
+/// A request-form `batch` (outer `id` present) returns one response
+/// object per sub-message that carried an `id` and produced a result,
+/// each tagged with that sub-message's own batch-local id so a caller
+/// correlates by matching.
+pub fn batchRequestFormReturnsResponsesCorrelatedBySubIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":7,"method":"batch","params":{"messages":[
+        \\  {"method":"create_metadata","params":{"json":"{\"a\":1}"},"id":1},
+        \\  {"method":"write_text","params":{"text":"hi"}},
+        \\  {"method":"create_metadata","params":{"json":"{\"b\":2}"},"id":2},
+        \\  {"method":"get_property","params":{"property":"cursor"},"id":3}
+        \\]}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, message);
+    defer alloc.free(decoded);
+
+    const result = try d.handle(alloc, decoded);
+    const body = result.response.?;
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(BatchResponseJson, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try testz.expectEqual(parsed.value.id, 7);
+    const responses = parsed.value.result.responses;
+    try testz.expectEqual(responses.len, 3);
+
+    try testz.expectEqual(responses[0].id, 1);
+    try testz.expectEqual(responses[1].id, 2);
+    try testz.expectEqual(responses[2].id, 3);
+
+    const h1 = responses[0].result.object.get("handle").?.integer;
+    const h2 = responses[1].result.object.get("handle").?.integer;
+    try testz.expectTrue(h1 != h2);
+    try testz.expectEqualStr("{\"a\":1}", ctx.metadataJson(@intCast(h1)).?);
+    try testz.expectEqualStr("{\"b\":2}", ctx.metadataJson(@intCast(h2)).?);
+
+    // The `write_text` sub-message ran too (cursor advanced), and the
+    // trailing `get_property` reports the post-write cursor.
+    try testz.expectEqual(responses[2].result.object.get("col").?.integer, 2);
+}
+
+/// A sub-message whose handler errors (here: `draw_icon` naming an icon
+/// no catalog entry exists for) is logged and skipped; the sub-messages
+/// around it still apply, and the batch as a whole doesn't error.
+pub fn batchSkipsFailingSubMessageAndContinuesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"batch","params":{"messages":[
+        \\  {"method":"write_text","params":{"text":"A"}},
+        \\  {"method":"draw_icon","params":{"row":1,"col":0,"name":"no-such-icon"}},
+        \\  {"method":"set_property","params":{"property":"cursor","row":2,"col":0}},
+        \\  {"method":"write_text","params":{"text":"B"}}
+        \\]}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, message);
+    defer alloc.free(decoded);
+
+    const result = try d.handle(alloc, decoded);
+    try testz.expectTrue(result.response == null);
+    try testz.expectEqualStr("A", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("B", ctx.root.cell(2, 0).grapheme());
+}
+
+/// `batch` and `load_image` can't be batched (no nesting; the binary
+/// side-channel payload can't be framed inside the messages array) --
+/// such a sub-message is skipped, the rest of the batch still runs.
+pub fn batchRejectsNestedBatchAndLoadImageSubMessagesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"batch","params":{"messages":[
+        \\  {"method":"batch","params":{"messages":[]}},
+        \\  {"method":"load_image","params":{"bytes":4},"id":9},
+        \\  {"method":"write_text","params":{"text":"ok"}}
+        \\]}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, message);
+    defer alloc.free(decoded);
+
+    const result = try d.handle(alloc, decoded);
+    try testz.expectTrue(result.response == null);
+    try testz.expectEqualStr("o", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("k", ctx.root.cell(0, 1).grapheme());
+}
+
+/// A request-form batch whose sub-messages are all notifications still
+/// replies (the outer `id` needs an answer) with an empty `responses`
+/// array.
+pub fn batchRequestFormWithOnlyNotificationsReturnsEmptyResponsesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":3,"method":"batch","params":{"messages":[
+        \\  {"method":"write_text","params":{"text":"x"}}
+        \\]}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, message);
+    defer alloc.free(decoded);
+
+    const result = try d.handle(alloc, decoded);
+    const body = result.response.?;
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(BatchResponseJson, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.id, 3);
+    try testz.expectEqual(parsed.value.result.responses.len, 0);
+}

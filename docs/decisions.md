@@ -863,6 +863,54 @@ surface.
   works. The e2e tests set it so driving the real `glyphwire-shell`
   binary doesn't append test commands to the developer's history.
 
+### Batch messages
+- **`batch` wraps an ordered list of other messages in one frame**,
+  applied server-side in a single pass under the one `ctx_mutex` hold the
+  server already takes per message. The motivating problem: `glyphwire-ls`
+  emits a listing as dozens of separate `set_property`/`draw_icon`/
+  `write_text` notifications interleaved with per-entry `create_metadata`
+  round trips, and glyphwire-host renders frames the whole time — so the
+  listing visibly paints itself a band at a time and scrolls as it goes.
+  Sent as one batch, the grid goes from its prior state straight to the
+  finished listing in a single frame.
+- **A wrapper method, not a JSON-RPC 2.0 top-level array.** The spec's
+  batch form is a bare `[...]` at the frame-body root; a `batch` method
+  with `{messages: [...]}` was chosen instead so the whole decode/dispatch
+  path keeps assuming one object envelope per frame (one new handler, no
+  parser change) and a batch stays `nc -U` / `jq`-inspectable as an
+  ordinary message. `dispatch.zig`'s `handle` split into a parse step and
+  a `dispatchEnvelope` step so each sub-message routes through the exact
+  same catalog as a standalone frame — a batched `write_text` and a
+  standalone one hit precisely the same handler.
+- **Both notification and request forms.** No outer `id`: fire-and-forget,
+  no response (a sub-request's result is dropped with a log line). Outer
+  `id` present: the response carries `{responses: [...]}`, one full
+  JSON-RPC response object per sub-message that had an `id` and produced a
+  result, in order, each tagged with that sub-message's batch-local id for
+  correlation. This is what lets `glyphwire-ls` collapse its N per-entry
+  `create_metadata` round trips into one batch request, then send every
+  draw call as one batch notification — a whole listing in two frames
+  instead of ~2N.
+- **Best-effort, not transactional.** A sub-message that fails to parse,
+  names a batch-invalid method, or errors in its handler is logged and
+  skipped; the rest still applies. There is no rollback — core has no
+  transaction support, and this matches how server.zig already treats a
+  standalone notification's dispatch error (log, don't sever). "Atomic"
+  here means only "one render", not all-or-nothing.
+- **`batch` and `load_image` can't be nested in a batch** — no recursive
+  batches, and `load_image`'s binary side-channel payload can't be framed
+  inside the `messages` array. Other broadcast-producing messages
+  (`report_key`, `scroll_view`, …) are accepted but their broadcast is
+  suppressed: a batch is meant for draw/layer/table/metadata commands,
+  not input.
+- **`glyphwire-ls` uses it.** `writeGrid` sends two batches (metadata
+  requests, then all draws) and tracks the draw row locally instead of a
+  per-band `get_property("cursor")` round trip — the local
+  `@min(draw_row + block_rows, rows - 1)` mirrors `Layer.resolveRow`'s
+  scroll-and-clamp, so the batched sequence lands identically to the old
+  call-per-band one. `writeLongTable` batches just its per-entry
+  `create_metadata` calls (its drawing was already one `table_set_rows`).
+
 ### Server architecture
 - **Headless-first.** Core state — the layer tree, positions, clip rects,
   scroll offsets, cell contents, animation state — is a pure, inspectable

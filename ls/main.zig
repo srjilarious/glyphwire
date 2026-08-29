@@ -659,13 +659,24 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 ///   row between bands and one band's icon doesn't overlap the next's
 ///   text.
 ///
-/// Reads the cursor back before *each band* rather than tracking a local
-/// row counter across the whole loop: the grid can scroll mid-listing
-/// (once enough bands have pushed past the bottom), and only the server
-/// knows the post-scroll row. Within a band every column's entry is
-/// written at that one known row, so no scroll happens until the band is
-/// complete and `setCursor` advances past it. Costs one extra request
-/// per band; fine over a local socket.
+/// Sends the whole listing as two batches (see decisions.md's Batch
+/// section) rather than a call per entry: pass 1 is one `batch` request
+/// that creates every entry's metadata tag at once (nothing is drawn, so
+/// no half-painted grid is ever visible -- this just collapses N
+/// `create_metadata` round trips into one); pass 2 is one `batch`
+/// notification carrying every `draw_icon`/`set_property`/`write_text`
+/// call, so glyphwire-host composites the finished grid in a single
+/// frame instead of visibly painting it a band at a time.
+///
+/// Because pass 2 can't read the cursor back mid-batch (the old
+/// per-band `getCursor`), the draw row is tracked locally:
+/// `set_property(cursor)` resolves an out-of-bounds row by scrolling and
+/// clamping to the last row (`Layer.resolveRow`), so once a band reaches
+/// the bottom every later band draws on that same last row while its
+/// trailing cursor move scrolls the listing up --
+/// `@min(draw_row + block_rows, rows - 1)` reproduces that clamp exactly.
+/// Within a band every column's entry is drawn at that one row, so no
+/// scroll happens until the band's trailing `setCursor` advances past it.
 ///
 /// Every entry's metadata tag (below) embeds its `abs_path` -- resolved
 /// once when the entry was scanned (see `FileEntry.abs_path`) -- so
@@ -713,30 +724,49 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
         .block_rows = block_rows,
     });
 
+    const start = try client.getCursor();
+
+    // Pass 1: one batch request creating every entry's metadata tag.
+    // Each cell an entry's block touches (icon and name) shares one
+    // metadata id -- see decisions.md's Metadata section on tagging a
+    // whole run rather than copying the same blob per cell. `mimetype`/
+    // `path` are the two fields glyphwire-shell's `browseEnter` (word for
+    // word) and any future context-menu client are expected to read.
+    const metas = try alloc.alloc(glyphwire.MetadataHandle, entries.len);
+    defer alloc.free(metas);
+    {
+        var meta_batch = client.batch();
+        defer meta_batch.deinit();
+        const slots = try alloc.alloc(glyphwire.Client.Batch.Slot, entries.len);
+        defer alloc.free(slots);
+        for (entries, 0..) |entry, i| {
+            const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = entry.abs_path }, .{});
+            defer alloc.free(json);
+            slots[i] = try meta_batch.createMetadata(json);
+        }
+        var results = try meta_batch.send();
+        defer results.deinit();
+        for (0..entries.len) |i| metas[i] = try results.metadataHandle(slots[i]);
+    }
+
+    // Pass 2: one batch notification with every draw call for the whole
+    // listing.
+    var draw_batch = client.batch();
+    defer draw_batch.deinit();
+
+    var draw_row: usize = start.row;
     var band: usize = 0;
     while (band < grid.rows) : (band += 1) {
-        const cur = try client.getCursor();
-        const row = cur.row;
-
         var gcol: usize = 0;
         while (gcol < grid.cols) : (gcol += 1) {
             const index = gcol * grid.rows + band; // column-major
             if (index >= entries.len) break;
             const entry = entries[index];
             const base_col = gcol * grid.block_cols;
-
-            // Every cell this entry's block touches (icon and name)
-            // shares one metadata id -- see decisions.md's Metadata
-            // section on tagging a whole run rather than copying the same
-            // blob per cell. `mimetype`/`path` are the two fields
-            // glyphwire-shell's `browseEnter` (word for word) and any
-            // future context-menu client are expected to read.
-            const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = entry.abs_path }, .{});
-            defer alloc.free(json);
-            const metadata_id = try client.createMetadata(json);
+            const metadata_id = metas[index];
 
             if (large) {
-                try client.drawIconStyled(row, base_col, iconForEntry(entry), .{
+                try draw_batch.drawIconStyled(draw_row, base_col, iconForEntry(entry), .{
                     .scale = .natural,
                     .h_align = .start,
                     .v_align = .center,
@@ -750,13 +780,13 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
                 // the icon actually renders, not just its leftmost cell.
                 var icon_col: usize = 1;
                 while (icon_col < icon_cols_spanned) : (icon_col += 1) {
-                    try client.tagMetadata(null, row, base_col + icon_col, metadata_id);
+                    try draw_batch.tagMetadata(null, draw_row, base_col + icon_col, metadata_id);
                 }
             } else {
-                try client.drawIconStyled(row, base_col, iconForEntry(entry), .{ .metadata_id = metadata_id });
+                try draw_batch.drawIconStyled(draw_row, base_col, iconForEntry(entry), .{ .metadata_id = metadata_id });
             }
 
-            try client.setCursor(row, base_col + icon_col_width);
+            try draw_batch.setCursor(draw_row, base_col + icon_col_width);
             const raw_name = switch (entry.kind) {
                 .directory => std.fmt.bufPrint(&buf, "{s}/", .{entry.name}) catch entry.name,
                 .sym_link => if (entry.link_target) |tgt|
@@ -779,16 +809,19 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
                 .sym_link => symlink_color,
                 else => file_color,
             };
-            try client.writeTextTagged(name_text, name_fg, null, metadata_id);
+            try draw_batch.writeTextTagged(name_text, name_fg, null, metadata_id);
         }
 
-        // set_property(cursor) scrolls-and-clamps a row at or past the
-        // bottom (Layer.resolveRow), so naming the next band's row
-        // directly is safe -- the next iteration's getCursor() reads back
-        // wherever it landed. `block_rows` is 2 in large mode: the blank
-        // row keeps this band's icons off the next band's text.
-        try client.setCursor(row + grid.block_rows, 0);
+        // Advance past this band. `block_rows` is 2 in large mode: the
+        // blank row keeps this band's icons off the next band's text.
+        // See this function's doc comment on why the local `draw_row`
+        // clamp mirrors `set_property(cursor)`'s server-side scroll.
+        try draw_batch.setCursor(draw_row + grid.block_rows, 0);
+        draw_row = @min(draw_row + grid.block_rows, layer.rows - 1);
     }
+
+    var draw_results = try draw_batch.send();
+    draw_results.deinit();
 }
 
 /// Body row height, in cells, `writeLongTable`'s `large` mode uses --
@@ -918,10 +951,29 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         alloc.free(rows);
     }
 
+    // Create every entry's metadata tag in one batch request rather than
+    // one round trip per entry -- see decisions.md's Batch section. Unlike
+    // `writeGrid`, the drawing here is already a single `tableSetRows`
+    // call, so only the `create_metadata` fan-out needed collapsing.
+    const metas = try alloc.alloc(glyphwire.MetadataHandle, entries.len);
+    defer alloc.free(metas);
+    {
+        var meta_batch = client.batch();
+        defer meta_batch.deinit();
+        const slots = try alloc.alloc(glyphwire.Client.Batch.Slot, entries.len);
+        defer alloc.free(slots);
+        for (entries, 0..) |entry, i| {
+            const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = entry.abs_path }, .{});
+            defer alloc.free(json);
+            slots[i] = try meta_batch.createMetadata(json);
+        }
+        var results = try meta_batch.send();
+        defer results.deinit();
+        for (0..entries.len) |i| metas[i] = try results.metadataHandle(slots[i]);
+    }
+
     for (entries, 0..) |entry, i| {
-        const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = entry.abs_path }, .{});
-        defer alloc.free(json);
-        const metadata_id = try client.createMetadata(json);
+        const metadata_id = metas[i];
 
         var name_text: []u8 = undefined;
         var name_fg: glyphwire.Color = undefined;

@@ -853,12 +853,170 @@ pub const Client = struct {
     fn send(self: *Client, msg: anytype) !void {
         const body = try std.json.Stringify.valueAlloc(self.alloc, msg, .{});
         defer self.alloc.free(body);
+        try self.frameAndFlush(body);
+    }
 
+    /// Frames one already-serialized JSON-RPC body and flushes it to the
+    /// socket. Split out of `send` so `Batch.send` can hand over a body it
+    /// assembled itself (splicing pre-validated sub-message objects into
+    /// one `batch` message) rather than round-tripping through
+    /// `Stringify.valueAlloc` again.
+    fn frameAndFlush(self: *Client, body: []const u8) !void {
         var write_buf: [4096]u8 = undefined;
         var w = self.stream.writer(self.io, &write_buf);
         try wire.writeFrame(&w.interface, body);
         try w.interface.flush();
     }
+
+    /// Starts a `batch`: a set of sub-messages sent in one frame and
+    /// applied server-side under a single lock hold, so nothing renders a
+    /// half-updated grid partway through -- see decisions.md's Batch
+    /// section, and `Batch` below for the builder API. The returned
+    /// `Batch` borrows this `Client` (for the socket and `next_id`);
+    /// add sub-messages, call `send` once, then `Batch.deinit`.
+    pub fn batch(self: *Client) Batch {
+        return .{
+            .client = self,
+            .arena = std.heap.ArenaAllocator.init(self.alloc),
+            .msgs = .empty,
+        };
+    }
+
+    /// Accumulates sub-messages for one `batch` frame. Notification
+    /// adders (`notify` and the typed conveniences) append fire-and-forget
+    /// sub-messages; request adders (`request`, `createMetadata`) append a
+    /// sub-message carrying a batch-local id and hand back a `Slot` to
+    /// pull that sub-message's result out of `send`'s `BatchResults`.
+    ///
+    /// Every adder serializes its sub-message immediately into the
+    /// `Batch`'s own arena, so a caller may reuse the buffers backing
+    /// `text`/`json`/etc. the moment the adder returns -- the bytes are
+    /// already copied into the pending JSON. `send` splices the pending
+    /// sub-message objects into one `batch` message; if any request
+    /// adders were used it then reads and parses the one response frame,
+    /// otherwise it sends notification-form and returns immediately.
+    pub const Batch = struct {
+        client: *Client,
+        arena: std.heap.ArenaAllocator,
+        msgs: std.ArrayList([]const u8),
+        n_requests: u32 = 0,
+
+        /// A handle to one request sub-message's eventual result -- see
+        /// `BatchResults.get`/`metadataHandle`. `id` is the sub-message's
+        /// batch-local id (1-based, in add order among request adders).
+        pub const Slot = struct { id: u32 };
+
+        pub fn deinit(self: *Batch) void {
+            self.arena.deinit();
+        }
+
+        fn append(self: *Batch, sub_id: ?u32, method: []const u8, params: anytype) !void {
+            const a = self.arena.allocator();
+            const s = if (sub_id) |sid|
+                try std.json.Stringify.valueAlloc(a, .{ .method = method, .params = params, .id = sid }, .{})
+            else
+                try std.json.Stringify.valueAlloc(a, .{ .method = method, .params = params }, .{});
+            try self.msgs.append(a, s);
+        }
+
+        /// Appends a notification sub-message (no result). `method`/
+        /// `params` are the same pair `Client`'s own notification methods
+        /// build -- this is the generic escape hatch for anything without
+        /// a typed convenience below.
+        pub fn notify(self: *Batch, method: []const u8, params: anytype) !void {
+            try self.append(null, method, params);
+        }
+
+        /// Appends a request sub-message and returns its `Slot`. `method`/
+        /// `params` mirror `Client.request`'s. The result comes back in
+        /// `send`'s `BatchResults`, keyed by the returned slot.
+        pub fn request(self: *Batch, method: []const u8, params: anytype) !Slot {
+            self.n_requests += 1;
+            const sub_id = self.n_requests;
+            try self.append(sub_id, method, params);
+            return .{ .id = sub_id };
+        }
+
+        /// Batched `set_property(cursor)` -- see `Client.setCursor`.
+        pub fn setCursor(self: *Batch, row: usize, col: usize) !void {
+            try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
+        }
+
+        /// Batched `write_text` -- see `Client.writeText`.
+        pub fn writeText(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
+            try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg) });
+        }
+
+        /// Batched `write_text` with a metadata tag -- see
+        /// `Client.writeTextTagged`.
+        pub fn writeTextTagged(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: core.MetadataHandle) !void {
+            try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg), .metadata_id = metadata_id });
+        }
+
+        /// Batched `tag_metadata` -- see `Client.tagMetadata`.
+        pub fn tagMetadata(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle) !void {
+            try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id });
+        }
+
+        /// Batched `draw_icon` with options -- see `Client.drawIconStyled`.
+        pub fn drawIconStyled(self: *Batch, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
+            try self.notify("draw_icon", .{
+                .row = row,
+                .col = col,
+                .name = name,
+                .scale = @tagName(opts.scale),
+                .h_align = @tagName(opts.h_align),
+                .v_align = @tagName(opts.v_align),
+                .max_w = opts.max_w,
+                .max_h = opts.max_h,
+                .metadata_id = opts.metadata_id,
+                .foreground = opts.foreground,
+            });
+        }
+
+        /// Batched `create_metadata` -- see `Client.createMetadata`.
+        /// Resolve the returned slot with `BatchResults.metadataHandle`.
+        pub fn createMetadata(self: *Batch, json: []const u8) !Slot {
+            return self.request("create_metadata", .{ .json = json });
+        }
+
+        /// Sends the batch. With no request adders used, sends
+        /// notification-form (no `id`, no reply) and returns an empty
+        /// `BatchResults`. Otherwise sends request-form using the
+        /// `Client`'s `next_id` for the outer id, then reads and parses
+        /// the single response frame. Caller frees with
+        /// `BatchResults.deinit`.
+        pub fn send(self: *Batch) !BatchResults {
+            const a = self.arena.allocator();
+            var bw = std.Io.Writer.Allocating.init(a);
+            const has_requests = self.n_requests > 0;
+
+            try bw.writer.writeAll("{\"jsonrpc\":\"2.0\",");
+            if (has_requests) {
+                const outer_id = self.client.next_id;
+                self.client.next_id += 1;
+                try bw.writer.print("\"id\":{d},", .{outer_id});
+            }
+            try bw.writer.writeAll("\"method\":\"batch\",\"params\":{\"messages\":[");
+            for (self.msgs.items, 0..) |m, i| {
+                if (i != 0) try bw.writer.writeAll(",");
+                try bw.writer.writeAll(m);
+            }
+            try bw.writer.writeAll("]}}");
+
+            try self.client.frameAndFlush(bw.written());
+
+            if (!has_requests) return .{ .parsed = null, .arena = std.heap.ArenaAllocator.init(self.client.alloc) };
+
+            const resp_body = try self.client.readFrame();
+            defer self.client.alloc.free(resp_body);
+            const parsed = try std.json.parseFromSlice(BatchResponseEnvelope, self.client.alloc, resp_body, .{
+                .ignore_unknown_fields = true,
+                .allocate = .alloc_always,
+            });
+            return .{ .parsed = parsed, .arena = std.heap.ArenaAllocator.init(self.client.alloc) };
+        }
+    };
 
     /// Reads and returns exactly one complete frame's body (caller frees
     /// with `self.alloc`), blocking on the socket until one arrives.
@@ -881,6 +1039,73 @@ fn ResponseOf(comptime ResultT: type) type {
         result: ResultT = undefined,
     };
 }
+
+/// The outer shape of a request-form `batch` response:
+/// `{result: {responses: [<response object>, ...]}}`. Each element is a
+/// whole JSON-RPC response object carrying a sub-message's batch-local
+/// `id`; `BatchResults` scans them by id. Left loosely typed
+/// (`std.json.Value` per element) since the element result types are
+/// heterogeneous and only re-parsed on demand by `BatchResults.get`.
+const BatchResponseEnvelope = struct {
+    result: struct {
+        responses: []const std.json.Value = &.{},
+    } = .{},
+};
+
+/// The result side of `Client.Batch.send`. `deinit` frees it. For a
+/// notification-form batch (no request adders) it's empty and every
+/// lookup returns `error.BatchResultMissing`.
+pub const BatchResults = struct {
+    parsed: ?std.json.Parsed(BatchResponseEnvelope),
+    /// Backs the on-demand re-parse in `get` -- kept separate from
+    /// `parsed`'s own arena so this type owns a definite allocator even
+    /// in the notification-form (`parsed == null`) case.
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *BatchResults) void {
+        if (self.parsed) |*p| p.deinit();
+        self.arena.deinit();
+    }
+
+    fn element(self: *const BatchResults, slot: Client.Batch.Slot) ?std.json.Value {
+        const p = self.parsed orelse return null;
+        for (p.value.result.responses) |resp| {
+            const obj = switch (resp) {
+                .object => |o| o,
+                else => continue,
+            };
+            const id_value = obj.get("id") orelse continue;
+            const id_int: i64 = switch (id_value) {
+                .integer => |n| n,
+                else => continue,
+            };
+            if (id_int == @as(i64, slot.id)) return resp;
+        }
+        return null;
+    }
+
+    /// Re-parses the response element for `slot` as `{result: T}` and
+    /// returns the `result`. `T` follows `std.json` parsing rules; a
+    /// scalar or owned-by-arena value is safe to use until `deinit`.
+    /// Errors `BatchResultMissing` if the slot produced no response (it
+    /// failed server-side, or the batch was notification-form).
+    pub fn get(self: *BatchResults, comptime T: type, slot: Client.Batch.Slot) !T {
+        const resp = self.element(slot) orelse return error.BatchResultMissing;
+        const Wrapped = struct { result: T };
+        const w = try std.json.parseFromValueLeaky(Wrapped, self.arena.allocator(), resp, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+        return w.result;
+    }
+
+    /// Convenience for the common `create_metadata` slot: returns just
+    /// the `MetadataHandle`.
+    pub fn metadataHandle(self: *BatchResults, slot: Client.Batch.Slot) !core.MetadataHandle {
+        const r = try self.get(struct { handle: core.MetadataHandle }, slot);
+        return r.handle;
+    }
+};
 
 /// The wire shapes this file builds requests from and parses responses
 /// into all live in `protocol.zig`, shared verbatim with `dispatch.zig`
