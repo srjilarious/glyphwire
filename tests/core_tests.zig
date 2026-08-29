@@ -259,6 +259,58 @@ pub fn viewRowClampsOffsetPastRetainedHistoryTest(io: std.Io, alloc: std.mem.All
     try testz.expectEqualStr("d", row1[0].grapheme());
 }
 
+/// Regression test for glyphwire-shell's `writeCapturedText`, which pipes
+/// a spawned child's stdout onto the grid as one `set_property(cursor)` +
+/// `write_text` pair per line. It used to hand `resolveRow` an
+/// ever-growing absolute row count with no ceiling: once the grid had
+/// scrolled once, the *next* line named a row two past the bottom, the one
+/// after that three past, and so on -- `resolveRow` scrolls once per row
+/// of overshoot a single call names, so each later line triggered more
+/// scrolls than the one line it actually represented, opening a widening
+/// run of blank rows nothing had written into (exactly what made `cat`ing
+/// a longer file show real content interspersed with growing gaps of
+/// blank space once scrollback made it possible to actually see). This
+/// drives `Layer` with the same call pattern `writeCapturedText` uses,
+/// with the fix applied: the target row capped at `height` once the grid
+/// has scrolled, so every line past the bottom asks for exactly the one
+/// scroll it should.
+pub fn manyLinesPastBottomCursorCappedAtHeightLeavesNoBlankRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 4, 20);
+    defer layer.deinit();
+
+    var row: usize = 0; // mirrors `CapturedOutput.row`'s initial value
+    var line: usize = 0;
+    while (line < 12) : (line += 1) {
+        if (line > 0) {
+            row = @min(row + 1, layer.height); // the fix
+            layer.setProperty(.{ .cursor = .{ .row = row, .col = 0 } });
+        }
+        var buf: [8]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "L{d}", .{line}) catch unreachable;
+        try layer.writeText(text, glyphwire.default_style.fg, glyphwire.default_style.bg);
+    }
+
+    // No blank rows: every visible row has real content.
+    var r: usize = 0;
+    while (r < layer.height) : (r += 1) {
+        try testz.expectTrue(layer.cell(r, 0).grapheme().len > 0);
+    }
+
+    // The live viewport shows the last 4 lines written (L8..L11), in
+    // order -- not scattered among blank rows.
+    try testz.expectEqualStr("L", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("8", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("L", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("9", layer.cell(1, 1).grapheme());
+    try testz.expectEqualStr("L", layer.cell(2, 0).grapheme());
+    try testz.expectEqualStr("1", layer.cell(2, 1).grapheme());
+    try testz.expectEqualStr("0", layer.cell(2, 2).grapheme());
+    try testz.expectEqualStr("L", layer.cell(3, 0).grapheme());
+    try testz.expectEqualStr("1", layer.cell(3, 1).grapheme());
+    try testz.expectEqualStr("1", layer.cell(3, 2).grapheme());
+}
+
 pub fn inputStateTracksKeyAndMouseButtonDownSetsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var input = glyphwire.InputState.init(alloc);

@@ -176,6 +176,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         var snapshot = try client.getCells();
         defer snapshot.deinit();
         prompt.grid_cols = snapshot.cols();
+        prompt.grid_rows = snapshot.rows();
     }
 
     try prompt.showPrompt();
@@ -342,6 +343,12 @@ const Prompt = struct {
     /// there's no lighter-weight "get grid size" property yet (`size` is
     /// still 🔶 in decisions.md), and it doesn't change over a session.
     grid_cols: usize = 0,
+    /// The root layer's row count -- fetched once at startup alongside
+    /// `grid_cols`, same reasoning. Used by `writeCapturedText` to cap the
+    /// locally-tracked "next row" at the bottom row instead of letting it
+    /// grow past it -- see that field's doc comment for why an unclamped
+    /// counter cascades into extra blank rows.
+    grid_rows: usize = 0,
     /// Non-null while the cursor is browsing the grid instead of sitting on
     /// the live prompt (`browseUp`/`browseDown`/`browseLeft`/`browseRight`,
     /// entered by plain Up with nothing being typed) -- see those methods'
@@ -882,7 +889,20 @@ const Prompt = struct {
         var first = true;
         while (it.next()) |line| {
             if (!first) {
-                capture.row += 1;
+                // Capped at `grid_rows`, not left to grow without bound:
+                // `set_property(cursor)`'s `resolveRow` scrolls once for
+                // every row past the bottom a given call names, same as
+                // one line advancing the cursor normally would. Once
+                // output has scrolled the grid at all, the bottom row is
+                // always index `grid_rows - 1` again -- an uncapped
+                // counter drifts further past that on every subsequent
+                // line (row `grid_rows`, then `grid_rows + 1`, ...), so
+                // each later line quietly asked for more and more scrolls
+                // than the one it actually represented, opening a growing
+                // run of blank rows nothing had written into. Pinning the
+                // counter at `grid_rows` keeps every post-scroll line
+                // asking for exactly the one scroll it should.
+                capture.row = if (self.grid_rows == 0) capture.row + 1 else @min(capture.row + 1, self.grid_rows);
                 try self.client.setCursor(capture.row, 0);
             }
             first = false;
