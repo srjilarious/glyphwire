@@ -423,6 +423,59 @@ const detail_color = rgb(120, 120, 120);
 /// listing, and the `total ...` summary line (`-l`).
 const header_color = rgb(200, 200, 200);
 
+// ── `-l` table cell colors (VSCode Dark+ palette, lsd-inspired) ─────────
+//
+// The server-side table gives each cell one foreground color for its
+// whole text -- no per-character styling, no bold -- so lsd's per-bit
+// permission coloring is approximated by splitting the mode into four
+// separately-colored cells (type char + three rwx triads) and coloring
+// each triad as a unit by how open it is. Owner and group get their own
+// name columns so the "brighter for owner, dimmer for group" pair lsd
+// uses (it leans on bold there, which a cell can't do) still reads.
+
+/// rwx triad cell, colored as a unit by access level -- `permTriadColor`.
+const perm_none = rgb(92, 99, 112); //   `---`  dim slate  (#5C6370)
+const perm_read = rgb(106, 153, 85); //  `r--`  comment green (#6A9955)
+const perm_rwx = rgb(129, 184, 105); //  `rwx`  brighter green
+const perm_write = rgb(215, 186, 125); // `rw-`  gold (#D7BA7D)
+const perm_exec = rgb(211, 105, 105); //  `--x`/`r-x`  soft red
+
+/// Owner-name column: the pale yellow VSCode uses for function names
+/// (#DCDCAA), standing in for lsd's bold user color.
+const owner_color = rgb(220, 220, 170);
+/// Group-name column: a dimmer wash of the same yellow -- lsd's
+/// non-bold group tone.
+const group_color = rgb(178, 174, 128);
+/// Time column: a muted steel blue, deliberately not the bright keyword
+/// blue (#569CD6) the rest of the palette uses for identifiers.
+const time_color = rgb(96, 139, 168);
+
+/// Foreground for one `formatPermTriad` cell, by how much access it
+/// grants -- see the color block above on why this is per-triad and not
+/// per-bit.
+fn permTriadColor(triad: []const u8) glyphwire.Color {
+    const has_r = triad.len > 0 and triad[0] == 'r';
+    const has_w = triad.len > 1 and triad[1] == 'w';
+    const has_x = triad.len > 2 and triad[2] == 'x';
+    if (!has_r and !has_w and !has_x) return perm_none;
+    if (has_w and has_x) return perm_rwx;
+    if (has_w) return perm_write;
+    if (has_x) return perm_exec;
+    return perm_read;
+}
+
+/// Foreground for the permission string's leading type-character cell:
+/// reuses the name colors so a `d`/`l` reads the same hue as the entry's
+/// own name, and a regular file's `-` stays quietly dim.
+fn permTypeColor(kind: EntryKind) glyphwire.Color {
+    return switch (kind) {
+        .directory => dir_color,
+        .sym_link => symlink_color,
+        .other => rgb(197, 134, 192), // magenta -- device/socket/fifo
+        .file => perm_none,
+    };
+}
+
 /// Foreground color for a `-l` Size cell, ramped by magnitude so a large
 /// file stands out without reading the digits: sub-KB stays the same dim
 /// gray the other detail columns use, KB-range is green, MB-range amber,
@@ -952,34 +1005,42 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
 /// anchor with overflow into neighboring rows).
 const large_table_row_height = 3;
 
-/// Clamp for the Owner (`owner:group`) column's width: sized to the
-/// widest value the listing actually holds, but never so narrow the
-/// "Owner" header is squeezed nor so wide one long name from an unusual
-/// uid stretches every row (`writeCellRun` clips past this with `…`).
-const owner_col_min = 7;
-const owner_col_max = 24;
+/// Clamp for the User / Group name columns' widths: each is sized to the
+/// widest name the listing actually holds, but never so narrow its
+/// header is squeezed nor so wide one long name from an unusual id
+/// stretches every row (`writeCellRun` clips past this with `…`).
+const id_name_col_min = 5;
+const id_name_col_max = 16;
 
 /// The `-l` listing: a real server-side table (`Client.createTable`/
 /// `tableSetRows`) instead of `writeGrid`'s per-row `write_text`/`draw_icon`
-/// layout. Columns follow exa's order:
+/// layout. Columns follow exa's order, with lsd-style coloring (VSCode
+/// Dark+ palette) worked around the table's "one fg per cell" limit by
+/// splitting the mode into four cells:
 ///
-/// - **Perms** -- the `formatPermBits` string (type char + `rwxrwxrwx`),
-///   one cell wider than its 10 chars for a little left-column gap.
+/// - **type / usr / grp / oth** -- the permission string as four
+///   separately-colored cells: the 1-wide type char (`permTypeColor`,
+///   hued like the entry's name) then three 3-wide `rwx` triads, each
+///   colored as a unit by access level (`permTriadColor`: green/gold/red/
+///   dim). The individual r/w/x bits within a triad still share a color.
 /// - **Size** -- typed numerically via `sort_key`, so a future
 ///   sort-by-size orders by byte count, not lexically on `"1.2 KB"`;
 ///   colored by magnitude (see `sizeColor`), right-aligned.
-/// - **Owner** -- `owner:group` (`ownerGroupText`), sized to the widest
-///   value this listing actually holds (clamped, `owner_col_min`..
-///   `owner_col_max`).
-/// - **Time** -- `formatTimestamp` (`YYYY-MM-DD HH:MM`), `sort_key` the
-///   raw mtime so a future sort-by-time is chronological.
+/// - **User** / **Group** -- separate name columns (`userName`/
+///   `groupName`), each sized to the widest name this listing holds
+///   (clamped `id_name_col_min`..`id_name_col_max`). User is drawn in a
+///   brighter pale yellow (`owner_color`), Group a dimmer wash
+///   (`group_color`) -- lsd leans on bold there, which a cell can't do.
+/// - **Time** -- `formatTimestamp` (`YYYY-MM-DD HH:MM`) in a muted steel
+///   blue (`time_color`), `sort_key` the raw mtime so a future
+///   sort-by-time is chronological.
 /// - **Name** -- icon plus colored filename in one cell (per `TableCell`'s
 ///   doc comment -- no separate icon column). Last, and **stretched**:
-///   its width is whatever's left after the four fixed columns so the
-///   table's total width fills the layer (`client.getSize().cols`),
-///   clamped up to `min_name_width` (+ the large-mode icon reserve) when
-///   the layer is too narrow to spare it -- the table then clips the
-///   longest names with `…`, same as a terminal `ls` in a cramped window.
+///   its width is whatever's left after the fixed columns so the table's
+///   total width fills the layer (`client.getSize().cols`), clamped up to
+///   `min_name_width` (+ the large-mode icon reserve) when the layer is
+///   too narrow to spare it -- the table then clips the longest names
+///   with `…`, same as a terminal `ls` in a cramped window.
 ///
 /// Every cell in an entry's row shares one metadata tag, same
 /// `mimetype`/`path` shape `writeGrid`'s tags already have.
@@ -1058,28 +1119,40 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         scratch.deinit(alloc);
     }
 
-    // `owner:group` for every entry, up front: the Owner column's width
-    // is sized to the widest value *this* listing holds (clamped), and
-    // the strings are reused when the rows are built.
-    const owner_texts = try alloc.alloc([]u8, entries.len);
-    defer alloc.free(owner_texts);
-    var max_owner_disp: usize = 0;
+    // Resolve owner / group *names* for every entry up front: the User
+    // and Group columns are each sized to the widest name this listing
+    // holds (clamped), and the strings are reused when the rows are built.
+    const user_texts = try alloc.alloc([]u8, entries.len);
+    const group_texts = try alloc.alloc([]u8, entries.len);
+    defer alloc.free(user_texts);
+    defer alloc.free(group_texts);
+    var max_user_disp: usize = 0;
+    var max_group_disp: usize = 0;
     {
-        var og_buf: [160]u8 = undefined;
+        var num_buf: [16]u8 = undefined;
         for (entries, 0..) |entry, i| {
-            const og = try alloc.dupe(u8, ownerGroupText(&og_buf, entry.uid, entry.gid));
-            owner_texts[i] = og;
-            try scratch.append(alloc, og);
-            max_owner_disp = @max(max_owner_disp, gridlayout.displayWidth(og));
+            const u = try alloc.dupe(u8, userName(entry.uid, &num_buf));
+            const g = try alloc.dupe(u8, groupName(entry.gid, &num_buf));
+            user_texts[i] = u;
+            group_texts[i] = g;
+            try scratch.append(alloc, u);
+            try scratch.append(alloc, g);
+            max_user_disp = @max(max_user_disp, gridlayout.displayWidth(u));
+            max_group_disp = @max(max_group_disp, gridlayout.displayWidth(g));
         }
     }
 
-    // 11, not 10: `formatPermBits` is exactly 10 chars, left-aligned, so
-    // the extra cell is a gap before Size.
-    const perms_width: usize = 11;
+    // The permission string is drawn as four cells so each can be colored
+    // apart: a 1-wide type char then three 3-wide `rwx` triads. The table
+    // forces a 1-col gap between cells, so this renders as
+    // `d rwx r-x r-x` -- 13 cells, a touch wider than the old single
+    // 10-char column but readably grouped.
+    const type_width: usize = 1;
+    const triad_width: usize = 3;
     // Raw byte counts run to 10+ digits; the human form never past ~8.
     const size_width: usize = if (raw_bytes) 14 else 8;
-    const owner_width = std.math.clamp(max_owner_disp, owner_col_min, owner_col_max);
+    const user_width = std.math.clamp(max_user_disp, id_name_col_min, id_name_col_max);
+    const group_width = std.math.clamp(max_group_disp, id_name_col_min, id_name_col_max);
     // "YYYY-MM-DD HH:MM" is 16 chars; +1 for a gap before Name.
     const time_width: usize = 17;
 
@@ -1105,17 +1178,21 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     // Stretch the last (Name) column so the table's total width fills the
     // layer. `core.Table.render` with `borders = false` lays a table out
     // as `sum(widths) + (n - 1)` cells wide from `cur.col`, so Name takes
-    // whatever's left once the four fixed columns and the four
+    // whatever's left once the eight fixed columns and their eight
     // inter-column separators are subtracted from that span.
     const layer = try client.getSize();
     const span = if (layer.cols > cur.col) layer.cols - cur.col else 0;
-    const fixed = perms_width + size_width + owner_width + time_width + 4;
+    const fixed = type_width + triad_width * 3 + size_width + user_width + group_width + time_width + 8;
     const name_width = if (span > fixed + name_floor) span - fixed else name_floor;
 
     const table = try client.createTable(null, table_row, cur.col, &.{
-        .{ .name = "Perms", .width = perms_width, .sortable = true },
+        .{ .name = "", .width = type_width },
+        .{ .name = "usr", .width = triad_width },
+        .{ .name = "grp", .width = triad_width },
+        .{ .name = "oth", .width = triad_width },
         .{ .name = "Size", .width = size_width, .kind = .number, .h_align = .end, .sortable = true },
-        .{ .name = "Owner", .width = owner_width, .sortable = true },
+        .{ .name = "User", .width = user_width, .sortable = true },
+        .{ .name = "Group", .width = group_width, .sortable = true },
         .{ .name = "Time", .width = time_width, .kind = .number, .sortable = true },
         .{ .name = "Name", .width = name_width, .sortable = true },
     }, .{
@@ -1179,22 +1256,35 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         const size_text = try alloc.dupe(u8, lsfmt.formatSize(&size_buf, entry.size, raw_bytes));
         try scratch.append(alloc, size_text);
 
-        var perm_buf: [10]u8 = undefined;
-        const perm_text = try alloc.dupe(u8, lsfmt.formatPermBits(&perm_buf, entry.mode));
-        try scratch.append(alloc, perm_text);
+        // The permission string split into its four separately-colored
+        // cells: type char, then the user / group / other `rwx` triads.
+        var triad_bufs: [3][3]u8 = undefined;
+        const type_text = try alloc.dupe(u8, &[_]u8{lsfmt.permTypeChar(entry.mode)});
+        const usr_triad = try alloc.dupe(u8, lsfmt.formatPermTriad(&triad_bufs[0], entry.mode, .user));
+        const grp_triad = try alloc.dupe(u8, lsfmt.formatPermTriad(&triad_bufs[1], entry.mode, .group));
+        const oth_triad = try alloc.dupe(u8, lsfmt.formatPermTriad(&triad_bufs[2], entry.mode, .other));
+        try scratch.append(alloc, type_text);
+        try scratch.append(alloc, usr_triad);
+        try scratch.append(alloc, grp_triad);
+        try scratch.append(alloc, oth_triad);
 
         var time_buf: [20]u8 = undefined;
         const time_text = try alloc.dupe(u8, lsfmt.formatTimestamp(&time_buf, entry.mtime_sec));
         try scratch.append(alloc, time_text);
 
-        // exa's column order: Perms, Size, Owner, Time, then icon + Name.
-        // `owner_texts[i]` is already in `scratch` from the pre-pass.
-        const row = try alloc.alloc(glyphwire.Client.TableCellInput, 5);
-        row[0] = .{ .display = perm_text, .fg = detail_color, .metadata_id = metadata_id };
-        row[1] = .{ .display = size_text, .sort_key = .{ .number = @floatFromInt(entry.size) }, .fg = sizeColor(entry.size), .metadata_id = metadata_id };
-        row[2] = .{ .display = owner_texts[i], .fg = detail_color, .metadata_id = metadata_id };
-        row[3] = .{ .display = time_text, .sort_key = .{ .number = @floatFromInt(entry.mtime_sec) }, .fg = detail_color, .metadata_id = metadata_id };
-        row[4] = .{ .display = name_text, .icon = iconForEntry(entry), .fg = name_fg, .metadata_id = metadata_id };
+        // exa's column order: type + rwx triads, Size, User, Group, Time,
+        // then icon + Name. `user_texts[i]`/`group_texts[i]` are already
+        // in `scratch` from the pre-pass.
+        const row = try alloc.alloc(glyphwire.Client.TableCellInput, 9);
+        row[0] = .{ .display = type_text, .fg = permTypeColor(entry.kind), .metadata_id = metadata_id };
+        row[1] = .{ .display = usr_triad, .fg = permTriadColor(usr_triad), .metadata_id = metadata_id };
+        row[2] = .{ .display = grp_triad, .fg = permTriadColor(grp_triad), .metadata_id = metadata_id };
+        row[3] = .{ .display = oth_triad, .fg = permTriadColor(oth_triad), .metadata_id = metadata_id };
+        row[4] = .{ .display = size_text, .sort_key = .{ .number = @floatFromInt(entry.size) }, .fg = sizeColor(entry.size), .metadata_id = metadata_id };
+        row[5] = .{ .display = user_texts[i], .fg = owner_color, .metadata_id = metadata_id };
+        row[6] = .{ .display = group_texts[i], .fg = group_color, .metadata_id = metadata_id };
+        row[7] = .{ .display = time_text, .sort_key = .{ .number = @floatFromInt(entry.mtime_sec) }, .fg = time_color, .metadata_id = metadata_id };
+        row[8] = .{ .display = name_text, .icon = iconForEntry(entry), .fg = name_fg, .metadata_id = metadata_id };
         rows[i] = row;
     }
 

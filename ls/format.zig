@@ -29,16 +29,14 @@ pub const FileMode = packed struct(u16) {
     type: u4,
 };
 
-/// `-l`'s permission column: a type character (`d`/`l`/`-`/... , same
-/// mapping lsz's `printLongEntry` uses) followed by the classic
-/// 9-character `rwxrwxrwx` triad (user, group, all -- `-` for an unset
-/// bit). Unlike lsz's version, this doesn't color each flag individually:
-/// a table cell carries one foreground color for its whole text (see
-/// `core.Table`), not per-character styling, and the type-character-plus-
-/// string shape reads clearly enough in the table's default color.
-pub fn formatPermBits(buf: *[10]u8, mode: u16) []const u8 {
+/// The leading type character of a `-l` permission string: `d`/`l`/`-`/...
+/// (the same mapping lsz's `printLongEntry` uses). Split out from
+/// `formatPermBits` so the glyphwire `-l` table -- which draws the type
+/// char in its own cell, separately colored from the rwx triads -- and
+/// the plain stdout string share one source of truth.
+pub fn permTypeChar(mode: u16) u8 {
     const fm: FileMode = @bitCast(mode);
-    buf[0] = switch (fm.type) {
+    return switch (fm.type) {
         4 => 'd',
         8 => '-',
         10 => 'l',
@@ -48,15 +46,40 @@ pub fn formatPermBits(buf: *[10]u8, mode: u16) []const u8 {
         12 => 's',
         else => '?',
     };
-    buf[1] = if (fm.user_r) 'r' else '-';
-    buf[2] = if (fm.user_w) 'w' else '-';
-    buf[3] = if (fm.user_x) 'x' else '-';
-    buf[4] = if (fm.group_r) 'r' else '-';
-    buf[5] = if (fm.group_w) 'w' else '-';
-    buf[6] = if (fm.group_x) 'x' else '-';
-    buf[7] = if (fm.all_r) 'r' else '-';
-    buf[8] = if (fm.all_w) 'w' else '-';
-    buf[9] = if (fm.all_x) 'x' else '-';
+}
+
+/// Which of the three `rwx` bit groups a `formatPermTriad` call wants.
+pub const PermGroup = enum { user, group, other };
+
+/// One `rwx` triad of a permission string (`-` for an unset bit), for the
+/// glyphwire `-l` table's split permission cells -- each triad is drawn
+/// in its own 3-wide cell so it can carry its own color (a table cell has
+/// one foreground for its whole text, so the individual r/w/x bits still
+/// can't be colored apart; the whole triad is colored as a unit -- see
+/// `permTriadColor` in `main.zig`).
+pub fn formatPermTriad(buf: *[3]u8, mode: u16, group: PermGroup) []const u8 {
+    const fm: FileMode = @bitCast(mode);
+    const r, const w, const x = switch (group) {
+        .user => .{ fm.user_r, fm.user_w, fm.user_x },
+        .group => .{ fm.group_r, fm.group_w, fm.group_x },
+        .other => .{ fm.all_r, fm.all_w, fm.all_x },
+    };
+    buf[0] = if (r) 'r' else '-';
+    buf[1] = if (w) 'w' else '-';
+    buf[2] = if (x) 'x' else '-';
+    return buf;
+}
+
+/// `-l`'s permission column, as one string: the `permTypeChar` type
+/// character followed by the classic 9-character `rwxrwxrwx` triad (user,
+/// group, all -- `-` for an unset bit). Still used verbatim for the plain
+/// stdout fallback; the glyphwire `-l` table draws the same bits as four
+/// separately-colored cells (`permTypeChar` + three `formatPermTriad`s).
+pub fn formatPermBits(buf: *[10]u8, mode: u16) []const u8 {
+    buf[0] = permTypeChar(mode);
+    _ = formatPermTriad(buf[1..4], mode, .user);
+    _ = formatPermTriad(buf[4..7], mode, .group);
+    _ = formatPermTriad(buf[7..10], mode, .other);
     return buf;
 }
 

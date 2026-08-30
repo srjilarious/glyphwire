@@ -180,6 +180,28 @@ pub fn formatPermBitsDirectoryAndSymlinkTest(_: std.Io, _: std.mem.Allocator) !v
     try testz.expectEqualStr(lsfmt.formatPermBits(&buf, (10 << 12) | 0o777), "lrwxrwxrwx");
 }
 
+// ─── lsfmt.permTypeChar / formatPermTriad (the `-l` table's split cells) ─
+
+pub fn permTypeCharMapsFileTypeNibbleTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(lsfmt.permTypeChar((8 << 12) | 0o644), @as(u8, '-'));
+    try testz.expectEqual(lsfmt.permTypeChar((4 << 12) | 0o755), @as(u8, 'd'));
+    try testz.expectEqual(lsfmt.permTypeChar((10 << 12) | 0o777), @as(u8, 'l'));
+    try testz.expectEqual(lsfmt.permTypeChar((12 << 12) | 0o755), @as(u8, 's')); // socket
+    try testz.expectEqual(lsfmt.permTypeChar((0 << 12) | 0o644), @as(u8, '?')); // unknown
+}
+
+pub fn formatPermTriadPicksTheRightBitGroupTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [3]u8 = undefined;
+    // 0o750: user rwx, group r-x, other ---
+    const mode: u16 = (8 << 12) | 0o750;
+    try testz.expectEqualStr(lsfmt.formatPermTriad(&buf, mode, .user), "rwx");
+    try testz.expectEqualStr(lsfmt.formatPermTriad(&buf, mode, .group), "r-x");
+    try testz.expectEqualStr(lsfmt.formatPermTriad(&buf, mode, .other), "---");
+    // The three triads laid end to end reproduce `formatPermBits`' tail.
+    var full: [10]u8 = undefined;
+    try testz.expectEqualStr(lsfmt.formatPermBits(&full, mode)[1..], "rwxr-x---");
+}
+
 // ─── lsfmt.formatTimestamp ─────────────────────────────────────────────
 
 pub fn formatTimestampEpochAndNegativeTest(_: std.Io, _: std.mem.Allocator) !void {

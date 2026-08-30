@@ -767,25 +767,42 @@ surface.
   alongside that same cell's `display` text instead — e.g.
   `glyphwire-ls`'s Name column carries both a per-entry icon and the
   filename in one cell, one column, not two.
-- **`glyphwire-ls -l` mirrors exa's column layout, and stretches the last
-  column to fill the layer.** Columns are Perms, Size, `owner:group`,
-  Time, then icon + Name — the name last, exa-style, not first. There's
-  no flex/stretch concept in the `create_table` wire shape (fixed
-  `width` per column, horizontal overflow just clips), so the client
-  does it: it reads `get_property("size")` for the layer width and sizes
-  the trailing Name column to whatever's left after the four fixed
-  columns and their separators, so `sum(widths) + (n-1)` lands exactly on
-  the layer's right edge. Name is clamped up to a small floor
-  (`min_name_width`, plus the large-mode icon reserve) when the layer is
-  too narrow to spare it — the table then clips the longest names with
-  `…`, same as a terminal `ls` in a cramped window. The Owner column's
-  own width is sized to the widest `owner:group` the listing actually
-  holds (clamped 7..24). uid/gid come from a raw `statx(2)` — Zig's
-  reduced std dropped the libc-independent Linux `stat` wrappers and
-  `std.Io.File.Stat` omits uid/gid — resolved to names via libc
-  `getpwuid`/`getgrgid` (`glyphwire-ls` already links libc), decimal-id
-  fallback when a lookup misses. The earlier "no owner/group, would need
-  libc" note is superseded.
+- **`glyphwire-ls -l` mirrors exa's column layout with lsd-style
+  coloring, and stretches the last column to fill the layer.** Column
+  order is the permission bits, Size, User, Group, Time, then icon +
+  Name — name last, exa-style, not first. There's no flex/stretch
+  concept in the `create_table` wire shape (fixed `width` per column,
+  horizontal overflow just clips), so the client stretches Name itself:
+  it reads `get_property("size")` for the layer width and sizes Name to
+  whatever's left after the fixed columns and their separators, so
+  `sum(widths) + (n-1)` lands exactly on the layer's right edge. Name is
+  clamped up to a small floor (`min_name_width`, plus the large-mode icon
+  reserve) when the layer is too narrow to spare it — the table then
+  clips the longest names with `…`, like a terminal `ls` in a cramped
+  window.
+  - **The permission string is four separately-colored cells**, not one.
+    A table cell carries a single foreground colour for its whole text
+    (no per-character styling — see the "No icon-only column" bullet's
+    sibling reasoning), so lsd's per-bit `r`/`w`/`x` colouring isn't
+    possible in a single `-rwxr-xr-x` cell. Instead: a 1-wide type-char
+    cell (hued like the entry's own name) then three 3-wide `rwx` triad
+    cells, each coloured as a unit by how much access it grants
+    (green / gold / red / dim). The table forces a 1-col gap between
+    cells, so this renders as `d rwx r-x r-x`. The individual bits inside
+    a triad still share one colour — a limitation, but most of lsd's
+    signal survives.
+  - **User and Group are separate name columns**, each sized to the
+    widest name the listing holds (clamped 5..16). User is a brighter
+    pale yellow, Group a dimmer wash of it — lsd distinguishes them with
+    bold, which a cell can't do. Time is a muted steel blue. Palette is
+    VSCode Dark+ tokens, to sit with the existing name colours. The plain
+    stdout fallback keeps a single uncoloured `owner:group` field.
+  - **uid/gid** come from a raw `statx(2)` — Zig's reduced std dropped
+    the libc-independent Linux `stat` wrappers and `std.Io.File.Stat`
+    omits uid/gid — resolved to names via libc `getpwuid`/`getgrgid`
+    (`glyphwire-ls` already links libc), decimal-id fallback when a
+    lookup misses. The earlier "no owner/group, would need libc" note is
+    superseded.
 - **A body icon composites over the row background, not into it.** A
   table body icon goes into the cell's `Cell.fg_icon` (via
   `setCellIconOver`), the same "draw over whatever background is already
