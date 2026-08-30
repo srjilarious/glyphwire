@@ -279,12 +279,18 @@ surface.
 - **Not built — still open:** `create_context`, non-root parenting,
   `clip`/`visibility` properties, a raw wheel-delta `mouse_scroll` event
   stream (distinct from `scroll`, which reports the resolved offset).
-- **v1 built — font config + runtime zoom:** `glyphwire-host` reads
-  `assets/conf.lua` at startup (global `config` table: `font_face`,
-  `font_face_name`, `font_fallback`, `font_size`; any subset, missing file
-  = all defaults). Kept host-local rather than a wire concern — the font
-  is a property of the rendering front end, not the shared grid model, and
-  the shell already has its own separate Lua config
+- **v1 built — font config + runtime zoom:** `glyphwire-host` runs
+  `~/.config/glyphwire/host.conf` at startup (global `config` table:
+  `font_face`, `font_face_name`, `font_fallback`, `font_size`; any subset,
+  missing file = all defaults). The config directory is resolved by the
+  same rule as the shell's `shell.conf` — `$GLYPHWIRE_CONFIG_DIR`
+  verbatim, else `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`
+  — via a `configDirPath` in `host/main.zig` kept byte-for-byte in step
+  with the shell's own copy. Was previously read from `assets/conf.lua`
+  relative to the working directory; moved so a user's real config isn't
+  the repo's checked-in file. Kept host-local rather than a wire concern —
+  the font is a property of the rendering front end, not the shared grid
+  model, and the shell already has its own separate Lua config
   (`~/.config/glyphwire/shell.conf`), so no new dependency for it. At
   runtime `Ctrl+-` / `Ctrl++` / `Ctrl+0` repack the pixzig default font
   atlas in place (`FontAtlas.setFontSize`, added to pixzig for this) and
@@ -296,7 +302,7 @@ surface.
   connected client isn't notified of a cell-metric change (only new
   `get_cell_metrics` queries see it), and a tiling WM that pins the
   window makes the grid reflow instead of the window resizing.
-- **v1 built — caret shape + blink (host-local):** `assets/conf.lua`'s
+- **v1 built — caret shape + blink (host-local):** `host.conf`'s
   `config` table also carries `cursor_shape` (`line` \| `block` \| `box` \|
   `underline`; default `line`, the original left-edge bar), `cursor_blink`
   (default true), and `cursor_blink_ms` (half-period, default 530, clamped
@@ -308,7 +314,7 @@ surface.
   (`App.tickBlink`). block/box/underline span both cells when the caret
   sits on a `wide_lead`.
 - **v1 built — initial grid size + scrollback config (host-local):**
-  `assets/conf.lua`'s `config` table also carries `grid_cols` (default
+  `host.conf`'s `config` table also carries `grid_cols` (default
   120), `grid_rows` (default 50) and `scrollback_rows` (default 1000, the
   root layer's history-ring depth passed to `Context.init`). `grid_cols` /
   `grid_rows` are clamped up to `min_grid_*` (16 / 4); `scrollback_rows` is

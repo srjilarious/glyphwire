@@ -180,18 +180,24 @@ keystroke injection.
 
 ### Font configuration
 
-`glyphwire-host` reads **`assets/conf.lua`** at startup, if present, for a
-global `config` table:
+`glyphwire-host` runs **`~/.config/glyphwire/host.conf`** at startup, if
+present, for a global `config` table. The directory is resolved the same
+way as the shell's `shell.conf`: `$GLYPHWIRE_CONFIG_DIR` verbatim when
+set, else `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`.
+See `host/host.conf.template` for the full annotated reference.
 
 | Field | Default | Notes |
 |---|---|---|
-| `font_face` | `assets/NotoSansCJK-Regular.ttc` | TTF/OTF, or a TTC collection. |
+| `font_face` | `assets/NotoSansCJK-Regular.ttc` | TTF/OTF, or a TTC collection. Relative paths resolve against the host's working directory (the repo root in dev mode), not `host.conf`'s directory. |
 | `font_face_name` | `Mono CJK JP` | Substring of the face name to pick out of a TTC; ignored for a plain font. |
 | `font_fallback` | `assets/JetBrainsMono-Regular.ttf` | Face used for codepoints the primary lacks. |
 | `font_size` | `20.0` | Starting cell size in px, clamped to 8..72. |
 
-Every field is optional and any omitted one keeps its default; a missing
-file uses all defaults. At runtime **`Ctrl+-`** / **`Ctrl++`** step the
+(`host.conf` also carries `cursor_shape` / `cursor_blink` /
+`cursor_blink_ms` and `grid_cols` / `grid_rows` / `scrollback_rows`; see
+the template.) Every field is optional and any omitted one keeps its
+default; a missing file (or no config directory at all) uses all
+defaults. At runtime **`Ctrl+-`** / **`Ctrl++`** step the
 font size by 2px and **`Ctrl+0`** restores the configured size — the
 window resizes to keep the same column/row count (best effort; a tiling
 WM that pins the window reflows the grid instead).

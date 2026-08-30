@@ -19,7 +19,7 @@ pub const std_options = pixzig.system.std_options;
 // times the measured cell pixel size. After that the window is
 // user-resizable and `grid_cols`/`grid_rows` track its live size (see
 // `App.syncWindowSize`) -- `var`, not `const`, for that reason.
-// `assets/conf.lua`'s `grid_cols` / `grid_rows` (and `--grid-cols` /
+// `host.conf`'s `grid_cols` / `grid_rows` (and `--grid-cols` /
 // `--grid-rows`, which win over the file) override the initial size at
 // startup; see `loadConfig` and `main`.
 const initial_grid_cols = 120;
@@ -33,13 +33,13 @@ var grid_rows: usize = initial_grid_rows;
 const min_grid_cols = 16;
 const min_grid_rows = 4;
 // Root layer scrollback depth in rows, passed to `Context.init`.
-// `assets/conf.lua`'s `scrollback_rows` overrides this at startup,
+// `host.conf`'s `scrollback_rows` overrides this at startup,
 // clamped to `[0, scrollback_rows_max]`. `var`, not `const`, for that.
 const scrollback_rows_default = 1000;
 const scrollback_rows_max = 100_000;
 var scrollback_rows: usize = scrollback_rows_default;
 
-// Font defaults. `assets/conf.lua` (a global `config` table with
+// Font defaults. `host.conf` (a global `config` table with
 // `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
 // subset) overrides these at startup; see `loadConfig`. The primary is
 // Noto Sans Mono CJK: one monospaced face covering Latin, Greek, Cyrillic
@@ -52,7 +52,12 @@ const font_path_default = "assets/NotoSansCJK-Regular.ttc";
 const font_face_name_default = "Mono CJK JP";
 const font_fallback_default = "assets/JetBrainsMono-Regular.ttf";
 const font_size_default: f32 = 20.0;
-const conf_lua_path = "assets/conf.lua";
+
+// Basename of the host's startup config inside glyphwire's config
+// directory (see `configDirPath`): `~/.config/glyphwire/host.conf`. Same
+// Lua `config`-table format the shell's `shell.conf` uses; only the
+// basename differs.
+const host_conf_name = "host.conf";
 
 // Always-registered extra fallback: a tiny pyftsubset of a Nerd Font to
 // the Powerline range (U+E0A0-E0D7), for a configured powerline shell
@@ -65,7 +70,7 @@ const min_font_size: f32 = 8.0;
 const max_font_size: f32 = 72.0;
 const font_size_step: f32 = 2.0;
 
-/// Font settings resolved at startup from `conf_lua_path` layered over the
+/// Font settings resolved at startup from `host.conf` layered over the
 /// `*_default` constants above. String fields point at `arena`-allocated
 /// (process-lifetime) memory, or the default string literals.
 const FontConfig = struct {
@@ -81,7 +86,7 @@ const cursor_width = 2;
 const cursor_underline_px = 2;
 const cursor_box_line_px = 2;
 
-/// The four caret shapes `assets/conf.lua`'s `cursor_shape` can select.
+/// The four caret shapes `host.conf`'s `cursor_shape` can select.
 /// `line` (a vertical bar at the cell's left edge) is the default and the
 /// original behavior; the rest fill, outline, or underline the cell.
 const CursorShape = enum { line, block, box, underline };
@@ -95,7 +100,7 @@ const cursor_blink_ms_default: f64 = 530;
 const cursor_blink_ms_min: f64 = 100;
 const cursor_blink_ms_max: f64 = 5000;
 
-/// Caret appearance, resolved at startup from `conf_lua_path` (see
+/// Caret appearance, resolved at startup from `host.conf` (see
 /// `loadConfig`). Host-local, like `FontConfig` -- the caret is a property
 /// of the rendering front end, not the shared grid model.
 const CursorConfig = struct {
@@ -105,7 +110,7 @@ const CursorConfig = struct {
 };
 
 /// Initial grid size and scrollback depth, resolved at startup from
-/// `conf_lua_path`. A `null` field was not set by `assets/conf.lua`, so
+/// `host.conf`. A `null` field was not set by `host.conf`, so
 /// the module-level default (or a `--grid-cols` / `--grid-rows` flag)
 /// stands. `cols` / `rows` are already clamped up to `min_grid_*` and
 /// `scrollback` down to `scrollback_rows_max` by `loadConfig`.
@@ -115,7 +120,7 @@ const GridConfig = struct {
     scrollback: ?usize = null,
 };
 
-/// Everything `loadConfig` resolves from `assets/conf.lua`.
+/// Everything `loadConfig` resolves from `host.conf`.
 const HostConfig = struct {
     font: FontConfig = .{},
     cursor: CursorConfig = .{},
@@ -265,7 +270,7 @@ pub const App = struct {
     font_size: f32,
     initial_font_size: f32,
 
-    /// Caret appearance from `assets/conf.lua` (see `CursorConfig`).
+    /// Caret appearance from `host.conf` (see `CursorConfig`).
     cursor_shape: CursorShape,
     cursor_blink: bool,
     cursor_blink_ms: f64,
@@ -1329,7 +1334,7 @@ pub const App = struct {
         // Cursor caret, in its own flushed pass so it sits on top of the
         // text just drawn (a filled rect in the text pass would be
         // submitted before the text batch and hidden by it). Shape and
-        // blink come from `assets/conf.lua` (see `CursorConfig`).
+        // blink come from `host.conf` (see `CursorConfig`).
         //
         // Normally the caret sits at the layer's live grid cursor -- which
         // glyphwire-shell's keyboard browse deliberately walks onto a
@@ -1560,27 +1565,65 @@ fn cursorShapeFromStr(s: []const u8) ?CursorShape {
     return std.meta.stringToEnum(CursorShape, s);
 }
 
-/// Resolves everything `assets/conf.lua` controls for this run: starts
-/// from the `*_default` constants and overlays whatever the global
-/// `config` table sets -- font fields (`font_face`, `font_face_name`,
-/// `font_fallback`, `font_size`), caret fields (`cursor_shape`,
-/// `cursor_blink`, `cursor_blink_ms`), and grid fields (`grid_cols`,
-/// `grid_rows`, `scrollback_rows`), any subset. A missing file is the
-/// normal case and is silent; a file that fails to read/parse, or a
-/// `config` that isn't a table, logs a warning and the defaults stand.
+/// Owned path to glyphwire's config directory (holds `host.conf`):
+/// `$GLYPHWIRE_CONFIG_DIR` verbatim when set, else `$XDG_CONFIG_HOME/glyphwire`,
+/// else `$HOME/.config/glyphwire`. `error.NoConfigHome` when none of those
+/// are set -- there's then nowhere to read `host.conf` from and the host
+/// just runs on its built-in defaults. Kept byte-for-byte in step with
+/// glyphwire-shell's own `configDirPath` (shell/main.zig) so both binaries
+/// resolve the same directory; `$GLYPHWIRE_CONFIG_DIR` is the override the
+/// e2e tests use to keep the real config directory out of their way.
+fn configDirPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]u8 {
+    if (environ_map.get("GLYPHWIRE_CONFIG_DIR")) |dir| {
+        if (dir.len > 0) return alloc.dupe(u8, dir);
+    }
+    if (environ_map.get("XDG_CONFIG_HOME")) |xdg| {
+        if (xdg.len > 0) return std.fs.path.join(alloc, &.{ xdg, "glyphwire" });
+    }
+    const home = environ_map.get("HOME") orelse return error.NoConfigHome;
+    if (home.len == 0) return error.NoConfigHome;
+    return std.fs.path.join(alloc, &.{ home, ".config", "glyphwire" });
+}
+
+/// Resolves everything `host.conf` controls for this run: starts from the
+/// `*_default` constants and overlays whatever the global `config` table
+/// in `~/.config/glyphwire/host.conf` (see `configDirPath`) sets -- font
+/// fields (`font_face`, `font_face_name`, `font_fallback`, `font_size`),
+/// caret fields (`cursor_shape`, `cursor_blink`, `cursor_blink_ms`), and
+/// grid fields (`grid_cols`, `grid_rows`, `scrollback_rows`), any subset.
+/// A missing file (or no config home at all) is the normal case and is
+/// silent; a file that fails to read/parse, or a `config` that isn't a
+/// table, logs a warning and the defaults stand.
 /// `font_size` is clamped to `[min_font_size, max_font_size]`,
 /// `cursor_blink_ms` to `[cursor_blink_ms_min, cursor_blink_ms_max]`,
 /// `grid_cols` / `grid_rows` up to `min_grid_*`, and `scrollback_rows`
 /// down to `scrollback_rows_max`. A `--grid-cols` / `--grid-rows` flag
 /// still wins over `grid_cols` / `grid_rows` (applied later, in `main`).
-/// `gpa` is used only for transient work (the source buffer, the Lua
-/// state); returned strings are `arena`-allocated so they outlive this call.
-fn loadConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) HostConfig {
+/// `gpa` is used only for transient work (the config path, the source
+/// buffer, the Lua state); returned strings are `arena`-allocated so they
+/// outlive this call.
+fn loadConfig(
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+) HostConfig {
     var cfg: HostConfig = .{};
 
-    const src = std.Io.Dir.cwd().readFileAlloc(io, conf_lua_path, gpa, .limited(256 * 1024)) catch |err| {
+    const config_dir = configDirPath(gpa, environ_map) catch |err| switch (err) {
+        // No $GLYPHWIRE_CONFIG_DIR / $XDG_CONFIG_HOME / $HOME -- nowhere to
+        // read a config from; run on defaults, same as a missing file.
+        error.NoConfigHome => return cfg,
+        error.OutOfMemory => return cfg,
+    };
+    defer gpa.free(config_dir);
+
+    const path = std.fs.path.join(gpa, &.{ config_dir, host_conf_name }) catch return cfg;
+    defer gpa.free(path);
+
+    const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(256 * 1024)) catch |err| {
         if (err != error.FileNotFound)
-            std.log.warn("glyphwire-host: couldn't read {s} ({t}); using defaults", .{ conf_lua_path, err });
+            std.log.warn("glyphwire-host: couldn't read {s} ({t}); using defaults", .{ path, err });
         return cfg;
     };
     defer gpa.free(src);
@@ -1594,7 +1637,7 @@ fn loadConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) Host
     defer eng.deinit();
 
     eng.run(src_z) catch |err| {
-        std.log.warn("glyphwire-host: {s} failed to run ({t}); using defaults", .{ conf_lua_path, err });
+        std.log.warn("glyphwire-host: {s} failed to run ({t}); using defaults", .{ host_conf_name, err });
         return cfg;
     };
 
@@ -1602,7 +1645,7 @@ fn loadConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) Host
     _ = lua.getGlobal("config") catch return cfg;
     defer lua.pop(1);
     if (!lua.isTable(-1)) {
-        std.log.warn("glyphwire-host: {s} defines no `config` table; using defaults", .{conf_lua_path});
+        std.log.warn("glyphwire-host: {s} defines no `config` table; using defaults", .{host_conf_name});
         return cfg;
     }
 
@@ -1613,7 +1656,7 @@ fn loadConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) Host
 
     const clamped = std.math.clamp(cfg.font.size, min_font_size, max_font_size);
     if (clamped != cfg.font.size) {
-        std.log.warn("glyphwire-host: conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });
+        std.log.warn("glyphwire-host: host.conf font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });
         cfg.font.size = clamped;
     }
 
@@ -1621,32 +1664,32 @@ fn loadConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) Host
         if (cursorShapeFromStr(v)) |shape| {
             cfg.cursor.shape = shape;
         } else {
-            std.log.warn("glyphwire-host: conf.lua cursor_shape '{s}' unknown; keeping '{t}'", .{ v, cfg.cursor.shape });
+            std.log.warn("glyphwire-host: host.conf cursor_shape '{s}' unknown; keeping '{t}'", .{ v, cfg.cursor.shape });
         }
     }
     if (luaBoolField(lua, "cursor_blink")) |v| cfg.cursor.blink = v;
     if (luaNumField(lua, "cursor_blink_ms")) |v| {
         cfg.cursor.blink_ms = std.math.clamp(@as(f64, v), cursor_blink_ms_min, cursor_blink_ms_max);
         if (cfg.cursor.blink_ms != v)
-            std.log.warn("glyphwire-host: conf.lua cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
+            std.log.warn("glyphwire-host: host.conf cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
     }
 
     if (luaUintField(lua, "grid_cols")) |v| {
         const c = @max(v, @as(usize, min_grid_cols));
         if (c != v)
-            std.log.warn("glyphwire-host: conf.lua grid_cols {d} below minimum {d}; clamped", .{ v, min_grid_cols });
+            std.log.warn("glyphwire-host: host.conf grid_cols {d} below minimum {d}; clamped", .{ v, min_grid_cols });
         cfg.grid.cols = c;
     }
     if (luaUintField(lua, "grid_rows")) |v| {
         const r = @max(v, @as(usize, min_grid_rows));
         if (r != v)
-            std.log.warn("glyphwire-host: conf.lua grid_rows {d} below minimum {d}; clamped", .{ v, min_grid_rows });
+            std.log.warn("glyphwire-host: host.conf grid_rows {d} below minimum {d}; clamped", .{ v, min_grid_rows });
         cfg.grid.rows = r;
     }
     if (luaUintField(lua, "scrollback_rows")) |v| {
         const s = @min(v, @as(usize, scrollback_rows_max));
         if (s != v)
-            std.log.warn("glyphwire-host: conf.lua scrollback_rows {d} above maximum {d}; clamped", .{ v, scrollback_rows_max });
+            std.log.warn("glyphwire-host: host.conf scrollback_rows {d} above maximum {d}; clamped", .{ v, scrollback_rows_max });
         cfg.grid.scrollback = s;
     }
 
@@ -1683,11 +1726,11 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
 
     // Font face/size/fallback, caret shape/blink, and initial grid size /
-    // scrollback: `assets/conf.lua` if present, else the `*_default`
-    // constants at the top of this file. Loaded before the arg loop so a
-    // `--grid-cols` / `--grid-rows` flag can still override `conf.lua`'s
-    // `grid_cols` / `grid_rows`.
-    const host_cfg = loadConfig(arena, alloc, io);
+    // scrollback: `~/.config/glyphwire/host.conf` if present, else the
+    // `*_default` constants at the top of this file. Loaded before the arg
+    // loop so a `--grid-cols` / `--grid-rows` flag can still override
+    // `host.conf`'s `grid_cols` / `grid_rows`.
+    const host_cfg = loadConfig(arena, alloc, io, init.environ_map);
     const font_cfg = host_cfg.font;
     if (host_cfg.grid.cols) |v| grid_cols = v;
     if (host_cfg.grid.rows) |v| grid_rows = v;
@@ -1699,7 +1742,7 @@ pub fn main(init: std.process.Init) !void {
     //   --screenshot <path>          write the grid region to <path> (PNG) then quit
     //   --screenshot-delay-ms <n>    wait n ms before capturing (default 2500)
     //   --grid-cols <n> / --grid-rows <n>   open at a non-default grid size,
-    //                                overriding conf.lua's grid_cols / grid_rows
+    //                                overriding host.conf's grid_cols / grid_rows
     //                                (handy for a screenshot whose output is
     //                                taller/wider than the default 120x50)
     var screenshot_path: ?[]const u8 = null;

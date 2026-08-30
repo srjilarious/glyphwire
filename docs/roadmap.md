@@ -1057,6 +1057,40 @@ section a pointer to the two status icons.
   and includes the new names. **347 pass.** The icons rendering under a
   real host still needs a `zig build host` eyeball.
 
+## `glyphwire-host` config moves to `~/.config/glyphwire/host.conf`
+
+No wire change. `api.md` untouched; `decisions.md` "Font config" section
+updated, README's "Font configuration" section rewritten.
+
+- **New location.** `glyphwire-host` used to read `assets/conf.lua`
+  relative to its working directory (the repo root in dev mode) — the
+  repo's own checked-in file, so a user couldn't keep a real config
+  without editing tracked source. It now runs
+  `~/.config/glyphwire/host.conf`, resolving the directory by the exact
+  same rule as the shell's `shell.conf`: `$GLYPHWIRE_CONFIG_DIR`
+  verbatim, else `$XDG_CONFIG_HOME/glyphwire`, else
+  `$HOME/.config/glyphwire`.
+- **`configDirPath` in `host/main.zig`.** A byte-for-byte copy of the
+  shell's `configDirPath` (a Zig module can't be shared across the
+  `shell/` and `host/` directories). Returns `error.NoConfigHome` when
+  none of the three env vars are set; `loadConfig` treats that (and a
+  missing file) as "run on the built-in `*_default` constants", silently.
+  A file that fails to read/parse still warns.
+- **Format unchanged.** Same global `config` table, same keys (`font_*`,
+  `cursor_*`, `grid_*`, `scrollback_rows`), same clamps and warnings. The
+  `--grid-cols` / `--grid-rows` flags still win (loaded before the arg
+  loop, as before). Relative `font_face` / `font_fallback` paths still
+  resolve against the host's working directory, not `host.conf`'s
+  directory.
+- **Template renamed.** `host/conf.lua.template` → `host/host.conf.template`,
+  header rewritten to list the three candidate paths like
+  `shell/shell.conf.template` does. `assets/conf.lua` is no longer read
+  and can be deleted (left in place for now).
+- **No tests.** Same as the prior host-config milestones: `loadConfig`
+  links pixzig and isn't reachable from `tests_exe`. Verified by
+  `zig build` + the full suite (**347 pass**); the actual file pickup
+  needs a `zig build host` eyeball.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and
