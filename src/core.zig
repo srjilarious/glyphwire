@@ -2423,8 +2423,10 @@ pub const default_context_id = "0";
 /// name this returns (see `host/main.zig`'s `loadIconsFromDir`). There's
 /// no hand-maintained manifest -- dropping a file into a subdirectory is
 /// all it takes to add an icon. The bundled subtrees are `oxygen/`
-/// (KDE Oxygen file-type art), `distro/` (prompt distro logos),
-/// `notify/` (`glyphwire-notify` type icons), `status/` (prompt status
+/// (KDE Oxygen file-type art), `dev/` (Devicon language / tool logos, plus
+/// the LobeHub Claude marks -- used by `glyphwire-ls`), `distro/` (Devicon
+/// distro logos, for prompts), `notify/` (`glyphwire-notify` type icons),
+/// `status/` (prompt status
 /// glyphs), and `box/` + `dialog/` (the two `draw_box` 9-patch styles --
 /// `draw_box`'s `style` param is the subdirectory name, so its pieces
 /// resolve as `box/tl`, `dialog/fill`, and so on).

@@ -40,9 +40,11 @@ const lsicons = @import("ls_support").icons;
 /// terminal output (the bundled JetBrainsMono-Regular.ttf isn't
 /// Nerd-Font-patched, so those glyphs would render as tofu), but that
 /// limitation doesn't apply here -- glyphwire's icons are small bitmap
-/// images (the bundled Oxygen-icon set under `assets/icons/oxygen/`), not
-/// font glyphs, so no font patching is needed. Requires whatever's
-/// serving the connection to have actually loaded that catalog
+/// images, not font glyphs, so no font patching is needed. Source files
+/// and project directories resolve to the Devicon language/tool logos
+/// under `assets/icons/dev/`; everything else falls back to the coarser
+/// KDE-Oxygen file-type set under `assets/icons/oxygen/`. Requires
+/// whatever's serving the connection to have actually loaded that catalog
 /// (glyphwire-host does, at startup); run against a
 /// bare `glyphwire-server` with nothing registered, `draw_icon` would
 /// error server-side and drop the connection -- not handled specially
@@ -493,19 +495,25 @@ fn sizeColor(size: u64) glyphwire.Color {
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 
-/// The icon-catalog name (the bundled `assets/icons/oxygen/` set) for one
-/// entry: `"oxygen/folder"` for directories, an extension-derived bucket
-/// for regular files (`lsicons.iconForExtension` / `ls/icons.zig`,
-/// falling back to `"oxygen/file"` for an unrecognized extension),
-/// `"oxygen/unknown"` for anything else (device files, sockets, ...).
-/// Symlinks reuse `"oxygen/file"` -- there's no dedicated symlink icon in
-/// the bundled set yet.
+/// The icon-catalog name for one entry (see `ls/icons.zig` for the tables
+/// and the `dev/*` vs `oxygen/*` split):
+///
+///   * directory -- its `dev/*` tool logo if the basename is well-known
+///     (`.vscode`, `.claude`, `.git`, `node_modules`, ...), else
+///     `"oxygen/folder"`.
+///   * regular file -- its `dev/*` logo by exact basename (`Dockerfile`,
+///     ...) or by extension (`.zig` -> `dev/zig`, `.ex` -> `dev/elixir`,
+///     ...), falling back through the coarse `oxygen/*` file-type buckets
+///     to `"oxygen/file"` for an unrecognized one.
+///   * symlink -- `"oxygen/file"` (no dedicated symlink icon in the
+///     bundled set yet).
+///   * anything else (device files, sockets, ...) -- `"oxygen/unknown"`.
 fn iconForEntry(entry: FileEntry) []const u8 {
     return switch (entry.kind) {
-        .directory => "oxygen/folder",
+        .directory => lsicons.iconForDirName(entry.name) orelse "oxygen/folder",
         .sym_link => "oxygen/file",
         .other => "oxygen/unknown",
-        .file => lsicons.iconForExtension(entry.name),
+        .file => lsicons.iconForFileName(entry.name) orelse lsicons.iconForExtension(entry.name),
     };
 }
 

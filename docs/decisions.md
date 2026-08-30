@@ -516,8 +516,8 @@ surface.
   of `assets/icons/`** (`host/main.zig`'s `loadIconsFromDir`). An icon's
   catalog name is its path under that directory with the `.png` extension
   removed (`core.iconName`) — so the bundled subtrees give
-  `oxygen/folder`, `distro/arch`, `notify/info`, `status/error`,
-  `box/tl`, `dialog/fill`. There is no hand-maintained manifest any more
+  `oxygen/folder`, `dev/zig`, `distro/arch`, `notify/info`,
+  `status/error`, `box/tl`, `dialog/fill`. There is no hand-maintained manifest any more
   (the old `core.default_*_manifest` arrays are gone): the file layout
   under `assets/icons/` *is* the manifest, and dropping a `.png` into a
   subdirectory adds an icon. `glyphwire-host` then scans a second,
@@ -535,9 +535,23 @@ surface.
   set (`oxygen/folder`/`oxygen/file`/`oxygen/audio`/…) there are finer
   file-type buckets — `oxygen/pdf`, `oxygen/document`,
   `oxygen/spreadsheet`, `oxygen/presentation`, `oxygen/text`,
-  `oxygen/code`, `oxygen/web`, `oxygen/package` — that `glyphwire-ls`
-  maps an extension onto (`ls/icons.zig`), still falling back to
-  `oxygen/file` for anything unrecognized.
+  `oxygen/web`, `oxygen/package` — that `glyphwire-ls` maps an extension
+  onto (`ls/icons.zig`), still falling back to `oxygen/file` for anything
+  unrecognized.
+- **`dev/` and `distro/` are the Devicon set.** For a recognised source
+  file or project directory, `glyphwire-ls` prefers a real
+  language/tool logo — `dev/zig`, `dev/elixir`, `dev/go`, `dev/vscode`,
+  `dev/git` (a `.vscode` / `.claude` / `.git` directory picks up the
+  matching one) — over the coarse `oxygen/*` bucket. Those, and the
+  `distro/*` prompt logos, are the [Devicon](https://github.com/devicons/devicon)
+  set ("-original" brand-coloured variants), rasterized from SVG to 48x48
+  RGBA PNG by `scripts/fetch-devicons.sh` (MIT, see
+  `assets/icons/dev/README.txt`). `dev/claude` and `dev/claudecode` are
+  not in Devicon and come from [LobeHub's icons](https://github.com/lobehub/lobe-icons)
+  instead. A few Devicon "-original" logos are a solid near-black glyph
+  (rust, deno, github, markdown, latex, crystal); since `glyphwire-ls`
+  draws on a near-black row background, that script repaints their opaque
+  pixels light (alpha preserved).
 - **Packed into one atlas texture at host startup.** After the scan,
   `glyphwire-host` decodes every registered icon and shelf-packs them
   (1px transparent gutter, NEAREST filtering) into a single

@@ -229,14 +229,54 @@ pub fn iconForExtensionMapsNewFileTypeBucketsTest(_: std.Io, _: std.mem.Allocato
     try testz.expectEqualStr(lsicons.iconForExtension("budget.xlsx"), "oxygen/spreadsheet");
     try testz.expectEqualStr(lsicons.iconForExtension("data.csv"), "oxygen/spreadsheet");
     try testz.expectEqualStr(lsicons.iconForExtension("deck.odp"), "oxygen/presentation");
-    try testz.expectEqualStr(lsicons.iconForExtension("README.md"), "oxygen/text");
     try testz.expectEqualStr(lsicons.iconForExtension("config.toml"), "oxygen/text");
-    try testz.expectEqualStr(lsicons.iconForExtension("index.html"), "oxygen/web");
-    try testz.expectEqualStr(lsicons.iconForExtension("style.css"), "oxygen/web");
-    try testz.expectEqualStr(lsicons.iconForExtension("main.zig"), "oxygen/code");
-    try testz.expectEqualStr(lsicons.iconForExtension("build.py"), "oxygen/code");
     try testz.expectEqualStr(lsicons.iconForExtension("pkg.deb"), "oxygen/package");
     try testz.expectEqualStr(lsicons.iconForExtension("pkg.rpm"), "oxygen/package");
+}
+
+pub fn iconForExtensionMapsSourceFilesToDevLogosTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Source files now get their language's real Devicon logo (dev/*)
+    // rather than the coarse oxygen/code / oxygen/text bucket.
+    try testz.expectEqualStr(lsicons.iconForExtension("main.zig"), "dev/zig");
+    try testz.expectEqualStr(lsicons.iconForExtension("build.zig.zon"), "dev/zig");
+    try testz.expectEqualStr(lsicons.iconForExtension("build.py"), "dev/python");
+    try testz.expectEqualStr(lsicons.iconForExtension("app.ex"), "dev/elixir");
+    try testz.expectEqualStr(lsicons.iconForExtension("app.exs"), "dev/elixir");
+    try testz.expectEqualStr(lsicons.iconForExtension("gen_server.erl"), "dev/erlang");
+    try testz.expectEqualStr(lsicons.iconForExtension("main.go"), "dev/go");
+    try testz.expectEqualStr(lsicons.iconForExtension("lib.rs"), "dev/rust");
+    try testz.expectEqualStr(lsicons.iconForExtension("widget.cpp"), "dev/cpp");
+    try testz.expectEqualStr(lsicons.iconForExtension("widget.hpp"), "dev/cpp");
+    try testz.expectEqualStr(lsicons.iconForExtension("main.c"), "dev/c");
+    try testz.expectEqualStr(lsicons.iconForExtension("app.tsx"), "dev/react");
+    try testz.expectEqualStr(lsicons.iconForExtension("index.ts"), "dev/typescript");
+    try testz.expectEqualStr(lsicons.iconForExtension("README.md"), "dev/markdown");
+    try testz.expectEqualStr(lsicons.iconForExtension("index.html"), "dev/html5");
+    try testz.expectEqualStr(lsicons.iconForExtension("style.css"), "dev/css3");
+}
+
+pub fn iconForFileNameMatchesWholeBasenamesTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Whole-name matches (no useful extension) resolve via iconForFileName,
+    // which iconForEntry checks before the extension table.
+    try testz.expectEqualStr(lsicons.iconForFileName("Dockerfile").?, "dev/docker");
+    try testz.expectEqualStr(lsicons.iconForFileName("CMakeLists.txt").?, "dev/cmake");
+    try testz.expectEqualStr(lsicons.iconForFileName(".gitignore").?, "dev/git");
+    try testz.expectEqualStr(lsicons.iconForFileName("package.json").?, "dev/npm");
+    try testz.expectEqualStr(lsicons.iconForFileName("go.mod").?, "dev/go");
+    try testz.expectEqual(lsicons.iconForFileName("notes.txt"), null);
+    try testz.expectEqual(lsicons.iconForFileName("main.zig"), null);
+}
+
+pub fn iconForDirNameMatchesToolDirectoriesTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(lsicons.iconForDirName(".vscode").?, "dev/vscode");
+    try testz.expectEqualStr(lsicons.iconForDirName(".claude").?, "dev/claude");
+    try testz.expectEqualStr(lsicons.iconForDirName(".git").?, "dev/git");
+    try testz.expectEqualStr(lsicons.iconForDirName(".github").?, "dev/github");
+    try testz.expectEqualStr(lsicons.iconForDirName("node_modules").?, "dev/nodejs");
+    // An ordinary directory name has no special icon; the caller falls
+    // back to "oxygen/folder".
+    try testz.expectEqual(lsicons.iconForDirName("src"), null);
+    try testz.expectEqual(lsicons.iconForDirName("assets"), null);
 }
 
 pub fn iconForExtensionIsCaseInsensitiveTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -245,10 +285,10 @@ pub fn iconForExtensionIsCaseInsensitiveTest(_: std.Io, _: std.mem.Allocator) !v
 }
 
 pub fn iconForExtensionShellScriptsAreCodeNotExecutableTest(_: std.Io, _: std.mem.Allocator) !void {
-    // .sh moved from the "executable" bucket to "code"; the real binaries
-    // stay on "executable".
-    try testz.expectEqualStr(lsicons.iconForExtension("deploy.sh"), "oxygen/code");
-    try testz.expectEqualStr(lsicons.iconForExtension("run.bash"), "oxygen/code");
+    // Shell scripts get the bash logo, not the "executable" (binary)
+    // bucket; the real binaries stay on "executable".
+    try testz.expectEqualStr(lsicons.iconForExtension("deploy.sh"), "dev/bash");
+    try testz.expectEqualStr(lsicons.iconForExtension("run.bash"), "dev/bash");
     try testz.expectEqualStr(lsicons.iconForExtension("tool.exe"), "oxygen/executable");
     try testz.expectEqualStr(lsicons.iconForExtension("blob.bin"), "oxygen/executable");
 }
