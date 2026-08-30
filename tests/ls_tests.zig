@@ -147,6 +147,23 @@ pub fn formatSizeHumanBucketsTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr(lsfmt.formatSize(&buf, 3 * 1024 * 1024 * 1024, false), "  3.0 GB");
 }
 
+// ─── lsfmt.formatOwnerGroup ────────────────────────────────────────────
+
+pub fn formatOwnerGroupJoinsWithColonTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    try testz.expectEqualStr(lsfmt.formatOwnerGroup(&buf, "jeffdw", "jeffdw"), "jeffdw:jeffdw");
+    try testz.expectEqualStr(lsfmt.formatOwnerGroup(&buf, "root", "wheel"), "root:wheel");
+    // A caller with no name for an id passes the decimal id through as-is.
+    try testz.expectEqualStr(lsfmt.formatOwnerGroup(&buf, "1000", "1000"), "1000:1000");
+}
+
+pub fn formatOwnerGroupOverflowIsEmptyTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [4]u8 = undefined;
+    // Too small to hold "a:bbbb" -- bufPrint fails, empty slice returned,
+    // same shape formatSize/formatTimestamp use on overflow.
+    try testz.expectEqual(lsfmt.formatOwnerGroup(&buf, "a", "bbbb").len, 0);
+}
+
 // ─── lsfmt.formatPermBits ──────────────────────────────────────────────
 
 pub fn formatPermBitsRegularFileTest(_: std.Io, _: std.mem.Allocator) !void {

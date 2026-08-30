@@ -73,6 +73,17 @@ pub fn formatSize(buf: []u8, size: u64, raw: bool) []const u8 {
     return std.fmt.bufPrint(buf, "{d:>5.1} GB", .{@as(f64, @floatFromInt(size)) / @as(f64, @floatFromInt(GBytes))}) catch buf[0..0];
 }
 
+/// `-l`'s Owner column: the resolved owner and group names joined with a
+/// colon (`owner:group`), matching exa's `user:group` cell. The names
+/// themselves are looked up by the caller -- glyphwire-ls links libc for
+/// `getpwuid`/`getgrgid`; this module stays pure -- and a caller with no
+/// name for an id passes the decimal id as the string instead. `buf`
+/// should hold at least `2 * longest_name + 1` bytes; on overflow this
+/// returns an empty slice, same shape `formatSize`/`formatTimestamp` use.
+pub fn formatOwnerGroup(buf: []u8, owner: []const u8, group: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}:{s}", .{ owner, group }) catch buf[0..0];
+}
+
 /// `YYYY-MM-DD HH:MM`, purely from `std.time.epoch` -- no libc needed.
 pub fn formatTimestamp(buf: []u8, sec: i64) []const u8 {
     if (sec < 0) return "";

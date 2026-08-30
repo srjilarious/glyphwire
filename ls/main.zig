@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const gridlayout = @import("ls_support").gridlayout;
@@ -14,14 +15,17 @@ const lsfmt = @import("ls_support").format;
 /// non-glyphwire `ls` would produce) when no session is available, per
 /// decisions.md's Discovery & Connection.
 ///
-/// Deliberately narrower than lsz: no full permission-bit/
-/// owner/group columns (would need the same raw `fstatat`/`getpwuid`/
-/// `getgrgid` C bindings lsz uses -- `-l` here sticks to what
-/// `std.Io.Dir.statFile`'s cross-platform `Stat` already gives: size and
-/// modified time) -- directory/symlink/file coloring plus a trailing `/`
-/// or ` -> target` covers the rest of what lsz's coloring conveys. lsz
-/// itself stays the terminal tool; this is a demonstration client, not a
-/// replacement.
+/// The `-l` listing follows exa's column order: permission bits, size,
+/// `owner:group`, modified time, then the icon + name (the name last, and
+/// its column stretched so the table fills the layer's width). Size,
+/// mtime and the permission bits come from `std.Io.Dir.statFile`'s
+/// cross-platform `Stat`; uid/gid need a raw `statx(2)` (Zig's reduced
+/// std dropped the libc-independent Linux `stat` wrappers, and
+/// `std.Io.File.Stat` omits uid/gid on purpose), and the names come from
+/// libc `getpwuid`/`getgrgid` (`glyphwire-ls` already links libc) with a
+/// decimal-id fallback. On a non-Linux target the Owner column is `0:0`.
+/// lsz itself stays the terminal tool; this is a demonstration client,
+/// not a replacement.
 ///
 /// The plain (non `-l`) listing *does* now pack into columns like a
 /// terminal `ls`: `get_property("size")` exposes the layer's width in
@@ -55,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
         .description = "Lists the contents of a directory, drawn over a glyphwire connection.",
         .opts = &.{
             .{ .longName = "hidden", .shortName = "a", .description = "Show hidden files and directories", .maxNumParams = 0 },
-            .{ .longName = "long", .shortName = "l", .description = "Long listing: adds size and modified time", .maxNumParams = 0 },
+            .{ .longName = "long", .shortName = "l", .description = "Long listing: adds permission bits, size, owner:group, and modified time", .maxNumParams = 0 },
             .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger, naturally-scaled icons (3-line-tall rows in a long listing). Wins over -S if both are given", .maxNumParams = 0 },
             .{ .longName = "small", .shortName = "S", .description = "Small format: one physical row per entry, its icon filling that line's height (no overflow into neighboring rows), in both the normal and long (-l) listing", .maxNumParams = 0 },
             .{ .longName = "human", .shortName = "h", .description = "Human-readable sizes (KB/MB/GB) -- the default; the explicit opposite of --bytes", .maxNumParams = 0 },
@@ -161,6 +165,12 @@ const FileEntry = struct {
     /// Raw POSIX mode bits (file type nibble + setuid/setgid/sticky +
     /// user/group/all rwx), only populated with `-l` -- see `FileMode`.
     mode: u16 = 0,
+    /// Owner / group ids, only populated with `-l` via a raw `statx(2)`
+    /// (`std.Io.File.Stat` has no uid/gid). `formatOwnerGroup` resolves
+    /// them to names for the Owner column; both stay 0 on a non-Linux
+    /// target or a failed stat.
+    uid: u32 = 0,
+    gid: u32 = 0,
 };
 
 /// One rendered block: a group of entries under an optional header. A
@@ -211,22 +221,28 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
         errdefer if (link_target) |t| alloc.free(t);
 
         // Only stat when -l actually needs it -- a plain listing has no
-        // use for size/mtime/mode, and stat is a syscall per entry.
+        // use for size/mtime/mode/owner, and stat is a syscall per entry.
         var size: u64 = 0;
         var mtime_sec: i64 = 0;
         var mode: u16 = 0;
+        var uid: u32 = 0;
+        var gid: u32 = 0;
         if (long_list) {
             if (dir.statFile(io, entry.name, .{ .follow_symlinks = false })) |st| {
                 size = st.size;
                 mtime_sec = st.mtime.toSeconds();
                 // `Stat.permissions` wraps the same raw POSIX mode bits
                 // `fstatat`'s `st_mode` gives (see `std.Io.File.statFromPosix`
-                // in std's Threaded.zig backend) -- no libc/manual `fstatat`
-                // binding needed just for permission bits, unlike lsz's
-                // getpwuid/getgrgid (owner/group *names*, not asked for
-                // here), which do need libc.
+                // in std's Threaded.zig backend) -- no manual `fstatat`
+                // binding needed just for permission bits.
                 mode = @truncate(st.permissions.toMode());
             } else |_| {}
+            // uid/gid aren't in `std.Io.File.Stat`, so a second, raw
+            // `statx(2)` just for those two -- relative to this open
+            // directory's handle, same "don't follow symlinks" choice.
+            const ids = ownerIds(dir.handle, entry.name);
+            uid = ids.uid;
+            gid = ids.gid;
         }
 
         const name_copy = try alloc.dupe(u8, entry.name);
@@ -241,6 +257,8 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
             .size = size,
             .mtime_sec = mtime_sec,
             .mode = mode,
+            .uid = uid,
+            .gid = gid,
         });
     }
 
@@ -290,6 +308,10 @@ fn statOperand(io: std.Io, alloc: std.mem.Allocator, path: []const u8, long_list
     errdefer alloc.free(name_copy);
     const abs_path = try resolveAbsolutePath(io, alloc, path);
 
+    // uid/gid via a raw `statx(2)` (see `listDir`) -- resolved against the
+    // cwd handle since `path` is a bare command-line operand here.
+    const ids = if (long_list) ownerIds(std.Io.Dir.cwd().handle, path) else OwnerIds{ .uid = 0, .gid = 0 };
+
     return .{
         .name = name_copy,
         .kind = kind,
@@ -298,6 +320,8 @@ fn statOperand(io: std.Io, alloc: std.mem.Allocator, path: []const u8, long_list
         .size = if (long_list) st.size else 0,
         .mtime_sec = if (long_list) st.mtime.toSeconds() else 0,
         .mode = if (long_list) @truncate(st.permissions.toMode()) else 0,
+        .uid = ids.uid,
+        .gid = ids.gid,
     };
 }
 
@@ -574,9 +598,85 @@ fn mimetypeForExtension(name: []const u8) []const u8 {
 
 // ── Long-listing formatting ─────────────────────────────────────────────────
 //
-// The size / permission-bit / timestamp formatters live in the pure
-// `ls_support` module (`ls/format.zig`, re-exported here as `lsfmt`) so
-// `tests/ls_tests.zig` can exercise them directly.
+// The size / permission-bit / timestamp / owner:group formatters live in
+// the pure `ls_support` module (`ls/format.zig`, re-exported here as
+// `lsfmt`) so `tests/ls_tests.zig` can exercise them directly. What can't
+// move there is the uid/gid *lookup* below: it needs a raw `statx(2)` and
+// libc's `getpwuid`/`getgrgid`, neither of which belongs in a pure module.
+
+/// One-field extern views of glibc's `struct passwd` / `struct group`.
+/// Only the leading name pointer is ever read (it's the first member of
+/// both structs), so the rest of each layout -- which varies by libc and
+/// is why Zig's reduced std dropped its own `stat` wrappers -- doesn't
+/// matter here. `glyphwire-ls` already links libc (`build.zig`).
+const pwlib = struct {
+    const passwd = extern struct { pw_name: ?[*:0]const u8 };
+    const group = extern struct { gr_name: ?[*:0]const u8 };
+    extern "c" fn getpwuid(uid: c_uint) ?*passwd;
+    extern "c" fn getgrgid(gid: c_uint) ?*group;
+};
+
+const OwnerIds = struct { uid: u32, gid: u32 };
+
+/// uid/gid for one entry, via a raw `statx(2)`. `dir_fd` is the handle
+/// `name` is resolved against (`std.Io.Dir.handle`); pass
+/// `std.Io.Dir.cwd().handle` (`AT.FDCWD`) for an absolute path. Zig's
+/// reduced std removed the libc-independent Linux `stat` wrappers and
+/// `std.Io.File.Stat` omits uid/gid on purpose, so this raw syscall is
+/// the lowest-friction way to get just those two fields. Returns
+/// `{ 0, 0 }` on any failure or on a non-Linux target -- the Owner column
+/// then reads `0:0`, and uid 0 still resolves to `root` for the name.
+fn ownerIds(dir_fd: std.posix.fd_t, name: []const u8) OwnerIds {
+    if (builtin.os.tag != .linux) return .{ .uid = 0, .gid = 0 };
+    const linux = std.os.linux;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (name.len >= path_buf.len) return .{ .uid = 0, .gid = 0 };
+    @memcpy(path_buf[0..name.len], name);
+    path_buf[name.len] = 0;
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(
+        dir_fd,
+        path_buf[0..name.len :0].ptr,
+        linux.AT.SYMLINK_NOFOLLOW,
+        .{ .UID = true, .GID = true },
+        &stx,
+    );
+    if (linux.errno(rc) != .SUCCESS) return .{ .uid = 0, .gid = 0 };
+    return .{ .uid = stx.uid, .gid = stx.gid };
+}
+
+/// `"owner:group"` for the Owner column, resolving each id to a name and
+/// falling back to its decimal form when the lookup returns null (an id
+/// with no passwd/group entry -- e.g. a file from another user
+/// namespace). The returned slice borrows `buf`, which needs room for
+/// two names plus a colon (callers give it 160 bytes).
+fn ownerGroupText(buf: []u8, uid: u32, gid: u32) []const u8 {
+    var owner_num: [16]u8 = undefined;
+    var group_num: [16]u8 = undefined;
+    // `getpwuid` and `getgrgid` each return a pointer into their own,
+    // distinct libc static buffer, so the first result stays valid across
+    // the second call; `formatOwnerGroup`'s `bufPrint` copies both out
+    // before either could be reused.
+    return lsfmt.formatOwnerGroup(buf, userName(uid, &owner_num), groupName(gid, &group_num));
+}
+
+fn userName(uid: u32, num_buf: []u8) []const u8 {
+    if (builtin.os.tag == .linux) {
+        if (pwlib.getpwuid(uid)) |pw| {
+            if (pw.pw_name) |n| return std.mem.span(n);
+        }
+    }
+    return std.fmt.bufPrint(num_buf, "{d}", .{uid}) catch num_buf[0..0];
+}
+
+fn groupName(gid: u32, num_buf: []u8) []const u8 {
+    if (builtin.os.tag == .linux) {
+        if (pwlib.getgrgid(gid)) |gr| {
+            if (gr.gr_name) |n| return std.mem.span(n);
+        }
+    }
+    return std.fmt.bufPrint(num_buf, "{d}", .{gid}) catch num_buf[0..0];
+}
 
 // ── glyphwire output ──────────────────────────────────────────────────────
 
@@ -585,27 +685,23 @@ fn mimetypeForExtension(name: []const u8) []const u8 {
 /// enough columns for a `.natural`-scaled icon before the name starts.
 const icon_native_px = 32;
 
-/// Floor/cap `writeLongTable`'s Name column is clamped to after sizing it
-/// from the actual listing (`maxDisplayLen`) -- the floor keeps a listing
-/// of all-short names from squeezing the "Name" header itself; the cap
-/// keeps one absurdly long symlink target from stretching the whole
-/// table (and pushing Size/Perms toward or past the layer's right edge)
-/// well past anything a directory listing needs -- `writeCellRun`
-/// already truncates-with-ellipsis past this anyway, same as it would
-/// for a wider column.
+/// Floor the stretched Name column (`writeLongTable`) is clamped to when
+/// the layer is too narrow to give it its leftover-width share -- the
+/// table then clips the longest names with a trailing `…`, same as a
+/// terminal `ls` in a cramped window. There's no ceiling: Name is the
+/// last column and deliberately absorbs whatever width the fixed columns
+/// leave so the table fills the layer (exa's layout). Still also the
+/// floor `maxDisplayLen` is clamped up to for `writeGrid`'s per-column
+/// name area, so an all-short-names listing doesn't squeeze its header.
 const min_name_width = 8;
-const max_name_width = 40;
 
-/// The widest an entry's Name-column content (filename plus its
-/// `/`/` -> target` suffix) actually is, in **display cells** -- East
-/// Asian wide codepoints count 2, matching how `core.writeText` advances
-/// the cursor and `gridlayout.truncateToCols` trims, so this agrees with
-/// the truncation math that eventually runs against it. Used to size that
-/// column to the *real* data instead of a blind constant (see
-/// `min_name_width`/`max_name_width`'s doc comment) -- a fixed width wide
-/// enough for a rare long name otherwise either clips shorter ones'
-/// siblings (Size/Perms pushed past the layer's edge) or wastes width
-/// when every name in this particular listing is short.
+/// The widest an entry's Name content (filename plus its `/`/` -> target`
+/// suffix) actually is, in **display cells** -- East Asian wide
+/// codepoints count 2, matching how `core.writeText` advances the cursor
+/// and `gridlayout.truncateToCols` trims, so this agrees with the
+/// truncation math that eventually runs against it. `writeGrid` uses it
+/// to size each column's name area to the *real* data instead of a blind
+/// constant.
 fn maxDisplayLen(entries: []const FileEntry) usize {
     var max_len: usize = 0;
     for (entries) |entry| {
@@ -856,17 +952,37 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
 /// anchor with overflow into neighboring rows).
 const large_table_row_height = 3;
 
+/// Clamp for the Owner (`owner:group`) column's width: sized to the
+/// widest value the listing actually holds, but never so narrow the
+/// "Owner" header is squeezed nor so wide one long name from an unusual
+/// uid stretches every row (`writeCellRun` clips past this with `…`).
+const owner_col_min = 7;
+const owner_col_max = 24;
+
 /// The `-l` listing: a real server-side table (`Client.createTable`/
 /// `tableSetRows`) instead of `writeGrid`'s per-row `write_text`/`draw_icon`
-/// layout -- Name (icon plus colored filename in one cell, per `TableCell`'s
-/// doc comment -- no separate icon column needed the way the client-
-/// composited prototype this replaced had), Size (typed numerically via
-/// `sort_key`, so a future sort-by-size actually orders by byte count, not
-/// lexically on `"1.2 KB"`, and colored by magnitude -- see `sizeColor`),
-/// and Perms (one blank cell wider than the perm string, for a little
-/// right-margin padding). Every cell in an entry's row shares one
-/// metadata tag, same `mimetype`/`path` shape `writeGrid`'s tags already
-/// have.
+/// layout. Columns follow exa's order:
+///
+/// - **Perms** -- the `formatPermBits` string (type char + `rwxrwxrwx`),
+///   one cell wider than its 10 chars for a little left-column gap.
+/// - **Size** -- typed numerically via `sort_key`, so a future
+///   sort-by-size orders by byte count, not lexically on `"1.2 KB"`;
+///   colored by magnitude (see `sizeColor`), right-aligned.
+/// - **Owner** -- `owner:group` (`ownerGroupText`), sized to the widest
+///   value this listing actually holds (clamped, `owner_col_min`..
+///   `owner_col_max`).
+/// - **Time** -- `formatTimestamp` (`YYYY-MM-DD HH:MM`), `sort_key` the
+///   raw mtime so a future sort-by-time is chronological.
+/// - **Name** -- icon plus colored filename in one cell (per `TableCell`'s
+///   doc comment -- no separate icon column). Last, and **stretched**:
+///   its width is whatever's left after the four fixed columns so the
+///   table's total width fills the layer (`client.getSize().cols`),
+///   clamped up to `min_name_width` (+ the large-mode icon reserve) when
+///   the layer is too narrow to spare it -- the table then clips the
+///   longest names with `…`, same as a terminal `ls` in a cramped window.
+///
+/// Every cell in an entry's row shares one metadata tag, same
+/// `mimetype`/`path` shape `writeGrid`'s tags already have.
 ///
 /// `large` (`-L`, see `main`) sets the table's `row_height` to
 /// `large_table_row_height`: `core.Table.render` then draws each row's
@@ -874,12 +990,11 @@ const large_table_row_height = 3;
 /// instead of `.fit`-scaled into one cell, same rendering `writeGrid`'s
 /// large mode gives its icons -- capped and column-widened using the
 /// icon's actual loaded pixel size server-side (see decisions.md's Table
-/// section), not a size this client has to guess. The Name column here
-/// still needs to be *wide enough* for that bigger icon, though -- same
+/// section), not a size this client has to guess. The stretched Name
+/// column still gets a `min_name_width + icon_reserve` floor so that
+/// bigger icon has room even in the narrow-layer clip case -- same
 /// `icon_native_px`/cell-metrics estimate `writeGrid` uses for its own
-/// `icon_col_width` (capped to `large_table_row_height` cell-heights
-/// instead of `writeGrid`'s fixed two), since column widths are fixed
-/// once at `create_table` time.
+/// `icon_col_width`, capped to `large_table_row_height` cell-heights.
 ///
 /// Unlike the client-composited prototype's streaming `row`/`cell`/
 /// `endRow` calls (each sent over the wire immediately), every row here
@@ -933,19 +1048,48 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     try client.writeText(total_line, header_color, null);
     const table_row = cur.row + 1;
 
-    // Size the Name column to what this listing actually contains
-    // (clamped, see `min_name_width`/`max_name_width`) rather than a
-    // blind constant -- a fixed width wide enough for a rare long name
-    // otherwise pushes Size/Perms toward (or past) the layer's right
-    // edge for every *other*, normally-short-named listing too.
-    const name_text_width = std.math.clamp(maxDisplayLen(entries), min_name_width, max_name_width);
-    // Small mode now draws the row's icon `.natural`-scaled and capped to
-    // one cell-height (see `core.Table.writeBodyRow`), not `.fit` into a
-    // single cell -- reserve the extra leading columns that needs so the
-    // Name text still starts clear of it. Large mode caps to
-    // `large_table_row_height` cell-heights instead. Without cell metrics
-    // the server keeps the old one-cell `.fit` and `icon_reserve` stays 1
-    // to match.
+    // Every heap-allocated display string built below (name, size, owner,
+    // time) goes in here -- a batched `tableSetRows` needs them all to
+    // outlive the build loop, and they're freed once it returns (it
+    // copies what it needs into the outgoing JSON first).
+    var scratch: std.ArrayList([]u8) = .empty;
+    defer {
+        for (scratch.items) |s| alloc.free(s);
+        scratch.deinit(alloc);
+    }
+
+    // `owner:group` for every entry, up front: the Owner column's width
+    // is sized to the widest value *this* listing holds (clamped), and
+    // the strings are reused when the rows are built.
+    const owner_texts = try alloc.alloc([]u8, entries.len);
+    defer alloc.free(owner_texts);
+    var max_owner_disp: usize = 0;
+    {
+        var og_buf: [160]u8 = undefined;
+        for (entries, 0..) |entry, i| {
+            const og = try alloc.dupe(u8, ownerGroupText(&og_buf, entry.uid, entry.gid));
+            owner_texts[i] = og;
+            try scratch.append(alloc, og);
+            max_owner_disp = @max(max_owner_disp, gridlayout.displayWidth(og));
+        }
+    }
+
+    // 11, not 10: `formatPermBits` is exactly 10 chars, left-aligned, so
+    // the extra cell is a gap before Size.
+    const perms_width: usize = 11;
+    // Raw byte counts run to 10+ digits; the human form never past ~8.
+    const size_width: usize = if (raw_bytes) 14 else 8;
+    const owner_width = std.math.clamp(max_owner_disp, owner_col_min, owner_col_max);
+    // "YYYY-MM-DD HH:MM" is 16 chars; +1 for a gap before Name.
+    const time_width: usize = 17;
+
+    // The stretched Name column still needs leading columns reserved in
+    // its cell for a `.natural`-scaled row icon. Large mode caps the icon
+    // to `large_table_row_height` cell-heights; small mode now caps it to
+    // one cell-height (`core.Table.writeBodyRow`), not the old one-cell
+    // `.fit` -- both want the same `icon_native_px`/cell-metrics estimate
+    // `writeGrid` uses. Without cell metrics the server keeps the old
+    // `.fit` and `icon_reserve` stays 1 to match.
     var icon_reserve: usize = 1;
     if (large) {
         const metrics = try client.getCellMetrics();
@@ -956,28 +1100,29 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         const icon_render_px: usize = @min(icon_native_px, metrics.h);
         icon_reserve = (icon_render_px + metrics.w - 1) / metrics.w + 1;
     }
-    const name_width = icon_reserve + name_text_width;
+    const name_floor = icon_reserve + min_name_width;
+
+    // Stretch the last (Name) column so the table's total width fills the
+    // layer. `core.Table.render` with `borders = false` lays a table out
+    // as `sum(widths) + (n - 1)` cells wide from `cur.col`, so Name takes
+    // whatever's left once the four fixed columns and the four
+    // inter-column separators are subtracted from that span.
+    const layer = try client.getSize();
+    const span = if (layer.cols > cur.col) layer.cols - cur.col else 0;
+    const fixed = perms_width + size_width + owner_width + time_width + 4;
+    const name_width = if (span > fixed + name_floor) span - fixed else name_floor;
 
     const table = try client.createTable(null, table_row, cur.col, &.{
+        .{ .name = "Perms", .width = perms_width, .sortable = true },
+        .{ .name = "Size", .width = size_width, .kind = .number, .h_align = .end, .sortable = true },
+        .{ .name = "Owner", .width = owner_width, .sortable = true },
+        .{ .name = "Time", .width = time_width, .kind = .number, .sortable = true },
         .{ .name = "Name", .width = name_width, .sortable = true },
-        // Raw byte counts run to 10+ digits; the human form never past ~8.
-        .{ .name = "Size", .width = if (raw_bytes) 14 else 8, .kind = .number, .h_align = .end, .sortable = true },
-        // 11, not 10: the perm string (`formatPermBits`) is exactly 10
-        // chars and left-aligned, so the extra cell is a trailing blank.
-        // Perms is the last column, so this reads as a right margin on
-        // every row (the `alt_row_bg` stripe included).
-        .{ .name = "Perms", .width = 11, .sortable = true },
     }, .{
         .borders = false,
         .alt_row_bg = rgb(30, 30, 30),
         .row_height = if (large) large_table_row_height else 1,
     });
-
-    var scratch: std.ArrayList([]u8) = .empty;
-    defer {
-        for (scratch.items) |s| alloc.free(s);
-        scratch.deinit(alloc);
-    }
 
     const rows = try alloc.alloc([]glyphwire.Client.TableCellInput, entries.len);
     defer {
@@ -1038,10 +1183,18 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         const perm_text = try alloc.dupe(u8, lsfmt.formatPermBits(&perm_buf, entry.mode));
         try scratch.append(alloc, perm_text);
 
-        const row = try alloc.alloc(glyphwire.Client.TableCellInput, 3);
-        row[0] = .{ .display = name_text, .icon = iconForEntry(entry), .fg = name_fg, .metadata_id = metadata_id };
+        var time_buf: [20]u8 = undefined;
+        const time_text = try alloc.dupe(u8, lsfmt.formatTimestamp(&time_buf, entry.mtime_sec));
+        try scratch.append(alloc, time_text);
+
+        // exa's column order: Perms, Size, Owner, Time, then icon + Name.
+        // `owner_texts[i]` is already in `scratch` from the pre-pass.
+        const row = try alloc.alloc(glyphwire.Client.TableCellInput, 5);
+        row[0] = .{ .display = perm_text, .fg = detail_color, .metadata_id = metadata_id };
         row[1] = .{ .display = size_text, .sort_key = .{ .number = @floatFromInt(entry.size) }, .fg = sizeColor(entry.size), .metadata_id = metadata_id };
-        row[2] = .{ .display = perm_text, .fg = detail_color, .metadata_id = metadata_id };
+        row[2] = .{ .display = owner_texts[i], .fg = detail_color, .metadata_id = metadata_id };
+        row[3] = .{ .display = time_text, .sort_key = .{ .number = @floatFromInt(entry.mtime_sec) }, .fg = detail_color, .metadata_id = metadata_id };
+        row[4] = .{ .display = name_text, .icon = iconForEntry(entry), .fg = name_fg, .metadata_id = metadata_id };
         rows[i] = row;
     }
 
@@ -1080,6 +1233,20 @@ fn writePlain(io: std.Io, listings: []const Listing, long_list: bool, raw_bytes:
             try w.interface.print("total {s}\n", .{std.mem.trim(u8, lsfmt.formatSize(&total_buf, total_bytes, raw_bytes), " ")});
         }
         for (listing.entries) |entry| {
+            // Same exa-style column order the glyphwire `-l` table uses:
+            // perms, size, owner:group, time, then the name.
+            if (long_list) {
+                var perm_buf: [10]u8 = undefined;
+                var size_buf: [24]u8 = undefined;
+                var owner_buf: [160]u8 = undefined;
+                var time_buf: [20]u8 = undefined;
+                try w.interface.print("{s}  {s}  {s}  {s}  ", .{
+                    lsfmt.formatPermBits(&perm_buf, entry.mode),
+                    lsfmt.formatSize(&size_buf, entry.size, raw_bytes),
+                    ownerGroupText(&owner_buf, entry.uid, entry.gid),
+                    lsfmt.formatTimestamp(&time_buf, entry.mtime_sec),
+                });
+            }
             switch (entry.kind) {
                 .directory => try w.interface.print("{s}/", .{entry.name}),
                 .sym_link => if (entry.link_target) |tgt|
@@ -1087,11 +1254,6 @@ fn writePlain(io: std.Io, listings: []const Listing, long_list: bool, raw_bytes:
                 else
                     try w.interface.print("{s}", .{entry.name}),
                 else => try w.interface.print("{s}", .{entry.name}),
-            }
-            if (long_list) {
-                var size_buf: [24]u8 = undefined;
-                var time_buf: [20]u8 = undefined;
-                try w.interface.print("  {s}  {s}", .{ lsfmt.formatSize(&size_buf, entry.size, raw_bytes), lsfmt.formatTimestamp(&time_buf, entry.mtime_sec) });
             }
             try w.interface.print("\n", .{});
         }
