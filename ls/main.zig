@@ -706,8 +706,11 @@ fn groupName(gid: u32, num_buf: []u8) []const u8 {
 // ── glyphwire output ──────────────────────────────────────────────────────
 
 /// Native pixel size of the bundled Oxygen icon set (decisions.md's Icon
-/// section: "kept at Oxygen's native 32x32") -- needed up front to reserve
-/// enough columns for a `.natural`-scaled icon before the name starts.
+/// section: "kept at Oxygen's native 32x32"). Used up front to reserve
+/// enough columns for a `.natural`-scaled icon before the name starts,
+/// and as the hard cap on how large `writeGrid` lets any icon render --
+/// so a mixed-resolution set (32px folders next to 48px dev-tool glyphs)
+/// still comes out visually uniform.
 const icon_native_px = 32;
 
 /// Floor the stretched Name column (`writeLongTable`) is clamped to when
@@ -841,18 +844,21 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
         // Small mode caps the icon to one cell-height so it fills the
         // entry's own row without spilling onto the rows above/below
         // (`block_rows` stays 1); large mode caps it to two and leaves a
-        // blank row between bands.
-        max_icon_h = @intCast((if (large) @as(usize, 2) else 1) * cell_h);
+        // blank row between bands. Either way, never past `icon_native_px`
+        // -- a higher-resolution icon (the 48px dev-tool glyphs, say) then
+        // renders at the same on-screen size as every 32px folder/file
+        // icon beside it instead of looming larger.
+        max_icon_h = @intCast(@min((if (large) @as(usize, 2) else 1) * cell_h, icon_native_px));
         // `.natural` scale with only `max_h` set ties the rendered width
         // to the same cap (square icons, uniform scale-down -- see
-        // `core.IconScale`'s doc comment), so the rendered pixel width is
+        // `core.IconScale`'s doc comment), so the rendered pixel size is
         // never more than `max_icon_h`.
-        const icon_render_px: usize = @min(icon_native_px, max_icon_h);
+        const icon_render_px: usize = max_icon_h;
         icon_cols_spanned = (icon_render_px + cell_w - 1) / cell_w;
-        // Large mode keeps its wider reserve from the icon's full native
-        // width (its taller cap lets the icon render at up to 32px wide);
-        // small mode only needs the columns the shorter icon reaches,
-        // plus a one-column gap.
+        // Large mode keeps a slightly wider reserve from the icon set's
+        // native width (`icon_native_px`, now also the render cap, so this
+        // is always enough); small mode only needs the columns the icon
+        // actually reaches, plus a one-column gap.
         icon_col_width = if (large)
             (icon_native_px + cell_w - 1) / cell_w + 1
         else
@@ -1063,14 +1069,17 @@ const id_name_col_max = 16;
 /// site that this table starts wherever glyphwire-shell's prompt left
 /// off, not at the layer's origin.
 ///
-/// Leaves the cursor on the row just below whatever the table actually
-/// painted (`tableGetState`'s `painted` extent, not a size this client
-/// computed itself -- see that field's doc comment on why: recomputing
-/// the same layout math `Table.render` already did would drift the
-/// moment that layout changes) -- without this, glyphwire-shell's next
-/// prompt would land back on the table's own last row and overwrite it,
-/// the same "leave the cursor after the last thing drawn" contract
-/// `writeGrid` already honors for the plain listing.
+/// Leaves the cursor a row below whatever the table actually painted
+/// (`tableGetState`'s `painted` extent, not a size this client computed
+/// itself -- see that field's doc comment on why: recomputing the same
+/// layout math `Table.render` already did would drift the moment that
+/// layout changes), so glyphwire-shell's next prompt doesn't land on the
+/// table's own last row and overwrite it -- the same "leave the cursor
+/// after the last thing drawn" contract `writeGrid` honors. When the
+/// table was taller than the window its `painted` footprint fills the
+/// whole viewport (it scrolled the layer as it drew, terminal-style), so
+/// there's no spare on-screen row: the cursor lands on the last line and
+/// one newline is emitted to scroll a blank gap in before the prompt.
 fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: bool, raw_bytes: bool) !void {
     const alloc = client.alloc;
     const cur = try client.getCursor();
@@ -1284,18 +1293,23 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     // cursor up by exactly those trailing blanks so the prompt sits one
     // line under the last entry's text, same as the non-large listing.
     const trailing_blank: usize = if (large) large_table_row_height - 1 - large_table_row_height / 2 else 0;
-    const desired_row = state.painted.row + state.painted.rows - trailing_blank;
-    // Never past the viewport's last row. When the listing is taller than
-    // the window the table already fills it (`Table.render` bottom-aligns
-    // it), and setting an absolute cursor row below the bottom makes
-    // `set_property(cursor)` scroll the whole listing up into scrollback --
-    // leaving the visible area full of blank rows, with a matching stack of
-    // them above the table in history. Clamping keeps the cursor on the
-    // last visible row; glyphwire-shell's own `+1` before it redraws does
-    // the single line of scroll a full screen of output needs, like any
-    // other command.
+    const past_table = state.painted.row + state.painted.rows;
     const layer_bottom = layer.rows -| 1;
-    try client.setCursor(@min(desired_row, layer_bottom), 0);
+    if (past_table <= layer_bottom) {
+        // The whole table fits with at least one row to spare below it:
+        // park the cursor on that row so glyphwire-shell's `+1` leaves one
+        // blank line between the listing and the next prompt.
+        try client.setCursor(past_table - trailing_blank, 0);
+    } else {
+        // The table was taller than the window, so `Table.render` scrolled
+        // the layer as it drew (terminal-style) and its footprint now fills
+        // the viewport -- there's no on-screen row left for the gap. Land
+        // on the last row and emit one newline: that scrolls a blank line
+        // in, and the shell's own `+1` then puts the prompt below it, the
+        // same one-line gap the fits-in-window case leaves.
+        try client.setCursor(layer_bottom, 0);
+        try client.writeText("\n", null, null);
+    }
 }
 
 /// The no-session fallback: the same content a non-glyphwire `ls` would

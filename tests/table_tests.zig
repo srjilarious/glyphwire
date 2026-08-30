@@ -607,13 +607,13 @@ pub fn createTableOnAnotherConnectionDefaultsToFirstConnectionsCursorTest(io: st
 /// A table taller than the whole layer (more rows, at a given
 /// `row_height`, than the viewport has -- easy to hit with
 /// `glyphwire-ls -l -L`'s 3-line rows on an ordinarily-sized directory
-/// listing and a modest window) must not crash. `Table.render` clips the
-/// top rows that scroll off above the viewport (`origin` goes negative
-/// and the body loop skips them) rather than drawing at negative rows --
-/// its painted extent still anchors at row 0 (the on-screen footprint
-/// starts there), which is what this test pins. `tableOversizedShowsTail`
-/// covers *which* rows stay visible and that no blank history piles up
-/// above them.
+/// listing and a modest window) must not crash. `Table.render` draws
+/// top-down, scrolling the layer a piece at a time (`tableMakeRoom`);
+/// once total scrolling hits the layer's capacity the excess rows just
+/// clip. The painted extent's `row` ends up 0 (the table's top scrolled
+/// into history), which is what this test pins. `tableOversizedShowsTail`
+/// covers *which* rows stay visible and that only real content, never
+/// blank filler, reaches scrollback.
 pub fn tableTallerThanLayerDoesNotCrashTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
     defer ctx.deinit();
@@ -649,17 +649,15 @@ pub fn tableTallerThanLayerDoesNotCrashTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqual(state.painted.row, 0);
 }
 
-/// A table taller than the viewport shows its *last* rows, pinned so the
-/// bottom entry lands on the last visible line and the top rows (header +
-/// earliest entries) clip off above. Crucially it does **not** over-scroll
-/// the layer chasing a bottom it can never reach: `Table.render` scrolls
-/// only far enough to bring the table's first row to the top of the
-/// viewport, so no stack of blank history rows piles up above it (the
-/// "preceding blank lines" `glyphwire-ls -l` used to leave in a small
-/// window). 6-row viewport, a `total_height == 11` table anchored at row
-/// 2: entries "a".."j" unsorted, so the visible tail is "e".."j" filling
-/// rows 0-5, and the whole viewport is table content -- no blank row on
-/// top.
+/// A table taller than the viewport renders like ordinary terminal
+/// output: top-down from its anchor, scrolling the layer one row at a
+/// time as it fills past the bottom, so the live tail ends up on screen
+/// and the header + earliest rows go into scrollback -- intact, never
+/// replaced by blank filler (the "preceding blank lines" `glyphwire-ls
+/// -l` used to leave in a small window). 6-row viewport, an 11-line table
+/// (header + 10 body rows) anchored at row 2 after a sentinel row: the
+/// visible tail is "e".."j" on rows 0-5, the sentinel and the header both
+/// sit in history at their real offsets.
 pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 20, 6, 20);
     defer ctx.deinit();
@@ -677,13 +675,12 @@ pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
 
-    // A sentinel two rows above the table, standing in for the shell's
-    // prompt / `total` line -- it should scroll into history (exactly two
-    // rows), not get buried under blanks.
+    // A sentinel on row 0, standing in for the shell's prompt / `total`
+    // line -- it should scroll into history intact, not get buried.
     try client.setCursor(0, 0);
     try client.writeText("S", .{ .r = 255, .g = 255, .b = 255 }, null);
 
-    // 1 (header) + 10 body rows * row_height 1 == 11 lines in a 6-row
+    // header + 10 body rows * row_height 1 == 11 lines in a 6-row
     // viewport, anchored at row 2.
     const table = try client.createTable(null, 2, 0, &.{
         .{ .name = "Name", .width = 4 },
@@ -699,14 +696,23 @@ pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try client.tableSetRows(null, table, &row_slices);
 
     const state = try client.tableGetState(null, table);
+    // Anchor scrolled entirely into history; footprint fills the viewport.
     try testz.expectEqual(state.painted.row, 0);
     try testz.expectEqual(state.painted.rows, 6);
 
     var snapshot = try client.getCells();
     defer snapshot.deinit();
-    // Top of the viewport is a table body row ("e"), not a blank left by
-    // over-scrolling.
+    // The live tail "e".."j" fills rows 0-5 -- no blank row anywhere.
     try testz.expectEqualStr("e", snapshot.cellAt(0, 0).grapheme);
-    // ...through to the last entry on the last visible line.
     try testz.expectEqualStr("j", snapshot.cellAt(5, 0).grapheme);
+
+    // Rendering from row 2 then scrolling 7 rows (11 lines - (6 - 2)
+    // on-screen) puts the header 5 rows above the viewport and the
+    // sentinel 7 -- both still holding their real content, not blanked.
+    var hist5 = try client.getCellsView(5);
+    defer hist5.deinit();
+    try testz.expectEqualStr("N", hist5.cellAt(0, 0).grapheme); // "Name" header
+    var hist7 = try client.getCellsView(7);
+    defer hist7.deinit();
+    try testz.expectEqualStr("S", hist7.cellAt(0, 0).grapheme);
 }

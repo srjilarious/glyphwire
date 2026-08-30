@@ -1989,31 +1989,30 @@ pub const Table = struct {
     /// table-specific work at all, since glyphwire-host's existing render
     /// pass already draws whatever's in the cell buffer.
     ///
-    /// Scrolls the layer first if the table's full height wouldn't
-    /// otherwise fit below `self.row` -- a table drawn as a command's
-    /// output (`glyphwire-ls -l`, printed wherever the shell's prompt
-    /// happened to leave the cursor, not necessarily near the top of the
-    /// screen) needs the same "make room for new output" behavior a real
-    /// terminal gives any other command, or most of it silently never
-    /// becomes visible at all. The table is bottom-aligned with the
-    /// viewport (its last row on the last visible line), scrolling the
-    /// layer by exactly that much -- but the scroll is capped at bringing
-    /// the table's *first* row to the top of the viewport. A table taller
-    /// than the viewport then shows its last rows, with the top ones
-    /// clipped (`origin` goes negative and the body loop skips them);
-    /// scrolling further toward an unreachable bottom would only pile
-    /// blank history rows above it. One scroll up front, not one per
-    /// cell/tile the way the client-composited prototype this replaced
-    /// first got wrong.
+    /// Draws top-down from `self.row`, scrolling the layer a row at a time
+    /// as it goes whenever the next piece would run past the bottom edge --
+    /// exactly how ordinary terminal output behaves. A table drawn as a
+    /// command's output (`glyphwire-ls -l`, printed wherever the shell's
+    /// prompt happened to leave the cursor) that's taller than the window
+    /// then scrolls its header and earliest rows up into scrollback, the
+    /// live tail filling the viewport, with no blank filler anywhere --
+    /// the table is a first-class model object for the sake of re-sorting
+    /// later, not so it can freeze a header or clip its middle. The scroll
+    /// is resolved once per *piece* (`tableMakeRoom`), never per cell: a
+    /// per-cell resolution scrolls relative to whatever's currently on top
+    /// every call, which is the compounding-scroll bug the
+    /// client-composited prototype this replaced first hit. Total scrolling
+    /// is capped at the layer's capacity, so a table with more rows than
+    /// the viewport plus scrollback can hold degrades to dropping its
+    /// newest rows rather than spinning.
     ///
-    /// Writes every cell directly (`layer.cell(r, c)`) after that,
-    /// **not** through `Layer.writeText`/`drawIcon`'s cursor-implicit
-    /// helpers -- this method already did the one scroll resolution a
-    /// table needs itself, so nothing past this point should trigger
-    /// another. Horizontal overflow still just clips (`self.col` never
-    /// moves) -- there's no horizontal-scroll concept for a cell grid,
-    /// same as `drawBox`/`drawImage` clamping their own rectangles to the
-    /// layer's width.
+    /// Writes every cell directly (`layer.cell(r, c)`) rather than through
+    /// `Layer.writeText`/`drawIcon`'s cursor-implicit helpers -- the scroll
+    /// bookkeeping lives here, in one place, so nothing downstream triggers
+    /// another. Horizontal overflow just clips (`self.col` never moves) --
+    /// there's no horizontal-scroll concept for a cell grid, same as
+    /// `drawBox`/`drawImage` clamping their own rectangles to the layer's
+    /// width.
     pub fn render(self: *Table, layer: *Layer, ctx: *const Context) !void {
         clearExtent(layer, self.painted);
 
@@ -2024,55 +2023,26 @@ pub const Table = struct {
         }
         const border_pad: usize = if (self.style.borders) 1 else 0;
         const row_height = @max(self.style.row_height, 1);
-        const separator_lines: usize = if (self.style.header_separator) 1 else 0;
-        const total_height = border_pad + 1 + separator_lines + self.rows.len * row_height + border_pad;
-
-        // `origin` is the table's first row as a *signed* layer row: it goes
-        // negative when the table is taller than the viewport and its top
-        // rows scroll off above the visible area. The render loop below
-        // draws a piece only when its row has reached 0, so those clipped
-        // top rows are simply skipped rather than drawn at negative rows.
-        var origin: i64 = @intCast(self.row);
-        if (total_height > 0) {
-            const vp: i64 = @intCast(layer.height);
-            const th: i64 = @intCast(total_height);
-            // Bottom-align the table with the viewport: move its first row
-            // up far enough that its last row lands on the last visible
-            // line -- but never *down* from where it was anchored (a table
-            // with room to spare below stays put). `vp - th` is negative
-            // once the table is taller than the viewport, which is exactly
-            // the "top rows clip off" case `origin` handles.
-            const new_top: i64 = @min(@as(i64, @intCast(self.row)), vp - th);
-            // Scroll the layer by however far the table actually moved up,
-            // but no further than pinning its first row to the top of the
-            // viewport (`new_top` clamped to 0). Scrolling past that --
-            // toward a bottom that can never be shown -- would only bury
-            // the table under blank history rows (the "preceding blank
-            // lines" bug). Capped at `capacity()` the same way
-            // `Layer.resolveRow` caps its own scrolling.
-            const scroll_by = @min(self.row - @as(usize, @intCast(@max(new_top, 0))), layer.capacity());
-            var s: usize = 0;
-            while (s < scroll_by) : (s += 1) layer.scrollOne();
-            origin = new_top;
-            self.row = @intCast(@max(new_top, 0));
-        }
 
         const content_start_col = self.col + border_pad;
-        var cur_row: i64 = origin;
+        const anchor_row = self.row;
+        var cur_row = self.row;
+        var scrolled: usize = 0;
 
         if (self.style.borders) {
-            if (cur_row >= 0) self.drawBorderEdge(layer, ctx, @intCast(cur_row), content_width, .top);
+            tableMakeRoom(layer, &cur_row, &scrolled, 1);
+            self.drawBorderEdge(layer, ctx, cur_row, content_width, .top);
             cur_row += 1;
         }
 
-        if (cur_row >= 0) {
-            self.writeHeaderRow(layer, @intCast(cur_row), content_start_col);
-            if (self.style.borders) self.drawSideBorders(layer, ctx, @intCast(cur_row), content_width);
-        }
+        tableMakeRoom(layer, &cur_row, &scrolled, 1);
+        self.writeHeaderRow(layer, cur_row, content_start_col);
+        if (self.style.borders) self.drawSideBorders(layer, ctx, cur_row, content_width);
         cur_row += 1;
 
         if (self.style.header_separator) {
-            if (cur_row >= 0) self.drawSeparatorRow(layer, ctx, @intCast(cur_row), content_start_col, content_width);
+            tableMakeRoom(layer, &cur_row, &scrolled, 1);
+            self.drawSeparatorRow(layer, ctx, cur_row, content_start_col, content_width);
             cur_row += 1;
         }
 
@@ -2080,35 +2050,31 @@ pub const Table = struct {
         defer self.alloc.free(indices);
 
         for (indices, 0..) |row_idx, display_i| {
-            // A body row whose top hasn't reached the viewport yet
-            // (`cur_row < 0`) is clipped whole -- see `origin`. `writeBodyRow`
-            // / `fillRowBg` do row arithmetic, so they only ever see a
-            // valid `usize` here.
-            if (cur_row >= 0) {
-                const rt: usize = @intCast(cur_row);
-                const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
-                if (row_bg) |bg| fillRowBg(layer, rt, content_start_col, content_width, row_height, bg);
-                if (self.style.borders) {
-                    var line: usize = 0;
-                    while (line < row_height) : (line += 1) self.drawSideBorders(layer, ctx, rt + line, content_width);
-                }
-                self.writeBodyRow(layer, ctx, self.rows[row_idx], rt, content_start_col, row_height, row_bg);
+            tableMakeRoom(layer, &cur_row, &scrolled, row_height);
+            const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
+            if (row_bg) |bg| fillRowBg(layer, cur_row, content_start_col, content_width, row_height, bg);
+            if (self.style.borders) {
+                var line: usize = 0;
+                while (line < row_height) : (line += 1) self.drawSideBorders(layer, ctx, cur_row + line, content_width);
             }
-            cur_row += @intCast(row_height);
+            self.writeBodyRow(layer, ctx, self.rows[row_idx], cur_row, content_start_col, row_height, row_bg);
+            cur_row += row_height;
         }
 
         if (self.style.borders) {
-            if (cur_row >= 0) self.drawBorderEdge(layer, ctx, @intCast(cur_row), content_width, .bottom);
+            tableMakeRoom(layer, &cur_row, &scrolled, 1);
+            self.drawBorderEdge(layer, ctx, cur_row, content_width, .bottom);
             cur_row += 1;
         }
 
-        // The painted extent is the table's *on-screen* footprint: the top
-        // clips at row 0, the bottom is wherever the loop ended (never past
-        // the viewport, since an oversized table's `origin + total_height`
-        // resolves to `layer.height`). `clearExtent` blanks exactly this
-        // region on the next render.
-        const painted_top: usize = @intCast(@max(origin, 0));
-        const painted_bottom: usize = @intCast(@max(cur_row, @as(i64, 0)));
+        // The painted extent is the table's *on-screen* footprint after any
+        // scrolling: its top is `anchor_row` shifted up by however many
+        // rows scrolled by (0 once it's scrolled off into history), its
+        // bottom is wherever the loop left `cur_row`, clamped to the
+        // viewport. `clearExtent` blanks exactly this region next render.
+        const painted_top = anchor_row -| scrolled;
+        const painted_bottom = @min(cur_row, layer.height);
+        self.row = painted_top;
         self.painted = .{
             .row = painted_top,
             .col = self.col,
@@ -2211,6 +2177,27 @@ pub const Table = struct {
 fn clearExtent(layer: *Layer, extent: TablePaintedExtent) void {
     if (extent.rows == 0 or extent.cols == 0) return;
     layer.clear(extent.row, extent.col, extent.rows, extent.cols);
+}
+
+/// Scrolls `layer` just far enough that a `piece_h`-row table piece about
+/// to be drawn at `cur_row.*` sits fully above the viewport's bottom edge
+/// -- the "make room for the next line" a terminal does as output flows
+/// past the bottom. Each scrolled-off row keeps whatever the table already
+/// wrote into it (`Table.render` draws top-down), so only real content
+/// ever reaches scrollback. `scrolled.*` accumulates the total so
+/// `render` can locate the table's top afterwards; scrolling stops once
+/// that total reaches the layer's capacity, past which the excess rows
+/// just clip (a table longer than viewport + scrollback).
+fn tableMakeRoom(layer: *Layer, cur_row: *usize, scrolled: *usize, piece_h: usize) void {
+    const past_bottom = cur_row.* + piece_h;
+    if (past_bottom <= layer.height) return;
+    const want = past_bottom - layer.height;
+    const budget = layer.capacity() -| scrolled.*;
+    const n = @min(want, budget);
+    var i: usize = 0;
+    while (i < n) : (i += 1) layer.scrollOne();
+    scrolled.* += n;
+    cur_row.* -|= n;
 }
 
 fn setCellText(layer: *Layer, row: usize, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
