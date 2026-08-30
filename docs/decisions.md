@@ -520,7 +520,13 @@ surface.
   `box/tl`, `dialog/fill`. There is no hand-maintained manifest any more
   (the old `core.default_*_manifest` arrays are gone): the file layout
   under `assets/icons/` *is* the manifest, and dropping a `.png` into a
-  subdirectory adds an icon. The art is the KDE Oxygen icon theme
+  subdirectory adds an icon. `glyphwire-host` then scans a second,
+  optional tree — `~/.config/glyphwire/icons/` (the same config dir as
+  `host.conf`, `configDirPath`) — the same way; because `registerIcon`
+  overwrites by name, a user file at a bundled relative path
+  (`icons/oxygen/folder.png`) replaces that bundled icon and a new
+  relative path just adds one. A missing user directory is silent. The
+  bundled art is the KDE Oxygen icon theme
   (LGPLv3, see `assets/icons/oxygen/README.txt`), kept at Oxygen's native
   32x32 (scale-to-fit means there's no need to pre-shrink them to any
   particular cell size). Chosen over a flatter/more minimal icon set

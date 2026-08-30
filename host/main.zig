@@ -1675,18 +1675,25 @@ fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator
     };
 }
 
-/// Recursively walks `root` (relative to the process cwd, normally
-/// `assets/icons`) and registers every `.png` under it into `ctx`'s flat
-/// icon catalog, named by its path beneath `root` with the extension
-/// removed (`core.iconName` -- so `oxygen/folder.png` -> `oxygen/folder`,
-/// `box/tl.png` -> `box/tl`). This replaces the old hand-maintained
-/// `default_*_manifest` arrays: the file layout under `assets/icons/` is
-/// the manifest now. The real file I/O lives here rather than in
-/// `core.zig` (headless-first). Logs and skips anything that can't be
-/// read/decoded rather than failing startup.
-fn loadIconsFromDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, root: []const u8) void {
+/// Recursively walks `root` and registers every `.png` under it into
+/// `ctx`'s flat icon catalog, named by its path beneath `root` with the
+/// extension removed (`core.iconName` -- so `oxygen/folder.png` ->
+/// `oxygen/folder`, `box/tl.png` -> `box/tl`). This replaces the old
+/// hand-maintained `default_*_manifest` arrays: the file layout under a
+/// directory is the manifest now.
+///
+/// Called twice at startup: once on the bundled `assets/icons/`, then
+/// once on `~/.config/glyphwire/icons/` (`warn_if_absent = false` --
+/// that directory is optional). `registerIcon` overwrites by name, so a
+/// user file at the same relative path replaces the bundled icon, and a
+/// new relative path just adds one. The real file I/O lives here rather
+/// than in `core.zig` (headless-first). Logs and skips anything that
+/// can't be read/decoded rather than failing startup.
+fn loadIconsFromDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, root: []const u8, warn_if_absent: bool) void {
     var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| {
-        std.log.warn("glyphwire-host: couldn't open icon directory '{s}': {t}", .{ root, err });
+        if (warn_if_absent or err != error.FileNotFound) {
+            std.log.warn("glyphwire-host: couldn't open icon directory '{s}': {t}", .{ root, err });
+        }
         return;
     };
     defer dir.close(io);
@@ -1731,9 +1738,12 @@ fn scanIconDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, di
                     std.log.warn("glyphwire-host: couldn't load icon '{s}': {t}", .{ rel, err });
                     continue;
                 };
+                const replacing = ctx.iconHandle(name) != null;
                 ctx.registerIcon(name, handle) catch |err| {
                     std.log.warn("glyphwire-host: couldn't register icon '{s}': {t}", .{ name, err });
+                    continue;
                 };
+                if (replacing) std.log.info("glyphwire-host: icon '{s}' overridden by a user file", .{name});
             },
             else => {},
         }
@@ -2026,7 +2036,15 @@ pub fn main(init: std.process.Init) !void {
     // matching -- see Context's doc comment on cell_px_w/cell_px_h.
     ctx.cell_px_w = @intCast(cell_w);
     ctx.cell_px_h = @intCast(cell_h);
-    loadIconsFromDir(io, alloc, &ctx, "assets/icons");
+    loadIconsFromDir(io, alloc, &ctx, "assets/icons", true);
+    // User icons: new names and overrides of the bundled set, from
+    // `~/.config/glyphwire/icons/` (same config dir as `host.conf`, see
+    // `configDirPath`). Scanned second so a user file at a bundled
+    // relative path wins. Absent directory is normal -- not warned.
+    if (configDirPath(arena, init.environ_map)) |config_dir| {
+        const user_icons = try std.fs.path.join(arena, &.{ config_dir, "icons" });
+        loadIconsFromDir(io, alloc, &ctx, user_icons, false);
+    } else |_| {}
 
     // `.listen()` inside `bind` is synchronous -- the socket is already
     // accept-ready (kernel-queued, even before `serveForever`'s thread

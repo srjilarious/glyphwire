@@ -18,6 +18,13 @@
 -- booleans `true` / `false`. `--` starts a comment. Unknown keys are
 -- ignored. A key set to the wrong type logs a warning and the default
 -- stands.
+--
+-- Custom icons: drop `.png` files into an `icons/` subdirectory of this
+-- config directory (e.g. ~/.config/glyphwire/icons/). Each is registered
+-- under its path there without the extension, so
+-- icons/mine/logo.png -> the name `mine/logo`, and a file at a bundled
+-- path such as icons/oxygen/folder.png replaces that bundled icon. Use
+-- the name in a prompt `{icon:...}`, a client's `draw_icon`, etc.
 
 -- config = {
 --

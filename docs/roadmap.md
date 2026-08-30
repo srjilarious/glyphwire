@@ -1109,6 +1109,13 @@ rows and `decisions.md`'s Icon + Box sections updated.
   (`shell.conf.example`, `shell.conf.template`), `ls/icons.zig`,
   `ls/main.zig`, `notify/main.zig`, `demo/main.zig` and the asset
   READMEs updated to the new names.
+- **User icon overrides.** After the bundled scan, `loadIconsFromDir`
+  runs again on `~/.config/glyphwire/icons/` (the `host.conf` config dir,
+  `warn_if_absent = false`). `registerIcon` overwrites by name, so a file
+  at a bundled relative path (`icons/oxygen/folder.png`) replaces that
+  icon in the atlas and a new path (`icons/mine/logo.png` → `mine/logo`)
+  adds one; a replacement logs one info line, a missing directory is
+  silent. `host.conf.template` documents it.
 - **One atlas texture.** `App.buildIconAtlas` (runs in `App.init`, after
   the GL context exists) decodes every registered icon, shelf-packs them
   into a 1024-wide `glyphwire-icon-atlas` texture (tallest-first, 1px
