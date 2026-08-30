@@ -804,22 +804,35 @@ surface.
   leave the cursor, not necessarily near the top of the screen), and
   most of it silently never becoming visible at all (because nothing
   made room the way typing more text would) reads as "the table doesn't
-  render," not "the table clipped." `Table.render` now resolves its
-  anchor against `Layer.resolveRow` exactly once per render call —
-  against the table's *bottom* row, then walked back to get the new
-  top — before writing anything, so the whole table always ends up
-  visible if it can be (scrolling earlier content, including whatever
-  isn't this table, out of view exactly like new terminal output would).
-  Once that one resolution lands, every actual cell write still goes
-  through `layer.cell(r, c)` directly, not `Layer.writeText`/`drawIcon`'s
+  render," not "the table clipped." `Table.render` now bottom-aligns the
+  table with the viewport exactly once per render call — its last row on
+  the last visible line — scrolling earlier content (including whatever
+  isn't this table) out of view exactly like new terminal output would.
+  Once that one scroll lands, every actual cell write still goes through
+  `layer.cell(r, c)` directly, not `Layer.writeText`/`drawIcon`'s
   cursor-implicit helpers, and horizontal overflow still just clips
   (there's no horizontal-scroll concept for a cell grid) — this is also
-  why the resolution has to happen exactly once, up front, rather than
-  emerging from many small per-cell writes: `Layer.resolveRow` scrolls
-  *relative to whatever's currently at the top* on every out-of-bounds
-  call, so resolving the same block's rows independently, one cell at a
-  time, is exactly the compounding-scroll bug the `row_height > 1`
-  variant of the client-composited prototype this replaced hit first.
+  why the scroll has to happen exactly once, up front, rather than
+  emerging from many small per-cell writes: scrolling *relative to
+  whatever's currently at the top* on every out-of-bounds call is
+  exactly the compounding-scroll bug the `row_height > 1` variant of the
+  client-composited prototype this replaced hit first.
+- **A table taller than the viewport shows its last rows, and the scroll
+  is capped at pinning its first row to the top.** The bottom-align above
+  would, for a table with more rows than the window has lines, scroll
+  toward a bottom that can never be shown — piling a full screen of blank
+  history rows above the table (`glyphwire-ls -l` in a small window left
+  "a bunch of preceding blank lines," and its own trailing
+  `set_property(cursor)` past the viewport bottom left as many *after*).
+  `Table.render` now caps the scroll at bringing the table's first row to
+  viewport row 0; past that the top rows (header + earliest entries) clip
+  off (`origin` goes negative, the body loop skips them) and the tail
+  fills the screen. `table_get_state`'s `painted` extent is the
+  *on-screen* footprint (top at row 0, bottom no lower than the last
+  visible line), so `glyphwire-ls`'s `writeLongTable` clamps its next
+  cursor move to the viewport's last row rather than an absolute row
+  below it — the shell's own `+1` before its next prompt does the single
+  line of scroll a full screen of output needs.
 - **No icon-only column — an icon lives on any cell, alongside its
   text.** The client-composited prototype needed a dedicated
   zero-content icon column (`.fit`-scaled into its own cell) plus a

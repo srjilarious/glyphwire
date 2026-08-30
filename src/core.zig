@@ -1995,15 +1995,16 @@ pub const Table = struct {
     /// happened to leave the cursor, not necessarily near the top of the
     /// screen) needs the same "make room for new output" behavior a real
     /// terminal gives any other command, or most of it silently never
-    /// becomes visible at all. Resolved via `Layer.resolveRow` against
-    /// the table's *bottom* row (`self.row + total_height - 1`), then
-    /// walked back to get the new top -- exactly once per `render` call,
-    /// not once per cell/tile the way the client-composited prototype
-    /// this replaced first got wrong (see its own historical bug: `resolveRow`
-    /// scrolls *relative to whatever's currently at the top* on every
-    /// out-of-bounds call, so resolving the same block's rows
-    /// independently, one cell at a time, compounds into runaway extra
-    /// scrolling). One resolution up front avoids that entirely.
+    /// becomes visible at all. The table is bottom-aligned with the
+    /// viewport (its last row on the last visible line), scrolling the
+    /// layer by exactly that much -- but the scroll is capped at bringing
+    /// the table's *first* row to the top of the viewport. A table taller
+    /// than the viewport then shows its last rows, with the top ones
+    /// clipped (`origin` goes negative and the body loop skips them);
+    /// scrolling further toward an unreachable bottom would only pile
+    /// blank history rows above it. One scroll up front, not one per
+    /// cell/tile the way the client-composited prototype this replaced
+    /// first got wrong.
     ///
     /// Writes every cell directly (`layer.cell(r, c)`) after that,
     /// **not** through `Layer.writeText`/`drawIcon`'s cursor-implicit
@@ -2025,36 +2026,53 @@ pub const Table = struct {
         const row_height = @max(self.style.row_height, 1);
         const separator_lines: usize = if (self.style.header_separator) 1 else 0;
         const total_height = border_pad + 1 + separator_lines + self.rows.len * row_height + border_pad;
+
+        // `origin` is the table's first row as a *signed* layer row: it goes
+        // negative when the table is taller than the viewport and its top
+        // rows scroll off above the visible area. The render loop below
+        // draws a piece only when its row has reached 0, so those clipped
+        // top rows are simply skipped rather than drawn at negative rows.
+        var origin: i64 = @intCast(self.row);
         if (total_height > 0) {
-            const bottom = self.row + total_height - 1;
-            const resolved_bottom = layer.resolveRow(bottom);
-            // Saturating, not plain, subtraction: `resolveRow` only ever
-            // scrolls up to `layer.capacity()` times (its own overshoot
-            // cap), so `resolved_bottom` can land smaller than
-            // `total_height - 1` when the table's own height exceeds the
-            // whole layer (more rows than the viewport, or than there's
-            // scrollback to hold) -- a plain `-` there panics on the
-            // underflow. Saturating to 0 in that case just anchors the
-            // table at the very top, same "show as much as will ever
-            // fit" degradation `resolveRow` itself already accepts by
-            // capping its own scroll count.
-            self.row = resolved_bottom -| (total_height - 1);
+            const vp: i64 = @intCast(layer.height);
+            const th: i64 = @intCast(total_height);
+            // Bottom-align the table with the viewport: move its first row
+            // up far enough that its last row lands on the last visible
+            // line -- but never *down* from where it was anchored (a table
+            // with room to spare below stays put). `vp - th` is negative
+            // once the table is taller than the viewport, which is exactly
+            // the "top rows clip off" case `origin` handles.
+            const new_top: i64 = @min(@as(i64, @intCast(self.row)), vp - th);
+            // Scroll the layer by however far the table actually moved up,
+            // but no further than pinning its first row to the top of the
+            // viewport (`new_top` clamped to 0). Scrolling past that --
+            // toward a bottom that can never be shown -- would only bury
+            // the table under blank history rows (the "preceding blank
+            // lines" bug). Capped at `capacity()` the same way
+            // `Layer.resolveRow` caps its own scrolling.
+            const scroll_by = @min(self.row - @as(usize, @intCast(@max(new_top, 0))), layer.capacity());
+            var s: usize = 0;
+            while (s < scroll_by) : (s += 1) layer.scrollOne();
+            origin = new_top;
+            self.row = @intCast(@max(new_top, 0));
         }
 
         const content_start_col = self.col + border_pad;
-        var cur_row = self.row;
+        var cur_row: i64 = origin;
 
         if (self.style.borders) {
-            self.drawBorderEdge(layer, ctx, cur_row, content_width, .top);
+            if (cur_row >= 0) self.drawBorderEdge(layer, ctx, @intCast(cur_row), content_width, .top);
             cur_row += 1;
         }
 
-        self.writeHeaderRow(layer, cur_row, content_start_col);
-        if (self.style.borders) self.drawSideBorders(layer, ctx, cur_row, content_width);
+        if (cur_row >= 0) {
+            self.writeHeaderRow(layer, @intCast(cur_row), content_start_col);
+            if (self.style.borders) self.drawSideBorders(layer, ctx, @intCast(cur_row), content_width);
+        }
         cur_row += 1;
 
         if (self.style.header_separator) {
-            self.drawSeparatorRow(layer, ctx, cur_row, content_start_col, content_width);
+            if (cur_row >= 0) self.drawSeparatorRow(layer, ctx, @intCast(cur_row), content_start_col, content_width);
             cur_row += 1;
         }
 
@@ -2062,25 +2080,39 @@ pub const Table = struct {
         defer self.alloc.free(indices);
 
         for (indices, 0..) |row_idx, display_i| {
-            const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
-            if (row_bg) |bg| fillRowBg(layer, cur_row, content_start_col, content_width, row_height, bg);
-            if (self.style.borders) {
-                var line: usize = 0;
-                while (line < row_height) : (line += 1) self.drawSideBorders(layer, ctx, cur_row + line, content_width);
+            // A body row whose top hasn't reached the viewport yet
+            // (`cur_row < 0`) is clipped whole -- see `origin`. `writeBodyRow`
+            // / `fillRowBg` do row arithmetic, so they only ever see a
+            // valid `usize` here.
+            if (cur_row >= 0) {
+                const rt: usize = @intCast(cur_row);
+                const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
+                if (row_bg) |bg| fillRowBg(layer, rt, content_start_col, content_width, row_height, bg);
+                if (self.style.borders) {
+                    var line: usize = 0;
+                    while (line < row_height) : (line += 1) self.drawSideBorders(layer, ctx, rt + line, content_width);
+                }
+                self.writeBodyRow(layer, ctx, self.rows[row_idx], rt, content_start_col, row_height, row_bg);
             }
-            self.writeBodyRow(layer, ctx, self.rows[row_idx], cur_row, content_start_col, row_height, row_bg);
-            cur_row += row_height;
+            cur_row += @intCast(row_height);
         }
 
         if (self.style.borders) {
-            self.drawBorderEdge(layer, ctx, cur_row, content_width, .bottom);
+            if (cur_row >= 0) self.drawBorderEdge(layer, ctx, @intCast(cur_row), content_width, .bottom);
             cur_row += 1;
         }
 
+        // The painted extent is the table's *on-screen* footprint: the top
+        // clips at row 0, the bottom is wherever the loop ended (never past
+        // the viewport, since an oversized table's `origin + total_height`
+        // resolves to `layer.height`). `clearExtent` blanks exactly this
+        // region on the next render.
+        const painted_top: usize = @intCast(@max(origin, 0));
+        const painted_bottom: usize = @intCast(@max(cur_row, @as(i64, 0)));
         self.painted = .{
-            .row = self.row,
+            .row = painted_top,
             .col = self.col,
-            .rows = cur_row - self.row,
+            .rows = painted_bottom - painted_top,
             .cols = content_width + 2 * border_pad,
         };
         self.revision += 1;

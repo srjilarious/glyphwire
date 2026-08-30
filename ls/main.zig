@@ -869,6 +869,17 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
         .block_rows = block_rows,
     });
 
+    // A blank row between whatever's above (the shell's prompt line, or a
+    // multi-operand block's `<operand>:` header) and the first band, so the
+    // icons aren't crammed right against it. The `-l` table has no
+    // equivalent -- it sits directly under its own `total` line, matching a
+    // terminal `ls -l`. `set_property(cursor)` past the bottom row just
+    // scrolls one line, same as any other output.
+    {
+        const before = try client.getCursor();
+        try client.setCursor(before.row + 1, 0);
+    }
+
     const start = try client.getCursor();
 
     // Pass 1: one batch request creating every entry's metadata tag.
@@ -1273,7 +1284,18 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     // cursor up by exactly those trailing blanks so the prompt sits one
     // line under the last entry's text, same as the non-large listing.
     const trailing_blank: usize = if (large) large_table_row_height - 1 - large_table_row_height / 2 else 0;
-    try client.setCursor(state.painted.row + state.painted.rows - trailing_blank, 0);
+    const desired_row = state.painted.row + state.painted.rows - trailing_blank;
+    // Never past the viewport's last row. When the listing is taller than
+    // the window the table already fills it (`Table.render` bottom-aligns
+    // it), and setting an absolute cursor row below the bottom makes
+    // `set_property(cursor)` scroll the whole listing up into scrollback --
+    // leaving the visible area full of blank rows, with a matching stack of
+    // them above the table in history. Clamping keeps the cursor on the
+    // last visible row; glyphwire-shell's own `+1` before it redraws does
+    // the single line of scroll a full screen of output needs, like any
+    // other command.
+    const layer_bottom = layer.rows -| 1;
+    try client.setCursor(@min(desired_row, layer_bottom), 0);
 }
 
 /// The no-session fallback: the same content a non-glyphwire `ls` would
