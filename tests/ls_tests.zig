@@ -6,6 +6,7 @@ const testz = @import("testz");
 // precisely so they can be exercised here.
 const gridlayout = @import("ls_support").gridlayout;
 const lsfmt = @import("ls_support").format;
+const lsicons = @import("ls_support").icons;
 
 const small_opts: gridlayout.Options = .{ .icon_cols = 2, .block_rows = 1 };
 
@@ -211,4 +212,49 @@ pub fn formatTimestampEpochAndNegativeTest(_: std.Io, _: std.mem.Allocator) !voi
     try testz.expectEqualStr(lsfmt.formatTimestamp(&buf, 1609459200), "2021-01-01 00:00");
     // Negative (pre-epoch / unset) yields an empty string.
     try testz.expectEqual(lsfmt.formatTimestamp(&buf, -1).len, 0);
+}
+
+// ─── lsicons.iconForExtension ─────────────────────────────────────────────
+
+pub fn iconForExtensionMapsKnownBucketsTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(lsicons.iconForExtension("photo.png"), "image");
+    try testz.expectEqualStr(lsicons.iconForExtension("song.flac"), "audio");
+    try testz.expectEqualStr(lsicons.iconForExtension("clip.mkv"), "video");
+    try testz.expectEqualStr(lsicons.iconForExtension("bundle.tar.gz"), "archive");
+}
+
+pub fn iconForExtensionMapsNewFileTypeBucketsTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(lsicons.iconForExtension("report.pdf"), "pdf");
+    try testz.expectEqualStr(lsicons.iconForExtension("notes.docx"), "document");
+    try testz.expectEqualStr(lsicons.iconForExtension("budget.xlsx"), "spreadsheet");
+    try testz.expectEqualStr(lsicons.iconForExtension("data.csv"), "spreadsheet");
+    try testz.expectEqualStr(lsicons.iconForExtension("deck.odp"), "presentation");
+    try testz.expectEqualStr(lsicons.iconForExtension("README.md"), "text");
+    try testz.expectEqualStr(lsicons.iconForExtension("config.toml"), "text");
+    try testz.expectEqualStr(lsicons.iconForExtension("index.html"), "web");
+    try testz.expectEqualStr(lsicons.iconForExtension("style.css"), "web");
+    try testz.expectEqualStr(lsicons.iconForExtension("main.zig"), "code");
+    try testz.expectEqualStr(lsicons.iconForExtension("build.py"), "code");
+    try testz.expectEqualStr(lsicons.iconForExtension("pkg.deb"), "package");
+    try testz.expectEqualStr(lsicons.iconForExtension("pkg.rpm"), "package");
+}
+
+pub fn iconForExtensionIsCaseInsensitiveTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(lsicons.iconForExtension("SCAN.PDF"), "pdf");
+    try testz.expectEqualStr(lsicons.iconForExtension("Photo.JPG"), "image");
+}
+
+pub fn iconForExtensionShellScriptsAreCodeNotExecutableTest(_: std.Io, _: std.mem.Allocator) !void {
+    // .sh moved from the "executable" bucket to "code"; the real binaries
+    // stay on "executable".
+    try testz.expectEqualStr(lsicons.iconForExtension("deploy.sh"), "code");
+    try testz.expectEqualStr(lsicons.iconForExtension("run.bash"), "code");
+    try testz.expectEqualStr(lsicons.iconForExtension("tool.exe"), "executable");
+    try testz.expectEqualStr(lsicons.iconForExtension("blob.bin"), "executable");
+}
+
+pub fn iconForExtensionFallsBackToFileTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(lsicons.iconForExtension("mystery.qwerty"), "file");
+    try testz.expectEqualStr(lsicons.iconForExtension("NOEXTENSION"), "file");
+    try testz.expectEqualStr(lsicons.iconForExtension(""), "file");
 }

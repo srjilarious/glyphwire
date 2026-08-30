@@ -4,6 +4,7 @@ const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const gridlayout = @import("ls_support").gridlayout;
 const lsfmt = @import("ls_support").format;
+const lsicons = @import("ls_support").icons;
 
 /// glyphwire-ls: a directory listing built on `lsz`'s core scanning logic
 /// (see /home/jeffdw/code/lsz/src/main.zig) but re-targeted to draw over a
@@ -492,77 +493,26 @@ fn sizeColor(size: u64) glyphwire.Color {
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 
-/// Extension (including the leading `.`, case-insensitive) -> default
-/// icon-registry name (`core.default_icon_manifest`). Coarse, extension-
-/// based classification -- the same thing a mime-type lookup would give
-/// for these, without needing an actual mime database dependency just for
-/// a handful of buckets.
-const extension_icons = [_]struct { ext: []const u8, icon: []const u8 }{
-    .{ .ext = ".png", .icon = "image" },
-    .{ .ext = ".jpg", .icon = "image" },
-    .{ .ext = ".jpeg", .icon = "image" },
-    .{ .ext = ".gif", .icon = "image" },
-    .{ .ext = ".bmp", .icon = "image" },
-    .{ .ext = ".svg", .icon = "image" },
-    .{ .ext = ".webp", .icon = "image" },
-
-    .{ .ext = ".mp3", .icon = "audio" },
-    .{ .ext = ".wav", .icon = "audio" },
-    .{ .ext = ".flac", .icon = "audio" },
-    .{ .ext = ".ogg", .icon = "audio" },
-    .{ .ext = ".m4a", .icon = "audio" },
-
-    .{ .ext = ".mp4", .icon = "video" },
-    .{ .ext = ".mkv", .icon = "video" },
-    .{ .ext = ".mov", .icon = "video" },
-    .{ .ext = ".webm", .icon = "video" },
-    .{ .ext = ".avi", .icon = "video" },
-
-    .{ .ext = ".zip", .icon = "archive" },
-    .{ .ext = ".tar", .icon = "archive" },
-    .{ .ext = ".gz", .icon = "archive" },
-    .{ .ext = ".tgz", .icon = "archive" },
-    .{ .ext = ".xz", .icon = "archive" },
-    .{ .ext = ".bz2", .icon = "archive" },
-    .{ .ext = ".7z", .icon = "archive" },
-    .{ .ext = ".rar", .icon = "archive" },
-
-    .{ .ext = ".sh", .icon = "executable" },
-    .{ .ext = ".bin", .icon = "executable" },
-    .{ .ext = ".exe", .icon = "executable" },
-    .{ .ext = ".appimage", .icon = "executable" },
-
-    .{ .ext = ".iso", .icon = "media-optical" },
-};
-
 /// The icon-registry name (see `core.default_icon_manifest`) for one
 /// entry: `"folder"` for directories, an extension-derived bucket for
-/// regular files (`extension_icons`, falling back to `"file"` for an
-/// unrecognized extension), `"unknown"` for anything else (device files,
-/// sockets, ...). Symlinks reuse `"file"` -- there's no dedicated symlink
-/// icon in the bundled set yet.
+/// regular files (`lsicons.iconForExtension` / `ls/icons.zig`, falling
+/// back to `"file"` for an unrecognized extension), `"unknown"` for
+/// anything else (device files, sockets, ...). Symlinks reuse `"file"` --
+/// there's no dedicated symlink icon in the bundled set yet.
 fn iconForEntry(entry: FileEntry) []const u8 {
     return switch (entry.kind) {
         .directory => "folder",
         .sym_link => "file",
         .other => "unknown",
-        .file => iconForExtension(entry.name),
+        .file => lsicons.iconForExtension(entry.name),
     };
 }
 
-fn iconForExtension(name: []const u8) []const u8 {
-    const ext = std.fs.path.extension(name);
-    for (extension_icons) |e| {
-        if (std.ascii.eqlIgnoreCase(ext, e.ext)) return e.icon;
-    }
-    return "file";
-}
-
-/// Real MIME types, unlike `extension_icons`' coarser display buckets --
+/// Real MIME types, unlike `ls/icons.zig`'s coarser display buckets --
 /// this is the `mimetype` field every entry's metadata tag carries (see
 /// `writeGrid`), and `glyphwire-shell`'s `browseEnter` specifically checks
 /// for the literal string `"directory"` to decide whether Enter should
-/// auto-`cd`. Not exhaustive, just the same common types `extension_icons`
+/// auto-`cd`. Not exhaustive, just the same common types `ls/icons.zig`
 /// already covers plus a handful of text/code extensions worth having a
 /// real type for.
 const extension_mimetypes = [_]struct { ext: []const u8, mime: []const u8 }{
@@ -614,6 +564,19 @@ const extension_mimetypes = [_]struct { ext: []const u8, mime: []const u8 }{
     .{ .ext = ".yaml", .mime = "application/yaml" },
     .{ .ext = ".yml", .mime = "application/yaml" },
     .{ .ext = ".toml", .mime = "application/toml" },
+
+    .{ .ext = ".doc", .mime = "application/msword" },
+    .{ .ext = ".docx", .mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    .{ .ext = ".odt", .mime = "application/vnd.oasis.opendocument.text" },
+    .{ .ext = ".rtf", .mime = "application/rtf" },
+    .{ .ext = ".xls", .mime = "application/vnd.ms-excel" },
+    .{ .ext = ".xlsx", .mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    .{ .ext = ".ods", .mime = "application/vnd.oasis.opendocument.spreadsheet" },
+    .{ .ext = ".ppt", .mime = "application/vnd.ms-powerpoint" },
+    .{ .ext = ".pptx", .mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+    .{ .ext = ".odp", .mime = "application/vnd.oasis.opendocument.presentation" },
+    .{ .ext = ".deb", .mime = "application/vnd.debian.binary-package" },
+    .{ .ext = ".rpm", .mime = "application/x-rpm" },
 
     .{ .ext = ".c", .mime = "text/x-c" },
     .{ .ext = ".h", .mime = "text/x-c" },

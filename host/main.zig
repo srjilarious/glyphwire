@@ -1765,6 +1765,7 @@ pub fn main(init: std.process.Init) !void {
     loadIconManifest(io, alloc, &ctx, &glyphwire.default_box_manifest);
     loadIconManifest(io, alloc, &ctx, &glyphwire.default_dialog_manifest);
     loadIconManifest(io, alloc, &ctx, &glyphwire.default_notify_icon_manifest);
+    loadIconManifest(io, alloc, &ctx, &glyphwire.default_status_icon_manifest);
 
     // `.listen()` inside `bind` is synchronous -- the socket is already
     // accept-ready (kernel-queued, even before `serveForever`'s thread

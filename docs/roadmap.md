@@ -1026,6 +1026,37 @@ section got a grid/scrollback bullet).
   by `zig build` + the full suite; the actual window-open size needs a
   `zig build host` eyeball.
 
+## More bundled icons: prompt status glyphs + file-type buckets
+
+No wire change (icons resolve server-side by name; `draw_icon` already
+takes a name). `api.md` untouched; `decisions.md` Icon section gained the
+file-type-bucket + `status-` namespace notes and the Shell / Powerline
+section a pointer to the two status icons.
+
+- **`status-error` / `status-slow`.** A new `core.default_status_icon_manifest`
+  (loaded by `host/main.zig` alongside the box/dialog/notify manifests),
+  `assets/icons/status/{error,slow}.png` — KDE Oxygen `edit-delete` (a
+  bare red cross) and `chronometer` (a stopwatch), normalized to 8-bit
+  RGBA. Meant for `{icon:status-error}` in a `when = "error"` powerline
+  segment and `{icon:status-slow}` in a `when = "slow"` one. `status-`
+  prefix for the same reason `notify-` has one.
+- **File-type buckets.** `default_icon_manifest` gained `pdf`, `document`,
+  `spreadsheet`, `presentation`, `text`, `code`, `web`, `package` (Oxygen
+  mimetype art, `assets/icons/oxygen/`). `glyphwire-ls`'s extension →
+  icon table moved to a pure `ls/icons.zig` (in `ls_support`, so
+  `tests/ls_tests.zig` can reach it) and grew mappings for those buckets;
+  `.sh` / `.bash` / `.zsh` / `.fish` moved from `executable` to `code`.
+  `extension_mimetypes` gained the matching office-format + `.deb` /
+  `.rpm` entries.
+- **Template configs.** `shell/shell.conf.template` and
+  `assets/shell.conf.example`'s powerline example now use
+  `{icon:status-error}` / `{icon:status-slow}` and are seeded from a real
+  two-line powerline config.
+- **Tests.** 5 `ls` cases for `lsicons.iconForExtension`, 1 `core` case
+  asserting every bundled manifest entry is well-formed, uniquely named,
+  and includes the new names. **347 pass.** The icons rendering under a
+  real host still needs a `zig build host` eyeball.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

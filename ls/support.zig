@@ -6,3 +6,4 @@
 
 pub const gridlayout = @import("gridlayout.zig");
 pub const format = @import("format.zig");
+pub const icons = @import("icons.zig");

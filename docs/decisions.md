@@ -507,17 +507,31 @@ surface.
   when `get_cell_metrics` is unavailable.
 - **v1 built:** a single flat, global catalog (`Context.registerIcon`/
   `iconHandle`), seeded at `glyphwire-host` startup from
-  `core.default_icon_manifest` — 12 colorful icons from the KDE Oxygen
-  icon theme (LGPLv3, see `assets/icons/oxygen/README.txt`), kept at
-  Oxygen's native 32x32 (scale-to-fit means there's no need to pre-shrink
-  them to any particular cell size). Chosen over a flatter/more minimal
-  icon set specifically to show off what drawing real multi-tone artwork
-  into a cell looks like, not just a monochrome glyph.
+  `core.default_icon_manifest` — colorful icons from the KDE Oxygen icon
+  theme (LGPLv3, see `assets/icons/oxygen/README.txt`), kept at Oxygen's
+  native 32x32 (scale-to-fit means there's no need to pre-shrink them to
+  any particular cell size). Chosen over a flatter/more minimal icon set
+  specifically to show off what drawing real multi-tone artwork into a
+  cell looks like, not just a monochrome glyph. Beyond the coarse
+  generic set (`folder`/`file`/`audio`/`image`/`video`/`archive`/…) there
+  are finer file-type buckets — `pdf`, `document`, `spreadsheet`,
+  `presentation`, `text`, `code`, `web`, `package` — that `glyphwire-ls`
+  maps an extension onto (`ls/icons.zig`), still falling back to `file`
+  for anything unrecognized.
+- **`status-` namespace for prompt status glyphs.** `status-error` (a red
+  cross) and `status-slow` (a stopwatch), loaded from
+  `core.default_status_icon_manifest`, are meant for `{icon:status-error}`
+  in a `when = "error"` powerline segment and `{icon:status-slow}` in a
+  `when = "slow"` one (see the Shell section). Kept out of the `notify-`
+  set (those carry dialog-background styling for `glyphwire-notify`) and
+  given their own prefix for the same reason `notify-` has one — leaving a
+  bare `error` free for some future unrelated icon.
 - **Not built — still open:** theming (a context-local catalog overriding
   the global one, so swapping a theme changes what a name resolves to
   without any client needing to know or reload anything) and a way to
   query the catalog's contents over the wire (a client currently just has
-  to know the names from `default_icon_manifest`).
+  to know the names from `default_icon_manifest` /
+  `default_status_icon_manifest`).
 - **`foreground: true` composites over the background instead of
   replacing it.** An ordinary `draw_icon` sets `Cell.style.bg`'s `.icon`
   variant — one of `Background`'s mutually exclusive cases, so it
@@ -1080,7 +1094,11 @@ surface.
   `text` is itself a template, so every token above works inside a
   segment. `when` is `always` (default) / `error` (non-zero exit) /
   `slow` (last command `>= dur_min_ms`); a segment whose text renders
-  empty is dropped, and no separator is drawn for a dropped segment.
+  empty is dropped, and no separator is drawn for a dropped segment. Two
+  bundled icons pair with those conditions: `{icon:status-error}` (a red
+  cross) for a `when = "error"` segment and `{icon:status-slow}` (a
+  stopwatch) for a `when = "slow"` one — see the Icon section's
+  `status-` namespace note.
 - **No new wire op — it's coloured cells + a Nerd Font glyph.** The
   "lighter alternative to background tiles": `drawChain` lays each
   segment's background as a run of spaces (`write_text` with `bg`), then

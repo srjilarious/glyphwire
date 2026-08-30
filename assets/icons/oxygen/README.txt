@@ -3,10 +3,10 @@ is seeded from the KDE Oxygen icon theme, 32x32 PNGs, pulled from:
 
   https://github.com/KDE/oxygen-icons (32x32/{places,mimetypes,devices}/*)
 
-with a couple of generic-mimetype icons (image, audio, video) pulled
-dereferenced from https://github.com/pasnox/oxygen-icons-png, since the
-upstream KDE repo stores those as symlinks GitHub's raw file server
-doesn't follow.
+Some entries (image, audio, video, spreadsheet, presentation, web) are
+pulled dereferenced from https://github.com/pasnox/oxygen-icons-png
+instead, since the upstream KDE repo stores those as symlinks GitHub's
+raw file server doesn't follow.
 
 Kept at 32x32, the icon theme's native small size. draw_icon scales an
 icon to fit its cell, aspect-correct (letterboxed, not stretched) -- see
@@ -32,3 +32,14 @@ Files here (name -> upstream icon):
   unknown.png           mimetypes/unknown.png
   drive.png             devices/drive-harddisk.png
   media-optical.png     devices/media-optical.png
+
+  Finer file-type buckets (glyphwire-ls maps an extension to one of
+  these; see ls/icons.zig):
+  pdf.png               mimetypes/application-pdf.png
+  document.png          mimetypes/x-office-document.png
+  spreadsheet.png       mimetypes/x-office-spreadsheet.png  (via pasnox)
+  presentation.png      mimetypes/x-office-presentation.png (via pasnox)
+  text.png              mimetypes/text-plain.png
+  code.png              mimetypes/application-x-shellscript.png
+  web.png               mimetypes/text-html.png             (via pasnox)
+  package.png           mimetypes/application-x-rpm.png

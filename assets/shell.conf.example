@@ -19,7 +19,9 @@ alias("gs", "git status")
 --   {host}       hostname
 --   {time}       local time (strftime `time_format`, default %H:%M)
 --   {env:NAME}   an environment variable ("" if unset)
---   {icon:NAME}  a bundled icon, one cell wide (e.g. distro-arch, distro-tux)
+--   {icon:NAME}  a bundled icon, one cell wide (e.g. distro-arch;
+--                file-type icons pdf / document / code / …; the prompt
+--                status glyphs status-error and status-slow)
 --   {exit}       expands to the `exit` sub-template, only on a non-zero exit
 --   {dur}        expands to the `dur` sub-template, only when the last
 --                command ran for at least dur_min_ms
@@ -51,22 +53,24 @@ alias("gs", "git status")
 
 prompt {
     left_segments = {
-        { "{icon:distro-arch}", fg = "#000000", bg = "#d0d0d0" },
-        { " {user} ",           fg = "#ffffff", bg = "#5f87af" },
-        { " {cwd} ",            fg = "#ffffff", bg = "#3a3a3a" },
-        { " {exit_code} ",      fg = "#ffffff", bg = "#d70000", when = "error" },
+        { "{icon:distro-arch}", fg = "#000", bg = "#3a3a3a" },
+        { " {user} ",           fg = "#fff", bg = "#3a3a3a" },
+        { " {cwd} ",            fg = "#fff", bg = "#3a6ea5" },
     },
     right_segments = {
-        { " {duration} ", fg = "#ffffff", bg = "#5f5f00", when = "slow" },
-        { " {time} ",     fg = "#ffffff", bg = "#5f87af" },
+        -- Only shown after a failing / slow command; each leads with its
+        -- status icon.
+        { "{icon:status-error} {exit_code} ", fg = "#fff", bg = "#870000", when = "error" },
+        { "{icon:status-slow} {duration} ",   fg = "#fff", bg = "#5f5f00", when = "slow" },
+        { " {time} ",                          fg = "#fff", bg = "#7c6ba8" },
     },
     head       = "\u{E0B6}",  -- rounded left cap
-    sep        = "\u{E0B1}",  -- thin right-pointing separator
+    sep        = "\u{E0B0}",  -- solid right-pointing separator
     tail       = "\u{E0B4}",  -- rounded right cap
     sep_right  = "\u{E0B3}",  -- thin left-pointing separator
     -- right_head defaults to head; set it here only to differ.
     lines = 2,
-    input = "> ",
+    input = "\u{E0B1} ",
     time_format = "%H:%M",
     dur_min_ms = 2000,
 }

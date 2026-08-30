@@ -2429,6 +2429,19 @@ pub const default_icon_manifest = [_]IconManifestEntry{
     .{ .name = "drive", .path = "assets/icons/oxygen/drive.png" },
     .{ .name = "media-optical", .path = "assets/icons/oxygen/media-optical.png" },
 
+    // Finer file-type buckets than the coarse generic set above -- a
+    // document listing (`glyphwire-ls`) maps an extension to one of these
+    // (see `ls/icons.zig`), falling back to `file` for anything
+    // unrecognized. Also Oxygen 32x32 mimetype art.
+    .{ .name = "pdf", .path = "assets/icons/oxygen/pdf.png" },
+    .{ .name = "document", .path = "assets/icons/oxygen/document.png" },
+    .{ .name = "spreadsheet", .path = "assets/icons/oxygen/spreadsheet.png" },
+    .{ .name = "presentation", .path = "assets/icons/oxygen/presentation.png" },
+    .{ .name = "text", .path = "assets/icons/oxygen/text.png" },
+    .{ .name = "code", .path = "assets/icons/oxygen/code.png" },
+    .{ .name = "web", .path = "assets/icons/oxygen/web.png" },
+    .{ .name = "package", .path = "assets/icons/oxygen/package.png" },
+
     // Distro logos, namespaced `distro-` (same convention as the `notify-`
     // icons) -- mainly for `{icon:...}` in a configured shell prompt.
     // Simple geometric renderings, not the official artwork.
@@ -2481,6 +2494,19 @@ pub const default_notify_icon_manifest = [_]IconManifestEntry{
     .{ .name = "notify-info", .path = "assets/icons/notify/info.png" },
     .{ .name = "notify-warn", .path = "assets/icons/notify/warn.png" },
     .{ .name = "notify-error", .path = "assets/icons/notify/error.png" },
+};
+
+/// Status glyphs for a configured shell prompt -- `{icon:status-error}` in
+/// a `when = "error"` powerline segment, `{icon:status-slow}` in a
+/// `when = "slow"` one (see decisions.md's Shell / "Powerline segments").
+/// Namespaced `status-` for the same reason as `notify-`: keep a bare
+/// `error` free for a future unrelated icon. KDE Oxygen 32x32 action art
+/// (`edit-delete` = a bare red cross, `chronometer` = a stopwatch), not
+/// the `notify-` popup icons, which carry their own dialog-background
+/// styling.
+pub const default_status_icon_manifest = [_]IconManifestEntry{
+    .{ .name = "status-error", .path = "assets/icons/status/error.png" },
+    .{ .name = "status-slow", .path = "assets/icons/status/slow.png" },
 };
 
 pub const Context = struct {
