@@ -114,14 +114,16 @@ pub fn tableColumnHAlignEndRightAlignsTextTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectEqualStr("9", snapshot.cellAt(1, 5).grapheme);
 }
 
-/// A cell's `icon` (an icon-registry name, resolved server-side)
-/// reserves exactly one cell at the column's start when `row_height == 1`
-/// (`.fit`-scaled into it), with the cell's `display` text starting right
-/// after -- see `core.Table.writeBodyRow`'s doc comment. The icon lands in
-/// `fg_icon`, not `bg_icon`: table body icons always composite over the
-/// row's background rather than replacing it (see
-/// `core.setCellIconOver`).
-pub fn tableCellIconReservesOneColumnAtDefaultRowHeightTest(io: std.Io, alloc: std.mem.Allocator) !void {
+/// A cell's `icon` (an icon-registry name, resolved server-side) at
+/// `row_height == 1` is drawn `.natural`-scaled, left-aligned and capped
+/// to one cell-height (so it fills the row's single line without spilling
+/// onto its neighbours), reserving the leading columns its rendered width
+/// needs before the cell's `display` text -- see `core.Table.writeBodyRow`'s
+/// doc comment. With this session's 12x12 cell metrics and a 12px-wide
+/// icon that's 2 columns. The icon lands in `fg_icon`, not `bg_icon`:
+/// table body icons always composite over the row's background rather than
+/// replacing it (see `core.setCellIconOver`).
+pub fn tableCellIconFillsLineAtDefaultRowHeightTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
     defer ctx.deinit();
 
@@ -155,6 +157,54 @@ pub fn tableCellIconReservesOneColumnAtDefaultRowHeightTest(io: std.Io, alloc: s
 
     const icon_cell = snapshot.cellAt(1, 0);
     try testz.expectTrue(icon_cell.bg_icon == null);
+    try testz.expectEqual(icon_cell.fg_icon.?.handle, file_handle);
+    try testz.expectTrue(icon_cell.fg_icon.?.scale == .natural);
+    try testz.expectTrue(icon_cell.fg_icon.?.h_align == .start);
+    try testz.expectTrue(icon_cell.fg_icon.?.v_align == .center);
+    try testz.expectEqual(icon_cell.fg_icon.?.max_h.?, 12); // 1 row * 12px cell height
+    try testz.expectEqualStr("x", snapshot.cellAt(1, 2).grapheme);
+}
+
+/// Without the session's cell pixel metrics (`ctx.cell_px_w`/`_h` zeroed
+/// -- a host that never set them), a `row_height == 1` body icon falls
+/// back to the original one-cell `.fit`, reserving exactly one column
+/// before the `display` text -- see `core.Table.writeBodyRow`'s doc
+/// comment.
+pub fn tableCellIconFallsBackToFitWithoutCellMetricsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+    ctx.cell_px_w = 0;
+    ctx.cell_px_h = 0;
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const png = fakePngBytes(12, 12);
+    const file_handle = try client.loadImage("png", &png);
+    try ctx.registerIcon("file", file_handle);
+
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "", .width = 6 },
+    }, .{ .borders = false, .header_separator = false });
+
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "x", .icon = "file" }},
+    });
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+
+    const icon_cell = snapshot.cellAt(1, 0);
     try testz.expectEqual(icon_cell.fg_icon.?.handle, file_handle);
     try testz.expectTrue(icon_cell.fg_icon.?.scale == .fit);
     try testz.expectEqualStr("x", snapshot.cellAt(1, 1).grapheme);

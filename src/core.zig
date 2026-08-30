@@ -2101,15 +2101,19 @@ pub const Table = struct {
 
     /// One column's icon (if any) plus display text, on the row block's
     /// middle line (`top_row + row_height / 2` -- `row_height == 1`
-    /// lands on the block's only line). An icon reserves enough leading
-    /// columns that the text after it doesn't collide: exactly 1 cell at
-    /// `row_height == 1` (`.fit`-scaled to fill it), or -- for a
-    /// `row_height > 1` "large format" row -- enough columns to fit the
+    /// lands on the block's only line). The icon is drawn `.natural`-scaled
+    /// and capped to `row_height` cell-heights tall (so a `row_height == 1`
+    /// row's icon fills that single line without spilling onto its
+    /// neighbours, and a `row_height > 1` "large format" row's icon grows
+    /// past its own line into the block's blank rows), then reserves enough
+    /// leading columns that the text after it doesn't collide -- from the
     /// icon's own natural pixel width (`ctx.imageInfo`, read from the
-    /// actually-loaded image rather than a hardcoded constant, unlike
-    /// the client-composited prototype's fixed `icon_native_px`),
-    /// `.natural`-scaled and capped to `row_height` cell-heights tall,
-    /// same as `writeGrid`'s icons in glyphwire-ls's non-table listing.
+    /// actually-loaded image rather than a hardcoded constant, unlike the
+    /// client-composited prototype's fixed `icon_native_px`). Same "fill
+    /// the line" rendering `writeGrid`'s icons in glyphwire-ls's non-table
+    /// listing use. If the session's cell pixel metrics are unavailable
+    /// (`ctx.cell_px_w`/`_h` zeroed) it falls back to a plain one-cell
+    /// `.fit`.
     ///
     /// The icon goes into `Cell.fg_icon` (`setCellIconOver`), not
     /// `style.bg` -- it composites *over* the row's background rather than
@@ -2126,11 +2130,11 @@ pub const Table = struct {
             var icon_reserve: usize = 0;
 
             if (cell.icon) |icon_handle| {
-                if (row_height > 1) {
+                if (ctx.cell_px_w > 0 and ctx.cell_px_h > 0) {
                     const info = ctx.imageInfo(icon_handle) orelse ImageInfo{ .width = 0, .height = 0 };
                     const max_h: u32 = @intCast(row_height * ctx.cell_px_h);
                     const render_px = @min(info.width, max_h);
-                    icon_reserve = if (ctx.cell_px_w > 0) (render_px + ctx.cell_px_w - 1) / ctx.cell_px_w + 1 else 1;
+                    icon_reserve = (render_px + ctx.cell_px_w - 1) / ctx.cell_px_w + 1;
                     setCellIconOver(layer, mid_row, col, icon_handle, .natural, .start, .center, max_h, cell.metadata_id);
                 } else {
                     icon_reserve = 1;

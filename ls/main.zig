@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
             .{ .longName = "hidden", .shortName = "a", .description = "Show hidden files and directories", .maxNumParams = 0 },
             .{ .longName = "long", .shortName = "l", .description = "Long listing: adds size and modified time", .maxNumParams = 0 },
             .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger, naturally-scaled icons (3-line-tall rows in a long listing). Wins over -S if both are given", .maxNumParams = 0 },
-            .{ .longName = "small", .shortName = "S", .description = "Small format: icons fit into one cell/line, in both the normal and long (-l) listing", .maxNumParams = 0 },
+            .{ .longName = "small", .shortName = "S", .description = "Small format: one physical row per entry, its icon filling that line's height (no overflow into neighboring rows), in both the normal and long (-l) listing", .maxNumParams = 0 },
             .{ .longName = "human", .shortName = "h", .description = "Human-readable sizes (KB/MB/GB) -- the default; the explicit opposite of --bytes", .maxNumParams = 0 },
             .{ .longName = "bytes", .description = "Show sizes as a raw byte count instead of KB/MB/GB (wins unless -h is also given)", .maxNumParams = 0 },
             .{ .longName = "help", .description = "Print help" },
@@ -642,23 +642,25 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 /// names are left un-truncated, long symlink targets included).
 ///
 /// `large` (`-L`, see `main`) picks between two icon renderings, and the
-/// block height (`Grid.block_rows`) follows:
+/// block height (`Grid.block_rows`) follows. Both draw the icon
+/// `.natural` sized (capped to `max_icon_h`) rather than `.fit`: at this
+/// font's actual cell size a `.fit`-shrunk 32x32 icon comes out only a
+/// few pixels tall, unrecognizable. `h_align = .start`/`v_align = .center`
+/// place it flush against the block's left edge, vertically centered.
+/// This needs the session's cell pixel size (`get_cell_metrics`); a host
+/// that doesn't answer that leaves `max_icon_h == 0` and small mode falls
+/// back to the old one-cell `.fit` (large mode can't run without it).
 ///
-/// - `false` (`-S`): `.fit`-scaled into the icon's single anchor cell,
-///   same as a `-l` table's icon at its default `row_height`. One
-///   physical row per entry (`block_rows == 1`).
-/// - `true` (default): `.natural` sized (capped to `max_icon_h`) instead
-///   of `.fit`: at this font's actual cell size a `.fit`-shrunk 32x32
-///   icon comes out only a few pixels tall, unrecognizable.
-///   `h_align = .start`/`v_align = .center` place it flush against the
-///   block's left edge, vertically centered -- growing rightward and
-///   vertically. `icon_col_width` (from the icon's own native width, not
-///   a fixed constant) reserves room before the name so they don't
-///   collide. `max_icon_h` -- two cell-heights -- with centered
-///   alignment puts a quarter of the icon above the entry's own row,
+/// - `false` (`-S`): `max_icon_h` is **one** cell-height, so the icon
+///   fills the entry's own row height without spilling onto the row above
+///   or below -- one physical row per entry (`block_rows == 1`). Same
+///   "fill the line" rendering the shell prompt's `{icon:...}` uses.
+/// - `true` (default): `max_icon_h` is **two** cell-heights; with centered
+///   alignment that puts a quarter of the icon above the entry's own row,
 ///   half on it, a quarter below, so `block_rows == 2` leaves a blank
 ///   row between bands and one band's icon doesn't overlap the next's
-///   text.
+///   text. `icon_col_width` (from the icon's own native width, not a
+///   fixed constant) reserves room before the name so they don't collide.
 ///
 /// Sends the whole listing as two batches (see decisions.md's Batch
 /// section) rather than a call per entry: pass 1 is one `batch` request
@@ -691,29 +693,50 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
     var name_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
 
-    // Small mode: the icon stays inside its one anchor cell, so the name
-    // just needs to start one column over (plus a one-column gap), and
-    // each entry only ever occupies its own single physical row.
+    // Both modes draw the icon `.natural` sized rather than `.fit` into
+    // one cell (unreadably tiny at this font's cell size). This needs the
+    // session's cell pixel metrics: large mode requires them; small mode
+    // falls back to the old one-cell `.fit` (`max_icon_h == 0`) without
+    // them. `icon_col_width` reserves the leading columns before the name;
+    // `icon_cols_spanned` is how many the icon's rendered width visually
+    // reaches, so every cell it covers -- not just its anchor -- gets
+    // tagged below.
     var icon_col_width: usize = 2;
     var max_icon_h: u32 = 0;
     var icon_cols_spanned: usize = 1;
     var block_rows: usize = 1;
 
-    if (large) {
-        const metrics = try client.getCellMetrics();
-        const cell_w: usize = metrics.w;
-        const cell_h: usize = metrics.h;
-        icon_col_width = (icon_native_px + cell_w - 1) / cell_w + 1;
-        max_icon_h = @intCast(2 * cell_h);
-        // How many columns (from the anchor) the icon's rendered width
-        // actually reaches, so every cell it visually covers -- not just
-        // its anchor cell -- can be tagged below. `.natural` scale with
-        // only `max_h` set ties width to the same cap (square icons,
-        // uniform scale-down -- see `core.IconScale`'s doc comment), so
-        // the rendered pixel width is never more than `max_icon_h`.
+    const metrics = metrics_blk: {
+        const m = client.getCellMetrics() catch |err| {
+            if (large) return err;
+            break :metrics_blk null;
+        };
+        break :metrics_blk m;
+    };
+
+    if (metrics) |m| {
+        const cell_w: usize = m.w;
+        const cell_h: usize = m.h;
+        // Small mode caps the icon to one cell-height so it fills the
+        // entry's own row without spilling onto the rows above/below
+        // (`block_rows` stays 1); large mode caps it to two and leaves a
+        // blank row between bands.
+        max_icon_h = @intCast((if (large) @as(usize, 2) else 1) * cell_h);
+        // `.natural` scale with only `max_h` set ties the rendered width
+        // to the same cap (square icons, uniform scale-down -- see
+        // `core.IconScale`'s doc comment), so the rendered pixel width is
+        // never more than `max_icon_h`.
         const icon_render_px: usize = @min(icon_native_px, max_icon_h);
         icon_cols_spanned = (icon_render_px + cell_w - 1) / cell_w;
-        block_rows = 2;
+        // Large mode keeps its wider reserve from the icon's full native
+        // width (its taller cap lets the icon render at up to 32px wide);
+        // small mode only needs the columns the shorter icon reaches,
+        // plus a one-column gap.
+        icon_col_width = if (large)
+            (icon_native_px + cell_w - 1) / cell_w + 1
+        else
+            icon_cols_spanned + 1;
+        block_rows = if (large) 2 else 1;
     }
 
     // Fit as many entry columns across the layer as the longest name
@@ -766,7 +789,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
             const base_col = gcol * grid.block_cols;
             const metadata_id = metas[index];
 
-            if (large) {
+            if (max_icon_h > 0) {
                 try draw_batch.drawIconStyled(draw_row, base_col, iconForEntry(entry), .{
                     .scale = .natural,
                     .h_align = .start,
@@ -916,11 +939,21 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     // otherwise pushes Size/Perms toward (or past) the layer's right
     // edge for every *other*, normally-short-named listing too.
     const name_text_width = std.math.clamp(maxDisplayLen(entries), min_name_width, max_name_width);
+    // Small mode now draws the row's icon `.natural`-scaled and capped to
+    // one cell-height (see `core.Table.writeBodyRow`), not `.fit` into a
+    // single cell -- reserve the extra leading columns that needs so the
+    // Name text still starts clear of it. Large mode caps to
+    // `large_table_row_height` cell-heights instead. Without cell metrics
+    // the server keeps the old one-cell `.fit` and `icon_reserve` stays 1
+    // to match.
     var icon_reserve: usize = 1;
     if (large) {
         const metrics = try client.getCellMetrics();
         const max_icon_h: u32 = @intCast(large_table_row_height * metrics.h);
         const icon_render_px: usize = @min(icon_native_px, max_icon_h);
+        icon_reserve = (icon_render_px + metrics.w - 1) / metrics.w + 1;
+    } else if (client.getCellMetrics() catch null) |metrics| {
+        const icon_render_px: usize = @min(icon_native_px, metrics.h);
         icon_reserve = (icon_render_px + metrics.w - 1) / metrics.w + 1;
     }
     const name_width = icon_reserve + name_text_width;

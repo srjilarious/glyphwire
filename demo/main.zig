@@ -33,11 +33,20 @@ fn rgb(r: u8, g: u8, b: u8) glyphwire.Color {
 
 // The box/icon panel's region -- named so the final cursor placement (see
 // `run`) can stay in sync with wherever the panel actually is instead of
-// duplicating its row/col/rows/cols as separate magic numbers.
+// duplicating its row/col/rows/cols as separate magic numbers. Tall/wide
+// enough for a title, a "fill" icon row (`.natural`, one cell-height), and
+// a "large" icon row (`.natural`, three cell-heights, so it overflows a
+// row up and down from its anchor).
 const panel_row = 8;
 const panel_col = 0;
-const panel_rows = 5;
-const panel_cols = 30;
+const panel_rows = 13;
+const panel_cols = 46;
+
+// Rows inside the panel the two icon strips are anchored on, and the
+// column the first icon of each starts at.
+const icon_col0 = panel_col + 2;
+const fill_icon_row = panel_row + 4;
+const large_icon_row = panel_row + 9;
 
 const runs = [_]Run{
     .{ .row = 0, .col = 0, .text = "glyphwire", .fg = rgb(0, 255, 255) },
@@ -77,15 +86,50 @@ fn run(init: std.process.Init) !void {
     }
 
     // Images/icons/box-drawing showcase (Phase 3/3.5/3.6) -- a panel built
-    // from the bundled "box" tile style, with a row of default icons
-    // inside it.
+    // from the bundled "box" tile style, holding two strips of the same
+    // default icons: one drawn "fill" style (`.natural`, capped to one
+    // cell-height, the way glyphwire-ls's small listings and the shell
+    // prompt's `{icon:...}` draw them) and one drawn large (`.natural`,
+    // capped to three cell-heights). Both need the session's cell pixel
+    // size (`get_cell_metrics`); without it the strip falls back to a
+    // plain one-cell `.fit` `draw_icon`.
     try client.drawBox(panel_row, panel_col, panel_rows, panel_cols, "box");
     try client.setCursor(panel_row + 1, panel_col + 2);
     try client.writeText("icons + box tiles", rgb(255, 255, 255), null);
 
     const icon_names = [_][]const u8{ "folder", "file", "audio", "image", "video", "archive", "executable", "drive" };
+    const metrics = client.getCellMetrics() catch null;
+
+    try client.setCursor(panel_row + 3, panel_col + 2);
+    try client.writeText("fill (1 line tall):", rgb(180, 180, 180), null);
     for (icon_names, 0..) |name, i| {
-        try client.drawIcon(panel_row + 3, panel_col + 2 + i * 2, name);
+        const col = icon_col0 + i * 3;
+        if (metrics) |m| {
+            try client.drawIconStyled(fill_icon_row, col, name, .{
+                .scale = .natural,
+                .h_align = .start,
+                .v_align = .center,
+                .max_h = m.h,
+            });
+        } else {
+            try client.drawIcon(fill_icon_row, col, name);
+        }
+    }
+
+    try client.setCursor(panel_row + 6, panel_col + 2);
+    try client.writeText("large (3 lines tall):", rgb(180, 180, 180), null);
+    for (icon_names, 0..) |name, i| {
+        const col = icon_col0 + i * 5;
+        if (metrics) |m| {
+            try client.drawIconStyled(large_icon_row, col, name, .{
+                .scale = .natural,
+                .h_align = .start,
+                .v_align = .center,
+                .max_h = 3 * m.h,
+            });
+        } else {
+            try client.drawIcon(large_icon_row, col, name);
+        }
     }
 
     // Non-Latin "Hello World" runs: exercises the host font atlas's

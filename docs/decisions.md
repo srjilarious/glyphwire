@@ -499,7 +499,12 @@ surface.
   to roughly two cell-heights instead reads as an actual picture, with
   the overflow effect (a quarter above the entry's row, half on it, a
   quarter below, via `v_align: "center"`) as a deliberate side effect
-  rather than an accident.
+  rather than an accident. The same treatment capped to *one*
+  cell-height (no overflow — it just fills the entry's own line) is what
+  `glyphwire-ls`'s small (`-S`) listings — both the plain grid and the
+  `-l` table's default-height rows — and the shell prompt's `{icon:...}`
+  now draw instead of `"fit"`; a one-cell `"fit"` is only the fallback
+  when `get_cell_metrics` is unavailable.
 - **v1 built:** a single flat, global catalog (`Context.registerIcon`/
   `iconHandle`), seeded at `glyphwire-host` startup from
   `core.default_icon_manifest` — 12 colorful icons from the KDE Oxygen
@@ -782,10 +787,21 @@ surface.
   "large format" option added mid-development of the client-composited
   version — kept here since the underlying need (a bigger, legible,
   `.natural`-scaled icon per row) didn't go away, just without the
-  scrolling bug noted above. A `row_height > 1` row's icon is capped to
-  `row_height` cell-heights tall, sized from the icon's *actual* loaded
-  pixel width (`Context.imageInfo`) rather than a hardcoded constant the
-  prototype used.
+  scrolling bug noted above. A row's icon is drawn `.natural`-scaled and
+  capped to `row_height` cell-heights tall, sized from the icon's
+  *actual* loaded pixel width (`Context.imageInfo`) rather than a
+  hardcoded constant the prototype used.
+- **A `row_height == 1` icon fills its line too, it isn't shrunk to
+  `.fit` one cell.** At a real session's cell size a `.fit`-scaled 32×32
+  icon comes out a few pixels tall — unreadable. So the default-height
+  row uses the same rendering the taller rows do: `.natural`, left-
+  aligned, capped to one cell-height (`1 × cell_px_h`), so it fills the
+  row's single line without spilling onto its neighbours, and reserves
+  the leading columns its rendered width needs (~2) before the text.
+  This is the same "fill the line" treatment `glyphwire-ls`'s small
+  (`-S`) grid listing and the shell prompt's `{icon:...}` already use.
+  The old one-cell `.fit` stays only as the fallback when the session's
+  cell pixel metrics are unavailable (`Context.cell_px_w`/`_h` zeroed).
 - **Interactivity (sort-on-click, a style toggle) is deliberately
   server-data-only for now, not server-autonomous.** The server doesn't
   hit-test mouse clicks against a table's header itself — that stays
@@ -993,7 +1009,10 @@ surface.
   visible vertical padding, which read as wrong in a prompt. If
   `get_cell_metrics` is unavailable the old one-cell `fit` is kept.
   `prompt_template.opsWidth` takes the column count as a parameter so the
-  layout math (segment widths, right-alignment) matches what's drawn.
+  layout math (segment widths, right-alignment) matches what's drawn. The
+  same one-cell-height `natural` rendering is what `glyphwire-ls`'s small
+  (`-S`) listings and the `-l` table's default-height rows draw their
+  per-entry icons with — see the Icon section's `max_w`/`max_h` bullet.
 - **`{exit}` and `{dur}` are conditional sections, not raw values** — the
   request's "show an error code / an icon only on a non-zero exit" and
   "don't show a duration under 2–3s". `{exit}` expands to the `exit`
