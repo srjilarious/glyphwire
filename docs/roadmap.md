@@ -1091,6 +1091,56 @@ updated, README's "Font configuration" section rewritten.
   `zig build` + the full suite (**347 pass**); the actual file pickup
   needs a `zig build host` eyeball.
 
+## Icon catalog: directory scan + one atlas texture
+
+No wire change (icon names resolve server-side; the change is which names
+the bundled set registers under). `api.md`'s `draw_icon` / `draw_box`
+rows and `decisions.md`'s Icon + Box sections updated.
+
+- **The `assets/icons/` tree is the manifest now.** `glyphwire-host`'s
+  `loadIconsFromDir` recursively walks `assets/icons/` at startup and
+  registers every `.png` under its path there minus the extension
+  (`core.iconName`). The five hand-maintained `core.default_*_manifest`
+  arrays are gone; `glyphwire.iconName` is the only survivor. Names moved
+  to the path form: `folder` → `oxygen/folder`, `distro-arch` →
+  `distro/arch`, `notify-info` → `notify/info`, `status-error` →
+  `status/error`, and `draw_box`'s tiles from `box-tl` → `box/tl`
+  (`borderTileHandle` joins with `/` now). All bundled configs/templates
+  (`shell.conf.example`, `shell.conf.template`), `ls/icons.zig`,
+  `ls/main.zig`, `notify/main.zig`, `demo/main.zig` and the asset
+  READMEs updated to the new names.
+- **One atlas texture.** `App.buildIconAtlas` (runs in `App.init`, after
+  the GL context exists) decodes every registered icon, shelf-packs them
+  into a 1024-wide `glyphwire-icon-atlas` texture (tallest-first, 1px
+  transparent gutter, height rounded to the next power of two), and fills
+  `App.icon_uv: handle → normalized sub-rect`. `drawIconCell` samples
+  that one texture for every icon, mapping `IconBg.src_*` through the
+  icon's atlas rect; it falls back to a per-handle `image_textures`
+  upload for a handle the atlas didn't get (decode failure, or a
+  `load_image` handle passed to `draw_icon`). `load_image` user images
+  stay on their own textures. A build failure is non-fatal (`icon_atlas`
+  stays null, every icon takes the fallback path).
+- **Why:** pixzig's sprite batch flushes on a texture bind change, so a
+  screen full of distinct icon textures — an `ls` icon grid, a
+  `draw_box` border — was one flush per icon. One bound texture collapses
+  that, and is the prerequisite for the **StaticBatch host render path**
+  (below): the grid's icons can't live in a batch that's only rebuilt on
+  a content change until they all share a texture.
+- **Tests:** `core_tests.zig`'s bundled-manifest walk replaced by
+  `iconNameDerivesFromPathTest` (path → name, `.png`-only,
+  case-insensitive extension). `dispatch_tests.zig`'s
+  `registerTestBoxStyle` and `ls_tests.zig`'s `iconForExtension`
+  expectations updated to the `/`-joined / `oxygen/`-prefixed names.
+  `prompt_template_tests.zig` / `shell_config_tests.zig` token strings
+  updated to `distro/arch`. No host test group exists — the atlas
+  packing and rendering need a `zig build host` eyeball.
+- **Next (not this change):** a **StaticBatch host render path**. Right
+  now `App.render` rebuilds every quad and swaps the buffer every frame.
+  With icons on one texture and text on the font atlas, the host could
+  build a `StaticBatch` per layer once and re-upload only when the grid's
+  revision changes or a paint is forced (cursor blink, resize), leaving
+  idle frames as a bare re-present. See `decisions.md`'s Icon section.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

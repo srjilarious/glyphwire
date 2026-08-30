@@ -23,7 +23,7 @@
 //!   - `{cwd_full}`  working directory, absolute
 //!   - `{user}`      `$USER`
 //!   - `{host}`      hostname
-//!   - `{icon:NAME}` a bundled icon by registry name (e.g. `distro-arch`)
+//!   - `{icon:NAME}` a bundled icon by registry name (e.g. `distro/arch`)
 //!   - `{exit}`      expands to the `exit` sub-template, but only when the
 //!                   last external command exited non-zero; empty otherwise
 //!   - `{dur}`       expands to the `dur` sub-template, but only when the

@@ -99,10 +99,10 @@ pub fn adjacentTextIsOneOpTest(_: std.Io, alloc: std.mem.Allocator) !void {
 // ─── icons ────────────────────────────────────────────────────────────
 
 pub fn iconBecomesItsOwnOpTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var r = try pt.render(alloc, "{icon:distro-arch} {cwd}", .{ .cwd = "~" });
+    var r = try pt.render(alloc, "{icon:distro/arch} {cwd}", .{ .cwd = "~" });
     defer r.deinit();
     try testz.expectEqual(r.ops.len, 2);
-    try testz.expectEqualStr("distro-arch", r.ops[0].icon);
+    try testz.expectEqualStr("distro/arch", r.ops[0].icon);
     try testz.expectEqualStr(" ~", r.ops[1].text);
 }
 
@@ -148,11 +148,11 @@ pub fn exitSectionCanCarryAnIconTest(_: std.Io, alloc: std.mem.Allocator) !void 
     var r = try pt.render(alloc, "{exit}", .{
         .have_status = true,
         .last_status = 1,
-        .exit_section = "{icon:distro-arch} {exit_code}",
+        .exit_section = "{icon:distro/arch} {exit_code}",
     });
     defer r.deinit();
     try testz.expectEqual(r.ops.len, 2);
-    try testz.expectEqualStr("distro-arch", r.ops[0].icon);
+    try testz.expectEqualStr("distro/arch", r.ops[0].icon);
     try testz.expectEqualStr(" 1", r.ops[1].text);
 }
 

@@ -512,32 +512,55 @@ surface.
   now draw instead of `"fit"`; a one-cell `"fit"` is only the fallback
   when `get_cell_metrics` is unavailable.
 - **v1 built:** a single flat, global catalog (`Context.registerIcon`/
-  `iconHandle`), seeded at `glyphwire-host` startup from
-  `core.default_icon_manifest` — colorful icons from the KDE Oxygen icon
-  theme (LGPLv3, see `assets/icons/oxygen/README.txt`), kept at Oxygen's
-  native 32x32 (scale-to-fit means there's no need to pre-shrink them to
-  any particular cell size). Chosen over a flatter/more minimal icon set
+  `iconHandle`), seeded at `glyphwire-host` startup by a **recursive scan
+  of `assets/icons/`** (`host/main.zig`'s `loadIconsFromDir`). An icon's
+  catalog name is its path under that directory with the `.png` extension
+  removed (`core.iconName`) — so the bundled subtrees give
+  `oxygen/folder`, `distro/arch`, `notify/info`, `status/error`,
+  `box/tl`, `dialog/fill`. There is no hand-maintained manifest any more
+  (the old `core.default_*_manifest` arrays are gone): the file layout
+  under `assets/icons/` *is* the manifest, and dropping a `.png` into a
+  subdirectory adds an icon. The art is the KDE Oxygen icon theme
+  (LGPLv3, see `assets/icons/oxygen/README.txt`), kept at Oxygen's native
+  32x32 (scale-to-fit means there's no need to pre-shrink them to any
+  particular cell size). Chosen over a flatter/more minimal icon set
   specifically to show off what drawing real multi-tone artwork into a
-  cell looks like, not just a monochrome glyph. Beyond the coarse
-  generic set (`folder`/`file`/`audio`/`image`/`video`/`archive`/…) there
-  are finer file-type buckets — `pdf`, `document`, `spreadsheet`,
-  `presentation`, `text`, `code`, `web`, `package` — that `glyphwire-ls`
-  maps an extension onto (`ls/icons.zig`), still falling back to `file`
-  for anything unrecognized.
-- **`status-` namespace for prompt status glyphs.** `status-error` (a red
-  cross) and `status-slow` (a stopwatch), loaded from
-  `core.default_status_icon_manifest`, are meant for `{icon:status-error}`
-  in a `when = "error"` powerline segment and `{icon:status-slow}` in a
-  `when = "slow"` one (see the Shell section). Kept out of the `notify-`
-  set (those carry dialog-background styling for `glyphwire-notify`) and
-  given their own prefix for the same reason `notify-` has one — leaving a
-  bare `error` free for some future unrelated icon.
+  cell looks like, not just a monochrome glyph. Beyond the coarse generic
+  set (`oxygen/folder`/`oxygen/file`/`oxygen/audio`/…) there are finer
+  file-type buckets — `oxygen/pdf`, `oxygen/document`,
+  `oxygen/spreadsheet`, `oxygen/presentation`, `oxygen/text`,
+  `oxygen/code`, `oxygen/web`, `oxygen/package` — that `glyphwire-ls`
+  maps an extension onto (`ls/icons.zig`), still falling back to
+  `oxygen/file` for anything unrecognized.
+- **Packed into one atlas texture at host startup.** After the scan,
+  `glyphwire-host` decodes every registered icon and shelf-packs them
+  (1px transparent gutter, NEAREST filtering) into a single
+  `glyphwire-icon-atlas` texture; `App.icon_uv` maps each icon's image
+  handle to its normalized sub-rect. Every icon draw — a `draw_box`
+  border, an `ls` icon grid, a powerline prompt — then samples that one
+  texture instead of rebinding the GL texture per icon (pixzig's sprite
+  batch flushes on a texture change, so a screen of distinct icon
+  textures was a flush per icon). `load_image` user images
+  (`glyphwire-view`) are *not* in the atlas — they keep their own
+  per-handle textures. A decode/pack failure is non-fatal: `icon_atlas`
+  stays null and each `draw_icon` falls back to a lazily-uploaded
+  per-handle texture. This is also the groundwork for a future
+  StaticBatch host render path (roadmap.md) — one bound texture is what
+  lets the whole grid's icons live in a batch that's only rebuilt on a
+  content change.
+- **`status/` folder for prompt status glyphs.** `status/error` (a red
+  cross) and `status/slow` (a stopwatch), from `assets/icons/status/`,
+  are meant for `{icon:status/error}` in a `when = "error"` powerline
+  segment and `{icon:status/slow}` in a `when = "slow"` one (see the
+  Shell section). Kept in their own folder, apart from `notify/` (whose
+  icons carry dialog-background styling for `glyphwire-notify`) — the
+  path prefix keeps a bare `error` free for some future unrelated icon,
+  the same job the old `status-`/`notify-` name prefixes did.
 - **Not built — still open:** theming (a context-local catalog overriding
   the global one, so swapping a theme changes what a name resolves to
   without any client needing to know or reload anything) and a way to
   query the catalog's contents over the wire (a client currently just has
-  to know the names from `default_icon_manifest` /
-  `default_status_icon_manifest`).
+  to know the names, i.e. the `assets/icons/` tree).
 - **`foreground: true` composites over the background instead of
   replacing it.** An ordinary `draw_icon` sets `Cell.style.bg`'s `.icon`
   variant — one of `Background`'s mutually exclusive cases, so it
@@ -1053,8 +1076,8 @@ surface.
   `{user}` (`$USER`), `{host}` (from `$HOSTNAME` / `/etc/hostname`,
   resolved once per session), `{time}` (local time via a libc `strftime`
   in `shell/main.zig`, format from `time_format`), `{env:NAME}` (an
-  environment variable), `{icon:NAME}` (a bundled icon by registry name —
-  e.g. `distro-arch`).
+  environment variable), `{icon:NAME}` (a bundled icon by catalog name —
+  its path under `assets/icons/` minus the `.png`, e.g. `distro/arch`).
 - **A prompt `{icon:...}` is drawn at natural size, not fit-in-one-cell.**
   `Prompt.resolveIconMetrics` reads `get_cell_metrics` once and draws the
   icon `scale: natural`, `v_align: center`, capped to **one cell-height**
@@ -1101,10 +1124,10 @@ surface.
   segment. `when` is `always` (default) / `error` (non-zero exit) /
   `slow` (last command `>= dur_min_ms`); a segment whose text renders
   empty is dropped, and no separator is drawn for a dropped segment. Two
-  bundled icons pair with those conditions: `{icon:status-error}` (a red
-  cross) for a `when = "error"` segment and `{icon:status-slow}` (a
+  bundled icons pair with those conditions: `{icon:status/error}` (a red
+  cross) for a `when = "error"` segment and `{icon:status/slow}` (a
   stopwatch) for a `when = "slow"` one — see the Icon section's
-  `status-` namespace note.
+  `status/` folder note.
 - **No new wire op — it's coloured cells + a Nerd Font glyph.** The
   "lighter alternative to background tiles": `drawChain` lays each
   segment's background as a run of spaces (`write_text` with `bg`), then

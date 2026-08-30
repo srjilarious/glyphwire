@@ -1,8 +1,9 @@
-Status glyphs for a configured glyphwire-shell prompt -- registered as
-`status-error` / `status-slow` in core.zig's default_status_icon_manifest,
-meant for `{icon:status-error}` in a `when = "error"` powerline segment
-and `{icon:status-slow}` in a `when = "slow"` one (see decisions.md's
-Shell section).
+Status glyphs for a configured glyphwire-shell prompt. glyphwire-host
+scans assets/icons/ at startup and registers every .png by its path
+under that directory minus the extension, so these are `status/error`
+and `status/slow` -- meant for `{icon:status/error}` in a
+`when = "error"` powerline segment and `{icon:status/slow}` in a
+`when = "slow"` one (see decisions.md's Shell section).
 
 32x32 PNGs from the KDE Oxygen icon theme (https://github.com/KDE/oxygen-icons),
 same source and license as ../oxygen/ -- see ../oxygen/README.txt and

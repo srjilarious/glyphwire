@@ -40,10 +40,10 @@ const lsicons = @import("ls_support").icons;
 /// terminal output (the bundled JetBrainsMono-Regular.ttf isn't
 /// Nerd-Font-patched, so those glyphs would render as tofu), but that
 /// limitation doesn't apply here -- glyphwire's icons are small bitmap
-/// images (the default Oxygen-icon registry, see core.zig's
-/// `default_icon_manifest`), not font glyphs, so no font patching is
-/// needed. Requires whatever's serving the connection to have actually
-/// loaded that registry (glyphwire-host does, at startup); run against a
+/// images (the bundled Oxygen-icon set under `assets/icons/oxygen/`), not
+/// font glyphs, so no font patching is needed. Requires whatever's
+/// serving the connection to have actually loaded that catalog
+/// (glyphwire-host does, at startup); run against a
 /// bare `glyphwire-server` with nothing registered, `draw_icon` would
 /// error server-side and drop the connection -- not handled specially
 /// here since glyphwire-ls is meant to run under glyphwire-host anyway.
@@ -493,17 +493,18 @@ fn sizeColor(size: u64) glyphwire.Color {
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 
-/// The icon-registry name (see `core.default_icon_manifest`) for one
-/// entry: `"folder"` for directories, an extension-derived bucket for
-/// regular files (`lsicons.iconForExtension` / `ls/icons.zig`, falling
-/// back to `"file"` for an unrecognized extension), `"unknown"` for
-/// anything else (device files, sockets, ...). Symlinks reuse `"file"` --
-/// there's no dedicated symlink icon in the bundled set yet.
+/// The icon-catalog name (the bundled `assets/icons/oxygen/` set) for one
+/// entry: `"oxygen/folder"` for directories, an extension-derived bucket
+/// for regular files (`lsicons.iconForExtension` / `ls/icons.zig`,
+/// falling back to `"oxygen/file"` for an unrecognized extension),
+/// `"oxygen/unknown"` for anything else (device files, sockets, ...).
+/// Symlinks reuse `"oxygen/file"` -- there's no dedicated symlink icon in
+/// the bundled set yet.
 fn iconForEntry(entry: FileEntry) []const u8 {
     return switch (entry.kind) {
-        .directory => "folder",
-        .sym_link => "file",
-        .other => "unknown",
+        .directory => "oxygen/folder",
+        .sym_link => "oxygen/file",
+        .other => "oxygen/unknown",
         .file => lsicons.iconForExtension(entry.name),
     };
 }

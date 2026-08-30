@@ -1741,39 +1741,31 @@ pub fn writeTextOverwritingHalfAWideCharBlanksItsPartnerTest(io: std.Io, alloc: 
     try testz.expectEqual(layer.cell(0, 2).wide, glyphwire.CellWidth.wide_lead);
 }
 
-// ─── bundled icon manifests ─────────────────────────────────────────────
+// ─── bundled icon naming ────────────────────────────────────────────────
 
-/// Every entry across the bundled icon manifests points at an
-/// `assets/icons/**.png` path and no name is registered twice (they all
-/// share one flat catalog -- see `default_icon_manifest`'s doc comment).
-pub fn bundledIconManifestsHaveWellFormedUniqueEntriesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+/// `core.iconName` derives an icon's catalog name from its path under
+/// `assets/icons/`: the path minus a trailing `.png` (case-insensitive),
+/// or null for anything that isn't a `.png`. `glyphwire-host` walks the
+/// tree at startup and registers every `.png` under this name -- there's
+/// no hand-maintained manifest.
+pub fn iconNameDerivesFromPathTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const manifests = [_][]const glyphwire.IconManifestEntry{
-        &glyphwire.default_icon_manifest,
-        &glyphwire.default_box_manifest,
-        &glyphwire.default_dialog_manifest,
-        &glyphwire.default_notify_icon_manifest,
-        &glyphwire.default_status_icon_manifest,
-    };
+    _ = alloc;
 
-    var seen = std.StringHashMap(void).init(alloc);
-    defer seen.deinit();
+    try testz.expectEqualStr("oxygen/folder", glyphwire.iconName("oxygen/folder.png").?);
+    try testz.expectEqualStr("box/tl", glyphwire.iconName("box/tl.png").?);
+    try testz.expectEqualStr("dialog/fill", glyphwire.iconName("dialog/fill.png").?);
+    try testz.expectEqualStr("notify/info", glyphwire.iconName("notify/info.png").?);
+    try testz.expectEqualStr("status/error", glyphwire.iconName("status/error.png").?);
+    try testz.expectEqualStr("distro/arch", glyphwire.iconName("distro/arch.png").?);
+    // A bare filename with no subdirectory is still a valid name.
+    try testz.expectEqualStr("plain", glyphwire.iconName("plain.png").?);
+    // Extension match is case-insensitive.
+    try testz.expectEqualStr("oxygen/folder", glyphwire.iconName("oxygen/folder.PNG").?);
 
-    for (manifests) |manifest| {
-        for (manifest) |entry| {
-            try testz.expectTrue(std.mem.startsWith(u8, entry.path, "assets/icons/"));
-            try testz.expectTrue(std.mem.endsWith(u8, entry.path, ".png"));
-            const gop = try seen.getOrPut(entry.name);
-            try testz.expectFalse(gop.found_existing); // duplicate icon name
-        }
-    }
-
-    // The new file-type + status names this feature added are present.
-    for ([_][]const u8{
-        "pdf",          "document",   "spreadsheet", "presentation",
-        "text",         "code",       "web",         "package",
-        "status-error", "status-slow",
-    }) |name| {
-        try testz.expectTrue(seen.contains(name));
-    }
+    // Non-`.png` files in the tree (READMEs, licenses) are skipped.
+    try testz.expectTrue(glyphwire.iconName("oxygen/README.txt") == null);
+    try testz.expectTrue(glyphwire.iconName("oxygen/OXYGEN-LICENSE.txt") == null);
+    try testz.expectTrue(glyphwire.iconName("no-extension") == null);
+    try testz.expectTrue(glyphwire.iconName("trailingdotpng") == null);
 }

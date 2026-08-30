@@ -217,44 +217,44 @@ pub fn formatTimestampEpochAndNegativeTest(_: std.Io, _: std.mem.Allocator) !voi
 // ─── lsicons.iconForExtension ─────────────────────────────────────────────
 
 pub fn iconForExtensionMapsKnownBucketsTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(lsicons.iconForExtension("photo.png"), "image");
-    try testz.expectEqualStr(lsicons.iconForExtension("song.flac"), "audio");
-    try testz.expectEqualStr(lsicons.iconForExtension("clip.mkv"), "video");
-    try testz.expectEqualStr(lsicons.iconForExtension("bundle.tar.gz"), "archive");
+    try testz.expectEqualStr(lsicons.iconForExtension("photo.png"), "oxygen/image");
+    try testz.expectEqualStr(lsicons.iconForExtension("song.flac"), "oxygen/audio");
+    try testz.expectEqualStr(lsicons.iconForExtension("clip.mkv"), "oxygen/video");
+    try testz.expectEqualStr(lsicons.iconForExtension("bundle.tar.gz"), "oxygen/archive");
 }
 
 pub fn iconForExtensionMapsNewFileTypeBucketsTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(lsicons.iconForExtension("report.pdf"), "pdf");
-    try testz.expectEqualStr(lsicons.iconForExtension("notes.docx"), "document");
-    try testz.expectEqualStr(lsicons.iconForExtension("budget.xlsx"), "spreadsheet");
-    try testz.expectEqualStr(lsicons.iconForExtension("data.csv"), "spreadsheet");
-    try testz.expectEqualStr(lsicons.iconForExtension("deck.odp"), "presentation");
-    try testz.expectEqualStr(lsicons.iconForExtension("README.md"), "text");
-    try testz.expectEqualStr(lsicons.iconForExtension("config.toml"), "text");
-    try testz.expectEqualStr(lsicons.iconForExtension("index.html"), "web");
-    try testz.expectEqualStr(lsicons.iconForExtension("style.css"), "web");
-    try testz.expectEqualStr(lsicons.iconForExtension("main.zig"), "code");
-    try testz.expectEqualStr(lsicons.iconForExtension("build.py"), "code");
-    try testz.expectEqualStr(lsicons.iconForExtension("pkg.deb"), "package");
-    try testz.expectEqualStr(lsicons.iconForExtension("pkg.rpm"), "package");
+    try testz.expectEqualStr(lsicons.iconForExtension("report.pdf"), "oxygen/pdf");
+    try testz.expectEqualStr(lsicons.iconForExtension("notes.docx"), "oxygen/document");
+    try testz.expectEqualStr(lsicons.iconForExtension("budget.xlsx"), "oxygen/spreadsheet");
+    try testz.expectEqualStr(lsicons.iconForExtension("data.csv"), "oxygen/spreadsheet");
+    try testz.expectEqualStr(lsicons.iconForExtension("deck.odp"), "oxygen/presentation");
+    try testz.expectEqualStr(lsicons.iconForExtension("README.md"), "oxygen/text");
+    try testz.expectEqualStr(lsicons.iconForExtension("config.toml"), "oxygen/text");
+    try testz.expectEqualStr(lsicons.iconForExtension("index.html"), "oxygen/web");
+    try testz.expectEqualStr(lsicons.iconForExtension("style.css"), "oxygen/web");
+    try testz.expectEqualStr(lsicons.iconForExtension("main.zig"), "oxygen/code");
+    try testz.expectEqualStr(lsicons.iconForExtension("build.py"), "oxygen/code");
+    try testz.expectEqualStr(lsicons.iconForExtension("pkg.deb"), "oxygen/package");
+    try testz.expectEqualStr(lsicons.iconForExtension("pkg.rpm"), "oxygen/package");
 }
 
 pub fn iconForExtensionIsCaseInsensitiveTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(lsicons.iconForExtension("SCAN.PDF"), "pdf");
-    try testz.expectEqualStr(lsicons.iconForExtension("Photo.JPG"), "image");
+    try testz.expectEqualStr(lsicons.iconForExtension("SCAN.PDF"), "oxygen/pdf");
+    try testz.expectEqualStr(lsicons.iconForExtension("Photo.JPG"), "oxygen/image");
 }
 
 pub fn iconForExtensionShellScriptsAreCodeNotExecutableTest(_: std.Io, _: std.mem.Allocator) !void {
     // .sh moved from the "executable" bucket to "code"; the real binaries
     // stay on "executable".
-    try testz.expectEqualStr(lsicons.iconForExtension("deploy.sh"), "code");
-    try testz.expectEqualStr(lsicons.iconForExtension("run.bash"), "code");
-    try testz.expectEqualStr(lsicons.iconForExtension("tool.exe"), "executable");
-    try testz.expectEqualStr(lsicons.iconForExtension("blob.bin"), "executable");
+    try testz.expectEqualStr(lsicons.iconForExtension("deploy.sh"), "oxygen/code");
+    try testz.expectEqualStr(lsicons.iconForExtension("run.bash"), "oxygen/code");
+    try testz.expectEqualStr(lsicons.iconForExtension("tool.exe"), "oxygen/executable");
+    try testz.expectEqualStr(lsicons.iconForExtension("blob.bin"), "oxygen/executable");
 }
 
 pub fn iconForExtensionFallsBackToFileTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(lsicons.iconForExtension("mystery.qwerty"), "file");
-    try testz.expectEqualStr(lsicons.iconForExtension("NOEXTENSION"), "file");
-    try testz.expectEqualStr(lsicons.iconForExtension(""), "file");
+    try testz.expectEqualStr(lsicons.iconForExtension("mystery.qwerty"), "oxygen/file");
+    try testz.expectEqualStr(lsicons.iconForExtension("NOEXTENSION"), "oxygen/file");
+    try testz.expectEqualStr(lsicons.iconForExtension(""), "oxygen/file");
 }

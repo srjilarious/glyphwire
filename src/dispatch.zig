@@ -1122,8 +1122,8 @@ pub const Dispatcher = struct {
     }
 
     /// `draw_icon`: resolves `name` against the icon catalog
-    /// (`Context.iconHandle`, populated from `default_icon_manifest` by
-    /// `glyphwire-host`) and draws it into exactly one cell -- an icon is
+    /// (`Context.iconHandle`, populated by `glyphwire-host` scanning
+    /// `assets/icons/`) and draws it into exactly one cell -- an icon is
     /// scoped to a single cell for now, per decisions.md's Icon section.
     /// `Layer.drawIcon` just needs the handle -- no dimensions/cell
     /// metrics to look up, unlike `handleDrawImage`, since an icon always
@@ -1170,8 +1170,9 @@ pub const Dispatcher = struct {
     }
 
     /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog
-    /// (`"{style}-tl"`, `"{style}-t"`, ... `"{style}-br"`/`"{style}-fill"`
-    /// — see `core.default_box_manifest`) and draws them via
+    /// (`"{style}/tl"`, `"{style}/t"`, ... `"{style}/br"`/`"{style}/fill"`
+    /// — the bundled `assets/icons/box/` and `assets/icons/dialog/`
+    /// subtrees) and draws them via
     /// `Layer.drawBox`. Errors (missing name, or a registered name that
     /// somehow isn't in `ctx.images`) abort before drawing anything,
     /// rather than leaving a box half-drawn with some pieces missing.
@@ -1191,7 +1192,7 @@ pub const Dispatcher = struct {
 
         var name_buf: [64]u8 = undefined;
         for (piece_names, 0..) |piece, i| {
-            const name = try std.fmt.bufPrint(&name_buf, "{s}-{s}", .{ p.style, piece });
+            const name = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ p.style, piece });
             pieces[i] = self.ctx.iconHandle(name) orelse return DispatchError.UnknownIcon;
         }
 

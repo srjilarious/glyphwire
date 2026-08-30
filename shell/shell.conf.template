@@ -42,12 +42,13 @@
 --   {host}       hostname
 --   {time}       local time (strftime `time_format`, default %H:%M)
 --   {env:NAME}   an environment variable ("" if unset)
---   {icon:NAME}  a bundled icon, one cell wide. e.g. distro-arch /
---                distro-tux; per-file-type icons pdf / document /
---                spreadsheet / presentation / text / code / web /
---                package; and the prompt status glyphs status-error (a
---                red cross, pair with when = "error") and status-slow (a
---                stopwatch, pair with when = "slow").
+--   {icon:NAME}  a bundled icon, one cell wide. NAME is the icon file's
+--                path under assets/icons/ without the .png -- e.g.
+--                distro/arch, distro/tux; per-file-type icons
+--                oxygen/pdf, oxygen/document, oxygen/code, ...; and the
+--                prompt status glyphs status/error (a red cross, pair
+--                with when = "error") and status/slow (a stopwatch, pair
+--                with when = "slow").
 --   {exit}       expands to the `exit` sub-template, only on a non-zero exit
 --   {dur}        expands to the `dur` sub-template, only when the last
 --                command ran for at least `dur_min_ms`
@@ -87,18 +88,18 @@
 -- A worked two-line powerline setup (a distro badge + user + cwd on the
 -- left; an error segment, a slow-command segment, and a clock on the
 -- right). The when = "error" / when = "slow" segments only appear after a
--- failing / slow command, and pair with the status-error / status-slow
+-- failing / slow command, and pair with the status/error / status/slow
 -- icons.
 --
 -- prompt {
 --     left_segments = {
---         { "{icon:distro-arch}", fg = "#000", bg = "#3a3a3a" },
+--         { "{icon:distro/arch}", fg = "#000", bg = "#3a3a3a" },
 --         { " {user} ",           fg = "#fff", bg = "#3a3a3a" },
 --         { " {cwd} ",            fg = "#fff", bg = "#3a6ea5" },
 --     },
 --     right_segments = {
---         { "{icon:status-error} {exit_code} ", fg = "#fff", bg = "#870000", when = "error" },
---         { "{icon:status-slow} {duration} ",   fg = "#fff", bg = "#5f5f00", when = "slow"  },
+--         { "{icon:status/error} {exit_code} ", fg = "#fff", bg = "#870000", when = "error" },
+--         { "{icon:status/slow} {duration} ",   fg = "#fff", bg = "#5f5f00", when = "slow"  },
 --         { " {time} ",                          fg = "#fff", bg = "#7c6ba8" },
 --     },
 --

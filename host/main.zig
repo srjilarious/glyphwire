@@ -208,6 +208,18 @@ pub const App = struct {
     /// address for its full lifetime, so `&managed.get().?.val` stays
     /// valid through the whole frame.
     image_textures: std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture),
+    /// Every bundled icon (`Context.icons`, seeded from the `assets/icons/`
+    /// scan -- see `loadIconsFromDir`) decoded once at startup and packed
+    /// into a single texture, so a screen full of icons -- a `draw_box`
+    /// border, an `ls` icon grid, a powerline prompt -- draws from one
+    /// bound texture instead of rebinding per icon. Null only if
+    /// `buildIconAtlas` failed (each `draw_icon` then falls back to a
+    /// per-handle `image_textures` upload). `icon_uv` maps an icon's image
+    /// handle to its normalized sub-rect inside `icon_atlas`;
+    /// `load_image` handles (user images, `glyphwire-view`) are never in
+    /// here and keep their own `image_textures` entry.
+    icon_atlas: ?*pixzig.ManagedTexture = null,
+    icon_uv: std.AutoHashMap(glyphwire.ImageHandle, pixzig.RectF),
     /// Scratch buffer for the `.natural`-icon overflow handled at the end
     /// of `renderLayer`'s icons pass -- see `DeferredIcon`. Cleared (not
     /// freed) at the start of that pass and reused across frames/layers.
@@ -315,12 +327,12 @@ pub const App = struct {
         font: FontRuntime,
         cursor: CursorConfig,
     ) !*App {
-        _ = eng;
         const app = try alloc.create(App);
         app.* = .{
             .alloc = alloc,
             .server = server,
             .image_textures = std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture).init(alloc),
+            .icon_uv = std.AutoHashMap(glyphwire.ImageHandle, pixzig.RectF).init(alloc),
             .shell_exited = shell_exited,
             .screenshot_path = screenshot_path,
             .screenshot_delay_ms = screenshot_delay_ms,
@@ -332,13 +344,157 @@ pub const App = struct {
             .cursor_blink = cursor.blink,
             .cursor_blink_ms = cursor.blink_ms,
         };
+
+        // Pack the bundled icons into one texture now that a GL context
+        // exists (the window is already open by the time `App.init` runs).
+        // Non-fatal: on failure `icon_atlas` stays null and each icon
+        // draws from its own lazily-uploaded texture instead.
+        app.buildIconAtlas(eng) catch |err| {
+            std.log.warn("glyphwire-host: icon atlas build failed ({t}); falling back to per-icon textures", .{err});
+        };
+
         return app;
     }
 
     pub fn deinit(self: *App) void {
         self.deferred_icons.deinit(self.alloc);
         self.image_textures.deinit();
+        self.icon_uv.deinit();
         self.alloc.destroy(self);
+    }
+
+    /// Atlas layout constants. Icons are small (Oxygen art is 32x32, the
+    /// box tiles smaller) so a fixed 1024-wide sheet with shelf packing
+    /// holds the whole bundled set in a few rows; `buildIconAtlas` grows
+    /// the height (to the next power of two) to fit and gives up past
+    /// `icon_atlas_max_px`. `icon_atlas_pad` is a 1px transparent gutter
+    /// between packed icons so neighbours can't bleed in when a UV rect is
+    /// sampled at a fractional scale.
+    const icon_atlas_width: usize = 1024;
+    const icon_atlas_max_px: usize = 8192;
+    const icon_atlas_pad: usize = 1;
+
+    /// Decodes every icon registered in `ctx.icons` and shelf-packs them
+    /// into a single RGBA texture (`icon_atlas`), recording each one's
+    /// normalized sub-rect in `icon_uv`. See `icon_atlas`'s doc comment
+    /// for why this exists (one bound texture for all icon draws).
+    fn buildIconAtlas(self: *App, eng: *AppRunner.Engine) !void {
+        const alloc = self.alloc;
+
+        // Distinct image handles referenced by the icon catalog. Several
+        // names can point at one handle in principle; pack each handle
+        // once.
+        var handles: std.ArrayList(glyphwire.ImageHandle) = .empty;
+        defer handles.deinit(alloc);
+        {
+            var seen = std.AutoHashMap(glyphwire.ImageHandle, void).init(alloc);
+            defer seen.deinit();
+            var it = self.server.ctx.icons.valueIterator();
+            while (it.next()) |h| {
+                if ((try seen.getOrPut(h.*)).found_existing) continue;
+                try handles.append(alloc, h.*);
+            }
+        }
+        if (handles.items.len == 0) return;
+
+        // One decoded icon awaiting its blit into the atlas buffer.
+        const Packed = struct {
+            handle: glyphwire.ImageHandle,
+            image: pixzig.stbi.Image,
+            x: usize = 0,
+            y: usize = 0,
+        };
+        var items = try alloc.alloc(Packed, handles.items.len);
+        var decoded: usize = 0;
+        defer {
+            for (items[0..decoded]) |*it| it.image.deinit();
+            alloc.free(items);
+        }
+        for (handles.items) |handle| {
+            const entry = self.server.ctx.images.get(handle) orelse continue;
+            var image = pixzig.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
+                std.log.warn("glyphwire-host: icon handle {d} failed to decode for the atlas: {t}", .{ handle, err });
+                continue;
+            };
+            // An icon that can't fit the sheet at all skips the atlas and
+            // takes `drawIconCell`'s per-handle fallback instead. The
+            // bundled art is 32x32, so this only guards against an
+            // oversized file dropped into `assets/icons/` later.
+            if (image.width + 2 * icon_atlas_pad > icon_atlas_width or
+                image.height + 2 * icon_atlas_pad > icon_atlas_max_px)
+            {
+                std.log.warn("glyphwire-host: icon handle {d} is {d}x{d}, too large for the atlas; using its own texture", .{ handle, image.width, image.height });
+                image.deinit();
+                continue;
+            }
+            items[decoded] = .{ .handle = handle, .image = image };
+            decoded += 1;
+        }
+        const packed_items = items[0..decoded];
+        if (packed_items.len == 0) return;
+
+        // Tallest first so a shelf's wasted vertical space stays small.
+        std.mem.sort(Packed, packed_items, {}, struct {
+            fn lessThan(_: void, a: Packed, b: Packed) bool {
+                return a.image.height > b.image.height;
+            }
+        }.lessThan);
+
+        // Shelf packing: place left to right along the current shelf,
+        // wrap to a new shelf (below the tallest icon on this one) when
+        // the next icon would cross the sheet's right edge.
+        var shelf_x: usize = icon_atlas_pad;
+        var shelf_y: usize = icon_atlas_pad;
+        var shelf_h: usize = 0;
+        for (packed_items) |*it| {
+            const w = it.image.width;
+            const h = it.image.height;
+            if (shelf_x + w + icon_atlas_pad > icon_atlas_width and shelf_x > icon_atlas_pad) {
+                shelf_y += shelf_h + icon_atlas_pad;
+                shelf_x = icon_atlas_pad;
+                shelf_h = 0;
+            }
+            it.x = shelf_x;
+            it.y = shelf_y;
+            shelf_x += w + icon_atlas_pad;
+            if (h > shelf_h) shelf_h = h;
+        }
+
+        const needed_h = shelf_y + shelf_h + icon_atlas_pad;
+        var atlas_h: usize = 1;
+        while (atlas_h < needed_h) atlas_h *= 2;
+        if (atlas_h > icon_atlas_max_px) return error.IconAtlasTooLarge;
+
+        var buf = try alloc.alloc(u8, icon_atlas_width * atlas_h * 4);
+        defer alloc.free(buf);
+        @memset(buf, 0);
+
+        for (packed_items) |*it| {
+            const w = it.image.width;
+            const h = it.image.height;
+            const src = it.image.data;
+            var yy: usize = 0;
+            while (yy < h) : (yy += 1) {
+                const dst_off = ((it.y + yy) * icon_atlas_width + it.x) * 4;
+                const src_off = yy * w * 4;
+                @memcpy(buf[dst_off .. dst_off + w * 4], src[src_off .. src_off + w * 4]);
+            }
+        }
+
+        const atlas = try eng.resources.loadTextureFromBuffer("glyphwire-icon-atlas", icon_atlas_width, atlas_h, buf);
+        self.icon_atlas = atlas;
+
+        const aw: f32 = @floatFromInt(icon_atlas_width);
+        const ah: f32 = @floatFromInt(atlas_h);
+        for (packed_items) |*it| {
+            const l: f32 = @floatFromInt(it.x);
+            const t: f32 = @floatFromInt(it.y);
+            const r: f32 = @floatFromInt(it.x + it.image.width);
+            const b: f32 = @floatFromInt(it.y + it.image.height);
+            try self.icon_uv.put(it.handle, .{ .l = l / aw, .t = t / ah, .r = r / aw, .b = b / ah });
+        }
+
+        std.log.info("glyphwire-host: packed {d} icons into a {d}x{d} atlas", .{ packed_items.len, icon_atlas_width, atlas_h });
     }
 
     /// Returns a stable pointer to the uploaded texture for `handle`,
@@ -441,8 +597,25 @@ pub const App = struct {
     /// it), so it has nothing of its own to sit above.
     fn drawIconCell(self: *App, eng: *AppRunner.Engine, icon: glyphwire.IconBg, pos: pixzig.Vec2I, foreground: bool) void {
         const entry = self.server.ctx.images.get(icon.handle) orelse return;
-        const tex = self.textureForImage(eng, icon.handle) orelse return;
         if (entry.width == 0 or entry.height == 0) return;
+
+        // Prefer the shared icon atlas: `atlas_uv` is this icon's
+        // sub-rect in it (null for a handle the atlas didn't get -- a
+        // decode failure, or a `load_image` handle passed to `draw_icon`,
+        // which then uses its own per-handle texture). Drawing every icon
+        // from one bound texture is the whole point (see `icon_atlas`).
+        var tex: *pixzig.Texture = undefined;
+        var atlas_uv: ?pixzig.RectF = null;
+        if (self.icon_atlas) |atlas| {
+            if (self.icon_uv.get(icon.handle)) |uv| {
+                const live = atlas.get() orelse return;
+                tex = &live.val;
+                atlas_uv = uv;
+            }
+        }
+        if (atlas_uv == null) {
+            tex = self.textureForImage(eng, icon.handle) orelse return;
+        }
 
         const cell_w_f: f32 = @floatFromInt(cell_w);
         const cell_h_f: f32 = @floatFromInt(cell_h);
@@ -477,7 +650,16 @@ pub const App = struct {
         };
 
         const dest = pixzig.RectF{ .l = dest_x, .t = dest_y, .r = dest_x + dest_w, .b = dest_y + dest_h };
-        const src = pixzig.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b };
+        // `icon.src_*` is a fraction of the icon (always 0..1 for a plain
+        // `draw_icon`, a sub-rect only for a box tile). Map it through the
+        // atlas sub-rect when drawing from the atlas; use it directly on a
+        // fallback per-handle texture.
+        const src = if (atlas_uv) |a| pixzig.RectF{
+            .l = a.l + icon.src_l * (a.r - a.l),
+            .t = a.t + icon.src_t * (a.b - a.t),
+            .r = a.l + icon.src_r * (a.r - a.l),
+            .b = a.t + icon.src_b * (a.b - a.t),
+        } else pixzig.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b };
         if (foreground) {
             eng.renderer.drawOverlayTexture(tex, dest, src);
         } else {
@@ -1493,28 +1675,68 @@ fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator
     };
 }
 
-/// Reads each entry in `manifest` (either `glyphwire.default_icon_manifest`
-/// or `glyphwire.default_box_manifest` -- both register into the same flat
-/// `icons` catalog, see decisions.md's Icon section) and loads its PNG
-/// file into `ctx` -- the real file I/O `core.zig` deliberately doesn't do
-/// itself (headless-first). Logs and skips any entry whose file is
-/// missing or fails to load rather than failing the whole host, so one
-/// broken/missing asset doesn't block startup.
-fn loadIconManifest(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, manifest: []const glyphwire.IconManifestEntry) void {
-    for (manifest) |entry| {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, entry.path, alloc, .limited(16 * 1024 * 1024)) catch |err| {
-            std.log.warn("glyphwire-host: couldn't read icon '{s}' ({s}): {t}", .{ entry.name, entry.path, err });
-            continue;
-        };
-        defer alloc.free(bytes);
+/// Recursively walks `root` (relative to the process cwd, normally
+/// `assets/icons`) and registers every `.png` under it into `ctx`'s flat
+/// icon catalog, named by its path beneath `root` with the extension
+/// removed (`core.iconName` -- so `oxygen/folder.png` -> `oxygen/folder`,
+/// `box/tl.png` -> `box/tl`). This replaces the old hand-maintained
+/// `default_*_manifest` arrays: the file layout under `assets/icons/` is
+/// the manifest now. The real file I/O lives here rather than in
+/// `core.zig` (headless-first). Logs and skips anything that can't be
+/// read/decoded rather than failing startup.
+fn loadIconsFromDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, root: []const u8) void {
+    var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| {
+        std.log.warn("glyphwire-host: couldn't open icon directory '{s}': {t}", .{ root, err });
+        return;
+    };
+    defer dir.close(io);
+    scanIconDir(io, alloc, ctx, dir, "");
+}
 
-        const handle = ctx.loadImage(.png, bytes) catch |err| {
-            std.log.warn("glyphwire-host: couldn't load icon '{s}': {t}", .{ entry.name, err });
-            continue;
-        };
-        ctx.registerIcon(entry.name, handle) catch |err| {
-            std.log.warn("glyphwire-host: couldn't register icon '{s}': {t}", .{ entry.name, err });
-        };
+/// One directory level of `loadIconsFromDir`'s walk. `prefix` is the path
+/// from the scan root to `dir` (empty at the root), used to build each
+/// icon's catalog name.
+fn scanIconDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, dir: std.Io.Dir, prefix: []const u8) void {
+    var it = dir.iterate();
+    while (it.next(io) catch |err| {
+        std.log.warn("glyphwire-host: icon directory iteration failed under '{s}': {t}", .{ prefix, err });
+        return;
+    }) |entry| {
+        // `entry.name` is only valid until the next `it.next`, so build
+        // the relative path (and use it) before iterating further.
+        const rel = if (prefix.len == 0)
+            alloc.dupe(u8, entry.name) catch continue
+        else
+            std.fmt.allocPrint(alloc, "{s}/{s}", .{ prefix, entry.name }) catch continue;
+        defer alloc.free(rel);
+
+        switch (entry.kind) {
+            .directory => {
+                var sub = dir.openDir(io, entry.name, .{ .iterate = true }) catch |err| {
+                    std.log.warn("glyphwire-host: couldn't open icon subdirectory '{s}': {t}", .{ rel, err });
+                    continue;
+                };
+                defer sub.close(io);
+                scanIconDir(io, alloc, ctx, sub, rel);
+            },
+            .file, .sym_link => {
+                const name = glyphwire.iconName(rel) orelse continue;
+                const bytes = dir.readFileAlloc(io, entry.name, alloc, .limited(16 * 1024 * 1024)) catch |err| {
+                    std.log.warn("glyphwire-host: couldn't read icon '{s}': {t}", .{ rel, err });
+                    continue;
+                };
+                defer alloc.free(bytes);
+
+                const handle = ctx.loadImage(.png, bytes) catch |err| {
+                    std.log.warn("glyphwire-host: couldn't load icon '{s}': {t}", .{ rel, err });
+                    continue;
+                };
+                ctx.registerIcon(name, handle) catch |err| {
+                    std.log.warn("glyphwire-host: couldn't register icon '{s}': {t}", .{ name, err });
+                };
+            },
+            else => {},
+        }
     }
 }
 
@@ -1804,11 +2026,7 @@ pub fn main(init: std.process.Init) !void {
     // matching -- see Context's doc comment on cell_px_w/cell_px_h.
     ctx.cell_px_w = @intCast(cell_w);
     ctx.cell_px_h = @intCast(cell_h);
-    loadIconManifest(io, alloc, &ctx, &glyphwire.default_icon_manifest);
-    loadIconManifest(io, alloc, &ctx, &glyphwire.default_box_manifest);
-    loadIconManifest(io, alloc, &ctx, &glyphwire.default_dialog_manifest);
-    loadIconManifest(io, alloc, &ctx, &glyphwire.default_notify_icon_manifest);
-    loadIconManifest(io, alloc, &ctx, &glyphwire.default_status_icon_manifest);
+    loadIconsFromDir(io, alloc, &ctx, "assets/icons");
 
     // `.listen()` inside `bind` is synchronous -- the socket is already
     // accept-ready (kernel-queued, even before `serveForever`'s thread

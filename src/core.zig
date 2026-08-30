@@ -2243,7 +2243,12 @@ fn fillRowBg(layer: *Layer, top_row: usize, content_start_col: usize, content_wi
 }
 
 fn borderTileHandle(ctx: *const Context, box_style: []const u8, piece: []const u8, name_buf: []u8) ?ImageHandle {
-    const name = std.fmt.bufPrint(name_buf, "{s}-{s}", .{ box_style, piece }) catch return null;
+    // Tiles are catalog entries `"<style>/<piece>"` -- the `assets/icons/`
+    // scan names an icon by its path under that directory (see
+    // `iconName`), so the bundled `box`/`dialog` styles live in
+    // `assets/icons/box/` and `assets/icons/dialog/` and resolve as
+    // `box/tl`, `dialog/fill`, and so on.
+    const name = std.fmt.bufPrint(name_buf, "{s}/{s}", .{ box_style, piece }) catch return null;
     return ctx.iconHandle(name);
 }
 
@@ -2405,109 +2410,28 @@ pub const InputState = struct {
 /// negotiating it over the wire.
 pub const default_context_id = "0";
 
-/// A bundled default icon, resolved server-side by name -- the v1 slice of
-/// decisions.md's post-v1 Icon section ("a themable, named reference to an
-/// image"). Just the flat name -> asset-path table; theming (a
-/// context-local catalog overriding this global one) isn't built -- see
-/// that section's remaining open scope. `path` is relative to the process
-/// cwd, same convention as `host/main.zig`'s font asset path; loading them
-/// (real file I/O) is `glyphwire-host`'s job, not core's -- see
-/// `main.zig`'s `loadDefaultIcons`.
-pub const IconManifestEntry = struct { name: []const u8, path: []const u8 };
-
-pub const default_icon_manifest = [_]IconManifestEntry{
-    .{ .name = "folder", .path = "assets/icons/oxygen/folder.png" },
-    .{ .name = "folder-open", .path = "assets/icons/oxygen/folder-open.png" },
-    .{ .name = "home", .path = "assets/icons/oxygen/home.png" },
-    .{ .name = "file", .path = "assets/icons/oxygen/file.png" },
-    .{ .name = "audio", .path = "assets/icons/oxygen/audio.png" },
-    .{ .name = "image", .path = "assets/icons/oxygen/image.png" },
-    .{ .name = "video", .path = "assets/icons/oxygen/video.png" },
-    .{ .name = "archive", .path = "assets/icons/oxygen/archive.png" },
-    .{ .name = "executable", .path = "assets/icons/oxygen/executable.png" },
-    .{ .name = "unknown", .path = "assets/icons/oxygen/unknown.png" },
-    .{ .name = "drive", .path = "assets/icons/oxygen/drive.png" },
-    .{ .name = "media-optical", .path = "assets/icons/oxygen/media-optical.png" },
-
-    // Finer file-type buckets than the coarse generic set above -- a
-    // document listing (`glyphwire-ls`) maps an extension to one of these
-    // (see `ls/icons.zig`), falling back to `file` for anything
-    // unrecognized. Also Oxygen 32x32 mimetype art.
-    .{ .name = "pdf", .path = "assets/icons/oxygen/pdf.png" },
-    .{ .name = "document", .path = "assets/icons/oxygen/document.png" },
-    .{ .name = "spreadsheet", .path = "assets/icons/oxygen/spreadsheet.png" },
-    .{ .name = "presentation", .path = "assets/icons/oxygen/presentation.png" },
-    .{ .name = "text", .path = "assets/icons/oxygen/text.png" },
-    .{ .name = "code", .path = "assets/icons/oxygen/code.png" },
-    .{ .name = "web", .path = "assets/icons/oxygen/web.png" },
-    .{ .name = "package", .path = "assets/icons/oxygen/package.png" },
-
-    // Distro logos, namespaced `distro-` (same convention as the `notify-`
-    // icons) -- mainly for `{icon:...}` in a configured shell prompt.
-    // Simple geometric renderings, not the official artwork.
-    .{ .name = "distro-arch", .path = "assets/icons/distro/arch.png" },
-    .{ .name = "distro-tux", .path = "assets/icons/distro/tux.png" },
-    .{ .name = "distro-debian", .path = "assets/icons/distro/debian.png" },
-    .{ .name = "distro-fedora", .path = "assets/icons/distro/fedora.png" },
-    .{ .name = "distro-ubuntu", .path = "assets/icons/distro/ubuntu.png" },
-};
-
-/// The default box-drawing tile set, registered into the same `icons`
-/// catalog as `default_icon_manifest` (there's only one flat catalog --
-/// see decisions.md's Icon section) under a `"box-"`-prefixed name per
-/// piece. `draw_box`'s `style` param is this prefix, so a future
-/// additional style (e.g. a double-line or rounded variant) is just more
-/// manifest entries under a different prefix -- no protocol change.
-pub const default_box_manifest = [_]IconManifestEntry{
-    .{ .name = "box-tl", .path = "assets/icons/box/tl.png" },
-    .{ .name = "box-t", .path = "assets/icons/box/t.png" },
-    .{ .name = "box-tr", .path = "assets/icons/box/tr.png" },
-    .{ .name = "box-l", .path = "assets/icons/box/l.png" },
-    .{ .name = "box-fill", .path = "assets/icons/box/fill.png" },
-    .{ .name = "box-r", .path = "assets/icons/box/r.png" },
-    .{ .name = "box-bl", .path = "assets/icons/box/bl.png" },
-    .{ .name = "box-b", .path = "assets/icons/box/b.png" },
-    .{ .name = "box-br", .path = "assets/icons/box/br.png" },
-};
-
-/// A second bundled box style, `"dialog"`, meant for `draw_box`'s
-/// `BoxMode.stretch` -- a light-blue-to-dark-blue vertical gradient with a
-/// white border, e.g. `glyphwire-notify`'s popup. Registered the same way
-/// as `default_box_manifest` (its own `"dialog-"`-prefixed pieces in the
-/// same flat `icons` catalog), just a different prefix.
-pub const default_dialog_manifest = [_]IconManifestEntry{
-    .{ .name = "dialog-tl", .path = "assets/icons/dialog/tl.png" },
-    .{ .name = "dialog-t", .path = "assets/icons/dialog/t.png" },
-    .{ .name = "dialog-tr", .path = "assets/icons/dialog/tr.png" },
-    .{ .name = "dialog-l", .path = "assets/icons/dialog/l.png" },
-    .{ .name = "dialog-fill", .path = "assets/icons/dialog/fill.png" },
-    .{ .name = "dialog-r", .path = "assets/icons/dialog/r.png" },
-    .{ .name = "dialog-bl", .path = "assets/icons/dialog/bl.png" },
-    .{ .name = "dialog-b", .path = "assets/icons/dialog/b.png" },
-    .{ .name = "dialog-br", .path = "assets/icons/dialog/br.png" },
-};
-
-/// `glyphwire-notify`'s per-type icons (`draw_icon`, drawn over the
-/// `"dialog"` background), namespaced under `"notify-"` so they don't
-/// collide with unrelated future icons named e.g. "info" or "error".
-pub const default_notify_icon_manifest = [_]IconManifestEntry{
-    .{ .name = "notify-info", .path = "assets/icons/notify/info.png" },
-    .{ .name = "notify-warn", .path = "assets/icons/notify/warn.png" },
-    .{ .name = "notify-error", .path = "assets/icons/notify/error.png" },
-};
-
-/// Status glyphs for a configured shell prompt -- `{icon:status-error}` in
-/// a `when = "error"` powerline segment, `{icon:status-slow}` in a
-/// `when = "slow"` one (see decisions.md's Shell / "Powerline segments").
-/// Namespaced `status-` for the same reason as `notify-`: keep a bare
-/// `error` free for a future unrelated icon. KDE Oxygen 32x32 action art
-/// (`edit-delete` = a bare red cross, `chronometer` = a stopwatch), not
-/// the `notify-` popup icons, which carry their own dialog-background
-/// styling.
-pub const default_status_icon_manifest = [_]IconManifestEntry{
-    .{ .name = "status-error", .path = "assets/icons/status/error.png" },
-    .{ .name = "status-slow", .path = "assets/icons/status/slow.png" },
-};
+/// Derives an icon's catalog name from its path under the bundled
+/// `assets/icons/` directory: just the path with a trailing `.png`
+/// extension removed (case-insensitive on the extension). So
+/// `oxygen/folder.png` -> `oxygen/folder`, `box/tl.png` -> `box/tl`,
+/// `status/error.png` -> `status/error`. Returns null for anything that
+/// isn't a `.png` (the tree also carries `README.txt` / license files),
+/// so the caller can skip it.
+///
+/// This is the whole naming convention: `glyphwire-host` recursively
+/// walks `assets/icons/` at startup and registers every `.png` under the
+/// name this returns (see `host/main.zig`'s `loadIconsFromDir`). There's
+/// no hand-maintained manifest -- dropping a file into a subdirectory is
+/// all it takes to add an icon. The bundled subtrees are `oxygen/`
+/// (KDE Oxygen file-type art), `distro/` (prompt distro logos),
+/// `notify/` (`glyphwire-notify` type icons), `status/` (prompt status
+/// glyphs), and `box/` + `dialog/` (the two `draw_box` 9-patch styles --
+/// `draw_box`'s `style` param is the subdirectory name, so its pieces
+/// resolve as `box/tl`, `dialog/fill`, and so on).
+pub fn iconName(rel_path: []const u8) ?[]const u8 {
+    if (!std.ascii.endsWithIgnoreCase(rel_path, ".png")) return null;
+    return rel_path[0 .. rel_path.len - ".png".len];
+}
 
 pub const Context = struct {
     alloc: std.mem.Allocator,
@@ -2530,9 +2454,9 @@ pub const Context = struct {
     images: std.AutoHashMap(ImageHandle, ImageEntry),
     next_image_handle: ImageHandle = 1,
     /// Name -> image handle, for `draw_icon` (decisions.md's Icon
-    /// section). Populated from `default_icon_manifest` by whoever loads
-    /// the icon files (`glyphwire-host`) -- empty until then, same as
-    /// `images` before any `load_image` call.
+    /// section). Populated by whoever loads the bundled icon files
+    /// (`glyphwire-host`, scanning `assets/icons/` -- see `iconName`) --
+    /// empty until then, same as `images` before any `load_image` call.
     icons: std.StringHashMap(ImageHandle),
     metadata: std.AutoHashMap(MetadataHandle, Metadata),
     next_metadata_handle: MetadataHandle = 1,
@@ -2721,8 +2645,9 @@ pub const Context = struct {
     }
 
     /// Registers `handle` under `name` in the icon catalog, for `draw_icon`
-    /// to resolve later. `name` is duped -- the caller (`loadDefaultIcons`)
-    /// doesn't need to keep its own copy alive. Overwrites any existing
+    /// to resolve later. `name` is duped -- the caller (`glyphwire-host`'s
+    /// `loadIconsFromDir`) doesn't need to keep its own copy alive.
+    /// Overwrites any existing
     /// registration under the same name (its old key is freed) rather than
     /// erroring, so re-running icon loading is idempotent.
     pub fn registerIcon(self: *Context, name: []const u8, handle: ImageHandle) !void {

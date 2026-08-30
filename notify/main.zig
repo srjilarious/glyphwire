@@ -11,7 +11,7 @@ const glyphwire = @import("glyphwire");
 /// erase it first.
 ///
 /// Background is the bundled `"dialog"` 9-patch style drawn in
-/// `BoxMode.stretch` (`core.default_dialog_manifest`) -- a light-to-dark
+/// `BoxMode.stretch` (the `assets/icons/dialog/` set) -- a light-to-dark
 /// blue gradient with a white border that reads as one continuous image
 /// regardless of the box's size, rather than `BoxMode.tile`'s repeated-
 /// per-cell look, which would band a gradient instead of blending it.
@@ -62,12 +62,12 @@ const NotifyType = enum {
         return null;
     }
 
-    /// Icon-catalog name (`core.default_notify_icon_manifest`).
+    /// Icon-catalog name (the bundled `assets/icons/notify/` set).
     fn iconName(self: NotifyType) []const u8 {
         return switch (self) {
-            .info => "notify-info",
-            .warn => "notify-warn",
-            .err => "notify-error",
+            .info => "notify/info",
+            .warn => "notify/warn",
+            .err => "notify/error",
         };
     }
 };
@@ -85,7 +85,7 @@ const icon_col = 1;
 const box_rows = 3;
 const text_row = 1;
 
-// Native pixel size of the bundled `notify-*` icons (`assets/icons/
+// Native pixel size of the bundled `notify/*` icons (`assets/icons/
 // notify/*.png`) -- same 32x32 as every other bundled icon/tile.
 const icon_native_px = 32;
 // Icon can grow up to 2 cell-heights tall (`.natural`, uniform, never

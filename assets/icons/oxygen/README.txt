@@ -1,5 +1,7 @@
-glyphwire's default icon registry (see core.zig's default_icon_manifest)
-is seeded from the KDE Oxygen icon theme, 32x32 PNGs, pulled from:
+glyphwire's default file-type icons. glyphwire-host scans assets/icons/
+at startup and registers every .png under its path minus the extension,
+so these resolve as oxygen/folder, oxygen/file, and so on. They're the
+KDE Oxygen icon theme, 32x32 PNGs, pulled from:
 
   https://github.com/KDE/oxygen-icons (32x32/{places,mimetypes,devices}/*)
 

@@ -352,8 +352,9 @@ pub const Client = struct {
     }
 
     /// `draw_icon(row?, col?, name)` -- a notification. Draws a bundled,
-    /// named icon (decisions.md's Icon section; the default set comes from
-    /// `core.default_icon_manifest`) into exactly one cell, anchored at the
+    /// named icon (decisions.md's Icon section; the default set is the
+    /// `assets/icons/` tree, each icon named by its path there minus the
+    /// `.png`) into exactly one cell, anchored at the
     /// layer's cursor when `row`/`col` is omitted -- unlike `drawImage`, no
     /// span: an icon is scoped to a single cell for now.
     pub fn drawIcon(self: *Client, row: ?usize, col: ?usize, name: []const u8) !void {
@@ -441,8 +442,8 @@ pub const Client = struct {
 
     /// `draw_box(row?, col?, rows, cols, style)` -- a notification. Draws a
     /// `rows x cols` box using `style`'s 9 registered corner/edge/fill
-    /// tiles (`"{style}-tl"`, ... -- see `core.default_box_manifest` for
-    /// the bundled `"box"` style's pieces), one tile per cell, tiled rather
+    /// tiles (`"{style}/tl"`, ... -- the bundled `assets/icons/box/`
+    /// subtree is the `"box"` style), one tile per cell, tiled rather
     /// than stretched, anchored at the layer's cursor when `row`/`col` is
     /// omitted.
     pub fn drawBox(self: *Client, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {

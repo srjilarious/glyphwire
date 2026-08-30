@@ -216,7 +216,7 @@ pub fn configReadsPowerlineSegmentsTest(_: std.Io, alloc: std.mem.Allocator) !vo
     const src =
         \\prompt {
         \\  left_segments = {
-        \\    { text = "{icon:distro-arch}", fg = "#000", bg = "#d0d0d0" },
+        \\    { text = "{icon:distro/arch}", fg = "#000", bg = "#d0d0d0" },
         \\    { " {cwd} ", fg = "#ffffff", bg = "#3a3a3a" },
         \\    { " {exit_code} ", bg = "#d70000", when = "error" },
         \\  },
@@ -235,7 +235,7 @@ pub fn configReadsPowerlineSegmentsTest(_: std.Io, alloc: std.mem.Allocator) !vo
 
     const left = p.left_segments.?;
     try testz.expectEqual(left.len, 3);
-    try testz.expectEqualStr("{icon:distro-arch}", left[0].text);
+    try testz.expectEqualStr("{icon:distro/arch}", left[0].text);
     try testz.expectEqualStr("#000", left[0].fg.?);
     try testz.expectEqualStr("#d0d0d0", left[0].bg.?);
     try testz.expectEqual(left[0].when, .always);

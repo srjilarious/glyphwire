@@ -1086,7 +1086,7 @@ fn registerTestBoxStyle(d: *dispatch.Dispatcher, alloc: std.mem.Allocator, ctx: 
         defer parsed.deinit();
 
         var name_buf: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "{s}-{s}", .{ style, piece });
+        const name = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ style, piece });
         try ctx.registerIcon(name, parsed.value.result.handle);
     }
 }
