@@ -974,13 +974,17 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
 /// its icons, as a real fixed-height table row.
 const large_table_row_height_fallback = 3;
 
-/// Rows a `-l -L` body row spans: enough for a `large_icon_px`-tall icon
-/// at this cell height, floored at 2 (keeps a blank line under the text)
-/// and capped so a big configured size can't make one row fill the
-/// window. Mirrors `writeGrid`'s `block_rows` math.
+/// Rows a `-l -L` body row block spans: enough for a `large_icon_px`-tall
+/// icon at this cell height. **Always odd** (rounded up: 2 -> 3, 4 -> 5,
+/// ...), so `core.Table.writeBodyRow`'s `top_row + row_height / 2` anchor
+/// row is the block's true centre -- with an even height the anchor lands
+/// half a row low, and the icon (`v_align: .center` on that cell) and the
+/// text both sit a row lower than the alternating-row-background stripe.
+/// Floored at 3 (the old fixed value, room for a blank line under the
+/// text), capped at 7.
 fn largeTableRowHeight(large_icon_px: u32, cell_h: usize) usize {
     const rows_for_icon = (@as(usize, large_icon_px) + cell_h - 1) / cell_h;
-    return std.math.clamp(rows_for_icon, 2, 6);
+    return std.math.clamp(rows_for_icon | 1, 3, 7);
 }
 
 /// Clamp for the User / Group name columns' widths: each is sized to the
