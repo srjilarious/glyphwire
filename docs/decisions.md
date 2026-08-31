@@ -51,9 +51,10 @@ final.
   that spawns arbitrary commands (`glyphwire-shell`'s `Prompt.runCommand`)
   can't know in advance whether a given command is glyphwire-aware, so it
   defaults to "plain program writing to a terminal": it pipes the child's
-  stdout/stderr and mirrors them onto the grid via `write_text`
-  (`Prompt.pumpChildOutput`/`writeCapturedText` — a small amount of
-  terminal-style `\n` handling of its own, since `write_text` has none).
+  stdout/stderr and forwards each chunk onto the grid via a single
+  `write_text` (`Prompt.pumpChildOutput`/`flushCapturedStream`), letting
+  `Layer.writeText`'s own C0 handling (see the styled-text section) take
+  care of `\n`/`\r`/`\t` and stray escape sequences.
   A glyphwire-aware child opts out automatically: `Client.connect` writes
   `glyphwire.handshake_marker` (a leading-NUL-byte sentinel, vanishingly
   unlikely to collide with a plain program's real output) to the child's
@@ -333,10 +334,13 @@ surface.
   already ≤ `grid_rows`); when it didn't, it caps the request at exactly
   one row past the layer's last row, asking for exactly the one further
   scroll actually needed to open a fresh line below the image instead of
-  redoing the scrolling `draw_image` already finished. The same
-  stale-absolute-row shape, independently hit and fixed the same way, in
-  `writeCapturedText`'s plain-command-output path (`shell/main.zig`) —
-  see that fix's own commit for the sibling case.
+  redoing the scrolling `draw_image` already finished. `glyphwire-shell`
+  used to hit the same stale-absolute-row shape in its plain-command
+  output path (`writeCapturedText`) and capped it the same way; that path
+  is gone now that `Layer.writeText` handles `\n` itself (see the
+  styled-text section), but `core_tests.zig`'s
+  `manyLinesPastBottomCursorCappedAtHeight...Test` still pins the
+  underlying `set_property(cursor)` + `resolveRow` behavior.
 
 **Icon**
 - A named reference to an image, resolved server-side rather than by raw
@@ -917,6 +921,32 @@ typed," so there's no obvious single cursor position to land on
 afterward the way there is after writing N characters) — a caller
 chaining a draw with more content on the same row still positions
 explicitly for what comes next.
+
+**Decision:** `write_text` interprets the C0 control bytes that describe
+plain cursor motion, and *strips* (without interpreting) VT100/ANSI
+escape sequences — but nothing more. `\n`/`\v`/`\f` act as newline
+(carriage return + line feed, matching a cooked terminal, so `"a\nb"`
+puts `b` at column 0 of the next row instead of staircasing under the end
+of `a`); `\r` returns to column 0; `\t` advances to the next 8-column tab
+stop, clamped to the last column rather than wrapping; `\b` steps back
+one column non-destructively (a no-op at column 0); every other C0 byte
+and DEL is silently dropped. A stray `ESC [ … ` (CSI) or `ESC ]`/`P`/`X`/
+`^`/`_ … ` (string) sequence is recognized only well enough to know where
+it ends, then discarded — the stripper state lives on the `Layer`
+(`Layer.esc_state`), not a `writeText` local, so a sequence split across
+two `write_text` calls (a pipe delivered the child's output in two
+chunks) still drops as one unit. This is the *baseline* terminal
+behavior a `print`-style program already assumes, not an escape-code
+interpreter: glyphwire replaces the VT100 model rather than reimplementing
+it (see this file's opening), and a `write_text` caller that wants
+styled or positioned output uses `fg`/`bg` and the cursor/`row`/`col`
+mechanisms above. Full escape *interpretation* — should a program ever
+genuinely need it — is a separate, deliberate layer to add later, and the
+object model is expected to absorb it without disturbing this shape.
+Before this, `glyphwire-shell` split piped child output on `\n` itself
+(`writeCapturedText`, plus a `grid_rows` scroll-counter cap for a bug
+that arose from doing so); moving the handling into `core` let that go
+back to a single `write_text` of each raw chunk.
 
 **Decision:** `write_text` always replaces a cell's whole style outright
 (fg *and* bg together, per-cell — same "overwrite outright" behavior

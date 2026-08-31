@@ -73,9 +73,10 @@ pub fn main(init: std.process.Init) !void {
     // to once `drawImage` finished scrolling -- so this always requests
     // at most the one further scroll needed to open a fresh line below
     // it, matching `Layer.resolveRow`'s contract instead of double
-    // counting scrolls it already performed. Same fix shape
-    // `writeCapturedText` (shell/main.zig) already applies to plain
-    // captured command output.
+    // counting scrolls it already performed. Same "cap the locally
+    // tracked next row at the grid height so `resolveRow` isn't handed a
+    // runaway overshoot" shape core_tests.zig's
+    // `manyLinesPastBottomCursorCappedAtHeight...Test` covers.
     var snapshot = try client.getCells();
     const grid_rows = snapshot.rows();
     snapshot.deinit();

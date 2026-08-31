@@ -322,27 +322,26 @@ pub fn layerResizeClampsScrollViewIntoNewHistoryTest(io: std.Io, alloc: std.mem.
     try testz.expectEqual(layer.view_scroll, 0);
 }
 
-/// Regression test for glyphwire-shell's `writeCapturedText`, which pipes
-/// a spawned child's stdout onto the grid as one `set_property(cursor)` +
-/// `write_text` pair per line. It used to hand `resolveRow` an
-/// ever-growing absolute row count with no ceiling: once the grid had
-/// scrolled once, the *next* line named a row two past the bottom, the one
-/// after that three past, and so on -- `resolveRow` scrolls once per row
-/// of overshoot a single call names, so each later line triggered more
-/// scrolls than the one line it actually represented, opening a widening
-/// run of blank rows nothing had written into (exactly what made `cat`ing
-/// a longer file show real content interspersed with growing gaps of
-/// blank space once scrollback made it possible to actually see). This
-/// drives `Layer` with the same call pattern `writeCapturedText` uses,
-/// with the fix applied: the target row capped at `height` once the grid
-/// has scrolled, so every line past the bottom asks for exactly the one
-/// scroll it should.
+/// A client that emits one `set_property(cursor)` + `write_text` pair per
+/// line (glyphwire-shell's `writeCapturedText` did this before
+/// `Layer.writeText` grew its own `\n` handling; other clients still
+/// drive explicit cursor moves this way) must not hand `resolveRow` an
+/// ever-growing absolute row count with no ceiling: once the grid has
+/// scrolled once, naming a row two past the bottom, then three, and so on
+/// makes `resolveRow` -- which scrolls once per row of overshoot a single
+/// call names -- trigger more scrolls than the one line each call
+/// represents, opening a widening run of blank rows nothing wrote into
+/// (exactly what made `cat`ing a longer file show real content
+/// interspersed with growing gaps once scrollback made it visible). This
+/// drives `Layer` with that call pattern, target row capped at `height`
+/// once the grid has scrolled, so every line past the bottom asks for
+/// exactly the one scroll it should.
 pub fn manyLinesPastBottomCursorCappedAtHeightLeavesNoBlankRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 4, 20);
     defer layer.deinit();
 
-    var row: usize = 0; // mirrors `CapturedOutput.row`'s initial value
+    var row: usize = 0; // the client's locally-tracked "next row"
     var line: usize = 0;
     while (line < 12) : (line += 1) {
         if (line > 0) {
@@ -1155,4 +1154,178 @@ pub fn layerClearOutOfBoundsAnchorIsNoOpTest(io: std.Io, alloc: std.mem.Allocato
     layer.clear(0, 0, 3, 0);
 
     try testz.expectEqual(layer.revision, revision_before);
+}
+
+// --- C0 control characters and ESC-sequence stripping in writeText -------------
+
+pub fn writeTextNewlineActsAsCarriageReturnLineFeedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // "\n" moves to column 0 of the next row (CR + LF), so "b" lands under
+    // "a" rather than staircasing after it.
+    try layer.writeText("a\nb", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("b", layer.cell(1, 0).grapheme());
+    try testz.expectEqual(layer.cursor.row, 1);
+    try testz.expectEqual(layer.cursor.col, 1);
+    // The "\n" itself is never drawn as a grapheme.
+    try testz.expectEqual(layer.cell(0, 1).grapheme().len, 0);
+}
+
+pub fn writeTextCarriageReturnReturnsToColumnZeroTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // A bare "\r" returns to column 0 of the *same* row -- the classic
+    // progress-bar overwrite.
+    try layer.writeText("12345\rXY", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("X", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("Y", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("3", layer.cell(0, 2).grapheme());
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqual(layer.cursor.col, 2);
+}
+
+pub fn writeTextTabAdvancesToNextStopTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // Stops every `tab_width` (8) columns: from col 1 -> 8, then 9 -> 16.
+    try layer.writeText("a\tb\tc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("b", layer.cell(0, 8).grapheme());
+    try testz.expectEqualStr("c", layer.cell(0, 16).grapheme());
+    try testz.expectEqual(layer.cursor.col, 17);
+    // Cells the tab skipped over are left untouched, not space-filled.
+    try testz.expectEqual(layer.cell(0, 3).grapheme().len, 0);
+}
+
+pub fn writeTextTabClampsToLastColumnTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 6, 3, 0);
+    defer layer.deinit();
+
+    // Next stop (8) is past the 6-wide layer -- the tab clamps to the last
+    // column instead of wrapping to the next row.
+    try layer.writeText("ab\tZ", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("Z", layer.cell(0, 5).grapheme());
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqual(layer.cursor.col, 6);
+}
+
+pub fn writeTextBackspaceStepsBackNonDestructivelyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // "\b" only moves the cursor; it doesn't erase. Writing after it
+    // overwrites the stepped-back cell.
+    try layer.writeText("abc\x08\x08X", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("X", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("c", layer.cell(0, 2).grapheme());
+    try testz.expectEqual(layer.cursor.col, 2);
+}
+
+pub fn writeTextBackspaceAtColumnZeroIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // No wrap back onto a previous row -- "\b" at column 0 does nothing.
+    try layer.writeText("\x08\x08hi", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("i", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqual(layer.cursor.col, 2);
+}
+
+pub fn writeTextDropsOtherC0AndDelBytesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // NUL, BEL, and DEL are swallowed -- neither drawn nor cursor-moving.
+    try layer.writeText("a\x00b\x07c\x7fd", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("b", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("c", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("d", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cursor.col, 4);
+}
+
+pub fn writeTextStripsCsiSequenceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // A SGR colour sequence is recognized and discarded whole -- the "m"
+    // final byte ends it, and none of "[31m" / "[0m" is drawn.
+    try layer.writeText("\x1b[31mRED\x1b[0m!", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("R", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("E", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("D", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("!", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cursor.col, 4);
+    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+}
+
+pub fn writeTextStripsOscSequenceTerminatedByBelTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // OSC "set window title" -- ends at the BEL, which must not itself be
+    // treated as a stray C0 byte to draw/skip separately.
+    try layer.writeText("\x1b]0;title\x07done", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("d", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("o", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("n", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("e", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cursor.col, 4);
+}
+
+pub fn writeTextStripsEscSequenceSplitAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // The pipe delivered "\x1b[1" and "2mX" as two chunks: the stripper
+    // state lives on the Layer, so the sequence is still discarded as one.
+    try layer.writeText("\x1b[1", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.esc_state, glyphwire.EscState.csi);
+    try layer.writeText("2mX", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("X", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cursor.col, 1);
+    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+}
+
+pub fn writeTextNewlineScrollsAtBottomRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 2);
+    defer layer.deinit();
+
+    // Cursor starts on the last row; "\n" there scrolls immediately, the
+    // same one-row advance `resolveRow` gives explicit cursor moves.
+    try layer.writeText("top\nbottom\nthird", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("b", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("t", layer.cell(1, 0).grapheme());
+    try testz.expectEqual(layer.cursor.row, 1);
+    try testz.expectEqual(layer.history_len, 1);
+    try testz.expectEqualStr("t", layer.scrollbackRow(0).?[0].grapheme());
 }

@@ -356,8 +356,11 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     // "echo hello"'s stdout ("hello\n") lands on row 1 starting at col 0,
     // same placement `runCommand`'s "command not found" report uses for
     // an unrecognized command -- both are written before any prompt
-    // prefix. Waiting for the final "o" (rather than the first "h")
-    // proves the whole word made it across, not just that capture started.
+    // prefix. The whole chunk (trailing "\n" included) goes across as one
+    // `write_text`; `Layer.writeText`'s own C0 handling turns the "\n"
+    // into the row advance. Waiting for the final "o" (rather than the
+    // first "h") proves the whole word made it across, not just that
+    // capture started.
     try waitForCell(&reporter, 1, 4, "o");
 
     var snapshot = try reporter.getCells();
@@ -368,10 +371,10 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     }
 
     // The next prompt lands two rows below the captured line: one for the
-    // trailing newline `writeCapturedText` already advanced past, one
-    // more for `submitLine`'s own resync -- proving the shell picked its
-    // cursor back up correctly after a captured command ran, not just
-    // that the capture itself worked.
+    // trailing newline `Layer.writeText` already advanced past while
+    // mirroring the output, one more for `submitLine`'s own resync --
+    // proving the shell picked its cursor back up correctly after a
+    // captured command ran, not just that the capture itself worked.
     try waitForCell(&reporter, 3, arrow_col, ">");
 }
 

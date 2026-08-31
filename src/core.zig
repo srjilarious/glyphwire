@@ -267,6 +267,35 @@ pub const root_layer_handle: LayerHandle = 0;
 
 pub const LayerError = error{UnknownLayer};
 
+/// Columns between horizontal tab stops for `\t` handling in
+/// `Layer.writeText` (see `Layer.consumeControl`). Fixed 8, the universal
+/// terminal default; not yet a per-layer or per-session setting.
+pub const tab_width: usize = 8;
+
+/// State of `Layer`'s tiny escape-sequence *stripper* (see
+/// `Layer.consumeControl` / `Layer.stepEscape`). glyphwire has no
+/// VT100/ANSI interpreter -- it replaces that model, per decisions.md --
+/// but a plain program mirrored onto the grid still sometimes emits a
+/// stray color code or cursor-move sequence. Rather than draw the raw
+/// bytes (`[31m` etc.) as garbage graphemes, `writeText` recognizes the
+/// common `ESC [ ... ` (CSI) and `ESC ] ... ` / `ESC P|X|^|_ ... ` (OSC
+/// and other string-terminated) shapes and *discards* them without
+/// acting on them. State lives on the `Layer`, not a `writeText` local,
+/// so a sequence split across two `write_text` calls (a pipe delivered
+/// the child's output in two chunks) is still stripped as one unit.
+pub const EscState = enum {
+    /// Not inside a sequence -- the normal case.
+    ground,
+    /// Last byte was ESC (0x1b); the next byte selects the sequence kind.
+    esc,
+    /// Inside `ESC [ ...` -- consume parameter/intermediate bytes
+    /// (0x20..0x3f) until a final byte (0x40..0x7e) ends it.
+    csi,
+    /// Inside a string-terminated sequence (`ESC ]`, `ESC P`, `ESC X`,
+    /// `ESC ^`, `ESC _`) -- consume until BEL (0x07) or ST (`ESC \`).
+    string,
+};
+
 /// A layer's cell grid is a fixed-capacity ring buffer of
 /// `height + scrollback_rows` physical rows, one contiguous allocation.
 /// The visible viewport is always the most recently written `height`
@@ -301,6 +330,10 @@ pub const Layer = struct {
     /// until history eviction forces a drift. See `PropertyName.scroll`.
     view_scroll: usize = 0,
     cursor: Cursor = .{},
+    /// Escape-sequence stripper state (see `EscState`). `.ground` except
+    /// while `writeText` is discarding an in-progress `ESC ...` sequence,
+    /// which can span more than one `writeText` call.
+    esc_state: EscState = .ground,
     /// See `PropertyName.revision`.
     revision: u64 = 0,
     /// See `PropertyName.position`. Zero for the root layer (there's no
@@ -532,6 +565,16 @@ pub const Layer = struct {
     /// out of a single `Style` value instead of just making `Style.bg`
     /// itself optional (`Cell.style` still always holds a concrete,
     /// resolved `Style` -- only the *write* can decline to touch it).
+    ///
+    /// C0 control bytes in `text` move the cursor instead of being drawn
+    /// (see `consumeControl`): `\n` / `\v` / `\f` act as newline (carriage
+    /// return + line feed, matching a cooked terminal so `"a\nb"` puts `b`
+    /// at column 0 of the next row rather than staircasing), `\r` returns
+    /// to column 0, `\t` advances to the next `tab_width` stop, `\b` steps
+    /// back one column; every other C0 byte and DEL is dropped. `ESC ...`
+    /// sequences are recognized and discarded, not interpreted -- glyphwire
+    /// has no VT100 layer (see `EscState`). This is baseline terminal
+    /// behavior, not escape-code parsing.
     pub fn writeText(self: *Layer, text: []const u8, fg: Color, bg: ?Background) !void {
         return self.writeTextTagged(text, fg, bg, null);
     }
@@ -546,9 +589,72 @@ pub const Layer = struct {
         const view = try std.unicode.Utf8View.init(text);
         var it = view.iterator();
         while (it.nextCodepointSlice()) |cp_bytes| {
+            if (cp_bytes.len == 1 and self.consumeControl(cp_bytes[0])) continue;
             self.putAtCursor(cp_bytes, fg, bg, metadata_id);
         }
         self.revision += 1;
+    }
+
+    /// Returns true when `byte` was consumed as a control byte (C0 control
+    /// or part of an `ESC ...` sequence) and must not be placed as a
+    /// grapheme; false for an ordinary printable byte the caller should
+    /// draw. Only ever called with a single-byte codepoint slice, so
+    /// `byte < 0x80` always holds. See `writeText`'s doc comment for the
+    /// per-control semantics and `EscState` for the escape-strip rationale.
+    fn consumeControl(self: *Layer, byte: u8) bool {
+        if (self.esc_state != .ground) {
+            self.stepEscape(byte);
+            return true;
+        }
+        switch (byte) {
+            0x1b => self.esc_state = .esc, // ESC: start of a sequence to strip
+            '\n', 0x0b, 0x0c => { // LF, VT, FF -- all treated as newline (CR + LF)
+                self.cursor.col = 0;
+                self.cursor.row = self.resolveRow(self.cursor.row + 1);
+            },
+            '\r' => self.cursor.col = 0, // CR
+            '\t' => { // HT: to the next tab stop, clamped to the last column (no wrap)
+                const stop = ((self.cursor.col / tab_width) + 1) * tab_width;
+                self.cursor.col = @min(stop, self.width - 1);
+            },
+            0x08 => { // BS: back one column, non-destructive; a no-op at column 0
+                if (self.cursor.col > 0) self.cursor.col -= 1;
+            },
+            // Every other C0 byte (NUL, BEL, SO..SUB, FS..US) and DEL: dropped.
+            0x00...0x07, 0x0e...0x1a, 0x1c...0x1f, 0x7f => {},
+            else => return false, // printable
+        }
+        return true;
+    }
+
+    /// Advances the escape-sequence stripper by one byte while
+    /// `esc_state != .ground`. Discards every byte it sees -- this only
+    /// decides *when the sequence ends*, never acts on its contents. See
+    /// `EscState`.
+    fn stepEscape(self: *Layer, byte: u8) void {
+        switch (self.esc_state) {
+            .ground => unreachable,
+            .esc => switch (byte) {
+                '[' => self.esc_state = .csi,
+                ']', 'P', 'X', '^', '_' => self.esc_state = .string,
+                0x1b => {}, // ESC ESC -- stay armed for the real sequence
+                // Anything else is a short two-byte escape (or the ST
+                // half of `ESC \`) -- it ends here. A charset-select
+                // third byte (`ESC ( B`) would leak its final byte;
+                // acceptable for output that isn't supposed to be VT100.
+                else => self.esc_state = .ground,
+            },
+            .csi => {
+                // Parameter/intermediate bytes stay in .csi; a final byte
+                // (0x40..0x7e) ends the sequence.
+                if (byte >= 0x40 and byte <= 0x7e) self.esc_state = .ground;
+            },
+            .string => switch (byte) {
+                0x07 => self.esc_state = .ground, // BEL terminator
+                0x1b => self.esc_state = .esc, // ESC of an `ESC \` (ST) terminator
+                else => {},
+            },
+        }
     }
 
     fn putAtCursor(self: *Layer, bytes: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {

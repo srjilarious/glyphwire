@@ -176,7 +176,6 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         var snapshot = try client.getCells();
         defer snapshot.deinit();
         prompt.grid_cols = snapshot.cols();
-        prompt.grid_rows = snapshot.rows();
     }
 
     try prompt.showPrompt();
@@ -362,12 +361,6 @@ const Prompt = struct {
     /// there's no lighter-weight "get grid size" property yet (`size` is
     /// still 🔶 in decisions.md), and it doesn't change over a session.
     grid_cols: usize = 0,
-    /// The root layer's row count -- fetched once at startup alongside
-    /// `grid_cols`, same reasoning. Used by `writeCapturedText` to cap the
-    /// locally-tracked "next row" at the bottom row instead of letting it
-    /// grow past it -- see that field's doc comment for why an unclamped
-    /// counter cascades into extra blank rows.
-    grid_rows: usize = 0,
     /// Non-null while the cursor is browsing the grid instead of sitting on
     /// the live prompt (`browseUp`/`browseDown`/`browseLeft`/`browseRight`,
     /// entered by plain Up with nothing being typed) -- see those methods'
@@ -896,9 +889,6 @@ const Prompt = struct {
         var passthrough_err_buf: [256]u8 = undefined;
         var passthrough_err = std.Io.File.stderr().writer(io, &passthrough_err_buf);
 
-        var capture: CapturedOutput = .{
-            .row = (self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 }).row,
-        };
         var handshake: ?bool = null;
 
         while (true) {
@@ -918,8 +908,8 @@ const Prompt = struct {
             // hold whatever arrives meanwhile, same as it would while
             // waiting on the other stream in `std.process.run`.
             if (handshake) |aware| {
-                try self.flushCapturedStream(mr.reader(0), aware, &capture, null, &passthrough_out.interface);
-                try self.flushCapturedStream(mr.reader(1), aware, &capture, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
+                try self.flushCapturedStream(mr.reader(0), aware, null, &passthrough_out.interface);
+                try self.flushCapturedStream(mr.reader(1), aware, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
             }
         }
 
@@ -929,26 +919,26 @@ const Prompt = struct {
         // and flushed to the grid like everything else this mechanism
         // defaults to.
         const aware = handshake orelse false;
-        try self.flushCapturedStream(mr.reader(0), aware, &capture, null, &passthrough_out.interface);
-        try self.flushCapturedStream(mr.reader(1), aware, &capture, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
+        try self.flushCapturedStream(mr.reader(0), aware, null, &passthrough_out.interface);
+        try self.flushCapturedStream(mr.reader(1), aware, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
 
         try mr.checkAnyError();
     }
 
-    /// `writeCapturedText`'s running "next row" cursor for a single
-    /// `runCommand` invocation, kept locally rather than re-querying
-    /// `get_cursor` per line: this process is the only writer while the
-    /// command runs, so the row only ever changes via its own explicit
-    /// `setCursor` calls below.
-    const CapturedOutput = struct { row: usize };
-
-    /// Drains whatever `r` currently has buffered: onto the grid (`fg`,
-    /// `capture`) as plain text if `aware` is false, or straight through
-    /// to this process's own real stdio (`passthrough`) if it's true --
-    /// see `runCommand`'s doc comment for what `aware` means. A no-op when
+    /// Drains whatever `r` currently has buffered: onto the grid (`fg`) as
+    /// plain text if `aware` is false, or straight through to this
+    /// process's own real stdio (`passthrough`) if it's true -- see
+    /// `runCommand`'s doc comment for what `aware` means. A no-op when
     /// nothing is buffered, so it's safe to call speculatively before the
     /// handshake question is even resolved (see `pumpChildOutput`).
-    fn flushCapturedStream(self: *Prompt, r: *std.Io.Reader, aware: bool, capture: *CapturedOutput, fg: ?glyphwire.Color, passthrough: *std.Io.Writer) !void {
+    ///
+    /// The grid path is a single `write_text` of the raw chunk:
+    /// `Layer.writeText` handles `\n` (and `\r`, `\t`, `\b`, and stripping
+    /// stray `ESC ...` sequences) itself now, so there's no line-splitting
+    /// or cursor bookkeeping to do here. A line straddling two chunks just
+    /// works -- the second `write_text` picks up exactly where the first
+    /// left the cursor.
+    fn flushCapturedStream(self: *Prompt, r: *std.Io.Reader, aware: bool, fg: ?glyphwire.Color, passthrough: *std.Io.Writer) !void {
         const chunk = r.buffered();
         if (chunk.len == 0) return;
         defer r.toss(chunk.len);
@@ -959,44 +949,7 @@ const Prompt = struct {
             return;
         }
 
-        try self.writeCapturedText(chunk, fg, capture);
-    }
-
-    /// Writes `text` (a chunk of a plain command's stdout/stderr) onto the
-    /// grid at the cursor, splitting on `\n` and advancing `capture.row`
-    /// itself between lines -- `write_text` has no newline handling of
-    /// its own (a literal `\n` byte would just be drawn as its own
-    /// grapheme, see core.zig's `Layer.writeText`), so this is the
-    /// minimal terminal-style line wrapping a plain program's output
-    /// needs to stay legible. A line split across two chunks (the pipe
-    /// delivered them separately) needs no special handling here: each
-    /// half is written with a plain `write_text` and no intervening
-    /// `setCursor` in between, so the second half lands right after the
-    /// first exactly like one call would have.
-    fn writeCapturedText(self: *Prompt, text: []const u8, fg: ?glyphwire.Color, capture: *CapturedOutput) !void {
-        var it = std.mem.splitScalar(u8, text, '\n');
-        var first = true;
-        while (it.next()) |line| {
-            if (!first) {
-                // Capped at `grid_rows`, not left to grow without bound:
-                // `set_property(cursor)`'s `resolveRow` scrolls once for
-                // every row past the bottom a given call names, same as
-                // one line advancing the cursor normally would. Once
-                // output has scrolled the grid at all, the bottom row is
-                // always index `grid_rows - 1` again -- an uncapped
-                // counter drifts further past that on every subsequent
-                // line (row `grid_rows`, then `grid_rows + 1`, ...), so
-                // each later line quietly asked for more and more scrolls
-                // than the one it actually represented, opening a growing
-                // run of blank rows nothing had written into. Pinning the
-                // counter at `grid_rows` keeps every post-scroll line
-                // asking for exactly the one scroll it should.
-                capture.row = if (self.grid_rows == 0) capture.row + 1 else @min(capture.row + 1, self.grid_rows);
-                try self.client.setCursor(capture.row, 0);
-            }
-            first = false;
-            if (line.len > 0) try self.client.writeText(line, fg, null);
-        }
+        try self.client.writeText(chunk, fg, null);
     }
 
     /// `cd` is a shell builtin, not a spawned program -- unlike
