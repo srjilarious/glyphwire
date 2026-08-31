@@ -32,6 +32,13 @@ const scrollback_rows = 1000;
 const font_path = "assets/JetBrainsMono-Regular.ttf";
 const font_size: f32 = 18.0;
 const cursor_width = 2;
+// Blank margin, in pixels, kept on both sides of the composited layers:
+// one strip against the window's left border, and one between the grid's
+// right edge and the always-on scrollbar. Every layer's screen origin is
+// shifted right by this, `cellFromPixel` subtracts it back out, and both
+// the initial window width and `syncWindowSize`'s cell math reserve
+// `2 * content_pad_px` (plus the scrollbar) so no column is lost to it.
+const content_pad_px: i32 = 2;
 
 // Cell size in pixels, set from the loaded font's own metrics at startup
 // -- see `main`. `var` (not `const`) because `pixzig.renderer.measureFontFile`
@@ -463,15 +470,16 @@ pub const App = struct {
     /// this) has already rebuilt the viewport/projection for the new
     /// framebuffer, so `render` just draws the larger or smaller grid.
     ///
-    /// The always-on scrollbar takes `scrollbar_width_px` off the right
-    /// edge, so that much is subtracted from the usable width before
-    /// dividing into cells -- otherwise the last column would sit under
-    /// the bar. The initial window (see `main`) is opened
-    /// `scrollbar_width_px` wider than the grid for the same reason.
+    /// The always-on scrollbar (`scrollbar_width_px`) plus a
+    /// `content_pad_px` margin on each side of the grid are subtracted
+    /// from the usable width before dividing into cells, so the last
+    /// column isn't lost under the bar or the padding. The initial window
+    /// (see `main`) is opened that much wider than the grid for the same
+    /// reason.
     fn syncWindowSize(self: *App, eng: *AppRunner.Engine) void {
         const fb = eng.window_state.framebuffer_size;
         if (cell_w <= 0 or cell_h <= 0) return;
-        const cols: usize = @intCast(@max(@divTrunc(fb.x - scrollbar_width_px, cell_w), min_grid_cols));
+        const cols: usize = @intCast(@max(@divTrunc(fb.x - 2 * content_pad_px - scrollbar_width_px, cell_w), min_grid_cols));
         const rows: usize = @intCast(@max(@divTrunc(fb.y, cell_h), min_grid_rows));
         if (cols == grid_cols and rows == grid_rows) return;
 
@@ -626,13 +634,13 @@ pub const App = struct {
             self.server.ctx_mutex.lockUncancelable(self.server.io);
             defer self.server.ctx_mutex.unlock(self.server.io);
 
-            self.renderLayer(eng, &self.server.ctx.root, 0, 0, true, self.server.ctx.root.view_scroll);
+            self.renderLayer(eng, &self.server.ctx.root, content_pad_px, 0, true, self.server.ctx.root.view_scroll);
             for (self.server.ctx.layer_order.items) |handle| {
                 const layer = self.server.ctx.layers.getPtr(handle) orelse continue;
                 self.renderLayer(
                     eng,
                     layer,
-                    @intFromFloat(@round(layer.pos.x)),
+                    @as(i32, @intFromFloat(@round(layer.pos.x))) + content_pad_px,
                     @intFromFloat(@round(layer.pos.y)),
                     false,
                     0,
@@ -785,8 +793,11 @@ pub const App = struct {
 /// Converts a pixel position (window-local, matching what
 /// `eng.inputs.mouse.pos()` reports since host doesn't set a scaled
 /// `logicalSize`) to a grid cell position, clamped to the grid bounds.
+/// Subtracts `content_pad_px` first, since the layers are composited
+/// shifted right by that much (see `render`); a click in the thin left
+/// margin just clamps to column 0.
 fn cellFromPixel(x: f32, y: f32) glyphwire.CellPos {
-    const col_f = x / @as(f32, @floatFromInt(cell_w));
+    const col_f = (x - @as(f32, @floatFromInt(content_pad_px))) / @as(f32, @floatFromInt(cell_w));
     const row_f = y / @as(f32, @floatFromInt(cell_h));
     const max_col: f32 = @floatFromInt(grid_cols - 1);
     const max_row: f32 = @floatFromInt(grid_rows - 1);
@@ -931,12 +942,11 @@ pub fn main(init: std.process.Init) !void {
     // context, so it still happens here, after the window is created.
     const appRunner = try AppRunner.init("glyphwire", alloc, .{
         .windowSize = .{
-            // `+ scrollbar_width_px`: the always-on scrollbar occupies
-            // that strip on the right, so open the window wide enough for
-            // all `grid_cols` cells *plus* the bar (see `syncWindowSize`,
-            // which subtracts it back out when converting a resize to
-            // cells).
-            .x = @as(i32, @intCast(grid_cols)) * cell_w + App.scrollbar_width_px,
+            // Open wide enough for all `grid_cols` cells *plus* the
+            // always-on scrollbar and a `content_pad_px` margin on each
+            // side of the grid (see `syncWindowSize`, which subtracts the
+            // same back out when converting a resize to cells).
+            .x = @as(i32, @intCast(grid_cols)) * cell_w + 2 * content_pad_px + App.scrollbar_width_px,
             .y = @as(i32, @intCast(grid_rows)) * cell_h,
         },
         .resizable = true,
