@@ -33,6 +33,29 @@ pub const PromptSegment = struct {
     fg: ?[]const u8 = null,
     bg: ?[]const u8 = null,
     when: SegmentWhen = .always,
+    /// Set when the segment's `when` value was a template expression (it
+    /// contained a `{`) rather than one of the `always|error|slow`
+    /// keywords -- `shell/main.zig` renders it against the command vars
+    /// and shows the segment only when the result is truthy (non-empty,
+    /// not `0`/`false`); a leading `!` negates. `when` stays `.always` in
+    /// that case so the keyword filter is a pass-through.
+    when_expr: ?[]const u8 = null,
+};
+
+/// One `commands = { name = ... }` entry from a `prompt{}` call. `run` is
+/// a `/bin/sh -c` command line the shell runs *on demand* -- only when a
+/// segment or a `when` clause actually references `{name}` -- and whose
+/// trimmed stdout is interpolated for `{name}`. `when`, if set, is a
+/// template expression (`{other_var}` tokens, optional leading `!`)
+/// gating whether the command runs at all, so a `git` command can be
+/// guarded by a cheap "am I in a repo" probe. `timeout_ms` overrides the
+/// built-in per-command timeout. All strings owned by the enclosing
+/// `ShellConfig` (`prompt_arena`).
+pub const CommandVar = struct {
+    name: []const u8,
+    run: []const u8,
+    when: ?[]const u8 = null,
+    timeout_ms: ?u64 = null,
 };
 
 /// The prompt templating a `prompt{ ... }` call declared. Two forms:
@@ -61,6 +84,10 @@ pub const PromptConfig = struct {
 
     left_segments: ?[]PromptSegment = null,
     right_segments: ?[]PromptSegment = null,
+    /// On-demand command vars from `commands = { ... }`. `null` -> none
+    /// declared. Looked up by `name` when a template hits an otherwise
+    /// unknown `{name}` token (see `shell/main.zig`'s `resolveCmdVar`).
+    command_vars: ?[]CommandVar = null,
     /// Separator glyph drawn between adjacent segments (fg = the left
     /// segment's bg, bg = the right segment's bg -- the powerline trick).
     sep: ?[]const u8 = null,
@@ -212,6 +239,7 @@ fn luaPrompt(lua: *Lua) !i32 {
 
     try promptSegmentsField(lua, cfg, &cfg.prompt.left_segments, "left_segments");
     try promptSegmentsField(lua, cfg, &cfg.prompt.right_segments, "right_segments");
+    try promptCommandsField(lua, cfg, &cfg.prompt.command_vars, "commands");
 
     _ = lua.getField(1, "dur_min_ms");
     if (!lua.isNoneOrNil(-1)) {
@@ -298,16 +326,82 @@ fn readSegment(lua: *Lua, arena: std.mem.Allocator, idx: i32) !PromptSegment {
     _ = lua.getField(idx, "when");
     if (!lua.isNoneOrNil(-1)) {
         const w = lua.checkString(-1);
-        seg.when = if (std.mem.eql(u8, w, "always")) .always else if (std.mem.eql(u8, w, "error") or std.mem.eql(u8, w, "err"))
-            .err
-        else if (std.mem.eql(u8, w, "slow"))
-            .slow
-        else
-            lua.raiseErrorStr("prompt: segment `when` must be always|error|slow", .{});
+        if (std.mem.indexOfScalar(u8, w, '{') != null) {
+            // A `{var}` template expression, not a keyword -- kept as-is
+            // and evaluated against the command vars by `shell/main.zig`.
+            seg.when_expr = try arena.dupe(u8, w);
+        } else {
+            seg.when = if (std.mem.eql(u8, w, "always")) .always else if (std.mem.eql(u8, w, "error") or std.mem.eql(u8, w, "err"))
+                .err
+            else if (std.mem.eql(u8, w, "slow"))
+                .slow
+            else
+                lua.raiseErrorStr("prompt: segment `when` must be always|error|slow or a {{var}} expression", .{});
+        }
     }
     lua.pop(1);
 
     return seg;
+}
+
+/// Reads the `commands = { name = "cmd" | { "cmd" (or run), when,
+/// timeout_ms }, ... }` map off the table at stack index 1 into `slot`,
+/// replacing any previous list. Map keys are the var names; a string
+/// value is the command line, a table value carries `when` /
+/// `timeout_ms` alongside it. Allocations go in `prompt_arena`, so a Lua
+/// error raised partway (a bad entry) frees wholesale in `deinit`.
+fn promptCommandsField(lua: *Lua, cfg: *ShellConfig, slot: *?[]CommandVar, key: [:0]const u8) !void {
+    _ = lua.getField(1, key);
+    defer lua.pop(1);
+    if (lua.isNoneOrNil(-1)) return;
+    lua.checkType(-1, .table);
+
+    const arena = cfg.prompt_arena.allocator();
+    const tbl = lua.getTop();
+
+    var list: std.ArrayList(CommandVar) = .empty;
+
+    lua.pushNil();
+    while (lua.next(tbl)) {
+        // Key at -2, value at -1. A string coercion on a numeric key
+        // mid-traversal would corrupt `next`, so type-check first.
+        if (lua.typeOf(-2) != .string)
+            lua.raiseErrorStr("prompt: `commands` keys must be strings (the var name)", .{});
+        const name = try arena.dupe(u8, lua.toString(-2) catch unreachable);
+
+        var cv = CommandVar{ .name = name, .run = &.{} };
+        switch (lua.typeOf(-1)) {
+            .string => cv.run = try arena.dupe(u8, lua.toString(-1) catch unreachable),
+            .table => {
+                const vidx = lua.getTop();
+
+                _ = lua.getField(vidx, "run");
+                if (lua.isNoneOrNil(-1)) {
+                    lua.pop(1);
+                    _ = lua.getIndex(vidx, 1);
+                }
+                cv.run = try arena.dupe(u8, lua.checkString(-1));
+                lua.pop(1);
+
+                cv.when = try optStrField(lua, arena, vidx, "when");
+
+                _ = lua.getField(vidx, "timeout_ms");
+                if (!lua.isNoneOrNil(-1)) {
+                    const n = lua.checkNumber(-1);
+                    if (n < 0) lua.raiseErrorStr("prompt: `commands` timeout_ms must be >= 0", .{});
+                    cv.timeout_ms = @as(u64, @intFromFloat(n));
+                }
+                lua.pop(1);
+            },
+            else => lua.raiseErrorStr("prompt: a `commands` entry must be a string or a table", .{}),
+        }
+
+        try list.append(arena, cv);
+        lua.pop(1); // pop value, leave key for the next `next`
+    }
+
+    if (list.items.len == 0) return;
+    slot.* = try list.toOwnedSlice(arena);
 }
 
 fn optStrField(lua: *Lua, alloc: std.mem.Allocator, idx: i32, key: [:0]const u8) !?[]const u8 {

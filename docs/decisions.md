@@ -1223,6 +1223,11 @@ surface.
   prompt, wrapping) before running it, so scrollback shows all of it.
   The `insert_cells` / `delete_cells` wire ops are now unused by the
   shell but stay in the protocol.
+- **Home / End are aliases for ctrl+a / ctrl+e**, in every state — on the
+  live line they jump to column 0 / end of input, and while browsing
+  scrollback they snap back to the live line first (`moveCursorTo` →
+  `setCursorAt`), exactly as the ctrl chords already did. No separate
+  browse-mode meaning, unlike plain Left/Right.
 - **A multi-line prompt near the bottom scrolls up-front, once.** After a
   command's output has scrolled the layer the cursor can be within
   `prompt_lines` of the last row. `writePowerlinePrefix` used to just
@@ -1255,12 +1260,52 @@ surface.
   redrawn from there (`writePowerlinePrefix`'s scroll-up-front handles an
   overflow). Mid-drag reflow can still look briefly odd — a real reflow
   model is a later item (`docs/ideas.md`).
+- **On-demand command vars — `prompt{ commands = { name = "cmd" } }`.**
+  The declarative slice of "let the prompt shell out for git state": a
+  map of var name → `/bin/sh -c` command line (a bare string, or a table
+  adding `when` / `timeout_ms`). `{name}` in any template string or
+  segment expands to the command's **trimmed stdout**. Chosen over the
+  deferred Lua-callback form for the common case because it needs no new
+  Lua surface and stays declarative like the rest of `prompt{}`; the
+  callback form is still the escape hatch for logic a shell one-liner
+  can't express.
+  - **Lazy + memoised per prompt.** A command runs only when a template
+    actually hits its `{name}` this draw, at most once — `Prompt`'s
+    `cmd_var_cache` (cleared by `resetCmdVars` at the top of
+    `writePromptPrefix`) means the idle right-chain refresh and a
+    multi-line redraw reuse the same values, and the next prompt re-runs
+    them. So a `git` call costs once per prompt, not once per 500 ms tick.
+  - **`when` gates the run, and `{name}` works inside a `when`.** A
+    command var's `when` is a `{var}` template expression; the command
+    runs only if it renders truthy (`prompt_template.whenTruthy` —
+    non-empty, not `0`/`false`; a leading `!` negates). A segment's
+    `when` grew the same expression form (`PromptSegment.when_expr`, set
+    when the Lua value contains a `{`; the `always|error|slow` keywords
+    are unchanged). This is what lets `git` commands be guarded by one
+    cheap `is_repo = "git rev-parse --is-inside-work-tree"` probe so they
+    never run outside a repo. Truthiness is **output-based, not exit
+    code** — one consistent meaning for `{name}` everywhere, and with
+    `sh -c` a probe just has to print something or nothing.
+  - **Synchronous, short timeout.** The command runs on the prompt-draw
+    thread with a 400 ms default cap (`timeout_ms` overrides); on the
+    timeout the child is killed and `{name}` renders empty, dropping a
+    now-empty segment like any other. An async/background repaint was
+    considered and deferred — the stall is bounded and rare, and the
+    caching keeps it to once per prompt.
+  - **`prompt_template` stays pure.** The engine gained a `Data.vars`
+    hook (`VarResolver`: an opaque ctx + a `resolve(ctx, name) ?[]const
+    u8` fn pointer) consulted only for a token no built-in field
+    claimed; `null` keeps the "unknown token stays verbatim" behaviour.
+    `shell/main.zig`'s `resolveCmdVar` is the implementation (with the
+    cycle/depth guard for a `when` that references its own var); the
+    module itself still takes no IO/exec/glyphwire dependency.
 - **Deferred:** a `prompt` *function* form — `shell.conf` sets a Lua
   callback that receives the same data items and emits its own draw
-  commands (so it can shell out to `git status` etc.). Recorded in
-  `docs/ideas.md` / roadmap.md; the string + segment forms here are the
-  first slices, and `prompt_template`'s `Op` list / `Data` snapshot are
-  already the right shape to hand to a callback.
+  commands, for prompt logic a `commands` one-liner can't express.
+  Recorded in `docs/ideas.md` / roadmap.md; the string + segment +
+  command-var forms here are the first slices, and `prompt_template`'s
+  `Op` list / `Data` snapshot are already the right shape to hand to a
+  callback.
 
 #### Persistent command history: `~/.config/glyphwire/history`
 - **Plain text, one command per line, oldest first** — same directory

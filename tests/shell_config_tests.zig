@@ -298,3 +298,137 @@ pub fn configPromptRejectsNegativeScrolloffTest(_: std.Io, alloc: std.mem.Alloca
     defer res.deinit();
     try testz.expectTrue(res.err != null);
 }
+
+// ─── prompt{ commands = { ... } } -- on-demand command vars ────────────
+
+pub fn configReadsCommandVarStringFormTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt {
+        \\  commands = {
+        \\    branch = "git branch --show-current",
+        \\  },
+        \\}
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    const cmds = res.config.prompt.command_vars.?;
+    try testz.expectEqual(cmds.len, 1);
+    try testz.expectEqualStr("branch", cmds[0].name);
+    try testz.expectEqualStr("git branch --show-current", cmds[0].run);
+    try testz.expectEqual(cmds[0].when, null);
+    try testz.expectEqual(cmds[0].timeout_ms, null);
+}
+
+pub fn configReadsCommandVarTableFormTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt {
+        \\  commands = {
+        \\    dirty = { "git status --porcelain", when = "{is_repo}", timeout_ms = 250 },
+        \\  },
+        \\}
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    const cmds = res.config.prompt.command_vars.?;
+    try testz.expectEqual(cmds.len, 1);
+    try testz.expectEqualStr("dirty", cmds[0].name);
+    try testz.expectEqualStr("git status --porcelain", cmds[0].run);
+    try testz.expectEqualStr("{is_repo}", cmds[0].when.?);
+    try testz.expectEqual(cmds[0].timeout_ms.?, @as(u64, 250));
+}
+
+pub fn configCommandVarTableAcceptsRunKeyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { commands = { v = { run = \"echo hi\" } } }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqualStr("echo hi", res.config.prompt.command_vars.?[0].run);
+}
+
+pub fn configCollectsMultipleCommandVarsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt {
+        \\  commands = {
+        \\    is_repo = "git rev-parse --is-inside-work-tree",
+        \\    branch  = { "git branch --show-current", when = "{is_repo}" },
+        \\  },
+        \\}
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    // Map order isn't defined by Lua, so assert on the set, not indices.
+    const cmds = res.config.prompt.command_vars.?;
+    try testz.expectEqual(cmds.len, 2);
+    var seen_repo = false;
+    var seen_branch = false;
+    for (cmds) |cv| {
+        if (std.mem.eql(u8, cv.name, "is_repo")) seen_repo = true;
+        if (std.mem.eql(u8, cv.name, "branch")) seen_branch = true;
+    }
+    try testz.expectTrue(seen_repo);
+    try testz.expectTrue(seen_branch);
+}
+
+pub fn configCommandVarsMergeAcrossCallsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt { commands = { a = "echo a", b = "echo b" } }
+        \\prompt { commands = { c = "echo c" } }
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    // A later `commands` replaces the map wholesale, like the segment lists.
+    try testz.expectEqual(res.config.prompt.command_vars.?.len, 1);
+    try testz.expectEqualStr("c", res.config.prompt.command_vars.?[0].name);
+}
+
+pub fn configCommandVarRejectsNonStringEntryTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { commands = { bad = 42 } }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}
+
+pub fn configCommandVarRejectsNegativeTimeoutTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { commands = { v = { \"echo\", timeout_ms = -5 } } }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}
+
+// ─── a segment `when` that is a {var} expression, not a keyword ────────
+
+pub fn configSegmentWhenExprIsKeptVerbatimTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt {
+        \\  right_segments = {
+        \\    { " {branch} ", when = "{is_repo}" },
+        \\    { " always ", when = "always" },
+        \\  },
+        \\}
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    const segs = res.config.prompt.right_segments.?;
+    try testz.expectEqual(segs.len, 2);
+    // The `{...}` form: kept as an expression string, `when` left `.always`
+    // so the keyword filter is a pass-through.
+    try testz.expectEqualStr("{is_repo}", segs[0].when_expr.?);
+    try testz.expectEqual(segs[0].when, .always);
+    // The keyword form still parses to the enum, no `when_expr`.
+    try testz.expectEqual(segs[1].when_expr, null);
+    try testz.expectEqual(segs[1].when, .always);
+}
+
+pub fn configSegmentWhenExprNegationIsKeptTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { left_segments = { { \"x\", when = \"!{is_repo}\" } } }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqualStr("!{is_repo}", res.config.prompt.left_segments.?[0].when_expr.?);
+}

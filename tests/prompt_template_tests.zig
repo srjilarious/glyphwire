@@ -320,3 +320,83 @@ pub fn parseColorRejectsMalformedTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(pt.parseColor("#12345"), null);
     try testz.expectEqual(pt.parseColor("#gggggg"), null);
 }
+
+// ─── {name} resolver hook (shell.conf's command vars) ─────────────────
+
+// Stands in for `shell/main.zig`'s `resolveCmdVar`: `branch` -> "main",
+// `flag` -> "" (a var that ran but produced nothing), `cwd` -> a value
+// that must never win over the built-in field, everything else -> null
+// (not a declared var, so the token stays literal).
+const StubVars = struct {
+    fn resolve(_: *anyopaque, name: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, name, "branch")) return "main";
+        if (std.mem.eql(u8, name, "flag")) return "";
+        if (std.mem.eql(u8, name, "cwd")) return "RESOLVER_CWD";
+        return null;
+    }
+};
+var stub_vars_ctx: u8 = 0;
+const stub_vars: pt.VarResolver = .{ .ctx = &stub_vars_ctx, .resolve = StubVars.resolve };
+
+pub fn resolverFillsUnknownTokenTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "on [{branch}]", .{ .vars = stub_vars });
+    defer alloc.free(s);
+    try testz.expectEqualStr("on [main]", s);
+}
+
+pub fn resolverNullKeepsTokenLiteralTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "{branch} {nope}", .{ .vars = stub_vars });
+    defer alloc.free(s);
+    try testz.expectEqualStr("main {nope}", s);
+}
+
+pub fn resolverEmptyValueRendersEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "a{flag}b", .{ .vars = stub_vars });
+    defer alloc.free(s);
+    try testz.expectEqualStr("ab", s);
+}
+
+pub fn resolverDoesNotOverrideBuiltinFieldTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `{cwd}` is a built-in field -- the resolver is only consulted for
+    // tokens nothing else claimed, so the real cwd still wins.
+    const s = try flatten(alloc, "{cwd}", .{ .cwd = "/home/x", .vars = stub_vars });
+    defer alloc.free(s);
+    try testz.expectEqualStr("/home/x", s);
+}
+
+pub fn resolverRunsInsideExitSectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "{exit}", .{
+        .vars = stub_vars,
+        .have_status = true,
+        .last_status = 1,
+        .exit_section = " on {branch}",
+    });
+    defer alloc.free(s);
+    try testz.expectEqualStr(" on main", s);
+}
+
+pub fn resolverAbsentLeavesTokenLiteralTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // No resolver configured at all -> unchanged "unknown token stays
+    // verbatim" behaviour.
+    const s = try flatten(alloc, "x {branch} y", .{});
+    defer alloc.free(s);
+    try testz.expectEqualStr("x {branch} y", s);
+}
+
+// ─── whenTruthy (the `when = "{var}"` truthiness rule) ────────────────
+
+pub fn whenTruthyAcceptsNonEmptyTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(pt.whenTruthy("true"));
+    try testz.expectTrue(pt.whenTruthy("main"));
+    try testz.expectTrue(pt.whenTruthy("  x  "));
+    try testz.expectTrue(pt.whenTruthy("3"));
+}
+
+pub fn whenTruthyRejectsEmptyAndFalseyTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(!pt.whenTruthy(""));
+    try testz.expectTrue(!pt.whenTruthy("   \n\t"));
+    try testz.expectTrue(!pt.whenTruthy("0"));
+    try testz.expectTrue(!pt.whenTruthy("false"));
+    try testz.expectTrue(!pt.whenTruthy("False"));
+    try testz.expectTrue(!pt.whenTruthy(" FALSE "));
+}

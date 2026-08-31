@@ -48,6 +48,18 @@ pub const Op = union(enum) {
 /// maps between them (this module stays free of the glyphwire import).
 pub const Color = struct { r: u8, g: u8, b: u8 };
 
+/// Resolver for `{name}` tokens that match no built-in field -- lets the
+/// shell plug in `shell.conf`'s on-demand command vars without this
+/// module taking an IO/exec dependency. `render` calls `resolve(ctx,
+/// name)` for such a token: a non-null return is interpolated verbatim,
+/// a null return keeps the "unknown token stays literal" behaviour so a
+/// typo is still visible. The returned slice only has to outlive the
+/// `render` / `renderOps` call.
+pub const VarResolver = struct {
+    ctx: *anyopaque,
+    resolve: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
+};
+
 /// The shell state a template renders against. All string fields default to
 /// empty so a caller can fill in only what it has.
 pub const Data = struct {
@@ -76,6 +88,11 @@ pub const Data = struct {
     /// Sub-template `{dur}` expands to, rendered only past the threshold.
     /// `null` means `{dur}` is always empty.
     dur_section: ?[]const u8 = null,
+
+    /// Optional resolver for non-built-in `{name}` tokens -- the shell's
+    /// on-demand command vars (see `VarResolver`). `null` -> an unknown
+    /// token is left verbatim, as before.
+    vars: ?VarResolver = null,
 };
 
 /// The result of `render`: an owned op list plus the arena backing every
@@ -242,6 +259,14 @@ fn expandToken(
             }
         }
     } else {
+        // A command var (or similar caller-supplied token) before we give
+        // up and pass it through verbatim.
+        if (data.vars) |vr| {
+            if (vr.resolve(vr.ctx, token)) |val| {
+                try pending.appendSlice(a, val);
+                return;
+            }
+        }
         // Unknown token -- pass it through verbatim so a typo is visible.
         try appendLiteralToken(a, pending, token);
     }
@@ -251,6 +276,15 @@ fn appendLiteralToken(a: std.mem.Allocator, pending: *std.ArrayList(u8), token: 
     try pending.append(a, '{');
     try pending.appendSlice(a, token);
     try pending.append(a, '}');
+}
+
+/// Whether a rendered `when` expression counts as "true": non-empty once
+/// trimmed, and not `0` / `false` (case-insensitive). The shell uses this
+/// for `when = "{var}"` segment gating and for a command var's own
+/// `when` -- a command whose output is non-empty reads as true.
+pub fn whenTruthy(rendered: []const u8) bool {
+    const t = std.mem.trim(u8, rendered, " \t\r\n");
+    return t.len > 0 and !std.mem.eql(u8, t, "0") and !std.ascii.eqlIgnoreCase(t, "false");
 }
 
 /// Humanizes a millisecond duration: `450ms`, `1.5s`, `2m3s`, `1h4m`.

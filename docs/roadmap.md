@@ -1185,6 +1185,56 @@ Icon + Table sections, `api.md`'s `create_table` / `table_set_style` /
   change shifts a couple of row numbers in the `e2e` browse test. No host
   test group — the theme swap needs a `zig build host` eyeball.
 
+## Prompt command vars, and Home/End line-editing keys
+
+Two client-local shell changes (no wire change — `api.md` untouched;
+`decisions.md` Shell section's "Prompt templating" + line-editor bullets
+updated, `shell/shell.conf.template` documents both):
+
+- **`prompt{ commands = { name = "cmd" } }` — on-demand command vars.** A
+  map of var name → `/bin/sh -c` command line (a bare string, or a table
+  with `when` / `timeout_ms`). `{name}` in any prompt template string or
+  powerline segment expands to the command's trimmed stdout. The
+  declarative slice of the deferred "Lua-function prompt": enough for
+  git branch / dirty / ahead-behind, k8s context, a `zig version` pill,
+  without a new Lua surface.
+  - **Lazy, and memoised for the life of one prompt.** A command runs
+    only if a template actually references its `{name}` this draw, at
+    most once — `Prompt.cmd_var_cache`, cleared by `resetCmdVars` at the
+    top of `writePromptPrefix`. The idle right-chain refresh and a
+    multi-line redraw reuse the cached values; the next prompt re-runs
+    them. So a `git` call is once per prompt, not once per 500 ms tick.
+  - **`when` gates the run and takes a `{var}` expression.** A command
+    var's optional `when` is a template expression; the command runs
+    only when it renders truthy (`prompt_template.whenTruthy` —
+    non-empty, not `0`/`false`; leading `!` negates). Segments gained the
+    same form: `PromptSegment.when_expr`, set by `shell/config.zig` when
+    the Lua `when` value contains a `{` (the `always|error|slow`
+    keywords are unchanged). One cheap `is_repo` probe can then gate
+    every `git` command so none run outside a repo. Truthiness is
+    output-based, not exit-code — `{name}` means "its output" everywhere.
+  - **Synchronous with a 400 ms default cap** (`timeout_ms` overrides);
+    on timeout the child is killed and `{name}` renders empty. Async
+    background repaint considered and deferred — bounded stall, once per
+    prompt.
+  - **`prompt_template` stays pure.** New `Data.vars` hook
+    (`VarResolver` = opaque ctx + `resolve(ctx, name) ?[]const u8`),
+    consulted only for a token no built-in field claimed; `null` keeps
+    "unknown token stays verbatim". `shell/main.zig`'s `resolveCmdVar` is
+    the impl, with a name-stack cycle/depth guard for a `when` that
+    references its own var. `prompt_template.whenTruthy` is the shared
+    truthiness rule.
+- **Home / End = ctrl+a / ctrl+e.** Added to `runPrompt`'s key handling
+  as plain aliases (no `ctrl` required), in every state — the ctrl
+  chords already snapped browse mode back to the live line via
+  `moveCursorTo`, and Home/End inherit that.
+- **Tests:** `tests/prompt_template_tests.zig` — the `Data.vars` resolver
+  hook (fill / null-keeps-literal / empty value / built-in field wins /
+  inside an `exit` section) and `whenTruthy`; `tests/shell_config_tests.zig`
+  — `commands` string + table forms, `run` key, multi-entry, merge-across-
+  calls, bad-entry / negative-timeout rejection, and a segment
+  `when = "{var}"` kept as `when_expr`. 374 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

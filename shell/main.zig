@@ -23,6 +23,13 @@ const default_prompt_left = "{cwd_full} > ";
 /// `prompt{ scrolloff = N }` isn't set. See `Prompt.scrolloffRows`.
 const default_scrolloff: usize = 8;
 
+/// Per-command wall-clock budget for a `prompt{ commands = { ... } }`
+/// var when its entry doesn't set `timeout_ms`. Kept short: the command
+/// runs synchronously while the prompt is being drawn, so a hung `git`
+/// in a huge repo must not stall the prompt for long -- it's killed and
+/// `{name}` renders empty. See `Prompt.runCmdVar`.
+const default_cmd_var_timeout_ms: u64 = 400;
+
 /// Resize debounce (see the resize handling in `runPrompt`). A resize
 /// drag emits an event per frame; redrawing the prompt on each one looks
 /// messy, so the redraw waits until the size has been quiet for
@@ -419,9 +426,14 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             try prompt.deleteBackward();
         } else if (std.mem.eql(u8, ev.key, "delete")) {
             try prompt.deleteForward();
-        } else if (ctrl and std.mem.eql(u8, ev.key, "a")) {
+        } else if ((ctrl and std.mem.eql(u8, ev.key, "a")) or std.mem.eql(u8, ev.key, "home")) {
+            // Home mirrors ctrl+a in every state: on the live line it goes
+            // to column 0, and while browsing scrollback `moveCursorTo` ->
+            // `setCursorAt` snaps back to the live line first (same as
+            // ctrl+a does today).
             try prompt.moveCursorTo(0);
-        } else if (ctrl and std.mem.eql(u8, ev.key, "e")) {
+        } else if ((ctrl and std.mem.eql(u8, ev.key, "e")) or std.mem.eql(u8, ev.key, "end")) {
+            // End mirrors ctrl+e, likewise unaffected by browse mode.
             try prompt.moveCursorTo(prompt.buffer.items.len);
         } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
             try prompt.killToStart();
@@ -658,6 +670,22 @@ const Prompt = struct {
     /// file. Owns its strings/segments; freed in `deinit`.
     prompt_config: ?config.ShellConfig = null,
 
+    /// Memoised output of the `prompt{ commands = { ... } }` vars for the
+    /// current prompt. `writePromptPrefix` clears it (`resetCmdVars`) so
+    /// each fresh prompt re-runs the commands, but the idle right-chain
+    /// refresh and multi-line redraws in between reuse the cached values
+    /// rather than shelling out again. Keyed by the config-owned
+    /// `CommandVar.name` (not duped); values are `client.alloc`-owned
+    /// (freed in `resetCmdVars` / `deinit`); an empty value means the
+    /// command was gated off by its `when`, failed, or timed out.
+    cmd_var_cache: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// Names currently being resolved, for cycle / depth breaking when a
+    /// command var's `when` references another. `resolveCmdVar` pushes on
+    /// entry and pops on exit; a name already present (or a full stack)
+    /// resolves to empty.
+    cmd_var_stack: [16][]const u8 = undefined,
+    cmd_var_depth: usize = 0,
+
     /// The last external command's exit status and wall-clock run time,
     /// plus whether any external command has run this session -- feeds
     /// `{exit}` / `{exit_code}` / `{dur}` / `{duration}` and a segment's
@@ -710,6 +738,19 @@ const Prompt = struct {
         self.aliases.deinit(alloc);
         if (self.history_path) |p| alloc.free(p);
         if (self.prompt_config) |*pcfg| pcfg.deinit();
+        self.resetCmdVars();
+        self.cmd_var_cache.deinit(alloc);
+    }
+
+    /// Drops every memoised command-var value. Called at the top of
+    /// `writePromptPrefix` (so a new prompt re-runs the commands) and
+    /// from `deinit`.
+    fn resetCmdVars(self: *Prompt) void {
+        const alloc = self.client.alloc;
+        var it = self.cmd_var_cache.valueIterator();
+        while (it.next()) |v| alloc.free(v.*);
+        self.cmd_var_cache.clearRetainingCapacity();
+        self.cmd_var_depth = 0;
     }
 
     /// The parsed prompt config, or `null` when there's no `shell.conf`.
@@ -792,6 +833,11 @@ const Prompt = struct {
         self.right_dynamic = false;
         self.prompt_lines = 1;
 
+        // A brand-new prompt: re-run the `commands` vars. Everything drawn
+        // for *this* prompt after here (the idle right-chain refresh, a
+        // multi-line redraw) reuses whatever they resolve to now.
+        self.resetCmdVars();
+
         const p = self.promptCfg() orelse return self.writeDefaultPrefix();
         if (p.left_segments != null or p.right_segments != null) return self.writePowerlinePrefix(p);
         if (p.left != null or p.right != null) return self.writeTemplatedPrefix(p);
@@ -836,7 +882,119 @@ const Prompt = struct {
             .dur_min_ms = self.durMinMs(),
             .exit_section = p.exit,
             .dur_section = p.dur,
+            .vars = self.cmdVarResolver(),
         };
+    }
+
+    /// The `prompt_template.VarResolver` for this prompt's `commands`
+    /// vars, or `null` when none are configured (so an unknown `{token}`
+    /// keeps its literal-passthrough behaviour). The `ctx` is the
+    /// `*Prompt`; `resolveCmdVarThunk` casts it back.
+    fn cmdVarResolver(self: *Prompt) ?prompt_template.VarResolver {
+        const p = self.promptCfg() orelse return null;
+        if (p.command_vars == null) return null;
+        return .{ .ctx = self, .resolve = resolveCmdVarThunk };
+    }
+
+    fn resolveCmdVarThunk(ctx: *anyopaque, name: []const u8) ?[]const u8 {
+        const self: *Prompt = @ptrCast(@alignCast(ctx));
+        return self.resolveCmdVar(name);
+    }
+
+    /// Resolves a `{name}` token against `prompt{ commands = { ... } }`.
+    /// Returns `null` when `name` isn't a declared command var (the
+    /// template then leaves the token verbatim); otherwise the command's
+    /// trimmed stdout, or `""` when it was gated off by its `when`,
+    /// failed, timed out, or hit the cycle/depth guard. Memoised in
+    /// `cmd_var_cache` for the life of the current prompt.
+    fn resolveCmdVar(self: *Prompt, name: []const u8) ?[]const u8 {
+        const p = self.promptCfg() orelse return null;
+        const vars = p.command_vars orelse return null;
+
+        const cv: *const config.CommandVar = blk: {
+            for (vars) |*entry| {
+                if (std.mem.eql(u8, entry.name, name)) break :blk entry;
+            }
+            return null;
+        };
+
+        if (self.cmd_var_cache.get(name)) |cached| return cached;
+
+        // Cycle / runaway-depth guard: a `when` that (transitively)
+        // references its own var resolves to empty rather than looping.
+        if (self.cmd_var_depth >= self.cmd_var_stack.len) return "";
+        for (self.cmd_var_stack[0..self.cmd_var_depth]) |n| {
+            if (std.mem.eql(u8, n, name)) return "";
+        }
+        self.cmd_var_stack[self.cmd_var_depth] = name;
+        self.cmd_var_depth += 1;
+        defer self.cmd_var_depth -= 1;
+
+        // `runCmdVar` hands back a `client.alloc`-owned slice (or a static
+        // "" on failure / empty output); the cache takes it as-is and
+        // `resetCmdVars` frees it. The gated-off path stores the same
+        // static "".
+        const gated_off = if (cv.when) |w| !self.cmdWhenTrue(w) else false;
+        const owned: []const u8 = if (gated_off) "" else self.runCmdVar(cv);
+
+        self.cmd_var_cache.put(self.client.alloc, name, owned) catch {};
+        return owned;
+    }
+
+    /// Runs `cv.run` through `/bin/sh -c`, synchronously, and returns its
+    /// trimmed stdout as a fresh `client.alloc` slice -- or `""` on a
+    /// spawn failure, an exit with no output, or the timeout firing (the
+    /// child is killed). Exit status is otherwise ignored: `{name}` *is*
+    /// the command's output, and a `when` clause treats a non-empty
+    /// output as true.
+    fn runCmdVar(self: *Prompt, cv: *const config.CommandVar) []const u8 {
+        const gpa = self.client.alloc;
+        const timeout_ms: i64 = @intCast(cv.timeout_ms orelse default_cmd_var_timeout_ms);
+
+        const argv = [_][]const u8{ "/bin/sh", "-c", cv.run };
+        const res = std.process.run(gpa, self.client.io, .{
+            .argv = &argv,
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(4 * 1024),
+            .timeout = .{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } },
+        }) catch return "";
+        defer gpa.free(res.stdout);
+        defer gpa.free(res.stderr);
+
+        const trimmed = std.mem.trim(u8, res.stdout, " \t\r\n");
+        if (trimmed.len == 0) return "";
+        return gpa.dupe(u8, trimmed) catch "";
+    }
+
+    /// Evaluates a `when` template expression (a segment's `when_expr` or
+    /// a command var's own `when`) against the command vars: renders it,
+    /// trims, and reports whether the result is "truthy" -- non-empty and
+    /// not `0` / `false`. A leading `!` (repeatable) negates. A render
+    /// failure counts as falsy (before negation).
+    fn cmdWhenTrue(self: *Prompt, expr_in: []const u8) bool {
+        var expr = std.mem.trim(u8, expr_in, " \t");
+        var negate = false;
+        while (expr.len > 0 and expr[0] == '!') {
+            negate = !negate;
+            expr = std.mem.trim(u8, expr[1..], " \t");
+        }
+
+        var arena_state = std.heap.ArenaAllocator.init(self.client.alloc);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+
+        const data = prompt_template.Data{
+            .environ = self.environ_map,
+            .vars = self.cmdVarResolver(),
+        };
+        const ops = prompt_template.renderOps(a, expr, data) catch return negate;
+
+        var buf: std.ArrayList(u8) = .empty;
+        for (ops) |op| switch (op) {
+            .text => |t| buf.appendSlice(a, t) catch return negate,
+            .icon => {},
+        };
+        return prompt_template.whenTruthy(buf.items) != negate;
     }
 
     /// Local time formatted per `fmt` (a `strftime` string), into `buf`.
@@ -910,6 +1068,11 @@ const Prompt = struct {
                 .always => {},
                 .err => if (!(data.have_status and data.last_status != 0)) continue,
                 .slow => if (!(data.dur_min_ms > 0 and data.last_dur_ms >= data.dur_min_ms)) continue,
+            }
+            // A `when = "{var}"` expression form -- shown only when the
+            // expression renders truthy against the command vars.
+            if (seg.when_expr) |we| {
+                if (!self.cmdWhenTrue(we)) continue;
             }
             const ops = try prompt_template.renderOps(arena, seg.text, data);
             const w = prompt_template.opsWidth(ops, self.icon_cols);

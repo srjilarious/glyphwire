@@ -52,11 +52,49 @@
 --   {exit}       expands to the `exit` sub-template, only on a non-zero exit
 --   {dur}        expands to the `dur` sub-template, only when the last
 --                command ran for at least `dur_min_ms`
+--   {NAME}       a command var declared in `commands = { ... }` (below) --
+--                expands to that command's trimmed stdout, run on demand
 --   {{  }}       literal braces;  \n \t \\  are unescaped
 --
 -- Inside the `exit` sub-template: {exit_code} is the number.
 -- Inside the `dur` sub-template:  {duration} is the humanized time
 --                                 (e.g. 450ms, 1.5s, 2m5s).
+
+
+---- Command vars: prompt{ commands = { ... } } ----------------------
+--
+-- A map of var name -> shell command. Each command runs through
+-- `/bin/sh -c` *on demand* -- only when a segment's text or a `when`
+-- clause actually references `{name}` this prompt -- and `{name}` expands
+-- to its trimmed stdout. Results are cached for the life of one prompt
+-- (the idle right-side redraw reuses them), then re-run for the next.
+--
+-- A value is either the command string, or a table adding:
+--   when       a `{var}` expression; the command runs only if it's truthy
+--              (non-empty, not `0`/`false`; a leading `!` negates). Lets a
+--              `git` command be gated on a cheap "in a repo?" probe so it
+--              never runs outside one.
+--   timeout_ms per-command wall-clock cap (default 400). On timeout the
+--              child is killed and `{name}` is empty.
+--
+-- In a `when` clause (a segment's or another command's), `{name}` is
+-- "true" when the command produced non-empty output -- so a probe just
+-- needs to print something (or nothing) rather than rely on its exit code.
+--
+-- prompt {
+--     commands = {
+--         is_repo  = "git rev-parse --is-inside-work-tree 2>/dev/null",
+--         branch   = { "git branch --show-current",            when = "{is_repo}" },
+--         dirty    = { "git status --porcelain | grep -q . && echo '*'",
+--                                                              when = "{is_repo}" },
+--         modified = { "git status --porcelain | grep -c '^ M' | grep -v '^0$'",
+--                                                              when = "{is_repo}" },
+--     },
+--     right_segments = {
+--         { " {icon:distro/arch} {branch}{dirty} {modified} ",
+--           when = "{is_repo}", fg = "#fff", bg = "#3a3a3a" },
+--     },
+-- }
 
 
 -- (A) Plain template strings.
@@ -79,8 +117,10 @@
 -- (B) Powerline segments. left_segments / right_segments are lists of
 -- { text (or positional [1]), fg, bg, when }.  A segment whose text
 -- renders empty is dropped.  `when` is "always" (default), "error" (shown
--- only after a non-zero exit) or "slow" (only when the last command took
--- >= dur_min_ms).  Segments are joined with `sep` (fg = the left
+-- only after a non-zero exit), "slow" (only when the last command took
+-- >= dur_min_ms), or a `{var}` expression (shown only when it renders
+-- truthy against the command vars -- e.g. when = "{is_repo}", or
+-- "!{is_repo}").  Segments are joined with `sep` (fg = the left
 -- segment's bg, bg = the right segment's bg -- the powerline trick) and
 -- capped with head / tail / right_head.  The \u{E0Bx} glyphs need a Nerd
 -- Font; glyphwire-host bundles a Powerline-range fallback face.

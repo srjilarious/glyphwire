@@ -68,7 +68,7 @@ prompt {
     head       = "\u{E0B6}",  -- rounded left cap
     sep        = "\u{E0B0}",  -- solid right-pointing separator
     tail       = "\u{E0B4}",  -- rounded right cap
-    sep_right  = "\u{E0B3}",  -- thin left-pointing separator
+    sep_right  = "\u{E0B2}",  -- solid left-pointing separator
     -- right_head defaults to head; set it here only to differ.
     lines = 2,
     input = "\u{E0B1} ",
