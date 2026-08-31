@@ -1168,7 +1168,7 @@ Icon + Table sections, `api.md`'s `create_table` / `table_set_style` /
   `{icon:oxygen/…}` working.
 - **`ls.conf`.** New `~/.config/glyphwire/ls.conf` (`ls/config.zig`, a Lua
   `config` table via the vendored Lua lib now linked into `ls`) with
-  `large_icon_px` (48) / `small_icon_px` (16). `writeGrid` /
+  `large_icon_px` (32) / `small_icon_px` (16). `writeGrid` /
   `writeLongTable` use them for the `.natural` cap and derive the band /
   row height from `ceil(px / cell_h)` instead of a fixed 2-vs-1.
 - **`TableStyle.max_icon_px`.** Plumbed client → protocol → dispatch →

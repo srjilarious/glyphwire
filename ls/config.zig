@@ -19,12 +19,10 @@ const conf_name = "ls.conf";
 /// upper bounds: a source icon smaller than the value renders at its own
 /// size. Clamped to `icon_px_min..icon_px_max` on load.
 pub const LsConfig = struct {
-    /// `-L` grid bands and `-l -L` table rows. 48 matches the bundled
-    /// art's own size (the Oxygen / Papirus / Material file-type themes,
-    /// the Devicon language logos, and the distro logos are all 48x48), so
-    /// every icon renders crisp and the same size; lower it for a denser
-    /// listing.
-    large_icon_px: u32 = 48,
+    /// `-L` grid bands and `-l -L` table rows. 32 keeps every icon the
+    /// size of a folder/file bucket icon even when the source art is
+    /// larger (the 48px `dev/*` logos); raise it for chunkier icons.
+    large_icon_px: u32 = 32,
     /// The default grid and `-l` (non-`-L`) table rows.
     small_icon_px: u32 = 16,
 };

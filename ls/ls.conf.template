@@ -30,7 +30,6 @@
 --     -- The default listing, and `ls -S`.
 --     small_icon_px = 16,
 --
---     -- `ls -L` (the default format) and `ls -l -L`. 48 is the bundled
---     -- icons' own size; lower it for a denser listing.
---     large_icon_px = 48,
+--     -- `ls -L` (the default format) and `ls -l -L`.
+--     large_icon_px = 32,
 -- }

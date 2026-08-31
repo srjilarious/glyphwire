@@ -589,7 +589,7 @@ surface.
   `glyphwire-ls`'s `writeGrid` and `writeLongTable` used to hardcode the
   `.natural` cap (one/two cell-heights, then a fixed 32px). Now
   `~/.config/glyphwire/ls.conf` (`ls/config.zig`, a Lua `config` table
-  like `host.conf`) sets `large_icon_px` (default 48, for `-L`) and
+  like `host.conf`) sets `large_icon_px` (default 32, for `-L`) and
   `small_icon_px` (default 16); the grid band / table row height follows
   (`ceil(px / cell_h)`), and the `-l` table passes the size through as
   `TableStyle.max_icon_px` so `core.Table.writeBodyRow` caps a tall row's

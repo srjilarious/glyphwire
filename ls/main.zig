@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
         .opts = &.{
             .{ .longName = "hidden", .shortName = "a", .description = "Show hidden files and directories", .maxNumParams = 0 },
             .{ .longName = "long", .shortName = "l", .description = "Long listing: adds permission bits, size, owner:group, and modified time", .maxNumParams = 0 },
-            .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger icons (ls.conf large_icon_px, 48 by default; taller rows in a long listing to fit). Wins over -S if both are given", .maxNumParams = 0 },
+            .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger icons (ls.conf large_icon_px, 32 by default; taller rows in a long listing to fit). Wins over -S if both are given", .maxNumParams = 0 },
             .{ .longName = "small", .shortName = "S", .description = "Small format: smaller icons (ls.conf small_icon_px, 16 by default) in both the normal and long (-l) listing", .maxNumParams = 0 },
             .{ .longName = "human", .shortName = "h", .description = "Human-readable sizes (KB/MB/GB) -- the default; the explicit opposite of --bytes", .maxNumParams = 0 },
             .{ .longName = "bytes", .description = "Show sizes as a raw byte count instead of KB/MB/GB (wins unless -h is also given)", .maxNumParams = 0 },
@@ -108,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
         var client = connected;
         defer client.deinit();
         // Icon sizes from `~/.config/glyphwire/ls.conf` (see `ls/config.zig`),
-        // or the built-in 48 / 16px defaults if there's no file. Read once
+        // or the built-in 32 / 16px defaults if there's no file. Read once
         // here and passed to `writeGrid` / `writeLongTable`.
         const cfg = cfg: {
             const dir = glyphwire.configDirPath(alloc, init.environ_map) catch break :cfg lsconfig.LsConfig{};
@@ -768,7 +768,7 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 ///
 /// The icon renders `.natural` (aspect-preserving, shrink-only) capped to
 /// `max_icon_h` pixels tall -- `cfg.small_icon_px` (default 16) or, with
-/// `-L`, `cfg.large_icon_px` (default 48), both from `ls.conf`. The block
+/// `-L`, `cfg.large_icon_px` (default 32), both from `ls.conf`. The block
 /// height (`Grid.block_rows`) is `ceil(max_icon_h / cell_h)`, floored at 1
 /// (small) or 2 (large, so a blank row sits between bands and one band's
 /// icon doesn't overlap the next's text) and capped at 6. `h_align =
@@ -811,7 +811,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
 
     // The icon renders `.natural` (aspect-preserving, shrink-only) capped
     // to `max_icon_h` pixels tall -- `cfg.large_icon_px` / `small_icon_px`
-    // from `ls.conf` (48 / 16 by default). `block_rows` is how many
+    // from `ls.conf` (32 / 16 by default). `block_rows` is how many
     // physical rows one band spans, derived from that height and the cell
     // size so the icon has room without a fixed 2-vs-1 assumption;
     // `icon_col_width` reserves the leading columns before the name and
