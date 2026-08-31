@@ -462,10 +462,16 @@ pub const App = struct {
     /// `refreshWindowState` (called each frame by the app runner before
     /// this) has already rebuilt the viewport/projection for the new
     /// framebuffer, so `render` just draws the larger or smaller grid.
+    ///
+    /// The always-on scrollbar takes `scrollbar_width_px` off the right
+    /// edge, so that much is subtracted from the usable width before
+    /// dividing into cells -- otherwise the last column would sit under
+    /// the bar. The initial window (see `main`) is opened
+    /// `scrollbar_width_px` wider than the grid for the same reason.
     fn syncWindowSize(self: *App, eng: *AppRunner.Engine) void {
         const fb = eng.window_state.framebuffer_size;
         if (cell_w <= 0 or cell_h <= 0) return;
-        const cols: usize = @intCast(@max(@divTrunc(fb.x, cell_w), min_grid_cols));
+        const cols: usize = @intCast(@max(@divTrunc(fb.x - scrollbar_width_px, cell_w), min_grid_cols));
         const rows: usize = @intCast(@max(@divTrunc(fb.y, cell_h), min_grid_rows));
         if (cols == grid_cols and rows == grid_rows) return;
 
@@ -614,38 +620,59 @@ pub const App = struct {
     /// place its next character, not something a user is looking at.
     pub fn render(self: *App, eng: *AppRunner.Engine) void {
         eng.renderer.clear(0.0, 0.0, 0.0, 1.0);
+
         eng.renderer.begin(eng.projMat);
+        {
+            self.server.ctx_mutex.lockUncancelable(self.server.io);
+            defer self.server.ctx_mutex.unlock(self.server.io);
 
-        self.server.ctx_mutex.lockUncancelable(self.server.io);
-        defer self.server.ctx_mutex.unlock(self.server.io);
-
-        self.renderLayer(eng, &self.server.ctx.root, 0, 0, true, self.server.ctx.root.view_scroll);
-        for (self.server.ctx.layer_order.items) |handle| {
-            const layer = self.server.ctx.layers.getPtr(handle) orelse continue;
-            self.renderLayer(
-                eng,
-                layer,
-                @intFromFloat(@round(layer.pos.x)),
-                @intFromFloat(@round(layer.pos.y)),
-                false,
-                0,
-            );
+            self.renderLayer(eng, &self.server.ctx.root, 0, 0, true, self.server.ctx.root.view_scroll);
+            for (self.server.ctx.layer_order.items) |handle| {
+                const layer = self.server.ctx.layers.getPtr(handle) orelse continue;
+                self.renderLayer(
+                    eng,
+                    layer,
+                    @intFromFloat(@round(layer.pos.x)),
+                    @intFromFloat(@round(layer.pos.y)),
+                    false,
+                    0,
+                );
+            }
         }
+        eng.renderer.end();
 
+        // Second pass, entirely after the first `end()` flushes: the
+        // renderer submits its batches in a fixed order (sprites, shapes,
+        // overlays, text), so a `drawFilledRect` in the same pass as the
+        // grid would still land *under* every layer's text. Flushing a
+        // fresh pass here puts the scrollbar's GL draws after all of that,
+        // so it sits over everything -- text and all layers included.
+        eng.renderer.begin(eng.projMat);
         self.renderScrollbar(eng);
-
         eng.renderer.end();
     }
 
     /// Draws the always-on scrollbar over the right edge: a dark track the
     /// full window height with a lighter thumb whose size and position
     /// reflect the root layer's scrollback (`history_len`) and current
-    /// view offset (`view_scroll`) -- see `scrollbarGeom`. Drawn last so
-    /// it sits over the grid; `handleScrollbar` owns the interaction.
+    /// view offset (`view_scroll`) -- see `scrollbarGeom`. Called in its
+    /// own render pass (see `render`) so it composites over every layer,
+    /// text included; `handleScrollbar` owns the interaction. Takes its
+    /// own short `ctx_mutex` snapshot rather than relying on `render`'s
+    /// lock, which is released by the time this second pass runs.
     fn renderScrollbar(self: *App, eng: *AppRunner.Engine) void {
         const fb = eng.window_state.framebuffer_size;
-        const root = &self.server.ctx.root;
-        const geom = scrollbarGeom(fb.x, fb.y, root.history_len, root.height, root.view_scroll);
+        var history_len: usize = undefined;
+        var height: usize = undefined;
+        var view_scroll: usize = undefined;
+        {
+            self.server.ctx_mutex.lockUncancelable(self.server.io);
+            defer self.server.ctx_mutex.unlock(self.server.io);
+            history_len = self.server.ctx.root.history_len;
+            height = self.server.ctx.root.height;
+            view_scroll = self.server.ctx.root.view_scroll;
+        }
+        const geom = scrollbarGeom(fb.x, fb.y, history_len, height, view_scroll);
 
         eng.renderer.drawFilledRect(
             pixzig.RectF.fromPosSize(@as(i32, @intFromFloat(geom.left)), 0, scrollbar_width_px, fb.y),
@@ -904,7 +931,12 @@ pub fn main(init: std.process.Init) !void {
     // context, so it still happens here, after the window is created.
     const appRunner = try AppRunner.init("glyphwire", alloc, .{
         .windowSize = .{
-            .x = @as(i32, @intCast(grid_cols)) * cell_w,
+            // `+ scrollbar_width_px`: the always-on scrollbar occupies
+            // that strip on the right, so open the window wide enough for
+            // all `grid_cols` cells *plus* the bar (see `syncWindowSize`,
+            // which subtracts it back out when converting a resize to
+            // cells).
+            .x = @as(i32, @intCast(grid_cols)) * cell_w + App.scrollbar_width_px,
             .y = @as(i32, @intCast(grid_rows)) * cell_h,
         },
         .resizable = true,
