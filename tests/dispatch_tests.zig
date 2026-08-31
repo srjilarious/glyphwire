@@ -646,6 +646,93 @@ pub fn getMetadataUntaggedCellReturnsNullTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"json\":null") != null);
 }
 
+/// `scroll_view` moves the root layer's scrollback view offset, returns
+/// the clamped `{offset, max}`, and queues a `scroll` broadcast for other
+/// subscribers.
+pub fn scrollViewMovesOffsetClampsAndBroadcastsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 4, 2, 5);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // 3 rows of content over a 2-tall viewport => history_len 1.
+    try ctx.root.writeText("aaaabbbbcccc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(ctx.root.history_len, 1);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":7,"method":"scroll_view","params":{"delta":9}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    defer if (result.broadcast) |b| alloc.free(b.body);
+
+    try testz.expectTrue(result.response != null);
+    // delta 9 clamps to history_len (1).
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"offset\":1") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"max\":1") != null);
+    try testz.expectEqual(ctx.root.view_scroll, 1);
+
+    try testz.expectTrue(result.broadcast != null);
+    try testz.expectEqualStr("scroll", result.broadcast.?.event);
+    try testz.expectTrue(std.mem.indexOf(u8, result.broadcast.?.body, "\"offset\":1") != null);
+}
+
+/// `get_property("scroll")` reports the same `{offset, max}` a preceding
+/// `scroll_view` landed on.
+pub fn getPropertyScrollReportsOffsetAndMaxTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 4, 2, 5);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try ctx.root.writeText("aaaabbbbccccdddd", glyphwire.default_style.fg, glyphwire.default_style.bg); // history_len 2
+    _ = ctx.root.scrollView(1, null);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":3,"method":"get_property","params":{"property":"scroll"}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"offset\":1") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"max\":2") != null);
+}
+
+/// `get_metadata` with a non-zero `view_offset` resolves `(row, col)`
+/// against scrollback (`Layer.viewRow`) rather than the live viewport --
+/// the path a click made while glyphwire-host is scrolled back takes so
+/// it lands on the row actually under the pointer.
+pub fn getMetadataWithViewOffsetResolvesScrollbackRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 4, 2, 5);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const id = try ctx.createMetadata("{\"path\":\"/x\"}");
+    try ctx.root.writeTextTagged("AB", glyphwire.default_style.fg, glyphwire.default_style.bg, id); // row 0
+    ctx.root.setProperty(.{ .cursor = .{ .row = 1, .col = 0 } });
+    try ctx.root.writeText("cd", glyphwire.default_style.fg, glyphwire.default_style.bg); // row 1
+    // Name a row past the bottom to scroll row 0 ("AB", tagged) into history.
+    ctx.root.setProperty(.{ .cursor = .{ .row = 2, .col = 0 } });
+    try testz.expectEqual(ctx.root.history_len, 1);
+
+    // view_offset 0: live viewport row 0 is now "cd", untagged.
+    const live_msg =
+        \\{"jsonrpc":"2.0","id":1,"method":"get_metadata","params":{"row":0,"col":0}}
+    ;
+    const live_result = try d.handle(alloc, live_msg);
+    defer if (live_result.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, live_result.response.?, "\"id\":null") != null);
+
+    // view_offset 1: the scrolled-off row 0 ("AB"), still carrying `id`.
+    const hist_msg =
+        \\{"jsonrpc":"2.0","id":2,"method":"get_metadata","params":{"row":0,"col":0,"view_offset":1}}
+    ;
+    const hist_result = try d.handle(alloc, hist_msg);
+    defer if (hist_result.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, hist_result.response.?, "\"id\":1") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, hist_result.response.?, "\\\"path\\\":\\\"/x\\\"") != null);
+}
+
 pub fn writeTextUnknownMetadataIdErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

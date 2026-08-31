@@ -10,14 +10,16 @@ const glyphwire = @import("glyphwire");
 /// client's job per decisions.md; `draw_image` itself only clips, never
 /// stretches.
 ///
-/// Waits for a keypress before exiting, like a real image viewer. When
+/// Draws the image and exits as soon as the pixels are on the grid -- no
+/// keypress wait. `draw_image` is a request, so by the time it returns
+/// the server has the cells and any client rendering them (glyphwire-host)
+/// will paint them on its next frame; nothing further needs this process
+/// alive. Launched from glyphwire-shell's prompt (the common case) the
+/// image simply stays on screen and the prompt returns immediately;
 /// launched directly as glyphwire-host's exec'd child (`glyphwire-host
 /// glyphwire-view <path>`, replacing glyphwire-shell -- see
-/// shell/main.zig's exec path), this process exiting is what ends the
-/// whole host (host/main.zig's `reapChild`/`shell_exited` treats any
-/// exec'd child's exit as "done"). Without this wait, the image would
-/// draw and the window would close again in the same fraction of a
-/// second -- indistinguishable from a crash even though nothing failed.
+/// shell/main.zig's exec path), this process exiting ends the host, so
+/// the window closes right after the image is drawn.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
@@ -79,18 +81,9 @@ pub fn main(init: std.process.Init) !void {
     snapshot.deinit();
     try client.setCursor(@min(cur.row + rows, grid_rows), 0);
 
-    // See the doc comment above: stay open until the user dismisses it
-    // (any keypress) rather than returning immediately. Falls back to
-    // returning right away if the subscription itself fails -- a viewer
-    // that can't listen for a dismissal key isn't worth blocking forever
-    // over.
-    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{"key"}) catch return;
-    defer listener.deinit();
-    while (true) {
-        const ev = (try listener.waitKeyEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
-        defer alloc.free(ev.key);
-        if (ev.pressed) return;
-    }
+    // Every request above has already round-tripped, so the image and the
+    // follow-up cursor move are committed server-side -- nothing left to
+    // wait for. Return (and exit); see the doc comment above.
 }
 
 fn fallback(io: std.Io, msg: []const u8) !void {

@@ -196,10 +196,11 @@ surface.
   thousands of rows of history, while a small transient layer (e.g. a
   45×3 popup notification) can reasonably ask for 0. Whatever creates a
   context/layer (the shell, eventually via `create_context`/
-  `create_layer`) decides this per layer. Reading scrollback rows back
-  isn't exposed over the wire yet — no message needs it yet, since the
-  message catalog so far only covers `write_text` and
-  `get_property`/`set_property("cursor")`.
+  `create_layer`) decides this per layer. Scrollback rows *are* now
+  readable over the wire — `get_cells`/`get_metadata` take a `view_offset`
+  (rows above the live viewport, via `Layer.viewRow`) so a client can
+  inspect exactly what's on screen while the host is scrolled back (the
+  path a mouse click in scrollback takes to resolve to the right cell).
 - **v1 built:** `create_layer`/`destroy_layer`, every layer parented
   directly to the (single, implicit) context's root layer — deeper
   nesting is designed above but nothing creates or needs a non-root
@@ -234,8 +235,24 @@ surface.
   shrink" because the ring buffer already models exactly this
   non-destructive live-tail behavior — a shrink is just the viewport
   window narrowing over content that's still there.
+- **v1 built — scrollback view + scrollbar:** the root layer carries a
+  display-only `view_scroll` (rows scrolled back into the cell-grid
+  history; `viewRow` applies it at read time, writes are unaffected).
+  One piece of state, three drivers: `glyphwire-host`'s mouse wheel and
+  its always-on right-edge scrollbar (`Server.reportScroll`, in-process),
+  and any client via the `scroll_view` request — `glyphwire-shell`'s
+  browse cursor calls it when Up walks past the top of the window, so a
+  listing longer than the window scrolls into view ("scroll the window
+  along"). `get_property("scroll")` reads `{offset, max}`; a `scroll`
+  notification (subscribe `"scroll"`) fires on every move so other
+  clients stay in sync (glyphwire-shell snaps back to the live tail when
+  the user starts typing). `scrollOne` bumps `view_scroll` in step with
+  incoming output so the rows being read stay put until history eviction
+  forces a drift. The scrollbar was chosen always-visible (a persistent
+  position indicator) with track-clicks paging one screenful.
 - **Not built — still open:** `create_context`, non-root parenting,
-  `clip`/`scroll`/`visibility` properties.
+  `clip`/`visibility` properties, a raw wheel-delta `mouse_scroll` event
+  stream (distinct from `scroll`, which reports the resolved offset).
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline

@@ -259,6 +259,69 @@ pub fn viewRowClampsOffsetPastRetainedHistoryTest(io: std.Io, alloc: std.mem.All
     try testz.expectEqualStr("d", row1[0].grapheme());
 }
 
+/// `scrollView` moves `view_scroll` and clamps to `0..history_len` --
+/// the primitive glyphwire-host's wheel/scrollbar and glyphwire-shell's
+/// browse cursor all drive (via `Server.reportScroll` / the `scroll_view`
+/// wire method).
+pub fn scrollViewClampsToRetainedHistoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 4);
+    defer layer.deinit();
+    try layer.writeText("abcdefghij", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    // 10 chars over a 3-wide, 2-tall viewport => 4 rows written, 2 scrolled
+    // off, so history_len == 2.
+    try testz.expectEqual(layer.history_len, 2);
+
+    try testz.expectEqual(layer.scrollView(1, null), 1);
+    try testz.expectEqual(layer.view_scroll, 1);
+    // Absolute past history clamps down; delta past 0 clamps up.
+    try testz.expectEqual(layer.scrollView(99, null), 2);
+    try testz.expectEqual(layer.scrollView(null, -99), 0);
+    // Pure query (both null) leaves it unchanged.
+    try testz.expectEqual(layer.scrollView(null, null), 0);
+}
+
+/// While the view is scrolled back, a fresh scroll (new output) bumps
+/// `view_scroll` in step so the rows the user is looking at stay put on
+/// screen instead of sliding down toward the tail -- terminal-style. Caps
+/// at `history_len`, so once scrollback is full the oldest viewed row is
+/// evicted and the view drifts.
+pub fn scrollOneKeepsScrolledBackViewPinnedToContentTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 10);
+    defer layer.deinit();
+    try layer.writeText("abcdefghi", glyphwire.default_style.fg, glyphwire.default_style.bg); // 3 rows, history_len 1
+
+    // Scroll back to the oldest retained row ("abc" at viewport row 0).
+    _ = layer.scrollView(1, null);
+    try testz.expectEqualStr("a", layer.viewRow(layer.view_scroll, 0)[0].grapheme());
+
+    // A row of new output scrolls the live tail; view_scroll follows so
+    // "abc" is still what the top row shows.
+    try layer.writeText("jkl", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.view_scroll, 2);
+    try testz.expectEqualStr("a", layer.viewRow(layer.view_scroll, 0)[0].grapheme());
+}
+
+/// A view scrolled deeper than the post-resize `history_len` is clamped
+/// back into range rather than left dangling past `scrollbackRow`'s
+/// bounds.
+pub fn layerResizeClampsScrollViewIntoNewHistoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 3, 4, 10);
+    defer layer.deinit();
+    // 6 rows of content over a 4-tall viewport => history_len 2.
+    try layer.writeText("aaabbbcccdddeeefff", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    _ = layer.scrollView(2, null);
+    try testz.expectEqual(layer.view_scroll, 2);
+
+    // Grow the viewport tall enough to pull all history back down:
+    // history_len goes to 0, so view_scroll must clamp to 0.
+    try layer.resize(3, 8);
+    try testz.expectEqual(layer.history_len, 0);
+    try testz.expectEqual(layer.view_scroll, 0);
+}
+
 /// Regression test for glyphwire-shell's `writeCapturedText`, which pipes
 /// a spawned child's stdout onto the grid as one `set_property(cursor)` +
 /// `write_text` pair per line. It used to hand `resolveRow` an

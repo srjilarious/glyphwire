@@ -287,7 +287,11 @@ pub const Server = struct {
     }
 
     /// In-process equivalent of `report_mouse_button` -- see `reportKey`.
-    pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos) !void {
+    /// `view_offset` is the root layer's current scrollback view offset
+    /// (see `core.Layer.view_scroll`), carried through into the broadcast
+    /// so a subscriber (glyphwire-shell) can resolve `cell` against the
+    /// same scrolled-back row the user actually clicked.
+    pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos, view_offset: usize) !void {
         const changed = changed: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
@@ -300,13 +304,46 @@ pub const Server = struct {
         const Notification = struct {
             jsonrpc: []const u8 = "2.0",
             method: []const u8 = "mouse_button",
-            params: struct { button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos },
+            params: struct { button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos, view_offset: usize },
         };
         const body = try std.json.Stringify.valueAlloc(alloc, Notification{
-            .params = .{ .button = button, .pressed = pressed, .px = px, .cell = cell },
+            .params = .{ .button = button, .pressed = pressed, .px = px, .cell = cell, .view_offset = view_offset },
         }, .{});
         defer alloc.free(body);
         self.broadcast(null, "mouse_button", body);
+    }
+
+    /// In-process scroll of the root layer's scrollback view (see
+    /// `core.Layer.scrollView`) -- glyphwire-host's mouse wheel and
+    /// scrollbar drive this directly rather than over a loopback
+    /// connection, same pattern as `reportKey`/`reportResize`. `offset`
+    /// (absolute target, rows) and/or `delta` (added after) are clamped
+    /// internally to the retained history; omitting both is a no-op.
+    /// Broadcasts a `scroll` notification (`{offset, max}`) to every
+    /// `"scroll"` subscriber only when the value actually changes, so
+    /// glyphwire-shell can keep its own view of the scroll state current
+    /// (e.g. to snap back to the live tail when the user starts typing).
+    /// Cheap to call every frame.
+    pub fn reportScroll(self: *Server, alloc: std.mem.Allocator, offset: ?usize, delta: ?i64) !void {
+        const result = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const before = self.ctx.root.view_scroll;
+            const after = self.ctx.root.scrollView(offset, delta);
+            break :blk .{ .changed = before != after, .offset = after, .max = self.ctx.root.history_len };
+        };
+        if (!result.changed) return;
+
+        const Notification = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8 = "scroll",
+            params: struct { offset: usize, max: usize },
+        };
+        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
+            .params = .{ .offset = result.offset, .max = result.max },
+        }, .{});
+        defer alloc.free(body);
+        self.broadcast(null, "scroll", body);
     }
 
     /// In-process equivalent of `report_mouse_move` -- see `reportKey`.

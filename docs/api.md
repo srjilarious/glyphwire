@@ -34,9 +34,10 @@ today; the server auto-creates exactly one context at startup.
 |---|---|---|---|---|
 | `create_layer` | request | `width?, height?, scrollback_rows` | layer handle | ✅ always parented to the root layer (no `parent`/`context` params — there's only one context per decisions.md's current scope, and deeper nesting isn't exercised yet); `width`/`height` default to the root layer's own size |
 | `destroy_layer` | notification | `layer` | — | ✅ frees the layer and drops it from compositing; the root layer (handle 0, i.e. an omitted `layer` elsewhere) can't be destroyed this way — an unknown or root handle both just report `UnknownLayer` |
-| `get_property` | request | `layer?, property` | property value | ✅ (`cursor`, `revision`, `position`) |
+| `get_property` | request | `layer?, property` | property value | ✅ (`cursor`, `revision`, `position`, `size`, `scroll`) |
 | `set_property` | notification | `layer?, property, value` | — | ✅ (`cursor`, `position`) |
-| `get_cells` | request | `layer?` | full row-major cell snapshot (`cols, rows, revision, cells`) | ✅ each cell also reports `fg_icon?` (an icon composited *over* the background — `draw_icon`'s `foreground: true`, and every table body icon; same shape as `bg_icon`) and `metadata_id?` (see Metadata below) alongside `bg`/`bg_image`/`bg_icon` — just the id/handle, not the resolved JSON, same "handle, not content" treatment `bg_image`/`bg_icon` give image/icon handles |
+| `get_cells` | request | `layer?, view_offset?` | full row-major cell snapshot (`cols, rows, revision, cells`) | ✅ each cell also reports `fg_icon?` (an icon composited *over* the background — `draw_icon`'s `foreground: true`, and every table body icon; same shape as `bg_icon`) and `metadata_id?` (see Metadata below) alongside `bg`/`bg_image`/`bg_icon` — just the id/handle, not the resolved JSON, same "handle, not content" treatment `bg_image`/`bg_icon` give image/icon handles. `view_offset` (default 0 = the live viewport) reads that many rows of scrollback above the live viewport, so a client can snapshot exactly what's on screen while the host is scrolled back |
+| `scroll_view` | request | `layer?, offset?, delta?` | `{offset, max}` | ✅ moves the layer's scrollback view offset (`offset` absolute rows, then `+delta`), clamped to `0..max` (`= history_len`); returns the result. Passing neither `offset` nor `delta` is a pure query. Also broadcasts a `scroll` notification (see Input) to other subscribers. This is how a client scrolls the host's view — glyphwire-shell's browse cursor drives it when it walks past the top of the window; the host's own mouse wheel / scrollbar move the same state in-process |
 
 Every message above whose params include `layer?` defaults to the root
 layer when omitted, same convention `row?`/`col?` already use for "at the
@@ -55,13 +56,15 @@ per property):
 | `size` | `{cols, rows}` — this is what answers "get window size" for the root layer, since a Context's base size **is** its root layer's default size. Get-only: a client reads it (or subscribes to `resize`, below) but can't set it — the host owns the window size | ✅ |
 | `position` | `{x, y}`, pixel-precise, relative to the layer's parent (the root layer for every `create_layer`-made layer today) | ✅ |
 | `clip` | clip rect | 🔶 |
-| `scroll` | scroll offset (pixel-precise; distinct from the cell-grid scrollback ring in core.zig) | 🔶 |
+| `scroll` | `{offset, max}` — how far the on-screen view is scrolled back into this layer's cell-grid scrollback ring (`offset` rows above the live tail, out of `max` = `history_len` retained). Get-only through `get_property`; move it with `scroll_view` (above), which also broadcasts a `scroll` notification. `offset == 0` is the live tail | ✅ |
 | `visibility` | shown/hidden | 🔶 |
 
 Live size changes arrive separately as a `resize` event (see Input
 below) rather than requiring the client to poll `get_property(layer,
 "size")` — polling still works, but a glyphwire-aware program that cares
-about resizes should subscribe instead.
+about resizes should subscribe instead. The `scroll` offset has the same
+poll-vs-subscribe split: a `scroll` notification fires whenever it moves
+(from `scroll_view` or the host's wheel/scrollbar).
 
 When the host window is resized, the root layer (and every
 `create_layer` layer made with no explicit size, which had been
@@ -108,7 +111,7 @@ dangling id isn't an error).
 |---|---|---|---|---|
 | `create_metadata` | request | `json` | metadata handle | ✅ stores `json` verbatim — the server never parses it, only stores/returns it |
 | `destroy_metadata` | notification | `id` | — | ✅ frees `id`'s stored JSON; errors `UnknownMetadata` on an unknown id, same treatment `destroy_layer` gives an unknown layer handle. No reference counting — a cell still tagged with `id` afterward is left dangling, see `get_metadata` |
-| `get_metadata` | request | `layer?, row, col` | `{id, json}`, both nullable | ✅ resolves `(row, col)` to a cell and reports its `metadata_id` plus that id's stored JSON. `row`/`col` are required (unlike `draw_icon`/`draw_image`'s cursor-defaulted `row?`/`col?`) — this is a targeted lookup (e.g. resolving whatever cell a mouse click landed on), not a draw at "wherever the cursor is". `id` non-null with `json` null means a dangling tag (the id was `destroy_metadata`'d after the cell was tagged) — reported rather than treated as an error, so a caller can tell "untagged" apart from "tagged but the data's gone" |
+| `get_metadata` | request | `layer?, row, col, view_offset?` | `{id, json}`, both nullable | ✅ resolves `(row, col)` to a cell and reports its `metadata_id` plus that id's stored JSON. `row`/`col` are required (unlike `draw_icon`/`draw_image`'s cursor-defaulted `row?`/`col?`) — this is a targeted lookup (e.g. resolving whatever cell a mouse click landed on), not a draw at "wherever the cursor is". `view_offset` (default 0) resolves against that many rows of scrollback above the live viewport, so a click made while the host is scrolled back — the `view_offset` comes through on the `mouse_button` event — lands on the row actually under the pointer. `id` non-null with `json` null means a dangling tag (the id was `destroy_metadata`'d after the cell was tagged) — reported rather than treated as an error, so a caller can tell "untagged" apart from "tagged but the data's gone" |
 | `tag_metadata` | notification | `layer?, row, col, metadata_id` | — | ✅ sets exactly one cell's `metadata_id`, touching nothing else about it — unlike `write_text`/`draw_icon` below, which tag as a side effect of also drawing something. For a client that needs a cell tagged without changing what's drawn there, e.g. `glyphwire-ls` tagging the extra cells a `.natural`-scaled icon visually overflows into so browsing resolves correctly anywhere the icon actually renders, not just its anchor cell. `metadata_id` is required (there'd be no point tagging with nothing) and validated the same as `write_text`/`draw_icon`'s |
 
 `write_text`/`draw_icon` (above) both take an optional `metadata_id` —
@@ -159,24 +162,26 @@ already uses) to call once that lands. See decisions.md's Table section.
 Two independent, separately-subscribable streams (raw events and mapped
 actions) per decisions.md's Input model. Raw key/mouse-button events are
 implemented end to end (an input-capturing process reports what it sees;
-subscribers get it re-broadcast); `resize` is implemented (the host
-reports its own window size changes in-process, subscribers get the new
-`{cols, rows}` re-broadcast); mouse move as a live stream, scroll,
-gamepad, IME, and action maps are all still open.
+subscribers get it re-broadcast); `resize` and `scroll` are implemented
+(the host reports its own window-size / scrollback-view changes
+in-process, subscribers get the new value re-broadcast); mouse move as a
+live stream, wheel-delta scroll, gamepad, IME, and action maps are all
+still open.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `subscribe` | request | `events: []str` (e.g. `["key", "mouse_button"]`) | acked subscription list | ✅ |
+| `subscribe` | request | `events: []str` (e.g. `["key", "mouse_button", "scroll"]`) | acked subscription list | ✅ |
 | `report_key` | notification, client→server | `key, pressed` | — | ✅ from whatever process captures input (`glyphwire-host`); see also `Server.reportKey`/`reportKeyRepeat` for a caller reporting in-process rather than over the wire |
-| `report_mouse_button` | notification, client→server | `button, pressed, px, cell` | — | ✅ |
+| `report_mouse_button` | notification, client→server | `button, pressed, px, cell, view_offset?` | — | ✅ `view_offset` (default 0) is the root layer's scrollback view offset at click time, carried into the `mouse_button` broadcast so a subscriber can resolve `cell` against the right scrolled-back row (see `get_metadata`) |
 | `report_mouse_move` | notification, client→server | `px, cell` | — | ✅ updates `get_input_state`'s cursor fields only, no broadcast — see below |
 | `get_input_state` | request | — | `keys_down, mouse_buttons_down, cursor_px, cursor_cell` | ✅ one-time snapshot; `InputListener` is the live-updating equivalent, fed by the notifications below |
 | `key_down` / `key_up` | notification, server→client | `key` | — | ✅ also re-sent (still `key_down`) on typematic repeat for a held key — no separate "this was a repeat" signal on the wire |
-| `mouse_button` | notification, server→client | `button, pressed, px, cell` | — | ✅ |
+| `mouse_button` | notification, server→client | `button, pressed, px, cell, view_offset` | — | ✅ `view_offset` is the scrollback rows shown when the click happened (0 at the live tail) — feed it straight into `get_metadata`'s `view_offset` |
 | `mouse_move` | notification, server→client | position | — | 🔶 no live push stream yet — `report_mouse_move` only updates state, doesn't broadcast |
-| `mouse_scroll` | notification, server→client | delta | — | 🔶 |
+| `mouse_scroll` | notification, server→client | delta | — | 🔶 wheel-delta stream; separate from `scroll` below, which reports the resolved scrollback view offset, not raw wheel ticks |
 | `gamepad_*` | notification, server→client | — | — | 🔶 |
 | `resize` | notification, server→client | new `{cols, rows}` | — | ✅ sent when `glyphwire-host`'s (now user-resizable) window changes size, after the root layer and every base-size-tracking layer have been resized (see Property names' `size` above for the bottom-anchored content behavior). Reported in-process by the host via `Server.reportResize`, same path as `reportKey`; subscribe with `"resize"`. `InputListener` (`pollResizeEvent`/`waitResizeEvent`/`size`) is the client-side consumer |
+| `scroll` | notification, server→client | `{offset, max}` | — | ✅ sent whenever the root layer's scrollback view offset moves — the host's mouse wheel / scrollbar (`Server.reportScroll`) or another client's `scroll_view` (e.g. glyphwire-shell's browse cursor). Subscribe with `"scroll"`; `InputListener` (`pollScrollEvent`/`waitScrollEvent`/`scroll`) is the client-side consumer. See Property names' `scroll` above |
 | *(text/IME composition)* | — | — | — | ⬜ own state machine, not detailed yet — kept distinct from raw key events |
 | `action` | notification, server→client | action name, phase | — | 🔶 sent alongside raw events, never instead of |
 

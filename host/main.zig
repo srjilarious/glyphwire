@@ -109,13 +109,12 @@ pub const App = struct {
     /// session out from under whatever's running in it.
     shell_exited: *std.atomic.Value(bool),
     last_mouse_px: pixzig.Vec2F = .{ .x = -1, .y = -1 },
-    /// How many rows of history the root layer's view is currently
-    /// scrolled back by -- 0 is the live viewport. Display-only (see
-    /// `glyphwire.Layer.viewRow`); doesn't touch the layer itself, so
-    /// glyphwire-shell keeps writing to the live buffer exactly as before
-    /// while the user is looking at scrollback. Driven by the mouse wheel
-    /// -- see `handleScroll`.
-    scroll_offset: usize = 0,
+    /// True while the left button is held on the scrollbar thumb after
+    /// grabbing it -- see `handleScrollbar`. `scrollbar_grab_dy` is the
+    /// pixel offset between the pointer and the thumb's top edge at grab
+    /// time, so the thumb tracks the pointer without jumping.
+    scrollbar_drag: bool = false,
+    scrollbar_grab_dy: f32 = 0,
     arrow_repeat: struct {
         up: ArrowRepeatState = .{},
         down: ArrowRepeatState = .{},
@@ -304,7 +303,11 @@ pub const App = struct {
 
         self.syncWindowSize(eng);
         self.reportKeyEvents(eng);
-        self.reportMouseEvents(eng);
+        // The scrollbar gets first refusal on the left button: a press or
+        // drag that belongs to it is consumed here so `reportMouseEvents`
+        // doesn't also forward it to the grid as a click.
+        const scrollbar_took_left = self.handleScrollbar(eng);
+        self.reportMouseEvents(eng, scrollbar_took_left);
         self.handleArrowKeys(eng, deltaTimeMs);
         self.handleScroll(eng);
 
@@ -321,25 +324,132 @@ pub const App = struct {
     /// that made `cat`ing anything longer than the window blast straight
     /// past with no way to look back at it (the ring buffer already
     /// retained the history via `Context.createLayer`'s `scrollback_rows`;
-    /// nothing ever read it for display). Purely a host-side view offset
-    /// (see `scroll_offset`'s doc comment) -- clamped to the root layer's
-    /// `history_len` so it can't scroll past what's actually retained.
+    /// nothing ever read it for display). Goes through
+    /// `Server.reportScroll`, which owns the clamp to `history_len` and
+    /// broadcasts a `scroll` notification so glyphwire-shell stays in sync
+    /// -- the wheel, the scrollbar, and glyphwire-shell's browse cursor
+    /// all move the same `root.view_scroll` field, which `render` reads
+    /// directly each frame.
     fn handleScroll(self: *App, eng: *AppRunner.Engine) void {
         if (!eng.inputs.mouse_enabled) return;
         const dy = eng.inputs.mouse.scroll().y;
         if (dy == 0) return;
 
-        self.server.ctx_mutex.lockUncancelable(self.server.io);
-        defer self.server.ctx_mutex.unlock(self.server.io);
-
-        const history_len = self.server.ctx.root.history_len;
         const delta: i64 = @intFromFloat(@round(dy * scroll_rows_per_tick));
-        const new_offset = std.math.clamp(
-            @as(i64, @intCast(self.scroll_offset)) + delta,
-            0,
-            @as(i64, @intCast(history_len)),
-        );
-        self.scroll_offset = @intCast(new_offset);
+        self.server.reportScroll(self.alloc, null, delta) catch |err| {
+            std.log.err("glyphwire-host: reportScroll(wheel) failed: {t}", .{err});
+        };
+    }
+
+    // Scrollbar geometry, in pixels. Always drawn on the window's right
+    // edge (per the design decision -- a persistent scroll indicator, not
+    // an auto-hiding one). The thumb never shrinks below `scrollbar_min_thumb_px`
+    // so it stays grabbable even with a very deep scrollback.
+    const scrollbar_width_px: i32 = 12;
+    const scrollbar_min_thumb_px: f32 = 24;
+
+    const ScrollbarGeom = struct {
+        /// Left edge of the bar in window pixels.
+        left: f32,
+        track_h: f32,
+        thumb_top: f32,
+        thumb_h: f32,
+    };
+
+    /// Pure geometry: where the scrollbar track and thumb sit for a given
+    /// framebuffer size and scroll state. The thumb's *height* is the
+    /// visible fraction (`height / (history_len + height)`) of the track;
+    /// its *position* runs from flush-bottom at `view_scroll == 0` (live
+    /// tail) to flush-top at `view_scroll == history_len` (oldest retained
+    /// row).
+    fn scrollbarGeom(fb_w: i32, fb_h: i32, history_len: usize, height: usize, view_scroll: usize) ScrollbarGeom {
+        const track_h: f32 = @floatFromInt(fb_h);
+        const total: f32 = @floatFromInt(history_len + height);
+        const view_h: f32 = @floatFromInt(height);
+
+        var thumb_h: f32 = if (total > 0) track_h * (view_h / total) else track_h;
+        thumb_h = std.math.clamp(thumb_h, @min(scrollbar_min_thumb_px, track_h), track_h);
+
+        const rows_above_top: f32 = @floatFromInt(history_len - view_scroll);
+        const top_frac: f32 = if (total > 0) rows_above_top / total else 0;
+        var thumb_top = track_h * top_frac;
+        const max_top = @max(track_h - thumb_h, 0);
+        thumb_top = std.math.clamp(thumb_top, 0, max_top);
+
+        return .{
+            .left = @floatFromInt(fb_w - scrollbar_width_px),
+            .track_h = track_h,
+            .thumb_top = thumb_top,
+            .thumb_h = thumb_h,
+        };
+    }
+
+    /// Handles the scrollbar's own mouse interaction, before the grid sees
+    /// the click. Returns true when the left button this frame belongs to
+    /// the scrollbar (a press that landed on the bar, or an in-progress
+    /// thumb drag, or the release ending one) -- the caller then tells
+    /// `reportMouseEvents` to drop the left button so it isn't also
+    /// delivered to glyphwire-shell as a grid click.
+    ///
+    /// - Press on the thumb: start dragging it (records the grab offset).
+    /// - Press on the track above/below the thumb: page the view one
+    ///   screenful toward the click.
+    /// - Drag: map the pointer to a row offset and push it through
+    ///   `Server.reportScroll`.
+    fn handleScrollbar(self: *App, eng: *AppRunner.Engine) bool {
+        if (!eng.inputs.mouse_enabled) return false;
+
+        const pos = eng.inputs.mouse.pos();
+        const fb = eng.window_state.framebuffer_size;
+
+        var history_len: usize = undefined;
+        var height: usize = undefined;
+        var view_scroll: usize = undefined;
+        {
+            self.server.ctx_mutex.lockUncancelable(self.server.io);
+            defer self.server.ctx_mutex.unlock(self.server.io);
+            history_len = self.server.ctx.root.history_len;
+            height = self.server.ctx.root.height;
+            view_scroll = self.server.ctx.root.view_scroll;
+        }
+        const geom = scrollbarGeom(fb.x, fb.y, history_len, height, view_scroll);
+        const on_bar = pos.x >= geom.left;
+
+        if (eng.inputs.mouse.pressed(.left)) {
+            if (!on_bar) return false;
+            if (pos.y >= geom.thumb_top and pos.y <= geom.thumb_top + geom.thumb_h) {
+                self.scrollbar_drag = true;
+                self.scrollbar_grab_dy = pos.y - geom.thumb_top;
+            } else {
+                // One screenful per track click, toward the pointer.
+                const page: i64 = @intCast(@max(height, 2) - 1);
+                const delta: i64 = if (pos.y < geom.thumb_top) page else -page;
+                self.server.reportScroll(self.alloc, null, delta) catch {};
+            }
+            return true;
+        }
+
+        if (self.scrollbar_drag) {
+            if (eng.inputs.mouse.down(.left)) {
+                const total: f32 = @floatFromInt(history_len + height);
+                const max_top = @max(geom.track_h - geom.thumb_h, 0);
+                const thumb_top = std.math.clamp(pos.y - self.scrollbar_grab_dy, 0, max_top);
+                const top_frac: f32 = if (geom.track_h > 0) thumb_top / geom.track_h else 0;
+                const rows_above_top: i64 = @intFromFloat(@round(top_frac * total));
+                const target: i64 = std.math.clamp(
+                    @as(i64, @intCast(history_len)) - rows_above_top,
+                    0,
+                    @as(i64, @intCast(history_len)),
+                );
+                self.server.reportScroll(self.alloc, @intCast(target), null) catch {};
+                return true;
+            }
+            // Button released -- end the drag and swallow this release.
+            self.scrollbar_drag = false;
+            return true;
+        }
+
+        return false;
     }
 
     /// Picks up a window resize: converts the current framebuffer size to
@@ -444,7 +554,16 @@ pub const App = struct {
         }
     }
 
-    fn reportMouseEvents(self: *App, eng: *AppRunner.Engine) void {
+    /// `skip_left` drops the left button for this frame -- set when
+    /// `handleScrollbar` already consumed it (a scrollbar press, drag, or
+    /// release), so the same click isn't also delivered to glyphwire-shell
+    /// as a grid click. Mouse *move* reporting is unaffected.
+    ///
+    /// The `view_offset` passed alongside each button is the root layer's
+    /// current scrollback view offset, so a click made while scrolled back
+    /// carries enough context for glyphwire-shell to resolve it against
+    /// the row actually under the pointer (see `Client.getMetadata`).
+    fn reportMouseEvents(self: *App, eng: *AppRunner.Engine, skip_left: bool) void {
         if (!eng.inputs.mouse_enabled) return;
         const pos = eng.inputs.mouse.pos();
         const cell = cellFromPixel(pos.x, pos.y);
@@ -454,17 +573,26 @@ pub const App = struct {
             self.server.reportMouseMove(.{ .x = pos.x, .y = pos.y }, cell);
         }
 
+        const view_offset = blk: {
+            self.server.ctx_mutex.lockUncancelable(self.server.io);
+            defer self.server.ctx_mutex.unlock(self.server.io);
+            break :blk self.server.ctx.root.view_scroll;
+        };
+
         const fields = @typeInfo(pixzig.glfw.MouseButton).@"enum".fields;
         inline for (fields) |field| {
             const btn = @field(pixzig.glfw.MouseButton, field.name);
-            if (eng.inputs.mouse.pressed(btn)) {
-                self.server.reportMouseButton(self.alloc, field.name, true, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
-                    std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field.name, err });
-                };
-            } else if (eng.inputs.mouse.released(btn)) {
-                self.server.reportMouseButton(self.alloc, field.name, false, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
-                    std.log.err("reportMouseButton({s}, false) failed: {t}", .{ field.name, err });
-                };
+            const is_left = btn == .left;
+            if (!(skip_left and is_left)) {
+                if (eng.inputs.mouse.pressed(btn)) {
+                    self.server.reportMouseButton(self.alloc, field.name, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
+                        std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field.name, err });
+                    };
+                } else if (eng.inputs.mouse.released(btn)) {
+                    self.server.reportMouseButton(self.alloc, field.name, false, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
+                        std.log.err("reportMouseButton({s}, false) failed: {t}", .{ field.name, err });
+                    };
+                }
             }
         }
     }
@@ -491,7 +619,7 @@ pub const App = struct {
         self.server.ctx_mutex.lockUncancelable(self.server.io);
         defer self.server.ctx_mutex.unlock(self.server.io);
 
-        self.renderLayer(eng, &self.server.ctx.root, 0, 0, true, self.scroll_offset);
+        self.renderLayer(eng, &self.server.ctx.root, 0, 0, true, self.server.ctx.root.view_scroll);
         for (self.server.ctx.layer_order.items) |handle| {
             const layer = self.server.ctx.layers.getPtr(handle) orelse continue;
             self.renderLayer(
@@ -504,16 +632,43 @@ pub const App = struct {
             );
         }
 
+        self.renderScrollbar(eng);
+
         eng.renderer.end();
+    }
+
+    /// Draws the always-on scrollbar over the right edge: a dark track the
+    /// full window height with a lighter thumb whose size and position
+    /// reflect the root layer's scrollback (`history_len`) and current
+    /// view offset (`view_scroll`) -- see `scrollbarGeom`. Drawn last so
+    /// it sits over the grid; `handleScrollbar` owns the interaction.
+    fn renderScrollbar(self: *App, eng: *AppRunner.Engine) void {
+        const fb = eng.window_state.framebuffer_size;
+        const root = &self.server.ctx.root;
+        const geom = scrollbarGeom(fb.x, fb.y, root.history_len, root.height, root.view_scroll);
+
+        eng.renderer.drawFilledRect(
+            pixzig.RectF.fromPosSize(@as(i32, @intFromFloat(geom.left)), 0, scrollbar_width_px, fb.y),
+            pixzig.Color.from(28, 28, 32, 255),
+        );
+        eng.renderer.drawFilledRect(
+            pixzig.RectF{
+                .l = geom.left + 2,
+                .t = geom.thumb_top,
+                .r = geom.left + @as(f32, @floatFromInt(scrollbar_width_px)) - 2,
+                .b = geom.thumb_top + geom.thumb_h,
+            },
+            pixzig.Color.from(120, 120, 130, 255),
+        );
     }
 
     /// Draws one layer's visible viewport with its top-left cell at
     /// `(origin_x, origin_y)` in screen pixels -- shared by `render` for
     /// the root layer (origin `(0, 0)`) and every other layer (origin its
     /// own `pos`, rounded to the nearest pixel). `view_offset` is the
-    /// scrollback view offset to render (see `scroll_offset`'s doc
-    /// comment) -- always 0 for non-root layers, which don't expose
-    /// scrollback viewing.
+    /// scrollback view offset to render (see `glyphwire.Layer.view_scroll`)
+    /// -- always 0 for non-root layers, which don't expose scrollback
+    /// viewing.
     fn renderLayer(self: *App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, draw_cursor: bool, view_offset: usize) void {
         self.deferred_icons.clearRetainingCapacity();
 

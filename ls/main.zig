@@ -793,7 +793,17 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, abs_dir
     try client.tableSetRows(null, table, rows);
 
     const state = try client.tableGetState(null, table);
-    try client.setCursor(state.painted.row + state.painted.rows, 0);
+    // `painted.row + painted.rows` is the row just past the table's whole
+    // footprint. In `large` mode each body row block is
+    // `large_table_row_height` cells tall with its text on the *middle*
+    // line (`core.Table.writeBodyRow`'s `top_row + row_height / 2`), so
+    // the last block carries `row_height - 1 - row_height/2` blank lines
+    // below its text -- landing the next shell prompt there leaves a
+    // visible gap under the listing (worse the taller the row). Pull the
+    // cursor up by exactly those trailing blanks so the prompt sits one
+    // line under the last entry's text, same as the non-large listing.
+    const trailing_blank: usize = if (large) large_table_row_height - 1 - large_table_row_height / 2 else 0;
+    try client.setCursor(state.painted.row + state.painted.rows - trailing_blank, 0);
 }
 
 fn writePlain(io: std.Io, entries: []const FileEntry, long_list: bool) !void {

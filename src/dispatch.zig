@@ -83,9 +83,24 @@ const CursorResult = struct { row: usize, col: usize };
 const RevisionResult = struct { revision: u64 };
 const PositionResult = struct { x: f32, y: f32 };
 const SizeResult = struct { cols: usize, rows: usize };
+const ScrollResult = struct { offset: usize, max: usize };
+
+/// `scroll_view` params: `offset` (absolute target, rows) and/or `delta`
+/// (added after), both optional -- omitting both is a pure query. See
+/// `core.Layer.scrollView`.
+const ScrollViewParams = struct {
+    layer: ?core.LayerHandle = null,
+    offset: ?usize = null,
+    delta: ?i64 = null,
+};
 
 const GetCellsParams = struct {
     layer: ?core.LayerHandle = null,
+    /// Rows of scrollback to read above the live viewport (see
+    /// `core.Layer.viewRow`). 0 (default) is the live viewport -- the
+    /// original behavior. Non-zero lets a client read what the user is
+    /// actually looking at while glyphwire-host is scrolled back.
+    view_offset: usize = 0,
 };
 
 const CreateLayerParams = struct {
@@ -114,6 +129,12 @@ const GetMetadataParams = struct {
     layer: ?core.LayerHandle = null,
     row: usize,
     col: usize,
+    /// Rows of scrollback to resolve `(row, col)` against, above the live
+    /// viewport (see `core.Layer.viewRow`). 0 (default) is the live
+    /// viewport. Non-zero is what lets a mouse click landing on a
+    /// scrolled-back row resolve to the cell the user actually sees
+    /// there, not the live-buffer cell at the same screen position.
+    view_offset: usize = 0,
 };
 
 /// `id`/`json` are both null together (the cell isn't tagged) or `id` is
@@ -171,6 +192,12 @@ const ReportMouseButtonParams = struct {
     pressed: bool,
     px: PxJson,
     cell: CellPosJson,
+    /// The root layer's scrollback view offset (see `core.Layer.view_scroll`)
+    /// at the moment of the click, so a subscriber resolving `cell` with
+    /// `get_metadata` can pass the same `view_offset` and land on the row
+    /// the user actually clicked while scrolled back. 0 (default) when the
+    /// reporter is at the live tail or doesn't track scrollback.
+    view_offset: usize = 0,
 };
 
 const ReportMouseMoveParams = struct {
@@ -436,11 +463,17 @@ pub const Subscriptions = struct {
     /// `resize` server->client notifications (`{cols, rows}`), sent when
     /// the host window is resized -- see `Server.reportResize`.
     resize: bool = false,
+    /// `scroll` server->client notifications (`{offset, max}`), sent when
+    /// the root layer's scrollback view offset moves -- see
+    /// `Server.reportScroll` (mouse wheel / scrollbar) and
+    /// `handleScrollView` (another client's browse cursor).
+    scroll: bool = false,
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
         if (std.mem.eql(u8, event, "mouse_button")) return self.mouse_button;
         if (std.mem.eql(u8, event, "resize")) return self.resize;
+        if (std.mem.eql(u8, event, "scroll")) return self.scroll;
         return false;
     }
 
@@ -450,6 +483,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "key")) s.key = true;
             if (std.mem.eql(u8, e, "mouse_button")) s.mouse_button = true;
             if (std.mem.eql(u8, e, "resize")) s.resize = true;
+            if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
         }
         return s;
     }
@@ -557,6 +591,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "get_cells")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleGetCells(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "scroll_view")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return try self.handleScrollView(alloc, id, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "create_layer")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleCreateLayer(alloc, id, envelope.params) };
@@ -769,6 +806,15 @@ pub const Dispatcher = struct {
             };
             const response: Response = .{ .id = id, .result = .{ .cols = sz.cols, .rows = sz.rows } };
             return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        } else if (std.mem.eql(u8, p.property, "scroll")) {
+            const sc = layer.getProperty(.scroll).scroll;
+            const Response = struct {
+                jsonrpc: []const u8 = "2.0",
+                id: std.json.Value,
+                result: ScrollResult,
+            };
+            const response: Response = .{ .id = id, .result = .{ .offset = sc.offset, .max = sc.max } };
+            return try std.json.Stringify.valueAlloc(alloc, response, .{});
         }
         return DispatchError.UnknownProperty;
     }
@@ -853,7 +899,10 @@ pub const Dispatcher = struct {
         const layer = try self.resolveLayer(p.layer);
 
         const metadata_id = if (p.row < layer.height and p.col < layer.width)
-            layer.cell(p.row, p.col).metadata_id
+            (if (p.view_offset > 0)
+                layer.viewRow(p.view_offset, p.row)[p.col].metadata_id
+            else
+                layer.cell(p.row, p.col).metadata_id)
         else
             null;
         const json = if (metadata_id) |m| self.ctx.metadataJson(m) else null;
@@ -877,14 +926,16 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
+        const view_offset = parsed.value.view_offset;
         const cells = try alloc.alloc(CellJson, layer.width * layer.height);
         defer alloc.free(cells);
 
         var row: usize = 0;
         while (row < layer.height) : (row += 1) {
+            const view_row: ?[]const core.Cell = if (view_offset > 0) layer.viewRow(view_offset, row) else null;
             var col: usize = 0;
             while (col < layer.width) : (col += 1) {
-                const cell = layer.cell(row, col);
+                const cell: *const core.Cell = if (view_row) |vr| &vr[col] else layer.cell(row, col);
                 const bg: ?ColorJson = switch (cell.style.bg) {
                     .color => |bgc| .{ .r = bgc.r, .g = bgc.g, .b = bgc.b, .a = bgc.a },
                     .image, .icon => null,
@@ -936,6 +987,43 @@ pub const Dispatcher = struct {
         return try std.json.Stringify.valueAlloc(alloc, response, .{});
     }
 
+    /// `scroll_view`: moves the layer's scrollback view offset (see
+    /// `core.Layer.scrollView` / `PropertyName.scroll`) and returns the
+    /// resulting `{offset, max}`. Also broadcasts a `scroll` notification
+    /// (same `{offset, max}`) to every *other* connection subscribed to
+    /// `"scroll"` -- glyphwire-shell drives this from its browse cursor,
+    /// and glyphwire-host, which owns the field directly, just reads it
+    /// next frame. A request, unlike the host-internal `Server.reportScroll`
+    /// path the mouse wheel/scrollbar use.
+    fn handleScrollView(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(ScrollViewParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const new_offset = layer.scrollView(p.offset, p.delta);
+
+        const Response = struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            result: ScrollResult,
+        };
+        const response: Response = .{ .id = id, .result = .{ .offset = new_offset, .max = layer.history_len } };
+        const resp_body = try std.json.Stringify.valueAlloc(alloc, response, .{});
+        errdefer alloc.free(resp_body);
+
+        const Notification = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8 = "scroll",
+            params: struct { offset: usize, max: usize },
+        };
+        const notif_body = try std.json.Stringify.valueAlloc(alloc, Notification{
+            .params = .{ .offset = new_offset, .max = layer.history_len },
+        }, .{});
+        return .{ .response = resp_body, .broadcast = .{ .event = "scroll", .body = notif_body } };
+    }
+
     /// A notification from an input-capturing client (glyphwire-host, in
     /// practice -- nothing here restricts it to a particular sender, see
     /// decisions.md's stance on there being no auth model yet). Updates
@@ -980,10 +1068,10 @@ pub const Dispatcher = struct {
         const Notification = struct {
             jsonrpc: []const u8 = "2.0",
             method: []const u8 = "mouse_button",
-            params: struct { button: []const u8, pressed: bool, px: PxJson, cell: CellPosJson },
+            params: struct { button: []const u8, pressed: bool, px: PxJson, cell: CellPosJson, view_offset: usize },
         };
         const notification: Notification = .{
-            .params = .{ .button = p.button, .pressed = p.pressed, .px = p.px, .cell = p.cell },
+            .params = .{ .button = p.button, .pressed = p.pressed, .px = p.px, .cell = p.cell, .view_offset = p.view_offset },
         };
         const notif_body = try std.json.Stringify.valueAlloc(alloc, notification, .{});
         return .{ .broadcast = .{ .event = "mouse_button", .body = notif_body } };

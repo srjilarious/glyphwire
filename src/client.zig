@@ -209,6 +209,38 @@ pub const Client = struct {
         return .{ .parsed = parsed };
     }
 
+    /// `get_cells(layer?, view_offset)` -- the root layer's grid as it
+    /// appears scrolled back by `view_offset` rows of history (see
+    /// `core.Layer.viewRow`). `view_offset == 0` is identical to
+    /// `getCells`.
+    pub fn getCellsView(self: *Client, view_offset: usize) !CellsSnapshot {
+        const parsed = try self.request(CellsResultJson, "get_cells", .{ .layer = @as(?core.LayerHandle, null), .view_offset = view_offset });
+        return .{ .parsed = parsed };
+    }
+
+    /// `get_property(layer, "scroll")` -- a request returning the root
+    /// layer's scrollback view state (`{offset, max}`): `offset` rows of
+    /// history currently showing above the live viewport, out of `max`
+    /// retained. `scrollView` is how a client moves it; `InputListener`
+    /// subscribed to `"scroll"` is the live-updating counterpart.
+    pub fn getScroll(self: *Client) !core.LayerScroll {
+        var parsed = try self.request(struct { offset: usize, max: usize }, "get_property", .{ .property = "scroll" });
+        defer parsed.deinit();
+        return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
+    }
+
+    /// `scroll_view(layer?, offset?, delta?)` -- a request that moves the
+    /// root layer's scrollback view offset (see `core.Layer.scrollView`)
+    /// and returns the resulting `{offset, max}`. `offset` is an absolute
+    /// target in rows; `delta` is added after; the result is clamped to
+    /// `0..max`. Passing neither is a pure query. The server also
+    /// broadcasts a `scroll` notification to other `"scroll"` subscribers.
+    pub fn scrollView(self: *Client, offset: ?usize, delta: ?i64) !core.LayerScroll {
+        var parsed = try self.request(struct { offset: usize, max: usize }, "scroll_view", .{ .offset = offset, .delta = delta });
+        defer parsed.deinit();
+        return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
+    }
+
     /// `report_key(key, pressed)` -- a notification. `key` is expected to
     /// be a stable, portable name (glyphwire-host uses `@tagName` of
     /// pixzig's GLFW key enum, e.g. "a", "left_shift", "escape"); this
@@ -217,13 +249,17 @@ pub const Client = struct {
         try self.notify("report_key", .{ .key = key, .pressed = pressed });
     }
 
-    /// `report_mouse_button(button, pressed, px, cell)` -- a notification.
-    pub fn reportMouseButton(self: *Client, button: []const u8, pressed: bool, px: PxPos, cell: CellPos) !void {
+    /// `report_mouse_button(button, pressed, px, cell, view_offset)` -- a
+    /// notification. `view_offset` is the root layer's scrollback view
+    /// offset at click time (see `core.Layer.view_scroll`); pass 0 from a
+    /// reporter that isn't tracking scrollback.
+    pub fn reportMouseButton(self: *Client, button: []const u8, pressed: bool, px: PxPos, cell: CellPos, view_offset: usize) !void {
         try self.notify("report_mouse_button", .{
             .button = button,
             .pressed = pressed,
             .px = px,
             .cell = cell,
+            .view_offset = view_offset,
         });
     }
 
@@ -752,8 +788,13 @@ pub const Client = struct {
     /// is a fresh copy the caller owns (free with this Client's
     /// allocator) -- unlike `CellsSnapshot`, there's no borrowed-data
     /// wrapper to keep alive for a single scalar lookup like this.
-    pub fn getMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize) !struct { id: ?core.MetadataHandle, json: ?[]u8 } {
-        var parsed = try self.request(struct { id: ?core.MetadataHandle, json: ?[]const u8 }, "get_metadata", .{ .layer = layer, .row = row, .col = col });
+    /// `view_offset` resolves `(row, col)` against that many rows of
+    /// scrollback above the live viewport (see `core.Layer.viewRow`) --
+    /// pass 0 for the live viewport, or the `view_offset` from a
+    /// `mouse_button` event so a click made while scrolled back lands on
+    /// the row actually under the pointer.
+    pub fn getMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, view_offset: usize) !struct { id: ?core.MetadataHandle, json: ?[]u8 } {
+        var parsed = try self.request(struct { id: ?core.MetadataHandle, json: ?[]const u8 }, "get_metadata", .{ .layer = layer, .row = row, .col = col, .view_offset = view_offset });
         defer parsed.deinit();
         const json = if (parsed.value.result.json) |j| try self.alloc.dupe(u8, j) else null;
         return .{ .id = parsed.value.result.id, .json = json };
@@ -1061,11 +1102,25 @@ pub const InputStateSnapshot = struct {
 /// enter", exactly once). `key` is owned; pop it via `pollKeyEvent` and
 /// free it with the same allocator passed to `InputListener.connect`.
 pub const KeyEvent = struct { key: []const u8, pressed: bool };
-pub const MouseButtonEvent = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos };
+pub const MouseButtonEvent = struct {
+    button: []const u8,
+    pressed: bool,
+    px: PxPos,
+    cell: CellPos,
+    /// Root layer's scrollback view offset at click time (see
+    /// `core.Layer.view_scroll`) -- feed this straight into
+    /// `Client.getMetadata`'s `view_offset` so a click made while the host
+    /// is scrolled back resolves to the row actually under the pointer.
+    view_offset: usize = 0,
+};
 /// One `resize` notification: the window's new size in cells. No owned
 /// memory (unlike `KeyEvent.key`), so `pollResizeEvent` hands it back by
 /// value with nothing for the caller to free.
 pub const ResizeEvent = struct { cols: usize, rows: usize };
+/// One `scroll` notification: the root layer's scrollback view offset
+/// (`offset` rows shown above the live viewport, out of `max` retained).
+/// No owned memory -- handed back by value like `ResizeEvent`.
+pub const ScrollEvent = struct { offset: usize, max: usize };
 
 pub const InputListener = struct {
     io: std.Io,
@@ -1097,6 +1152,13 @@ pub const InputListener = struct {
     resize_events: std.ArrayList(ResizeEvent) = .empty,
     resize_sem: std.Io.Semaphore = .{},
     last_size: ?ResizeEvent = null,
+    /// Queued `scroll` notifications (see `ScrollEvent`), same
+    /// drain-on-poll shape as `resize_events`. `last_scroll` caches the
+    /// most recent one for `scroll()`'s instant read; null until the
+    /// first `scroll` arrives.
+    scroll_events: std.ArrayList(ScrollEvent) = .empty,
+    scroll_sem: std.Io.Semaphore = .{},
+    last_scroll: ?ScrollEvent = null,
 
     /// Connects, subscribes to `events`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
@@ -1155,6 +1217,7 @@ pub const InputListener = struct {
         for (self.mouse_events.items) |ev| self.alloc.free(ev.button);
         self.mouse_events.deinit(self.alloc);
         self.resize_events.deinit(self.alloc);
+        self.scroll_events.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -1240,6 +1303,35 @@ pub const InputListener = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.last_size;
+    }
+
+    /// Pops the oldest queued `scroll` event, if any (non-blocking) --
+    /// see `pollResizeEvent`, the same drain shape. Nothing to free.
+    pub fn pollScrollEvent(self: *InputListener) ?ScrollEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.scroll_events.items.len == 0) return null;
+        return self.scroll_events.orderedRemove(0);
+    }
+
+    /// Blocks until a `scroll` event is queued or `timeout` elapses -- see
+    /// `waitKeyEvent`.
+    pub fn waitScrollEvent(self: *InputListener, timeout: std.Io.Timeout) !?ScrollEvent {
+        self.scroll_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
+            error.Timeout => return null,
+            error.Canceled => |e| return e,
+        };
+        return self.pollScrollEvent();
+    }
+
+    /// The most recently pushed scrollback view offset, or null if no
+    /// `scroll` notification has arrived yet -- a live-cache read (like
+    /// `size`), independent of whether `pollScrollEvent` has drained the
+    /// queue.
+    pub fn scroll(self: *InputListener) ?ScrollEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.last_scroll;
     }
 
     pub fn cursorPixel(self: *InputListener) PxPos {
@@ -1335,7 +1427,7 @@ pub const InputListener = struct {
             try self.key_events.append(self.alloc, .{ .key = owned_key, .pressed = pressed });
             self.key_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "mouse_button")) {
-            const P = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos };
+            const P = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos, view_offset: usize = 0 };
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
                 .ignore_unknown_fields = true,
             });
@@ -1349,8 +1441,21 @@ pub const InputListener = struct {
             self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
             self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
             _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
-            try self.mouse_events.append(self.alloc, .{ .button = owned_button, .pressed = p.value.pressed, .px = p.value.px, .cell = p.value.cell });
+            try self.mouse_events.append(self.alloc, .{ .button = owned_button, .pressed = p.value.pressed, .px = p.value.px, .cell = p.value.cell, .view_offset = p.value.view_offset });
             self.mouse_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "scroll")) {
+            const P = struct { offset: usize, max: usize };
+            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const ev: ScrollEvent = .{ .offset = p.value.offset, .max = p.value.max };
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.last_scroll = ev;
+            try self.scroll_events.append(self.alloc, ev);
+            self.scroll_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "resize")) {
             const P = struct { cols: usize, rows: usize };
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{

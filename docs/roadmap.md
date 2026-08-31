@@ -313,13 +313,20 @@ vector shape+border primitive (that alternative stays unbuilt).
   Fixed by caching the `*ManagedTexture` pool instead and returning a
   pointer into its heap-allocated `Handle`, which pixzig documents as
   staying at a stable address for its full lifetime.
-- **`glyphwire-view` looked broken because the whole host window closed
-  the instant it finished drawing.** Launched as `glyphwire-host
-  glyphwire-view <path>`, this process *is* what `glyphwire-shell` execs
-  into — `glyphwire-host`'s `reapChild`/`shell_exited` treats any exec'd
-  child's exit as "done" and closes the window. `glyphwire-view` used to
-  draw and return immediately; now it subscribes to `key` and blocks
-  until any keypress before exiting, like a real image viewer.
+- **`glyphwire-view` draws and exits immediately — no keypress wait.**
+  Launched from `glyphwire-shell`'s prompt (the common case, e.g.
+  clicking a `.png` in an `ls` listing) the image stays on the grid and
+  the prompt returns at once. Launched directly as `glyphwire-host`'s
+  exec'd child (`glyphwire-host glyphwire-view <path>`, where this
+  process *is* what would have been the shell — `reapChild`/`shell_exited`
+  treats any exec'd child's exit as "done"), the window closes right
+  after the image is drawn. Every `draw_image`/`set_property` request has
+  already round-tripped by the time `main` returns, so the pixels are
+  committed server-side and any renderer paints them next frame; there is
+  nothing left to wait for. (An earlier revision blocked on a keypress
+  "like a real image viewer" — dropped, the wait was noise everywhere
+  except the exec'd-child case, and even there it just delayed an
+  inevitable close.)
 
 ## Phase 3.7: `clear`
 

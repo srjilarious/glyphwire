@@ -11,6 +11,8 @@ pub const CellsSnapshot = client.CellsSnapshot;
 pub const InputListener = client.InputListener;
 pub const InputStateSnapshot = client.InputStateSnapshot;
 pub const ResizeEvent = client.ResizeEvent;
+pub const ScrollEvent = client.ScrollEvent;
+pub const MouseButtonEvent = client.MouseButtonEvent;
 pub const PxPos = client.PxPos;
 pub const CellPos = client.CellPos;
 
@@ -44,6 +46,7 @@ pub const PropertyName = core.PropertyName;
 pub const PropertyValue = core.PropertyValue;
 pub const PropertyError = core.PropertyError;
 pub const LayerSize = core.LayerSize;
+pub const LayerScroll = core.LayerScroll;
 pub const Layer = core.Layer;
 pub const LayerHandle = core.LayerHandle;
 pub const root_layer_handle = core.root_layer_handle;

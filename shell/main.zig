@@ -160,7 +160,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     };
     defer client.deinit();
 
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "mouse_button" }) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "mouse_button", "scroll" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -196,9 +196,20 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         if (listener.pollMouseButtonEvent()) |mev| {
             defer alloc.free(mev.button);
             if (mev.pressed and std.mem.eql(u8, mev.button, "left")) {
-                try prompt.activateSelectionAt(mev.cell.row, mev.cell.col);
+                // `mev.view_offset` is how far the host was scrolled back
+                // when the click happened -- pass it through so the
+                // lookup resolves against the row actually under the
+                // pointer, not the live-buffer cell at that screen
+                // position.
+                try prompt.activateSelectionAt(mev.cell.row, mev.cell.col, mev.view_offset);
             }
         }
+
+        // Keep `prompt.view_scroll` current with any host-driven scroll
+        // (mouse wheel, scrollbar) so browse-down and the type-to-snap-back
+        // in `setCursorAt` know the real offset. Drained non-blocking,
+        // same as the mouse queue above.
+        while (listener.pollScrollEvent()) |sev| prompt.view_scroll = sev.offset;
 
         // Blocks until a key event is queued rather than polling on a fixed
         // interval, so a keystroke gets picked up immediately instead of
@@ -355,6 +366,13 @@ const Prompt = struct {
     /// doc comments, and `setCursorAt`'s for how every ordinary editing
     /// operation implicitly ends browsing just by moving the real cursor.
     browse_pos: ?glyphwire.Cursor = null,
+    /// The host's current scrollback view offset in rows (see
+    /// `core.Layer.view_scroll`), mirrored locally: bumped by
+    /// `scrollWindow` when browsing past the top of the window scrolls the
+    /// host view, updated from `scroll` notifications when the host's own
+    /// wheel/scrollbar moves it, and reset to 0 by `setCursorAt` so
+    /// starting to type snaps back to the live prompt.
+    view_scroll: usize = 0,
 
     fn deinit(self: *Prompt) void {
         const alloc = self.client.alloc;
@@ -511,23 +529,56 @@ const Prompt = struct {
         try self.setCursorAt(self.cursor);
     }
 
+    /// Moves the host's scrollback view (see `Prompt.view_scroll` /
+    /// `Client.scrollView`) by `delta` rows -- positive scrolls back into
+    /// history, negative toward the live tail -- and records the clamped
+    /// result the server hands back. This is the "scroll the window along"
+    /// half of browsing: `browseUp`/`browseDown` call it once the browse
+    /// cursor hits the top of the visible area.
+    fn scrollWindow(self: *Prompt, delta: i64) !void {
+        const res = try self.client.scrollView(null, delta);
+        self.view_scroll = res.offset;
+    }
+
     /// Plain Up (`count == 1`) moves the cursor up into the scrollback
     /// above the prompt instead of editing anything -- entering "browse"
     /// mode (`browse_pos`) on the first press, starting directly above
     /// wherever the real cursor currently sits so it reads as "look
     /// straight up from here" rather than jumping to a fixed column.
     /// Ctrl+Up (`count == 5`, only while already browsing -- see the key
-    /// loop) is a bigger step for scanning a long listing faster, still
-    /// clamped at row 0 the same way. A no-op at row 0 (the very first
-    /// prompt) when not yet browsing: there's nothing above to browse.
+    /// loop) is a bigger step for scanning a long listing faster.
+    ///
+    /// Once the browse cursor reaches the top visible row, any further
+    /// upward movement scrolls the host window back into scrollback
+    /// (`scrollWindow`) instead of clamping -- so a listing longer than
+    /// the window can be walked all the way up. Entering browse at the
+    /// very first prompt (`line_start_row == 0`) is allowed now too, as
+    /// long as there's history to scroll to (an empty `scroll_view`
+    /// clamps to a no-op otherwise).
     fn browseUp(self: *Prompt, count: usize) !void {
-        if (self.browse_pos) |*bp| {
-            bp.row -|= count;
-        } else {
-            if (self.line_start_row == 0) return;
-            self.browse_pos = .{ .row = (self.line_start_row - 1) -| (count - 1), .col = self.line_start_col + self.cursor };
+        if (self.browse_pos == null) {
+            const start_row = if (self.line_start_row > 0)
+                (self.line_start_row - 1) -| (count - 1)
+            else
+                0;
+            self.browse_pos = .{ .row = start_row, .col = self.line_start_col + self.cursor };
+            const absorbed = self.line_start_row -| start_row;
+            const overshoot = count -| absorbed;
+            if (overshoot > 0) try self.scrollWindow(@intCast(overshoot));
+            try self.client.setCursor(start_row, self.browse_pos.?.col);
+            return;
         }
-        try self.client.setCursor(self.browse_pos.?.row, self.browse_pos.?.col);
+
+        var bp = self.browse_pos.?;
+        if (bp.row >= count) {
+            bp.row -= count;
+        } else {
+            const overshoot = count - bp.row;
+            bp.row = 0;
+            try self.scrollWindow(@intCast(overshoot));
+        }
+        self.browse_pos = bp;
+        try self.client.setCursor(bp.row, bp.col);
     }
 
     /// Plain Down (`count == 1`) while browsing moves the browse cursor
@@ -536,19 +587,32 @@ const Prompt = struct {
     /// on the real prompt cursor instead (rather than "browsing" a row
     /// that's actually the live line). Ctrl+Down (`count == 5`, only
     /// while already browsing) is a bigger step, but clamps at that same
-    /// bottom row rather than overshooting into a snap-back -- jumping 5
-    /// rows down from 2 rows above the prompt should land at the bottom
-    /// of the browsable range, not suddenly exit browsing because the
-    /// step overshot it. A no-op when not currently browsing; Down has no
-    /// other meaning at the prompt (ctrl+down is history recall, handled
-    /// separately).
+    /// bottom row rather than overshooting into a snap-back.
+    ///
+    /// When the host window is scrolled back (`view_scroll > 0`), Down
+    /// first scrolls it toward the live tail (`scrollWindow`), the mirror
+    /// of `browseUp`'s scroll-past-the-top; only once the view is back at
+    /// the tail does Down resume moving the browse cursor down toward the
+    /// prompt. A no-op when not currently browsing.
     fn browseDown(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
+
+        var remaining = count;
+        if (self.view_scroll > 0) {
+            const consume = @min(remaining, self.view_scroll);
+            try self.scrollWindow(-@as(i64, @intCast(consume)));
+            remaining -= consume;
+            if (remaining == 0) {
+                try self.client.setCursor(bp.row, bp.col);
+                return;
+            }
+        }
+
         if (bp.row + 1 >= self.line_start_row) {
             try self.setCursorAt(self.cursor);
             return;
         }
-        bp.row = @min(bp.row + count, self.line_start_row - 1);
+        bp.row = @min(bp.row + remaining, self.line_start_row - 1);
         self.browse_pos = bp;
         try self.client.setCursor(bp.row, bp.col);
     }
@@ -578,7 +642,7 @@ const Prompt = struct {
     /// the actual logic, shared with `runPrompt`'s mouse-click handling.
     fn browseEnter(self: *Prompt) !void {
         const bp = self.browse_pos orelse return;
-        try self.activateSelectionAt(bp.row, bp.col);
+        try self.activateSelectionAt(bp.row, bp.col, self.view_scroll);
     }
 
     /// Looks up `(row, col)`'s metadata (`get_metadata`) and, depending on
@@ -598,10 +662,17 @@ const Prompt = struct {
     /// anywhere yet (see `runCommand`'s doc comment), so neither does
     /// this. Shared by `browseEnter` (Enter while browsing) and
     /// `runPrompt`'s left-click handling.
-    fn activateSelectionAt(self: *Prompt, row: usize, col: usize) !void {
+    ///
+    /// `view_offset` is how many rows of scrollback the host was showing
+    /// when `(row, col)` was picked (0 at the live tail) -- forwarded to
+    /// `get_metadata` so a click/Enter on a scrolled-back row resolves
+    /// against the cell actually there, not the live-buffer cell at the
+    /// same screen position. `setLine` -> `setCursorAt` snaps the view
+    /// back to the live tail before the command runs.
+    fn activateSelectionAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !void {
         const alloc = self.client.alloc;
 
-        const lookup = self.client.getMetadata(null, row, col) catch return;
+        const lookup = self.client.getMetadata(null, row, col, view_offset) catch return;
         const json = lookup.json orelse return;
         defer alloc.free(json);
 
@@ -654,8 +725,18 @@ const Prompt = struct {
     /// know browsing was happening: the moment any of those run, the grid
     /// cursor lands back on the live prompt as a side effect of what it was
     /// already going to do anyway.
+    ///
+    /// If the host window was scrolled back into scrollback (via browsing
+    /// past the top, or the host's own wheel/scrollbar), snap it back to
+    /// the live tail here too -- starting to type, recall history, move
+    /// the cursor, etc. all mean "I'm done looking at history", the same
+    /// as this already does for `browse_pos`.
     fn setCursorAt(self: *Prompt, offset: usize) !void {
         self.browse_pos = null;
+        if (self.view_scroll != 0) {
+            const res = try self.client.scrollView(0, null);
+            self.view_scroll = res.offset;
+        }
         try self.client.setCursor(self.line_start_row, self.line_start_col + offset);
     }
 

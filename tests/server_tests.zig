@@ -231,6 +231,60 @@ pub fn reportResizeResizesRootAndBroadcastsToSubscribersTest(io: std.Io, alloc: 
     try testz.expectEqual(ctx.root.height, 30);
 }
 
+/// `Server.reportScroll` (the in-process path glyphwire-host's mouse
+/// wheel / scrollbar call) moves the root layer's scrollback view offset
+/// and pushes a `scroll` notification to a `"scroll"` subscriber.
+pub fn reportScrollMovesViewOffsetAndBroadcastsToSubscribersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 4, 2, 5);
+    defer ctx.deinit();
+    // 3 rows of content over a 2-tall viewport => history_len 1.
+    try ctx.root.writeText("aaaabbbbcccc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-scroll-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer accept_thread.join();
+
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["scroll"]}}
+    );
+    try w.interface.flush();
+
+    const ack = try readOneFrame(io, alloc, &stream, &decoder);
+    alloc.free(ack);
+
+    // delta past history clamps to history_len (1).
+    try srv.reportScroll(alloc, null, 9);
+
+    const notif_body = try readOneFrame(io, alloc, &stream, &decoder);
+    defer alloc.free(notif_body);
+
+    const Notification = struct {
+        method: []const u8,
+        params: struct { offset: usize, max: usize },
+    };
+    const parsed = try std.json.parseFromSlice(Notification, alloc, notif_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try testz.expectEqualStr("scroll", parsed.value.method);
+    try testz.expectEqual(parsed.value.params.offset, 1);
+    try testz.expectEqual(parsed.value.params.max, 1);
+    try testz.expectEqual(ctx.root.view_scroll, 1);
+}
+
 /// A notification whose dispatch fails server-side (here: draw_icon
 /// naming an icon nothing registered) has no response channel to report
 /// the error on anyway -- should just be logged, not sever the whole

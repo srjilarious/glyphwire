@@ -214,6 +214,12 @@ pub const Cursor = struct {
 /// answer to "how big is the window right now" (see `Context.resize`).
 pub const LayerSize = struct { cols: usize, rows: usize };
 
+/// A layer's scrollback view state (see `PropertyName.scroll` and the
+/// `scroll_view` wire method): `offset` rows of retained history are
+/// currently shown above the live viewport, out of `max` (`history_len`)
+/// retained in total. `offset == 0` is the live tail.
+pub const LayerScroll = struct { offset: usize, max: usize };
+
 pub const PropertyName = enum {
     cursor,
     /// Bumped once per `writeText` call; a cheap poll a renderer client can
@@ -232,6 +238,14 @@ pub const PropertyName = enum {
     /// changes) but can't set it -- the host owns the window size, see
     /// `Context.resize`.
     size,
+    /// Scrollback view offset in rows (`{offset, max}`) -- how far the
+    /// on-screen view is scrolled back into this layer's history (0 is
+    /// the live tail), out of `history_len` retained. Get-only through
+    /// `get_property`: a client changes it with the `scroll_view` request
+    /// instead (which clamps and broadcasts a `scroll` notification),
+    /// mirroring how `size` is read-only here and only moved by the
+    /// host-driven resize path. See `Layer.view_scroll` / `Layer.scrollView`.
+    scroll,
 };
 
 pub const PropertyValue = union(PropertyName) {
@@ -239,6 +253,7 @@ pub const PropertyValue = union(PropertyName) {
     revision: u64,
     position: PxPos,
     size: LayerSize,
+    scroll: LayerScroll,
 };
 
 pub const PropertyError = error{UnknownProperty};
@@ -275,6 +290,16 @@ pub const Layer = struct {
     /// How many rows above the viewport currently hold real history, vs.
     /// never-written blank space. Saturates at `scrollback_rows`.
     history_len: usize = 0,
+    /// Display-only scrollback view offset in rows: how many rows of
+    /// history (`history_len`) are currently shown above the live
+    /// viewport. 0 is the live tail. Never affects where writes land --
+    /// `viewRow` applies it at read time only, and `cell()` ignores it
+    /// entirely. Driven by glyphwire-host's mouse wheel / scrollbar and
+    /// by the `scroll_view` wire method (glyphwire-shell's browse cursor).
+    /// `scrollOne` bumps it in step with incoming output so the rows a
+    /// user is looking at stay put while new output accumulates below,
+    /// until history eviction forces a drift. See `PropertyName.scroll`.
+    view_scroll: usize = 0,
     cursor: Cursor = .{},
     /// See `PropertyName.revision`.
     revision: u64 = 0,
@@ -374,11 +399,30 @@ pub const Layer = struct {
         return self.rowSlice(self.physicalRow(row - clamped_offset));
     }
 
+    /// Moves the scrollback view offset (see `view_scroll`). `offset`, if
+    /// given, is the absolute target in rows; `delta` is then added; the
+    /// result is clamped to `0..history_len`. Returns the resulting
+    /// offset. Both null is a pure query (returns the current offset
+    /// unchanged). This is display-only -- it never touches
+    /// `viewport_start`/`history_len` or where writes land.
+    pub fn scrollView(self: *Layer, offset: ?usize, delta: ?i64) usize {
+        var target: i64 = if (offset) |o| @intCast(o) else @intCast(self.view_scroll);
+        if (delta) |d| target += d;
+        self.view_scroll = @intCast(std.math.clamp(target, 0, @as(i64, @intCast(self.history_len))));
+        return self.view_scroll;
+    }
+
     /// Scrolls the viewport down by one row: the current top row becomes
     /// history (evicting the oldest history row once `scrollback_rows`
     /// is full), and a fresh blank row appears at the bottom.
     fn scrollOne(self: *Layer) void {
         self.history_len = @min(self.history_len + 1, self.scrollback_rows);
+        // If the view is currently scrolled back, follow the incoming row
+        // so the content the user is looking at stays at the same screen
+        // position while new output piles up below it -- terminal-style.
+        // Caps at `history_len`, so once scrollback is full the oldest
+        // viewed row is evicted and the view drifts toward the tail.
+        if (self.view_scroll > 0) self.view_scroll = @min(self.view_scroll + 1, self.history_len);
         self.viewport_start = (self.viewport_start + 1) % self.capacity();
         for (self.rowSlice(self.physicalRow(self.height - 1))) |*c| c.* = .{};
     }
@@ -471,6 +515,7 @@ pub const Layer = struct {
         self.height = new_height;
         self.viewport_start = self.scrollback_rows;
         self.history_len = if (keep > new_height) keep - new_height else 0;
+        if (self.view_scroll > self.history_len) self.view_scroll = self.history_len;
 
         if (self.cursor.row >= new_height) self.cursor.row = new_height - 1;
         if (self.cursor.col >= new_width) self.cursor.col = new_width - 1;
@@ -860,6 +905,7 @@ pub const Layer = struct {
             .revision => .{ .revision = self.revision },
             .position => .{ .position = self.pos },
             .size => .{ .size = .{ .cols = self.width, .rows = self.height } },
+            .scroll => .{ .scroll = .{ .offset = self.view_scroll, .max = self.history_len } },
         };
     }
 
@@ -869,6 +915,7 @@ pub const Layer = struct {
             .revision => unreachable, // get-only; see PropertyName.revision
             .position => |p| self.pos = p,
             .size => unreachable, // get-only; window size is host-driven, see Context.resize
+            .scroll => unreachable, // get-only; move it with scrollView, see PropertyName.scroll
         }
     }
 };
