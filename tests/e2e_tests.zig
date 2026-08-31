@@ -829,20 +829,20 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
 
     // If ~/ expanded correctly, glyphwire-ls lists the marker directory
     // and "marker.txt" lands on row 2 starting at ls/main.zig's
-    // icon_col_width -- 4 at this ctx's default 12x12 cell metrics, see
-    // lsClientWritesEntriesOverRealSocketTest's comment for the formula
-    // (row 2, not 1: `writeGrid` leaves a blank leading row). If it didn't
-    // (a literal "~" directory that doesn't exist), the listing is empty
-    // and the *next prompt* shows up on row 1 instead -- so waiting
-    // specifically for "marker.txt"'s first letter here fails (times out)
-    // rather than false-passing on an empty listing.
-    try waitForCell(&reporter, 2, 4, "m");
+    // icon_col_width -- 5 at this ctx's 12x12 cell metrics with the
+    // default 48px icons, see lsClientWritesEntriesOverRealSocketTest's
+    // comment for the formula (row 2, not 1: `writeGrid` leaves a blank
+    // leading row). If it didn't (a literal "~" directory that doesn't
+    // exist), the listing is empty and the *next prompt* shows up on row 1
+    // instead -- so waiting specifically for "marker.txt"'s first letter
+    // here fails (times out) rather than false-passing on an empty listing.
+    try waitForCell(&reporter, 2, 5, "m");
 
     var snapshot = try reporter.getCells();
     defer snapshot.deinit();
     for ("marker.txt", 0..) |expected_ch, i| {
         var expected_buf: [1]u8 = .{expected_ch};
-        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(2, 4 + i).grapheme);
+        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(2, 5 + i).grapheme);
     }
 
     // glyphwire-ls handshakes by writing only `handshake_marker` to its
@@ -902,10 +902,10 @@ fn waitForCursorCol(client: *glyphwire.Client, want_col: usize) !void {
 /// cursor back on the subdirectory's row (deterministic here -- a single
 /// entry's icon lands at row 2, per `lsClientWritesEntriesOverRealSocketTest`'s
 /// row-math comment (`writeGrid` leaves a blank leading row), and the next
-/// prompt four rows below that, at row 6, since `writeGrid` leaves the
-/// cursor at `entry_row + block_rows` (3 at this test's 12px cells) and
-/// `submitLine` adds one more), then presses Enter and confirms the
-/// *next* prompt's cwd
+/// prompt five rows below that, at row 7, since `writeGrid` leaves the
+/// cursor at `entry_row + block_rows` (4 for the default 48px icon at this
+/// test's 12px cells) and `submitLine` adds one more), then presses Enter
+/// and confirms the *next* prompt's cwd
 /// echo shows the subdirectory -- i.e. a real `cd` actually ran, not just
 /// that browsing moved a cursor around.
 ///
@@ -979,18 +979,18 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     try reporter.reportKey("enter", false);
 
     // "target"'s row/col per lsClientWritesEntriesOverRealSocketTest's
-    // formula (default 12x12 cell metrics, one entry -> row 2 after
-    // `writeGrid`'s blank leading row, name at icon_col_width == 4).
-    try waitForCell(&reporter, 2, 4, "t");
-    // The next prompt: entry_row (2) + 3 (writeGrid's post-entry advance,
-    // block_rows at 12px cells) + 1 (submitLine's own advance) == row 6,
-    // same cwd (nothing's cd'd yet) so the same arrow_col.
-    try waitForCell(&reporter, 6, arrow_col, ">");
+    // formula (12x12 cell metrics, default 48px icons: one entry -> row 2
+    // after `writeGrid`'s blank leading row, name at icon_col_width == 5).
+    try waitForCell(&reporter, 2, 5, "t");
+    // The next prompt: entry_row (2) + 4 (writeGrid's post-entry advance,
+    // block_rows for a 48px icon at 12px cells) + 1 (submitLine's own
+    // advance) == row 7, same cwd (nothing's cd'd yet) so the same arrow_col.
+    try waitForCell(&reporter, 7, arrow_col, ">");
 
-    // Four Up presses walk the browse cursor from the prompt row (6) back
+    // Five Up presses walk the browse cursor from the prompt row (7) back
     // up to the entry's row (2).
     var row_presses: usize = 0;
-    while (row_presses < 4) : (row_presses += 1) {
+    while (row_presses < 5) : (row_presses += 1) {
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }
@@ -1000,10 +1000,10 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // (and, until Left/Right move it, stays) wherever the real cursor was
     // on the prompt line, i.e. right after the "{cwd} > " prefix
     // (`cwd_len + 3`: space, '>', space), nowhere near "target"'s tagged
-    // cells (icon at col 0, name at icon_col_width == 4). Left has to walk
+    // cells (icon at col 0, name at icon_col_width == 5). Left has to walk
     // it back over there before Enter means anything.
     const line_start_col = cwd_len + 3;
-    const icon_col_width = 4;
+    const icon_col_width = 5;
     var col_presses: usize = 0;
     while (col_presses < line_start_col - icon_col_width) : (col_presses += 1) {
         try reporter.reportKey("left", true);
@@ -1015,9 +1015,9 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     try reporter.reportKey("enter", false);
 
     // A real `cd` ran: the next prompt's cwd echo includes "target". Row
-    // 8 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
+    // 9 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
     // post-command `getCursor()` still reads back the row it set for
-    // itself (entry_row(2) + block_rows(3), from browseEnter's synthesized
+    // itself (entry_row(2) + block_rows(4), from browseEnter's synthesized
     // "cd ..." line, then +1 again) before the final +1 for the new prompt.
     var found = false;
     var attempts: usize = 0;
@@ -1028,7 +1028,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
         while (col + 6 <= snapshot.cols()) : (col += 1) {
             var matched = true;
             for ("target", 0..) |expected_ch, i| {
-                if (snapshot.cellAt(8, col + i).grapheme.len != 1 or snapshot.cellAt(8, col + i).grapheme[0] != expected_ch) {
+                if (snapshot.cellAt(9, col + i).grapheme.len != 1 or snapshot.cellAt(9, col + i).grapheme[0] != expected_ch) {
                     matched = false;
                     break;
                 }
@@ -1107,19 +1107,19 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
     // `writeGrid` now packs entries into columns across the layer width
     // (column-major, like `ls -C`) instead of one per row. Each entry's
     // block is `icon_cols + name_cols + gap` wide: the `.natural` icon
-    // reserves columns for its native 32px width (`(32 + 12 - 1) / 12 + 1
-    // == 4` at this ctx's default 12x12 cell metrics), the name area is
-    // the longest display string clamped to [8, 40] ("clink -> afile.txt"
-    // == 18), and the gap is 2 -- so `block_cols == 24`. An 80-wide layer
-    // fits 3 such blocks, and with only 3 entries that's one row of three
-    // columns at base columns 0, 24, 48; names start `icon_cols == 4`
+    // reserves columns for `large_icon_px` (48 by default) at this ctx's
+    // 12x12 cell metrics -- `(48 + 12 - 1) / 12 + 1 == 5`; the name area
+    // is the longest display string clamped to [8, 40] ("clink -> afile.txt"
+    // == 18); the gap is 2 -- so `block_cols == 25`. An 80-wide layer fits
+    // 3 such blocks, and with only 3 entries that's one row of three
+    // columns at base columns 0, 25, 50; names start `icon_cols == 5`
     // past each. `writeGrid` leaves a blank leading row for breathing
     // room, so the band lands on row 1, not row 0.
-    try testz.expectEqualStr("a", ctx.root.cell(1, 4).grapheme()); // "afile.txt"
-    try testz.expectEqualStr("b", ctx.root.cell(1, 28).grapheme());
-    try testz.expectEqualStr("/", ctx.root.cell(1, 32).grapheme()); // "bdir/"
-    try testz.expectEqualStr("c", ctx.root.cell(1, 52).grapheme());
-    try testz.expectEqualStr(">", ctx.root.cell(1, 59).grapheme()); // "clink -> afile.txt"
+    try testz.expectEqualStr("a", ctx.root.cell(1, 5).grapheme()); // "afile.txt"
+    try testz.expectEqualStr("b", ctx.root.cell(1, 30).grapheme());
+    try testz.expectEqualStr("/", ctx.root.cell(1, 34).grapheme()); // "bdir/"
+    try testz.expectEqualStr("c", ctx.root.cell(1, 55).grapheme());
+    try testz.expectEqualStr(">", ctx.root.cell(1, 62).grapheme()); // "clink -> afile.txt"
 }
 
 /// Proves the multi-operand + file-operand path (`classifyAndList` in
@@ -1186,18 +1186,18 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
     // The loose file block is first, headerless. `writeGrid` leaves a
     // blank leading row, so it lands on row 1: its name is the operand
     // string as typed ("<tmp>/zeta.txt"), drawn after the icon reserve
-    // (col 4). `tmp_name` starts with 'g'.
-    try testz.expectEqualStr("g", ctx.root.cell(1, 4).grapheme());
+    // (col 5 at 48px icons / 12px cells). `tmp_name` starts with 'g'.
+    try testz.expectEqualStr("g", ctx.root.cell(1, 5).grapheme());
 
-    // Find the row where "inner.txt" was written (col 4 onward). Two rows
+    // Find the row where "inner.txt" was written (col 5 onward). Two rows
     // above it is the "<tmp>/sub:" header (`writeGrid`'s blank leading row
     // sits between the header and the band) -- starts with 'g', ends in
     // ':'.
     var inner_row: ?usize = null;
     var r: usize = 1;
     while (r < 24) : (r += 1) {
-        if (ctx.root.cell(r, 4).grapheme().len == 1 and ctx.root.cell(r, 4).grapheme()[0] == 'i' and
-            ctx.root.cell(r, 5).grapheme().len == 1 and ctx.root.cell(r, 5).grapheme()[0] == 'n')
+        if (ctx.root.cell(r, 5).grapheme().len == 1 and ctx.root.cell(r, 5).grapheme()[0] == 'i' and
+            ctx.root.cell(r, 6).grapheme().len == 1 and ctx.root.cell(r, 6).grapheme()[0] == 'n')
         {
             inner_row = r;
             break;

@@ -9,7 +9,7 @@
 -- host.conf via `icon_theme`, not here.
 
 config = {
-    -- Bigger, chunkier icons than the 32 / 16 default.
-    large_icon_px = 48,
-    small_icon_px = 24,
+    -- A denser listing than the 48 / 16 default.
+    large_icon_px = 32,
+    small_icon_px = 14,
 }

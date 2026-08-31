@@ -306,7 +306,7 @@ pub fn lsConfigDefaultsWhenEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void 
     var r = lsconfig.load(alloc, "");
     defer r.deinit(alloc);
     try testz.expectTrue(r.err == null);
-    try testz.expectEqual(r.config.large_icon_px, @as(u32, 32));
+    try testz.expectEqual(r.config.large_icon_px, @as(u32, 48));
     try testz.expectEqual(r.config.small_icon_px, @as(u32, 16));
 }
 
@@ -332,7 +332,7 @@ pub fn lsConfigIgnoresWrongTypesAndUnknownKeysTest(_: std.Io, alloc: std.mem.All
     defer r.deinit(alloc);
     try testz.expectTrue(r.err == null);
     // The bad key keeps its default; the good one still applies.
-    try testz.expectEqual(r.config.large_icon_px, @as(u32, 32));
+    try testz.expectEqual(r.config.large_icon_px, @as(u32, 48));
     try testz.expectEqual(r.config.small_icon_px, @as(u32, 22));
 }
 
@@ -340,5 +340,5 @@ pub fn lsConfigSurfacesLuaErrorButKeepsDefaultsTest(_: std.Io, alloc: std.mem.Al
     var r = lsconfig.load(alloc, "this is not lua !!!");
     defer r.deinit(alloc);
     try testz.expectTrue(r.err != null);
-    try testz.expectEqual(r.config.large_icon_px, @as(u32, 32));
+    try testz.expectEqual(r.config.large_icon_px, @as(u32, 48));
 }
