@@ -21,7 +21,7 @@ alias("gs", "git status")
 --   {env:NAME}   an environment variable ("" if unset)
 --   {icon:NAME}  a bundled icon, one cell wide.  NAME is the icon file's
 --                path under assets/icons/ without the .png (e.g.
---                distro/arch; file-type icons oxygen/pdf / oxygen/code /
+--                distro/arch; file-type icons file/pdf / file/code /
 --                …; the prompt status glyphs status/error, status/slow)
 --   {exit}       expands to the `exit` sub-template, only on a non-zero exit
 --   {dur}        expands to the `dur` sub-template, only when the last

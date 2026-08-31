@@ -5,6 +5,7 @@ const zargs = @import("zargunaught");
 const gridlayout = @import("ls_support").gridlayout;
 const lsfmt = @import("ls_support").format;
 const lsicons = @import("ls_support").icons;
+const lsconfig = @import("ls_support").config;
 
 /// glyphwire-ls: a directory listing built on `lsz`'s core scanning logic
 /// (see /home/jeffdw/code/lsz/src/main.zig) but re-targeted to draw over a
@@ -42,8 +43,8 @@ const lsicons = @import("ls_support").icons;
 /// limitation doesn't apply here -- glyphwire's icons are small bitmap
 /// images, not font glyphs, so no font patching is needed. Source files
 /// and project directories resolve to the Devicon language/tool logos
-/// under `assets/icons/dev/`; everything else falls back to the coarser
-/// KDE-Oxygen file-type set under `assets/icons/oxygen/`. Requires
+/// under `assets/icons/dev/`; everything else falls back to the coarser file-type set (`file/*`,
+/// themed host-side -- see `ls/icons.zig`). Requires
 /// whatever's serving the connection to have actually loaded that catalog
 /// (glyphwire-host does, at startup); run against a
 /// bare `glyphwire-server` with nothing registered, `draw_icon` would
@@ -63,8 +64,8 @@ pub fn main(init: std.process.Init) !void {
         .opts = &.{
             .{ .longName = "hidden", .shortName = "a", .description = "Show hidden files and directories", .maxNumParams = 0 },
             .{ .longName = "long", .shortName = "l", .description = "Long listing: adds permission bits, size, owner:group, and modified time", .maxNumParams = 0 },
-            .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger, naturally-scaled icons (3-line-tall rows in a long listing). Wins over -S if both are given", .maxNumParams = 0 },
-            .{ .longName = "small", .shortName = "S", .description = "Small format: one physical row per entry, its icon filling that line's height (no overflow into neighboring rows), in both the normal and long (-l) listing", .maxNumParams = 0 },
+            .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger icons (ls.conf large_icon_px, 32 by default; taller rows in a long listing to fit). Wins over -S if both are given", .maxNumParams = 0 },
+            .{ .longName = "small", .shortName = "S", .description = "Small format: smaller icons (ls.conf small_icon_px, 16 by default) in both the normal and long (-l) listing", .maxNumParams = 0 },
             .{ .longName = "human", .shortName = "h", .description = "Human-readable sizes (KB/MB/GB) -- the default; the explicit opposite of --bytes", .maxNumParams = 0 },
             .{ .longName = "bytes", .description = "Show sizes as a raw byte count instead of KB/MB/GB (wins unless -h is also given)", .maxNumParams = 0 },
             .{ .longName = "help", .description = "Print help" },
@@ -106,6 +107,14 @@ pub fn main(init: std.process.Init) !void {
     if (glyphwire.Client.connectFromEnv(io, alloc, init.environ_map)) |connected| {
         var client = connected;
         defer client.deinit();
+        // Icon sizes from `~/.config/glyphwire/ls.conf` (see `ls/config.zig`),
+        // or the built-in 32 / 16px defaults if there's no file. Read once
+        // here and passed to `writeGrid` / `writeLongTable`.
+        const cfg = cfg: {
+            const dir = glyphwire.configDirPath(alloc, init.environ_map) catch break :cfg lsconfig.LsConfig{};
+            defer alloc.free(dir);
+            break :cfg lsconfig.loadFromDir(alloc, io, dir);
+        };
         // Large icons by default in both views; `-S` opts into small ones
         // (also in both); `-L` wins if both are given, so it can force
         // large back on even under an inherited/aliased `-S`. Resolved
@@ -127,9 +136,9 @@ pub fn main(init: std.process.Init) !void {
                 try client.setCursor(c2.row + 1, 0);
             }
             if (long_list) {
-                try writeLongTable(&client, listing.entries, large, raw_bytes);
+                try writeLongTable(&client, listing.entries, large, raw_bytes, cfg);
             } else {
-                try writeGrid(&client, listing.entries, large);
+                try writeGrid(&client, listing.entries, large, cfg);
             }
         }
     } else |_| {
@@ -496,23 +505,23 @@ fn sizeColor(size: u64) glyphwire.Color {
 // ── Icons ──────────────────────────────────────────────────────────────────
 
 /// The icon-catalog name for one entry (see `ls/icons.zig` for the tables
-/// and the `dev/*` vs `oxygen/*` split):
+/// and the `dev/*` vs `file/*` split):
 ///
 ///   * directory -- its `dev/*` tool logo if the basename is well-known
 ///     (`.vscode`, `.claude`, `.git`, `node_modules`, ...), else
-///     `"oxygen/folder"`.
+///     `"file/folder"`.
 ///   * regular file -- its `dev/*` logo by exact basename (`Dockerfile`,
 ///     ...) or by extension (`.zig` -> `dev/zig`, `.ex` -> `dev/elixir`,
-///     ...), falling back through the coarse `oxygen/*` file-type buckets
-///     to `"oxygen/file"` for an unrecognized one.
-///   * symlink -- `"oxygen/file"` (no dedicated symlink icon in the
+///     ...), falling back through the coarse `file/*` file-type buckets
+///     to `"file/file"` for an unrecognized one.
+///   * symlink -- `"file/file"` (no dedicated symlink icon in the
 ///     bundled set yet).
-///   * anything else (device files, sockets, ...) -- `"oxygen/unknown"`.
+///   * anything else (device files, sockets, ...) -- `"file/unknown"`.
 fn iconForEntry(entry: FileEntry) []const u8 {
     return switch (entry.kind) {
-        .directory => lsicons.iconForDirName(entry.name) orelse "oxygen/folder",
-        .sym_link => "oxygen/file",
-        .other => "oxygen/unknown",
+        .directory => lsicons.iconForDirName(entry.name) orelse "file/folder",
+        .sym_link => "file/file",
+        .other => "file/unknown",
         .file => lsicons.iconForFileName(entry.name) orelse lsicons.iconForExtension(entry.name),
     };
 }
@@ -705,14 +714,6 @@ fn groupName(gid: u32, num_buf: []u8) []const u8 {
 
 // ── glyphwire output ──────────────────────────────────────────────────────
 
-/// Native pixel size of the bundled Oxygen icon set (decisions.md's Icon
-/// section: "kept at Oxygen's native 32x32"). Used up front to reserve
-/// enough columns for a `.natural`-scaled icon before the name starts,
-/// and as the hard cap on how large `writeGrid` lets any icon render --
-/// so a mixed-resolution set (32px folders next to 48px dev-tool glyphs)
-/// still comes out visually uniform.
-const icon_native_px = 32;
-
 /// Floor the stretched Name column (`writeLongTable`) is clamped to when
 /// the layer is too narrow to give it its leftover-width share -- the
 /// table then clips the longest names with a trailing `…`, same as a
@@ -765,26 +766,17 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 /// single-column, same as before this packing existed (and in that case
 /// names are left un-truncated, long symlink targets included).
 ///
-/// `large` (`-L`, see `main`) picks between two icon renderings, and the
-/// block height (`Grid.block_rows`) follows. Both draw the icon
-/// `.natural` sized (capped to `max_icon_h`) rather than `.fit`: at this
-/// font's actual cell size a `.fit`-shrunk 32x32 icon comes out only a
-/// few pixels tall, unrecognizable. `h_align = .start`/`v_align = .center`
-/// place it flush against the block's left edge, vertically centered.
-/// This needs the session's cell pixel size (`get_cell_metrics`); a host
-/// that doesn't answer that leaves `max_icon_h == 0` and small mode falls
-/// back to the old one-cell `.fit` (large mode can't run without it).
-///
-/// - `false` (`-S`): `max_icon_h` is **one** cell-height, so the icon
-///   fills the entry's own row height without spilling onto the row above
-///   or below -- one physical row per entry (`block_rows == 1`). Same
-///   "fill the line" rendering the shell prompt's `{icon:...}` uses.
-/// - `true` (default): `max_icon_h` is **two** cell-heights; with centered
-///   alignment that puts a quarter of the icon above the entry's own row,
-///   half on it, a quarter below, so `block_rows == 2` leaves a blank
-///   row between bands and one band's icon doesn't overlap the next's
-///   text. `icon_col_width` (from the icon's own native width, not a
-///   fixed constant) reserves room before the name so they don't collide.
+/// The icon renders `.natural` (aspect-preserving, shrink-only) capped to
+/// `max_icon_h` pixels tall -- `cfg.small_icon_px` (default 16) or, with
+/// `-L`, `cfg.large_icon_px` (default 32), both from `ls.conf`. The block
+/// height (`Grid.block_rows`) is `ceil(max_icon_h / cell_h)`, floored at 1
+/// (small) or 2 (large, so a blank row sits between bands and one band's
+/// icon doesn't overlap the next's text) and capped at 6. `h_align =
+/// .start` / `v_align = .center` place the icon flush against the block's
+/// left edge, vertically centered; `icon_col_width` reserves the columns
+/// its width covers plus a gap. This needs the session's cell pixel size
+/// (`get_cell_metrics`); a host that doesn't answer leaves `max_icon_h ==
+/// 0` and every mode falls back to a one-cell `.fit`.
 ///
 /// Sends the whole listing as two batches (see decisions.md's Batch
 /// section) rather than a call per entry: pass 1 is one `batch` request
@@ -811,20 +803,22 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 /// other tools) doesn't have to share this process's cwd, and a listing
 /// that mixes directories (the multi-operand loose-files block) still
 /// tags each entry with its own real path.
-fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool) !void {
+fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool, cfg: lsconfig.LsConfig) !void {
     if (entries.len == 0) return;
     const alloc = client.alloc;
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
     var name_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
 
-    // Both modes draw the icon `.natural` sized rather than `.fit` into
-    // one cell (unreadably tiny at this font's cell size). This needs the
-    // session's cell pixel metrics: large mode requires them; small mode
-    // falls back to the old one-cell `.fit` (`max_icon_h == 0`) without
-    // them. `icon_col_width` reserves the leading columns before the name;
-    // `icon_cols_spanned` is how many the icon's rendered width visually
-    // reaches, so every cell it covers -- not just its anchor -- gets
-    // tagged below.
+    // The icon renders `.natural` (aspect-preserving, shrink-only) capped
+    // to `max_icon_h` pixels tall -- `cfg.large_icon_px` / `small_icon_px`
+    // from `ls.conf` (32 / 16 by default). `block_rows` is how many
+    // physical rows one band spans, derived from that height and the cell
+    // size so the icon has room without a fixed 2-vs-1 assumption;
+    // `icon_col_width` reserves the leading columns before the name and
+    // `icon_cols_spanned` is how many the icon's width actually covers (so
+    // every one gets metadata-tagged, not just the anchor). Without cell
+    // metrics the server falls back to a one-cell `.fit` (`max_icon_h ==
+    // 0`) and `block_rows` / reserve stay at their `.fit` values.
     var icon_col_width: usize = 2;
     var max_icon_h: u32 = 0;
     var icon_cols_spanned: usize = 1;
@@ -841,29 +835,15 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
     if (metrics) |m| {
         const cell_w: usize = m.w;
         const cell_h: usize = m.h;
-        // Small mode caps the icon to one cell-height so it fills the
-        // entry's own row without spilling onto the rows above/below
-        // (`block_rows` stays 1); large mode caps it to two and leaves a
-        // blank row between bands. Either way, never past `icon_native_px`
-        // -- a higher-resolution icon (the 48px dev-tool glyphs, say) then
-        // renders at the same on-screen size as every 32px folder/file
-        // icon beside it instead of looming larger.
-        max_icon_h = @intCast(@min((if (large) @as(usize, 2) else 1) * cell_h, icon_native_px));
-        // `.natural` scale with only `max_h` set ties the rendered width
-        // to the same cap (square icons, uniform scale-down -- see
-        // `core.IconScale`'s doc comment), so the rendered pixel size is
-        // never more than `max_icon_h`.
-        const icon_render_px: usize = max_icon_h;
-        icon_cols_spanned = (icon_render_px + cell_w - 1) / cell_w;
-        // Large mode keeps a slightly wider reserve from the icon set's
-        // native width (`icon_native_px`, now also the render cap, so this
-        // is always enough); small mode only needs the columns the icon
-        // actually reaches, plus a one-column gap.
-        icon_col_width = if (large)
-            (icon_native_px + cell_w - 1) / cell_w + 1
-        else
-            icon_cols_spanned + 1;
-        block_rows = if (large) 2 else 1;
+        max_icon_h = if (large) cfg.large_icon_px else cfg.small_icon_px;
+        // A band is as many rows tall as the icon needs, floored so large
+        // mode keeps its "blank row between bands" and small mode stays a
+        // single row when the icon fits one, capped so a huge configured
+        // size can't make one entry swallow the window.
+        const rows_for_icon = (@as(usize, max_icon_h) + cell_h - 1) / cell_h;
+        block_rows = std.math.clamp(rows_for_icon, if (large) @as(usize, 2) else 1, 6);
+        icon_cols_spanned = (@as(usize, max_icon_h) + cell_w - 1) / cell_w;
+        icon_col_width = icon_cols_spanned + 1;
     }
 
     // Fit as many entry columns across the layer as the longest name
@@ -986,13 +966,22 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool)
     draw_results.deinit();
 }
 
-/// Body row height, in cells, `writeLongTable`'s `large` mode uses --
-/// same "give a `.natural`-scaled icon room to actually read as a
-/// picture" idea `writeGrid`'s `max_icon_h` gives its icons, just as a
-/// real fixed-height table row (`core.Table.render` centers and caps the
-/// icon to this many cell-heights, instead of `writeGrid`'s single-row
-/// anchor with overflow into neighboring rows).
-const large_table_row_height = 3;
+/// Body row height, in cells, for `writeLongTable`'s `large` mode when the
+/// session's cell size is unknown -- normally it's computed from
+/// `ls.conf`'s `large_icon_px` and the real cell height (`largeTableRowHeight`),
+/// so a `large_icon_px`-tall icon has room. Same "give a `.natural`-scaled
+/// icon room to read as a picture" idea `writeGrid`'s `max_icon_h` gives
+/// its icons, as a real fixed-height table row.
+const large_table_row_height_fallback = 3;
+
+/// Rows a `-l -L` body row spans: enough for a `large_icon_px`-tall icon
+/// at this cell height, floored at 2 (keeps a blank line under the text)
+/// and capped so a big configured size can't make one row fill the
+/// window. Mirrors `writeGrid`'s `block_rows` math.
+fn largeTableRowHeight(large_icon_px: u32, cell_h: usize) usize {
+    const rows_for_icon = (@as(usize, large_icon_px) + cell_h - 1) / cell_h;
+    return std.math.clamp(rows_for_icon, 2, 6);
+}
 
 /// Clamp for the User / Group name columns' widths: each is sized to the
 /// widest name the listing actually holds, but never so narrow its
@@ -1035,16 +1024,14 @@ const id_name_col_max = 16;
 /// `mimetype`/`path` shape `writeGrid`'s tags already have.
 ///
 /// `large` (`-L`, see `main`) sets the table's `row_height` to
-/// `large_table_row_height`: `core.Table.render` then draws each row's
-/// icon `.natural`-scaled and centered across the whole 3-line row block
-/// instead of `.fit`-scaled into one cell, same rendering `writeGrid`'s
-/// large mode gives its icons -- capped and column-widened using the
-/// icon's actual loaded pixel size server-side (see decisions.md's Table
-/// section), not a size this client has to guess. The stretched Name
-/// column still gets a `min_name_width + icon_reserve` floor so that
-/// bigger icon has room even in the narrow-layer clip case -- same
-/// `icon_native_px`/cell-metrics estimate `writeGrid` uses for its own
-/// `icon_col_width`, capped to `large_table_row_height` cell-heights.
+/// `largeTableRowHeight(cfg.large_icon_px, cell_h)` and passes
+/// `style.max_icon_px = cfg.large_icon_px`: `core.Table.render` then draws
+/// each row's icon `.natural`-scaled and centered across that whole row
+/// block, capped to `large_icon_px`, instead of `.fit`-scaled into one
+/// cell -- the same size `writeGrid`'s large mode gives its icons. The
+/// stretched Name column gets a `min_name_width + icon_reserve` floor so
+/// that icon has room even in the narrow-layer clip case, `icon_reserve`
+/// being `large_icon_px` in cells plus a gap.
 ///
 /// Unlike the client-composited prototype's streaming `row`/`cell`/
 /// `endRow` calls (each sent over the wire immediately), every row here
@@ -1080,7 +1067,7 @@ const id_name_col_max = 16;
 /// whole viewport (it scrolled the layer as it drew, terminal-style), so
 /// there's no spare on-screen row: the cursor lands on the last line and
 /// one newline is emitted to scroll a blank gap in before the prompt.
-fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: bool, raw_bytes: bool) !void {
+fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: bool, raw_bytes: bool, cfg: lsconfig.LsConfig) !void {
     const alloc = client.alloc;
     const cur = try client.getCursor();
 
@@ -1148,22 +1135,26 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     // "YYYY-MM-DD HH:MM" is 16 chars; +1 for a gap before Name.
     const time_width: usize = 17;
 
-    // The stretched Name column still needs leading columns reserved in
-    // its cell for a `.natural`-scaled row icon. Large mode caps the icon
-    // to `large_table_row_height` cell-heights; small mode now caps it to
-    // one cell-height (`core.Table.writeBodyRow`), not the old one-cell
-    // `.fit` -- both want the same `icon_native_px`/cell-metrics estimate
-    // `writeGrid` uses. Without cell metrics the server keeps the old
-    // `.fit` and `icon_reserve` stays 1 to match.
+    // The stretched Name column reserves leading columns in its cell for a
+    // `.natural`-scaled row icon. The icon renders at `large_icon_px` /
+    // `small_icon_px` (from `ls.conf`, passed to the table as
+    // `style.max_icon_px`), so the reserve is that many cells wide plus a
+    // gap. `row_height` follows `large_icon_px` in large mode
+    // (`largeTableRowHeight`), stays 1 otherwise. Without cell metrics the
+    // server keeps a one-cell `.fit` and `icon_reserve` stays 1 to match.
+    const icon_px: u32 = if (large) cfg.large_icon_px else cfg.small_icon_px;
     var icon_reserve: usize = 1;
-    if (large) {
-        const metrics = try client.getCellMetrics();
-        const max_icon_h: u32 = @intCast(large_table_row_height * metrics.h);
-        const icon_render_px: usize = @min(icon_native_px, max_icon_h);
-        icon_reserve = (icon_render_px + metrics.w - 1) / metrics.w + 1;
-    } else if (client.getCellMetrics() catch null) |metrics| {
-        const icon_render_px: usize = @min(icon_native_px, metrics.h);
-        icon_reserve = (icon_render_px + metrics.w - 1) / metrics.w + 1;
+    var row_height: usize = if (large) large_table_row_height_fallback else 1;
+    if (client.getCellMetrics() catch null) |metrics| {
+        if (large) row_height = largeTableRowHeight(cfg.large_icon_px, metrics.h);
+        // Cap the reserve estimate at what actually fits the row block so
+        // a big `large_icon_px` doesn't reserve half the line.
+        const render_px = @min(@as(usize, icon_px), row_height * metrics.h);
+        icon_reserve = (render_px + metrics.w - 1) / metrics.w + 1;
+    } else if (large) {
+        // Large mode needs metrics for the natural-icon path; without them
+        // the request below will surface the error like it used to.
+        _ = try client.getCellMetrics();
     }
     const name_floor = icon_reserve + min_name_width;
 
@@ -1190,7 +1181,8 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     }, .{
         .borders = false,
         .alt_row_bg = rgb(30, 30, 30),
-        .row_height = if (large) large_table_row_height else 1,
+        .row_height = row_height,
+        .max_icon_px = icon_px,
     });
 
     const rows = try alloc.alloc([]glyphwire.Client.TableCellInput, entries.len);
@@ -1284,15 +1276,15 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
 
     const state = try client.tableGetState(null, table);
     // `painted.row + painted.rows` is the row just past the table's whole
-    // footprint. In `large` mode each body row block is
-    // `large_table_row_height` cells tall with its text on the *middle*
-    // line (`core.Table.writeBodyRow`'s `top_row + row_height / 2`), so
-    // the last block carries `row_height - 1 - row_height/2` blank lines
-    // below its text -- landing the next shell prompt there leaves a
-    // visible gap under the listing (worse the taller the row). Pull the
-    // cursor up by exactly those trailing blanks so the prompt sits one
-    // line under the last entry's text, same as the non-large listing.
-    const trailing_blank: usize = if (large) large_table_row_height - 1 - large_table_row_height / 2 else 0;
+    // footprint. In `large` mode each body row block is `row_height` cells
+    // tall with its text on the *middle* line (`core.Table.writeBodyRow`'s
+    // `top_row + row_height / 2`), so the last block carries
+    // `row_height - 1 - row_height/2` blank lines below its text -- landing
+    // the next shell prompt there leaves a visible gap under the listing
+    // (worse the taller the row). Pull the cursor up by exactly those
+    // trailing blanks so the prompt sits one line under the last entry's
+    // text, same as the non-large listing.
+    const trailing_blank: usize = if (large) row_height - 1 - row_height / 2 else 0;
     const past_table = state.painted.row + state.painted.rows;
     const layer_bottom = layer.rows -| 1;
     if (past_table <= layer_bottom) {

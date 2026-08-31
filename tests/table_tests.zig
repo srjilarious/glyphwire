@@ -165,6 +165,53 @@ pub fn tableCellIconFillsLineAtDefaultRowHeightTest(io: std.Io, alloc: std.mem.A
     try testz.expectEqualStr("x", snapshot.cellAt(1, 2).grapheme);
 }
 
+/// `style.max_icon_px` caps a body icon below what the row height alone
+/// would allow -- `glyphwire-ls` sets it so a tall `-l -L` row still
+/// renders a modest icon (see `core.Table.writeBodyRow` / `TableStyle`).
+/// Here a 3-line row would give `3 * 12 == 36`px, but `max_icon_px = 20`
+/// wins; without it the same row is back to 36.
+pub fn tableStyleMaxIconPxCapsBodyIconTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 12, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const png = fakePngBytes(48, 48);
+    const file_handle = try client.loadImage("png", &png);
+    try ctx.registerIcon("file", file_handle);
+
+    const capped = try client.createTable(null, 0, 0, &.{
+        .{ .name = "", .width = 8 },
+    }, .{ .borders = false, .header_separator = false, .row_height = 3, .max_icon_px = 20 });
+    try client.tableSetRows(null, capped, &.{&.{.{ .display = "x", .icon = "file" }}});
+
+    const uncapped = try client.createTable(null, 6, 0, &.{
+        .{ .name = "", .width = 8 },
+    }, .{ .borders = false, .header_separator = false, .row_height = 3 });
+    try client.tableSetRows(null, uncapped, &.{&.{.{ .display = "y", .icon = "file" }}});
+
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+
+    // The icon sits on the body row block's middle line: header at the
+    // anchor row, body top one below, middle another `row_height/2 == 1`
+    // down -> row 2 for the first table (anchored at 0), row 8 for the
+    // second (anchored at 6).
+    try testz.expectEqual(snapshot.cellAt(2, 0).fg_icon.?.max_h.?, 20);
+    try testz.expectEqual(snapshot.cellAt(8, 0).fg_icon.?.max_h.?, 36);
+}
+
 /// Without the session's cell pixel metrics (`ctx.cell_px_w`/`_h` zeroed
 /// -- a host that never set them), a `row_height == 1` body icon falls
 /// back to the original one-cell `.fit`, reserving exactly one column

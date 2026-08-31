@@ -45,7 +45,7 @@
 --   {icon:NAME}  a bundled icon, one cell wide. NAME is the icon file's
 --                path under assets/icons/ without the .png -- e.g.
 --                distro/arch, distro/tux; per-file-type icons
---                oxygen/pdf, oxygen/document, oxygen/code, ...; and the
+--                file/pdf, file/document, file/code, ...; and the
 --                prompt status glyphs status/error (a red cross, pair
 --                with when = "error") and status/slow (a stopwatch, pair
 --                with when = "slow").

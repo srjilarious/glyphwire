@@ -44,6 +44,10 @@ pub fn build(b: *std.Build) void {
     // shell/config.zig lives in this module and imports ziglua; both
     // glyphwire-shell and the test runner pull it in transitively.
     shell_support_mod.addImport("ziglua", ziglua_mod);
+    // ls/config.zig (glyphwire-ls's ls.conf parser) does the same -- so
+    // `ls_support` is no longer strictly dependency-free, but the width
+    // math it also carries still pulls in nothing at its own call sites.
+    ls_support_mod.addImport("ziglua", ziglua_mod);
 
     const tests_exe = b.addExecutable(.{
         .name = "tests",
@@ -197,6 +201,9 @@ pub fn build(b: *std.Build) void {
     ls_exe.root_module.addImport("glyphwire", glyphwire_mod);
     ls_exe.root_module.addImport("zargunaught", zargunaught_mod);
     ls_exe.root_module.addImport("ls_support", ls_support_mod);
+    // ls_support -> ls/config.zig -> ziglua: the Lua C library has to be
+    // linked onto the final binary, same as shell_exe does for shell.conf.
+    ls_exe.root_module.linkLibrary(lua_lib);
     ls_exe.root_module.link_libc = true;
     b.installArtifact(ls_exe);
 

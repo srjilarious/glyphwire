@@ -902,9 +902,10 @@ fn waitForCursorCol(client: *glyphwire.Client, want_col: usize) !void {
 /// cursor back on the subdirectory's row (deterministic here -- a single
 /// entry's icon lands at row 2, per `lsClientWritesEntriesOverRealSocketTest`'s
 /// row-math comment (`writeGrid` leaves a blank leading row), and the next
-/// prompt three rows below that, at row 5, since `writeGrid` leaves the
-/// cursor at `entry_row + 2` and `submitLine` adds one more), then presses
-/// Enter and confirms the *next* prompt's cwd
+/// prompt four rows below that, at row 6, since `writeGrid` leaves the
+/// cursor at `entry_row + block_rows` (3 at this test's 12px cells) and
+/// `submitLine` adds one more), then presses Enter and confirms the
+/// *next* prompt's cwd
 /// echo shows the subdirectory -- i.e. a real `cd` actually ran, not just
 /// that browsing moved a cursor around.
 ///
@@ -981,13 +982,15 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // formula (default 12x12 cell metrics, one entry -> row 2 after
     // `writeGrid`'s blank leading row, name at icon_col_width == 4).
     try waitForCell(&reporter, 2, 4, "t");
-    // The next prompt: entry_row (2) + 2 (writeGrid's post-entry advance)
-    // + 1 (submitLine's own advance) == row 5, same cwd (nothing's cd'd
-    // yet) so the same arrow_col.
-    try waitForCell(&reporter, 5, arrow_col, ">");
+    // The next prompt: entry_row (2) + 3 (writeGrid's post-entry advance,
+    // block_rows at 12px cells) + 1 (submitLine's own advance) == row 6,
+    // same cwd (nothing's cd'd yet) so the same arrow_col.
+    try waitForCell(&reporter, 6, arrow_col, ">");
 
+    // Four Up presses walk the browse cursor from the prompt row (6) back
+    // up to the entry's row (2).
     var row_presses: usize = 0;
-    while (row_presses < 3) : (row_presses += 1) {
+    while (row_presses < 4) : (row_presses += 1) {
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }
@@ -1012,10 +1015,10 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     try reporter.reportKey("enter", false);
 
     // A real `cd` ran: the next prompt's cwd echo includes "target". Row
-    // 7 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
+    // 8 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
     // post-command `getCursor()` still reads back the row it set for
-    // itself (entry_row(2)+2, from browseEnter's synthesized "cd ..."
-    // line, then +1 again) before the final +1 for the new prompt.
+    // itself (entry_row(2) + block_rows(3), from browseEnter's synthesized
+    // "cd ..." line, then +1 again) before the final +1 for the new prompt.
     var found = false;
     var attempts: usize = 0;
     while (attempts < 1000 and !found) : (attempts += 1) {
@@ -1025,7 +1028,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
         while (col + 6 <= snapshot.cols()) : (col += 1) {
             var matched = true;
             for ("target", 0..) |expected_ch, i| {
-                if (snapshot.cellAt(7, col + i).grapheme.len != 1 or snapshot.cellAt(7, col + i).grapheme[0] != expected_ch) {
+                if (snapshot.cellAt(8, col + i).grapheme.len != 1 or snapshot.cellAt(8, col + i).grapheme[0] != expected_ch) {
                     matched = false;
                     break;
                 }

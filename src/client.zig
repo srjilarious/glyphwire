@@ -607,6 +607,9 @@ pub const Client = struct {
         header_fg: ?core.Color = null,
         header_bg: ?core.Color = null,
         row_height: usize = 1,
+        /// Upper bound in pixels on a body icon's rendered height -- see
+        /// `core.TableStyle.max_icon_px`.
+        max_icon_px: ?u32 = null,
     };
 
     /// A cell's sort value -- see `core.SortKey`'s doc comment on why a
@@ -1138,6 +1141,7 @@ fn tableStyleToJson(s: Client.TableStyleInput) protocol.TableStyle {
         .header_fg = Client.colorToJson(s.header_fg),
         .header_bg = Client.colorToJson(s.header_bg),
         .row_height = s.row_height,
+        .max_icon_px = s.max_icon_px,
     };
 }
 

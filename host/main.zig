@@ -125,7 +125,15 @@ const HostConfig = struct {
     font: FontConfig = .{},
     cursor: CursorConfig = .{},
     grid: GridConfig = .{},
+    /// Which bundled file-type icon set (`assets/icons/filetype/<name>/`)
+    /// backs the canonical `file/*` names glyphwire-ls draws with -- one
+    /// of `oxygen` (default), `papirus`, `material`. An unknown value
+    /// warns and falls back to `oxygen`. `arena`-owned when set from
+    /// `host.conf`, otherwise this literal.
+    icon_theme: []const u8 = default_icon_theme,
 };
+
+const default_icon_theme = "oxygen";
 
 // Blank margin, in pixels, kept on both sides of the composited layers:
 // one strip against the window's left border, and one between the grid's
@@ -1689,7 +1697,7 @@ fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator
 /// new relative path just adds one. The real file I/O lives here rather
 /// than in `core.zig` (headless-first). Logs and skips anything that
 /// can't be read/decoded rather than failing startup.
-fn loadIconsFromDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, root: []const u8, warn_if_absent: bool) void {
+fn loadIconsFromDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, root: []const u8, prefix: []const u8, warn_if_absent: bool) void {
     var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| {
         if (warn_if_absent or err != error.FileNotFound) {
             std.log.warn("glyphwire-host: couldn't open icon directory '{s}': {t}", .{ root, err });
@@ -1697,7 +1705,7 @@ fn loadIconsFromDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Contex
         return;
     };
     defer dir.close(io);
-    scanIconDir(io, alloc, ctx, dir, "");
+    scanIconDir(io, alloc, ctx, dir, prefix);
 }
 
 /// One directory level of `loadIconsFromDir`'s walk. `prefix` is the path
@@ -1709,6 +1717,12 @@ fn scanIconDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, di
         std.log.warn("glyphwire-host: icon directory iteration failed under '{s}': {t}", .{ prefix, err });
         return;
     }) |entry| {
+        // The file-type icon *themes* live under `filetype/<theme>/` and
+        // are loaded separately, under the canonical `file/` prefix, by
+        // whichever one `host.conf`'s `icon_theme` selects -- so the
+        // generic walk skips the whole subtree.
+        if (prefix.len == 0 and entry.kind == .directory and std.mem.eql(u8, entry.name, "filetype")) continue;
+
         // `entry.name` is only valid until the next `it.next`, so build
         // the relative path (and use it) before iterating further.
         const rel = if (prefix.len == 0)
@@ -1748,6 +1762,47 @@ fn scanIconDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, di
             else => {},
         }
     }
+}
+
+/// Loads one file-type icon theme -- every `.png` directly under
+/// `assets/icons/filetype/<theme>/` -- registering each under the
+/// canonical `file/<name>` and, for back-compat with configs / demos that
+/// still say `oxygen/<name>`, that name too (`registerIcon` is
+/// last-write-wins, and the user-icon scan still runs after this to
+/// override either). Returns whether the directory existed and held at
+/// least one icon, so `main` can fall back to `oxygen`. Not recursive: a
+/// theme is a flat set of buckets.
+fn loadFiletypeTheme(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, theme_dir: []const u8) bool {
+    var dir = std.Io.Dir.cwd().openDir(io, theme_dir, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+
+    var loaded: usize = 0;
+    var it = dir.iterate();
+    while (it.next(io) catch return loaded > 0) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        const base = glyphwire.iconName(entry.name) orelse continue; // strips `.png`
+
+        const bytes = dir.readFileAlloc(io, entry.name, alloc, .limited(16 * 1024 * 1024)) catch |err| {
+            std.log.warn("glyphwire-host: couldn't read theme icon '{s}/{s}': {t}", .{ theme_dir, entry.name, err });
+            continue;
+        };
+        defer alloc.free(bytes);
+
+        const handle = ctx.loadImage(.png, bytes) catch |err| {
+            std.log.warn("glyphwire-host: couldn't load theme icon '{s}/{s}': {t}", .{ theme_dir, entry.name, err });
+            continue;
+        };
+
+        for ([_][]const u8{ "file", "oxygen" }) |ns| {
+            const name = std.fmt.allocPrint(alloc, "{s}/{s}", .{ ns, base }) catch continue;
+            defer alloc.free(name);
+            ctx.registerIcon(name, handle) catch |err| {
+                std.log.warn("glyphwire-host: couldn't register '{s}': {t}", .{ name, err });
+            };
+        }
+        loaded += 1;
+    }
+    return loaded > 0;
 }
 
 /// Reads a string field named `key` from the `config` table on the Lua
@@ -1797,25 +1852,10 @@ fn cursorShapeFromStr(s: []const u8) ?CursorShape {
     return std.meta.stringToEnum(CursorShape, s);
 }
 
-/// Owned path to glyphwire's config directory (holds `host.conf`):
-/// `$GLYPHWIRE_CONFIG_DIR` verbatim when set, else `$XDG_CONFIG_HOME/glyphwire`,
-/// else `$HOME/.config/glyphwire`. `error.NoConfigHome` when none of those
-/// are set -- there's then nowhere to read `host.conf` from and the host
-/// just runs on its built-in defaults. Kept byte-for-byte in step with
-/// glyphwire-shell's own `configDirPath` (shell/main.zig) so both binaries
-/// resolve the same directory; `$GLYPHWIRE_CONFIG_DIR` is the override the
-/// e2e tests use to keep the real config directory out of their way.
-fn configDirPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]u8 {
-    if (environ_map.get("GLYPHWIRE_CONFIG_DIR")) |dir| {
-        if (dir.len > 0) return alloc.dupe(u8, dir);
-    }
-    if (environ_map.get("XDG_CONFIG_HOME")) |xdg| {
-        if (xdg.len > 0) return std.fs.path.join(alloc, &.{ xdg, "glyphwire" });
-    }
-    const home = environ_map.get("HOME") orelse return error.NoConfigHome;
-    if (home.len == 0) return error.NoConfigHome;
-    return std.fs.path.join(alloc, &.{ home, ".config", "glyphwire" });
-}
+/// Owned path to glyphwire's config directory (holds `host.conf`).
+/// Shared with glyphwire-shell and glyphwire-ls -- see
+/// `glyphwire.configDirPath`.
+const configDirPath = glyphwire.configDirPath;
 
 /// Resolves everything `host.conf` controls for this run: starts from the
 /// `*_default` constants and overlays whatever the global `config` table
@@ -1885,6 +1925,8 @@ fn loadConfig(
     if (luaStrField(lua, arena, "font_face_name")) |v| cfg.font.face_name = v;
     if (luaStrField(lua, arena, "font_fallback")) |v| cfg.font.fallback = v;
     if (luaNumField(lua, "font_size")) |v| cfg.font.size = v;
+
+    if (luaStrField(lua, arena, "icon_theme")) |v| cfg.icon_theme = v;
 
     const clamped = std.math.clamp(cfg.font.size, min_font_size, max_font_size);
     if (clamped != cfg.font.size) {
@@ -2036,14 +2078,28 @@ pub fn main(init: std.process.Init) !void {
     // matching -- see Context's doc comment on cell_px_w/cell_px_h.
     ctx.cell_px_w = @intCast(cell_w);
     ctx.cell_px_h = @intCast(cell_h);
-    loadIconsFromDir(io, alloc, &ctx, "assets/icons", true);
+    loadIconsFromDir(io, alloc, &ctx, "assets/icons", "", true);
+    // The file-type icon set (`file/*`, aliased `oxygen/*`) comes from
+    // whichever `assets/icons/filetype/<theme>/` `host.conf`'s
+    // `icon_theme` names -- Oxygen by default, else Papirus / Material.
+    // An unknown or missing theme falls back to Oxygen.
+    {
+        const theme_dir = try std.fmt.allocPrint(arena, "assets/icons/filetype/{s}", .{host_cfg.icon_theme});
+        var ok = loadFiletypeTheme(io, alloc, &ctx, theme_dir);
+        if (!ok and !std.mem.eql(u8, host_cfg.icon_theme, default_icon_theme)) {
+            std.log.warn("glyphwire-host: icon_theme '{s}' not found under assets/icons/filetype/; using '{s}'", .{ host_cfg.icon_theme, default_icon_theme });
+            ok = loadFiletypeTheme(io, alloc, &ctx, "assets/icons/filetype/" ++ default_icon_theme);
+        }
+        if (!ok) std.log.warn("glyphwire-host: no file-type icon theme loaded (assets/icons/filetype/ missing?)", .{});
+    }
     // User icons: new names and overrides of the bundled set, from
     // `~/.config/glyphwire/icons/` (same config dir as `host.conf`, see
-    // `configDirPath`). Scanned second so a user file at a bundled
-    // relative path wins. Absent directory is normal -- not warned.
+    // `configDirPath`). Scanned last so a user file at a bundled
+    // relative path -- `file/folder.png` included -- wins. Absent
+    // directory is normal -- not warned.
     if (configDirPath(arena, init.environ_map)) |config_dir| {
         const user_icons = try std.fs.path.join(arena, &.{ config_dir, "icons" });
-        loadIconsFromDir(io, alloc, &ctx, user_icons, false);
+        loadIconsFromDir(io, alloc, &ctx, user_icons, "", false);
     } else |_| {}
 
     // `.listen()` inside `bind` is synchronous -- the socket is already

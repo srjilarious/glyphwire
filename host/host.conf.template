@@ -23,7 +23,7 @@
 -- config directory (e.g. ~/.config/glyphwire/icons/). Each is registered
 -- under its path there without the extension, so
 -- icons/mine/logo.png -> the name `mine/logo`, and a file at a bundled
--- path such as icons/oxygen/folder.png replaces that bundled icon. Use
+-- path such as icons/file/folder.png replaces that bundled icon. Use
 -- the name in a prompt `{icon:...}`, a client's `draw_icon`, etc.
 
 -- config = {
@@ -80,4 +80,16 @@
 --     -- the history ring keeps for the mouse wheel / scrollbar to reach.
 --     -- Clamped to 0..100000.
 --     scrollback_rows = 1000,
+--
+--     ---- Icons ------------------------------------------------------
+--
+--     -- Which bundled file-type icon set backs the canonical `file/*`
+--     -- names (folder, file, image, pdf, ...) that glyphwire-ls draws
+--     -- with: "oxygen" (the default, KDE Oxygen), "material" (the VS Code
+--     -- Material Icon Theme), or "papirus". An unknown name, or a theme
+--     -- whose icons aren't present, warns and falls back to "oxygen".
+--     -- Language / tool logos (dev/zig, distro/arch, ...) are the same in
+--     -- every theme. "papirus" needs `scripts/fetch-icon-themes.sh
+--     -- papirus` run once to fetch its icons.
+--     icon_theme = "oxygen",
 -- }

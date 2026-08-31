@@ -112,6 +112,10 @@ pub const TableStyle = struct {
     header_fg: ?Color = null,
     header_bg: ?Color = null,
     row_height: usize = 1,
+    /// Upper bound in pixels on a body icon's rendered height (see
+    /// `core.TableStyle.max_icon_px`). Omitted → the row height alone
+    /// bounds it.
+    max_icon_px: ?u32 = null,
 };
 
 /// One row's cell, as sent to `table_set_rows`. `sort_key` (see

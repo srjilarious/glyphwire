@@ -1849,6 +1849,13 @@ pub const TableStyle = struct {
     header_fg: ?Color = null,
     header_bg: ?Color = null,
     row_height: usize = 1,
+    /// Upper bound, in pixels, on a body-cell icon's rendered height --
+    /// `writeBodyRow` caps `.natural` scaling to `min(row_height *
+    /// cell_px_h, max_icon_px)`. `null` means "no extra cap", the row
+    /// height alone bounds it (the historical behaviour). `glyphwire-ls`
+    /// sets it so a tall `-l -L` row still renders its icon at the same
+    /// size the icon grid uses, regardless of the source art's resolution.
+    max_icon_px: ?u32 = null,
 
     pub fn deinit(self: TableStyle, alloc: std.mem.Allocator) void {
         alloc.free(self.box_style);
@@ -2130,7 +2137,13 @@ pub const Table = struct {
             if (cell.icon) |icon_handle| {
                 if (ctx.cell_px_w > 0 and ctx.cell_px_h > 0) {
                     const info = ctx.imageInfo(icon_handle) orelse ImageInfo{ .width = 0, .height = 0 };
-                    const max_h: u32 = @intCast(row_height * ctx.cell_px_h);
+                    // Row height bounds the icon; `style.max_icon_px` (if
+                    // set) bounds it further, so a tall row still renders a
+                    // modest icon.
+                    const max_h: u32 = @min(
+                        @as(u32, @intCast(row_height * ctx.cell_px_h)),
+                        self.style.max_icon_px orelse std.math.maxInt(u32),
+                    );
                     const render_px = @min(info.width, max_h);
                     icon_reserve = (render_px + ctx.cell_px_w - 1) / ctx.cell_px_w + 1;
                     setCellIconOver(layer, mid_row, col, icon_handle, .natural, .start, .center, max_h, cell.metadata_id);

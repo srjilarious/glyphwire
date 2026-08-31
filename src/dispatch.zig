@@ -1256,6 +1256,7 @@ pub const Dispatcher = struct {
             .header_fg = if (s.header_fg) |c| colorFromJson(c) else null,
             .header_bg = if (s.header_bg) |c| colorFromJson(c) else null,
             .row_height = @max(s.row_height, 1),
+            .max_icon_px = s.max_icon_px,
         };
     }
 
@@ -1480,6 +1481,7 @@ pub const Dispatcher = struct {
                 .header_fg = if (table.style.header_fg) |c| colorToJson(c) else null,
                 .header_bg = if (table.style.header_bg) |c| colorToJson(c) else null,
                 .row_height = table.style.row_height,
+                .max_icon_px = table.style.max_icon_px,
             },
             .painted = .{
                 .row = table.painted.row,

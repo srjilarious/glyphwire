@@ -129,7 +129,7 @@ sequenceDiagram
 | **Layers** | `create_layer`, `destroy_layer`, `get_property` / `set_property` (`cursor`, `position`, `size`, `revision`, `scroll`) | A popup, notification, or HUD is its own addressable surface with a pixel-precise position you can animate — it composites over the shell's scrollback without disturbing it. Every draw message takes an optional `layer`; omit it and you get the root. |
 | **Scrollback & resize** | `scroll_view`, `resize` / `scroll` notifications, `get_cells` with `view_offset` | The ring-buffer scrollback is readable over the wire, so a client can inspect exactly what's on screen while the host is scrolled back (how a click in scrollback resolves to the right cell). Window resize is bottom-anchored and non-destructive. |
 | **Images** | `load_image` (binary side-channel), `get_image_info`, `draw_image`, `get_cell_metrics` | Show real bitmaps in the grid — an image viewer, TUI background art — placed at natural size and clipped, not stretched. Binary bytes ride a length-prefixed side channel, never base64 in JSON. |
-| **Icons** | `draw_icon` (`scale` fit / natural / stretch, `h_align` / `v_align`, `max_w` / `max_h`, `foreground`) | A bundled named catalog (KDE Oxygen file-type art, Devicon language/tool + distro logos) so every tool doesn't reload its own "folder" / "audio file" art. `foreground: true` composites over a background instead of replacing it. |
+| **Icons** | `draw_icon` (`scale` fit / natural / stretch, `h_align` / `v_align`, `max_w` / `max_h`, `foreground`) | A bundled named catalog (a selectable file-type icon theme — Oxygen / Material / Papirus — behind `file/*`, plus Devicon language/tool + distro logos) so every tool doesn't reload its own "folder" / "audio file" art. `foreground: true` composites over a background instead of replacing it. |
 | **Boxes / panels** | `draw_box` (`style`, `mode` tile / stretch) | 9-slice panels and borders from tile sets; `stretch` mode treats an edge/fill role as one continuous picture so a gradient panel blends smoothly at any size. |
 | **Tables** | `create_table`, `table_set_rows`, `table_set_sort`, `table_set_style`, `table_get_state`, `destroy_table` | Structured, typed, sortable table state that lives **server-side** and survives the process that created it — `glyphwire-ls -l` can exit and the table is still there to re-sort or restyle. Sorts on a typed `SortKey`, not the display string. |
 | **Metadata** | `create_metadata`, `destroy_metadata`, `get_metadata`, `tag_metadata` | Tag a cell (or a whole `write_text` run) with opaque client-defined JSON — a command to run on select, a file path for a context menu. The server stores the blob and never parses it. |
@@ -194,10 +194,13 @@ See `host/host.conf.template` for the full annotated reference.
 | `font_size` | `20.0` | Starting cell size in px, clamped to 8..72. |
 
 (`host.conf` also carries `cursor_shape` / `cursor_blink` /
-`cursor_blink_ms` and `grid_cols` / `grid_rows` / `scrollback_rows`; see
-the template.) Every field is optional and any omitted one keeps its
-default; a missing file (or no config directory at all) uses all
-defaults. At runtime **`Ctrl+-`** / **`Ctrl++`** step the
+`cursor_blink_ms`, `grid_cols` / `grid_rows` / `scrollback_rows`, and
+`icon_theme` — `"oxygen"` (default) / `"material"` / `"papirus"`, the set
+behind the `file/*` file-type icons; see the template.) Every field is
+optional and any omitted one keeps its default; a missing file (or no
+config directory at all) uses all defaults. `glyphwire-ls` has its own
+optional `~/.config/glyphwire/ls.conf` (`large_icon_px` / `small_icon_px`;
+see `ls/ls.conf.template`). At runtime **`Ctrl+-`** / **`Ctrl++`** step the
 font size by 2px and **`Ctrl+0`** restores the configured size — the
 window resizes to keep the same column/row count (best effort; a tiling
 WM that pins the window reflows the grid instead).

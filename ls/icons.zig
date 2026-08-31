@@ -8,9 +8,12 @@
 //!     under `assets/icons/dev/` (plus the two LobeHub Claude marks). A
 //!     recognised source file, or a well-known project directory / dotfile,
 //!     gets its language's real logo here.
-//!   * `oxygen/*` -- the coarser KDE-Oxygen file-type buckets under
-//!     `assets/icons/oxygen/`, the fallback for everything without a `dev/`
-//!     logo (images, audio, video, archives, office docs, ...).
+//!   * `file/*` -- the coarser file-type buckets (folder, image, audio,
+//!     archive, pdf, ...), the fallback for everything without a `dev/`
+//!     logo. `file/*` is a *canonical* name: `glyphwire-host` resolves it
+//!     to whichever bundled icon theme `host.conf`'s `icon_theme` selects
+//!     (`assets/icons/filetype/{oxygen,papirus,material}/`), Oxygen by
+//!     default. `oxygen/*` still resolves too, as a back-compat alias.
 //!
 //! `glyphwire-host` resolves these names server-side for `draw_icon` /
 //! `table_set_rows`. This is still a coarse, name-based classification --
@@ -20,75 +23,75 @@ const std = @import("std");
 
 /// Extension (including the leading `.`, matched case-insensitively) ->
 /// default icon-registry name. First match wins; `iconForExtension`
-/// falls back to `"oxygen/file"` for anything not listed.
+/// falls back to `"file/file"` for anything not listed.
 pub const extension_icons = [_]struct { ext: []const u8, icon: []const u8 }{
     // ── Media / documents / archives: coarse Oxygen buckets ──────────
-    .{ .ext = ".png", .icon = "oxygen/image" },
-    .{ .ext = ".jpg", .icon = "oxygen/image" },
-    .{ .ext = ".jpeg", .icon = "oxygen/image" },
-    .{ .ext = ".gif", .icon = "oxygen/image" },
-    .{ .ext = ".bmp", .icon = "oxygen/image" },
-    .{ .ext = ".svg", .icon = "oxygen/image" },
-    .{ .ext = ".webp", .icon = "oxygen/image" },
+    .{ .ext = ".png", .icon = "file/image" },
+    .{ .ext = ".jpg", .icon = "file/image" },
+    .{ .ext = ".jpeg", .icon = "file/image" },
+    .{ .ext = ".gif", .icon = "file/image" },
+    .{ .ext = ".bmp", .icon = "file/image" },
+    .{ .ext = ".svg", .icon = "file/image" },
+    .{ .ext = ".webp", .icon = "file/image" },
 
-    .{ .ext = ".mp3", .icon = "oxygen/audio" },
-    .{ .ext = ".wav", .icon = "oxygen/audio" },
-    .{ .ext = ".flac", .icon = "oxygen/audio" },
-    .{ .ext = ".ogg", .icon = "oxygen/audio" },
-    .{ .ext = ".m4a", .icon = "oxygen/audio" },
+    .{ .ext = ".mp3", .icon = "file/audio" },
+    .{ .ext = ".wav", .icon = "file/audio" },
+    .{ .ext = ".flac", .icon = "file/audio" },
+    .{ .ext = ".ogg", .icon = "file/audio" },
+    .{ .ext = ".m4a", .icon = "file/audio" },
 
-    .{ .ext = ".mp4", .icon = "oxygen/video" },
-    .{ .ext = ".mkv", .icon = "oxygen/video" },
-    .{ .ext = ".mov", .icon = "oxygen/video" },
-    .{ .ext = ".webm", .icon = "oxygen/video" },
-    .{ .ext = ".avi", .icon = "oxygen/video" },
+    .{ .ext = ".mp4", .icon = "file/video" },
+    .{ .ext = ".mkv", .icon = "file/video" },
+    .{ .ext = ".mov", .icon = "file/video" },
+    .{ .ext = ".webm", .icon = "file/video" },
+    .{ .ext = ".avi", .icon = "file/video" },
 
-    .{ .ext = ".zip", .icon = "oxygen/archive" },
-    .{ .ext = ".tar", .icon = "oxygen/archive" },
-    .{ .ext = ".gz", .icon = "oxygen/archive" },
-    .{ .ext = ".tgz", .icon = "oxygen/archive" },
-    .{ .ext = ".xz", .icon = "oxygen/archive" },
-    .{ .ext = ".bz2", .icon = "oxygen/archive" },
-    .{ .ext = ".7z", .icon = "oxygen/archive" },
-    .{ .ext = ".rar", .icon = "oxygen/archive" },
-    .{ .ext = ".zst", .icon = "oxygen/archive" },
+    .{ .ext = ".zip", .icon = "file/archive" },
+    .{ .ext = ".tar", .icon = "file/archive" },
+    .{ .ext = ".gz", .icon = "file/archive" },
+    .{ .ext = ".tgz", .icon = "file/archive" },
+    .{ .ext = ".xz", .icon = "file/archive" },
+    .{ .ext = ".bz2", .icon = "file/archive" },
+    .{ .ext = ".7z", .icon = "file/archive" },
+    .{ .ext = ".rar", .icon = "file/archive" },
+    .{ .ext = ".zst", .icon = "file/archive" },
 
-    .{ .ext = ".deb", .icon = "oxygen/package" },
-    .{ .ext = ".rpm", .icon = "oxygen/package" },
-    .{ .ext = ".pkg", .icon = "oxygen/package" },
-    .{ .ext = ".apk", .icon = "oxygen/package" },
+    .{ .ext = ".deb", .icon = "file/package" },
+    .{ .ext = ".rpm", .icon = "file/package" },
+    .{ .ext = ".pkg", .icon = "file/package" },
+    .{ .ext = ".apk", .icon = "file/package" },
 
-    .{ .ext = ".pdf", .icon = "oxygen/pdf" },
+    .{ .ext = ".pdf", .icon = "file/pdf" },
 
-    .{ .ext = ".doc", .icon = "oxygen/document" },
-    .{ .ext = ".docx", .icon = "oxygen/document" },
-    .{ .ext = ".odt", .icon = "oxygen/document" },
-    .{ .ext = ".rtf", .icon = "oxygen/document" },
+    .{ .ext = ".doc", .icon = "file/document" },
+    .{ .ext = ".docx", .icon = "file/document" },
+    .{ .ext = ".odt", .icon = "file/document" },
+    .{ .ext = ".rtf", .icon = "file/document" },
 
-    .{ .ext = ".xls", .icon = "oxygen/spreadsheet" },
-    .{ .ext = ".xlsx", .icon = "oxygen/spreadsheet" },
-    .{ .ext = ".ods", .icon = "oxygen/spreadsheet" },
-    .{ .ext = ".csv", .icon = "oxygen/spreadsheet" },
+    .{ .ext = ".xls", .icon = "file/spreadsheet" },
+    .{ .ext = ".xlsx", .icon = "file/spreadsheet" },
+    .{ .ext = ".ods", .icon = "file/spreadsheet" },
+    .{ .ext = ".csv", .icon = "file/spreadsheet" },
 
-    .{ .ext = ".ppt", .icon = "oxygen/presentation" },
-    .{ .ext = ".pptx", .icon = "oxygen/presentation" },
-    .{ .ext = ".odp", .icon = "oxygen/presentation" },
+    .{ .ext = ".ppt", .icon = "file/presentation" },
+    .{ .ext = ".pptx", .icon = "file/presentation" },
+    .{ .ext = ".odp", .icon = "file/presentation" },
 
-    .{ .ext = ".txt", .icon = "oxygen/text" },
-    .{ .ext = ".rst", .icon = "oxygen/text" },
-    .{ .ext = ".log", .icon = "oxygen/text" },
-    .{ .ext = ".xml", .icon = "oxygen/text" },
-    .{ .ext = ".json", .icon = "oxygen/text" },
-    .{ .ext = ".yaml", .icon = "oxygen/text" },
-    .{ .ext = ".yml", .icon = "oxygen/text" },
-    .{ .ext = ".toml", .icon = "oxygen/text" },
-    .{ .ext = ".ini", .icon = "oxygen/text" },
+    .{ .ext = ".txt", .icon = "file/text" },
+    .{ .ext = ".rst", .icon = "file/text" },
+    .{ .ext = ".log", .icon = "file/text" },
+    .{ .ext = ".xml", .icon = "file/text" },
+    .{ .ext = ".json", .icon = "file/text" },
+    .{ .ext = ".yaml", .icon = "file/text" },
+    .{ .ext = ".yml", .icon = "file/text" },
+    .{ .ext = ".toml", .icon = "file/text" },
+    .{ .ext = ".ini", .icon = "file/text" },
 
-    .{ .ext = ".bin", .icon = "oxygen/executable" },
-    .{ .ext = ".exe", .icon = "oxygen/executable" },
-    .{ .ext = ".appimage", .icon = "oxygen/executable" },
+    .{ .ext = ".bin", .icon = "file/executable" },
+    .{ .ext = ".exe", .icon = "file/executable" },
+    .{ .ext = ".appimage", .icon = "file/executable" },
 
-    .{ .ext = ".iso", .icon = "oxygen/media-optical" },
+    .{ .ext = ".iso", .icon = "file/media-optical" },
 
     // ── Source files: the language's real Devicon logo ──────────────
     .{ .ext = ".md", .icon = "dev/markdown" },
@@ -204,7 +207,7 @@ pub const filename_icons = [_]struct { name: []const u8, icon: []const u8 }{
 /// Exact directory basename (matched case-sensitively) -> icon-registry
 /// name, so a project's tooling directory shows that tool's logo instead
 /// of the generic folder. `iconForDirName` returns null for anything not
-/// listed, and the caller falls back to `"oxygen/folder"`.
+/// listed, and the caller falls back to `"file/folder"`.
 pub const dir_icons = [_]struct { name: []const u8, icon: []const u8 }{
     .{ .name = ".vscode", .icon = "dev/vscode" },
     .{ .name = ".claude", .icon = "dev/claude" },
@@ -218,7 +221,7 @@ pub const dir_icons = [_]struct { name: []const u8, icon: []const u8 }{
 };
 
 /// The icon-registry name for a regular file, derived from its extension
-/// (`extension_icons`), falling back to `"oxygen/file"` for an
+/// (`extension_icons`), falling back to `"file/file"` for an
 /// unrecognized one. `iconForFileName` takes precedence over this at the
 /// call site (`ls/main.zig`'s `iconForEntry`) for whole-name matches like
 /// `Dockerfile`.
@@ -227,7 +230,7 @@ pub fn iconForExtension(name: []const u8) []const u8 {
     for (extension_icons) |e| {
         if (std.ascii.eqlIgnoreCase(ext, e.ext)) return e.icon;
     }
-    return "oxygen/file";
+    return "file/file";
 }
 
 /// The `dev/*` logo for an exact file basename (`filename_icons`), or null
@@ -241,7 +244,7 @@ pub fn iconForFileName(name: []const u8) ?[]const u8 {
 
 /// The `dev/*` logo for an exact directory basename (`dir_icons`), or null
 /// if the name isn't one of the special-cased ones (the caller then uses
-/// `"oxygen/folder"`).
+/// `"file/folder"`).
 pub fn iconForDirName(name: []const u8) ?[]const u8 {
     for (dir_icons) |d| {
         if (std.mem.eql(u8, name, d.name)) return d.icon;

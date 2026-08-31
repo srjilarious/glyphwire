@@ -1148,6 +1148,43 @@ rows and `decisions.md`'s Icon + Box sections updated.
   revision changes or a paint is forced (cursor blink, resize), leaving
   idle frames as a bare re-present. See `decisions.md`'s Icon section.
 
+## Selectable file-type icon theme + configurable icon sizes
+
+No wire change beyond one optional `TableStyle` field. `decisions.md`'s
+Icon + Table sections, `api.md`'s `create_table` / `table_set_style` /
+`table_set_rows` / `table_get_state` rows, `README.md` and
+`host.conf.template` updated.
+
+- **`file/*` is a themed name.** The coarse folder/file/mimetype icons
+  moved from `assets/icons/oxygen/` to `assets/icons/filetype/<theme>/`
+  (`oxygen` — now 48x48 via `scripts/fetch-oxygen.sh`, `material` — via
+  `scripts/fetch-icon-themes.sh`, `papirus` — same script, not vendored
+  because its repo host wasn't reachable where this was built). The
+  generic `assets/icons/` walk skips `filetype/`; `host/main.zig`'s
+  `loadFiletypeTheme` loads the one `host.conf`'s `icon_theme` selects,
+  under both `file/<name>` and the alias `oxygen/<name>`. Unknown / empty
+  theme → warn, fall back to `oxygen`. `ls/icons.zig` and the sample
+  configs now use `file/*`; the alias keeps a user's existing
+  `{icon:oxygen/…}` working.
+- **`ls.conf`.** New `~/.config/glyphwire/ls.conf` (`ls/config.zig`, a Lua
+  `config` table via the vendored Lua lib now linked into `ls`) with
+  `large_icon_px` (32) / `small_icon_px` (16). `writeGrid` /
+  `writeLongTable` use them for the `.natural` cap and derive the band /
+  row height from `ceil(px / cell_h)` instead of a fixed 2-vs-1.
+- **`TableStyle.max_icon_px`.** Plumbed client → protocol → dispatch →
+  `core.TableStyle`; `writeBodyRow` caps a body icon to
+  `min(row_height * cell_px_h, max_icon_px)`. `glyphwire-ls` sets it so a
+  tall `-l -L` row's icon matches the grid's size. `null` (any other
+  table) keeps the old row-height-only cap.
+- **`configDirPath` shared.** The identical copy in `host/main.zig` and
+  `shell/main.zig` moved to `src/config_dir.zig`
+  (`glyphwire.configDirPath`); `ls` uses it too.
+- **Tests:** `ls_tests.zig` gains `ls.conf` parse cases and its
+  `iconForExtension` expectations move to `file/*`; `table_tests.zig`
+  gains `tableStyleMaxIconPxCapsBodyIconTest`; the `writeGrid` band-height
+  change shifts a couple of row numbers in the `e2e` browse test. No host
+  test group — the theme swap needs a `zig build host` eyeball.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

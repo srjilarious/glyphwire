@@ -1,0 +1,35 @@
+-- glyphwire-ls configuration template.
+--
+-- This is the full reference for `ls.conf`, the file glyphwire-ls reads
+-- once at startup (see ls/config.zig `load`). Copy it to one of:
+--
+--   $GLYPHWIRE_CONFIG_DIR/ls.conf
+--   $XDG_CONFIG_HOME/glyphwire/ls.conf
+--   ~/.config/glyphwire/ls.conf                    (the usual location)
+--
+-- Every key is listed below at its built-in default, with every line
+-- commented out -- so copying this file verbatim changes nothing.
+-- Uncomment and edit only the keys you want to override.
+--
+-- Syntax: a plain Lua script (standard libraries open). Assign a single
+-- global table named `config`. Unknown keys are ignored; a key of the
+-- wrong type or an out-of-range value logs a warning and the default
+-- stands.
+--
+-- Which file-type icon set is used (Oxygen / Papirus / Material) is a
+-- *host* setting, not an ls one -- see `icon_theme` in host.conf.
+
+-- config = {
+--
+--     -- On-screen icon height in pixels. Icons scale down to fit
+--     -- (aspect-preserving), so these are upper bounds: source art
+--     -- smaller than the value renders at its own size. Both are clamped
+--     -- to 8..128. A body row / grid band grows as tall as it needs to
+--     -- hold the icon at the current font's cell size.
+--
+--     -- The default listing, and `ls -S`.
+--     small_icon_px = 16,
+--
+--     -- `ls -L` (the default format) and `ls -l -L`.
+--     large_icon_px = 32,
+-- }

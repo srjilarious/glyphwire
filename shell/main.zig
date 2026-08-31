@@ -217,24 +217,9 @@ fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
 }
 
 /// Owned path to glyphwire's config directory (holds `shell.conf` and
-/// `history`): `$GLYPHWIRE_CONFIG_DIR` verbatim when set, else
-/// `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`.
-/// `error.NoConfigHome` when none of those are set -- there's then
-/// nowhere to read `shell.conf` from or persist history to, and the
-/// shell just runs without either. `$GLYPHWIRE_CONFIG_DIR` is the
-/// override the e2e tests use to keep the real config directory out of
-/// their way.
-fn configDirPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]u8 {
-    if (environ_map.get("GLYPHWIRE_CONFIG_DIR")) |dir| {
-        if (dir.len > 0) return alloc.dupe(u8, dir);
-    }
-    if (environ_map.get("XDG_CONFIG_HOME")) |xdg| {
-        if (xdg.len > 0) return std.fs.path.join(alloc, &.{ xdg, "glyphwire" });
-    }
-    const home = environ_map.get("HOME") orelse return error.NoConfigHome;
-    if (home.len == 0) return error.NoConfigHome;
-    return std.fs.path.join(alloc, &.{ home, ".config", "glyphwire" });
-}
+/// `history`). Shared with glyphwire-host and glyphwire-ls -- see
+/// `glyphwire.configDirPath`.
+const configDirPath = glyphwire.configDirPath;
 
 /// Drains every queued `resize` notification into `prompt.pending_resize`
 /// (see `Prompt.noteResize`) and then applies it if the size has settled

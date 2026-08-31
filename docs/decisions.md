@@ -524,25 +524,34 @@ surface.
   optional tree — `~/.config/glyphwire/icons/` (the same config dir as
   `host.conf`, `configDirPath`) — the same way; because `registerIcon`
   overwrites by name, a user file at a bundled relative path
-  (`icons/oxygen/folder.png`) replaces that bundled icon and a new
-  relative path just adds one. A missing user directory is silent. The
-  bundled art is the KDE Oxygen icon theme
-  (LGPLv3, see `assets/icons/oxygen/README.txt`), kept at Oxygen's native
-  32x32 (scale-to-fit means there's no need to pre-shrink them to any
-  particular cell size). Chosen over a flatter/more minimal icon set
-  specifically to show off what drawing real multi-tone artwork into a
-  cell looks like, not just a monochrome glyph. Beyond the coarse generic
-  set (`oxygen/folder`/`oxygen/file`/`oxygen/audio`/…) there are finer
-  file-type buckets — `oxygen/pdf`, `oxygen/document`,
-  `oxygen/spreadsheet`, `oxygen/presentation`, `oxygen/text`,
-  `oxygen/web`, `oxygen/package` — that `glyphwire-ls` maps an extension
-  onto (`ls/icons.zig`), still falling back to `oxygen/file` for anything
-  unrecognized.
+  (`icons/file/folder.png`) replaces that bundled icon and a new
+  relative path just adds one. A missing user directory is silent.
+- **The coarse file-type buckets are a *selectable theme*, named
+  `file/*`.** The folder / file / mimetype icons `glyphwire-ls` falls
+  back to (`file/folder`, `file/pdf`, `file/image`, … — ~20 canonical
+  names in `ls/icons.zig`) don't live at a fixed path any more. Each
+  bundled set is a flat directory under `assets/icons/filetype/<theme>/`
+  — `oxygen` (the default, KDE Oxygen, LGPL-3.0), `material` (VS Code
+  Material Icon Theme, MIT), `papirus` (GPL-3.0, fetched by
+  `scripts/fetch-icon-themes.sh`) — and `host.conf`'s `icon_theme` picks
+  one. The generic `assets/icons/` walk skips `filetype/` entirely;
+  `host/main.zig`'s `loadFiletypeTheme` then loads just the chosen set,
+  registering each icon under the canonical `file/<name>` **and** the
+  back-compat alias `oxygen/<name>` (so existing configs / demos that
+  still say `oxygen/folder` keep resolving). An unknown or empty theme
+  warns and falls back to `oxygen`. Everything else (`dev/`, `distro/`,
+  `box/`, `dialog/`, `status/`, `notify/`) is theme-independent and loads
+  as before. Oxygen was chosen as the default over a flatter set
+  specifically to show off real multi-tone artwork in a cell, not just a
+  monochrome glyph; it's now bundled at Oxygen's native **48x48** (via
+  `scripts/fetch-oxygen.sh`, from the pasnox mirror that dereferences
+  KDE's symlinks) so every set matches the 48px `dev/*` logos and
+  scale-to-fit does the rest.
 - **`dev/` and `distro/` are the Devicon set.** For a recognised source
   file or project directory, `glyphwire-ls` prefers a real
   language/tool logo — `dev/zig`, `dev/elixir`, `dev/go`, `dev/vscode`,
   `dev/git` (a `.vscode` / `.claude` / `.git` directory picks up the
-  matching one) — over the coarse `oxygen/*` bucket. Those, and the
+  matching one) — over the coarse `file/*` bucket. Those, and the
   `distro/*` prompt logos, are the [Devicon](https://github.com/devicons/devicon)
   set ("-original" brand-coloured variants), rasterized from SVG to 48x48
   RGBA PNG by `scripts/fetch-devicons.sh` (MIT, see
@@ -576,11 +585,25 @@ surface.
   icons carry dialog-background styling for `glyphwire-notify`) — the
   path prefix keeps a bare `error` free for some future unrelated icon,
   the same job the old `status-`/`notify-` name prefixes did.
-- **Not built — still open:** theming (a context-local catalog overriding
-  the global one, so swapping a theme changes what a name resolves to
-  without any client needing to know or reload anything) and a way to
-  query the catalog's contents over the wire (a client currently just has
-  to know the names, i.e. the `assets/icons/` tree).
+- **Icon render size is `ls.conf`-configurable, capped consistently.**
+  `glyphwire-ls`'s `writeGrid` and `writeLongTable` used to hardcode the
+  `.natural` cap (one/two cell-heights, then a fixed 32px). Now
+  `~/.config/glyphwire/ls.conf` (`ls/config.zig`, a Lua `config` table
+  like `host.conf`) sets `large_icon_px` (default 32, for `-L`) and
+  `small_icon_px` (default 16); the grid band / table row height follows
+  (`ceil(px / cell_h)`), and the `-l` table passes the size through as
+  `TableStyle.max_icon_px` so `core.Table.writeBodyRow` caps a tall row's
+  icon the same way the grid does — a 48px `dev/*` logo then renders the
+  same on-screen size as a `file/*` bucket icon everywhere. `ls.conf` is
+  Lua (not a flat key=value file) so a future `colors = { … }` override
+  table fits without a format change. `ls` links the vendored Lua lib for
+  this, same as `glyphwire-shell` does for `shell.conf`.
+- **Partly built — theming.** The file-type slice is done (`file/*` +
+  `host.conf` `icon_theme`, above). Still open: a fully context-local
+  catalog (a per-`Context` override so one connection can theme
+  independently of another, live) and a way to query the catalog's
+  contents over the wire (a client currently just has to know the names,
+  i.e. the `assets/icons/` tree).
 - **`foreground: true` composites over the background instead of
   replacing it.** An ordinary `draw_icon` sets `Cell.style.bg`'s `.icon`
   variant — one of `Background`'s mutually exclusive cases, so it

@@ -7,6 +7,7 @@ const testz = @import("testz");
 const gridlayout = @import("ls_support").gridlayout;
 const lsfmt = @import("ls_support").format;
 const lsicons = @import("ls_support").icons;
+const lsconfig = @import("ls_support").config;
 
 const small_opts: gridlayout.Options = .{ .icon_cols = 2, .block_rows = 1 };
 
@@ -217,26 +218,26 @@ pub fn formatTimestampEpochAndNegativeTest(_: std.Io, _: std.mem.Allocator) !voi
 // ─── lsicons.iconForExtension ─────────────────────────────────────────────
 
 pub fn iconForExtensionMapsKnownBucketsTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(lsicons.iconForExtension("photo.png"), "oxygen/image");
-    try testz.expectEqualStr(lsicons.iconForExtension("song.flac"), "oxygen/audio");
-    try testz.expectEqualStr(lsicons.iconForExtension("clip.mkv"), "oxygen/video");
-    try testz.expectEqualStr(lsicons.iconForExtension("bundle.tar.gz"), "oxygen/archive");
+    try testz.expectEqualStr(lsicons.iconForExtension("photo.png"), "file/image");
+    try testz.expectEqualStr(lsicons.iconForExtension("song.flac"), "file/audio");
+    try testz.expectEqualStr(lsicons.iconForExtension("clip.mkv"), "file/video");
+    try testz.expectEqualStr(lsicons.iconForExtension("bundle.tar.gz"), "file/archive");
 }
 
 pub fn iconForExtensionMapsNewFileTypeBucketsTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(lsicons.iconForExtension("report.pdf"), "oxygen/pdf");
-    try testz.expectEqualStr(lsicons.iconForExtension("notes.docx"), "oxygen/document");
-    try testz.expectEqualStr(lsicons.iconForExtension("budget.xlsx"), "oxygen/spreadsheet");
-    try testz.expectEqualStr(lsicons.iconForExtension("data.csv"), "oxygen/spreadsheet");
-    try testz.expectEqualStr(lsicons.iconForExtension("deck.odp"), "oxygen/presentation");
-    try testz.expectEqualStr(lsicons.iconForExtension("config.toml"), "oxygen/text");
-    try testz.expectEqualStr(lsicons.iconForExtension("pkg.deb"), "oxygen/package");
-    try testz.expectEqualStr(lsicons.iconForExtension("pkg.rpm"), "oxygen/package");
+    try testz.expectEqualStr(lsicons.iconForExtension("report.pdf"), "file/pdf");
+    try testz.expectEqualStr(lsicons.iconForExtension("notes.docx"), "file/document");
+    try testz.expectEqualStr(lsicons.iconForExtension("budget.xlsx"), "file/spreadsheet");
+    try testz.expectEqualStr(lsicons.iconForExtension("data.csv"), "file/spreadsheet");
+    try testz.expectEqualStr(lsicons.iconForExtension("deck.odp"), "file/presentation");
+    try testz.expectEqualStr(lsicons.iconForExtension("config.toml"), "file/text");
+    try testz.expectEqualStr(lsicons.iconForExtension("pkg.deb"), "file/package");
+    try testz.expectEqualStr(lsicons.iconForExtension("pkg.rpm"), "file/package");
 }
 
 pub fn iconForExtensionMapsSourceFilesToDevLogosTest(_: std.Io, _: std.mem.Allocator) !void {
     // Source files now get their language's real Devicon logo (dev/*)
-    // rather than the coarse oxygen/code / oxygen/text bucket.
+    // rather than the coarse file/code / file/text bucket.
     try testz.expectEqualStr(lsicons.iconForExtension("main.zig"), "dev/zig");
     try testz.expectEqualStr(lsicons.iconForExtension("build.zig.zon"), "dev/zig");
     try testz.expectEqualStr(lsicons.iconForExtension("build.py"), "dev/python");
@@ -274,14 +275,14 @@ pub fn iconForDirNameMatchesToolDirectoriesTest(_: std.Io, _: std.mem.Allocator)
     try testz.expectEqualStr(lsicons.iconForDirName(".github").?, "dev/github");
     try testz.expectEqualStr(lsicons.iconForDirName("node_modules").?, "dev/nodejs");
     // An ordinary directory name has no special icon; the caller falls
-    // back to "oxygen/folder".
+    // back to "file/folder".
     try testz.expectEqual(lsicons.iconForDirName("src"), null);
     try testz.expectEqual(lsicons.iconForDirName("assets"), null);
 }
 
 pub fn iconForExtensionIsCaseInsensitiveTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(lsicons.iconForExtension("SCAN.PDF"), "oxygen/pdf");
-    try testz.expectEqualStr(lsicons.iconForExtension("Photo.JPG"), "oxygen/image");
+    try testz.expectEqualStr(lsicons.iconForExtension("SCAN.PDF"), "file/pdf");
+    try testz.expectEqualStr(lsicons.iconForExtension("Photo.JPG"), "file/image");
 }
 
 pub fn iconForExtensionShellScriptsAreCodeNotExecutableTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -289,12 +290,55 @@ pub fn iconForExtensionShellScriptsAreCodeNotExecutableTest(_: std.Io, _: std.me
     // bucket; the real binaries stay on "executable".
     try testz.expectEqualStr(lsicons.iconForExtension("deploy.sh"), "dev/bash");
     try testz.expectEqualStr(lsicons.iconForExtension("run.bash"), "dev/bash");
-    try testz.expectEqualStr(lsicons.iconForExtension("tool.exe"), "oxygen/executable");
-    try testz.expectEqualStr(lsicons.iconForExtension("blob.bin"), "oxygen/executable");
+    try testz.expectEqualStr(lsicons.iconForExtension("tool.exe"), "file/executable");
+    try testz.expectEqualStr(lsicons.iconForExtension("blob.bin"), "file/executable");
 }
 
 pub fn iconForExtensionFallsBackToFileTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(lsicons.iconForExtension("mystery.qwerty"), "oxygen/file");
-    try testz.expectEqualStr(lsicons.iconForExtension("NOEXTENSION"), "oxygen/file");
-    try testz.expectEqualStr(lsicons.iconForExtension(""), "oxygen/file");
+    try testz.expectEqualStr(lsicons.iconForExtension("mystery.qwerty"), "file/file");
+    try testz.expectEqualStr(lsicons.iconForExtension("NOEXTENSION"), "file/file");
+    try testz.expectEqualStr(lsicons.iconForExtension(""), "file/file");
+}
+
+// ─── ls.conf parsing (ls/config.zig) ───────────────────────────────────
+
+pub fn lsConfigDefaultsWhenEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var r = lsconfig.load(alloc, "");
+    defer r.deinit(alloc);
+    try testz.expectTrue(r.err == null);
+    try testz.expectEqual(r.config.large_icon_px, @as(u32, 32));
+    try testz.expectEqual(r.config.small_icon_px, @as(u32, 16));
+}
+
+pub fn lsConfigReadsIconSizesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var r = lsconfig.load(alloc, "config = { large_icon_px = 64, small_icon_px = 20 }");
+    defer r.deinit(alloc);
+    try testz.expectTrue(r.err == null);
+    try testz.expectEqual(r.config.large_icon_px, @as(u32, 64));
+    try testz.expectEqual(r.config.small_icon_px, @as(u32, 20));
+}
+
+pub fn lsConfigClampsOutOfRangeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var r = lsconfig.load(alloc, "config = { large_icon_px = 9000, small_icon_px = 1 }");
+    defer r.deinit(alloc);
+    try testz.expectEqual(r.config.large_icon_px, lsconfig.icon_px_max);
+    try testz.expectEqual(r.config.small_icon_px, lsconfig.icon_px_min);
+}
+
+pub fn lsConfigIgnoresWrongTypesAndUnknownKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var r = lsconfig.load(alloc,
+        \\config = { large_icon_px = "big", nonsense = true, small_icon_px = 22 }
+    );
+    defer r.deinit(alloc);
+    try testz.expectTrue(r.err == null);
+    // The bad key keeps its default; the good one still applies.
+    try testz.expectEqual(r.config.large_icon_px, @as(u32, 32));
+    try testz.expectEqual(r.config.small_icon_px, @as(u32, 22));
+}
+
+pub fn lsConfigSurfacesLuaErrorButKeepsDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var r = lsconfig.load(alloc, "this is not lua !!!");
+    defer r.deinit(alloc);
+    try testz.expectTrue(r.err != null);
+    try testz.expectEqual(r.config.large_icon_px, @as(u32, 32));
 }

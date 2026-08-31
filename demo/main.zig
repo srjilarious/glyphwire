@@ -97,7 +97,7 @@ fn run(init: std.process.Init) !void {
     try client.setCursor(panel_row + 1, panel_col + 2);
     try client.writeText("icons + box tiles", rgb(255, 255, 255), null);
 
-    const icon_names = [_][]const u8{ "oxygen/folder", "oxygen/file", "oxygen/audio", "oxygen/image", "oxygen/video", "oxygen/archive", "oxygen/executable", "oxygen/drive" };
+    const icon_names = [_][]const u8{ "file/folder", "file/file", "file/audio", "file/image", "file/video", "file/archive", "file/executable", "file/drive" };
     const metrics = client.getCellMetrics() catch null;
 
     try client.setCursor(panel_row + 3, panel_col + 2);
