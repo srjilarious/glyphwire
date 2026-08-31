@@ -7,10 +7,13 @@
 # name glyphwire uses (folder, file, image, pdf, ...).
 #
 # Sources:
-#   * Papirus   PapirusDevelopment/papirus-icon-theme  (GPL-3.0)
-#               Papirus/64x64/{places,mimetypes,devices}/<name>.svg
+#   * Papirus   PapirusDevelopmentTeam/papirus-icon-theme  (GPL-3.0)
+#               Papirus/48x48/{places,mimetypes,devices}/<name>.svg
 #   * Material  material-extensions/vscode-material-icon-theme  (MIT)
 #               icons/<name>.svg
+#
+# $PAPIRUS_REF / $MATERIAL_REF override the git ref fetched from (default
+# `master` / `main`).
 #
 # Needs: curl, one of rsvg-convert / resvg, and python3+Pillow for the
 # dark-glyph relight pass.  Safe to re-run.  A source that can't be
@@ -38,19 +41,44 @@ else
     exit 1
 fi
 
-pap_base="https://raw.githubusercontent.com/PapirusDevelopment/papirus-icon-theme/master/Papirus/64x64"
-pap_license="https://raw.githubusercontent.com/PapirusDevelopment/papirus-icon-theme/master/LICENSE"
-mat_base="https://raw.githubusercontent.com/material-extensions/vscode-material-icon-theme/main/icons"
-mat_license="https://raw.githubusercontent.com/material-extensions/vscode-material-icon-theme/main/LICENSE"
+pap_ref="${PAPIRUS_REF:-master}"
+mat_ref="${MATERIAL_REF:-main}"
+pap_root="https://raw.githubusercontent.com/PapirusDevelopmentTeam/papirus-icon-theme/$pap_ref"
+pap_base="$pap_root/Papirus/48x48"
+pap_license="$pap_root/LICENSE"
+mat_root="https://raw.githubusercontent.com/material-extensions/vscode-material-icon-theme/$mat_ref"
+mat_base="$mat_root/icons"
+mat_license="$mat_root/LICENSE"
 
 ok=0 miss=0
 
-# fetch_svg <url> <dest.png>  -- download, confirm it's really SVG, rasterize.
+# fetch_svg <base-url> <rel-path> <dest.png>  -- download, following the
+# relative symlinks Papirus uses (raw.github hands a symlink back as its
+# target path string, not the file), then rasterize.
 fetch_svg() {
-    local url="$1" dst="$2" svg="$tmp/x.svg"
-    curl -fsSL -m 20 "$url" -o "$svg" 2>/dev/null || return 1
-    head -c 400 "$svg" | grep -qi "<svg" || return 1
-    rasterize "$svg" "$dst"
+    local base="$1" rel="$2" dst="$3" svg="$tmp/x.svg"
+    local hop
+    for hop in 1 2 3 4 5; do
+        curl -fsSL -m 20 "$base/$rel" -o "$svg" 2>/dev/null || return 1
+        if head -c 400 "$svg" | grep -qi "<svg"; then
+            rasterize "$svg" "$dst"
+            return 0
+        fi
+        # Not SVG: maybe a one-line relative symlink target. Resolve it
+        # lexically against $rel's directory and try again. Bail if it
+        # doesn't look like a plain `.svg` path (no spaces / markup).
+        local target
+        target="$(tr -d '\r\n' < "$svg")"
+        case "$target" in
+            *.svg) ;;
+            *) return 1 ;;
+        esac
+        case "$target" in
+            *[[:space:]]* | *"<"*) return 1 ;;
+        esac
+        rel="$(realpath -m -s "/$(dirname "$rel")/$target")"; rel="${rel#/}"
+    done
+    return 1
 }
 
 # do_theme <theme> <base-url> <path-fn>  where path-fn maps a canonical
@@ -68,7 +96,7 @@ do_theme() {
     local name src
     for name in "${!m[@]}"; do
         src="${m[$name]}"
-        if fetch_svg "$base/$src" "$out/$name.png"; then
+        if fetch_svg "$base" "$src" "$out/$name.png"; then
             printf '  %-30s <- %s\n' "$out/$name.png" "$src"
             ok=$((ok + 1))
         else
@@ -84,14 +112,14 @@ do_theme() {
     echo
 }
 
-# ---- Papirus: places/ + mimetypes/ + devices/ ----------------------------
+# ---- Papirus: places/ + mimetypes/ + devices/ (all verified present) ----
 declare -A papirus=(
     [folder]=places/folder.svg
     [folder-open]=places/folder-open.svg
     [home]=places/user-home.svg
-    [file]=mimetypes/unknown.svg
+    [file]=mimetypes/text-x-generic.svg
     [text]=mimetypes/text-plain.svg
-    [code]=mimetypes/text-x-script.svg
+    [code]=mimetypes/application-x-shellscript.svg
     [web]=mimetypes/text-html.svg
     [image]=mimetypes/image-x-generic.svg
     [audio]=mimetypes/audio-x-generic.svg

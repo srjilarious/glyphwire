@@ -1156,10 +1156,10 @@ Icon + Table sections, `api.md`'s `create_table` / `table_set_style` /
 `host.conf.template` updated.
 
 - **`file/*` is a themed name.** The coarse folder/file/mimetype icons
-  moved from `assets/icons/oxygen/` to `assets/icons/filetype/<theme>/`
-  (`oxygen` — now 48x48 via `scripts/fetch-oxygen.sh`, `material` — via
-  `scripts/fetch-icon-themes.sh`, `papirus` — same script, not vendored
-  because its repo host wasn't reachable where this was built). The
+  moved from `assets/icons/oxygen/` to `assets/icons/filetype/<theme>/` —
+  `oxygen` (48x48 via `scripts/fetch-oxygen.sh`), `material` and `papirus`
+  (both via `scripts/fetch-icon-themes.sh`, which follows the relative
+  symlinks Papirus stores colour variants / mime aliases as). The
   generic `assets/icons/` walk skips `filetype/`; `host/main.zig`'s
   `loadFiletypeTheme` loads the one `host.conf`'s `icon_theme` selects,
   under both `file/<name>` and the alias `oxygen/<name>`. Unknown / empty

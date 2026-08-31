@@ -89,7 +89,6 @@
 --     -- Material Icon Theme), or "papirus". An unknown name, or a theme
 --     -- whose icons aren't present, warns and falls back to "oxygen".
 --     -- Language / tool logos (dev/zig, distro/arch, ...) are the same in
---     -- every theme. "papirus" needs `scripts/fetch-icon-themes.sh
---     -- papirus` run once to fetch its icons.
+--     -- every theme.
 --     icon_theme = "oxygen",
 -- }
