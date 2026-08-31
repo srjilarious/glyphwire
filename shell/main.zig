@@ -197,10 +197,18 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             defer alloc.free(mev.button);
             if (mev.pressed and std.mem.eql(u8, mev.button, "left")) {
                 // `mev.view_offset` is how far the host was scrolled back
-                // when the click happened -- pass it through so the
-                // lookup resolves against the row actually under the
-                // pointer, not the live-buffer cell at that screen
-                // position.
+                // when the click happened -- ground truth, stamped by the
+                // host atomically with the click, so trust it over the
+                // locally-mirrored `view_scroll` (which can lag a
+                // host-driven wheel/scrollbar scroll by a loop iteration).
+                // It's both the lookup offset (resolve against the row
+                // actually under the pointer) and, once recorded here,
+                // what makes `setLine` -> `setCursorAt` snap the view back
+                // down to the live prompt when the click activates a
+                // command -- clicking an `ls` entry in scrollback should
+                // land you back at the new prompt, not leave you scrolled
+                // up.
+                prompt.view_scroll = mev.view_offset;
                 try prompt.activateSelectionAt(mev.cell.row, mev.cell.col, mev.view_offset);
             }
         }
