@@ -726,6 +726,35 @@ surface.
   natural place to set the discovery env var before exec. No further
   mechanism needed beyond that — see Discovery & Connection above.
 
+#### Prompt word-splitting, quoting, aliases
+- The prompt used to split lines on bare whitespace (`std.mem.tokenizeAny`).
+  It now runs through `shell/wordsplit.zig`'s `split`, which is quote- and
+  escape-aware: `'...'` (fully literal), `"..."` (also literal here — the
+  shell has no `$`/backtick/`!` expansion, so only `\"` and `\\` are
+  special inside it), and backslash-escaping of the next byte outside
+  quotes. This is the minimum needed for filenames with spaces (`cat 'my
+  file.txt'`) and is the shared front end for alias bodies and (later)
+  glob tokens.
+- **`alias` / `unalias` are builtins**, session-only — there's no config
+  file yet (a Lua-backed startup config is the planned next step), so
+  nothing survives `exit`. `alias NAME=VALUE` uses **rest-of-line value
+  semantics**: everything after the first `=` is the body, with one
+  wrapping quote pair stripped. So `alias ll=ls -l` and `alias ll='ls
+  -l'` are equivalent. This was chosen over bash's per-argument
+  `name=value` splitting (which would let `alias a=1 b=2` define two at
+  once) because rest-of-line needs no quoting for the common
+  `alias g=git status` case; quoting is still there when you need a
+  literal leading/trailing space (`alias x=' ls '`).
+- Alias expansion happens only on the **first word** of a line, before
+  builtin/command dispatch, so an alias can resolve to a builtin
+  (`alias h=cd ~`) or another alias. Chains are followed, but a name is
+  never expanded twice on one line — `alias ls='ls --color'` resolves
+  once and stops, matching bash — with a hard depth cap as a backstop.
+- `alias` itself is detected off the **raw** line, ahead of
+  word-splitting, because its value isn't word-split the way the rest of
+  a line is. Every other builtin (`cd`, `exit`, `unalias`) is dispatched
+  from the post-split, post-alias-expansion argv.
+
 ### Server architecture
 - **Headless-first.** Core state — the layer tree, positions, clip rects,
   scroll offsets, cell contents, animation state — is a pure, inspectable

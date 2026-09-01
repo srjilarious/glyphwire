@@ -8,6 +8,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/glyphwire.zig"),
     });
 
+    // Pure prompt helpers shared by glyphwire-shell and its test runner
+    // (a Zig module can't be reached across directories via relative
+    // `@import`, so tests/ can't pull shell/ files in directly).
+    const shell_support_mod = b.addModule("shell_support", .{
+        .root_source_file = b.path("shell/support.zig"),
+    });
+
     const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });
     const pixzig_mod = pixzig_dep.module("pixzig");
 
@@ -22,6 +29,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    tests_exe.root_module.addImport("shell_support", shell_support_mod);
 
     const testz_dep = b.dependency("testz", .{});
     tests_exe.root_module.addImport("testz", testz_dep.module("testz"));
@@ -62,6 +70,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     shell_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    shell_exe.root_module.addImport("shell_support", shell_support_mod);
     shell_exe.root_module.link_libc = true;
     b.installArtifact(shell_exe);
 

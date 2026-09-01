@@ -1,5 +1,6 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const wordsplit = @import("shell_support").wordsplit;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -321,6 +322,53 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     }
 }
 
+/// Session-only alias store backing the prompt's `alias`/`unalias`
+/// builtins. There's no config file yet (a Lua-backed startup config is a
+/// planned next step), so nothing here survives `exit`. Keys and values
+/// are owned dups; `Prompt.deinit` frees the whole table.
+const AliasTable = struct {
+    map: std.StringHashMapUnmanaged([]const u8) = .empty,
+
+    fn deinit(self: *AliasTable, alloc: std.mem.Allocator) void {
+        var it = self.map.iterator();
+        while (it.next()) |e| {
+            alloc.free(e.key_ptr.*);
+            alloc.free(e.value_ptr.*);
+        }
+        self.map.deinit(alloc);
+    }
+
+    /// Binds `name` to `value`, replacing (and freeing) any prior binding
+    /// for `name`.
+    fn set(self: *AliasTable, alloc: std.mem.Allocator, name: []const u8, value: []const u8) !void {
+        const key = try alloc.dupe(u8, name);
+        errdefer alloc.free(key);
+        const val = try alloc.dupe(u8, value);
+        errdefer alloc.free(val);
+
+        const gop = try self.map.getOrPut(alloc, key);
+        if (gop.found_existing) {
+            alloc.free(key);
+            alloc.free(gop.value_ptr.*);
+        }
+        gop.value_ptr.* = val;
+    }
+
+    /// Removes `name`'s binding; returns whether there was one to remove.
+    fn remove(self: *AliasTable, alloc: std.mem.Allocator, name: []const u8) bool {
+        if (self.map.fetchRemove(name)) |kv| {
+            alloc.free(kv.key);
+            alloc.free(kv.value);
+            return true;
+        }
+        return false;
+    }
+
+    fn get(self: *const AliasTable, name: []const u8) ?[]const u8 {
+        return self.map.get(name);
+    }
+};
+
 /// The prompt's line-editing state. Tracks where the current line started
 /// and a cursor *offset* into the line -- needed the moment editing can
 /// happen anywhere but the end (ctrl+a/e/u, ctrl+arrow word jumps, plain
@@ -347,6 +395,9 @@ const Prompt = struct {
     /// is an owned dupe (the submitted line's `buffer` gets cleared by the
     /// next `showPrompt`, so history can't just borrow it).
     history: std.ArrayList([]const u8) = .empty,
+    /// Alias bindings from the `alias` builtin -- see `AliasTable` and
+    /// `expandAliases`. Empty until the user defines one.
+    aliases: AliasTable = .{},
     /// `null` means the line on screen is the one actually being typed
     /// (not a recalled history entry). Otherwise, an index into `history`
     /// for whichever entry `historyUp`/`historyDown` last loaded.
@@ -381,6 +432,7 @@ const Prompt = struct {
         self.history.deinit(alloc);
         self.scratch.deinit(alloc);
         self.buffer.deinit(alloc);
+        self.aliases.deinit(alloc);
     }
 
     /// Writes the current directory followed by `> ` at the cursor's
@@ -764,25 +816,52 @@ const Prompt = struct {
         }
         self.history_index = null;
 
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(alloc);
-        var it = std.mem.tokenizeAny(u8, self.buffer.items, " \t");
-        while (it.next()) |tok| try argv.append(alloc, tok);
-
-        if (argv.items.len > 0) {
-            if (std.mem.eql(u8, argv.items[0], "exit")) {
-                self.should_exit = true;
-                return;
-            } else if (std.mem.eql(u8, argv.items[0], "cd")) {
-                try self.doCd(argv.items[1..]);
-            } else {
-                try self.runCommand(argv.items);
-            }
-        }
+        try self.dispatchLine();
+        if (self.should_exit) return; // "exit" (typed or via an alias) -- see dispatchLine
 
         const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
         try self.client.setCursor(cur.row + 1, 0);
         try self.showPrompt();
+    }
+
+    /// Runs whatever the just-committed line (`self.buffer`) names -- the
+    /// `alias`/`unalias`/`cd`/`exit` builtins, or an external command via
+    /// `runCommand`.
+    ///
+    /// Word-splitting is quote-aware (`wordsplit.split`: single/double
+    /// quotes and backslash escapes), and a leading alias is expanded
+    /// first (`expandAliases`), so an `alias`-defined name reaches exactly
+    /// the same builtin/command dispatch a typed name would. `alias`
+    /// itself is handled off the raw line ahead of splitting -- its value
+    /// has rest-of-line semantics (`wordsplit.parseAliasDef`), unlike
+    /// every other argument on the line.
+    fn dispatchLine(self: *Prompt) !void {
+        const alloc = self.client.alloc;
+        const trimmed = std.mem.trimStart(u8, self.buffer.items, " \t");
+
+        if (std.mem.startsWith(u8, trimmed, "alias") and
+            (trimmed.len == "alias".len or trimmed["alias".len] == ' ' or trimmed["alias".len] == '\t'))
+        {
+            return self.doAlias(self.buffer.items);
+        }
+
+        const words = try wordsplit.split(alloc, self.buffer.items);
+        defer wordsplit.freeTokens(alloc, words);
+        if (words.len == 0) return;
+
+        const argv = try self.expandAliases(words);
+        defer wordsplit.freeTokens(alloc, argv);
+        if (argv.len == 0) return;
+
+        if (std.mem.eql(u8, argv[0], "exit")) {
+            self.should_exit = true;
+        } else if (std.mem.eql(u8, argv[0], "unalias")) {
+            try self.doUnalias(argv[1..]);
+        } else if (std.mem.eql(u8, argv[0], "cd")) {
+            try self.doCd(argv[1..]);
+        } else {
+            try self.runCommand(argv);
+        }
     }
 
     /// Spawns `argv` and waits for it to exit, treating its stdout/stderr
@@ -998,6 +1077,105 @@ const Prompt = struct {
         var buf: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "cd: {s}: {t}", .{ target, err }) catch "cd: failed";
         try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+    }
+
+    /// `alias` builtin. Given a `NAME=VALUE` argument
+    /// (`wordsplit.parseAliasDef` -- rest-of-line value, one binding per
+    /// line), records the binding; a bare `alias` lists every current
+    /// binding, one `NAME='VALUE'` per row sorted by name, matching
+    /// bash's output shape. Takes the raw prompt line because the value
+    /// is not word-split.
+    fn doAlias(self: *Prompt, line: []const u8) !void {
+        const alloc = self.client.alloc;
+        if (wordsplit.parseAliasDef(line)) |def| {
+            try self.aliases.set(alloc, def.name, def.value);
+            return;
+        }
+        try self.listAliases();
+    }
+
+    fn listAliases(self: *Prompt) !void {
+        const alloc = self.client.alloc;
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(alloc);
+        var it = self.aliases.map.iterator();
+        while (it.next()) |e| try names.append(alloc, e.key_ptr.*);
+
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+
+        for (names.items) |name| {
+            const value = self.aliases.get(name).?;
+            var buf: [1024]u8 = undefined;
+            const rendered = std.fmt.bufPrint(&buf, "alias {s}='{s}'\n", .{ name, value }) catch continue;
+            try self.client.writeText(rendered, null, null);
+        }
+    }
+
+    /// `unalias NAME...` builtin. A name with no current binding is
+    /// reported onto the grid (bash-style) rather than propagated as an
+    /// error.
+    fn doUnalias(self: *Prompt, names: []const []const u8) !void {
+        const alloc = self.client.alloc;
+        for (names) |name| {
+            if (!self.aliases.remove(alloc, name)) {
+                var buf: [160]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "unalias: {s}: not found", .{name}) catch "unalias: not found";
+                try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+            }
+        }
+    }
+
+    /// Expands a leading alias in `words` into a fresh owned token list.
+    /// Follows an alias whose body again begins with an alias name
+    /// (bash-style chaining), but stops the first time a name would be
+    /// expanded twice on one line -- so `alias ls='ls --color'` resolves
+    /// exactly once instead of looping -- with a hard depth cap as a
+    /// backstop. When `words[0]` isn't an alias the result is just an
+    /// owned copy of `words`. Always freshly allocated; free with
+    /// `wordsplit.freeTokens`.
+    fn expandAliases(self: *Prompt, words: []const []const u8) ![]const []const u8 {
+        const alloc = self.client.alloc;
+
+        var list: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (list.items) |w| alloc.free(w);
+            list.deinit(alloc);
+        }
+        for (words) |w| try list.append(alloc, try alloc.dupe(u8, w));
+
+        var seen: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (seen.items) |n| alloc.free(n);
+            seen.deinit(alloc);
+        }
+
+        var depth: usize = 0;
+        while (depth < 32) : (depth += 1) {
+            if (list.items.len == 0) break;
+            const first = list.items[0];
+
+            for (seen.items) |n| {
+                if (std.mem.eql(u8, n, first)) return list.toOwnedSlice(alloc);
+            }
+            const body = self.aliases.get(first) orelse break;
+            try seen.append(alloc, try alloc.dupe(u8, first));
+
+            const body_words = try wordsplit.split(alloc, body);
+            defer wordsplit.freeTokens(alloc, body_words);
+
+            alloc.free(list.orderedRemove(0));
+            var at: usize = 0;
+            for (body_words) |bw| {
+                try list.insert(alloc, at, try alloc.dupe(u8, bw));
+                at += 1;
+            }
+        }
+
+        return list.toOwnedSlice(alloc);
     }
 };
 
