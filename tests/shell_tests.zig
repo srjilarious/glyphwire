@@ -5,6 +5,7 @@ const testz = @import("testz");
 // prompt helpers are gathered into the `shell_support` module (see
 // build.zig) precisely so they can be exercised here.
 const wordsplit = @import("shell_support").wordsplit;
+const complete = @import("shell_support").complete;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -116,4 +117,64 @@ pub fn parseAliasBareReturnsNullTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectTrue(wordsplit.parseAliasDef("alias") == null);
     try testz.expectTrue(wordsplit.parseAliasDef("alias   ") == null);
     try testz.expectTrue(wordsplit.parseAliasDef("alias noequals") == null);
+}
+
+// ─── complete.wordRange ────────────────────────────────────────────────
+
+pub fn wordRangeAtEndOfLineTest(_: std.Io, _: std.mem.Allocator) !void {
+    const line = "cat src/co";
+    const wr = complete.wordRange(line, line.len);
+    try testz.expectEqual(wr.start, 4);
+    try testz.expectEqual(wr.end, line.len);
+    try testz.expectEqualStr("src/co", line[wr.start..wr.end]);
+}
+
+pub fn wordRangeMidWordExtendsBothWaysTest(_: std.Io, _: std.mem.Allocator) !void {
+    const line = "ls README.md here";
+    // cursor sits between "READ" and "ME.md"
+    const wr = complete.wordRange(line, 7);
+    try testz.expectEqualStr("README.md", line[wr.start..wr.end]);
+}
+
+pub fn wordRangeEmptyWhenOnWhitespaceTest(_: std.Io, _: std.mem.Allocator) !void {
+    const line = "ls ";
+    const wr = complete.wordRange(line, 3);
+    try testz.expectEqual(wr.start, 3);
+    try testz.expectEqual(wr.end, 3);
+}
+
+pub fn wordRangeKeepsEscapedSpaceInWordTest(_: std.Io, _: std.mem.Allocator) !void {
+    const line = "cat my\\ fi";
+    const wr = complete.wordRange(line, line.len);
+    try testz.expectEqualStr("my\\ fi", line[wr.start..wr.end]);
+}
+
+// ─── complete.dirPrefix ────────────────────────────────────────────────
+
+pub fn dirPrefixSplitsOnLastSlashTest(_: std.Io, _: std.mem.Allocator) !void {
+    const a = complete.dirPrefix("src/co");
+    try testz.expectEqualStr("src/", a.dir);
+    try testz.expectEqualStr("co", a.prefix);
+
+    const b = complete.dirPrefix("co");
+    try testz.expectEqualStr("", b.dir);
+    try testz.expectEqualStr("co", b.prefix);
+
+    const c = complete.dirPrefix("build/");
+    try testz.expectEqualStr("build/", c.dir);
+    try testz.expectEqualStr("", c.prefix);
+
+    const d = complete.dirPrefix("/etc/pa");
+    try testz.expectEqualStr("/etc/", d.dir);
+    try testz.expectEqualStr("pa", d.prefix);
+}
+
+// ─── complete.commonPrefixLen ──────────────────────────────────────────
+
+pub fn commonPrefixLenTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(complete.commonPrefixLen(&.{ "core.zig", "core_test.zig" }), 4);
+    try testz.expectEqual(complete.commonPrefixLen(&.{ "abc", "abc" }), 3);
+    try testz.expectEqual(complete.commonPrefixLen(&.{ "abc", "xyz" }), 0);
+    try testz.expectEqual(complete.commonPrefixLen(&.{"only"}), 4);
+    try testz.expectEqual(complete.commonPrefixLen(&.{}), 0);
 }

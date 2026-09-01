@@ -755,6 +755,32 @@ surface.
   a line is. Every other builtin (`cd`, `exit`, `unalias`) is dispatched
   from the post-split, post-alias-expansion argv.
 
+#### Tab completion
+- **Filenames only, bash-style two-press behaviour.** Tab completes the
+  word under the cursor against the directory named by its leading
+  `dir/` part (cwd if none; `~`/`~/` expanded). One match: filled in,
+  with `/` appended for a directory and a space for anything else.
+  Several matches with a longer shared prefix: the word is extended to
+  that prefix (first Tab). Several matches with nothing more in common:
+  the candidate list is printed below the prompt, but only on the
+  *second* consecutive Tab (`Prompt.completion_armed`, cleared by any
+  other key) — the same "bell once, then list" rule bash uses, chosen
+  over fish's always-list because printing to the grid and redrawing the
+  prompt is the heavier operation here.
+- Dot-files are only offered when the typed prefix itself begins with a
+  dot. Directory-ness comes from the readdir entry `kind`, so a symlink
+  to a directory is treated as a plain file (gets a space, not `/`) —
+  acceptable for now, revisit if it bites.
+- Quoting inside the completed word is **not** interpreted
+  (`complete.wordRange` is pure string math): a Tab inside `'...'` sees
+  the quote as an ordinary character. Command-name completion from
+  `$PATH` and richer, config-driven completions (the planned Lua config
+  is the natural home for those) are explicitly out of scope for now.
+- Split for testability: `shell/complete.zig` holds the pure helpers
+  (word boundary, `dir/`+prefix split, longest common prefix); the
+  directory scan and the grid edits stay in `Prompt.doComplete` /
+  `listCompletions`.
+
 ### Server architecture
 - **Headless-first.** Core state — the layer tree, positions, clip rects,
   scroll offsets, cell contents, animation state — is a pure, inspectable

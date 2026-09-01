@@ -245,6 +245,80 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqualStr("z", snapshot.cellAt(2, text_col + 2).grapheme); // "e" was backspaced away, "z" took its place
 }
 
+/// Drives the real glyphwire-shell binary through a filename Tab
+/// completion: types `ls sr` at the prompt and presses Tab, expecting the
+/// only `sr*` entry in the shell's cwd (`src/`, this repo's source dir --
+/// the test process runs from the repo root, same assumption
+/// `shellPromptEchoesTypedInputTest` already makes for finding the shell
+/// binary) to be filled in, with the trailing `/` a directory match
+/// appends. Proves the whole path works over the real wire: key event ->
+/// `Prompt.doComplete` -> directory scan -> `insert_cells`/`write_text`
+/// back onto the grid.
+pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shell-tab-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread3.join();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    const text_col = cwd_len + 3;
+
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    try typeText(&reporter, "ls sr");
+    // Wait for the last typed character to land before pressing Tab, so
+    // the completion acts on the full word rather than a partial one.
+    try waitForCell(&reporter, 0, text_col + 4, "r");
+
+    try reporter.reportKey("tab", true);
+    try reporter.reportKey("tab", false);
+
+    // "ls sr" + Tab -> "ls src/": the "c" and "/" are what completion
+    // added; waiting on the "/" proves the directory suffix ran.
+    try waitForCell(&reporter, 0, text_col + 6, "/");
+
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+    try testz.expectEqualStr("s", snapshot.cellAt(0, text_col + 3).grapheme);
+    try testz.expectEqualStr("r", snapshot.cellAt(0, text_col + 4).grapheme);
+    try testz.expectEqualStr("c", snapshot.cellAt(0, text_col + 5).grapheme);
+    try testz.expectEqualStr("/", snapshot.cellAt(0, text_col + 6).grapheme);
+}
+
 /// Reports key presses that reproduce typing `text` at the shell prompt --
 /// the reverse of shell/main.zig's `charFromKeyName` table. Only covers
 /// the characters this file's tests actually type (lowercase letters,

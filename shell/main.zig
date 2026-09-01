@@ -1,6 +1,7 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const wordsplit = @import("shell_support").wordsplit;
+const complete = @import("shell_support").complete;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -231,6 +232,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         const alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt");
         const super = listener.isKeyDown("left_super") or listener.isKeyDown("right_super");
 
+        // Tab completion's "list on the second press" needs to know the
+        // previous key was also Tab; any other key breaks that streak.
+        if (!std.mem.eql(u8, ev.key, "tab")) prompt.completion_armed = false;
+
         if (std.mem.eql(u8, ev.key, "enter")) {
             if (prompt.browse_pos != null) {
                 try prompt.browseEnter();
@@ -244,6 +249,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // as a side effect of also doing something; this does nothing
             // else.
             try prompt.setCursorAt(prompt.cursor);
+        } else if (std.mem.eql(u8, ev.key, "tab")) {
+            // Filename completion on the live line only -- Tab does
+            // nothing while browsing scrollback.
+            if (prompt.browse_pos == null) try prompt.doComplete();
         } else if (std.mem.eql(u8, ev.key, "backspace")) {
             try prompt.deleteBackward();
         } else if (std.mem.eql(u8, ev.key, "delete")) {
@@ -322,6 +331,11 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     }
 }
 
+/// One filename offered by Tab completion -- `name` is the raw directory
+/// entry (no trailing slash), `is_dir` drives the `/` vs ` ` suffix on a
+/// unique match and the `/` shown in a listing.
+const CompletionCandidate = struct { name: []const u8, is_dir: bool };
+
 /// Session-only alias store backing the prompt's `alias`/`unalias`
 /// builtins. There's no config file yet (a Lua-backed startup config is a
 /// planned next step), so nothing here survives `exit`. Keys and values
@@ -398,6 +412,11 @@ const Prompt = struct {
     /// Alias bindings from the `alias` builtin -- see `AliasTable` and
     /// `expandAliases`. Empty until the user defines one.
     aliases: AliasTable = .{},
+    /// True when the last key was a Tab that found multiple matches with
+    /// no further common prefix to fill in -- the next Tab then prints the
+    /// candidate list (bash's "ring the bell once, list on the second
+    /// press"). Any non-Tab key clears it (see `runPrompt`).
+    completion_armed: bool = false,
     /// `null` means the line on screen is the one actually being typed
     /// (not a recalled history entry). Otherwise, an index into `history`
     /// for whichever entry `historyUp`/`historyDown` last loaded.
@@ -1176,6 +1195,135 @@ const Prompt = struct {
         }
 
         return list.toOwnedSlice(alloc);
+    }
+
+    /// Inserts a run of characters at the cursor -- the multi-char sibling
+    /// of `insertChar`, used by Tab completion to drop in a completed
+    /// suffix in one `insert_cells` + `write_text` pair instead of a round
+    /// trip per character.
+    fn insertText(self: *Prompt, text: []const u8) !void {
+        if (text.len == 0) return;
+        try self.buffer.insertSlice(self.client.alloc, self.cursor, text);
+        try self.setCursorAt(self.cursor);
+        try self.client.insertCells(text.len);
+        try self.client.writeText(text, null, null);
+        self.cursor += text.len;
+    }
+
+    /// Tab: filename completion for the word under the cursor. Reads the
+    /// directory named by the word's leading `dir/` part (cwd if none;
+    /// `~`/`~/` expanded), keeps entries whose name starts with the
+    /// word's final segment, and:
+    ///
+    ///   * 0 matches       -> nothing;
+    ///   * exactly 1 match -> fills it in and appends `/` (a directory) or
+    ///                        a space (anything else);
+    ///   * >1 matches with a longer shared prefix -> extends the word to
+    ///                        that common prefix (bash's first-Tab behaviour);
+    ///   * >1 matches, nothing more to share -> prints the candidate list
+    ///                        below the prompt, but only on the *second*
+    ///                        consecutive Tab (`completion_armed`).
+    ///
+    /// Dot-files are skipped unless the typed prefix itself starts with a
+    /// dot, matching every shell. Quoting inside the word isn't
+    /// interpreted -- see `complete.wordRange`.
+    fn doComplete(self: *Prompt) !void {
+        const alloc = self.client.alloc;
+        const io = self.client.io;
+
+        const line = self.buffer.items;
+        const wr = complete.wordRange(line, self.cursor);
+        const word = line[wr.start..self.cursor];
+        const dp = complete.dirPrefix(word);
+
+        const scan_dir = try self.completionDir(dp.dir);
+        defer alloc.free(scan_dir);
+
+        var dir = std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true }) catch return;
+        defer dir.close(io);
+
+        var cands: std.ArrayList(CompletionCandidate) = .empty;
+        defer {
+            for (cands.items) |cand| alloc.free(cand.name);
+            cands.deinit(alloc);
+        }
+
+        const want_hidden = dp.prefix.len > 0 and dp.prefix[0] == '.';
+        var it = dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, dp.prefix)) continue;
+            if (!want_hidden and std.mem.startsWith(u8, entry.name, ".")) continue;
+            try cands.append(alloc, .{
+                .name = try alloc.dupe(u8, entry.name),
+                .is_dir = entry.kind == .directory,
+            });
+        }
+        if (cands.items.len == 0) return;
+
+        std.mem.sort(CompletionCandidate, cands.items, {}, struct {
+            fn lessThan(_: void, a: CompletionCandidate, b: CompletionCandidate) bool {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }.lessThan);
+
+        if (cands.items.len == 1) {
+            const only = cands.items[0];
+            try self.insertText(only.name[dp.prefix.len..]);
+            try self.insertText(if (only.is_dir) "/" else " ");
+            self.completion_armed = false;
+            return;
+        }
+
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(alloc);
+        for (cands.items) |cand| try names.append(alloc, cand.name);
+        const lcp = complete.commonPrefixLen(names.items);
+
+        if (lcp > dp.prefix.len) {
+            try self.insertText(cands.items[0].name[dp.prefix.len..lcp]);
+            self.completion_armed = true;
+            return;
+        }
+
+        if (self.completion_armed) {
+            try self.listCompletions(cands.items);
+            self.completion_armed = false;
+        } else {
+            self.completion_armed = true;
+        }
+    }
+
+    /// Resolves the `dir/` portion of a completion word to a path
+    /// `openDir` can take: an owned copy of `"."` when there's no
+    /// directory part, otherwise the part itself with `~`/`~/` expanded.
+    /// Always returns an owned string for the caller to free.
+    fn completionDir(self: *Prompt, dir_part: []const u8) ![]const u8 {
+        const alloc = self.client.alloc;
+        if (dir_part.len == 0) return alloc.dupe(u8, ".");
+        const expanded = self.expandTilde(dir_part) catch return alloc.dupe(u8, dir_part);
+        if (expanded.ptr == dir_part.ptr) return alloc.dupe(u8, dir_part);
+        return expanded; // expandTilde already returned an owned allocation
+    }
+
+    /// Prints the completion candidates on the row below the prompt
+    /// (two spaces between, `/` after directories), then redraws the
+    /// prompt prefix and the in-progress line underneath and restores the
+    /// cursor -- the same "write below, then re-show the prompt" shape
+    /// `submitLine` uses.
+    fn listCompletions(self: *Prompt, cands: []const CompletionCandidate) !void {
+        try self.client.setCursor(self.line_start_row + 1, 0);
+        for (cands, 0..) |cand, i| {
+            if (i != 0) try self.client.writeText("  ", null, null);
+            try self.client.writeText(cand.name, null, null);
+            if (cand.is_dir) try self.client.writeText("/", null, null);
+        }
+        try self.client.writeText("\n", null, null);
+
+        const cur = try self.writePromptPrefix();
+        self.line_start_row = cur.row;
+        self.line_start_col = cur.col;
+        if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
+        try self.setCursorAt(self.cursor);
     }
 };
 

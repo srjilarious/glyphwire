@@ -6,3 +6,4 @@
 //! reach across directories with a relative `@import`.
 
 pub const wordsplit = @import("wordsplit.zig");
+pub const complete = @import("complete.zig");
