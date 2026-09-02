@@ -150,6 +150,35 @@ a future client (almost certainly `glyphwire-shell`, following the same
 `get_metadata`-driven click-resolution pattern `activateSelectionAt`
 already uses) to call once that lands. See decisions.md's Table section.
 
+## Selection & Clipboard
+
+Real server-side state, like Table — a linear (stream, not rectangular)
+text selection lives on a `Layer` (`core.Layer.selection`), and one
+session clipboard buffer lives on the `Context`. See decisions.md's
+Selection & clipboard section for the reasoning (why selection is server
+state, why endpoints are content-anchored, why the clipboard is a buffer
+glyphwire-host mirrors to the OS, and the `copy_request` handshake).
+
+A **selection point** is `{above, col}`: `above` is how many grid rows
+the point sits above the live viewport's top row — positive counts up
+into retained scrollback (`above == 1` is the row just above the
+viewport), zero or negative is a live viewport row (`-above`). It is
+deliberately not a screen position: `above` is anchored to the content,
+so a selection stays pinned to its text while the view scrolls, and the
+server shifts both ends as fresh output pushes rows into scrollback. An
+end scrolling off the top of retained history, or a `resize`, drops the
+selection.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `set_selection` | notification | `layer?, anchor: {above, col}, active: {above, col}` | — | ✅ starts or replaces the layer's selection (root when `layer` omitted). Broadcasts `selection` |
+| `update_selection` | notification | `layer?, active: {above, col}` | — | ✅ moves only the active (dragging) end; a no-op if nothing is selected. Broadcasts `selection` |
+| `clear_selection` | notification | `layer?` | — | ✅ broadcasts `selection` (inactive) |
+| `get_selection` | request | `layer?` | `{active, anchor?: {above, col}, active_end?: {above, col}}` | ✅ `active` false ⇒ nothing selected, the two point fields absent |
+| `get_selection_text` | request | `layer?` | `{text}` | ✅ the selected text: interior rows taken whole, first/last row clipped to the start/end column, each row's trailing blanks trimmed, rows joined with `\n`, a wide character's spacer half skipped. `""` when nothing (or a zero-width selection) is selected |
+| `set_clipboard` | notification | `text` | — | ✅ replaces the session clipboard buffer (`core.Context.clipboard`) and bumps its serial. glyphwire-host mirrors the buffer to the OS clipboard on its next frame |
+| `get_clipboard` | request | *(none)* | `{text}` | ✅ the session clipboard buffer. On glyphwire-host this reflects OS-clipboard changes another app made only once the host has synced (its next copy/paste) — see decisions.md |
+
 ## Batch
 
 One `batch` message carries an ordered list of other messages, applied
@@ -222,6 +251,9 @@ still open.
 | `gamepad_*` | notification, server→client | — | — | 🔶 |
 | `resize` | notification, server→client | new `{cols, rows}` | — | ✅ sent when `glyphwire-host`'s (now user-resizable) window changes size, after the root layer and every base-size-tracking layer have been resized (see Property names' `size` above for the bottom-anchored content behavior). Reported in-process by the host via `Server.reportResize`, same path as `reportKey`; subscribe with `"resize"`. `InputListener` (`pollResizeEvent`/`waitResizeEvent`/`size`) is the client-side consumer |
 | `scroll` | notification, server→client | `{offset, max}` | — | ✅ sent whenever the root layer's scrollback view offset moves — the host's mouse wheel / scrollbar (`Server.reportScroll`) or another client's `scroll_view` (e.g. glyphwire-shell's browse cursor). Subscribe with `"scroll"`; `InputListener` (`pollScrollEvent`/`waitScrollEvent`/`scroll`) is the client-side consumer. See Property names' `scroll` above |
+| `selection` | notification, server→client | `{active, anchor?: {above, col}, active_end?: {above, col}}` | — | ✅ sent whenever a layer's selection changes (any of `set_selection`/`update_selection`/`clear_selection`, or glyphwire-host's in-process path). Subscribe with `"selection"`. See the Selection & Clipboard section |
+| `copy_request` | notification, server→client | *(none)* | — | ✅ the copy shortcut (Ctrl+Shift+C) was pressed with nothing selected — a subscriber that owns editable text (glyphwire-shell) answers with `set_clipboard`. Subscribe with `"clipboard"` |
+| `paste` | notification, server→client | `{text}` | — | ✅ committed clipboard text to insert (Ctrl+Shift+V). Distinct from `text` so a client can treat it differently — glyphwire-shell inserts it literally, newlines included, without submitting. Subscribe with `"clipboard"`; on the client it arrives on the same ordered queue as `key`/`text` (`InputEvent{paste}`), and `copy_request` as `InputEvent.copy_request` |
 | *(IME preedit / composition)* | — | — | — | ⬜ only *committed* text crosses the wire today (`text`, above). A live preedit/composition-string state machine is still open — GLFW's char callback already hands the host post-IME codepoints, so basic committed CJK input works without it |
 | `action` | notification, server→client | action name, phase | — | 🔶 sent alongside raw events, never instead of |
 

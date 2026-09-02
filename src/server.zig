@@ -362,4 +362,97 @@ pub const Server = struct {
         defer alloc.free(body);
         self.broadcast(null, "resize", body);
     }
+
+    // ── Selection & clipboard (in-process, for glyphwire-host) ──────────
+    //
+    // Same pattern as `reportKey` / `reportScroll`: glyphwire-host owns
+    // the `Context` and drives selection from its own mouse/keyboard
+    // capture rather than over a loopback connection. Each mutator takes
+    // `ctx_mutex`, applies the change, then fans a `selection`
+    // notification out to every other subscriber.
+
+    /// In-process `set_selection` on `layer_handle` (null = root).
+    pub fn setSelection(
+        self: *Server,
+        alloc: std.mem.Allocator,
+        layer_handle: ?core.LayerHandle,
+        anchor: core.SelectionPoint,
+        active: core.SelectionPoint,
+    ) !void {
+        const snapshot: ?core.Selection = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const layer = self.ctx.layerPtr(layer_handle) orelse return;
+            layer.setSelection(anchor, active);
+            break :blk layer.selection;
+        };
+        const body = try rpc.selectionNotification(alloc, snapshot);
+        defer alloc.free(body);
+        self.broadcast(null, "selection", body);
+    }
+
+    /// In-process `clear_selection` on `layer_handle` (null = root).
+    pub fn clearSelection(self: *Server, alloc: std.mem.Allocator, layer_handle: ?core.LayerHandle) !void {
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const layer = self.ctx.layerPtr(layer_handle) orelse return;
+            layer.clearSelection();
+        }
+        const body = try rpc.selectionNotification(alloc, null);
+        defer alloc.free(body);
+        self.broadcast(null, "selection", body);
+    }
+
+    /// The selected text on `layer_handle` (null = root), or null when
+    /// nothing is selected. Caller owns the result.
+    pub fn selectionText(self: *Server, alloc: std.mem.Allocator, layer_handle: ?core.LayerHandle) !?[]u8 {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        const layer = self.ctx.layerPtr(layer_handle) orelse return null;
+        return layer.selectionText(alloc);
+    }
+
+    /// Replaces the session clipboard buffer (and bumps its serial, so
+    /// glyphwire-host's next frame pushes it to the OS). Does not
+    /// broadcast -- `set_clipboard` has no server->client counterpart.
+    pub fn setClipboard(self: *Server, text: []const u8) !void {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        try self.ctx.setClipboard(text);
+    }
+
+    /// Fans a `copy_request` notification out to every `"clipboard"`
+    /// subscriber -- the host calls this when the copy shortcut is
+    /// pressed with nothing selected, so glyphwire-shell can answer with
+    /// its current prompt via `set_clipboard`.
+    pub fn requestCopy(self: *Server, alloc: std.mem.Allocator) !void {
+        const body = try rpc.copyRequestNotification(alloc);
+        defer alloc.free(body);
+        self.broadcast(null, "clipboard", body);
+    }
+
+    /// Fans a `paste` notification (committed clipboard text) out to
+    /// every `"clipboard"` subscriber.
+    pub fn broadcastPaste(self: *Server, alloc: std.mem.Allocator, text: []const u8) !void {
+        const body = try rpc.pasteNotification(alloc, text);
+        defer alloc.free(body);
+        self.broadcast(null, "clipboard", body);
+    }
+
+    /// The current session clipboard serial (see
+    /// `core.Context.clipboard_serial`) -- glyphwire-host polls this each
+    /// frame to decide whether to push the buffer to the OS clipboard.
+    pub fn clipboardSerial(self: *Server) u64 {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        return self.ctx.clipboard_serial;
+    }
+
+    /// A copy of the current session clipboard buffer. Caller owns it.
+    pub fn clipboardText(self: *Server, alloc: std.mem.Allocator) ![]u8 {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        return alloc.dupe(u8, self.ctx.clipboardText());
+    }
 };

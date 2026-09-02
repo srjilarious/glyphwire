@@ -427,6 +427,49 @@ pub fn clientBatchNotificationFormAppliesWithoutReplyTest(io: std.Io, alloc: std
     try testz.expectEqualStr("t", ctx.root.cell(2, 1).grapheme());
 }
 
+/// `Client`'s selection and clipboard methods round-trip over a real
+/// socket: set a selection, read its text back, then set/get the
+/// clipboard.
+pub fn clientSelectionAndClipboardRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    try client.writeText("hello world", null, null);
+
+    const none = try client.getSelection(null);
+    try testz.expectTrue(!none.active);
+
+    try client.setSelection(null, .{ .above = 0, .col = 0 }, .{ .above = 0, .col = 5 });
+    const some = try client.getSelection(null);
+    try testz.expectTrue(some.active);
+    try testz.expectEqual(some.active_end.?.col, 5);
+
+    const sel_text = try client.getSelectionText(null);
+    defer alloc.free(sel_text);
+    try testz.expectEqualStr("hello", sel_text);
+
+    try client.clearSelection(null);
+    const cleared = try client.getSelection(null);
+    try testz.expectTrue(!cleared.active);
+
+    try client.setClipboard("board contents");
+    const clip = try client.getClipboard();
+    defer alloc.free(clip);
+    try testz.expectEqualStr("board contents", clip);
+}
+
 fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
     server.acceptOne(alloc) catch |err| {
         std.debug.print("test server connection failed: {t}\n", .{err});

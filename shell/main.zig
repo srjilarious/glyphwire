@@ -257,7 +257,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     };
     defer client.deinit();
 
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "scroll", "resize" }) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "scroll", "resize", "clipboard" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -410,6 +410,23 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             .text => |tev| {
                 defer alloc.free(tev.text);
                 if (prompt.browse_pos == null) try prompt.insertText(tev.text);
+                continue;
+            },
+            .paste => |tev| {
+                defer alloc.free(tev.text);
+                // Ctrl+Shift+V: insert the clipboard text literally --
+                // newlines and all -- without submitting. The user
+                // presses Enter themselves if they want it to run.
+                if (prompt.browse_pos == null) try prompt.insertText(tev.text);
+                continue;
+            },
+            .copy_request => {
+                // Ctrl+Shift+C was pressed with nothing selected in the
+                // host: answer with the current line so it lands on the
+                // OS clipboard.
+                client.setClipboard(prompt.buffer.items) catch |err| {
+                    std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
+                };
                 continue;
             },
             .key => |kev| kev,
@@ -2154,6 +2171,17 @@ const Prompt = struct {
                     pty.writeAll(tev.text);
                     continue;
                 },
+                .paste => |tev| {
+                    // Ctrl+Shift+V while a child owns the pty: feed the
+                    // clipboard straight to its stdin, like a terminal
+                    // pasting into a running program.
+                    defer alloc.free(tev.text);
+                    pty.writeAll(tev.text);
+                    continue;
+                },
+                // No shell prompt to copy while a child is foregrounded;
+                // a selection copy is handled entirely host-side.
+                .copy_request => continue,
                 .key => |kev| kev,
             };
             defer alloc.free(ev.key);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const core = @import("core.zig");
 const protocol = @import("protocol.zig");
 
 /// Tiny JSON-RPC envelope builders shared by the socket path
@@ -84,4 +85,30 @@ pub fn scrollNotification(alloc: std.mem.Allocator, offset: usize, max: usize) !
 /// `resize` -- the host window is now `cols` x `rows` cells.
 pub fn resizeNotification(alloc: std.mem.Allocator, cols: usize, rows: usize) ![]u8 {
     return notification(alloc, "resize", protocol.ResizeParams{ .cols = cols, .rows = rows });
+}
+
+/// `selection` -- a layer's selection changed (from `set_selection` /
+/// `update_selection` / `clear_selection`, or the host's in-process
+/// path). `sel` null means the selection was cleared.
+pub fn selectionNotification(alloc: std.mem.Allocator, sel: ?core.Selection) ![]u8 {
+    const body: protocol.SelectionState = if (sel) |s| .{
+        .active = true,
+        .anchor = .{ .above = s.anchor.above, .col = s.anchor.col },
+        .active_end = .{ .above = s.active.above, .col = s.active.col },
+    } else .{ .active = false };
+    return notification(alloc, "selection", body);
+}
+
+/// `copy_request` -- the user pressed the copy shortcut with nothing
+/// selected; a subscriber that owns editable text (glyphwire-shell)
+/// should answer with `set_clipboard`. No params.
+pub fn copyRequestNotification(alloc: std.mem.Allocator) ![]u8 {
+    return notification(alloc, "copy_request", struct {}{});
+}
+
+/// `paste` -- committed clipboard text to insert, distinct from the
+/// `text` typing stream so a client can treat it differently (e.g. not
+/// auto-executing a multi-line paste).
+pub fn pasteNotification(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    return notification(alloc, "paste", protocol.ClipboardTextParams{ .text = text });
 }

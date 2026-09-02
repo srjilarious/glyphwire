@@ -1769,3 +1769,135 @@ pub fn iconNameDerivesFromPathTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectTrue(glyphwire.iconName("no-extension") == null);
     try testz.expectTrue(glyphwire.iconName("trailingdotpng") == null);
 }
+
+// ─── selection & clipboard ─────────────────────────────────────────────
+
+/// A linear selection spanning three rows: the first row is clipped to
+/// the start column, the last to the end column, the middle row is taken
+/// whole, and each row's trailing blanks are trimmed. Rows join with
+/// `\n`.
+pub fn selectionTextSpansRowsLinearlyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 6, 0);
+    defer layer.deinit();
+
+    try layer.writeText("abcdefgh\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try layer.writeText("second line\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try layer.writeText("third row here", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // From row 0 col 2 ("cdefgh") through row 2 col 4 ("third"). All ends
+    // are live-viewport rows, so `above` is 0/-1/-2.
+    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = -2, .col = 4 });
+
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("cdefgh\nsecond line\nthird", text);
+}
+
+/// The selection endpoints can be given in either order -- `ordered`
+/// sorts them into reading order before extraction.
+pub fn selectionTextIsOrderIndependentTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 4, 0);
+    defer layer.deinit();
+    try layer.writeText("one\ntwo", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // active end before anchor end in reading order.
+    layer.setSelection(.{ .above = -1, .col = 3 }, .{ .above = 0, .col = 0 });
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("one\ntwo", text);
+}
+
+/// A zero-width selection is "nothing selected" as far as text goes; a
+/// cleared selection returns null.
+pub fn selectionTextEmptyForZeroWidthTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
+    defer layer.deinit();
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = 0, .col = 2 });
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("", text);
+
+    layer.clearSelection();
+    try testz.expectTrue((try layer.selectionText(alloc)) == null);
+}
+
+/// `selectionColRange` reports the selected span per row for the
+/// renderer: clipped on the first/last row, full width between, null
+/// outside.
+pub fn selectionColRangeClipsEndsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
+    defer layer.deinit();
+
+    layer.setSelection(.{ .above = 0, .col = 3 }, .{ .above = -2, .col = 6 });
+
+    try testz.expectTrue(layer.selectionColRange(1) == null); // above the selection
+    const first = layer.selectionColRange(0).?;
+    try testz.expectEqual(first.start, 3);
+    try testz.expectEqual(first.end, 10);
+    const mid = layer.selectionColRange(-1).?;
+    try testz.expectEqual(mid.start, 0);
+    try testz.expectEqual(mid.end, 10);
+    const last = layer.selectionColRange(-2).?;
+    try testz.expectEqual(last.start, 0);
+    try testz.expectEqual(last.end, 7); // end col + 1
+    try testz.expectTrue(layer.selectionColRange(-3) == null); // below
+}
+
+/// A selection stays pinned to its content as fresh output scrolls rows
+/// into history (`scrollOne` bumps both ends' `above`), and is dropped
+/// once an end scrolls off the top of retained scrollback.
+pub fn selectionFollowsScrollAndDropsOnEvictionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 2); // 2 rows scrollback
+    defer layer.deinit();
+
+    try layer.writeText("row0\nrow1", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 4 });
+
+    // Two newlines past the bottom scroll once: the selected row is now
+    // one row further above the viewport top.
+    try layer.writeText("\n\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.selection.?.anchor.above, 1);
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("row0", text);
+
+    // Enough further newlines evict that row from the 2-row scrollback.
+    try layer.writeText("\n\n\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.selection == null);
+}
+
+/// `resize` rebuilds the ring buffer, so it drops any selection.
+pub fn selectionClearedByResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
+    defer layer.deinit();
+    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 2 });
+    try layer.resize(12, 4);
+    try testz.expectTrue(layer.selection == null);
+}
+
+/// `setClipboard` replaces the buffer and bumps the serial each call;
+/// `clipboardText` reads it back.
+pub fn contextClipboardBufferRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+
+    try testz.expectEqualStr("", ctx.clipboardText());
+    try testz.expectEqual(ctx.clipboard_serial, 0);
+
+    try ctx.setClipboard("hello");
+    try testz.expectEqualStr("hello", ctx.clipboardText());
+    try testz.expectEqual(ctx.clipboard_serial, 1);
+
+    try ctx.setClipboard("world!");
+    try testz.expectEqualStr("world!", ctx.clipboardText());
+    try testz.expectEqual(ctx.clipboard_serial, 2);
+}

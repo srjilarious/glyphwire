@@ -947,6 +947,76 @@ surface.
   needs to know e.g. which columns are sortable before deciding what a
   header click should do.
 
+### Selection & clipboard
+- **Selection is real server-side state on a `Layer`, not a client-side
+  overlay.** `core.Layer.selection` (`?Selection`, two `SelectionPoint`
+  ends) is set/moved/cleared over the wire (`set_selection` /
+  `update_selection` / `clear_selection`), queried two ways
+  (`get_selection` for the endpoints, `get_selection_text` for the
+  extracted text), and read directly by glyphwire-host's renderer for the
+  highlight. Same reasoning tables got promoted from a client prototype to
+  `core.Table`: more than one participant needs it (the host renders it,
+  the shell answers copy, a future client could drive it), and the
+  extraction logic — trailing-blank trimming, wide-cell spacer skipping,
+  scrollback row lookup — belongs next to the cell grid, not copied into
+  each client.
+- **Endpoints are content-anchored (`above` = rows above the live
+  viewport top), not a `(view_offset, screen_row)` pair.** A screen
+  position drifts the instant the view scrolls or output arrives; `above`
+  doesn't, and `Layer.scrollOne` bumps both ends by one so a selection
+  stays pinned to its text as fresh output pushes rows into scrollback.
+  An end that scrolls off the top of retained history drops the whole
+  selection (the text it referred to is gone); `resize` drops it too (the
+  ring buffer is rebuilt). This mirrors glyphwire-host's existing
+  `caret_pin` trick, lifted into the data model so every reader shares it.
+- **Linear (stream) selection only, no rectangular mode.** Interior rows
+  select their whole width; the first and last row clip to the start/end
+  column. A rectangular/column mode would thread a flag through every
+  selection message and double the extraction and render cases for a rare
+  need — deferred.
+- **`selection` broadcast, subscribe `"selection"`.** Every mutation fans
+  out the new `SelectionState` to other subscribers, same poll-vs-
+  subscribe split `scroll`/`resize` already have. glyphwire-host doesn't
+  need it (it reads `layer.selection` straight out of the in-process
+  `Context` each frame) but a separate renderer or a selection-aware
+  client would.
+- **The clipboard is one session buffer on `Context` (`clipboard` +
+  `clipboard_serial`), mirrored to the OS by glyphwire-host.** The
+  headless server (`server/main.zig`, tests) has nothing behind
+  `set_clipboard` / `get_clipboard` but that buffer. glyphwire-host treats
+  it as the source of truth: it pushes to the OS clipboard whenever
+  `clipboard_serial` changes (a client's `set_clipboard`, or its own
+  selection copy) and refreshes it from the OS on paste. GLFW clipboard
+  calls are main-thread-only, so the wire path can't touch the OS directly
+  — going through the buffer + a once-per-frame `syncClipboardToOs` keeps
+  every GLFW call on the render thread. Consequence: a wire `get_clipboard`
+  only sees OS-clipboard changes another app made once the host has synced
+  (on its next copy/paste) — acceptable for the interplay this feature is
+  about, not a general OS-clipboard mirror.
+- **Ctrl+Shift+C with nothing selected → `copy_request`, and the shell
+  answers with `set_clipboard`.** The host owns the selection and the
+  clipboard but has no idea what "the current prompt" is — that's the
+  shell's line buffer. So when the copy shortcut fires with no selection
+  (or a zero-width one), the host broadcasts `copy_request` to
+  `"clipboard"` subscribers; glyphwire-shell replies with `set_clipboard`
+  carrying `prompt.buffer.items`. A real selection is copied entirely
+  host-side with no round trip.
+- **Paste is its own `paste` notification, not the `text` typing
+  stream.** Distinct so a client can treat it differently — glyphwire-
+  shell inserts pasted text literally, newlines and all, *without*
+  submitting (the user presses Enter themselves), where a multi-line
+  `text` run would look like separate typed commands. Other clients that
+  only care about typing can ignore `paste`. Both ride the `"clipboard"`
+  subscription alongside `copy_request`.
+- **Ctrl+Shift+Space toggles a keyboard selection mode in the host.**
+  While active the host swallows the arrows / Home / End / Escape / Enter
+  before `reportKeyEvents` forwards them and uses them to move the
+  selection's active end (scrolling the view when it walks past an edge);
+  a mouse drag supersedes it. Mouse drag-selection: the host holds the
+  left button back from the shell for the duration of a drag and only
+  forwards a synthetic press+release for a plain click (no movement), so
+  glyphwire-shell's existing click-to-activate is untouched.
+
 ### Events
 - No separate wire-level "event" mechanism — events are just notifications
   (method name + payload), same as everything else. The actual design work

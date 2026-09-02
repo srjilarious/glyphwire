@@ -663,6 +663,45 @@ pub const Cursor = struct {
     col: usize = 0,
 };
 
+/// One end of a linear text selection on a layer, in scroll-stable
+/// coordinates. `above` is how many grid rows this point sits above the
+/// live viewport's top row: positive counts up into retained scrollback
+/// (`above == 1` is the row immediately above the viewport), zero or
+/// negative is inside the live viewport (live buffer row `= -above`).
+/// Deliberately not a `(view_offset, screen_row)` pair -- `above` is
+/// anchored to the content, so a selection stays pinned to the same text
+/// while the view is scrolled, and `Layer.scrollOne` shifts both ends by
+/// one so it also stays pinned as fresh output pushes rows into history.
+/// `col` is a 0-based cell column.
+pub const SelectionPoint = struct { above: i64, col: usize };
+
+/// A linear (stream, not rectangular) selection on a layer: from `anchor`
+/// (where the drag / keyboard selection started) to `active` (the moving
+/// end). Reading order runs from whichever end is further back in
+/// scrollback (larger `above`, ties broken on smaller `col`) to the
+/// other -- see `ordered`.
+pub const Selection = struct {
+    anchor: SelectionPoint,
+    active: SelectionPoint,
+
+    /// The two ends in reading order: `start` is the earlier point (higher
+    /// on screen / further back in history), `end` the later one. `start`
+    /// always has `above >= end.above`.
+    pub fn ordered(self: Selection) struct { start: SelectionPoint, end: SelectionPoint } {
+        const a = self.anchor;
+        const b = self.active;
+        const a_first = a.above > b.above or (a.above == b.above and a.col <= b.col);
+        return if (a_first) .{ .start = a, .end = b } else .{ .start = b, .end = a };
+    }
+
+    /// Whether both ends coincide -- a zero-width selection, which
+    /// `Layer.selectionText` renders as the empty string (the host treats
+    /// that the same as "nothing selected").
+    pub fn isEmpty(self: Selection) bool {
+        return self.anchor.above == self.active.above and self.anchor.col == self.active.col;
+    }
+};
+
 /// A layer's viewport size in cells -- what `get_property(layer, "size")`
 /// reports. For the root layer this is the context's base size, i.e. the
 /// answer to "how big is the window right now" (see `Context.resize`).
@@ -804,6 +843,15 @@ pub const Layer = struct {
     /// until history eviction forces a drift. See `PropertyName.scroll`.
     view_scroll: usize = 0,
     cursor: Cursor = .{},
+    /// The layer's current text selection, or null when nothing is
+    /// selected -- see `Selection`. Set/moved/cleared by the
+    /// `set_selection` / `update_selection` / `clear_selection` wire
+    /// messages (and glyphwire-host's in-process equivalents), read by the
+    /// renderer (`selectionColRange`) and `get_selection_text`
+    /// (`selectionText`). `scrollOne` keeps both ends pinned to their
+    /// content as output scrolls; `resize` drops it (the ring buffer is
+    /// rebuilt from scratch).
+    selection: ?Selection = null,
     /// Escape-sequence machine state (see `EscState`). `.ground` except
     /// partway through a single `writeText` call that is
     /// interpreting/discarding an `ESC ...` sequence -- reset back to
@@ -943,6 +991,16 @@ pub const Layer = struct {
     /// is full), and a fresh blank row appears at the bottom.
     fn scrollOne(self: *Layer) void {
         self.history_len = @min(self.history_len + 1, self.scrollback_rows);
+        // Keep a selection pinned to its content: every row moves one step
+        // further above the live viewport's top when the viewport advances
+        // (see `SelectionPoint`). Drop it once an end scrolls off the top
+        // of retained history -- the text it referred to is gone.
+        if (self.selection) |*s| {
+            s.anchor.above += 1;
+            s.active.above += 1;
+            const max_above = @max(s.anchor.above, s.active.above);
+            if (max_above > @as(i64, @intCast(self.history_len))) self.selection = null;
+        }
         // If the view is currently scrolled back, follow the incoming row
         // so the content the user is looking at stays at the same screen
         // position while new output piles up below it -- terminal-style.
@@ -1003,6 +1061,9 @@ pub const Layer = struct {
     pub fn resize(self: *Layer, new_width: usize, new_height: usize) !void {
         std.debug.assert(new_width > 0 and new_height > 0);
         if (new_width == self.width and new_height == self.height) return;
+        // The ring buffer is rebuilt below, so any selection's row math is
+        // about to be meaningless -- drop it rather than try to re-anchor.
+        self.selection = null;
 
         const old_cap = self.capacity();
         // Meaningful rows in oldest -> newest logical order: `history_len`
@@ -1714,6 +1775,102 @@ pub const Layer = struct {
             .size => unreachable, // get-only; window size is host-driven, see Context.resize
             .scroll => unreachable, // get-only; move it with scrollView, see PropertyName.scroll
         }
+    }
+
+    // ── Selection ───────────────────────────────────────────────────────
+    //
+    // A linear selection over the layer's cell grid, including its
+    // scrollback. State is just `self.selection` (see `Selection` /
+    // `SelectionPoint`); these are the operations the wire messages and
+    // glyphwire-host's in-process path drive it through, plus the two
+    // read helpers the renderer and `get_selection_text` need.
+
+    /// Starts (or replaces) the selection: `anchor` is the fixed end,
+    /// `active` the moving one.
+    pub fn setSelection(self: *Layer, anchor: SelectionPoint, active: SelectionPoint) void {
+        self.selection = .{ .anchor = anchor, .active = active };
+    }
+
+    /// Moves the selection's active (moving) end -- a no-op when nothing
+    /// is selected, so a stray drag/extend after a `clear` does nothing.
+    pub fn updateSelectionActive(self: *Layer, active: SelectionPoint) void {
+        if (self.selection) |*s| s.active = active;
+    }
+
+    pub fn clearSelection(self: *Layer) void {
+        self.selection = null;
+    }
+
+    /// The cell row `above` rows above the live viewport's top row (see
+    /// `SelectionPoint`), or null if that row isn't currently retained.
+    /// `above <= 0` is a live viewport row (`-above`); `above >= 1` walks
+    /// up into scrollback.
+    fn rowForAbove(self: *const Layer, above: i64) ?[]const Cell {
+        if (above > 0) {
+            if (above - 1 >= @as(i64, @intCast(self.history_len))) return null;
+            return self.scrollbackRow(@intCast(above - 1));
+        }
+        const live_row: i64 = -above;
+        if (live_row >= @as(i64, @intCast(self.height))) return null;
+        return self.rowSlice(self.physicalRow(@intCast(live_row)));
+    }
+
+    /// For the renderer: the `[start, end)` column range selected on the
+    /// row `above` rows above the live viewport's top (see
+    /// `SelectionPoint`), or null if that row is outside the selection.
+    /// Linear model -- interior rows select their whole width, the first
+    /// and last row are clipped to the selection's start/end column.
+    pub fn selectionColRange(self: *const Layer, above: i64) ?struct { start: usize, end: usize } {
+        const sel = self.selection orelse return null;
+        if (sel.isEmpty()) return null;
+        const o = sel.ordered();
+        if (above > o.start.above or above < o.end.above) return null;
+        const lo: usize = if (above == o.start.above) @min(o.start.col, self.width) else 0;
+        var hi: usize = if (above == o.end.above) o.end.col + 1 else self.width;
+        if (hi > self.width) hi = self.width;
+        if (lo >= hi) return null;
+        return .{ .start = lo, .end = hi };
+    }
+
+    /// The selected text, or null when nothing is selected (a zero-width
+    /// selection returns `""`). Rows are joined with `\n`, each row's
+    /// trailing blanks trimmed; a blank cell inside the range becomes a
+    /// space, a wide character's spacer half is skipped. A row no longer
+    /// retained in scrollback contributes an empty line. Caller owns the
+    /// result.
+    pub fn selectionText(self: *const Layer, alloc: std.mem.Allocator) !?[]u8 {
+        const sel = self.selection orelse return null;
+        if (sel.isEmpty()) return try alloc.dupe(u8, "");
+        const o = sel.ordered();
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+
+        var above = o.start.above;
+        while (above >= o.end.above) : (above -= 1) {
+            const lo: usize = if (above == o.start.above) @min(o.start.col, self.width) else 0;
+            var hi: usize = if (above == o.end.above) o.end.col + 1 else self.width;
+            if (hi > self.width) hi = self.width;
+
+            const line_start = out.items.len;
+            if (lo < hi) {
+                if (self.rowForAbove(above)) |cells| {
+                    var col = lo;
+                    while (col < hi) : (col += 1) {
+                        const c = cells[col];
+                        if (c.wide == .wide_spacer) continue;
+                        const g = c.grapheme();
+                        if (g.len == 0) try out.append(alloc, ' ') else try out.appendSlice(alloc, g);
+                    }
+                }
+            }
+            while (out.items.len > line_start and out.items[out.items.len - 1] == ' ') {
+                out.items.len -= 1;
+            }
+            if (above != o.end.above) try out.append(alloc, '\n');
+        }
+
+        return try out.toOwnedSlice(alloc);
     }
 };
 
@@ -2505,6 +2662,18 @@ pub const Context = struct {
     /// Shared across every layer's `tables` map -- see `TableHandle`'s
     /// doc comment.
     next_table_handle: TableHandle = 1,
+    /// Session clipboard buffer. The wire's `set_clipboard` /
+    /// `get_clipboard` read and write this directly; the headless case
+    /// (`server/main.zig`, tests) has nothing else behind it. glyphwire-
+    /// host treats it as the source of truth and mirrors it to the OS
+    /// clipboard whenever `clipboard_serial` changes (a `set_clipboard`
+    /// from a client, or its own selection copy) and refreshes it from
+    /// the OS on paste. See decisions.md's Selection & Clipboard section.
+    clipboard: std.ArrayList(u8) = .empty,
+    /// Bumped by every `setClipboard`; glyphwire-host compares it against
+    /// the serial it last pushed to the OS to know when to push again,
+    /// without diffing the bytes every frame.
+    clipboard_serial: u64 = 0,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Context {
         return .{
@@ -2534,6 +2703,22 @@ pub const Context = struct {
         var metadata_it = self.metadata.valueIterator();
         while (metadata_it.next()) |m| self.alloc.free(m.json);
         self.metadata.deinit();
+        self.clipboard.deinit(self.alloc);
+    }
+
+    /// `set_clipboard`: replaces the clipboard buffer with `text` (copied
+    /// in) and bumps `clipboard_serial`.
+    pub fn setClipboard(self: *Context, text: []const u8) !void {
+        self.clipboard.clearRetainingCapacity();
+        try self.clipboard.appendSlice(self.alloc, text);
+        self.clipboard_serial +%= 1;
+    }
+
+    /// `get_clipboard`: the current clipboard buffer, borrowed (valid
+    /// until the next `setClipboard`). On glyphwire-host this is only as
+    /// fresh as the last host->OS / OS->host sync -- see `clipboard`.
+    pub fn clipboardText(self: *const Context) []const u8 {
+        return self.clipboard.items;
     }
 
     /// `create_metadata`: stores `json` verbatim (duped -- the caller's

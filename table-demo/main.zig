@@ -109,7 +109,8 @@ fn run(init: std.process.Init) !void {
         defer input_ev.deinit(alloc);
         switch (input_ev) {
             .key => |k| if (k.pressed) return,
-            .text => {},
+            .text, .paste => {},
+            .copy_request => {},
         }
     }
 }

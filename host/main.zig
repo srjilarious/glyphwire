@@ -317,6 +317,38 @@ pub const App = struct {
     /// itself moves the cursor, by `render`'s own check.
     caret_pin: ?struct { row: usize, col: usize, base_scroll: usize } = null,
 
+    /// The GLFW window, kept so the OS clipboard can be read/written from
+    /// the main thread (GLFW clipboard calls are main-thread-only, so the
+    /// wire `set_clipboard` path can't touch it directly -- it goes
+    /// through `ctx.clipboard` + `syncClipboardToOs` instead).
+    window: *pixzig.glfw.Window,
+    /// Last `ctx.clipboard_serial` this host pushed to the OS clipboard.
+    /// `syncClipboardToOs` compares it each frame so a `set_clipboard`
+    /// from a client (or the host's own selection copy) reaches the OS
+    /// without diffing bytes every frame.
+    clipboard_serial_pushed: u64 = 0,
+    /// Keyboard selection mode (toggled by Ctrl+Shift+Space). While set,
+    /// the host swallows the arrows / Home / End / Escape / Enter keys
+    /// and uses them to move the selection's active end instead of
+    /// forwarding them to glyphwire-shell. See `handleSelectionKeys`.
+    select_mode: bool = false,
+    /// The selection's fixed and moving ends while the host drives it
+    /// (keyboard mode or a mouse drag), mirrored here so a move can be
+    /// computed without a `get_selection` round trip. In
+    /// `glyphwire.SelectionPoint` coordinates.
+    sel_anchor: glyphwire.SelectionPoint = .{ .above = 0, .col = 0 },
+    sel_active: glyphwire.SelectionPoint = .{ .above = 0, .col = 0 },
+    /// Mouse drag-selection state. `mouse_selecting` is set on a
+    /// non-scrollbar left press; `mouse_moved` flips true once the
+    /// pointer leaves the anchor cell, which is when a real selection is
+    /// created -- a press+release with no move stays a plain click and is
+    /// forwarded to glyphwire-shell. `mouse_anchor` is where the press
+    /// landed, `mouse_last_cell` the cell the pointer was last seen in.
+    mouse_selecting: bool = false,
+    mouse_moved: bool = false,
+    mouse_anchor: glyphwire.SelectionPoint = .{ .above = 0, .col = 0 },
+    mouse_last_cell: glyphwire.CellPos = .{},
+
     /// Font file/size passed to `App.init` -- what `applyFontSize` needs to
     /// repeat the startup `measureFontFileIndexed` at a new size.
     pub const FontRuntime = struct {
@@ -351,6 +383,7 @@ pub const App = struct {
             .cursor_shape = cursor.shape,
             .cursor_blink = cursor.blink,
             .cursor_blink_ms = cursor.blink_ms,
+            .window = eng.window,
         };
 
         // Pack the bundled icons into one texture now that a GL context
@@ -698,13 +731,24 @@ pub const App = struct {
         // and then resizes the window) is only reconciled against the
         // framebuffer on the *next* frame, once both have settled.
         self.handleFontZoom(eng);
+        // Ctrl+Shift+C / +V / +Space and, in keyboard selection mode, the
+        // arrow/Home/End/Escape/Enter motions. Runs before
+        // `reportKeyEvents`, which swallows the same keys so the shell
+        // never sees them (see `selectionSwallows`).
+        self.handleSelectionKeys(eng);
+        // Push the session clipboard buffer to the OS clipboard if it
+        // changed (a client's `set_clipboard`, or a selection copy just
+        // above). Main-thread GLFW call.
+        self.syncClipboardToOs();
         const key_pressed = self.reportKeyEvents(eng);
         const text_typed = self.reportTextInput(eng);
         // The scrollbar gets first refusal on the left button: a press or
         // drag that belongs to it is consumed here so `reportMouseEvents`
-        // doesn't also forward it to the grid as a click.
+        // doesn't also forward it to the grid as a click. Mouse
+        // drag-selection gets second refusal, for the same reason.
         const scrollbar_took_left = self.handleScrollbar(eng);
-        self.reportMouseEvents(eng, scrollbar_took_left);
+        const select_took_left = self.handleMouseSelection(eng, scrollbar_took_left);
+        self.reportMouseEvents(eng, scrollbar_took_left or select_took_left);
         self.handleRepeatKeys(eng, deltaTimeMs);
         self.handleScroll(eng);
         // After both the key/text forwarding and the scroll handlers: a
@@ -1032,6 +1076,312 @@ pub const App = struct {
         self.resizeWindowForCells(eng);
     }
 
+    // ── Selection & clipboard ──────────────────────────────────────────
+
+    /// A translucent tint drawn over the selected cells in the
+    /// `color_bg` render pass, so text painted afterward stays readable
+    /// on top of it.
+    const selection_highlight_color = pixzig.Color.from(80, 130, 220, 90);
+
+    /// Whether `reportKeyEvents` should hold this key back from the wire
+    /// because `handleSelectionKeys` owns it this frame: Ctrl+Shift+C/V/
+    /// Space always, and the motion/commit keys while keyboard selection
+    /// mode is active.
+    fn selectionSwallows(self: *const App, key: pixzig.glfw.Key, kb: anytype) bool {
+        const cs = kb.ctrl() and kb.shift();
+        switch (key) {
+            .c, .v, .space => if (cs) return true,
+            else => {},
+        }
+        if (self.select_mode) switch (key) {
+            .left, .right, .up, .down, .home, .end, .escape, .enter, .kp_enter => return true,
+            else => {},
+        };
+        return false;
+    }
+
+    /// Root layer's current scrollback view offset -- a short locked read,
+    /// used to convert a screen row to a scroll-stable `SelectionPoint`.
+    fn rootViewScroll(self: *App) usize {
+        self.server.ctx_mutex.lockUncancelable(self.server.io);
+        defer self.server.ctx_mutex.unlock(self.server.io);
+        return self.server.ctx.root.view_scroll;
+    }
+
+    /// The `SelectionPoint` for grid cell `(row, col)` at the current
+    /// view offset (see `glyphwire.SelectionPoint`: `above` is content-
+    /// anchored, `= view_scroll - row`).
+    fn pointFromScreen(self: *App, row: usize, col: usize) glyphwire.SelectionPoint {
+        const vs = self.rootViewScroll();
+        return .{ .above = @as(i64, @intCast(vs)) - @as(i64, @intCast(row)), .col = col };
+    }
+
+    /// Ctrl+Shift+C / +V / +Space, plus the keyboard-selection-mode
+    /// motion keys. Runs before `reportKeyEvents` (which swallows the
+    /// same keys).
+    fn handleSelectionKeys(self: *App, eng: *AppRunner.Engine) void {
+        const kb = &eng.inputs.keyboard;
+        const cs = kb.ctrl() and kb.shift();
+
+        if (cs and kb.pressed(.c)) {
+            self.copyShortcut();
+            return;
+        }
+        if (cs and kb.pressed(.v)) {
+            self.pasteShortcut();
+            return;
+        }
+        if (cs and kb.pressed(.space)) {
+            self.toggleSelectMode();
+            return;
+        }
+        if (!self.select_mode) return;
+
+        if (kb.pressed(.escape)) {
+            self.endSelectMode(true);
+            return;
+        }
+        if (kb.pressed(.enter) or kb.pressed(.kp_enter)) {
+            self.copyShortcut();
+            return;
+        }
+
+        var dcol: i64 = 0;
+        var drow: i64 = 0;
+        var to_edge: i8 = 0;
+        if (kb.pressed(.left)) {
+            dcol = -1;
+        } else if (kb.pressed(.right)) {
+            dcol = 1;
+        } else if (kb.pressed(.up)) {
+            drow = -1;
+        } else if (kb.pressed(.down)) {
+            drow = 1;
+        } else if (kb.pressed(.home)) {
+            to_edge = -1;
+        } else if (kb.pressed(.end)) {
+            to_edge = 1;
+        } else {
+            return;
+        }
+        self.moveSelectionActive(dcol, drow, to_edge);
+    }
+
+    /// Enters keyboard selection mode with a zero-width selection at the
+    /// root cursor, or leaves it (clearing the selection) if already on.
+    fn toggleSelectMode(self: *App) void {
+        if (self.select_mode) {
+            self.endSelectMode(true);
+            return;
+        }
+        var vs: usize = undefined;
+        var crow: usize = undefined;
+        var ccol: usize = undefined;
+        {
+            self.server.ctx_mutex.lockUncancelable(self.server.io);
+            defer self.server.ctx_mutex.unlock(self.server.io);
+            const root = &self.server.ctx.root;
+            vs = root.view_scroll;
+            crow = root.cursor.row;
+            ccol = root.cursor.col;
+        }
+        const p: glyphwire.SelectionPoint = .{
+            .above = @as(i64, @intCast(vs)) - @as(i64, @intCast(crow)),
+            .col = ccol,
+        };
+        self.sel_anchor = p;
+        self.sel_active = p;
+        self.select_mode = true;
+        self.server.setSelection(self.alloc, null, p, p) catch |err| {
+            std.log.err("glyphwire-host: setSelection (enter select mode) failed: {t}", .{err});
+        };
+    }
+
+    fn endSelectMode(self: *App, clear: bool) void {
+        self.select_mode = false;
+        if (clear) self.server.clearSelection(self.alloc, null) catch |err| {
+            std.log.err("glyphwire-host: clearSelection failed: {t}", .{err});
+        };
+    }
+
+    /// Moves the selection's active end by `drow`/`dcol` cells (or to the
+    /// line's start/end when `to_edge` is -1/+1), scrolling the view when
+    /// the end walks past the top or bottom of the viewport.
+    fn moveSelectionActive(self: *App, dcol: i64, drow: i64, to_edge: i8) void {
+        var width: usize = undefined;
+        var height: usize = undefined;
+        var hist: usize = undefined;
+        var vs: usize = undefined;
+        {
+            self.server.ctx_mutex.lockUncancelable(self.server.io);
+            defer self.server.ctx_mutex.unlock(self.server.io);
+            const root = &self.server.ctx.root;
+            width = root.width;
+            height = root.height;
+            hist = root.history_len;
+            vs = root.view_scroll;
+        }
+        if (width == 0 or height == 0) return;
+
+        // Current active end -> screen row, moved by drow, then re-clamped
+        // into the viewport by scrolling.
+        var srow: i64 = @as(i64, @intCast(vs)) - self.sel_active.above + drow;
+        var new_vs: i64 = @intCast(vs);
+        if (srow < 0) {
+            new_vs += -srow;
+            srow = 0;
+        } else if (srow >= @as(i64, @intCast(height))) {
+            new_vs -= srow - @as(i64, @intCast(height)) + 1;
+            srow = @as(i64, @intCast(height)) - 1;
+        }
+        new_vs = std.math.clamp(new_vs, 0, @as(i64, @intCast(hist)));
+
+        var col: i64 = @intCast(self.sel_active.col);
+        if (to_edge < 0) {
+            col = 0;
+        } else if (to_edge > 0) {
+            col = @as(i64, @intCast(width)) - 1;
+        } else {
+            col = std.math.clamp(col + dcol, 0, @as(i64, @intCast(width)) - 1);
+        }
+
+        self.sel_active = .{ .above = new_vs - srow, .col = @intCast(col) };
+        if (new_vs != @as(i64, @intCast(vs))) {
+            self.server.reportScroll(self.alloc, @intCast(new_vs), null) catch {};
+        }
+        self.server.setSelection(self.alloc, null, self.sel_anchor, self.sel_active) catch |err| {
+            std.log.err("glyphwire-host: setSelection (move) failed: {t}", .{err});
+        };
+    }
+
+    /// Ctrl+Shift+C / select-mode Enter: copy the selection to the OS
+    /// clipboard, or -- with nothing (or a zero-width selection) --
+    /// broadcast `copy_request` so glyphwire-shell answers with its
+    /// prompt.
+    fn copyShortcut(self: *App) void {
+        const maybe_text = self.server.selectionText(self.alloc, null) catch |err| {
+            std.log.err("glyphwire-host: selectionText failed: {t}", .{err});
+            return;
+        };
+        if (maybe_text) |text| {
+            defer self.alloc.free(text);
+            self.endSelectMode(true);
+            if (text.len > 0) {
+                self.server.setClipboard(text) catch |err| {
+                    std.log.err("glyphwire-host: setClipboard (copy) failed: {t}", .{err});
+                };
+                return;
+            }
+            // A zero-width selection: fall through to the prompt copy.
+        }
+        self.server.requestCopy(self.alloc) catch |err| {
+            std.log.err("glyphwire-host: requestCopy failed: {t}", .{err});
+        };
+    }
+
+    /// Ctrl+Shift+V: read the OS clipboard (main thread) and broadcast it
+    /// as a `paste` notification. Also refreshes `ctx.clipboard` so a
+    /// later `get_clipboard` sees it.
+    fn pasteShortcut(self: *App) void {
+        const s = self.window.getClipboardString() orelse return;
+        if (s.len == 0) return;
+        // `s` is GLFW-owned and only valid until the next clipboard call;
+        // both calls below copy it right away.
+        self.server.setClipboard(s) catch |err| {
+            std.log.err("glyphwire-host: setClipboard (paste) failed: {t}", .{err});
+            return;
+        };
+        // The bytes already match the OS clipboard -- don't push them
+        // straight back out in `syncClipboardToOs`.
+        self.clipboard_serial_pushed = self.server.clipboardSerial();
+        self.server.broadcastPaste(self.alloc, s) catch |err| {
+            std.log.err("glyphwire-host: broadcastPaste failed: {t}", .{err});
+        };
+    }
+
+    /// Pushes `ctx.clipboard` to the OS clipboard when its serial has
+    /// moved since the last push -- called once per frame on the main
+    /// thread (GLFW clipboard writes are main-thread-only).
+    fn syncClipboardToOs(self: *App) void {
+        const serial = self.server.clipboardSerial();
+        if (serial == self.clipboard_serial_pushed) return;
+        const text = self.server.clipboardText(self.alloc) catch return;
+        defer self.alloc.free(text);
+        const z = self.alloc.dupeZ(u8, text) catch return;
+        defer self.alloc.free(z);
+        self.window.setClipboardString(z);
+        self.clipboard_serial_pushed = serial;
+    }
+
+    /// Mouse drag-selection. Returns true when the left button this frame
+    /// belongs to a selection drag, so `reportMouseEvents` drops it (the
+    /// shell only ever sees a plain click -- press+release with no move --
+    /// which this forwards synthetically). Given second refusal after the
+    /// scrollbar (`skip_left`).
+    fn handleMouseSelection(self: *App, eng: *AppRunner.Engine, skip_left: bool) bool {
+        if (!eng.inputs.mouse_enabled) return false;
+        const m = &eng.inputs.mouse;
+        const pos = m.pos();
+        const fb = eng.window_state.framebuffer_size;
+        const on_scrollbar = pos.x >= @as(f32, @floatFromInt(fb.x - scrollbar_width_px));
+        const cell = cellFromPixel(pos.x, pos.y);
+
+        if (!self.mouse_selecting) {
+            if (skip_left or on_scrollbar) return false;
+            if (m.pressed(.left)) {
+                self.mouse_selecting = true;
+                self.mouse_moved = false;
+                self.mouse_last_cell = cell;
+                self.mouse_anchor = self.pointFromScreen(cell.row, cell.col);
+                return true;
+            }
+            return false;
+        }
+
+        if (m.down(.left)) {
+            // Slow auto-scroll while the pointer rests at the top/bottom
+            // edge -- this moves content under a stationary pointer, so it
+            // also forces a selection update below.
+            var edge_scrolled = false;
+            if (pos.y < @as(f32, @floatFromInt(cell_h))) {
+                self.server.reportScroll(self.alloc, null, 1) catch {};
+                edge_scrolled = true;
+            } else if (pos.y > @as(f32, @floatFromInt(@as(i32, @intCast(grid_rows -| 1)) * cell_h))) {
+                self.server.reportScroll(self.alloc, null, -1) catch {};
+                edge_scrolled = true;
+            }
+
+            const moved_cell = cell.row != self.mouse_last_cell.row or cell.col != self.mouse_last_cell.col;
+            if (moved_cell or (self.mouse_moved and edge_scrolled)) {
+                self.mouse_last_cell = cell;
+                if (!self.mouse_moved) {
+                    self.mouse_moved = true;
+                    // A drag supersedes any keyboard selection mode.
+                    self.select_mode = false;
+                    self.sel_anchor = self.mouse_anchor;
+                }
+                self.sel_active = self.pointFromScreen(cell.row, cell.col);
+                self.server.setSelection(self.alloc, null, self.sel_anchor, self.sel_active) catch |err| {
+                    std.log.err("glyphwire-host: setSelection (drag) failed: {t}", .{err});
+                };
+            }
+            return true;
+        }
+
+        // Button released.
+        self.mouse_selecting = false;
+        if (!self.mouse_moved) {
+            // A plain click: hand the shell the press+release it activates
+            // on, and clear any leftover selection (standard behaviour).
+            const vo = self.rootViewScroll();
+            self.server.reportMouseButton(self.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, cell, vo) catch {};
+            self.server.reportMouseButton(self.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, cell, vo) catch {};
+            self.server.clearSelection(self.alloc, null) catch {};
+            self.select_mode = false;
+        }
+        return true;
+    }
+
     /// Resizes the OS window so a framebuffer of exactly
     /// `grid_cols` x `grid_rows` cells (plus the scrollbar and side
     /// padding) fits -- the inverse of `syncWindowSize`'s cell math, so it
@@ -1065,6 +1415,10 @@ pub const App = struct {
     /// keys repeat fine already -- their repeats come in on the `text`
     /// stream via GLFW's char callback.)
     fn handleRepeatKeys(self: *App, eng: *AppRunner.Engine, delta_ms: f64) void {
+        // In keyboard selection mode the arrows/edit keys are swallowed
+        // (they move the selection, not the shell's line) -- don't
+        // synthesize repeats the shell would act on.
+        if (self.select_mode) return;
         self.handleArrowRepeat(eng, .up, "up", &self.key_repeat.up, 0, -1, delta_ms);
         self.handleArrowRepeat(eng, .down, "down", &self.key_repeat.down, 0, 1, delta_ms);
         self.handleArrowRepeat(eng, .left, "left", &self.key_repeat.left, -1, 0, delta_ms);
@@ -1177,7 +1531,7 @@ pub const App = struct {
         const fields = @typeInfo(pixzig.glfw.Key).@"enum".fields;
         inline for (fields) |field| {
             const key = @field(pixzig.glfw.Key, field.name);
-            const skip = switch (key) {
+            const skip_static = switch (key) {
                 // Forwarded by reportModifier above, not per physical key.
                 .left_control, .right_control, .left_alt, .right_alt, .left_shift, .right_shift, .left_super, .right_super => true,
                 // Ctrl + these are `handleFontZoom`'s shortcuts; swallow
@@ -1185,6 +1539,10 @@ pub const App = struct {
                 .minus, .equal, .zero, .kp_subtract, .kp_add, .kp_0 => ctrl_held,
                 else => false,
             };
+            // Selection / clipboard shortcuts (Ctrl+Shift+C/V/Space) and,
+            // in keyboard selection mode, the motion keys are consumed by
+            // `handleSelectionKeys` -- keep them off the wire too.
+            const skip = skip_static or self.selectionSwallows(key, kb);
             if (skip) {
                 // Consumed elsewhere; don't forward it.
             } else if (kb.pressed(key)) {
@@ -1515,6 +1873,25 @@ pub const App = struct {
             if (pass == .icons) {
                 for (self.deferred_icons.items) |d| {
                     self.drawIconCell(eng, d.icon, d.pos, d.foreground);
+                }
+            }
+
+            // Selection tint: drawn in the color-background pass so the
+            // text pass paints over it and stays readable. One filled
+            // rect per selected row span (see `Layer.selectionColRange`);
+            // `above = view_offset - row` is the scroll-stable row key.
+            if (pass == .color_bg and layer.selection != null) {
+                var srow: usize = 0;
+                while (srow < layer.height) : (srow += 1) {
+                    const above: i64 = @as(i64, @intCast(view_offset)) - @as(i64, @intCast(srow));
+                    const range = layer.selectionColRange(above) orelse continue;
+                    const x0 = origin_x + @as(i32, @intCast(range.start)) * cell_w;
+                    const rect_w = @as(i32, @intCast(range.end - range.start)) * cell_w;
+                    const y0 = origin_y + @as(i32, @intCast(srow)) * cell_h;
+                    eng.renderer.drawFilledRect(
+                        pixzig.RectF.fromPosSize(x0, y0, rect_w, cell_h),
+                        selection_highlight_color,
+                    );
                 }
             }
 
