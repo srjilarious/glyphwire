@@ -25,14 +25,25 @@ const std = @import("std");
 /// into a single token, e.g. `alias ll='ls -l'` splits to `alias` and
 /// `ll=ls -l`, and `''` yields one empty token -- both the same as bash.
 ///
-/// Returns an owned slice of owned token strings (all quoting removed).
-/// Free it with `freeTokens`. Empty / whitespace-only input yields a
-/// zero-length slice.
-pub fn split(alloc: std.mem.Allocator, line: []const u8) ![]const []const u8 {
-    var tokens: std.ArrayList([]const u8) = .empty;
+/// One split-out token.
+pub const Arg = struct {
+    /// The token text, with all quoting/escaping already removed.
+    text: []const u8,
+    /// True if any byte of the token came from inside `'...'` / `"..."`
+    /// or was backslash-escaped. Such a token is a literal string and
+    /// must never be treated as a glob pattern, matching bash: `echo
+    /// '*'`, `echo "*"` and `echo \*` all print a literal `*`.
+    quoted: bool,
+};
+
+/// Full splitter: returns owned `Arg`s (text + a "was quoted" flag).
+/// Free with `freeArgs`. Empty / whitespace-only input yields a
+/// zero-length slice. `split` is the text-only convenience wrapper.
+pub fn splitArgs(alloc: std.mem.Allocator, line: []const u8) ![]Arg {
+    var args: std.ArrayList(Arg) = .empty;
     errdefer {
-        for (tokens.items) |t| alloc.free(t);
-        tokens.deinit(alloc);
+        for (args.items) |a| alloc.free(a.text);
+        args.deinit(alloc);
     }
 
     var cur: std.ArrayList(u8) = .empty;
@@ -40,19 +51,22 @@ pub fn split(alloc: std.mem.Allocator, line: []const u8) ![]const []const u8 {
     // Distinct from `cur.items.len != 0`: an explicit empty token (`''`)
     // has to survive too.
     var in_token = false;
+    var cur_quoted = false;
 
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
         switch (line[i]) {
             ' ', '\t' => {
                 if (in_token) {
-                    try tokens.append(alloc, try alloc.dupe(u8, cur.items));
+                    try args.append(alloc, .{ .text = try alloc.dupe(u8, cur.items), .quoted = cur_quoted });
                     cur.clearRetainingCapacity();
                     in_token = false;
+                    cur_quoted = false;
                 }
             },
             '\'' => {
                 in_token = true;
+                cur_quoted = true;
                 i += 1;
                 while (i < line.len and line[i] != '\'') : (i += 1) {
                     try cur.append(alloc, line[i]);
@@ -62,6 +76,7 @@ pub fn split(alloc: std.mem.Allocator, line: []const u8) ![]const []const u8 {
             },
             '"' => {
                 in_token = true;
+                cur_quoted = true;
                 i += 1;
                 while (i < line.len and line[i] != '"') : (i += 1) {
                     if (line[i] == '\\' and i + 1 < line.len and
@@ -76,6 +91,7 @@ pub fn split(alloc: std.mem.Allocator, line: []const u8) ![]const []const u8 {
                 in_token = true;
                 if (i + 1 < line.len) {
                     i += 1;
+                    cur_quoted = true;
                     try cur.append(alloc, line[i]);
                 } else {
                     try cur.append(alloc, '\\');
@@ -87,9 +103,27 @@ pub fn split(alloc: std.mem.Allocator, line: []const u8) ![]const []const u8 {
             },
         }
     }
-    if (in_token) try tokens.append(alloc, try alloc.dupe(u8, cur.items));
+    if (in_token) try args.append(alloc, .{ .text = try alloc.dupe(u8, cur.items), .quoted = cur_quoted });
 
-    return tokens.toOwnedSlice(alloc);
+    return args.toOwnedSlice(alloc);
+}
+
+pub fn freeArgs(alloc: std.mem.Allocator, args: []const Arg) void {
+    for (args) |a| alloc.free(a.text);
+    alloc.free(args);
+}
+
+/// Text-only splitter: quoting/escaping removed, "was quoted" flag
+/// dropped. Returns an owned slice of owned token strings; free with
+/// `freeTokens`.
+pub fn split(alloc: std.mem.Allocator, line: []const u8) ![]const []const u8 {
+    const args = try splitArgs(alloc, line);
+    defer alloc.free(args); // each `.text` is moved into `out`, not freed here
+    errdefer for (args) |a| alloc.free(a.text);
+
+    const out = try alloc.alloc([]const u8, args.len);
+    for (args, 0..) |a, idx| out[idx] = a.text;
+    return out;
 }
 
 pub fn freeTokens(alloc: std.mem.Allocator, tokens: []const []const u8) void {

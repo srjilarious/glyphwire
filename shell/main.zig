@@ -2,6 +2,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const wordsplit = @import("shell_support").wordsplit;
 const complete = @import("shell_support").complete;
+const glob = @import("shell_support").glob;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -847,13 +848,14 @@ const Prompt = struct {
     /// `alias`/`unalias`/`cd`/`exit` builtins, or an external command via
     /// `runCommand`.
     ///
-    /// Word-splitting is quote-aware (`wordsplit.split`: single/double
-    /// quotes and backslash escapes), and a leading alias is expanded
-    /// first (`expandAliases`), so an `alias`-defined name reaches exactly
-    /// the same builtin/command dispatch a typed name would. `alias`
-    /// itself is handled off the raw line ahead of splitting -- its value
-    /// has rest-of-line semantics (`wordsplit.parseAliasDef`), unlike
-    /// every other argument on the line.
+    /// Order matches bash: word-splitting is quote-aware
+    /// (`wordsplit.splitArgs`: single/double quotes and backslash
+    /// escapes), then a leading alias is expanded (`expandAliases`), then
+    /// `*` globs (`expandGlobs`), then builtin/command dispatch -- so an
+    /// `alias`-defined name reaches exactly the same dispatch a typed
+    /// name would. `alias` itself is handled off the raw line ahead of
+    /// splitting -- its value has rest-of-line semantics
+    /// (`wordsplit.parseAliasDef`), unlike every other argument.
     fn dispatchLine(self: *Prompt) !void {
         const alloc = self.client.alloc;
         const trimmed = std.mem.trimStart(u8, self.buffer.items, " \t");
@@ -864,11 +866,18 @@ const Prompt = struct {
             return self.doAlias(self.buffer.items);
         }
 
-        const words = try wordsplit.split(alloc, self.buffer.items);
-        defer wordsplit.freeTokens(alloc, words);
+        const words = try wordsplit.splitArgs(alloc, self.buffer.items);
+        defer wordsplit.freeArgs(alloc, words);
         if (words.len == 0) return;
 
-        const argv = try self.expandAliases(words);
+        const expanded = try self.expandAliases(words);
+        defer wordsplit.freeArgs(alloc, expanded);
+        if (expanded.len == 0) return;
+
+        // Glob expansion happens after alias expansion (bash order) and
+        // drops the per-token "was quoted" flag, so it's the last step
+        // before dispatch.
+        const argv = try self.expandGlobs(expanded);
         defer wordsplit.freeTokens(alloc, argv);
         if (argv.len == 0) return;
 
@@ -1148,23 +1157,29 @@ const Prompt = struct {
         }
     }
 
-    /// Expands a leading alias in `words` into a fresh owned token list.
+    /// Expands a leading alias in `words` into a fresh owned `Arg` list.
     /// Follows an alias whose body again begins with an alias name
     /// (bash-style chaining), but stops the first time a name would be
     /// expanded twice on one line -- so `alias ls='ls --color'` resolves
     /// exactly once instead of looping -- with a hard depth cap as a
     /// backstop. When `words[0]` isn't an alias the result is just an
     /// owned copy of `words`. Always freshly allocated; free with
-    /// `wordsplit.freeTokens`.
-    fn expandAliases(self: *Prompt, words: []const []const u8) ![]const []const u8 {
+    /// `wordsplit.freeArgs`.
+    ///
+    /// Tokens introduced from an alias body are marked `quoted = false`
+    /// (glob-eligible): re-evaluating an alias body is exactly what makes
+    /// `alias x='echo *'` expand the `*` in the caller's directory, the
+    /// same as bash. Tokens carried over from the original line keep
+    /// their own `quoted` flag.
+    fn expandAliases(self: *Prompt, words: []const wordsplit.Arg) ![]wordsplit.Arg {
         const alloc = self.client.alloc;
 
-        var list: std.ArrayList([]const u8) = .empty;
+        var list: std.ArrayList(wordsplit.Arg) = .empty;
         errdefer {
-            for (list.items) |w| alloc.free(w);
+            for (list.items) |a| alloc.free(a.text);
             list.deinit(alloc);
         }
-        for (words) |w| try list.append(alloc, try alloc.dupe(u8, w));
+        for (words) |a| try list.append(alloc, .{ .text = try alloc.dupe(u8, a.text), .quoted = a.quoted });
 
         var seen: std.ArrayList([]const u8) = .empty;
         defer {
@@ -1175,7 +1190,10 @@ const Prompt = struct {
         var depth: usize = 0;
         while (depth < 32) : (depth += 1) {
             if (list.items.len == 0) break;
-            const first = list.items[0];
+            const first = list.items[0].text;
+            // A quoted first word ('ls' foo) is a literal command name,
+            // never an alias key -- matches bash.
+            if (list.items[0].quoted) break;
 
             for (seen.items) |n| {
                 if (std.mem.eql(u8, n, first)) return list.toOwnedSlice(alloc);
@@ -1186,15 +1204,82 @@ const Prompt = struct {
             const body_words = try wordsplit.split(alloc, body);
             defer wordsplit.freeTokens(alloc, body_words);
 
-            alloc.free(list.orderedRemove(0));
+            alloc.free(list.orderedRemove(0).text);
             var at: usize = 0;
             for (body_words) |bw| {
-                try list.insert(alloc, at, try alloc.dupe(u8, bw));
+                try list.insert(alloc, at, .{ .text = try alloc.dupe(u8, bw), .quoted = false });
                 at += 1;
             }
         }
 
         return list.toOwnedSlice(alloc);
+    }
+
+    /// Expands single-segment `*` / `?` / `[...]` globs in `args` into a
+    /// plain owned token list (the `quoted` flag is consumed here and
+    /// dropped). For each arg: a quoted token or one with no wildcard
+    /// passes through unchanged; otherwise its final path segment is
+    /// matched against the entries of the directory its `dir/` prefix
+    /// names (cwd if none; `~`/`~/` expanded), and the sorted matches
+    /// replace it -- each with the original `dir/` prefix kept. A pattern
+    /// with no matches is left literally in place (bash's default,
+    /// nullglob off). Only the last segment is a pattern; a wildcard in
+    /// the `dir/` part is not expanded yet (see decisions.md). Free the
+    /// result with `wordsplit.freeTokens`.
+    fn expandGlobs(self: *Prompt, args: []const wordsplit.Arg) ![]const []const u8 {
+        const alloc = self.client.alloc;
+        const io = self.client.io;
+
+        var out: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (out.items) |t| alloc.free(t);
+            out.deinit(alloc);
+        }
+
+        for (args) |arg| {
+            if (arg.quoted or !glob.hasWildcard(arg.text)) {
+                try out.append(alloc, try alloc.dupe(u8, arg.text));
+                continue;
+            }
+
+            const dp = complete.dirPrefix(arg.text);
+            const scan_dir = try self.completionDir(dp.dir);
+            defer alloc.free(scan_dir);
+
+            var dir = std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true }) catch {
+                try out.append(alloc, try alloc.dupe(u8, arg.text));
+                continue;
+            };
+            defer dir.close(io);
+
+            var matches: std.ArrayList([]const u8) = .empty;
+            defer {
+                for (matches.items) |m| alloc.free(m);
+                matches.deinit(alloc);
+            }
+
+            const want_hidden = dp.prefix.len > 0 and dp.prefix[0] == '.';
+            var it = dir.iterate();
+            while (it.next(io) catch null) |entry| {
+                if (!want_hidden and std.mem.startsWith(u8, entry.name, ".")) continue;
+                if (!glob.match(dp.prefix, entry.name)) continue;
+                try matches.append(alloc, try std.fmt.allocPrint(alloc, "{s}{s}", .{ dp.dir, entry.name }));
+            }
+
+            if (matches.items.len == 0) {
+                try out.append(alloc, try alloc.dupe(u8, arg.text));
+                continue;
+            }
+
+            std.mem.sort([]const u8, matches.items, {}, struct {
+                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.lessThan(u8, a, b);
+                }
+            }.lessThan);
+            for (matches.items) |m| try out.append(alloc, try alloc.dupe(u8, m));
+        }
+
+        return out.toOwnedSlice(alloc);
     }
 
     /// Inserts a run of characters at the cursor -- the multi-char sibling

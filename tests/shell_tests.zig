@@ -6,6 +6,7 @@ const testz = @import("testz");
 // build.zig) precisely so they can be exercised here.
 const wordsplit = @import("shell_support").wordsplit;
 const complete = @import("shell_support").complete;
+const glob = @import("shell_support").glob;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -69,6 +70,64 @@ pub fn splitBackslashEscapesQuoteTest(_: std.Io, alloc: std.mem.Allocator) !void
     defer wordsplit.freeTokens(alloc, toks);
     try testz.expectEqual(toks.len, 2);
     try testz.expectEqualStr("it's", toks[1]);
+}
+
+// ─── wordsplit.splitArgs (the `quoted` flag) ───────────────────────────
+
+pub fn splitArgsFlagsQuotedTokensTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const args = try wordsplit.splitArgs(alloc, "echo * '*' \"*\" \\*");
+    defer wordsplit.freeArgs(alloc, args);
+    try testz.expectEqual(args.len, 5);
+    try testz.expectEqualStr("echo", args[0].text);
+    try testz.expectTrue(!args[0].quoted);
+    try testz.expectEqualStr("*", args[1].text);
+    try testz.expectTrue(!args[1].quoted); // bare -> a glob pattern
+    try testz.expectTrue(args[2].quoted); // '*'  -> literal
+    try testz.expectTrue(args[3].quoted); // "*"  -> literal
+    try testz.expectTrue(args[4].quoted); // \*   -> literal
+}
+
+// ─── glob.hasWildcard ─────────────────────────────────────────────────
+
+pub fn hasWildcardTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(glob.hasWildcard("*.zig"));
+    try testz.expectTrue(glob.hasWildcard("co?e"));
+    try testz.expectTrue(glob.hasWildcard("f[ab]x"));
+    try testz.expectTrue(!glob.hasWildcard("plain.txt"));
+    try testz.expectTrue(!glob.hasWildcard("a\\*b")); // escaped star
+    try testz.expectTrue(!glob.hasWildcard("f[ab")); // no closing ]
+}
+
+// ─── glob.match ───────────────────────────────────────────────────────
+
+pub fn globMatchStarTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(glob.match("*.zig", "core.zig"));
+    try testz.expectTrue(!glob.match("*.zig", "core.c"));
+    try testz.expectTrue(glob.match("core.*", "core.zig"));
+    try testz.expectTrue(glob.match("*", "anything"));
+    try testz.expectTrue(glob.match("*", ""));
+    try testz.expectTrue(glob.match("a*b*c", "axxbxxc"));
+    try testz.expectTrue(!glob.match("a*b*c", "axxbxx"));
+}
+
+pub fn globMatchQuestionTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(glob.match("c?re.zig", "core.zig"));
+    try testz.expectTrue(!glob.match("c?re.zig", "cre.zig"));
+    try testz.expectTrue(!glob.match("c?re.zig", "coore.zig"));
+}
+
+pub fn globMatchClassTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(glob.match("[abc]at", "bat"));
+    try testz.expectTrue(!glob.match("[abc]at", "dat"));
+    try testz.expectTrue(glob.match("[!abc]at", "dat"));
+    try testz.expectTrue(!glob.match("[!abc]at", "bat"));
+    try testz.expectTrue(glob.match("[a-z].txt", "m.txt"));
+    try testz.expectTrue(!glob.match("[a-z].txt", "M.txt"));
+}
+
+pub fn globMatchMalformedClassIsLiteralTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(glob.match("file[", "file["));
+    try testz.expectTrue(!glob.match("file[", "file"));
 }
 
 pub fn splitUnterminatedQuoteRunsToEndOfLineTest(_: std.Io, alloc: std.mem.Allocator) !void {

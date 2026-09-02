@@ -781,6 +781,28 @@ surface.
   directory scan and the grid edits stay in `Prompt.doComplete` /
   `listCompletions`.
 
+#### `*` glob expansion
+- **Single-segment only, for now.** A token containing `*`, `?`, or a
+  well-formed `[...]` class has its *final* path segment matched against
+  the entries of the directory its literal `dir/` prefix names (cwd if
+  none; `~`/`~/` expanded). The sorted matches replace the token, each
+  keeping the original `dir/` prefix — so `ls src/*.zig` works, but a
+  wildcard in an earlier segment (`ls */*.zig`) is left literal.
+  Recursive multi-segment globbing is a deliberate later step.
+- **No match → literal token**, bash's default (nullglob off). `rm
+  build/*.o` with nothing to match runs `rm` with a literal `build/*.o`.
+- Expansion runs **after** alias expansion, as the last step before
+  dispatch. A **quoted or backslash-escaped** wildcard is never expanded
+  — `echo '*'`, `echo "*"`, `echo \*` all print a literal `*`. That's
+  why `shell/wordsplit.zig` now carries a per-token `quoted` flag
+  (`Arg`) through alias expansion into `Prompt.expandGlobs`; tokens
+  introduced by an alias body are glob-eligible, so `alias l='ls *'`
+  still expands in the caller's directory like bash.
+- Dot-files are only matched when the pattern's final segment starts
+  with a literal `.` (`Prompt.expandGlobs` enforces this; the matcher in
+  `shell/glob.zig` is otherwise plain `*`/`?`/`[...]` string matching
+  with `!`/`^` negation and `a-z` ranges).
+
 ### Server architecture
 - **Headless-first.** Core state — the layer tree, positions, clip rects,
   scroll offsets, cell contents, animation state — is a pure, inspectable

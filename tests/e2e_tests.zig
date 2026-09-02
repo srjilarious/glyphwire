@@ -319,6 +319,79 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqualStr("/", snapshot.cellAt(0, text_col + 6).grapheme);
 }
 
+/// Drives the real glyphwire-shell binary through a `*` glob expansion:
+/// types `echo *.zon` at the prompt and presses Enter. The shell's cwd
+/// (this repo's root, same assumption the other shell e2e tests make)
+/// contains exactly one `*.zon` file, `build.zig.zon`, so the expanded
+/// argv is `echo build.zig.zon` and that filename is what lands on the
+/// grid as the command's captured stdout. Proves the whole path:
+/// `dispatchLine` -> `expandGlobs` -> directory scan -> spawn with the
+/// substituted argument.
+pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shell-glob-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread3.join();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // `echo` lives on the system PATH, not under zig-out/bin -- forward
+    // it explicitly, same as shellCapturesPlainCommandStdoutTest.
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    try typeText(&reporter, "echo *.zon");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // Expanded stdout is "build.zig.zon\n" on row 1 from col 0. The final
+    // "n" landing proves the whole expanded name made it across.
+    try waitForCell(&reporter, 1, 12, "n");
+
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+    for ("build.zig.zon", 0..) |expected_ch, i| {
+        var expected_buf: [1]u8 = .{expected_ch};
+        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, i).grapheme);
+    }
+}
+
 /// Reports key presses that reproduce typing `text` at the shell prompt --
 /// the reverse of shell/main.zig's `charFromKeyName` table. Only covers
 /// the characters this file's tests actually type (lowercase letters,
@@ -346,6 +419,10 @@ fn typeText(reporter: *glyphwire.Client, text: []const u8) !void {
             '~' => blk: {
                 shift = true;
                 break :blk "grave_accent";
+            },
+            '*' => blk: {
+                shift = true;
+                break :blk "eight";
             },
             else => unreachable, // extend the table above if a test needs a new character
         };

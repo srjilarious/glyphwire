@@ -7,3 +7,4 @@
 
 pub const wordsplit = @import("wordsplit.zig");
 pub const complete = @import("complete.zig");
+pub const glob = @import("glob.zig");
