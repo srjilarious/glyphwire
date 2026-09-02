@@ -368,3 +368,133 @@ pub fn defcmdShadowsAScriptFileTest(io: std.Io, alloc: std.mem.Allocator) !void 
     _ = eng.runCommand("dup", &.{});
     try testz.expectEqualStr("from defcmd\n", host.output());
 }
+
+// ─── collectCommandNames (Tab completion, command position) ───────────
+
+/// Frees an owned `[]const []const u8` and the list itself.
+fn freeNames(alloc: std.mem.Allocator, names: *std.ArrayList([]const u8)) void {
+    for (names.items) |n| alloc.free(n);
+    names.deinit(alloc);
+}
+
+/// Whether `list` contains `want` (order from `collectCommandNames` is
+/// unspecified).
+fn hasName(list: []const []const u8, want: []const u8) bool {
+    for (list) |n| {
+        if (std.mem.eql(u8, n, want)) return true;
+    }
+    return false;
+}
+
+pub fn collectCommandNamesReturnsDefcmdNamesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf(
+        \\defcmd('deploy', function() end)
+        \\defcmd('depcheck', function() end)
+        \\defcmd('build', function() end)
+    );
+    try testz.expectEqual(eng.conf_err, null);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer freeNames(alloc, &names);
+    try eng.collectCommandNames(alloc, "dep", &names);
+
+    try testz.expectEqual(names.items.len, 2);
+    try testz.expectTrue(hasName(names.items, "deploy"));
+    try testz.expectTrue(hasName(names.items, "depcheck"));
+    try testz.expectTrue(!hasName(names.items, "build"));
+}
+
+pub fn collectCommandNamesEmptyPrefixReturnsAllTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf("defcmd('a', function() end)\ndefcmd('b', function() end)");
+    try testz.expectEqual(eng.conf_err, null);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer freeNames(alloc, &names);
+    try eng.collectCommandNames(alloc, "", &names);
+
+    try testz.expectEqual(names.items.len, 2);
+    try testz.expectTrue(hasName(names.items, "a"));
+    try testz.expectTrue(hasName(names.items, "b"));
+}
+
+pub fn collectCommandNamesIncludesScriptFilesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const cfg_dir = try uniqueDir(alloc, "collect");
+    defer alloc.free(cfg_dir);
+    const lib_dir = try std.fs.path.join(alloc, &.{ cfg_dir, "scripts", "lib" });
+    defer alloc.free(lib_dir);
+    try std.Io.Dir.cwd().createDirPath(io, lib_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, cfg_dir) catch {};
+
+    const scripts_dir = try std.fs.path.join(alloc, &.{ cfg_dir, "scripts" });
+    defer alloc.free(scripts_dir);
+
+    inline for (.{
+        .{ "greet.lua", "print('hi')\n" },
+        .{ "grep-notes.lua", "print('notes')\n" },
+        .{ "notes.txt", "not a script\n" },
+    }) |entry| {
+        const p = try std.fs.path.join(alloc, &.{ scripts_dir, entry[0] });
+        defer alloc.free(p);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = entry[1] });
+    }
+    // A lib module: present but never a command.
+    const libmod = try std.fs.path.join(alloc, &.{ lib_dir, "helper.lua" });
+    defer alloc.free(libmod);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = libmod, .data = "return {}\n" });
+
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try script_engine.ScriptEngine.init(alloc, io, host.hooks(), cfg_dir);
+    defer eng.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer freeNames(alloc, &names);
+    try eng.collectCommandNames(alloc, "gr", &names);
+
+    try testz.expectEqual(names.items.len, 2);
+    try testz.expectTrue(hasName(names.items, "greet"));
+    try testz.expectTrue(hasName(names.items, "grep-notes"));
+    try testz.expectTrue(!hasName(names.items, "notes")); // .txt skipped
+    try testz.expectTrue(!hasName(names.items, "helper")); // lib/ skipped
+}
+
+pub fn collectCommandNamesMergesDefcmdAndFilesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const cfg_dir = try uniqueDir(alloc, "collectmerge");
+    defer alloc.free(cfg_dir);
+    const scripts_dir = try std.fs.path.join(alloc, &.{ cfg_dir, "scripts" });
+    defer alloc.free(scripts_dir);
+    try std.Io.Dir.cwd().createDirPath(io, scripts_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, cfg_dir) catch {};
+
+    const filecmd = try std.fs.path.join(alloc, &.{ scripts_dir, "sync.lua" });
+    defer alloc.free(filecmd);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = filecmd, .data = "print('sync')\n" });
+
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try script_engine.ScriptEngine.init(alloc, io, host.hooks(), cfg_dir);
+    defer eng.deinit();
+
+    // `status` from defcmd, `sync` from a file: both come back. `sync`
+    // also has a defcmd, so it appears twice -- the caller dedups.
+    try eng.runConf("defcmd('status', function() end)\ndefcmd('sync', function() end)");
+    try testz.expectEqual(eng.conf_err, null);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer freeNames(alloc, &names);
+    try eng.collectCommandNames(alloc, "s", &names);
+
+    try testz.expectTrue(hasName(names.items, "status"));
+    try testz.expectTrue(hasName(names.items, "sync"));
+    try testz.expectEqual(names.items.len, 3);
+}
