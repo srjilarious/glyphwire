@@ -11,6 +11,7 @@ pub const Client = client.Client;
 pub const handshake_marker = client.handshake_marker;
 pub const RenderCell = client.RenderCell;
 pub const CellsSnapshot = client.CellsSnapshot;
+pub const HighlightSnapshot = client.HighlightSnapshot;
 pub const InputListener = client.InputListener;
 pub const InputStateSnapshot = client.InputStateSnapshot;
 pub const ResizeEvent = client.ResizeEvent;

@@ -1890,6 +1890,8 @@ pub const App = struct {
 
             eng.renderer.begin(eng.projMat);
 
+            const any_highlight = layer.highlighted_ids.items.len > 0;
+
             var row: usize = 0;
             while (row < layer.height) : (row += 1) {
                 const row_cells = layer.viewRow(view_offset, row);
@@ -1900,6 +1902,21 @@ pub const App = struct {
                         .y = origin_y + @as(i32, @intCast(row)) * cell_h,
                     };
                     self.drawCell(eng, &row_cells[col], pos, pass);
+
+                    // Highlight tint: any cell whose `metadata_id` is in the
+                    // layer's highlighted-id set (glyphwire-shell's ls
+                    // multi-select marks). Drawn in the color-background
+                    // pass so the text pass paints over it and stays
+                    // readable, and per cell rather than as a span so it
+                    // follows the tagged content with no row math.
+                    if (pass == .color_bg and any_highlight and
+                        layer.isHighlighted(row_cells[col].metadata_id))
+                    {
+                        eng.renderer.drawFilledRect(
+                            pixzig.RectF.fromPosSize(pos.x, pos.y, cell_w, cell_h),
+                            selection_highlight_color,
+                        );
+                    }
                 }
             }
 
@@ -1932,6 +1949,7 @@ pub const App = struct {
                     );
                 }
             }
+
 
             eng.renderer.end();
         }

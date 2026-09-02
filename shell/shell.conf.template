@@ -33,6 +33,48 @@
 -- alias("gs", "git status")
 
 
+---- Open actions -----------------------------------------------------
+--
+-- open_actions{ [key] = command } -- what runs when you activate a
+-- glyphwire-ls entry (click it, or press Enter/Space while browsing).
+-- glyphwire-ls tags each entry with its `kind` ("file" / "directory" /
+-- "symlink" / "other") and, for a file, a real `mimetype`; the key is
+-- matched most-specific first:
+--
+--   1. the exact mimetype   ["image/png"]
+--   2. the mimetype group   ["image/*"]
+--   3. the kind keyword     ["directory"]
+--
+-- Your entries are merged over the built-in defaults (a key you set
+-- replaces that default; a later call wins for the same key). The
+-- defaults are:
+--
+--   open_actions{
+--     ["directory"]  = "cd {sel}",
+--     ["image/png"]  = "glyphwire-view {selections}",
+--     ["image/jpeg"] = "glyphwire-view {selections}",
+--     ["image/gif"]  = "glyphwire-view {selections}",
+--     ["image/bmp"]  = "glyphwire-view {selections}",
+--   }
+--
+-- The command is a template. `{sel}` expands to one shell-quoted path
+-- and is an error if more than one entry is selected; `{selections}`
+-- expands to one or more, space-separated. A template with neither runs
+-- as-is. A value can also be a list of commands (`{ "ark {sel}",
+-- "unzip {sel}" }`) -- only the first runs today, the rest are reserved
+-- for a future action menu.
+--
+-- Ctrl+click (or Space while browsing) marks several entries; a plain
+-- click / Enter then runs the first mark's action over every marked
+-- path. Ctrl+Shift+C with entries marked copies their paths.
+--
+-- open_actions{
+--   ["application/zip"] = "ark {selections}",
+--   ["text/*"]          = "code {sel}",   -- any text/* file into an editor
+--   ["file"]            = "xdg-open {sel}", -- catch-all for other files
+-- }
+
+
 ---- Scripts ----------------------------------------------------------
 --
 -- A builtin is either a `defcmd(name, fn)` registration here, or a file

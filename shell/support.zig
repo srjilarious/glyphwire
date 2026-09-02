@@ -21,3 +21,4 @@ pub const script_engine = @import("script_engine.zig");
 pub const keyencode = @import("keyencode.zig");
 pub const prompt_template = @import("prompt_template.zig");
 pub const browsescroll = @import("browsescroll.zig");
+pub const openaction = @import("openaction.zig");

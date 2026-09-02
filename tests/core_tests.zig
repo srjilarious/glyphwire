@@ -1883,6 +1883,59 @@ pub fn selectionClearedByResizeTest(io: std.Io, alloc: std.mem.Allocator) !void 
     try testz.expectTrue(layer.selection == null);
 }
 
+// ─── highlights ───────────────────────────────────────────────────────
+
+/// `toggleHighlightId` flips membership; `isHighlighted` is the per-cell
+/// test the renderer runs, and an untagged (`null`) cell is never hit.
+pub fn highlightToggleAndMembershipTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
+    defer layer.deinit();
+
+    try testz.expectFalse(layer.isHighlighted(7));
+    try testz.expectFalse(layer.isHighlighted(null));
+
+    try layer.toggleHighlightId(7);
+    try layer.toggleHighlightId(9);
+    try testz.expectTrue(layer.isHighlighted(7));
+    try testz.expectTrue(layer.isHighlighted(9));
+    try testz.expectFalse(layer.isHighlighted(8));
+    try testz.expectEqual(layer.highlighted_ids.items.len, 2);
+
+    try layer.toggleHighlightId(7); // off again
+    try testz.expectFalse(layer.isHighlighted(7));
+    try testz.expectTrue(layer.isHighlighted(9));
+    try testz.expectEqual(layer.highlighted_ids.items.len, 1);
+}
+
+/// `setHighlightIds` replaces the whole set; `clearHighlightIds` empties it.
+pub fn highlightSetAndClearIdsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
+    defer layer.deinit();
+
+    try layer.toggleHighlightId(1);
+    try layer.setHighlightIds(&.{ 4, 5, 6 });
+    try testz.expectEqual(layer.highlighted_ids.items.len, 3);
+    try testz.expectFalse(layer.isHighlighted(1));
+    try testz.expectTrue(layer.isHighlighted(5));
+
+    layer.clearHighlightIds();
+    try testz.expectEqual(layer.highlighted_ids.items.len, 0);
+}
+
+/// Highlights are keyed by metadata id, not rows, so a `resize` leaves the
+/// set intact (the tagged cells keep their tags through the reflow).
+pub fn highlightSurvivesResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
+    defer layer.deinit();
+    try layer.setHighlightIds(&.{ 2, 3 });
+    try layer.resize(12, 4);
+    try testz.expectEqual(layer.highlighted_ids.items.len, 2);
+    try testz.expectTrue(layer.isHighlighted(3));
+}
+
 /// `setClipboard` replaces the buffer and bumps the serial each call;
 /// `clipboardText` reads it back.
 pub fn contextClipboardBufferRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {

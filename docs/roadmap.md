@@ -1299,6 +1299,69 @@ subsection.
   `client_tests.zig` +1 (selection + clipboard round trip over a
   socket). 388 pass.
 
+## `ls` metadata as data + `open_actions` table + multi-select marks
+
+**Done.** `glyphwire-ls` now tags entries with `kind` / `path`
+(+ `mimetype` for files) and no embedded command; the shell resolves what
+to run through a `shell.conf` `open_actions` table over built-in
+defaults, and can mark several entries to open at once. Wire change —
+`docs/api.md` gained a Highlights section and four requests;
+`docs/decisions.md` a Highlights subsection in Selection & clipboard plus
+`open_actions` bullets in the Shell section.
+
+- **`core.Layer.highlighted_ids` (`std.ArrayList(MetadataHandle)`)** — a
+  set of metadata ids, not cell ranges. The host renderer tints any cell
+  whose `metadata_id` is in the set (per-cell, in the `color_bg` pass),
+  so highlights follow their content through scrollback and survive a
+  `resize` with no row math — no `scrollOne`/`resize` handling, unlike the
+  selection. `isHighlighted` / `toggleHighlightId` / `setHighlightIds` /
+  `clearHighlightIds`. Wire: `toggle_highlight` (names a *cell*; the host
+  resolves the id and flips it), `set_highlight` (`ids`), `clear_highlight`,
+  `get_highlight` — all **requests** answering with `HighlightState`
+  (`{entries: [{id, json}]}`, each id's stored blob bundled in). No
+  `get_cells` scan on the client — that was the first cut and was dropped
+  as slow and the wrong shape (see the feedback memory / decisions.md).
+- **`ls/main.zig`**: `entryMetadataJson` replaces `mimetypeForEntry` —
+  `{kind, path}` always (`kind` ∈ file/directory/symlink/other), plus a
+  real `mimetype` only for `kind == "file"`.
+- **`shell/openaction.zig`** (NEW, pure, in `shell_support`): `resolve`
+  (exact mimetype → `group/*` → kind keyword, user table over defaults,
+  more-specific wins across forms) + `expand` (`{sel}` = one quoted path,
+  errors on >1; `{selections}` = one or more, space-joined). Defaults:
+  `directory` → `cd {sel}`, PNG/JPEG/GIF/BMP → `glyphwire-view
+  {selections}`.
+- **`shell/config.zig`**: `open_actions{ ["key"] = "cmd" | {"cmd", ...} }`
+  binding (`luaOpenActions`), collected into `ShellConfig.open_actions`
+  (arena-backed, accumulates across calls). `OpenActionDef` is
+  `openaction.Action` verbatim. `commands` is a list so a future
+  action-picker menu isn't designed out; only `commands[0]` runs today.
+- **`shell/main.zig`**: a plain left click always runs the clicked
+  entry's own action (`activateSelectionAt` → `openActionLine`, one
+  `get_metadata` — a targeted lookup, not a grid scan), regardless of
+  what's marked. **Ctrl+click** (or Space while browsing) toggles the
+  mark; `toggleHighlightAt` sends `toggle_highlight` and rebuilds
+  `Prompt.marks` (`{kind, path, mimetype}`) from the response via
+  `applyHighlight`. Browse-Enter with marks runs `runMarkedAction` (the
+  keyboard multi-open path); Escape → `resetMarks`; `submitLine` drops
+  the marks (a `resize` doesn't). `copy_request` with marks copies the
+  newline-joined paths.
+- **`InputListener` now posts `input_sem` on a `mouse_button`
+  notification too**, so a shell parked in `waitInputEvent` between
+  keystrokes wakes on a click and handles it on the next loop turn
+  instead of after the 500 ms fallback heartbeat (`waitInputEvent`
+  returns null — the loop already treats that as an idle tick and drains
+  the mouse queue at the top). The click's own work is a single
+  `toggle_highlight` request over the local socket; the visible tint is
+  the host rendering `layer.highlighted_ids` on its next frame.
+- **Tests:** `openaction_tests.zig` (NEW, group `openaction`, 15:
+  resolve precedence / user-over-default / last-match / group-slash-guard,
+  expand quoting / join / `NeedsSingle` / passthrough), `core_tests.zig`
+  +3 (`toggleHighlightId`/`isHighlighted`, `setHighlightIds`/`clear`,
+  survives-resize), `dispatch_tests.zig` +2 (`toggle_highlight` flips the
+  id and returns the blob, `set`/`clear` replace the id set),
+  `shell_config_tests.zig` +5 (`open_actions` string / list / accumulate /
+  bad-value / empty-list). 429 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

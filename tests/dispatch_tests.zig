@@ -1495,6 +1495,74 @@ pub fn clearSelectionBroadcastsInactiveTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectTrue(!parsed.value.result.active);
 }
 
+/// `toggle_highlight` resolves the cell to its metadata id, flips it in
+/// the layer's highlighted-id set, and answers with a `HighlightState`
+/// carrying every highlighted id and its stored blob. Toggling the same
+/// cell again removes it; `clear_highlight` empties the set.
+pub fn toggleHighlightFlipsIdAndReturnsStateTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const create_result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_metadata","params":{"json":"{\"kind\":\"directory\",\"path\":\"/tmp/d\"}"}}
+    );
+    defer if (create_result.response) |r| alloc.free(r);
+
+    try testz.expectTrue((try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"d","metadata_id":1}}
+    )).response == null);
+
+    // First toggle: id 1 becomes highlighted; response carries it + blob.
+    const on = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"toggle_highlight","params":{"row":0,"col":0}}
+    );
+    defer if (on.response) |r| alloc.free(r);
+    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 1);
+    try testz.expectEqual(ctx.root.highlighted_ids.items[0], 1);
+    try testz.expectTrue(std.mem.indexOf(u8, on.response.?, "\"id\":1") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, on.response.?, "\\\"path\\\":\\\"/tmp/d\\\"") != null);
+
+    // A cell with no tag: no change.
+    const untagged = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":3,"method":"toggle_highlight","params":{"row":0,"col":5}}
+    );
+    defer if (untagged.response) |r| alloc.free(r);
+    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 1);
+
+    // Toggling the same tagged cell again removes the id.
+    const off = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":4,"method":"toggle_highlight","params":{"row":0,"col":0}}
+    );
+    defer if (off.response) |r| alloc.free(r);
+    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 0);
+    try testz.expectTrue(std.mem.indexOf(u8, off.response.?, "\"entries\":[]") != null);
+}
+
+/// `set_highlight` replaces the id set wholesale; `clear_highlight` empties
+/// it. Both answer with the resulting `HighlightState`.
+pub fn setAndClearHighlightReplaceTheIdSetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const set_result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"set_highlight","params":{"ids":[3,7,9]}}
+    );
+    defer if (set_result.response) |r| alloc.free(r);
+    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 3);
+    // No metadata was created, so every entry's json is null (dangling).
+    try testz.expectTrue(std.mem.indexOf(u8, set_result.response.?, "\"id\":7") != null);
+
+    const clear_result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"clear_highlight","params":{}}
+    );
+    defer if (clear_result.response) |r| alloc.free(r);
+    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 0);
+}
+
 /// `set_clipboard` stores the text on the context; `get_clipboard`
 /// returns it.
 pub fn setClipboardThenGetClipboardRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {

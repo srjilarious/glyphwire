@@ -1016,6 +1016,28 @@ surface.
   left button back from the shell for the duration of a drag and only
   forwards a synthetic press+release for a plain click (no movement), so
   glyphwire-shell's existing click-to-activate is untouched.
+- **Highlights are a separate `Layer` concept from the selection, and are
+  stored as metadata ids, not cell ranges** (`core.Layer.highlighted_ids`,
+  toggled/replaced/cleared by `toggle_highlight` / `set_highlight` /
+  `clear_highlight`, all requests answering with a `HighlightState`). The
+  selection is one contiguous range in one slot and feeds the copy path;
+  a highlight set is many entries, need not be contiguous, and the copy
+  path ignores it — overloading `selection` for both would mean a mode
+  flag on every selection message and a merged extraction. Keying on the
+  metadata id rather than `{above, col, len}` means the renderer just
+  tints any cell whose `metadata_id` is in the set: the highlight follows
+  its content through scrollback with zero row math, survives a `resize`
+  untouched, and an id whose cells are all evicted matches nothing (ids
+  never repeat, so a stale entry is harmless) — no `scrollOne` pinning or
+  `resize` clearing needed, unlike the selection. `toggle_highlight`
+  takes a *cell* and the server resolves the id, so a client never reads
+  the grid back to find "what's tagged here". The response bundles each
+  id's stored JSON blob so a client can act on every entry without a
+  `get_metadata` per id. Rendered by the host with the selection's
+  translucent overlay; no broadcast/subscription (the only consumer is
+  the in-process host renderer, and the sender gets the state in the
+  reply). glyphwire-shell drives this for its `ls` multi-select marks —
+  see the Shell section.
 
 ### Events
 - No separate wire-level "event" mechanism — events are just notifications
@@ -1056,16 +1078,53 @@ surface.
   quotes. This is the minimum needed for filenames with spaces (`cat 'my
   file.txt'`) and is the shared front end for alias bodies and (later)
   glob tokens.
-- **A click on a `glyphwire-ls` entry builds a `cd` / `glyphwire-view`
-  line with the path single-quoted** (`wordsplit.quoteArg`, the inverse of
-  the splitter — an embedded `'` becomes `'\''`). `activateSelectionAt`
-  synthesizes a command string that then goes back through the same
-  `dispatchLine` split every typed line does, so without quoting a name
-  with a space or a shell metacharacter would tokenize wrong or, worse,
-  inject. The set of image types a click opens in `glyphwire-view` is
-  whatever `core.ImageFormat.fromMimetype` recognizes (PNG/JPEG/BMP/GIF —
-  not the `image/svg+xml` / `image/webp` entries `glyphwire-ls` also
-  tags), so the shell and the viewer can't drift apart.
+- **`glyphwire-ls` metadata carries `kind` + `path` (+ `mimetype` for a
+  regular file), never a command.** The blob a listed entry's cells are
+  tagged with is `{kind, path}` plus, for `kind == "file"`, a real
+  extension-derived `mimetype` (`entryMetadataJson` in `ls/main.zig`).
+  `kind` is one of `"file"` / `"directory"` / `"symlink"` / `"other"`; a
+  directory or symlink gets no `mimetype`. Deciding what to *do* on
+  activation is the reader's policy, not baked into the listing — so a
+  user can teach the shell new types without `glyphwire-ls` changing.
+- **The shell resolves activation through a `shell.conf` `open_actions`
+  table over built-in defaults.** `shell/openaction.zig` maps a key —
+  a mimetype (`image/png`), a mimetype group (`image/*`) or a `kind`
+  keyword (`directory`) — to a command template, trying the three key
+  forms most-specific-first (exact mimetype, then group, then kind).
+  Within one form a user `open_actions` entry beats a default and a later
+  user entry beats an earlier one; across forms specificity wins, so a
+  broad user `image/*` still yields to the built-in `image/png`. The
+  shipped defaults are just `cd {sel}` for a directory and
+  `glyphwire-view {selections}` for the four image types the viewer
+  actually decodes (PNG/JPEG/GIF/BMP). Nothing matches ⇒ nothing happens
+  (the "don't guess" policy).
+- **`{sel}` / `{selections}` are the template placeholders**, expanding to
+  the shell-quoted path(s) (`wordsplit.quoteArg`, the inverse of the
+  splitter — an embedded `'` becomes `'\''`) — the synthesized line goes
+  back through the same `dispatchLine` split a typed line does, so without
+  quoting a name with a space or metacharacter would tokenize wrong or
+  inject. `{sel}` requires exactly one entry (a multi-select given a
+  `{sel}`-only action surfaces an error and runs nothing); `{selections}`
+  takes one or more, space-joined. A template with neither runs as-is.
+- **Multi-select marks are a highlighted-metadata-id set the host owns,
+  not something the shell computes.** Ctrl+click (or Space while browsing)
+  sends `toggle_highlight(row, col, view_offset)`; the host resolves the
+  cell to its `metadata_id`, flips it in `layer.highlighted_ids`, and
+  answers with a `HighlightState` — every highlighted id plus its stored
+  JSON blob. The shell rebuilds `Prompt.marks` (parsed `kind`/`path`/
+  `mimetype`) from that response; it never scans the grid. A plain click /
+  browse-Enter with marks runs the resolved action once over every marked
+  path; Escape clears them; running any command drops them (a `resize`
+  does *not* — the highlight is keyed by id, not rows). With marks
+  present, `copy_request` (Ctrl+Shift+C, host selection empty) answers
+  with the newline-joined marked paths instead of the input line. The
+  earlier design had the shell scan a `get_cells` snapshot for the run of
+  cells sharing an entry's id — dropped because a client round-tripping
+  the whole grid to re-derive what the host already knows is both slow
+  (noticeably so) and the wrong shape. Highlights being a separate `Layer`
+  concept from the selection is what lets a set of non-contiguous marks
+  and the copy path not fight over the one `selection` slot — see the
+  Selection & clipboard section.
 - **`alias` / `unalias` are builtins.** The `alias` table is seeded at
   startup from `shell.conf` (see below) and then mutated for the rest of
   the session by the builtins; a binding made or removed with the builtin

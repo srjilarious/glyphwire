@@ -527,12 +527,12 @@ fn iconForEntry(entry: FileEntry) []const u8 {
 }
 
 /// Real MIME types, unlike `ls/icons.zig`'s coarser display buckets --
-/// this is the `mimetype` field every entry's metadata tag carries (see
-/// `writeGrid`), and `glyphwire-shell`'s `browseEnter` specifically checks
-/// for the literal string `"directory"` to decide whether Enter should
-/// auto-`cd`. Not exhaustive, just the same common types `ls/icons.zig`
-/// already covers plus a handful of text/code extensions worth having a
-/// real type for.
+/// this is the `mimetype` field a regular file's metadata tag carries
+/// (see `entryMetadataJson` / `writeGrid`); `glyphwire-shell` keys its
+/// `open_actions` table off it (`image/png`, then the `image/*` group,
+/// then the entry `kind`). Not exhaustive, just the same common types
+/// `ls/icons.zig` already covers plus a handful of text/code extensions
+/// worth having a real type for.
 const extension_mimetypes = [_]struct { ext: []const u8, mime: []const u8 }{
     .{ .ext = ".png", .mime = "image/png" },
     .{ .ext = ".jpg", .mime = "image/jpeg" },
@@ -605,20 +605,40 @@ const extension_mimetypes = [_]struct { ext: []const u8, mime: []const u8 }{
     .{ .ext = ".go", .mime = "text/x-go" },
 };
 
-/// `"directory"` for directories -- the exact value `glyphwire-shell`'s
-/// `browseEnter` checks for auto-`cd` -- `"inode/symlink"` for symlinks
-/// (not resolved to the target's own type: same "treat uniformly, don't
-/// follow" choice `iconForEntry` already makes for symlinks), an
-/// extension-derived real MIME type for regular files
-/// (`extension_mimetypes`, falling back to `"application/octet-stream"`
-/// for an unrecognized extension), and that same generic fallback for
-/// anything else (device files, sockets, ...).
-fn mimetypeForEntry(entry: FileEntry) []const u8 {
-    return switch (entry.kind) {
+/// The `kind` string an entry's metadata tag carries -- one of the four
+/// values `glyphwire-shell`'s `open_actions` accepts as a fallback key
+/// (`"file"` / `"directory"` / `"symlink"` / `"other"`). Symlinks are
+/// reported as themselves, not resolved to the target's type -- the same
+/// "treat uniformly, don't follow" choice `iconForEntry` makes.
+fn entryKindName(kind: EntryKind) []const u8 {
+    return switch (kind) {
+        .file => "file",
         .directory => "directory",
-        .sym_link => "inode/symlink",
-        .other => "application/octet-stream",
-        .file => mimetypeForExtension(entry.name),
+        .sym_link => "symlink",
+        .other => "other",
+    };
+}
+
+/// The JSON metadata blob an entry's cells are tagged with (`create_metadata`,
+/// one per entry -- see `writeGrid` / `writeLongTable`). Always carries the
+/// entry's `kind` and absolute `path`; a regular file additionally carries a
+/// real extension-derived `mimetype` (falling back to
+/// `"application/octet-stream"` for an unknown extension). A directory or
+/// symlink gets no `mimetype` -- it has no meaningful one, and the shell
+/// keys its action table off `kind` for those. No command is embedded:
+/// deciding what to *do* on activation is entirely the reader's policy.
+fn entryMetadataJson(alloc: std.mem.Allocator, entry: FileEntry) ![]u8 {
+    const kind = entryKindName(entry.kind);
+    return switch (entry.kind) {
+        .file => std.json.Stringify.valueAlloc(alloc, .{
+            .kind = kind,
+            .path = entry.abs_path,
+            .mimetype = mimetypeForExtension(entry.name),
+        }, .{}),
+        else => std.json.Stringify.valueAlloc(alloc, .{
+            .kind = kind,
+            .path = entry.abs_path,
+        }, .{}),
     };
 }
 
@@ -871,9 +891,10 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
     // Pass 1: one batch request creating every entry's metadata tag.
     // Each cell an entry's block touches (icon and name) shares one
     // metadata id -- see decisions.md's Metadata section on tagging a
-    // whole run rather than copying the same blob per cell. `mimetype`/
-    // `path` are the two fields glyphwire-shell's `browseEnter` (word for
-    // word) and any future context-menu client are expected to read.
+    // whole run rather than copying the same blob per cell. The blob's
+    // `kind` / `path` (and `mimetype`, for files) are what
+    // glyphwire-shell's `activateSelectionAt` and any future context-menu
+    // client read -- see `entryMetadataJson`.
     const metas = try alloc.alloc(glyphwire.MetadataHandle, entries.len);
     defer alloc.free(metas);
     {
@@ -882,7 +903,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
         const slots = try alloc.alloc(glyphwire.Client.Batch.Slot, entries.len);
         defer alloc.free(slots);
         for (entries, 0..) |entry, i| {
-            const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = entry.abs_path }, .{});
+            const json = try entryMetadataJson(alloc, entry);
             defer alloc.free(json);
             slots[i] = try meta_batch.createMetadata(json);
         }
@@ -1024,8 +1045,8 @@ const id_name_col_max = 16;
 ///   too narrow to spare it -- the table then clips the longest names
 ///   with `…`, same as a terminal `ls` in a cramped window.
 ///
-/// Every cell in an entry's row shares one metadata tag, same
-/// `mimetype`/`path` shape `writeGrid`'s tags already have.
+/// Every cell in an entry's row shares one metadata tag, the same
+/// `entryMetadataJson` blob `writeGrid`'s tags carry.
 ///
 /// `large` (`-L`, see `main`) sets the table's `row_height` to
 /// `largeTableRowHeight(cfg.large_icon_px, cell_h)` and passes
@@ -1207,7 +1228,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         const slots = try alloc.alloc(glyphwire.Client.Batch.Slot, entries.len);
         defer alloc.free(slots);
         for (entries, 0..) |entry, i| {
-            const json = try std.json.Stringify.valueAlloc(alloc, .{ .mimetype = mimetypeForEntry(entry), .path = entry.abs_path }, .{});
+            const json = try entryMetadataJson(alloc, entry);
             defer alloc.free(json);
             slots[i] = try meta_batch.createMetadata(json);
         }

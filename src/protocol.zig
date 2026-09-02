@@ -244,6 +244,37 @@ pub const SelectionState = struct {
 /// `get_selection_text` result.
 pub const SelectionTextResult = struct { text: []const u8 };
 
+// ─── Highlights ──────────────────────────────────────────────────────────
+
+/// `toggle_highlight` params: the cell to resolve to a metadata id and
+/// flip in the layer's highlight set. `row`/`col` are a viewport
+/// position; `view_offset` (default 0) resolves against that many rows of
+/// scrollback, same as `get_metadata`.
+pub const ToggleHighlightParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: usize,
+    col: usize,
+    view_offset: usize = 0,
+};
+
+/// `set_highlight` params: the full highlighted-id set for the layer,
+/// replacing whatever was there. An empty `ids` is the same as
+/// `clear_highlight`.
+pub const SetHighlightParams = struct {
+    layer: ?core.LayerHandle = null,
+    ids: []const core.MetadataHandle = &.{},
+};
+
+/// One entry in a `HighlightState`: a highlighted metadata id and that
+/// id's stored JSON blob (`json` null ⇒ the id was destroyed but is still
+/// in the set — same dangling case `get_metadata` reports).
+pub const HighlightEntry = struct { id: core.MetadataHandle, json: ?[]const u8 = null };
+
+/// `toggle_highlight` / `set_highlight` / `clear_highlight` / `get_highlight`
+/// result: every currently highlighted id on the layer, each with its
+/// metadata blob so a client needn't round-trip per id.
+pub const HighlightState = struct { entries: []const HighlightEntry };
+
 /// `set_clipboard` params and the `paste` server->client notification --
 /// both just carry the text.
 pub const ClipboardTextParams = struct { text: []const u8 };

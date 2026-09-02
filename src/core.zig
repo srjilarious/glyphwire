@@ -852,6 +852,16 @@ pub const Layer = struct {
     /// content as output scrolls; `resize` drops it (the ring buffer is
     /// rebuilt from scratch).
     selection: ?Selection = null,
+    /// Metadata ids whose cells are drawn with the selection's translucent
+    /// tint -- set/cleared by the `toggle_highlight` / `set_highlight` /
+    /// `clear_highlight` messages. Stored as *ids*, not cell ranges: the
+    /// renderer tints any cell whose `metadata_id` is in this set, so a
+    /// highlight follows its content through scrollback and survives a
+    /// `resize` for free, and an id whose cells have all scrolled out of
+    /// retained history simply matches nothing (harmless -- ids are never
+    /// reused). glyphwire-shell drives this for its `ls` multi-select
+    /// marks. Owned -- freed in `deinit`.
+    highlighted_ids: std.ArrayList(MetadataHandle) = .empty,
     /// Escape-sequence machine state (see `EscState`). `.ground` except
     /// partway through a single `writeText` call that is
     /// interpreting/discarding an `ESC ...` sequence -- reset back to
@@ -924,6 +934,7 @@ pub const Layer = struct {
         while (table_it.next()) |t| t.deinit();
         self.tables.deinit();
         self.table_order.deinit(self.alloc);
+        self.highlighted_ids.deinit(self.alloc);
     }
 
     pub fn capacity(self: *const Layer) usize {
@@ -1001,6 +1012,10 @@ pub const Layer = struct {
             const max_above = @max(s.anchor.above, s.active.above);
             if (max_above > @as(i64, @intCast(self.history_len))) self.selection = null;
         }
+        // Highlights need no pinning here: they're keyed by metadata id and
+        // the renderer matches them against live cell data, so they follow
+        // their content automatically and an id with no matching cells left
+        // just draws nothing.
         // If the view is currently scrolled back, follow the incoming row
         // so the content the user is looking at stays at the same screen
         // position while new output piles up below it -- terminal-style.
@@ -1063,6 +1078,8 @@ pub const Layer = struct {
         if (new_width == self.width and new_height == self.height) return;
         // The ring buffer is rebuilt below, so any selection's row math is
         // about to be meaningless -- drop it rather than try to re-anchor.
+        // Highlights are keyed by metadata id, not rows, so they carry
+        // over untouched (their cells keep their tags through the reflow).
         self.selection = null;
 
         const old_cap = self.capacity();
@@ -1799,6 +1816,41 @@ pub const Layer = struct {
 
     pub fn clearSelection(self: *Layer) void {
         self.selection = null;
+    }
+
+    /// Whether `id` is currently highlighted -- the per-cell test the
+    /// renderer runs against `Cell.metadata_id`. `null` (an untagged cell)
+    /// is never highlighted.
+    pub fn isHighlighted(self: *const Layer, id: ?MetadataHandle) bool {
+        const want = id orelse return false;
+        for (self.highlighted_ids.items) |h| {
+            if (h == want) return true;
+        }
+        return false;
+    }
+
+    /// Adds `id` to the highlight set if absent, removes it if present
+    /// (`toggle_highlight`).
+    pub fn toggleHighlightId(self: *Layer, id: MetadataHandle) !void {
+        for (self.highlighted_ids.items, 0..) |h, i| {
+            if (h == id) {
+                _ = self.highlighted_ids.swapRemove(i);
+                return;
+            }
+        }
+        try self.highlighted_ids.append(self.alloc, id);
+    }
+
+    /// Replaces the whole highlight set with `ids` (`set_highlight`). An
+    /// empty slice clears it, same as `clearHighlightIds`.
+    pub fn setHighlightIds(self: *Layer, ids: []const MetadataHandle) !void {
+        self.highlighted_ids.clearRetainingCapacity();
+        try self.highlighted_ids.appendSlice(self.alloc, ids);
+    }
+
+    /// Drops every highlighted id (`clear_highlight`).
+    pub fn clearHighlightIds(self: *Layer) void {
+        self.highlighted_ids.clearRetainingCapacity();
     }
 
     /// The cell row `above` rows above the live viewport's top row (see

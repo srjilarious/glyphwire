@@ -8,6 +8,16 @@
 alias("ll", "ls -l")
 alias("gs", "git status")
 
+-- What activating a glyphwire-ls entry runs. Key is an exact mimetype,
+-- a "group/*", or a kind keyword ("directory"/"file"/"symlink"/"other"),
+-- matched most-specific first; merged over the built-in defaults (cd into
+-- a directory, glyphwire-view an image). {sel} = one shell-quoted path,
+-- {selections} = one or more. Ctrl+click marks several to open at once.
+open_actions{
+    ["text/*"] = "code {sel}",
+    ["application/zip"] = "ark {selections}",
+}
+
 -- Prompt templating. Call prompt{ ... } with any subset of its keys;
 -- multiple calls merge, last write winning per key. Leave it out entirely
 -- to keep the built-in "<cwd> > " prompt.
