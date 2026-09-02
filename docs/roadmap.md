@@ -1283,7 +1283,10 @@ subsection.
   `ctx.clipboard` to the OS on serial change, main-thread GLFW),
   `selectionSwallows` (holds the shortcut/motion keys back from
   `reportKeyEvents`), a translucent highlight drawn in `renderLayer`'s
-  `color_bg` pass. `select_mode` also short-circuits `handleRepeatKeys`.
+  `color_bg` pass. `select_mode` short-circuits the shell-bound
+  `handleRepeatKeys`; a held arrow instead repeats through
+  `App.select_repeat` (its own `KeyRepeatState`s, same
+  delay/interval), extending the selection at the typematic cadence.
 - **Not visually verified** — the highlight, keyboard select mode, mouse
   drag, and OS-clipboard round trip need a `zig build host` eyeball
   (flagged to the user; per `feedback_no_screenshots` don't screenshot).
