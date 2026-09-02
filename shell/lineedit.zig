@@ -1,4 +1,6 @@
-//! Pure UTF-8 / display-width helpers for glyphwire-shell's line editor.
+//! Pure UTF-8 / display-width helpers for glyphwire-shell's line editor,
+//! plus `flattenNewlines` for sanitizing pasted text into the single-line
+//! buffer. No IO.
 //!
 //! `Prompt` (in `shell/main.zig`) keeps its cursor as a *byte* offset into
 //! the line buffer, but the grid it draws to is addressed in *display
@@ -55,4 +57,29 @@ pub fn displayCol(buf: []const u8, offset: usize) usize {
 /// `delete_cells` count in (not bytes).
 pub fn cellWidth(text: []const u8) usize {
     return glyphwire.stringWidth(text);
+}
+
+/// Every maximal run of `\n` / `\r` in `text` replaced by a single space,
+/// as an owned copy (free with `alloc`). The shell's line editor is
+/// single-line; pasted text that carries newlines -- a multi-select copy
+/// of file paths, a block from another window -- has to arrive as
+/// space-separated words so it lands as one editable line and the
+/// word-splitter turns it into arguments. Text with no newline still
+/// comes back as a fresh allocation, so the caller frees unconditionally.
+pub fn flattenNewlines(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, text.len);
+
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\n' or text[i] == '\r') {
+            while (i < text.len and (text[i] == '\n' or text[i] == '\r')) : (i += 1) {}
+            try out.append(alloc, ' ');
+        } else {
+            try out.append(alloc, text[i]);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(alloc);
 }

@@ -34,6 +34,24 @@ pub fn splitEmptyAndWhitespaceYieldsNoTokensTest(_: std.Io, alloc: std.mem.Alloc
     try testz.expectEqual(b.len, 0);
 }
 
+pub fn splitTreatsNewlinesAsSeparatorsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A pasted multi-select file list (one path per line, a trailing
+    // newline) must split into one token per line, not one giant token.
+    const toks = try wordsplit.split(alloc, "src\ndocs\nbuild.zig\n");
+    defer wordsplit.freeTokens(alloc, toks);
+    try testz.expectEqual(toks.len, 3);
+    try testz.expectEqualStr("src", toks[0]);
+    try testz.expectEqualStr("docs", toks[1]);
+    try testz.expectEqualStr("build.zig", toks[2]);
+
+    // CRLF and blank lines collapse the same way spaces do.
+    const crlf = try wordsplit.split(alloc, "a\r\n\r\nb");
+    defer wordsplit.freeTokens(alloc, crlf);
+    try testz.expectEqual(crlf.len, 2);
+    try testz.expectEqualStr("a", crlf[0]);
+    try testz.expectEqualStr("b", crlf[1]);
+}
+
 pub fn splitSingleQuotesKeepSpacesLiteralTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const toks = try wordsplit.split(alloc, "cat 'my file.txt'");
     defer wordsplit.freeTokens(alloc, toks);
@@ -125,6 +143,30 @@ pub fn quoteArgRoundTripsEmbeddedSingleQuoteTest(_: std.Io, alloc: std.mem.Alloc
 
 pub fn quoteArgRoundTripsShellMetacharactersTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try expectQuoteArgRoundTrips(alloc, "weird $name *.bmp;rm -rf~ (x).png");
+}
+
+// ─── wordsplit.quoteArgIfNeeded ───────────────────────────────────────
+
+pub fn quoteArgIfNeededLeavesPlainPathBareTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    for ([_][]const u8{ "photo.png", "src/docs/build.zig", "a_b-c.2", "./rel/path" }) |plain| {
+        const got = try wordsplit.quoteArgIfNeeded(alloc, plain);
+        defer alloc.free(got);
+        try testz.expectEqualStr(plain, got); // untouched, but still an owned copy
+    }
+}
+
+pub fn quoteArgIfNeededQuotesWhenItHasToTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Space, glob char, shell metacharacter, and the empty string all
+    // force quoting; the result must re-split to the one original token.
+    for ([_][]const u8{ "my holiday pics/2.jpg", "shot*.png", "a;b", "" }) |s| {
+        const got = try wordsplit.quoteArgIfNeeded(alloc, s);
+        defer alloc.free(got);
+        try testz.expectTrue(got.len >= 2 and got[0] == '\'');
+        const toks = try wordsplit.split(alloc, got);
+        defer wordsplit.freeTokens(alloc, toks);
+        try testz.expectEqual(toks.len, 1);
+        try testz.expectEqualStr(s, toks[0]);
+    }
 }
 
 // ─── glob.hasWildcard ─────────────────────────────────────────────────
@@ -471,6 +513,29 @@ pub fn lineeditCellWidthCountsGridCellsNotBytesTest(_: std.Io, _: std.mem.Alloca
     try testz.expectEqual(lineedit.cellWidth("ab"), @as(usize, 2));
     try testz.expectEqual(lineedit.cellWidth("日本語"), @as(usize, 6));
     try testz.expectEqual(lineedit.cellWidth(""), @as(usize, 0));
+}
+
+// ─── lineedit.flattenNewlines ─────────────────────────────────────────
+
+pub fn flattenNewlinesCollapsesRunsToSingleSpaceTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A pasted multi-select list: each newline (and a CRLF run, and a
+    // trailing newline) becomes exactly one space.
+    const got = try lineedit.flattenNewlines(alloc, "src\ndocs\r\n\r\nbuild.zig\n");
+    defer alloc.free(got);
+    try testz.expectEqualStr("src docs build.zig ", got);
+}
+
+pub fn flattenNewlinesLeavesNewlineFreeTextAloneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // No newline: same bytes back, but a fresh allocation the caller owns.
+    const src = "ls -l 'my dir'";
+    const got = try lineedit.flattenNewlines(alloc, src);
+    defer alloc.free(got);
+    try testz.expectEqualStr(src, got);
+    try testz.expectTrue(got.ptr != src.ptr);
+
+    const empty = try lineedit.flattenNewlines(alloc, "");
+    defer alloc.free(empty);
+    try testz.expectEqual(empty.len, 0);
 }
 
 // ─── browsescroll: scrollback browsing scrolloff math ──────────────────

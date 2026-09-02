@@ -427,17 +427,24 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             },
             .paste => |tev| {
                 defer alloc.free(tev.text);
-                // Ctrl+Shift+V: insert the clipboard text literally --
-                // newlines and all -- without submitting. The user
-                // presses Enter themselves if they want it to run.
-                if (prompt.browse_pos == null) try prompt.insertText(tev.text);
+                // Ctrl+Shift+V: insert the clipboard text into the live
+                // line without submitting (the user presses Enter). The
+                // editor is single-line, so newline runs are flattened to
+                // single spaces first -- a pasted file list then reads as
+                // space-separated arguments instead of one unusable blob.
+                if (prompt.browse_pos == null) {
+                    const flat = try lineedit.flattenNewlines(alloc, tev.text);
+                    defer alloc.free(flat);
+                    try prompt.insertText(flat);
+                }
                 continue;
             },
             .copy_request => {
                 // Ctrl+Shift+C was pressed with nothing selected in the
-                // host. With entries marked, answer with their
-                // newline-joined paths; otherwise with the current line.
-                // Either way it lands on the OS clipboard.
+                // host. With entries marked, answer with their paths as
+                // one space-separated line (each quoted only if it needs
+                // it); otherwise with the current line. Either way it
+                // lands on the OS clipboard.
                 if (prompt.marks.items.len > 0) {
                     if (prompt.markedPathsText(alloc)) |text| {
                         defer alloc.free(text);
@@ -764,7 +771,7 @@ const Prompt = struct {
     /// while browsing). Empty most of the time. A marked set changes what
     /// a plain click / browse-Enter does (run the resolved `open_actions`
     /// command once over every marked path) and what Ctrl+Shift+C copies
-    /// (the newline-joined paths). Cleared -- with its `set_highlight`
+    /// (the paths as one space-separated line). Cleared -- with its `set_highlight`
     /// overlay -- whenever a command runs, the window resizes, or Escape
     /// is pressed. Owned; freed in `deinit`.
     marks: std.ArrayList(Mark) = .empty,
@@ -2056,15 +2063,20 @@ const Prompt = struct {
         try self.applyHighlight(&snap);
     }
 
-    /// The marked entries' paths, one per line, in mark order -- what
-    /// Ctrl+Shift+C copies while a listing has marks. Owned; free with
-    /// `alloc`.
+    /// The marked entries' paths as one line -- space-separated, in mark
+    /// order, each path passed through `wordsplit.quoteArgIfNeeded` so a
+    /// plain path stays bare and one with a space or a metacharacter is
+    /// quoted. This is what Ctrl+Shift+C copies while a listing has marks;
+    /// pasting it after a command name (`ls `, `cp ... `) gives a valid
+    /// argument list. Owned; free with `alloc`.
     fn markedPathsText(self: *Prompt, alloc: std.mem.Allocator) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(alloc);
         for (self.marks.items, 0..) |m, i| {
-            if (i > 0) try out.append(alloc, '\n');
-            try out.appendSlice(alloc, m.path);
+            if (i > 0) try out.append(alloc, ' ');
+            const tok = try wordsplit.quoteArgIfNeeded(alloc, m.path);
+            defer alloc.free(tok);
+            try out.appendSlice(alloc, tok);
         }
         return out.toOwnedSlice(alloc);
     }
