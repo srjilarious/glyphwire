@@ -609,6 +609,18 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "get_selection_text")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleGetSelectionText(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "toggle_highlight")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleToggleHighlight(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "set_highlight")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleSetHighlight(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "clear_highlight")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleClearHighlight(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "get_highlight")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetHighlight(alloc, id, envelope.params) };
         } else if (std.mem.eql(u8, envelope.method, "set_clipboard")) {
             try self.handleSetClipboard(alloc, envelope.params);
             return .{};
@@ -1591,6 +1603,68 @@ pub const Dispatcher = struct {
         const text = (try layer.selectionText(alloc)) orelse try alloc.dupe(u8, "");
         defer alloc.free(text);
         return try rpc.response(alloc, id, protocol.SelectionTextResult{ .text = text });
+    }
+
+    /// Builds the `HighlightState` response for `layer`: every currently
+    /// highlighted id with its stored JSON blob (null for a dangling id).
+    fn highlightStateResponse(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, layer: *const core.Layer) ![]u8 {
+        const ids = layer.highlighted_ids.items;
+        const entries = try alloc.alloc(protocol.HighlightEntry, ids.len);
+        defer alloc.free(entries);
+        for (ids, entries) |mid, *e| e.* = .{ .id = mid, .json = self.ctx.metadataJson(mid) };
+        return try rpc.response(alloc, id, protocol.HighlightState{ .entries = entries });
+    }
+
+    fn handleToggleHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(protocol.ToggleHighlightParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+
+        // Resolve the cell to a metadata id the same way `get_metadata`
+        // does, honouring `view_offset` for a click made while scrolled
+        // back. A cell with no tag is a no-op (the set is unchanged).
+        const metadata_id = if (p.row < layer.height and p.col < layer.width)
+            (if (p.view_offset > 0)
+                layer.viewRow(p.view_offset, p.row)[p.col].metadata_id
+            else
+                layer.cell(p.row, p.col).metadata_id)
+        else
+            null;
+        if (metadata_id) |mid| try layer.toggleHighlightId(mid);
+
+        return try self.highlightStateResponse(alloc, id, layer);
+    }
+
+    fn handleSetHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(protocol.SetHighlightParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
+        try layer.setHighlightIds(parsed.value.ids);
+        return try self.highlightStateResponse(alloc, id, layer);
+    }
+
+    fn handleClearHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
+        layer.clearHighlightIds();
+        return try self.highlightStateResponse(alloc, id, layer);
+    }
+
+    fn handleGetHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
+        return try self.highlightStateResponse(alloc, id, layer);
     }
 
     fn handleSetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {

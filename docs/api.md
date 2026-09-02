@@ -179,6 +179,33 @@ selection.
 | `set_clipboard` | notification | `text` | — | ✅ replaces the session clipboard buffer (`core.Context.clipboard`) and bumps its serial. glyphwire-host mirrors the buffer to the OS clipboard on its next frame |
 | `get_clipboard` | request | *(none)* | `{text}` | ✅ the session clipboard buffer. On glyphwire-host this reflects OS-clipboard changes another app made only once the host has synced (its next copy/paste) — see decisions.md |
 
+## Highlights
+
+A tinted **set of metadata ids** on a `Layer` (`core.Layer.highlighted_ids`),
+separate from the selection: many at once, and the copy path never touches
+them. glyphwire-shell uses it to mark `ls` entries for a multi-open. It's
+stored as ids, not cell ranges — the renderer tints any cell whose
+`metadata_id` is in the set, so a highlight follows its content through
+scrollback and survives a `resize` for free, and an id whose cells have
+all scrolled out of retained history simply matches nothing (ids are
+never reused, so a stale id is harmless). glyphwire-host renders the tint
+with the same translucent overlay as the selection.
+
+The client never scans the grid: `toggle_highlight` names a **cell**, the
+server resolves it to that cell's `metadata_id` (honouring `view_offset`
+like `get_metadata`) and flips it. Every highlight message answers with a
+`HighlightState` — `{entries: [{id, json}, ...]}` — carrying every
+currently highlighted id together with that id's stored metadata blob
+(`json` null for a dangling id), so a client gets what it needs to act on
+each entry without a round trip per id.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `toggle_highlight` | request | `layer?, row, col, view_offset?` | `HighlightState` | ✅ resolves `(row, col)` to a cell's `metadata_id` and flips it in the layer's set (root when `layer` omitted). A cell with no tag leaves the set unchanged |
+| `set_highlight` | request | `layer?, ids: [u32, ...]` | `HighlightState` | ✅ replaces the whole highlighted-id set. An empty `ids` clears it |
+| `clear_highlight` | request | `layer?` | `HighlightState` | ✅ drops every highlighted id |
+| `get_highlight` | request | `layer?` | `HighlightState` | ✅ the layer's current highlighted-id set, unchanged |
+
 ## Batch
 
 One `batch` message carries an ordered list of other messages, applied

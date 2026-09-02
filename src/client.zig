@@ -873,6 +873,41 @@ pub const Client = struct {
         return try self.alloc.dupe(u8, parsed.value.result.text);
     }
 
+    /// `toggle_highlight(layer?, row, col, view_offset?)` -- a request.
+    /// Resolves `(row, col)` to a cell (in the view scrolled back by
+    /// `view_offset`), flips that cell's `metadata_id` in the layer's
+    /// highlight set, and returns the resulting `HighlightState`. A cell
+    /// with no tag leaves the set unchanged. Caller owns the snapshot --
+    /// call `.deinit()`.
+    pub fn toggleHighlight(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, view_offset: usize) !HighlightSnapshot {
+        return .{ .parsed = try self.request(protocol.HighlightState, "toggle_highlight", .{
+            .layer = layer,
+            .row = row,
+            .col = col,
+            .view_offset = view_offset,
+        }) };
+    }
+
+    /// `set_highlight(layer?, ids)` -- a request. Replaces the layer's
+    /// whole highlighted-id set with `ids` (empty clears it) and returns
+    /// the resulting `HighlightState`. Caller owns the snapshot.
+    pub fn setHighlight(self: *Client, layer: ?core.LayerHandle, ids: []const core.MetadataHandle) !HighlightSnapshot {
+        return .{ .parsed = try self.request(protocol.HighlightState, "set_highlight", .{ .layer = layer, .ids = ids }) };
+    }
+
+    /// `clear_highlight(layer?)` -- a request. Drops every highlighted id
+    /// and returns the (now empty) `HighlightState`. Caller owns the
+    /// snapshot.
+    pub fn clearHighlight(self: *Client, layer: ?core.LayerHandle) !HighlightSnapshot {
+        return .{ .parsed = try self.request(protocol.HighlightState, "clear_highlight", .{ .layer = layer }) };
+    }
+
+    /// `get_highlight(layer?)` -- a request. The layer's current
+    /// `HighlightState`, unchanged. Caller owns the snapshot.
+    pub fn getHighlight(self: *Client, layer: ?core.LayerHandle) !HighlightSnapshot {
+        return .{ .parsed = try self.request(protocol.HighlightState, "get_highlight", .{ .layer = layer }) };
+    }
+
     /// `set_clipboard(text)` -- a notification. Replaces the session
     /// clipboard buffer; glyphwire-host mirrors it to the OS clipboard.
     pub fn setClipboard(self: *Client, text: []const u8) !void {
@@ -1283,6 +1318,23 @@ pub const CellsSnapshot = struct {
                 break :blk .narrow;
             },
         };
+    }
+};
+
+/// Owns the parsed JSON backing a `toggle_highlight` / `set_highlight` /
+/// `clear_highlight` / `get_highlight` response. `entries()` borrows that
+/// arena, so keep the snapshot alive while reading it; `deinit` frees it.
+pub const HighlightSnapshot = struct {
+    parsed: std.json.Parsed(ResponseOf(protocol.HighlightState)),
+
+    pub fn deinit(self: *HighlightSnapshot) void {
+        self.parsed.deinit();
+    }
+
+    /// Every currently highlighted metadata id on the layer, each with its
+    /// stored JSON blob (`json` null for a dangling id).
+    pub fn entries(self: *const HighlightSnapshot) []const protocol.HighlightEntry {
+        return self.parsed.value.result.entries;
     }
 };
 
@@ -1745,6 +1797,14 @@ pub const InputListener = struct {
             _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
             try self.mouse_events.append(self.alloc, .{ .button = owned_button, .pressed = p.value.pressed, .px = p.value.px, .cell = p.value.cell, .view_offset = p.value.view_offset });
             self.mouse_sem.post(self.io);
+            // Also wake `waitInputEvent`: a consumer loop that blocks on
+            // it between keystrokes (glyphwire-shell) drains the mouse
+            // queue at the top of every iteration, so a spurious wake here
+            // is all it takes to handle a click immediately instead of
+            // after the loop's fallback timeout. `waitInputEvent` returns
+            // null (the input queue is untouched), which that loop already
+            // treats as an idle tick.
+            self.input_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "scroll")) {
             const P = protocol.ScrollParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{

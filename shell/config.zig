@@ -16,6 +16,7 @@
 const std = @import("std");
 const ziglua = @import("ziglua");
 const Lua = ziglua.Lua;
+const openaction = @import("openaction.zig");
 
 /// One `alias(name, value)` call collected from a shell.conf run. Both
 /// fields are owned by the enclosing `ShellConfig`.
@@ -23,6 +24,16 @@ pub const AliasDef = struct {
     name: []const u8,
     value: []const u8,
 };
+
+/// One `open_actions{ ["key"] = ... }` entry -- `openaction.Action`
+/// verbatim (key = a mimetype "image/png" / group "image/*" / kind
+/// keyword; `commands` = the ordered command templates, `{sel}` /
+/// `{selections}` expanding to shell-quoted paths). A string value in the
+/// conf becomes a one-element list; a table value is taken in order. Only
+/// `commands[0]` runs today -- the list shape is kept for a future action
+/// picker. All strings are owned by the enclosing `ShellConfig`
+/// (`prompt_arena`).
+pub const OpenActionDef = openaction.Action;
 
 /// When a powerline segment is shown. `always` is the default; `err`
 /// shows it only after a non-zero exit; `slow` only when the last
@@ -134,11 +145,17 @@ pub const ShellConfig = struct {
     /// Prompt templating from `prompt{ ... }` calls. Multiple calls merge
     /// key by key, last write winning per key.
     prompt: PromptConfig = .{},
-    /// Backs every string and segment array in `prompt`. An arena because
-    /// `luaPrompt`'s validation raises Lua errors (a C `longjmp` past Zig
-    /// `defer`/`errdefer`), so per-allocation cleanup on a bad-config path
-    /// is unreachable -- the arena frees the partial work wholesale in
-    /// `deinit` instead. Merging `prompt` calls just accumulates here.
+    /// `open_actions{ ... }` entries, in declaration order across every
+    /// call (a later entry for the same key wins -- `openaction.resolve`
+    /// scans last-match). Empty means "defaults only". Backed by
+    /// `prompt_arena` -- see its doc comment on why an arena.
+    open_actions: std.ArrayList(OpenActionDef) = .empty,
+    /// Backs every string and segment array in `prompt`, plus every
+    /// `open_actions` entry (and its own list backing). An arena because
+    /// `luaPrompt`'s / `luaOpenActions`' validation raises Lua errors (a C
+    /// `longjmp` past Zig `defer`/`errdefer`), so per-allocation cleanup on
+    /// a bad-config path is unreachable -- the arena frees the partial work
+    /// wholesale in `deinit` instead. Merging calls just accumulates here.
     prompt_arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *ShellConfig) void {
@@ -182,6 +199,9 @@ pub fn installBindings(lua: *Lua) void {
 
     lua.pushFunction(ziglua.wrap(luaPrompt));
     lua.setGlobal("prompt");
+
+    lua.pushFunction(ziglua.wrap(luaOpenActions));
+    lua.setGlobal("open_actions");
 }
 
 /// Makes `cfg` the `ShellConfig` every `alias`/`prompt` call appends
@@ -429,6 +449,51 @@ fn promptCommandsField(lua: *Lua, cfg: *ShellConfig, slot: *?[]CommandVar, key: 
 
     if (list.items.len == 0) return;
     slot.* = try list.toOwnedSlice(arena);
+}
+
+/// `open_actions{ ["key"] = "cmd template" | { "cmd", ... }, ... }` --
+/// one table argument, string keys (a mimetype / `"group/*"` / kind
+/// keyword). A string value is a single command template; a table value
+/// is an ordered list of them (for a future action picker). Every call
+/// appends into `cfg.open_actions`; `openaction.resolve` handles a later
+/// entry overriding an earlier one for the same key. Allocations go in
+/// `prompt_arena`, so a Lua error raised partway frees wholesale in
+/// `deinit`.
+fn luaOpenActions(lua: *Lua) !i32 {
+    const cfg = g_active orelse return 0;
+    lua.checkType(1, .table);
+    const arena = cfg.prompt_arena.allocator();
+
+    lua.pushNil();
+    while (lua.next(1)) {
+        // Key at -2, value at -1. Type-check the key before any string
+        // coercion so a stray numeric key can't corrupt `next`.
+        if (lua.typeOf(-2) != .string)
+            lua.raiseErrorStr("open_actions: keys must be strings (a mimetype, \"group/*\", or a kind keyword)", .{});
+        const key = try arena.dupe(u8, lua.toString(-2) catch unreachable);
+
+        var cmds: std.ArrayList([]const u8) = .empty;
+        switch (lua.typeOf(-1)) {
+            .string => try cmds.append(arena, try arena.dupe(u8, lua.toString(-1) catch unreachable)),
+            .table => {
+                const vidx = lua.getTop();
+                const n = lua.rawLen(vidx);
+                if (n == 0)
+                    lua.raiseErrorStr("open_actions: a list value must hold at least one command string", .{});
+                var i: usize = 1;
+                while (i <= n) : (i += 1) {
+                    _ = lua.getIndex(vidx, @intCast(i));
+                    try cmds.append(arena, try arena.dupe(u8, lua.checkString(-1)));
+                    lua.pop(1);
+                }
+            },
+            else => lua.raiseErrorStr("open_actions: a value must be a command string or a list of them", .{}),
+        }
+
+        try cfg.open_actions.append(arena, .{ .key = key, .commands = try cmds.toOwnedSlice(arena) });
+        lua.pop(1); // pop value, leave key for the next `next`
+    }
+    return 0;
 }
 
 fn optStrField(lua: *Lua, alloc: std.mem.Allocator, idx: i32, key: [:0]const u8) !?[]const u8 {

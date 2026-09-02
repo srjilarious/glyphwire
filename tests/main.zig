@@ -20,6 +20,7 @@ const Tests = blk: {
         testz.Group{ .name = "Shell Script Engine Tests", .tag = "shell-script", .mod = @import("./shell_script_engine_tests.zig") },
         testz.Group{ .name = "Prompt Template Tests", .tag = "prompt", .mod = @import("./prompt_template_tests.zig") },
         testz.Group{ .name = "Ls Tests", .tag = "ls", .mod = @import("./ls_tests.zig") },
+        testz.Group{ .name = "Open Action Tests", .tag = "openaction", .mod = @import("./openaction_tests.zig") },
     }, .{});
 };
 

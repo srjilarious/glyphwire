@@ -432,3 +432,69 @@ pub fn configSegmentWhenExprNegationIsKeptTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectEqual(res.err, null);
     try testz.expectEqualStr("!{is_repo}", res.config.prompt.left_segments.?[0].when_expr.?);
 }
+
+// ─── open_actions{ ["key"] = ... } binding ─────────────────────────────
+
+pub fn configOpenActionsStringValueTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc,
+        \\open_actions { ["directory"] = "cd {sel}", ["image/png"] = "glyphwire-view {selections}" }
+    );
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.open_actions.items.len, 2);
+
+    var saw_dir = false;
+    var saw_png = false;
+    for (res.config.open_actions.items) |a| {
+        try testz.expectEqual(a.commands.len, 1);
+        if (std.mem.eql(u8, a.key, "directory")) {
+            saw_dir = true;
+            try testz.expectEqualStr("cd {sel}", a.commands[0]);
+        } else if (std.mem.eql(u8, a.key, "image/png")) {
+            saw_png = true;
+            try testz.expectEqualStr("glyphwire-view {selections}", a.commands[0]);
+        }
+    }
+    try testz.expectTrue(saw_dir and saw_png);
+}
+
+pub fn configOpenActionsListValueKeepsOrderTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc,
+        \\open_actions { ["application/zip"] = { "ark {sel}", "unzip {sel}" } }
+    );
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.open_actions.items.len, 1);
+    const a = res.config.open_actions.items[0];
+    try testz.expectEqualStr("application/zip", a.key);
+    try testz.expectEqual(a.commands.len, 2);
+    try testz.expectEqualStr("ark {sel}", a.commands[0]);
+    try testz.expectEqualStr("unzip {sel}", a.commands[1]);
+}
+
+pub fn configOpenActionsAccumulatesAcrossCallsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc,
+        \\open_actions { [".zig"] = "code {sel}" }
+        \\open_actions { ["directory"] = "cd {sel}" }
+    );
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.open_actions.items.len, 2);
+    try testz.expectEqualStr(".zig", res.config.open_actions.items[0].key);
+    try testz.expectEqualStr("directory", res.config.open_actions.items[1].key);
+}
+
+pub fn configOpenActionsRejectsNonStringValueTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "open_actions { [\"directory\"] = 3 }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}
+
+pub fn configOpenActionsRejectsEmptyListTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "open_actions { [\"directory\"] = {} }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}

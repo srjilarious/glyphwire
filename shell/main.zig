@@ -11,6 +11,7 @@ const keyencode = @import("shell_support").keyencode;
 const lineedit = @import("shell_support").lineedit;
 const prompt_template = @import("shell_support").prompt_template;
 const browsescroll = @import("shell_support").browsescroll;
+const openaction = @import("shell_support").openaction;
 const Pty = @import("pty.zig").Pty;
 
 /// The left prompt template used when `shell.conf` configured a prompt
@@ -356,7 +357,19 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
                 // land you back at the new prompt, not leave you scrolled
                 // up.
                 prompt.view_scroll = mev.view_offset;
-                try prompt.activateSelectionAt(mev.cell.row, mev.cell.col, mev.view_offset);
+                const ctrl_held = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
+                if (ctrl_held) {
+                    // Ctrl+click toggles the entry in the multi-select mark
+                    // set (same as Space while browsing).
+                    try prompt.toggleHighlightAt(mev.cell.row, mev.cell.col, mev.view_offset);
+                } else {
+                    // A plain click always runs the entry's own action
+                    // (the first `open_actions` command for its type),
+                    // regardless of what's marked -- marks are built and
+                    // acted on from the keyboard (Space to mark, Enter to
+                    // run) or copied with Ctrl+Shift+C.
+                    try prompt.activateSelectionAt(mev.cell.row, mev.cell.col, mev.view_offset);
+                }
             }
         }
 
@@ -422,11 +435,23 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             },
             .copy_request => {
                 // Ctrl+Shift+C was pressed with nothing selected in the
-                // host: answer with the current line so it lands on the
-                // OS clipboard.
-                client.setClipboard(prompt.buffer.items) catch |err| {
-                    std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
-                };
+                // host. With entries marked, answer with their
+                // newline-joined paths; otherwise with the current line.
+                // Either way it lands on the OS clipboard.
+                if (prompt.marks.items.len > 0) {
+                    if (prompt.markedPathsText(alloc)) |text| {
+                        defer alloc.free(text);
+                        client.setClipboard(text) catch |err| {
+                            std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
+                        };
+                    } else |err| {
+                        std.log.err("prompt: could not build marked-paths clipboard text: {t}", .{err});
+                    }
+                } else {
+                    client.setClipboard(prompt.buffer.items) catch |err| {
+                        std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
+                    };
+                }
                 continue;
             },
             .key => |kev| kev,
@@ -454,11 +479,22 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
                 if (prompt.should_exit) return; // "exit" was typed -- see submitLine
             }
         } else if (std.mem.eql(u8, ev.key, "escape")) {
-            // The explicit "never mind, back to typing" key -- everything
-            // else that snaps browsing back to the prompt (below) does so
-            // as a side effect of also doing something; this does nothing
-            // else.
-            try prompt.setCursorAt(prompt.cursor);
+            // The explicit "never mind" key. If entries are marked, the
+            // first Escape just clears the marks (and their highlight),
+            // leaving you where you were; otherwise it snaps browsing back
+            // to the prompt. Everything else that ends browsing (below)
+            // does so as a side effect of also doing something.
+            if (prompt.marks.items.len > 0) {
+                try prompt.resetMarks();
+            } else {
+                try prompt.setCursorAt(prompt.cursor);
+            }
+        } else if (std.mem.eql(u8, ev.key, "space")) {
+            // Space while browsing a listing toggles the entry under the
+            // cursor in the multi-select mark set (Ctrl+click does the
+            // same with the mouse). Ignored off the browse path -- a
+            // literal space on the live line comes from the `.text` stream.
+            if (prompt.browse_pos) |bp| try prompt.toggleHighlightAt(bp.row, bp.col, prompt.view_scroll);
         } else if (std.mem.eql(u8, ev.key, "tab")) {
             // Filename completion on the live line only -- Tab does
             // nothing while browsing scrollback.
@@ -625,6 +661,17 @@ const AliasTable = struct {
     }
 };
 
+/// One marked `ls` entry -- the `kind` / `path` / `mimetype` fields
+/// parsed out of a `HighlightState` entry's metadata blob (owned,
+/// `client.alloc`). The mark set is rebuilt wholesale from every
+/// `toggle_highlight` / `clear_highlight` response (`applyHighlight`); the
+/// host owns which ids are highlighted and their on-screen tint.
+const Mark = struct {
+    path: []const u8,
+    kind: []const u8,
+    mimetype: ?[]const u8,
+};
+
 /// The prompt's line-editing state. Tracks where the current line started
 /// and a cursor *offset* into the line -- needed the moment editing can
 /// happen anywhere but the end (ctrl+a/e/u, ctrl+arrow word jumps, plain
@@ -713,6 +760,14 @@ const Prompt = struct {
     /// over a session; a slightly stale value just means a browse step
     /// scrolls one iteration less far before the next call corrects it.
     view_max: usize = 0,
+    /// Entries the user has marked for a multi-open (Ctrl+click, or Space
+    /// while browsing). Empty most of the time. A marked set changes what
+    /// a plain click / browse-Enter does (run the resolved `open_actions`
+    /// command once over every marked path) and what Ctrl+Shift+C copies
+    /// (the newline-joined paths). Cleared -- with its `set_highlight`
+    /// overlay -- whenever a command runs, the window resizes, or Escape
+    /// is pressed. Owned; freed in `deinit`.
+    marks: std.ArrayList(Mark) = .empty,
     /// Absolute path to `~/.config/glyphwire/history`, set by
     /// `loadHistory` once it knows the config directory exists. `null`
     /// when there's no `$HOME`/`$XDG_CONFIG_HOME` to derive it from, or
@@ -801,6 +856,8 @@ const Prompt = struct {
         self.scratch.deinit(alloc);
         self.buffer.deinit(alloc);
         self.aliases.deinit(alloc);
+        for (self.marks.items) |m| freeMark(alloc, m);
+        self.marks.deinit(alloc);
         if (self.history_path) |p| alloc.free(p);
         // `prompt_config` just borrows `script_engine.?.cfg`; the engine
         // frees it.
@@ -1600,6 +1657,10 @@ const Prompt = struct {
         self.grid_cols = cols;
         self.grid_rows = rows;
 
+        // Highlights are keyed by metadata id, so they (and `self.marks`)
+        // carry across a resize untouched -- the tagged cells keep their
+        // tags through the reflow.
+
         self.browse_pos = null;
         if (self.view_scroll != 0) {
             const res = try self.client.scrollView(0, null);
@@ -1832,64 +1893,197 @@ const Prompt = struct {
     }
 
     /// Enter while browsing: looks up whatever cell the browse cursor is
-    /// over and acts on it -- see `activateSelectionAt`'s doc comment for
-    /// the actual logic, shared with `runPrompt`'s mouse-click handling.
+    /// over and acts on it. With entries marked (Space / Ctrl+click), Enter
+    /// runs the marked set (`runMarkedAction`); otherwise it acts on the
+    /// single entry under the cursor (`activateSelectionAt`).
     fn browseEnter(self: *Prompt) !void {
         const bp = self.browse_pos orelse return;
-        try self.activateSelectionAt(bp.row, bp.col, self.view_scroll);
+        if (self.marks.items.len > 0) {
+            try self.runMarkedAction();
+        } else {
+            try self.activateSelectionAt(bp.row, bp.col, self.view_scroll);
+        }
     }
 
-    /// Looks up `(row, col)`'s metadata (`get_metadata`) and, depending on
-    /// its `mimetype` (glyphwire-ls tags every entry it draws this way --
-    /// see `iconForEntry`'s caller in ls/main.zig), runs a command as if
-    /// it had been typed: `cd <path>` for `"directory"`, `glyphwire-view
-    /// <path>` for any image type glyphwire-view can open
-    /// (`core.ImageFormat.fromMimetype` -- PNG/JPEG/BMP/GIF, but not
-    /// `image/svg+xml` or `image/webp`). The `<path>` is single-quoted
-    /// (`wordsplit.quoteArg`) so a name with spaces or shell
-    /// metacharacters survives `dispatchLine`'s re-split. `setLine` both
-    /// echoes the command and, via `setCursorAt`, ends any in-progress
-    /// browsing before `submitLine` runs it -- same path a real typed
-    /// command takes, so e.g. `glyphwire-view`'s own "wait for a keypress
-    /// before exiting" behavior (see view/main.zig) just works, blocking
-    /// the prompt loop exactly like it would for a command the user typed
-    /// themselves. A no-op for anything else (untagged, an unrecognized
-    /// mimetype, empty space) per the "don't guess" policy: nothing should
-    /// happen on a cell that isn't unambiguously actionable. Shared by
-    /// `browseEnter` (Enter while browsing) and `runPrompt`'s left-click
-    /// handling.
+    /// The metadata blob glyphwire-ls tags every listed entry with (see
+    /// `ls/main.zig`'s `entryMetadataJson`). `kind` and `path` are always
+    /// present; `mimetype` only for a regular file.
+    const MetaEntry = struct { kind: ?[]const u8 = null, path: ?[]const u8 = null, mimetype: ?[]const u8 = null };
+
+    /// Parses the metadata at `(row, col)` in the view scrolled back by
+    /// `view_offset`, or null if there's no tag there / it doesn't parse /
+    /// it's missing `kind` or `path`. On success the caller must, in this
+    /// order, `.parsed.deinit()` then free `.json` with `client.alloc`
+    /// (the parsed strings can point into `json`).
+    fn metaEntryAt(self: *Prompt, row: usize, col: usize, view_offset: usize) ?struct {
+        json: []u8,
+        parsed: std.json.Parsed(MetaEntry),
+    } {
+        const alloc = self.client.alloc;
+        const lookup = self.client.getMetadata(null, row, col, view_offset) catch return null;
+        const json = lookup.json orelse return null;
+        const parsed = std.json.parseFromSlice(MetaEntry, alloc, json, .{ .ignore_unknown_fields = true }) catch {
+            alloc.free(json);
+            return null;
+        };
+        if (parsed.value.kind == null or parsed.value.path == null) {
+            parsed.deinit();
+            alloc.free(json);
+            return null;
+        }
+        return .{ .json = json, .parsed = parsed };
+    }
+
+    /// Resolves the `open_actions` command for one entry and runs it as if
+    /// typed. The user's `shell.conf` table is checked first, then the
+    /// built-in defaults (`cd` into a directory, `glyphwire-view` an
+    /// image) -- see `shell/openaction.zig`. A no-op when nothing matches,
+    /// per the "don't guess" policy: an unrecognized file type does
+    /// nothing rather than guessing. `setLine` echoes the command and,
+    /// via `setCursorAt`, ends any browsing / snaps the view back to the
+    /// live tail before `submitLine` runs it -- the same path a typed
+    /// command takes, so e.g. `glyphwire-view`'s "wait for a keypress"
+    /// blocks the prompt loop exactly as it would for a real command.
     ///
-    /// `view_offset` is how many rows of scrollback the host was showing
-    /// when `(row, col)` was picked (0 at the live tail) -- forwarded to
-    /// `get_metadata` so a click/Enter on a scrolled-back row resolves
-    /// against the cell actually there, not the live-buffer cell at the
-    /// same screen position. `setLine` -> `setCursorAt` snaps the view
-    /// back to the live tail before the command runs.
+    /// `view_offset` is how far the host was scrolled back when
+    /// `(row, col)` was picked -- forwarded to `get_metadata` so a click
+    /// on a scrolled-back row resolves against the cell actually there.
     fn activateSelectionAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !void {
         const alloc = self.client.alloc;
 
-        const lookup = self.client.getMetadata(null, row, col, view_offset) catch return;
-        const json = lookup.json orelse return;
-        defer alloc.free(json);
+        const got = self.metaEntryAt(row, col, view_offset) orelse return;
+        defer alloc.free(got.json);
+        defer got.parsed.deinit();
 
-        const Meta = struct { mimetype: ?[]const u8 = null, path: ?[]const u8 = null };
-        const parsed = std.json.parseFromSlice(Meta, alloc, json, .{ .ignore_unknown_fields = true }) catch return;
-        defer parsed.deinit();
+        const line = self.openActionLine(alloc, &.{.{
+            .kind = got.parsed.value.kind.?,
+            .path = got.parsed.value.path.?,
+            .mimetype = got.parsed.value.mimetype,
+        }}) catch return orelse return;
+        defer alloc.free(line);
 
-        const mimetype = parsed.value.mimetype orelse return;
-        const path = parsed.value.path orelse return;
+        try self.setLine(line);
+        try self.submitLine();
+    }
 
-        // Single-quote the path so `dispatchLine` re-splits it back into
-        // one token even with spaces / shell metacharacters in the name.
-        const quoted = wordsplit.quoteArg(alloc, path) catch return;
-        defer alloc.free(quoted);
+    /// The command line to run for `entries` (one or more), or null when
+    /// no `open_actions` entry / default matches the first entry's type.
+    /// The first entry decides which action runs; `{sel}` / `{selections}`
+    /// in its template expand to the shell-quoted path(s) -- a `{sel}`
+    /// template given more than one entry surfaces an error line and
+    /// returns null (nothing runs). Owned result; free with `alloc`.
+    fn openActionLine(self: *Prompt, alloc: std.mem.Allocator, entries: []const openaction.Entry) !?[]u8 {
+        std.debug.assert(entries.len >= 1);
+        const user: []const openaction.Action = if (self.prompt_config) |pc| pc.open_actions.items else &.{};
+        const action = openaction.resolve(user, entries[0]) orelse return null;
 
-        const line = if (std.mem.eql(u8, mimetype, "directory"))
-            std.fmt.allocPrint(alloc, "cd {s}", .{quoted}) catch return
-        else if (glyphwire.ImageFormat.fromMimetype(mimetype) != null)
-            std.fmt.allocPrint(alloc, "glyphwire-view {s}", .{quoted}) catch return
-        else
-            return;
+        const paths = try alloc.alloc([]const u8, entries.len);
+        defer alloc.free(paths);
+        for (entries, paths) |e, *p| p.* = e.path;
+
+        return openaction.expand(alloc, action.commands[0], paths) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NeedsSingle => {
+                try self.client.writeText(
+                    "glyphwire-shell: that action opens one file at a time\n",
+                    .{ .r = 255, .g = 85, .b = 85 },
+                    null,
+                );
+                return null;
+            },
+        };
+    }
+
+    // ── Multi-select marks ─────────────────────────────────────────────
+
+    fn freeMark(alloc: std.mem.Allocator, m: Mark) void {
+        alloc.free(m.path);
+        alloc.free(m.kind);
+        if (m.mimetype) |mt| alloc.free(mt);
+    }
+
+    /// Frees every mark and empties the list -- local only, no wire
+    /// traffic. `applyHighlight` and `deinit` use it.
+    fn clearMarks(self: *Prompt) void {
+        const alloc = self.client.alloc;
+        for (self.marks.items) |m| freeMark(alloc, m);
+        self.marks.clearRetainingCapacity();
+    }
+
+    /// Rebuilds `self.marks` from a `HighlightState` the host just sent
+    /// back (`toggle_highlight` / `clear_highlight` / `set_highlight`
+    /// response). Each entry carries the highlighted id's metadata blob;
+    /// an entry with no blob, or one missing `kind`/`path`, is skipped.
+    fn applyHighlight(self: *Prompt, snap: *const glyphwire.HighlightSnapshot) !void {
+        const alloc = self.client.alloc;
+        self.clearMarks();
+        for (snap.entries()) |e| {
+            const json = e.json orelse continue;
+            const parsed = std.json.parseFromSlice(MetaEntry, alloc, json, .{ .ignore_unknown_fields = true }) catch continue;
+            defer parsed.deinit();
+            const kind = parsed.value.kind orelse continue;
+            const path = parsed.value.path orelse continue;
+
+            const path_owned = try alloc.dupe(u8, path);
+            errdefer alloc.free(path_owned);
+            const kind_owned = try alloc.dupe(u8, kind);
+            errdefer alloc.free(kind_owned);
+            const mime_owned: ?[]const u8 = if (parsed.value.mimetype) |mt| try alloc.dupe(u8, mt) else null;
+            errdefer if (mime_owned) |mt| alloc.free(mt);
+
+            try self.marks.append(alloc, .{ .path = path_owned, .kind = kind_owned, .mimetype = mime_owned });
+        }
+    }
+
+    /// Toggles the `ls` entry at `(row, col)` in the host's highlight set
+    /// (`toggle_highlight`) and rebuilds `self.marks` from the response.
+    /// The host resolves the cell to a metadata id, flood-fills it, and
+    /// hands back every highlighted id with its blob -- the shell does no
+    /// grid scanning of its own.
+    fn toggleHighlightAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !void {
+        var snap = try self.client.toggleHighlight(null, row, col, view_offset);
+        defer snap.deinit();
+        try self.applyHighlight(&snap);
+    }
+
+    /// Clears the marks and the host's highlight overlay
+    /// (`clear_highlight`). A no-op (no wire message) when nothing was
+    /// marked.
+    fn resetMarks(self: *Prompt) !void {
+        if (self.marks.items.len == 0) return;
+        var snap = try self.client.clearHighlight(null);
+        defer snap.deinit();
+        try self.applyHighlight(&snap);
+    }
+
+    /// The marked entries' paths, one per line, in mark order -- what
+    /// Ctrl+Shift+C copies while a listing has marks. Owned; free with
+    /// `alloc`.
+    fn markedPathsText(self: *Prompt, alloc: std.mem.Allocator) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+        for (self.marks.items, 0..) |m, i| {
+            if (i > 0) try out.append(alloc, '\n');
+            try out.appendSlice(alloc, m.path);
+        }
+        return out.toOwnedSlice(alloc);
+    }
+
+    /// Runs the `open_actions` command for the marked entries as one
+    /// command line (the first mark's type picks the action, every marked
+    /// path is passed). Marks and their highlight are dropped by
+    /// `submitLine`. A no-op if nothing resolves.
+    fn runMarkedAction(self: *Prompt) !void {
+        if (self.marks.items.len == 0) return;
+        const alloc = self.client.alloc;
+
+        const entries = try alloc.alloc(openaction.Entry, self.marks.items.len);
+        defer alloc.free(entries);
+        for (self.marks.items, entries) |m, *e| {
+            e.* = .{ .kind = m.kind, .path = m.path, .mimetype = m.mimetype };
+        }
+
+        const line = (try self.openActionLine(alloc, entries)) orelse return;
         defer alloc.free(line);
 
         try self.setLine(line);
@@ -1956,6 +2150,10 @@ const Prompt = struct {
     /// naturally wrapped onto the next row as it was typed and the
     /// command's output then drew over that wrapped tail.
     fn submitLine(self: *Prompt) !void {
+        // Running any command spends the multi-select: drop the marks and
+        // their highlight before the command's output scrolls in.
+        try self.resetMarks();
+
         try self.client.setCursor(self.line_start_row, self.line_start_col);
         if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
         try self.client.setCursor(self.line_start_row + 1, 0);
