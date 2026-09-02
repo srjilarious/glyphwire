@@ -64,7 +64,13 @@ final.
   what connecting means, invisible from the call site. The launcher
   checks for the marker before mirroring anything. Once resolved, whichever
   answer applies sticks for the rest of that command's run — the
-  launcher never re-checks mid-stream. This is deliberately a side
+  launcher never re-checks mid-stream. The check also runs once more
+  after the child's stdout hits EOF, before the final flush: an aware
+  child that writes *only* the marker and then draws entirely over its
+  own wire connection (`glyphwire-ls`) produces no further stdout for the
+  read loop to wake on, so the marker would otherwise still be sitting
+  unresolved in the buffer and get mirrored onto the grid as the literal
+  text `glyphwire-handshake-v1`. This is deliberately a side
   channel on the child's own stdout, not a wire-protocol message: the
   launcher would otherwise need to correlate a spawned PID with a
   possibly-unrelated later socket connection (the `SO_PEERCRED`-based
@@ -1009,10 +1015,19 @@ stop, clamped to the last column rather than wrapping; `\b` steps back
 one column non-destructively (a no-op at column 0); every other C0 byte
 and DEL is silently dropped. A stray `ESC [ … ` (CSI) or `ESC ]`/`P`/`X`/
 `^`/`_ … ` (string) sequence is recognized only well enough to know where
-it ends, then discarded — the stripper state lives on the `Layer`
-(`Layer.esc_state`), not a `writeText` local, so a sequence split across
-two `write_text` calls (a pipe delivered the child's output in two
-chunks) still drops as one unit. This is the *baseline* terminal
+it ends, then discarded. The stripper state is **not carried between
+`write_text` calls**: a sequence still open when a call's text runs out
+is abandoned — `Layer.esc_state` is reset to `.ground` before the call
+returns — and its tail then draws as ordinary text in the next call.
+This gives up cleanly stripping a sequence a pipe happened to split
+across two chunks (rare — a plain program emits each escape in one
+`write`), in exchange for the guarantee that a lone trailing `ESC`, a
+truncated `ESC [ …`, or an unterminated `ESC ] …` (OSC) can **never**
+silently swallow everything written afterward, `glyphwire-shell`'s own
+prompt included. (The first cut kept the state on the `Layer` so a split
+sequence dropped as one unit; that let an unterminated OSC in a `cat`'d
+file wedge the root layer — no more output, no prompt — so the trade was
+reversed.) This is the *baseline* terminal
 behavior a `print`-style program already assumes, not an escape-code
 interpreter: glyphwire replaces the VT100 model rather than reimplementing
 it (see this file's opening), and a `write_text` caller that wants

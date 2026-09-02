@@ -7,6 +7,7 @@ const testz = @import("testz");
 const wordsplit = @import("shell_support").wordsplit;
 const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
+const handshake = @import("shell_support").handshake;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -236,4 +237,30 @@ pub fn commonPrefixLenTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(complete.commonPrefixLen(&.{ "abc", "xyz" }), 0);
     try testz.expectEqual(complete.commonPrefixLen(&.{"only"}), 4);
     try testz.expectEqual(complete.commonPrefixLen(&.{}), 0);
+}
+
+// ─── handshake.aware ──────────────────────────────────────────────────
+
+pub fn handshakeAwareDetectsFullMarkerTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(handshake.aware(handshake.marker), true);
+    // Marker followed by real output still resolves as aware.
+    try testz.expectEqual(handshake.aware(handshake.marker ++ "hello"), true);
+}
+
+pub fn handshakeAwareTreatsPlainOutputAsNotAwareTest(_: std.Io, _: std.mem.Allocator) !void {
+    // At least marker-length and not a match -> definitely a plain program.
+    try testz.expectEqual(handshake.aware("this is plain program output!!!"), false);
+    // Shorter than the marker but already diverging from it -> plain.
+    try testz.expectEqual(handshake.aware("hi\n"), false);
+}
+
+pub fn handshakeAwareIsUndecidedOnPartialMarkerPrefixTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Nothing read yet, or a leading NUL then part of the marker: could
+    // still become the marker once more bytes arrive -- the caller keeps
+    // reading, and settles on "not aware" if the stream ends here.
+    try testz.expectEqual(handshake.aware(""), null);
+    try testz.expectEqual(handshake.aware(handshake.marker[0..1]), null);
+    try testz.expectEqual(handshake.aware(handshake.marker[0..10]), null);
+    // One byte short is still undecided.
+    try testz.expectEqual(handshake.aware(handshake.marker[0 .. handshake.marker.len - 1]), null);
 }

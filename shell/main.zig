@@ -3,6 +3,15 @@ const glyphwire = @import("glyphwire");
 const wordsplit = @import("shell_support").wordsplit;
 const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
+const hs = @import("shell_support").handshake;
+
+comptime {
+    // The captured-child marker detector keeps its own copy of the
+    // marker string to stay dependency-free (see shell/handshake.zig);
+    // keep it identical to what an aware client actually writes.
+    if (!std.mem.eql(u8, hs.marker, glyphwire.handshake_marker))
+        @compileError("shell_support.handshake.marker is out of sync with glyphwire.handshake_marker");
+}
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -1004,11 +1013,7 @@ const Prompt = struct {
                 else => |e| return e,
             };
 
-            if (handshake == null and mr.reader(0).bufferedLen() >= glyphwire.handshake_marker.len) {
-                const seen = std.mem.eql(u8, mr.reader(0).buffered()[0..glyphwire.handshake_marker.len], glyphwire.handshake_marker);
-                if (seen) mr.reader(0).toss(glyphwire.handshake_marker.len);
-                handshake = seen;
-            }
+            handshake = handshake orelse resolveHandshake(mr.reader(0));
 
             // Nothing is drained from either stream until the handshake
             // question resolves -- `MultiReader` grows its buffers to
@@ -1020,16 +1025,33 @@ const Prompt = struct {
             }
         }
 
-        // Covers the case where the handshake question never resolved
-        // inside the loop (e.g. a plain command whose entire stdout, if
-        // any, is shorter than the marker) -- treated as "not handshaken"
-        // and flushed to the grid like everything else this mechanism
-        // defaults to.
+        // The loop above breaks the moment `mr.fill` hits EOF, so a
+        // glyphwire-aware child that writes only the marker to stdout and
+        // then draws entirely over its own wire connection
+        // (`glyphwire-ls` is exactly this) never has its handshake
+        // resolved inside the loop -- the marker is still sitting unread
+        // in the buffer. Resolve it here before the final flush, or that
+        // raw marker is mirrored onto the grid as the text
+        // "glyphwire-handshake-v1". Still `null` afterward (stdout
+        // shorter than the marker, or empty) settles as "not aware" --
+        // the plain-program default this whole mechanism exists for.
+        handshake = handshake orelse resolveHandshake(mr.reader(0));
         const aware = handshake orelse false;
         try self.flushCapturedStream(mr.reader(0), aware, null, &passthrough_out.interface);
         try self.flushCapturedStream(mr.reader(1), aware, .{ .r = 255, .g = 85, .b = 85 }, &passthrough_err.interface);
 
         try mr.checkAnyError();
+    }
+
+    /// Runs `handshake.aware` against `r`'s buffered head and, on a
+    /// definite match, tosses the marker bytes so they reach neither the
+    /// grid nor the child's passthrough stdio. `null` (undecided -- what
+    /// little is buffered is still a prefix of the marker) leaves the
+    /// buffer intact for the next read to extend. See `pumpChildOutput`.
+    fn resolveHandshake(r: *std.Io.Reader) ?bool {
+        const seen = hs.aware(r.buffered()) orelse return null;
+        if (seen) r.toss(hs.marker.len);
+        return seen;
     }
 
     /// Drains whatever `r` currently has buffered: onto the grid (`fg`) as

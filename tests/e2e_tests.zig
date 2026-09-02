@@ -642,6 +642,30 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
         var expected_buf: [1]u8 = .{expected_ch};
         try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, 4 + i).grapheme);
     }
+
+    // glyphwire-ls handshakes by writing only `handshake_marker` to its
+    // stdout and then drawing over its own wire connection -- it never
+    // produces more stdout for `pumpChildOutput`'s read loop to wake on,
+    // so the marker sits unresolved until EOF. `pumpChildOutput` must
+    // recognize it there; otherwise its bytes get mirrored onto the grid
+    // as the literal text "glyphwire-handshake-v1". Scan the first few
+    // rows to prove none did.
+    var row: usize = 0;
+    while (row < 4) : (row += 1) {
+        var col: usize = 0;
+        var line_buf: [80]u8 = undefined;
+        var line_len: usize = 0;
+        while (col < 40) : (col += 1) {
+            const g = snapshot.cellAt(row, col).grapheme;
+            if (g.len == 1 and line_len < line_buf.len) {
+                line_buf[line_len] = g[0];
+                line_len += 1;
+            }
+        }
+        if (std.mem.indexOf(u8, line_buf[0..line_len], "glyphwire-handshake") != null) {
+            return error.HandshakeMarkerLeakedToGrid;
+        }
+    }
 }
 
 /// Polls `get_property(cursor)` until its row matches `want_row` -- the

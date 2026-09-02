@@ -1298,20 +1298,57 @@ pub fn writeTextStripsOscSequenceTerminatedByBelTest(io: std.Io, alloc: std.mem.
     try testz.expectEqual(layer.cursor.col, 4);
 }
 
-pub fn writeTextStripsEscSequenceSplitAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn writeTextDoesNotCarryPartialEscSequenceAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
-    // The pipe delivered "\x1b[1" and "2mX" as two chunks: the stripper
-    // state lives on the Layer, so the sequence is still discarded as one.
+    // A sequence split across two calls ("\x1b[1" then "2mX") is NOT
+    // stripped as one unit: the first call abandons the still-open
+    // sequence (esc_state back to .ground) rather than leaving the
+    // stripper armed, so the second call's "2mX" draws literally. This
+    // is the deliberate trade for never letting an unterminated sequence
+    // swallow a later write -- see writeText / EscState.
     try layer.writeText("\x1b[1", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.esc_state, glyphwire.EscState.csi);
+    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
     try layer.writeText("2mX", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
-    try testz.expectEqualStr("X", layer.cell(0, 0).grapheme());
-    try testz.expectEqual(layer.cursor.col, 1);
+    try testz.expectEqualStr("2", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("m", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("X", layer.cell(0, 2).grapheme());
+    try testz.expectEqual(layer.cursor.col, 3);
     try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+}
+
+pub fn writeTextUnterminatedEscSequenceDoesNotSwallowNextCallTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    // An unterminated OSC ("\x1b]2;still-open", no BEL/ST) ends the call
+    // with the stripper mid-sequence. Before the reset-at-end-of-call
+    // fix this armed state persisted and ate the whole next write; the
+    // shell's own prompt would silently vanish. Now the next call draws
+    // in full.
+    try layer.writeText("out\x1b]2;still-open", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("/home/user > ", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("/", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("h", layer.cell(1, 1).grapheme());
+    try testz.expectEqualStr("e", layer.cell(1, 4).grapheme());
+    try testz.expectEqual(layer.cursor.col, "/home/user > ".len);
+
+    // A lone trailing ESC is abandoned the same way.
+    layer.cursor = .{ .row = 2, .col = 0 };
+    try layer.writeText("tail\x1b", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+    layer.cursor = .{ .row = 3, .col = 0 };
+    try layer.writeText("next", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("n", layer.cell(3, 0).grapheme());
+    try testz.expectEqualStr("t", layer.cell(3, 3).grapheme());
 }
 
 pub fn writeTextNewlineScrollsAtBottomRowTest(io: std.Io, alloc: std.mem.Allocator) !void {

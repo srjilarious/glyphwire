@@ -280,9 +280,18 @@ pub const tab_width: usize = 8;
 /// bytes (`[31m` etc.) as garbage graphemes, `writeText` recognizes the
 /// common `ESC [ ... ` (CSI) and `ESC ] ... ` / `ESC P|X|^|_ ... ` (OSC
 /// and other string-terminated) shapes and *discards* them without
-/// acting on them. State lives on the `Layer`, not a `writeText` local,
-/// so a sequence split across two `write_text` calls (a pipe delivered
-/// the child's output in two chunks) is still stripped as one unit.
+/// acting on them.
+///
+/// The stripper is reset to `.ground` at the end of every `writeText`
+/// call (see `writeTextTagged`): an unterminated sequence never carries
+/// into the next call. This deliberately gives up cleanly stripping a
+/// sequence a pipe split across two `write_text` chunks (its tail then
+/// draws as literal text) in exchange for never letting a lone trailing
+/// `ESC`, a truncated `ESC [ ...`, or an unterminated `ESC ] ...` (OSC)
+/// silently swallow everything written afterward -- including
+/// glyphwire-shell's own prompt. In practice a plain program emits each
+/// escape sequence in a single `write`, so it arrives whole in one
+/// chunk anyway.
 pub const EscState = enum {
     /// Not inside a sequence -- the normal case.
     ground,
@@ -331,8 +340,9 @@ pub const Layer = struct {
     view_scroll: usize = 0,
     cursor: Cursor = .{},
     /// Escape-sequence stripper state (see `EscState`). `.ground` except
-    /// while `writeText` is discarding an in-progress `ESC ...` sequence,
-    /// which can span more than one `writeText` call.
+    /// partway through a single `writeText` call that is discarding an
+    /// `ESC ...` sequence -- reset back to `.ground` before that call
+    /// returns, so an unterminated sequence never leaks into the next one.
     esc_state: EscState = .ground,
     /// See `PropertyName.revision`.
     revision: u64 = 0,
@@ -575,6 +585,11 @@ pub const Layer = struct {
     /// sequences are recognized and discarded, not interpreted -- glyphwire
     /// has no VT100 layer (see `EscState`). This is baseline terminal
     /// behavior, not escape-code parsing.
+    ///
+    /// Escape stripping does not span calls: a sequence still open when
+    /// this call's `text` runs out is abandoned (`esc_state` reset to
+    /// `.ground`), so an unterminated `ESC ] ...` or a trailing `ESC [`
+    /// can't swallow whatever the next `writeText` writes. See `EscState`.
     pub fn writeText(self: *Layer, text: []const u8, fg: Color, bg: ?Background) !void {
         return self.writeTextTagged(text, fg, bg, null);
     }
@@ -592,6 +607,13 @@ pub const Layer = struct {
             if (cp_bytes.len == 1 and self.consumeControl(cp_bytes[0])) continue;
             self.putAtCursor(cp_bytes, fg, bg, metadata_id);
         }
+        // Don't carry a half-consumed `ESC ...` sequence into the next
+        // call: a lone trailing `ESC`, a truncated `ESC [ ...`, or an
+        // unterminated `ESC ] ...` (OSC) would otherwise leave the
+        // stripper armed and eat the start of whatever is written next
+        // (glyphwire-shell's prompt, the following command's output).
+        // See `EscState`.
+        self.esc_state = .ground;
         self.revision += 1;
     }
 
