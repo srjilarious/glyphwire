@@ -2843,6 +2843,10 @@ fn hookPollInterrupt(ctx: *anyopaque) bool {
                 hit = true;
         },
         .text => |tev| self.client.alloc.free(tev.text),
+        // Type-ahead (paste included) is dropped while a script builtin
+        // runs; a copy_request carries nothing to free.
+        .paste => |tev| self.client.alloc.free(tev.text),
+        .copy_request => {},
     };
     return hit;
 }
