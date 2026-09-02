@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core.zig");
 const wire = @import("wire.zig");
 const dispatch = @import("dispatch.zig");
+const rpc = @import("rpc.zig");
 
 /// Tracks one accepted connection long enough for *other* connections'
 /// dispatch to push a notification to it -- see `Server.broadcastToOthers`.
@@ -251,15 +252,7 @@ pub const Server = struct {
         };
         if (!changed) return;
 
-        const Notification = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8,
-            params: struct { key: []const u8 },
-        };
-        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
-            .method = if (pressed) "key_down" else "key_up",
-            .params = .{ .key = key },
-        }, .{});
+        const body = try rpc.keyNotification(alloc, key, pressed);
         defer alloc.free(body);
         self.broadcast(null, "key", body);
     }
@@ -274,14 +267,7 @@ pub const Server = struct {
     /// `reportKey`'s -- no separate "this was a repeat" signal, since
     /// nothing here needs to tell the difference from a fresh press.
     pub fn reportKeyRepeat(self: *Server, alloc: std.mem.Allocator, key: []const u8) !void {
-        const Notification = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8 = "key_down",
-            params: struct { key: []const u8 },
-        };
-        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
-            .params = .{ .key = key },
-        }, .{});
+        const body = try rpc.keyRepeatNotification(alloc, key);
         defer alloc.free(body);
         self.broadcast(null, "key", body);
     }
@@ -301,14 +287,7 @@ pub const Server = struct {
         };
         if (!changed) return;
 
-        const Notification = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8 = "mouse_button",
-            params: struct { button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos, view_offset: usize },
-        };
-        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
-            .params = .{ .button = button, .pressed = pressed, .px = px, .cell = cell, .view_offset = view_offset },
-        }, .{});
+        const body = try rpc.mouseButtonNotification(alloc, button, pressed, px, cell, view_offset);
         defer alloc.free(body);
         self.broadcast(null, "mouse_button", body);
     }
@@ -334,14 +313,7 @@ pub const Server = struct {
         };
         if (!result.changed) return;
 
-        const Notification = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8 = "scroll",
-            params: struct { offset: usize, max: usize },
-        };
-        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
-            .params = .{ .offset = result.offset, .max = result.max },
-        }, .{});
+        const body = try rpc.scrollNotification(alloc, result.offset, result.max);
         defer alloc.free(body);
         self.broadcast(null, "scroll", body);
     }
@@ -373,14 +345,7 @@ pub const Server = struct {
             try self.ctx.resize(cols, rows);
         }
 
-        const Notification = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8 = "resize",
-            params: struct { cols: usize, rows: usize },
-        };
-        const body = try std.json.Stringify.valueAlloc(alloc, Notification{
-            .params = .{ .cols = cols, .rows = rows },
-        }, .{});
+        const body = try rpc.resizeNotification(alloc, cols, rows);
         defer alloc.free(body);
         self.broadcast(null, "resize", body);
     }

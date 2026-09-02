@@ -1,5 +1,7 @@
 const core = @import("core.zig");
 pub const wire = @import("wire.zig");
+pub const protocol = @import("protocol.zig");
+pub const rpc = @import("rpc.zig");
 pub const dispatch = @import("dispatch.zig");
 pub const server = @import("server.zig");
 pub const client = @import("client.zig");

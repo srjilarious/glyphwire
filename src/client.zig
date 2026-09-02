@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core.zig");
 const wire = @import("wire.zig");
+const protocol = @import("protocol.zig");
 
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
@@ -198,14 +199,14 @@ pub const Client = struct {
     /// params for, but `get_cells` now does (`GetCellsParams`), so it
     /// needs a real single-field object on the wire.
     pub fn getCells(self: *Client) !CellsSnapshot {
-        const parsed = try self.request(CellsResultJson, "get_cells", .{ .layer = @as(?core.LayerHandle, null) });
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = @as(?core.LayerHandle, null) });
         return .{ .parsed = parsed };
     }
 
     /// `get_cells(layer)` for a specific (non-root) layer -- see
     /// `getCells` for the root-layer version.
     pub fn getCellsOn(self: *Client, layer: core.LayerHandle) !CellsSnapshot {
-        const parsed = try self.request(CellsResultJson, "get_cells", .{ .layer = layer });
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = layer });
         return .{ .parsed = parsed };
     }
 
@@ -214,7 +215,7 @@ pub const Client = struct {
     /// `core.Layer.viewRow`). `view_offset == 0` is identical to
     /// `getCells`.
     pub fn getCellsView(self: *Client, view_offset: usize) !CellsSnapshot {
-        const parsed = try self.request(CellsResultJson, "get_cells", .{ .layer = @as(?core.LayerHandle, null), .view_offset = view_offset });
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = @as(?core.LayerHandle, null), .view_offset = view_offset });
         return .{ .parsed = parsed };
     }
 
@@ -633,7 +634,7 @@ pub const Client = struct {
         columns: []const TableColumnInput,
         style: TableStyleInput,
     ) !core.TableHandle {
-        const wire_columns = try self.alloc.alloc(TableColumnJson, columns.len);
+        const wire_columns = try self.alloc.alloc(protocol.TableColumn, columns.len);
         defer self.alloc.free(wire_columns);
         for (columns, 0..) |c, i| {
             wire_columns[i] = .{
@@ -678,13 +679,13 @@ pub const Client = struct {
     /// temporary array to reshape it into wire JSON, freed before
     /// returning.
     pub fn tableSetRows(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle, rows: []const []const TableCellInput) !void {
-        const wire_rows = try self.alloc.alloc([]TableCellJson, rows.len);
+        const wire_rows = try self.alloc.alloc([]protocol.TableCell, rows.len);
         defer {
             for (wire_rows) |r| self.alloc.free(r);
             self.alloc.free(wire_rows);
         }
         for (rows, 0..) |row, ri| {
-            const wire_row = try self.alloc.alloc(TableCellJson, row.len);
+            const wire_row = try self.alloc.alloc(protocol.TableCell, row.len);
             wire_rows[ri] = wire_row;
             for (row, 0..) |c, ci| {
                 wire_row[ci] = .{
@@ -747,7 +748,7 @@ pub const Client = struct {
     /// owning layer's normal `getCells` (a table paints into ordinary
     /// cells).
     pub fn tableGetState(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle) !TableState {
-        var parsed = try self.request(TableStateResultJson, "table_get_state", .{ .layer = layer, .table = table });
+        var parsed = try self.request(protocol.TableStateResult, "table_get_state", .{ .layer = layer, .table = table });
         defer parsed.deinit();
         const r = parsed.value.result;
         return .{
@@ -805,11 +806,11 @@ pub const Client = struct {
     /// bootstrap query; `InputListener` is the live-updating counterpart.
     /// Owns its own parsed JSON arena; caller must call `.deinit()`.
     pub fn getInputState(self: *Client) !InputStateSnapshot {
-        const parsed = try self.request(InputStateResultJson, "get_input_state", .{});
+        const parsed = try self.request(protocol.InputStateResult, "get_input_state", .{});
         return .{ .parsed = parsed };
     }
 
-    fn colorToJson(c: ?core.Color) ?ColorJson {
+    fn colorToJson(c: ?core.Color) ?protocol.Color {
         const v = c orelse return null;
         return .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a };
     }
@@ -881,28 +882,13 @@ fn ResponseOf(comptime ResultT: type) type {
     };
 }
 
-const ColorJson = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
-
-const TableColumnJson = struct {
-    name: []const u8,
-    kind: []const u8,
-    sortable: bool,
-    width: usize,
-    min_width: usize,
-    h_align: []const u8,
-};
-
-const TableStyleJson = struct {
-    borders: bool,
-    header_separator: bool,
-    box_style: []const u8,
-    alt_row_bg: ?ColorJson,
-    header_fg: ?ColorJson,
-    header_bg: ?ColorJson,
-    row_height: usize,
-};
-
-fn tableStyleToJson(s: Client.TableStyleInput) TableStyleJson {
+/// The wire shapes this file builds requests from and parses responses
+/// into all live in `protocol.zig`, shared verbatim with `dispatch.zig`
+/// so the two ends can't drift. `tableStyleToJson` is the one bit of
+/// client-only glue left here: it flattens the ergonomic
+/// `Client.TableStyleInput` (real `core.Color` / enum fields) down to the
+/// wire `protocol.TableStyle`.
+fn tableStyleToJson(s: Client.TableStyleInput) protocol.TableStyle {
     return .{
         .borders = s.borders,
         .header_separator = s.header_separator,
@@ -913,67 +899,6 @@ fn tableStyleToJson(s: Client.TableStyleInput) TableStyleJson {
         .row_height = s.row_height,
     };
 }
-
-const TableCellJson = struct {
-    display: []const u8,
-    sort_key: ?std.json.Value = null,
-    icon: ?[]const u8 = null,
-    fg: ?ColorJson = null,
-    metadata_id: ?core.MetadataHandle = null,
-};
-
-const TableColumnStateJson = struct {
-    name: []const u8,
-    kind: []const u8,
-    sortable: bool,
-    width: usize,
-    min_width: usize,
-    h_align: []const u8,
-};
-
-const TablePaintedJson = struct {
-    row: usize,
-    col: usize,
-    rows: usize,
-    cols: usize,
-};
-
-const TableStateResultJson = struct {
-    columns: []const TableColumnStateJson,
-    row_count: usize,
-    sort_column: ?usize,
-    sort_direction: []const u8,
-    style: TableStyleJson,
-    painted: TablePaintedJson,
-    revision: u64,
-};
-
-const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
-const IconBgJson = struct { handle: core.ImageHandle, scale: []const u8, h_align: []const u8, v_align: []const u8, max_w: ?u32 = null, max_h: ?u32 = null };
-
-const CellJson = struct {
-    g: []const u8,
-    fg: ColorJson,
-    bg: ?ColorJson,
-    bg_image: ?ImageBgJson = null,
-    bg_icon: ?IconBgJson = null,
-    fg_icon: ?IconBgJson = null,
-    metadata_id: ?core.MetadataHandle = null,
-};
-
-const CellsResultJson = struct {
-    cols: usize,
-    rows: usize,
-    revision: u64,
-    cells: []const CellJson,
-};
-
-const InputStateResultJson = struct {
-    keys_down: []const []const u8,
-    mouse_buttons_down: []const []const u8,
-    cursor_px: PxPos,
-    cursor_cell: CellPos,
-};
 
 /// A cell in renderer-friendly form: `core.Color`/`core.ImageBg` fields
 /// instead of raw JSON. Exactly one of `bg`/`bg_image`/`bg_icon` is
@@ -995,7 +920,7 @@ pub const RenderCell = struct {
 /// `cellAt` is a cheap view into that backing data, not a copy -- don't
 /// hold onto a `RenderCell` past the snapshot's `deinit()`.
 pub const CellsSnapshot = struct {
-    parsed: std.json.Parsed(ResponseOf(CellsResultJson)),
+    parsed: std.json.Parsed(ResponseOf(protocol.CellsResult)),
 
     pub fn deinit(self: *CellsSnapshot) void {
         self.parsed.deinit();
@@ -1045,7 +970,7 @@ pub const CellsSnapshot = struct {
 /// frees it. A one-time snapshot -- see `InputListener` for a
 /// live-updating equivalent.
 pub const InputStateSnapshot = struct {
-    parsed: std.json.Parsed(ResponseOf(InputStateResultJson)),
+    parsed: std.json.Parsed(ResponseOf(protocol.InputStateResult)),
 
     pub fn deinit(self: *InputStateSnapshot) void {
         self.parsed.deinit();
@@ -1411,7 +1336,7 @@ pub const InputListener = struct {
         defer parsed.deinit();
 
         if (std.mem.eql(u8, parsed.value.method, "key_down") or std.mem.eql(u8, parsed.value.method, "key_up")) {
-            const P = struct { key: []const u8 };
+            const P = protocol.KeyParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
                 .ignore_unknown_fields = true,
             });
@@ -1427,7 +1352,7 @@ pub const InputListener = struct {
             try self.key_events.append(self.alloc, .{ .key = owned_key, .pressed = pressed });
             self.key_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "mouse_button")) {
-            const P = struct { button: []const u8, pressed: bool, px: PxPos, cell: CellPos, view_offset: usize = 0 };
+            const P = protocol.MouseButtonParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
                 .ignore_unknown_fields = true,
             });
@@ -1444,7 +1369,7 @@ pub const InputListener = struct {
             try self.mouse_events.append(self.alloc, .{ .button = owned_button, .pressed = p.value.pressed, .px = p.value.px, .cell = p.value.cell, .view_offset = p.value.view_offset });
             self.mouse_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "scroll")) {
-            const P = struct { offset: usize, max: usize };
+            const P = protocol.ScrollParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
                 .ignore_unknown_fields = true,
             });
@@ -1457,7 +1382,7 @@ pub const InputListener = struct {
             try self.scroll_events.append(self.alloc, ev);
             self.scroll_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "resize")) {
-            const P = struct { cols: usize, rows: usize };
+            const P = protocol.ResizeParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
                 .ignore_unknown_fields = true,
             });

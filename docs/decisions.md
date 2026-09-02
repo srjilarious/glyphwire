@@ -818,6 +818,19 @@ surface.
   core, not entangled with it. This shapes the Text & Styling data-model
   choices below, which favor directly-assertable structures over anything
   requiring resolution/indirection to inspect.
+- **Wire DTOs live in one module.** `src/protocol.zig` holds the pure JSON
+  shapes that cross the socket (colors, cells, table state, input state,
+  the input-notification param objects) with no behavior attached. Both
+  the server side (`dispatch.zig`) and the client side (`client.zig`)
+  import it, so the two ends can't drift on a field name or type -- the
+  previous arrangement kept a parallel copy of each shape in both files.
+  `src/rpc.zig` is a thin companion: `response`/`notification` envelope
+  builders plus one builder per input notification (`key_down`/`key_up`,
+  `mouse_button`, `scroll`, `resize`), shared by `dispatch.zig`'s socket
+  handlers and `server.zig`'s in-process reporters. Neither module knows
+  about connections or core state; adding a message still means editing
+  the handler and (if the shape is shared) `protocol.zig`, so the message
+  catalog stays visible rather than hidden behind a framework.
 
 ### Deferred: capability caching
 - Considered: a server-side cache (never client-side — the client must

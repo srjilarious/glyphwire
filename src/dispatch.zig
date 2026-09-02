@@ -1,5 +1,7 @@
 const std = @import("std");
 const core = @import("core.zig");
+const protocol = @import("protocol.zig");
+const rpc = @import("rpc.zig");
 
 /// Dispatches decoded JSON-RPC message bodies (the wire module's frame
 /// payloads) against a headless `Context`. This is the message-catalog
@@ -34,8 +36,6 @@ const Envelope = struct {
     params: std.json.Value = .null,
 };
 
-const ColorJson = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
-
 /// No `row`/`col` fields: this slice's `Layer.writeText` only supports
 /// cursor-implicit writes (see core.zig). Explicit positioning is decided
 /// in decisions.md but not needed until a milestone past this slice.
@@ -44,8 +44,8 @@ const ColorJson = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
 const WriteTextParams = struct {
     layer: ?core.LayerHandle = null,
     text: []const u8,
-    fg: ?ColorJson = null,
-    bg: ?ColorJson = null,
+    fg: ?protocol.Color = null,
+    bg: ?protocol.Color = null,
     /// See `core.Cell.metadata_id`'s doc comment.
     metadata_id: ?core.MetadataHandle = null,
     /// `false` (default): `bg` omitted means "reset to
@@ -149,39 +149,6 @@ const GetMetadataResult = struct {
 
 const CellMetricsResult = struct { cell_px_w: u32, cell_px_h: u32 };
 
-const ImageBgJson = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
-const IconBgJson = struct { handle: core.ImageHandle, scale: []const u8, h_align: []const u8, v_align: []const u8, max_w: ?u32 = null, max_h: ?u32 = null };
-
-/// One flattened cell in a `get_cells` response, row-major starting at
-/// (0,0). Exactly one of `bg`/`bg_image`/`bg_icon` is non-null, per
-/// `core.Background`'s tagged union — see decisions.md's Cell section.
-/// `fg_icon` is a sibling of that union, not part of it: an icon drawn
-/// *over* the background (`draw_icon`'s `foreground: true`, and every
-/// table body icon — see `core.Cell.fg_icon`), independent of which
-/// `bg*` case is set.
-const CellJson = struct {
-    g: []const u8,
-    fg: ColorJson,
-    bg: ?ColorJson,
-    bg_image: ?ImageBgJson = null,
-    bg_icon: ?IconBgJson = null,
-    fg_icon: ?IconBgJson = null,
-    /// Just the id, not the resolved JSON -- same "handle, not content"
-    /// treatment `bg_image`/`bg_icon` already give image/icon handles.
-    /// `get_metadata` resolves an id to its actual content.
-    metadata_id: ?core.MetadataHandle = null,
-};
-
-const CellsResult = struct {
-    cols: usize,
-    rows: usize,
-    revision: u64,
-    cells: []const CellJson,
-};
-
-const PxJson = struct { x: f32, y: f32 };
-const CellPosJson = struct { row: usize, col: usize };
-
 const ReportKeyParams = struct {
     key: []const u8,
     pressed: bool,
@@ -190,8 +157,8 @@ const ReportKeyParams = struct {
 const ReportMouseButtonParams = struct {
     button: []const u8,
     pressed: bool,
-    px: PxJson,
-    cell: CellPosJson,
+    px: protocol.PxPos,
+    cell: protocol.CellPos,
     /// The root layer's scrollback view offset (see `core.Layer.view_scroll`)
     /// at the moment of the click, so a subscriber resolving `cell` with
     /// `get_metadata` can pass the same `view_offset` and land on the row
@@ -201,8 +168,8 @@ const ReportMouseButtonParams = struct {
 };
 
 const ReportMouseMoveParams = struct {
-    px: PxJson,
-    cell: CellPosJson,
+    px: protocol.PxPos,
+    cell: protocol.CellPos,
 };
 
 const SubscribeParams = struct {
@@ -292,11 +259,11 @@ const DrawBoxParams = struct {
 // (unlike a layer handle, which is globally meaningful), since it's
 // stored in that layer's own `tables` map.
 
-fn colorFromJson(c: ColorJson) core.Color {
+fn colorFromJson(c: protocol.Color) core.Color {
     return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
 }
 
-fn colorToJson(c: core.Color) ColorJson {
+fn colorToJson(c: core.Color) protocol.Color {
     return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
 }
 
@@ -310,36 +277,12 @@ fn parseTableOption(comptime E: type, value: ?[]const u8, default: E) !E {
     return std.meta.stringToEnum(E, s) orelse DispatchError.InvalidTableOption;
 }
 
-const ColumnJson = struct {
-    name: []const u8,
-    /// "text" (default) or "number" -- see `core.ColumnKind`.
-    kind: ?[]const u8 = null,
-    sortable: bool = false,
-    width: usize,
-    min_width: usize = 1,
-    /// "start" (default), "center", or "end".
-    h_align: ?[]const u8 = null,
-};
-
-/// Shared by `create_table`'s `style` and `table_set_style`'s -- and
-/// reused as the output shape `table_get_state`'s `style` field reports
-/// back, since the wire and read-back shapes are identical.
-const TableStyleJson = struct {
-    borders: bool = true,
-    header_separator: bool = true,
-    box_style: ?[]const u8 = null,
-    alt_row_bg: ?ColorJson = null,
-    header_fg: ?ColorJson = null,
-    header_bg: ?ColorJson = null,
-    row_height: usize = 1,
-};
-
 const CreateTableParams = struct {
     layer: ?core.LayerHandle = null,
     row: ?usize = null,
     col: ?usize = null,
-    columns: []const ColumnJson,
-    style: TableStyleJson = .{},
+    columns: []const protocol.TableColumn,
+    style: protocol.TableStyle = .{},
 };
 
 const CreateTableResult = struct { handle: core.TableHandle };
@@ -349,27 +292,10 @@ const DestroyTableParams = struct {
     table: core.TableHandle,
 };
 
-/// One row's cell, as sent to `table_set_rows`. `sort_key` (see
-/// `core.SortKey`'s doc comment) is left as a raw `std.json.Value` rather
-/// than a typed field, since it's naturally either a JSON number or a
-/// JSON string depending on the column -- no wrapper object needed to
-/// disambiguate; a number parses as `.number`, a string as `.text`,
-/// anything else (or the field omitted) falls back to a copy of
-/// `display`, same as a column with no explicit sort key at all.
-const TableCellJson = struct {
-    display: []const u8,
-    sort_key: ?std.json.Value = null,
-    /// An icon-registry name, resolved the same way `draw_icon`'s `name`
-    /// already is (`Context.iconHandle`) -- see `buildTableCell`.
-    icon: ?[]const u8 = null,
-    fg: ?ColorJson = null,
-    metadata_id: ?core.MetadataHandle = null,
-};
-
 const TableSetRowsParams = struct {
     layer: ?core.LayerHandle = null,
     table: core.TableHandle,
-    rows: []const []const TableCellJson,
+    rows: []const []const protocol.TableCell,
 };
 
 const TableSetSortParams = struct {
@@ -383,43 +309,12 @@ const TableSetSortParams = struct {
 const TableSetStyleParams = struct {
     layer: ?core.LayerHandle = null,
     table: core.TableHandle,
-    style: TableStyleJson,
+    style: protocol.TableStyle,
 };
 
 const TableGetStateParams = struct {
     layer: ?core.LayerHandle = null,
     table: core.TableHandle,
-};
-
-const ColumnStateJson = struct {
-    name: []const u8,
-    kind: []const u8,
-    sortable: bool,
-    width: usize,
-    min_width: usize,
-    h_align: []const u8,
-};
-
-/// Where a table last painted (`core.Table.painted`) -- a client that
-/// wants to place something below the table (e.g. `glyphwire-ls -l`'s
-/// next shell prompt) needs this rather than recomputing the same layout
-/// math `Table.render` already did, which would drift the moment that
-/// layout changes.
-const TablePaintedJson = struct {
-    row: usize,
-    col: usize,
-    rows: usize,
-    cols: usize,
-};
-
-const TableStateResult = struct {
-    columns: []const ColumnStateJson,
-    row_count: usize,
-    sort_column: ?usize,
-    sort_direction: []const u8,
-    style: TableStyleJson,
-    painted: TablePaintedJson,
-    revision: u64,
 };
 
 /// `rows`/`cols` are optional: omitted means "the rest of the layer from
@@ -443,13 +338,6 @@ const ClearParams = struct {
 pub const LoadImageHeader = struct {
     id: std.json.Value,
     bytes: usize,
-};
-
-const InputStateResult = struct {
-    keys_down: []const []const u8,
-    mouse_buttons_down: []const []const u8,
-    cursor_px: PxJson,
-    cursor_cell: CellPosJson,
 };
 
 /// Which input event categories a connection has opted into (see
@@ -673,13 +561,7 @@ pub const Dispatcher = struct {
     /// frame for `hdr.id`.
     pub fn handleLoadImage(self: *Dispatcher, alloc: std.mem.Allocator, hdr: LoadImageHeader, raw_bytes: []const u8) ![]u8 {
         const image_handle = try self.ctx.loadImage(raw_bytes);
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: LoadImageResult,
-        };
-        const response: Response = .{ .id = hdr.id, .result = .{ .handle = image_handle } };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, hdr.id, LoadImageResult{ .handle = image_handle });
     }
 
     /// Resolves a wire-level `layer` field (omitted means the root layer,
@@ -772,49 +654,19 @@ pub const Dispatcher = struct {
 
         if (std.mem.eql(u8, p.property, "cursor")) {
             const cursor = layer.getProperty(.cursor).cursor;
-            const Response = struct {
-                jsonrpc: []const u8 = "2.0",
-                id: std.json.Value,
-                result: CursorResult,
-            };
-            const response: Response = .{ .id = id, .result = .{ .row = cursor.row, .col = cursor.col } };
-            return try std.json.Stringify.valueAlloc(alloc, response, .{});
+            return try rpc.response(alloc, id, CursorResult{ .row = cursor.row, .col = cursor.col });
         } else if (std.mem.eql(u8, p.property, "revision")) {
             const revision = layer.getProperty(.revision).revision;
-            const Response = struct {
-                jsonrpc: []const u8 = "2.0",
-                id: std.json.Value,
-                result: RevisionResult,
-            };
-            const response: Response = .{ .id = id, .result = .{ .revision = revision } };
-            return try std.json.Stringify.valueAlloc(alloc, response, .{});
+            return try rpc.response(alloc, id, RevisionResult{ .revision = revision });
         } else if (std.mem.eql(u8, p.property, "position")) {
             const pos = layer.getProperty(.position).position;
-            const Response = struct {
-                jsonrpc: []const u8 = "2.0",
-                id: std.json.Value,
-                result: PositionResult,
-            };
-            const response: Response = .{ .id = id, .result = .{ .x = pos.x, .y = pos.y } };
-            return try std.json.Stringify.valueAlloc(alloc, response, .{});
+            return try rpc.response(alloc, id, PositionResult{ .x = pos.x, .y = pos.y });
         } else if (std.mem.eql(u8, p.property, "size")) {
             const sz = layer.getProperty(.size).size;
-            const Response = struct {
-                jsonrpc: []const u8 = "2.0",
-                id: std.json.Value,
-                result: SizeResult,
-            };
-            const response: Response = .{ .id = id, .result = .{ .cols = sz.cols, .rows = sz.rows } };
-            return try std.json.Stringify.valueAlloc(alloc, response, .{});
+            return try rpc.response(alloc, id, SizeResult{ .cols = sz.cols, .rows = sz.rows });
         } else if (std.mem.eql(u8, p.property, "scroll")) {
             const sc = layer.getProperty(.scroll).scroll;
-            const Response = struct {
-                jsonrpc: []const u8 = "2.0",
-                id: std.json.Value,
-                result: ScrollResult,
-            };
-            const response: Response = .{ .id = id, .result = .{ .offset = sc.offset, .max = sc.max } };
-            return try std.json.Stringify.valueAlloc(alloc, response, .{});
+            return try rpc.response(alloc, id, ScrollResult{ .offset = sc.offset, .max = sc.max });
         }
         return DispatchError.UnknownProperty;
     }
@@ -829,13 +681,7 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         const layer_handle = try self.ctx.createLayer(p.width, p.height, p.scrollback_rows);
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: CreateLayerResult,
-        };
-        const response: Response = .{ .id = id, .result = .{ .handle = layer_handle } };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, CreateLayerResult{ .handle = layer_handle });
     }
 
     /// `destroy_layer`: frees a layer and drops it from compositing (see
@@ -861,13 +707,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
 
         const metadata_handle = try self.ctx.createMetadata(parsed.value.json);
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: CreateMetadataResult,
-        };
-        const response: Response = .{ .id = id, .result = .{ .handle = metadata_handle } };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, CreateMetadataResult{ .handle = metadata_handle });
     }
 
     /// `destroy_metadata`: frees `id`'s stored JSON (see
@@ -907,13 +747,7 @@ pub const Dispatcher = struct {
             null;
         const json = if (metadata_id) |m| self.ctx.metadataJson(m) else null;
 
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: GetMetadataResult,
-        };
-        const response: Response = .{ .id = id, .result = .{ .id = metadata_id, .json = json } };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, GetMetadataResult{ .id = metadata_id, .json = json });
     }
 
     /// Returns a full row-major snapshot of the given layer's (default:
@@ -927,7 +761,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         const view_offset = parsed.value.view_offset;
-        const cells = try alloc.alloc(CellJson, layer.width * layer.height);
+        const cells = try alloc.alloc(protocol.WireCell, layer.width * layer.height);
         defer alloc.free(cells);
 
         var row: usize = 0;
@@ -936,15 +770,15 @@ pub const Dispatcher = struct {
             var col: usize = 0;
             while (col < layer.width) : (col += 1) {
                 const cell: *const core.Cell = if (view_row) |vr| &vr[col] else layer.cell(row, col);
-                const bg: ?ColorJson = switch (cell.style.bg) {
+                const bg: ?protocol.Color = switch (cell.style.bg) {
                     .color => |bgc| .{ .r = bgc.r, .g = bgc.g, .b = bgc.b, .a = bgc.a },
                     .image, .icon => null,
                 };
-                const bg_image: ?ImageBgJson = switch (cell.style.bg) {
+                const bg_image: ?protocol.ImageBg = switch (cell.style.bg) {
                     .image => |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y },
                     .color, .icon => null,
                 };
-                const bg_icon: ?IconBgJson = switch (cell.style.bg) {
+                const bg_icon: ?protocol.IconBg = switch (cell.style.bg) {
                     .icon => |icon| .{
                         .handle = icon.handle,
                         .scale = @tagName(icon.scale),
@@ -955,7 +789,7 @@ pub const Dispatcher = struct {
                     },
                     .color, .image => null,
                 };
-                const fg_icon: ?IconBgJson = if (cell.fg_icon) |icon| .{
+                const fg_icon: ?protocol.IconBg = if (cell.fg_icon) |icon| .{
                     .handle = icon.handle,
                     .scale = @tagName(icon.scale),
                     .h_align = @tagName(icon.h_align),
@@ -975,16 +809,12 @@ pub const Dispatcher = struct {
             }
         }
 
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: CellsResult,
-        };
-        const response: Response = .{
-            .id = id,
-            .result = .{ .cols = layer.width, .rows = layer.height, .revision = layer.revision, .cells = cells },
-        };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, protocol.CellsResult{
+            .cols = layer.width,
+            .rows = layer.height,
+            .revision = layer.revision,
+            .cells = cells,
+        });
     }
 
     /// `scroll_view`: moves the layer's scrollback view offset (see
@@ -1004,23 +834,10 @@ pub const Dispatcher = struct {
         const layer = try self.resolveLayer(p.layer);
         const new_offset = layer.scrollView(p.offset, p.delta);
 
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: ScrollResult,
-        };
-        const response: Response = .{ .id = id, .result = .{ .offset = new_offset, .max = layer.history_len } };
-        const resp_body = try std.json.Stringify.valueAlloc(alloc, response, .{});
+        const resp_body = try rpc.response(alloc, id, ScrollResult{ .offset = new_offset, .max = layer.history_len });
         errdefer alloc.free(resp_body);
 
-        const Notification = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8 = "scroll",
-            params: struct { offset: usize, max: usize },
-        };
-        const notif_body = try std.json.Stringify.valueAlloc(alloc, Notification{
-            .params = .{ .offset = new_offset, .max = layer.history_len },
-        }, .{});
+        const notif_body = try rpc.scrollNotification(alloc, new_offset, layer.history_len);
         return .{ .response = resp_body, .broadcast = .{ .event = "scroll", .body = notif_body } };
     }
 
@@ -1040,16 +857,7 @@ pub const Dispatcher = struct {
         const changed = try self.ctx.input.setKey(p.key, p.pressed);
         if (!changed) return .{};
 
-        const Notification = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8,
-            params: struct { key: []const u8 },
-        };
-        const notification: Notification = .{
-            .method = if (p.pressed) "key_down" else "key_up",
-            .params = .{ .key = p.key },
-        };
-        const notif_body = try std.json.Stringify.valueAlloc(alloc, notification, .{});
+        const notif_body = try rpc.keyNotification(alloc, p.key, p.pressed);
         return .{ .broadcast = .{ .event = "key", .body = notif_body } };
     }
 
@@ -1065,15 +873,7 @@ pub const Dispatcher = struct {
         const changed = try self.ctx.input.setMouseButton(p.button, p.pressed);
         if (!changed) return .{};
 
-        const Notification = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8 = "mouse_button",
-            params: struct { button: []const u8, pressed: bool, px: PxJson, cell: CellPosJson, view_offset: usize },
-        };
-        const notification: Notification = .{
-            .params = .{ .button = p.button, .pressed = p.pressed, .px = p.px, .cell = p.cell, .view_offset = p.view_offset },
-        };
-        const notif_body = try std.json.Stringify.valueAlloc(alloc, notification, .{});
+        const notif_body = try rpc.mouseButtonNotification(alloc, p.button, p.pressed, p.px, p.cell, p.view_offset);
         return .{ .broadcast = .{ .event = "mouse_button", .body = notif_body } };
     }
 
@@ -1098,13 +898,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         self.subscriptions = Subscriptions.setFromEvents(parsed.value.events);
 
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: SubscribeResult,
-        };
-        const response: Response = .{ .id = id, .result = .{ .subscribed = parsed.value.events } };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, SubscribeResult{ .subscribed = parsed.value.events });
     }
 
     fn handleGetInputState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
@@ -1118,21 +912,12 @@ pub const Dispatcher = struct {
         var bit = self.ctx.input.mouse_buttons_down.keyIterator();
         while (bit.next()) |k| try buttons.append(alloc, k.*);
 
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: InputStateResult,
-        };
-        const response: Response = .{
-            .id = id,
-            .result = .{
-                .keys_down = keys.items,
-                .mouse_buttons_down = buttons.items,
-                .cursor_px = .{ .x = self.ctx.input.cursor_px.x, .y = self.ctx.input.cursor_px.y },
-                .cursor_cell = .{ .row = self.ctx.input.cursor_cell.row, .col = self.ctx.input.cursor_cell.col },
-            },
-        };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, protocol.InputStateResult{
+            .keys_down = keys.items,
+            .mouse_buttons_down = buttons.items,
+            .cursor_px = .{ .x = self.ctx.input.cursor_px.x, .y = self.ctx.input.cursor_px.y },
+            .cursor_cell = .{ .row = self.ctx.input.cursor_cell.row, .col = self.ctx.input.cursor_cell.col },
+        });
     }
 
     fn handleGetImageInfo(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
@@ -1142,13 +927,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
 
         const info = self.ctx.imageInfo(parsed.value.handle) orelse return DispatchError.UnknownImage;
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: ImageInfoResult,
-        };
-        const response: Response = .{ .id = id, .result = .{ .width = info.width, .height = info.height } };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, ImageInfoResult{ .width = info.width, .height = info.height });
     }
 
     /// Resolves an optional `row`/`col` pair against `layer`'s current
@@ -1299,23 +1078,17 @@ pub const Dispatcher = struct {
     /// `Context.cell_px_w`/`cell_px_h` and glyphwire-host's matching
     /// constants.
     fn handleGetCellMetrics(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: CellMetricsResult,
-        };
-        const response: Response = .{
-            .id = id,
-            .result = .{ .cell_px_w = self.ctx.cell_px_w, .cell_px_h = self.ctx.cell_px_h },
-        };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, CellMetricsResult{
+            .cell_px_w = self.ctx.cell_px_w,
+            .cell_px_h = self.ctx.cell_px_h,
+        });
     }
 
     /// Builds an owned `core.TableStyle` from wire JSON -- `box_style`
     /// always ends up an owned copy (defaulted to a duped `"box"` when
     /// omitted) so `TableStyle.deinit` can always safely free it. Shared
     /// by `handleCreateTable` and `handleTableSetStyle`.
-    fn resolveTableStyle(alloc: std.mem.Allocator, s: TableStyleJson) !core.TableStyle {
+    fn resolveTableStyle(alloc: std.mem.Allocator, s: protocol.TableStyle) !core.TableStyle {
         const box_style = try alloc.dupe(u8, s.box_style orelse "box");
         return .{
             .borders = s.borders,
@@ -1364,13 +1137,7 @@ pub const Dispatcher = struct {
         const style = try resolveTableStyle(talloc, p.style);
         const table_handle = try self.ctx.createTable(p.layer, anchor.row, anchor.col, columns, style);
 
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: CreateTableResult,
-        };
-        const response: Response = .{ .id = id, .result = .{ .handle = table_handle } };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+        return try rpc.response(alloc, id, CreateTableResult{ .handle = table_handle });
     }
 
     /// `destroy_table`: blanks the table's painted region and frees it
@@ -1389,13 +1156,13 @@ pub const Dispatcher = struct {
     }
 
     /// One `table_set_rows` cell: dupes `display`, resolves `sort_key`
-    /// (a raw JSON number/string -- see `TableCellJson`'s doc comment,
+    /// (a raw JSON number/string -- see `protocol.TableCell`'s doc comment,
     /// falling back to a copy of `display` for anything else or when
     /// omitted), resolves `icon`'s name against the icon catalog (erroring
     /// `UnknownIcon` immediately, same "fail loud at the point of use"
     /// treatment `draw_icon`'s `name` already gets), and validates
     /// `metadata_id` the same way `write_text`/`draw_icon`'s already is.
-    fn buildTableCell(self: *Dispatcher, alloc: std.mem.Allocator, cj: TableCellJson) !core.TableCell {
+    fn buildTableCell(self: *Dispatcher, alloc: std.mem.Allocator, cj: protocol.TableCell) !core.TableCell {
         const display = try alloc.dupe(u8, cj.display);
         errdefer alloc.free(display);
 
@@ -1423,7 +1190,7 @@ pub const Dispatcher = struct {
         };
     }
 
-    fn buildTableRow(self: *Dispatcher, alloc: std.mem.Allocator, row_json: []const TableCellJson) !core.TableRow {
+    fn buildTableRow(self: *Dispatcher, alloc: std.mem.Allocator, row_json: []const protocol.TableCell) !core.TableRow {
         const cells = try alloc.alloc(core.TableCell, row_json.len);
         var built: usize = 0;
         errdefer {
@@ -1444,7 +1211,7 @@ pub const Dispatcher = struct {
     /// leave a dangling `errdefer` active around the later `setRows` call
     /// in `handleTableSetRows`, which already frees `rows` itself on its
     /// own error path.
-    fn buildTableRows(self: *Dispatcher, alloc: std.mem.Allocator, rows_json: []const []const TableCellJson) ![]core.TableRow {
+    fn buildTableRows(self: *Dispatcher, alloc: std.mem.Allocator, rows_json: []const []const protocol.TableCell) ![]core.TableRow {
         const rows = try alloc.alloc(core.TableRow, rows_json.len);
         var built: usize = 0;
         errdefer {
@@ -1529,7 +1296,7 @@ pub const Dispatcher = struct {
         const layer = try self.resolveLayer(p.layer);
         const table = layer.tables.getPtr(p.table) orelse return DispatchError.UnknownTable;
 
-        const columns = try alloc.alloc(ColumnStateJson, table.columns.len);
+        const columns = try alloc.alloc(protocol.ColumnState, table.columns.len);
         defer alloc.free(columns);
         for (table.columns, 0..) |c, i| {
             columns[i] = .{
@@ -1542,36 +1309,27 @@ pub const Dispatcher = struct {
             };
         }
 
-        const Response = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: std.json.Value,
-            result: TableStateResult,
-        };
-        const response: Response = .{
-            .id = id,
-            .result = .{
-                .columns = columns,
-                .row_count = table.rows.len,
-                .sort_column = table.sort_column,
-                .sort_direction = @tagName(table.sort_dir),
-                .style = .{
-                    .borders = table.style.borders,
-                    .header_separator = table.style.header_separator,
-                    .box_style = table.style.box_style,
-                    .alt_row_bg = if (table.style.alt_row_bg) |c| colorToJson(c) else null,
-                    .header_fg = if (table.style.header_fg) |c| colorToJson(c) else null,
-                    .header_bg = if (table.style.header_bg) |c| colorToJson(c) else null,
-                    .row_height = table.style.row_height,
-                },
-                .painted = .{
-                    .row = table.painted.row,
-                    .col = table.painted.col,
-                    .rows = table.painted.rows,
-                    .cols = table.painted.cols,
-                },
-                .revision = table.revision,
+        return try rpc.response(alloc, id, protocol.TableStateResult{
+            .columns = columns,
+            .row_count = table.rows.len,
+            .sort_column = table.sort_column,
+            .sort_direction = @tagName(table.sort_dir),
+            .style = .{
+                .borders = table.style.borders,
+                .header_separator = table.style.header_separator,
+                .box_style = table.style.box_style,
+                .alt_row_bg = if (table.style.alt_row_bg) |c| colorToJson(c) else null,
+                .header_fg = if (table.style.header_fg) |c| colorToJson(c) else null,
+                .header_bg = if (table.style.header_bg) |c| colorToJson(c) else null,
+                .row_height = table.style.row_height,
             },
-        };
-        return try std.json.Stringify.valueAlloc(alloc, response, .{});
+            .painted = .{
+                .row = table.painted.row,
+                .col = table.painted.col,
+                .rows = table.painted.rows,
+                .cols = table.painted.cols,
+            },
+            .revision = table.revision,
+        });
     }
 };
