@@ -215,6 +215,51 @@ pub const ScriptEngine = struct {
         return true;
     }
 
+    /// Appends every script-builtin name starting with `prefix` to `out`
+    /// as owned dups the caller frees: the `defcmd` registrations, then
+    /// the readable `<scripts_dir>/*.lua` basenames (the `lib/` subdir and
+    /// non-`.lua` entries skipped). Order is unspecified and a name can
+    /// appear twice (a `defcmd` that also has a file) -- shell/main.zig's
+    /// Tab completion, the only caller, sorts and dedups. Errors only on
+    /// allocation failure; a missing or unreadable scripts dir is just an
+    /// empty file contribution.
+    pub fn collectCommandNames(
+        self: *ScriptEngine,
+        alloc: std.mem.Allocator,
+        prefix: []const u8,
+        out: *std.ArrayList([]const u8),
+    ) !void {
+        const lua = self.lua;
+        const base = lua.getTop();
+        defer lua.setTop(base);
+
+        // `defcmd` table keys. `lua.next` walks the table; the key sits at
+        // -2 and the value at -1, so pop only the value each turn.
+        _ = lua.rawGetIndex(ziglua.registry_index, self.cmds_ref);
+        lua.pushNil();
+        while (lua.next(-2)) {
+            if (lua.typeOf(-2) == .string) {
+                const key = lua.toString(-2) catch "";
+                if (std.mem.startsWith(u8, key, prefix))
+                    try out.append(alloc, try alloc.dupe(u8, key));
+            }
+            lua.pop(1);
+        }
+
+        // `<scripts_dir>/<name>.lua` files (not the `lib/` subdir).
+        if (self.scripts_dir.len == 0) return;
+        var dir = std.Io.Dir.cwd().openDir(self.io, self.scripts_dir, .{ .iterate = true }) catch return;
+        defer dir.close(self.io);
+        var it = dir.iterate();
+        while (it.next(self.io) catch null) |entry| {
+            if (entry.kind == .directory) continue;
+            if (!std.mem.endsWith(u8, entry.name, script_ext)) continue;
+            const stem = entry.name[0 .. entry.name.len - script_ext.len];
+            if (stem.len == 0 or !std.mem.startsWith(u8, stem, prefix)) continue;
+            try out.append(alloc, try alloc.dupe(u8, stem));
+        }
+    }
+
     /// Runs the builtin `name` with `args`, returning its exit status
     /// (a numeric Lua return, clamped to 0..255; 0 otherwise). A Lua
     /// error is written to the grid as `name: message` and reported as

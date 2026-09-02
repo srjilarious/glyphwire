@@ -1107,11 +1107,27 @@ surface.
 - Quoting inside the completed word is **not** interpreted
   (`complete.wordRange` is pure string math): a Tab inside `'...'` sees
   the quote as an ordinary character. Command-name completion from
-  `$PATH` and richer, config-driven completions (the planned Lua config
-  is the natural home for those) are explicitly out of scope for now.
+  `$PATH` is still out of scope (a `$PATH` scan on every Tab), and so are
+  richer, config-driven completions (the planned Lua config is the
+  natural home for those).
+- **Command position also completes names, not just files.** When the
+  word under the cursor is `argv[0]` (the first token on the line, no
+  `dir/` part), Tab merges three more name sources into the candidate
+  list: the live `alias` bindings, the core builtins
+  (`core_builtin_names` -- `alias`/`cd`/`exit`/`unalias`), and the script
+  builtins (`ScriptEngine.collectCommandNames` -- every `defcmd`
+  registration plus each `~/.config/glyphwire/scripts/*.lua` basename,
+  `lib/` excluded). They are plain candidates: sorted in with the
+  filesystem matches, no marker, deduped by name so a script and a
+  like-named file in the cwd list once. Argument positions are unchanged
+  (filenames only). `collectCommandNames` may hand back the same name
+  twice (a `defcmd` that also has a file); `appendCommandNameCandidates`
+  dedups.
 - Split for testability: `shell/complete.zig` holds the pure helpers
-  (word boundary, `dir/`+prefix split, longest common prefix); the
-  directory scan and the grid edits stay in `Prompt.doComplete` /
+  (word boundary, `dir/`+prefix split, longest common prefix);
+  `ScriptEngine.collectCommandNames` is unit-tested against a real Lua
+  state and a temp scripts dir; the directory scan and the grid edits
+  stay in `Prompt.doComplete` / `appendCommandNameCandidates` /
   `listCompletions`.
 
 #### `*` glob expansion

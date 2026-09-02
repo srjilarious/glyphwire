@@ -570,6 +570,12 @@ fn runScriptFile(io: std.Io, alloc: std.mem.Allocator, prompt: *Prompt, path: []
 /// unique match and the `/` shown in a listing.
 const CompletionCandidate = struct { name: []const u8, is_dir: bool };
 
+/// The core builtins `dispatchLine` recognises by name (see the
+/// precedence comment there). Offered by Tab completion in command
+/// position alongside aliases and script builtins. `alias` is handled a
+/// step earlier than the rest but is still a name worth completing.
+const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "unalias" };
+
 /// Alias store backing the prompt's `alias`/`unalias` builtins. Seeded at
 /// startup from `~/.config/glyphwire/shell.conf`'s `alias(name, value)`
 /// calls (see `Prompt.loadStartupConfig`), then mutated for the rest of
@@ -2700,6 +2706,13 @@ const Prompt = struct {
                 .is_dir = entry.kind == .directory,
             });
         }
+
+        // In command position (`argv[0]`, no `dir/` part) Tab also
+        // completes the names the plain directory scan can't see:
+        // aliases, the core builtins, and script builtins.
+        if (dp.dir.len == 0 and std.mem.indexOfNone(u8, line[0..wr.start], " \t") == null)
+            try self.appendCommandNameCandidates(&cands, dp.prefix);
+
         if (cands.items.len == 0) return;
 
         std.mem.sort(CompletionCandidate, cands.items, {}, struct {
@@ -2732,6 +2745,50 @@ const Prompt = struct {
             self.completion_armed = false;
         } else {
             self.completion_armed = true;
+        }
+    }
+
+    /// Appends the command-position names matching `prefix` to `cands`
+    /// (which already holds the cwd filesystem matches): the `alias`
+    /// bindings, the core builtins (`core_builtin_names`), and the script
+    /// builtins (`ScriptEngine.collectCommandNames` -- `defcmd` names plus
+    /// `~/.config/glyphwire/scripts/*.lua`). A name already in `cands`
+    /// (from the directory scan or an earlier source here) is skipped, so
+    /// a script and a like-named file are offered once. All get
+    /// `is_dir = false`; `doComplete` sorts the merged list.
+    fn appendCommandNameCandidates(
+        self: *Prompt,
+        cands: *std.ArrayList(CompletionCandidate),
+        prefix: []const u8,
+    ) !void {
+        const alloc = self.client.alloc;
+
+        const push = struct {
+            fn f(a: std.mem.Allocator, list: *std.ArrayList(CompletionCandidate), name: []const u8) !void {
+                for (list.items) |cand| {
+                    if (std.mem.eql(u8, cand.name, name)) return;
+                }
+                try list.append(a, .{ .name = try a.dupe(u8, name), .is_dir = false });
+            }
+        }.f;
+
+        for (core_builtin_names) |name| {
+            if (std.mem.startsWith(u8, name, prefix)) try push(alloc, cands, name);
+        }
+
+        var ai = self.aliases.map.keyIterator();
+        while (ai.next()) |key| {
+            if (std.mem.startsWith(u8, key.*, prefix)) try push(alloc, cands, key.*);
+        }
+
+        if (self.script_engine) |eng| {
+            var names: std.ArrayList([]const u8) = .empty;
+            defer {
+                for (names.items) |n| alloc.free(n);
+                names.deinit(alloc);
+            }
+            try eng.collectCommandNames(alloc, prefix, &names);
+            for (names.items) |n| try push(alloc, cands, n);
         }
     }
 
