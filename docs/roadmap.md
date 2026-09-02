@@ -1362,6 +1362,43 @@ defaults, and can mark several entries to open at once. Wire change —
   `shell_config_tests.zig` +5 (`open_actions` string / list / accumulate /
   bad-value / empty-list). 429 pass.
 
+## Multi-select copy is space-separated, and pasted newlines flatten
+
+**Done.** Follow-up to the multi-select marks above. Copying a set of
+marked `ls` entries (Ctrl+Shift+C, host selection empty) now puts them on
+the clipboard as one **space-separated** line, each path quoted only when
+it needs it, so the text pastes straight back after a command name
+(`ls `, `cp … `) as a working argument list — the earlier newline-joined
+form made `ls` choke on the first paste. The line editor is still
+single-line: pasted text has its `\n` / `\r` runs flattened to single
+spaces on the way in, and the word-splitter now treats a bare newline as
+a token separator too, as a backstop. No wire change — client-local, so
+`docs/decisions.md`'s Selection & clipboard + Shell sections were updated,
+`docs/api.md` untouched. A real multi-line prompt editor is still a future
+change (deliberately deferred).
+
+- **`wordsplit.splitArgs`**: `' ', '\t'` separator case → `' ', '\t',
+  '\n', '\r'`. A multi-line paste that still reaches `dispatchLine` splits
+  one argument per line instead of fusing into one unusable token.
+- **`wordsplit.quoteArgIfNeeded`** (NEW): returns the string as a bare
+  owned dupe when every byte is a "plain word" char (`A-Za-z0-9` plus
+  `@%+=:,./_-`, the `shlex.quote` unreserved set), otherwise falls back to
+  `quoteArg`. The empty string quotes to `''`.
+- **`lineedit.flattenNewlines`** (NEW): every maximal `\n` / `\r` run in a
+  slice → one space, as an owned copy (newline-free input still comes back
+  as a fresh allocation, so callers free unconditionally). Called from the
+  shell's `.paste` handler before `insertText`; the pty-passthrough
+  `.paste` path is left verbatim so a foregrounded program still gets the
+  newlines.
+- **`shell/main.zig`**: `markedPathsText` joins with `' '` and runs each
+  path through `quoteArgIfNeeded` (was `'\n'` + raw). The `.paste` arm in
+  the prompt loop flattens before inserting.
+- **Tests:** `shell_tests.zig` +5 — `splitTreatsNewlinesAsSeparators`
+  (newline / CRLF / blank-line list → per-line tokens),
+  `quoteArgIfNeededLeavesPlainPathBare` + `quoteArgIfNeededQuotesWhenItHasTo`
+  (round-trips through `split`), `flattenNewlinesCollapsesRunsToSingleSpace`
+  + `flattenNewlinesLeavesNewlineFreeTextAlone`. 438 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

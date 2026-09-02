@@ -1003,11 +1003,21 @@ surface.
   host-side with no round trip.
 - **Paste is its own `paste` notification, not the `text` typing
   stream.** Distinct so a client can treat it differently — glyphwire-
-  shell inserts pasted text literally, newlines and all, *without*
-  submitting (the user presses Enter themselves), where a multi-line
-  `text` run would look like separate typed commands. Other clients that
-  only care about typing can ignore `paste`. Both ride the `"clipboard"`
-  subscription alongside `copy_request`.
+  shell inserts pasted text into the live line *without* submitting (the
+  user presses Enter themselves), where a multi-line `text` run would look
+  like separate typed commands. Because the shell's line editor is
+  single-line, it first flattens every run of `\n` / `\r` in the pasted
+  text to one space (`lineedit.flattenNewlines`): a multi-select copy of
+  file paths, or any block pasted from another window, then lands as one
+  editable line of space-separated words instead of a buffer with embedded
+  newlines the editor can't render. A proper multi-line editor is a
+  future change; until then the word-splitter also treats `\n` / `\r` as
+  ordinary token separators (same as space / tab) so a stray newline that
+  still reaches `dispatchLine` splits arguments rather than fusing them
+  into one. The pty-passthrough path keeps paste verbatim — a foregrounded
+  program gets the newlines. Other clients that only care about typing can
+  ignore `paste`. Both ride the `"clipboard"` subscription alongside
+  `copy_request`.
 - **Ctrl+Shift+Space toggles a keyboard selection mode in the host.**
   While active the host swallows the arrows / Home / End / Escape / Enter
   before `reportKeyEvents` forwards them and uses them to move the
@@ -1117,7 +1127,12 @@ surface.
   path; Escape clears them; running any command drops them (a `resize`
   does *not* — the highlight is keyed by id, not rows). With marks
   present, `copy_request` (Ctrl+Shift+C, host selection empty) answers
-  with the newline-joined marked paths instead of the input line. The
+  with the marked paths as one **space-separated** line instead of the
+  input line — each path passed through `wordsplit.quoteArgIfNeeded`
+  (bare when it's a plain word, single-quoted when it holds a space or a
+  shell metacharacter), so the clipboard text pastes straight back after a
+  command name as a valid argument list. (Newline-joining was the first
+  cut; it broke the moment the list was pasted after `ls`.) The
   earlier design had the shell scan a `get_cells` snapshot for the run of
   cells sharing an entry's id — dropped because a client round-tripping
   the whole grid to re-derive what the host already knows is both slow

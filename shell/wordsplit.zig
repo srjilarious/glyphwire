@@ -5,6 +5,12 @@ const std = @import("std");
 /// Deliberately minimal (see shell/main.zig's top doc comment on the
 /// shell's scope): it recognizes
 ///
+///   * whitespace -- space, tab, newline (`\n`) or carriage return
+///     (`\r`) -- as a token separator; a run of it counts once, and
+///     leading/trailing whitespace is ignored. A newline is no different
+///     from a space here, so a multi-line paste (a copied file list, say)
+///     splits into one argument per line rather than one unusable giant
+///     argument;
 ///   * single quotes  `'...'`  -- everything between them is literal,
 ///     backslash included; an embedded `'` cannot be escaped (same as
 ///     every POSIX shell);
@@ -56,7 +62,7 @@ pub fn splitArgs(alloc: std.mem.Allocator, line: []const u8) ![]Arg {
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
         switch (line[i]) {
-            ' ', '\t' => {
+            ' ', '\t', '\n', '\r' => {
                 if (in_token) {
                     try args.append(alloc, .{ .text = try alloc.dupe(u8, cur.items), .quoted = cur_quoted });
                     cur.clearRetainingCapacity();
@@ -139,6 +145,36 @@ pub fn quoteArg(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
     try out.append(alloc, '\'');
 
     return out.toOwnedSlice(alloc);
+}
+
+/// Bytes that can appear in a shell word with no quoting at all: the
+/// unreserved set every POSIX shell (and `shlex.quote`) leaves alone.
+/// Anything outside it -- whitespace, a quote, a glob or shell
+/// metacharacter, a non-ASCII byte -- forces quoting.
+const plain_word_extra = "@%+=:,./_-";
+
+fn isPlainWord(s: []const u8) bool {
+    if (s.len == 0) return false; // the empty string must become `''`
+    for (s) |c| {
+        const safe = (c >= 'A' and c <= 'Z') or
+            (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or
+            std.mem.indexOfScalar(u8, plain_word_extra, c) != null;
+        if (!safe) return false;
+    }
+    return true;
+}
+
+/// Like `quoteArg`, but only wraps `s` when it actually needs it: a path
+/// made entirely of "plain word" bytes (`isPlainWord`) is returned as a
+/// bare owned dupe, everything else goes through `quoteArg`. Used to build
+/// clipboard text from marked `ls` paths -- an ordinary path stays
+/// readable, one with a space or a metacharacter still pastes back as a
+/// single token. Caller owns the returned bytes; free with `alloc` either
+/// way.
+pub fn quoteArgIfNeeded(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    if (isPlainWord(s)) return alloc.dupe(u8, s);
+    return quoteArg(alloc, s);
 }
 
 /// Text-only splitter: quoting/escaping removed, "was quoted" flag
