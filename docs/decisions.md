@@ -112,7 +112,9 @@ final.
   for this workload.
 - Binary payloads (image bytes) are not base64-embedded in JSON. A JSON
   header frame declares `{bytes: N, format: "png", ...}`, then N raw bytes
-  follow directly on the socket.
+  follow directly on the socket. `format` is parsed (`png`/`jpeg`/`bmp`/
+  `gif`) and picks the header parser used to measure the image — see the
+  Image section.
 
 ### Protocol shape
 - Fully duplex on one connection. Input (key/mouse/gamepad/resize) flows
@@ -286,6 +288,22 @@ surface.
 **Image**
 - A loaded resource (via the binary side-channel framing decided earlier:
   JSON header + raw bytes), referenced by a server-generated handle.
+- **Four container formats: PNG, JPEG, BMP, GIF.** Superseded the original
+  "assume PNG" scope. `load_image`'s `format` field is now *parsed* (it
+  used to be sent-but-unchecked) and selects which fixed-offset header
+  parser measures the image — `core.imageDimensions` dispatches to
+  `pngDimensions` (IHDR) / `jpegDimensions` (first SOFn segment) /
+  `bmpDimensions` (DIB header) / `gifDimensions` (logical screen
+  descriptor). Each is a header read of a few dozen lines, **not** a
+  decoder — the headless core still never touches pixels, and no image
+  codec dependency was added to it. An unknown `format`, or bytes that
+  don't match the one declared, fails the `load_image` request (same
+  connection-severing path a malformed PNG already took). The renderer
+  side needed nothing: glyphwire-host's stb_image already auto-detects all
+  four from the same bytes. **The client picks `format` by sniffing the
+  file's own magic bytes** (`core.detectImageFormat`), not its extension —
+  a wrong hint would fail server-side, and a headless `glyphwire-view foo`
+  with no extension still works.
 - `draw_image(layer, handle, row, col, row_span, col_span)` places the
   image at its natural pixel size, anchored at the span's top-left cell —
   **no stretching**. If the image is larger than the span's pixel bounds,

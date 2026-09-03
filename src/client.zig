@@ -284,11 +284,11 @@ pub const Client = struct {
     /// `load_image(format, bytes)` -- a request using the binary
     /// side-channel: the JSON header frame declares `bytes.len`, then
     /// `bytes` follows directly on the wire (not another framed message) —
-    /// see decisions.md's Transport & Wire Format. Only `"png"` is
-    /// meaningful today (decisions.md's "assume PNG" scope), but `format`
-    /// is still sent so the wire shape doesn't need to change when that
-    /// widens. Returns a server-generated handle for `get_image_info`/
-    /// `drawImage`.
+    /// see decisions.md's Transport & Wire Format. `format` is now parsed
+    /// server-side (`"png"`, `"jpeg"`/`"jpg"`, `"bmp"`, `"gif"`) to pick
+    /// the header parser that measures the image; an unknown value or bytes
+    /// that don't match the declared format fail the request. Returns a
+    /// server-generated handle for `get_image_info`/`drawImage`.
     pub fn loadImage(self: *Client, format: []const u8, bytes: []const u8) !core.ImageHandle {
         const id = self.next_id;
         self.next_id += 1;

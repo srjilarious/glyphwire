@@ -1,14 +1,17 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 
-/// glyphwire-view: a minimal client that loads a PNG file and draws it as a
-/// sprite spanning the cells it needs -- the first real exercise of Image
-/// support (`load_image`/`get_image_info`/`draw_image`) end to end, see
-/// docs/roadmap.md's Phase 3. Computes `row_span`/`col_span` from the
-/// image's natural pixel size (`get_image_info`) and the session's fixed
-/// cell metrics (`get_cell_metrics`) -- aspect-ratio-aware placement is the
-/// client's job per decisions.md; `draw_image` itself only clips, never
-/// stretches.
+/// glyphwire-view: a minimal client that loads an image file (PNG, JPEG,
+/// BMP, or GIF) and draws it as a sprite spanning the cells it needs -- the
+/// first real exercise of Image support (`load_image`/`get_image_info`/
+/// `draw_image`) end to end, see docs/roadmap.md's Phase 3. The container
+/// format is sniffed from the file's magic bytes (`detectImageFormat`),
+/// not its extension, and sent as `load_image`'s `format` so the server
+/// reads the right header; glyphwire-host's stb_image decodes all four.
+/// Computes `row_span`/`col_span` from the image's natural pixel size
+/// (`get_image_info`) and the session's fixed cell metrics
+/// (`get_cell_metrics`) -- aspect-ratio-aware placement is the client's job
+/// per decisions.md; `draw_image` itself only clips, never stretches.
 ///
 /// Draws the image and exits as soon as the pixels are on the grid -- no
 /// keypress wait. `draw_image` is a request, so by the time it returns
@@ -26,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(alloc);
 
     if (args.len < 2) {
-        return fallback(io, "usage: glyphwire-view <image.png>\n");
+        return fallback(io, "usage: glyphwire-view <image>   (PNG, JPEG, BMP, or GIF)\n");
     }
     const path = args[1];
 
@@ -37,12 +40,21 @@ pub fn main(init: std.process.Init) !void {
     };
     defer alloc.free(bytes);
 
+    // Sniff the container format from the file's own bytes rather than its
+    // name -- `load_image`'s `format` is parsed server-side now, and a
+    // wrong hint fails the request.
+    const format = glyphwire.detectImageFormat(bytes) orelse {
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "glyphwire-view: '{s}' isn't a PNG, JPEG, BMP, or GIF\n", .{path}) catch "glyphwire-view: unsupported image format\n";
+        return fallback(io, msg);
+    };
+
     var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
         return fallback(io, "glyphwire-view: no session, falling back to plain output\n");
     };
     defer client.deinit();
 
-    const handle = try client.loadImage("png", bytes);
+    const handle = try client.loadImage(format.name(), bytes);
     const info = try client.getImageInfo(handle);
     const metrics = try client.getCellMetrics();
 

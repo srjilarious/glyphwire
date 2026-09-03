@@ -246,7 +246,7 @@ pub fn writeTextTransparentBgLeavesExistingBackgroundUntouchedTest(io: std.Io, a
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("panel-fill", 1);
 
@@ -425,6 +425,15 @@ pub fn peekLoadImageExtractsHeaderTest(io: std.Io, alloc: std.mem.Allocator) !vo
     const hdr = (try dispatch.peekLoadImage(alloc, message)).?;
     try testz.expectEqual(hdr.bytes, 24);
     try testz.expectEqual(hdr.id.integer, 7);
+    try testz.expectEqual(hdr.format, .png);
+}
+
+pub fn peekLoadImageRejectsUnknownFormatTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const message =
+        \\{"jsonrpc":"2.0","id":7,"method":"load_image","params":{"format":"webp","bytes":24}}
+    ;
+    try testz.expectError(dispatch.peekLoadImage(alloc, message), dispatch.DispatchError.UnsupportedImageFormat);
 }
 
 pub fn peekLoadImageReturnsNullForOtherMethodsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -442,7 +451,7 @@ pub fn loadImageThenGetImageInfoRoundTripsTest(io: std.Io, alloc: std.mem.Alloca
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(64, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     defer alloc.free(load_resp);
     try testz.expectTrue(std.mem.indexOf(u8, load_resp, "\"handle\":1") != null);
 
@@ -475,7 +484,7 @@ pub fn drawImageMarksRootLayerCellsTest(io: std.Io, alloc: std.mem.Allocator) !v
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(24, 12); // 2 cells wide, 1 cell tall at 12px cells
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
 
     const draw_message =
@@ -503,7 +512,7 @@ pub fn drawImageOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator
     ctx.root.setProperty(.{ .cursor = .{ .row = 4, .col = 5 } });
 
     const png = fakePngBytes(12, 12);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
 
     const draw_message =
@@ -536,7 +545,7 @@ pub fn setPropertyCursorAfterScrollingDrawImageScrollsExactlyOnceMoreTest(io: st
     // the 5-row layer, anchored at row 1, so drawing it has to scroll
     // partway through (see `Layer.drawImage`'s doc comment).
     const png = fakePngBytes(12, 96);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
 
     const draw_message =
@@ -566,7 +575,7 @@ pub fn drawIconAppliesScaleAndAlignParamsTest(io: std.Io, alloc: std.mem.Allocat
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
@@ -590,7 +599,7 @@ pub fn drawIconAppliesMaxWidthAndHeightParamsTest(io: std.Io, alloc: std.mem.All
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
@@ -612,7 +621,7 @@ pub fn drawIconStretchScaleParsesTest(io: std.Io, alloc: std.mem.Allocator) !voi
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
@@ -789,7 +798,7 @@ pub fn drawIconUnknownMetadataIdErrorsTest(io: std.Io, alloc: std.mem.Allocator)
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
@@ -894,7 +903,7 @@ pub fn drawIconInvalidScaleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
@@ -911,7 +920,7 @@ pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !vo
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
@@ -940,7 +949,7 @@ pub fn drawIconForegroundSetsFgIconOverExistingBgTest(io: std.Io, alloc: std.mem
     var d = dispatch.Dispatcher.init(&ctx);
 
     const bg_png = fakePngBytes(32, 32);
-    const bg_load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = bg_png.len }, &bg_png);
+    const bg_load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = bg_png.len }, &bg_png);
     alloc.free(bg_load_resp);
     try ctx.registerIcon("panel-fill", 1);
 
@@ -950,7 +959,7 @@ pub fn drawIconForegroundSetsFgIconOverExistingBgTest(io: std.Io, alloc: std.mem
     try testz.expectTrue((try d.handle(alloc, bg_message)).response == null);
 
     const fg_png = fakePngBytes(32, 32);
-    const fg_load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 2 }, .bytes = fg_png.len }, &fg_png);
+    const fg_load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 2 }, .format = .png, .bytes = fg_png.len }, &fg_png);
     alloc.free(fg_load_resp);
     try ctx.registerIcon("badge", 2);
 
@@ -979,7 +988,7 @@ pub fn drawIconKeepsLandingAcrossAScrollBoundaryTest(io: std.Io, alloc: std.mem.
     var d = dispatch.Dispatcher.init(&ctx);
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
@@ -1021,7 +1030,7 @@ pub fn drawIconOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator)
     ctx.root.setProperty(.{ .cursor = .{ .row = 2, .col = 6 } });
 
     const png = fakePngBytes(32, 32);
-    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .bytes = png.len }, &png);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
     try ctx.registerIcon("folder", 1);
 
@@ -1041,7 +1050,7 @@ fn registerTestBoxStyle(d: *dispatch.Dispatcher, alloc: std.mem.Allocator, ctx: 
     for (pieces) |piece| {
         const png = fakePngBytes(12, 12);
         const id: i64 = 1;
-        const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = id }, .bytes = png.len }, &png);
+        const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = id }, .format = .png, .bytes = png.len }, &png);
         defer alloc.free(load_resp);
 
         const parsed = try std.json.parseFromSlice(struct { result: struct { handle: glyphwire.ImageHandle } }, alloc, load_resp, .{ .ignore_unknown_fields = true });

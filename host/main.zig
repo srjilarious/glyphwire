@@ -1014,7 +1014,7 @@ fn loadIconManifest(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Contex
         };
         defer alloc.free(bytes);
 
-        const handle = ctx.loadImage(bytes) catch |err| {
+        const handle = ctx.loadImage(.png, bytes) catch |err| {
             std.log.warn("glyphwire-host: couldn't load icon '{s}': {t}", .{ entry.name, err });
             continue;
         };

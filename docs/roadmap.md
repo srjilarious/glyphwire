@@ -842,6 +842,32 @@ few MB at the cost of tofu for rare kanji; deferred. Grapheme
 segmentation (UAX #29) is still open — width is measured per base
 codepoint, so ZWJ emoji / combining clusters aren't handled as one unit.
 
+## JPEG / BMP / GIF alongside PNG in `load_image`
+
+`glyphwire-view` was PNG-only; the request was JPEG support and it grew to
+all four "simple header" formats. `load_image`'s `format` field, which
+used to be sent-but-ignored, is now parsed server-side
+(`core.ImageFormat.fromName`, accepting `"jpg"` for `jpeg`) and picks the
+header parser that measures the image: `core.imageDimensions` dispatches
+to `pngDimensions` (unchanged), new `jpegDimensions` (walks marker
+segments to the first SOFn and reads its 16-bit height/width), new
+`bmpDimensions` (BITMAPCOREHEADER u16 or BITMAPINFOHEADER+ i32 w/h, abs
+value for a top-down negative height), and new `gifDimensions` (logical
+screen descriptor). All are fixed-offset header reads, ~15-40 lines each,
+**no codec dependency in the headless core** — pixel decoding stays
+glyphwire-host's stb_image, which already auto-detects every one of these.
+`ImageEntry` gained a `format` field; `Context.loadImage` takes the format
+now. An unknown `format`, or bytes that don't match the declared one,
+fails the `load_image` request (`dispatch.DispatchError.UnsupportedImageFormat`
+from `peekLoadImage`, or the format-specific `ImageError` from the parser —
+same connection-severing path a malformed PNG already took). **This is a
+wire change** (the `format` field is now load-bearing), so `api.md` +
+`decisions.md` are updated. `glyphwire-view` picks the format by sniffing
+the file's magic bytes (`core.detectImageFormat`), not its extension, and
+its usage / doc comments now say "image" not "PNG". 9 new `core` tests
+(the four parsers + `detectImageFormat` + a declared-format-mismatch
+case), 1 new `dispatch` test (unknown format rejected); 264 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

@@ -664,12 +664,138 @@ pub fn contextLoadImageParsesDimensionsTest(io: std.Io, alloc: std.mem.Allocator
     defer ctx.deinit();
 
     const bytes = fakePngBytes(48, 24);
-    const handle = try ctx.loadImage(&bytes);
+    const handle = try ctx.loadImage(.png, &bytes);
 
     const info = ctx.imageInfo(handle).?;
     try testz.expectEqual(info.width, 48);
     try testz.expectEqual(info.height, 24);
     try testz.expectTrue(ctx.imageInfo(handle + 1) == null);
+}
+
+/// A minimal JPEG byte stream `jpegDimensions` can walk: SOI, a stub APP0
+/// segment (to exercise the segment-length skip), then an SOF0 frame
+/// header carrying `precision(1) height(2) width(2)` and enough trailing
+/// bytes to satisfy its declared length. Not a decodable JPEG.
+fn fakeJpegBytes(width: u16, height: u16) [23]u8 {
+    var bytes: [23]u8 = undefined;
+    bytes[0] = 0xFF;
+    bytes[1] = 0xD8; // SOI
+    bytes[2] = 0xFF;
+    bytes[3] = 0xE0; // APP0
+    std.mem.writeInt(u16, bytes[4..6], 4, .big); // APP0 length (covers itself + 2)
+    bytes[6] = 0;
+    bytes[7] = 0;
+    bytes[8] = 0xFF;
+    bytes[9] = 0xC0; // SOF0
+    std.mem.writeInt(u16, bytes[10..12], 11, .big); // SOF0 length: 2 + precision + h + w + 4 stub
+    bytes[12] = 8; // sample precision
+    std.mem.writeInt(u16, bytes[13..15], height, .big);
+    std.mem.writeInt(u16, bytes[15..17], width, .big);
+    @memset(bytes[17..23], 0); // component stub bytes the length accounts for
+    return bytes;
+}
+
+pub fn jpegDimensionsParsesSofTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    const bytes = fakeJpegBytes(640, 400);
+    const info = try glyphwire.jpegDimensions(&bytes);
+    try testz.expectEqual(info.width, 640);
+    try testz.expectEqual(info.height, 400);
+}
+
+pub fn jpegDimensionsRejectsNonJpegTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    const png = fakePngBytes(16, 16);
+    try testz.expectError(glyphwire.jpegDimensions(&png), glyphwire.ImageError.InvalidJpeg);
+}
+
+/// A BMP with a 40-byte BITMAPINFOHEADER: the 14-byte file header ("BM" +
+/// sizes we don't read), then the DIB header size, then little-endian i32
+/// width and height.
+fn fakeBmpBytes(width: i32, height: i32) [26]u8 {
+    var bytes = [_]u8{0} ** 26;
+    bytes[0] = 'B';
+    bytes[1] = 'M';
+    std.mem.writeInt(u32, bytes[14..18], 40, .little);
+    std.mem.writeInt(i32, bytes[18..22], width, .little);
+    std.mem.writeInt(i32, bytes[22..26], height, .little);
+    return bytes;
+}
+
+pub fn bmpDimensionsParsesInfoHeaderTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    const bytes = fakeBmpBytes(100, 50);
+    const info = try glyphwire.bmpDimensions(&bytes);
+    try testz.expectEqual(info.width, 100);
+    try testz.expectEqual(info.height, 50);
+}
+
+pub fn bmpDimensionsTopDownHeightIsAbsoluteTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    const bytes = fakeBmpBytes(100, -50); // negative height = top-down row order
+    const info = try glyphwire.bmpDimensions(&bytes);
+    try testz.expectEqual(info.width, 100);
+    try testz.expectEqual(info.height, 50);
+}
+
+pub fn gifDimensionsParsesScreenDescriptorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    var bytes = [_]u8{0} ** 10;
+    @memcpy(bytes[0..6], "GIF89a");
+    std.mem.writeInt(u16, bytes[6..8], 320, .little);
+    std.mem.writeInt(u16, bytes[8..10], 240, .little);
+    const info = try glyphwire.gifDimensions(&bytes);
+    try testz.expectEqual(info.width, 320);
+    try testz.expectEqual(info.height, 240);
+}
+
+pub fn detectImageFormatSniffsMagicBytesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    const png = fakePngBytes(8, 8);
+    const jpeg = fakeJpegBytes(8, 8);
+    const bmp = fakeBmpBytes(8, 8);
+    var gif = [_]u8{0} ** 10;
+    @memcpy(gif[0..6], "GIF87a");
+
+    try testz.expectEqual(glyphwire.detectImageFormat(&png).?, .png);
+    try testz.expectEqual(glyphwire.detectImageFormat(&jpeg).?, .jpeg);
+    try testz.expectEqual(glyphwire.detectImageFormat(&bmp).?, .bmp);
+    try testz.expectEqual(glyphwire.detectImageFormat(&gif).?, .gif);
+    try testz.expectTrue(glyphwire.detectImageFormat("not an image") == null);
+}
+
+pub fn contextLoadImageDeclaredFormatMismatchFailsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    // PNG bytes handed over as a JPEG: the JPEG header parser rejects them.
+    const png = fakePngBytes(48, 24);
+    try testz.expectError(ctx.loadImage(.jpeg, &png), glyphwire.ImageError.InvalidJpeg);
+}
+
+pub fn contextLoadImageStoresDeclaredFormatTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const gif = blk: {
+        var bytes = [_]u8{0} ** 10;
+        @memcpy(bytes[0..6], "GIF89a");
+        std.mem.writeInt(u16, bytes[6..8], 12, .little);
+        std.mem.writeInt(u16, bytes[8..10], 34, .little);
+        break :blk bytes;
+    };
+    const handle = try ctx.loadImage(.gif, &gif);
+    const info = ctx.imageInfo(handle).?;
+    try testz.expectEqual(info.width, 12);
+    try testz.expectEqual(info.height, 34);
 }
 
 pub fn layerDrawImageMarksCoveredCellsWithOffsetsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -939,7 +1065,7 @@ pub fn contextRegisterIconThenLookUpByNameTest(io: std.Io, alloc: std.mem.Alloca
     defer ctx.deinit();
 
     const png = fakePngBytes(32, 32);
-    const handle = try ctx.loadImage(&png);
+    const handle = try ctx.loadImage(.png, &png);
     try ctx.registerIcon("folder", handle);
 
     try testz.expectEqual(ctx.iconHandle("folder").?, handle);
@@ -952,11 +1078,11 @@ pub fn contextRegisterIconTwiceUnderSameNameOverwritesTest(io: std.Io, alloc: st
     defer ctx.deinit();
 
     const png_a = fakePngBytes(16, 16);
-    const handle_a = try ctx.loadImage(&png_a);
+    const handle_a = try ctx.loadImage(.png, &png_a);
     try ctx.registerIcon("icon", handle_a);
 
     const png_b = fakePngBytes(32, 32);
-    const handle_b = try ctx.loadImage(&png_b);
+    const handle_b = try ctx.loadImage(.png, &png_b);
     try ctx.registerIcon("icon", handle_b);
 
     try testz.expectEqual(ctx.iconHandle("icon").?, handle_b);

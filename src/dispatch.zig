@@ -28,6 +28,7 @@ pub const DispatchError = error{
     UnknownTable,
     InvalidTableOption,
     TableRowShapeMismatch,
+    UnsupportedImageFormat,
 };
 
 const Envelope = struct {
@@ -344,9 +345,12 @@ const BatchParams = struct {
 /// wire.zig's `readRaw`. `id` is copied by value straight out of the
 /// envelope's arena: safe only because `Client` always sends integer
 /// request ids (never a string, which would need its own copy) — see
-/// `Client.request`'s `next_id: i64`.
+/// `Client.request`'s `next_id: i64`. `format` is the wire string already
+/// resolved to a `core.ImageFormat` (`peekLoadImage` rejects an unknown
+/// one with `DispatchError.UnsupportedImageFormat`).
 pub const LoadImageHeader = struct {
     id: std.json.Value,
+    format: core.ImageFormat,
     bytes: usize,
 };
 
@@ -423,13 +427,14 @@ pub fn peekLoadImage(alloc: std.mem.Allocator, body: []const u8) !?LoadImageHead
     if (!std.mem.eql(u8, parsed.value.method, "load_image")) return null;
     const id = parsed.value.id orelse return DispatchError.NotARequest;
 
-    const Params = struct { bytes: usize };
+    const Params = struct { format: []const u8, bytes: usize };
     const p = try std.json.parseFromValue(Params, alloc, parsed.value.params, .{
         .ignore_unknown_fields = true,
     });
     defer p.deinit();
 
-    return .{ .id = id, .bytes = p.value.bytes };
+    const format = core.ImageFormat.fromName(p.value.format) orelse return DispatchError.UnsupportedImageFormat;
+    return .{ .id = id, .format = format, .bytes = p.value.bytes };
 }
 
 /// Peeks at a decoded frame body to determine whether it's a notification
@@ -675,7 +680,7 @@ pub const Dispatcher = struct {
     /// frame `handle` can see). Stores `raw_bytes` and returns the response
     /// frame for `hdr.id`.
     pub fn handleLoadImage(self: *Dispatcher, alloc: std.mem.Allocator, hdr: LoadImageHeader, raw_bytes: []const u8) ![]u8 {
-        const image_handle = try self.ctx.loadImage(raw_bytes);
+        const image_handle = try self.ctx.loadImage(hdr.format, raw_bytes);
         return try rpc.response(alloc, hdr.id, LoadImageResult{ .handle = image_handle });
     }
 
