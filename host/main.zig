@@ -1648,7 +1648,9 @@ pub const App = struct {
 
         if (pos.x != self.last_mouse_px.x or pos.y != self.last_mouse_px.y) {
             self.last_mouse_px = pos;
-            self.server.reportMouseMove(.{ .x = pos.x, .y = pos.y }, cell);
+            self.server.reportMouseMove(self.alloc, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
+                std.log.err("reportMouseMove failed: {t}", .{err});
+            };
         }
 
         const view_offset = blk: {

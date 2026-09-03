@@ -12,7 +12,8 @@ const lineedit = @import("shell_support").lineedit;
 const prompt_template = @import("shell_support").prompt_template;
 const browsescroll = @import("shell_support").browsescroll;
 const openaction = @import("shell_support").openaction;
-const Pty = @import("pty.zig").Pty;
+const Pty = glyphwire.Pty;
+const ModeTracker = glyphwire.ModeTracker;
 
 /// The left prompt template used when `shell.conf` configured a prompt
 /// (`prompt.right` and/or the sub-templates) but not `prompt.left`. Byte
@@ -245,6 +246,63 @@ fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
     prompt.applyPendingResize(false) catch {};
 }
 
+/// The modifier keys currently held, as `key_encode` wants them -- shared
+/// by the pty key loop and the mouse encoder.
+fn ptyMods(listener: *glyphwire.InputListener) keyencode.Mods {
+    return .{
+        .ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control"),
+        .shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift"),
+        .alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt"),
+    };
+}
+
+/// The primary mouse button currently held, or null if none -- used to
+/// decide whether `?1002` (motion only while dragging) should report, and
+/// which button to name in the report.
+fn heldMouseButton(listener: *glyphwire.InputListener) ?keyencode.MouseButton {
+    if (listener.isMouseButtonDown("left")) return .left;
+    if (listener.isMouseButtonDown("middle")) return .middle;
+    if (listener.isMouseButtonDown("right")) return .right;
+    return null;
+}
+
+/// Drains `InputListener`'s mouse queues once. When the foregrounded pty
+/// child has a mouse-reporting mode on (`glyphwire.ModeTracker`), each
+/// event is re-encoded as an xterm mouse report and written to the pty;
+/// otherwise the events are just discarded so the queues don't fill while
+/// a command runs. `mev.button` is freed either way.
+fn pumpPtyMouse(
+    alloc: std.mem.Allocator,
+    listener: *glyphwire.InputListener,
+    pty: *Pty,
+    modes: *ModeTracker,
+) void {
+    const reporting = modes.mouseReporting();
+    const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
+
+    while (listener.pollMouseButtonEvent()) |mev| {
+        defer alloc.free(mev.button);
+        if (!reporting) continue;
+        const btn = keyencode.mouseButtonFromName(mev.button) orelse continue;
+        const action: keyencode.MouseAction = if (mev.pressed) .press else .release;
+        var buf: [16]u8 = undefined;
+        if (keyencode.encodeMouse(enc, btn, action, mev.cell.col, mev.cell.row, ptyMods(listener), &buf)) |seq|
+            pty.writeAll(seq);
+    }
+
+    const want_motion = reporting and modes.wantsMotion();
+    while (listener.pollMouseMoveEvent()) |mev| {
+        if (!want_motion) continue;
+        // `?1002` reports motion only while a button is held; `?1003`
+        // reports it with a "no button" code the rest of the time.
+        const btn = heldMouseButton(listener) orelse
+            (if (modes.wantsAnyMotion()) keyencode.MouseButton.none else continue);
+        var buf: [16]u8 = undefined;
+        if (keyencode.encodeMouse(enc, btn, .motion, mev.cell.col, mev.cell.row, ptyMods(listener), &buf)) |seq|
+            pty.writeAll(seq);
+    }
+}
+
 /// Prints the current directory followed by `> `, echoes typed characters
 /// live, Enter commits the line and starts a new prompt row below it. See
 /// `Prompt` for the rest of the line editing (cursor movement, interior
@@ -258,7 +316,11 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     };
     defer client.deinit();
 
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "scroll", "resize", "clipboard" }) catch |err| {
+    // `mouse_move` is subscribed session-wide but only consumed by the
+    // pty foreground loop (`runCommand`) when a child turns on motion
+    // reporting; the prompt loop lets `InputListener`'s own cap drop the
+    // backlog.
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "clipboard" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -2266,7 +2328,7 @@ const Prompt = struct {
         return true;
     }
 
-    /// Runs `argv` under a B0 "dumb PTY" (`shell/pty.zig`): the child's
+    /// Runs `argv` under a B0 "dumb PTY" (`src/pty.zig`): the child's
     /// stdin/stdout/stderr are a pseudo-terminal. A background thread
     /// (`ptyReaderThread`) mirrors the master onto the grid via
     /// `write_text` -- `Layer.writeText` interprets the child's own SGR
@@ -2355,7 +2417,13 @@ const Prompt = struct {
             self.have_status = true;
         }
 
-        var reader_ctx = PtyReaderCtx{ .prompt = self, .master = pty.master };
+        // Sniffed from the child's own output by the reader thread; read
+        // by the key/mouse encoding below to match the modes the child
+        // turned on (application cursor keys, bracketed paste, mouse
+        // reporting). See `glyphwire.ModeTracker`.
+        var modes: ModeTracker = .{};
+
+        var reader_ctx = PtyReaderCtx{ .prompt = self, .master = pty.master, .modes = &modes };
         const reader = std.Thread.spawn(.{}, ptyReaderThread, .{&reader_ctx}) catch |err| {
             // Can't mirror output -- tear the child down rather than leak it.
             pty.signalGroup(std.posix.SIG.KILL);
@@ -2375,7 +2443,22 @@ const Prompt = struct {
         // `pty.reaped()` polls (WNOHANG) once per loop; the wait's short
         // timeout bounds how long an exit-with-no-keypress waits.
         while (!pty.reaped()) {
-            const input_ev = (listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
+            // Terminal resize -> SIGWINCH the child (via the kernel line
+            // discipline). Coalesced: only the final size matters.
+            var new_size: ?glyphwire.ResizeEvent = null;
+            while (listener.pollResizeEvent()) |rev| new_size = rev;
+            if (new_size) |rev| pty.resize(@intCast(rev.cols), @intCast(rev.rows));
+
+            // Mouse: encode to the child when it asked for reporting,
+            // otherwise drain the queues so `InputListener` doesn't sit
+            // full while a command runs.
+            pumpPtyMouse(alloc, listener, &pty, &modes);
+
+            // Poll faster while a mouse-mode TUI is foregrounded so
+            // pointer motion isn't a frame behind; the plain case stays
+            // lazy.
+            const wait_ms: i64 = if (modes.mouseReporting()) 16 else 120;
+            const input_ev = (listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(wait_ms), .clock = .awake } }) catch null) orelse continue;
 
             // Typed text (layout/dead-key/IME resolved) goes to the child's
             // stdin verbatim, exactly as a terminal feeds a pty -- taken
@@ -2390,9 +2473,14 @@ const Prompt = struct {
                 .paste => |tev| {
                     // Ctrl+Shift+V while a child owns the pty: feed the
                     // clipboard straight to its stdin, like a terminal
-                    // pasting into a running program.
+                    // pasting into a running program. Wrap it in the
+                    // bracketed-paste guards if the child turned that mode
+                    // on (`?2004`), so an editor treats it as one literal
+                    // block instead of interpreting each line.
                     defer alloc.free(tev.text);
+                    if (modes.bracketedPaste()) pty.writeAll("\x1b[200~");
                     pty.writeAll(tev.text);
+                    if (modes.bracketedPaste()) pty.writeAll("\x1b[201~");
                     continue;
                 },
                 // No shell prompt to copy while a child is foregrounded;
@@ -2412,8 +2500,9 @@ const Prompt = struct {
             // twice. `toPtyBytes` still handles the named keys (Enter,
             // arrows, ...) and ctrl/alt combos, which produce no `text`.
             if (!mods.ctrl and !mods.alt and keyencode.charFromKeyName(ev.key, false) != null) continue;
+            const cursor_mode: keyencode.CursorKeyMode = if (modes.appCursor()) .application else .normal;
             var kb: [8]u8 = undefined;
-            if (keyencode.toPtyBytes(ev.key, mods, &kb)) |seq| pty.writeAll(seq);
+            if (keyencode.toPtyBytes(ev.key, mods, cursor_mode, &kb)) |seq| pty.writeAll(seq);
         }
 
         // Child reaped -> its slave is closed -> the reader's next master
@@ -2426,6 +2515,9 @@ const Prompt = struct {
     const PtyReaderCtx = struct {
         prompt: *Prompt,
         master: std.c.fd_t,
+        /// Fed every master chunk so the foreground loop can see the DEC
+        /// private modes the child sets.
+        modes: *ModeTracker,
     };
 
     /// Reads the pty master and mirrors it onto the grid via `write_text`
@@ -2461,6 +2553,11 @@ const Prompt = struct {
             const n = std.c.read(ctx.master, &buf, buf.len);
             if (n <= 0) break; // EOF, or EIO once the slave is fully closed
             const chunk = buf[0..@intCast(n)];
+
+            // Watch for `ESC [ ? ... h/l` the child emits regardless of
+            // whether we're mirroring it or handing it to an aware child
+            // (aware output is wire JSON -- no such sequences, harmless).
+            ctx.modes.feed(chunk);
 
             if (aware == null) {
                 pending.appendSlice(alloc, chunk) catch break;

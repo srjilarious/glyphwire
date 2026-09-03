@@ -76,6 +76,13 @@ pub fn mouseButtonNotification(
     });
 }
 
+/// `mouse_move` -- the pointer moved to a new cell (`px`/`cell`). See
+/// `protocol.MouseMoveParams`; broadcast by `Server.reportMouseMove` /
+/// `handleReportMouseMove` only on a cell change.
+pub fn mouseMoveNotification(alloc: std.mem.Allocator, px: protocol.PxPos, cell: protocol.CellPos) ![]u8 {
+    return notification(alloc, "mouse_move", protocol.MouseMoveParams{ .px = px, .cell = cell });
+}
+
 /// `scroll` -- the root layer's scrollback view moved to `offset` (of
 /// `max` retained rows).
 pub fn scrollNotification(alloc: std.mem.Allocator, offset: usize, max: usize) ![]u8 {

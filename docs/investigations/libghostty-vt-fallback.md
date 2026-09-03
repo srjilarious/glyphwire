@@ -403,9 +403,10 @@ The PTY and the VT model are independent, and a **dumb PTY passthrough
 with no VT work beyond Phase A** already buys most of the day-to-day
 value:
 
-- **B0 — dumb PTY passthrough — BUILT** (`shell/pty.zig` +
-  `shell/keyencode.zig`, ~260 LOC incl. the exec-status pipe and key
-  encoder; `runCommand` rewritten). `runCommand`'s old
+- **B0 — dumb PTY passthrough — BUILT** (now `src/pty.zig` +
+  `src/key_encode.zig`, moved out of `shell/` so more than
+  glyphwire-shell can use them; ~260 LOC incl. the exec-status pipe and
+  key encoder; `runCommand` rewritten). `runCommand`'s old
   `stdin=.ignore, stdout=.pipe, stderr=.pipe` spawn is replaced by
   `Pty.spawn`: `openpty` (libc, glyphwire-shell already links it for
   Lua), `fork`, and in the child `setsid` + `TIOCSCTTY` + `dup2` +
@@ -418,7 +419,16 @@ value:
   arrows + nav as `CSI`, `Ctrl`-letter → C0, `Alt` → `ESC` prefix) and
   writes them to the master; it exits when `waitpid(WNOHANG)` reaps the
   child. Initial `TIOCSWINSZ` from `get_property("size")`; live resize
-  (`Pty.resize`) is wired but not yet fed events — a B0 follow-up.
+  now feeds `Pty.resize` from the foreground loop's `resize` events, so a
+  foregrounded child gets a real `SIGWINCH` (VT phase 1, below).
+
+  **VT phase 1 follow-up (BUILT):** the foreground loop also sniffs the
+  child's output (`glyphwire.ModeTracker`) for DEC private modes and
+  encodes input to match — application cursor keys (`?1`), bracketed
+  paste (`?2004`), and mouse reporting (`?1000`/`?1002`/`?1003`/`?1006`,
+  fed by a new coalesced `mouse_move` wire notification). Still no
+  screen-model work: alt screen, scroll regions, IL/DL, cursor
+  save/restore, and a query reply path are B1 (below).
 
   What B0 gets, *with zero new escape-sequence work* (all confirmed):
   - **Immediate output.** The child sees `isatty(1)` → libc switches
@@ -435,10 +445,12 @@ value:
     line-oriented colourful output (a `make` build, `git status`) looks
     right.
 
-  What B0 does **not** get: anything using the **alternate screen**
-  (`ESC [ ? 1049 h`), **scroll regions** (`ESC [ r`), **insert/delete
-  line** (`ESC [ L`/`M`), save/restore cursor, or mouse reporting — i.e.
-  `less`, `vim`, `htop`, `tmux`, `fzf`, `nano`. Phase A *discards*
+  What B0 (even with VT phase 1) does **not** get: anything using the
+  **alternate screen** (`ESC [ ? 1049 h`), **scroll regions**
+  (`ESC [ r`), **insert/delete line** (`ESC [ L`/`M`), or save/restore
+  cursor — i.e. `less`, `vim`, `htop`, `tmux`, `fzf`, `nano`. (Mouse
+  reporting input *is* encoded now, but a program that also needs the
+  alt screen still won't render right.) Phase A *discards*
   `ESC [ ? 1049 h`, so `less` (and therefore a long `git log`, `man`,
   `git diff`) draws over the existing grid instead of a clean screen and
   doesn't restore on `q`. Keystrokes and paging would mostly work; it'd
