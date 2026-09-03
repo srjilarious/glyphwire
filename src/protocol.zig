@@ -214,6 +214,13 @@ pub const MouseMoveParams = struct {
 /// retained-history maximum it's clamped to.
 pub const ScrollParams = struct { offset: usize, max: usize };
 
+/// `terminal_reply` params: the bytes a `write_text` produced in answer
+/// to a terminal query (`CSI 6n` cursor-position, `CSI c` device
+/// attributes, DECRQM) in the text it mirrored. All printable ASCII in
+/// practice (`ESC [ ... R` etc.). glyphwire-shell writes them to the pty
+/// master so the foregrounded child sees its reply.
+pub const TerminalReplyParams = struct { bytes: []const u8 };
+
 /// `resize` params: the new host window size, in cells.
 pub const ResizeParams = struct { cols: usize, rows: usize };
 

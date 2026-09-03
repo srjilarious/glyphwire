@@ -89,6 +89,13 @@ pub fn scrollNotification(alloc: std.mem.Allocator, offset: usize, max: usize) !
     return notification(alloc, "scroll", protocol.ScrollParams{ .offset = offset, .max = max });
 }
 
+/// `terminal_reply` -- `bytes` are a terminal query answer a `write_text`
+/// produced (see `core.Layer.takeReply`), for a `"terminal"` subscriber
+/// to write to the pty master.
+pub fn terminalReplyNotification(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    return notification(alloc, "terminal_reply", protocol.TerminalReplyParams{ .bytes = bytes });
+}
+
 /// `resize` -- the host window is now `cols` x `rows` cells.
 pub fn resizeNotification(alloc: std.mem.Allocator, cols: usize, rows: usize) ![]u8 {
     return notification(alloc, "resize", protocol.ResizeParams{ .cols = cols, .rows = rows });

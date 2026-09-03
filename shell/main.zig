@@ -320,7 +320,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     // pty foreground loop (`runCommand`) when a child turns on motion
     // reporting; the prompt loop lets `InputListener`'s own cap drop the
     // backlog.
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "clipboard" }) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "clipboard", "terminal" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -2454,6 +2454,13 @@ const Prompt = struct {
             // full while a command runs.
             pumpPtyMouse(alloc, listener, &pty, &modes);
 
+            // Terminal query replies (`CSI 6n` / DA / DECRQM) the host
+            // parsed out of the child's own output on the way to the grid.
+            while (listener.pollTerminalReply()) |reply| {
+                defer alloc.free(reply);
+                pty.writeAll(reply);
+            }
+
             // Poll faster while a mouse-mode TUI is foregrounded so
             // pointer motion isn't a frame behind; the plain case stays
             // lazy.
@@ -2508,6 +2515,17 @@ const Prompt = struct {
         // Child reaped -> its slave is closed -> the reader's next master
         // read returns EOF/EIO and the thread exits on its own.
         reader.join();
+
+        // Undo the screen state a program that died without cleaning up
+        // could leave behind: `?1049l` exits the alt screen, then `! p`
+        // (DECSTR soft reset) puts the scroll region back to full and
+        // un-hides the caret without moving the cursor or clearing
+        // anything. Both are no-ops if the program already reset them.
+        // This matters for `less -X` / `bat` / git's default pager, which
+        // set a bottom-margin scroll region on the *primary* screen (no
+        // alt screen) and would otherwise leave `regionActive()` stuck,
+        // freezing scrollback and making the host wheel page the shell.
+        self.client.writeText("\x1b[?1049l\x1b[!p", null, null) catch {};
     }
 
     /// Context for `ptyReaderThread`. `master` is owned by `runCommand`

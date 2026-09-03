@@ -1968,6 +1968,84 @@ intended form instead of losing all colour. This is deliberately the
   where the terminal *state machine* — the genuinely hard part — is what
   it would buy. See the investigation doc for the full rationale.
 
+**Decision (VT phase 2 — B1 screen model):** `Layer.writeText`'s
+interpreter grew from "colour + a few cursor/erase finals" into a
+line-oriented screen model, still hand-rolled in `core.Layer`, still no
+VT library. It is what makes `less` / `git log` / `man` / `nano` / `fzf`
+and simple full-screen TUIs usable under the B0 pty; real
+`nvim`/`htop`/`tmux` remain B2 (a full VT model). New behaviour, all on
+`core.Layer`:
+
+- **Alternate screen** (`CSI ? 1049 h/l`, and `?47`/`?1047` treated
+  alike): a lazily-allocated `width*height` cell buffer with **no
+  scrollback ring**. Entering stashes the primary cursor and homes;
+  exiting restores it. The primary buffer — and its scrollback — is
+  never touched, so `?1049l` brings the shell's prompt and history back
+  exactly as they were. `on_alt` routes `cell`/`viewRow`/the scrollers
+  at the accessor level, so the alt screen needs no parallel code path
+  and the host renders `ctx.root` unchanged.
+- **Scroll region** (`CSI r`, DECSTBM): a `[top, bot]` band. While it's
+  narrower than the full screen (or on the alt screen), a line feed at
+  the bottom margin, `SU`/`SD` (`CSI S`/`T`), `IL`/`DL` (`CSI L`/`M`)
+  and `RI` (`ESC M`) shuffle rows **within the band with no
+  scrollback** — a pushed-past-the-margin row is gone. The default
+  full-screen region keeps the classic ring-buffer scroll-into-
+  scrollback on a line feed past the bottom, so nothing changes for
+  normal output.
+- **Cursor moves now clamp, never scroll.** `CSI B`/`d`/`H`/`f` used to
+  route a target row past the bottom through `resolveRow` (which
+  scrolls) — fine for Phase A's colour + progress-bar output, but a
+  full-screen program that positions to its last line (`less`'s status
+  line) scrolled the whole primary layer one row per keypress, so the
+  status line climbed instead of staying pegged. Only a line feed /
+  `IND` (`ESC D`) / `NEL` (`ESC E`) / `RI` (`ESC M`) / explicit scroll
+  command scrolls now — `IND`/`NEL` are new (they were dropped before).
+- **`ICH`/`DCH`/`ECH`** (`CSI @`/`P`/`X`) reuse the existing
+  `insertCells`/`deleteCells` primitives (`X` is a plain `clear`).
+  **`DECSC`/`DECRC`** (`ESC 7`/`ESC 8`, and ANSI.SYS `CSI s`/`CSI u`)
+  save/restore the cursor. **`DECTCEM`** (`CSI ? 25 h/l`) sets
+  `Layer.cursor_visible`, which glyphwire-host's caret renderer now
+  honours.
+- **Terminal query replies.** `CSI 6n` (cursor position), `CSI 5n`,
+  `CSI c` / `CSI > c` (device attributes) and DECRQM (`CSI ? Ps $ p`,
+  for the modes the screen model tracks) are answered — the reply bytes
+  can't be written from `core.Layer` (a pure grid, no output channel),
+  so `writeText` stashes them and the dispatcher drains them
+  (`Layer.takeReply`) into a new **`terminal_reply`** server→client
+  notification. glyphwire-shell subscribes to `"terminal"` while a pty
+  child is foregrounded and writes them to the pty master. This is the
+  one wire addition; the CSI finals themselves are all inside
+  `write_text`.
+- **After a foregrounded pty child exits**, glyphwire-shell writes
+  `ESC [ ? 1049 l  ESC [ ! p` to its own connection — leave the alt
+  screen, then **DECSTR** (soft reset: scroll region back to full, caret
+  shown, saved cursor and SGR pen cleared; the cursor is *not* moved and
+  nothing is cleared). Without the region reset a `less -X` / `bat` /
+  git-pager session — which sets a bottom-margin scroll region on the
+  **primary** screen and never enters the alt screen — leaves
+  `regionActive()` stuck true forever.
+- **While a full-screen program owns the root layer**, glyphwire-host
+  stops driving the scrollback view *and* stops nudging `ctx.root.cursor`
+  on arrow presses (its caret-preview for the shell's own prompt): the
+  program's output is the sole authority on the cursor, so a program
+  that redraws relative to it — `less`'s `:` prompt at BOF is
+  `\r \x1b[K :`, no absolute address — no longer lands a row higher per
+  keypress. The mouse wheel is redirected to arrow-key events for the
+  program (xterm's `alternateScroll`, so a wheel over `less`/`bat` pages
+  it), the scrollbar is inert, `render` pins the view to the live tail,
+  and any scrolled-back view is snapped to 0 the moment the program
+  takes over. Keys are still forwarded — only the local caret/scroll
+  side effects are suppressed. The trigger is `on_alt` *or* a
+  scroll region set *or* **DECCKM** (`CSI ? 1 h`, application cursor
+  keys — `Layer.app_cursor_keys`, tracked purely so the host can read
+  it). `less -FRX` (git's default pager) and `bat` set neither the alt
+  screen nor a scroll region, but every full-screen TUI — `less`, `vim`,
+  `htop`, `nano`, `fzf` — sets DECCKM, and `ls`/`cat`/`grep` don't, so
+  it's the reliable "a program is driving the screen" signal. Without
+  this, `less -X`'s status line (on the primary screen, not the alt
+  screen) and content appeared to crawl as the user scrolled the host
+  view.
+
 **Decision:** `write_text` always replaces a cell's whole style outright
 (fg *and* bg together, per-cell — same "overwrite outright" behavior
 `draw_icon` used to have before `foreground: true`, see the Icon section)

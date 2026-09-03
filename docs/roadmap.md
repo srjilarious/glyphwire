@@ -1442,6 +1442,86 @@ cell-granular. New `"mouse_move"` subscription (separate from
   feeds), `dispatch_tests.zig` +2 (`mouse_move` broadcasts only on a
   cell change, `"mouse_move"` subscription). 446 pass.
 
+## VT B1 screen model (VT phase 2)
+
+**Done.** The `core.Layer` screen model, hand-rolled (still no VT
+library). `Layer.writeText`'s interpreter went from "colour + a handful
+of cursor/erase finals" to a line-oriented terminal: alternate screen,
+scroll region, insert/delete line, and a query reply path. Gets `less` /
+`git log` / `man` / `nano` / `fzf` and simple full-screen TUIs usable
+under the B0 pty; `nvim`/`htop`/`tmux` are still B2 (a real VT model).
+
+- **Alt screen** (`CSI ? 1049 h/l`, `?47`/`?1047` alike): `Layer` grew a
+  lazily-allocated `alt_cells: ?[]Cell` of `width*height`, **no
+  scrollback**. `on_alt` is checked in a new `liveRow` accessor that
+  `cell` / `clear` / `insertCells` / `deleteCells` / the scrollers all
+  route through, plus a short-circuit in `viewRow` — so the alt screen
+  needs no parallel code and the host renders `ctx.root` unchanged.
+  Entering stashes the primary cursor (`stashed_cursor`) and homes;
+  exiting restores it. Primary buffer + scrollback never touched.
+- **Scroll region** (`CSI r`, DECSTBM): `scroll_top`/`scroll_bot`
+  (inclusive; `init` sets `scroll_bot = height-1`, `resize` resets to
+  full). New `scrollRange(top, bot, n, .up|.down)` backs a line feed at
+  the bottom margin (`lineFeed`, which replaces the old inline `\n`
+  handling), `SU`/`SD` (`CSI S`/`T`), `IL`/`DL` (`CSI L`/`M`) and `RI`
+  (`ESC M`) — all no scrollback. The default full-screen region keeps
+  today's `resolveRow` ring-buffer behaviour, so normal output is
+  unchanged. `resolveRow` clamps (never scrolls) while `on_alt`.
+- **`ICH`/`DCH`/`ECH`** (`CSI @`/`P`/`X`) reuse `insertCells`/
+  `deleteCells`/`clear`. **`DECSC`/`DECRC`** (`ESC 7`/`ESC 8`, `CSI s`/
+  `CSI u`) → `saved_cursor`. **`DECTCEM`** (`CSI ? 25 h/l`) →
+  `Layer.cursor_visible`; `host/main.zig`'s `caretVisible()` honours it.
+- **`csiCursor` clamps, never scrolls.** `CSI B`/`d`/`H`/`f` routed a
+  past-the-bottom row through `resolveRow` (scrolls); a full-screen
+  program parking on its last line (`less` status line) scrolled the
+  primary layer one row per keypress. Now every cursor CSI clamps to
+  `[0, height-1]`; only a line feed / `IND` (`ESC D`, newly handled) /
+  `NEL` (`ESC E`, newly handled) / `RI` / explicit scroll scrolls.
+- **Query replies.** `CSI 6n`/`5n`/`c`/`>c` and DECRQM (`CSI ? Ps $ p`)
+  are answered into `Layer.reply_buf` (a fixed 96 bytes); the dispatcher
+  drains it (`Layer.takeReply`) after each `write_text` and, when
+  non-empty, returns a **`terminal_reply`** broadcast. **Wire change:**
+  `protocol.TerminalReplyParams`, `rpc.terminalReplyNotification`,
+  `Subscriptions.terminal`, `InputListener.pollTerminalReply`
+  (owned-bytes queue), `handleWriteText` now returns `HandleResult`.
+  glyphwire-shell subscribes `"terminal"` and writes the bytes to the
+  pty master in the `runCommand` foreground loop. A batched `write_text`
+  that produced a reply drops it with a warning (aware clients don't
+  query) — acceptable.
+- **Post-exit cleanup:** after a pty child is reaped, `runCommand`
+  writes `ESC [ ? 1049 l  ESC [ ! p` — leave the alt screen, then
+  **DECSTR** (`CSI ! p`, new in `execCsi`): scroll region → full, caret
+  shown, saved cursor + SGR pen cleared, cursor *not* moved, screen
+  *not* cleared. (`ESC [ r` was tried first and dropped — DECSTBM homes
+  the cursor, corrupting the next prompt and hanging two e2e tests on
+  their `waitForCell` timeout.)
+- **Host scrollback gated while a program owns the screen** —
+  `App.screenOwnedByProgram()` / `rootOwned()` = `on_alt` *or*
+  `regionActive()` *or* `root.app_cursor_keys` (DECCKM, `CSI ? 1 h`, new
+  `Layer` field tracked for the host). git's default pager (`less -FRX`)
+  and `bat` set neither alt screen nor scroll region, but every
+  full-screen TUI sets DECCKM. While owned: `render` pins the root view
+  to 0, `handleScrollbar` is inert, `handleScroll` redirects the wheel
+  to `up`/`down` key events (`Server.reportKey`, xterm `alternateScroll`
+  — so a wheel over `less` pages it), `update` snaps `view_scroll` to 0
+  the frame a program takes over, and **`handleArrowRepeat` skips its
+  `moveCursor` caret-preview** (`preview_caret` param) — the host was
+  nudging `ctx.root.cursor` up on every arrow press, and `less` at BOF
+  redraws its `:` prompt relative to the cursor (`\r \x1b[K :`, no
+  absolute address), so the prompt climbed a row per keypress. Keys are
+  still forwarded; only the local side effects stop.
+- **Tests:** `core_tests.zig` +11 (alt-screen isolation + no-scrollback,
+  DECTCEM + DECCKM tracking, scroll-region line feed, SU/SD/RI, IL/DL,
+  ICH/DCH/ECH, DECSC/DECRC, DECSTR, cursor-clamp-not-scroll, query
+  replies), `dispatch_tests.zig` +2 (`terminal_reply` broadcast on a
+  query / none on plain text, `"terminal"` subscription). 459 pass.
+- **Not done (B2):** DEC private modes beyond the above, precise
+  scroll-region redraw optimisation, tab stops (`HTS`/`TBC`), origin
+  mode (`?6`), autowrap toggle (`?7`), keypad application mode
+  (`ESC =`/`ESC >`), and the mouse/kitty-keyboard depth `nvim` wants.
+  A real VT model (libghostty Terminal API, or vendored ghostty) is the
+  call there — see `docs/investigations/libghostty-vt-fallback.md`.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and
