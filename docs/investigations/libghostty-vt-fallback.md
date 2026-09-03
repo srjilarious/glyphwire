@@ -1,15 +1,17 @@
 # Investigation: a VT100/PTY-capable fallback via libghostty
 
-Status: **Phase A built** (this branch — hand-rolled, not libghostty; see
-§7 and the "Update" note below). **Phase B: investigation only.** This
+Status: **Phase A + B0 + B1 built** (all hand-rolled, not libghostty —
+see §7a for the tier breakdown and the "Update" note below). **B2
+(`vim`/`htop`/`tmux`, a real VT model): investigation only.** This
 document records the shape of the problem, what `libghostty` can and
 can't do for us today, three candidate paths, and a recommended phasing
 for running ANSI-emitting programs and old-school full-screen TUIs (vim,
 less, htop, `ncurses` apps) under glyphwire.
 
-Decisions here are provisional. Phase A's "why" now also lives in
+Decisions here are provisional. The "why" for what's built now lives in
 `decisions.md` (In Progress: Text Writing & Styling → the "Phase A VT
-fallback" decision); Phase B remains unbuilt.
+fallback" and "VT phase 2 — B1 screen model" decisions) and the
+per-feature detail in `roadmap.md`; **B2 remains unbuilt.**
 
 ---
 
@@ -456,13 +458,20 @@ value:
   doesn't restore on `q`. Keystrokes and paging would mostly work; it'd
   be usable-but-ugly.
 
-- **B1 — pagers and line-oriented TUIs (+150-250 LOC in `core.zig`).**
-  Add alternate-screen handling (`ESC [ ? 1049 h` / `? 47 h`: save the
-  layer's cell buffer, clear; `l`: restore), `ESC [ r` scroll region,
-  `ESC [ L`/`M` insert/delete line, `ESC [ S`/`T` scroll, `ESC 7`/`ESC 8`
-  save/restore cursor. This is the "`less`, `git log`, `man`, `nano`,
+- **B1 — pagers and line-oriented TUIs — BUILT** (`core.zig`
+  `Layer.writeText` interpreter; ~300 LOC + one wire notification).
+  Alternate-screen buffer (`ESC [ ? 1049 h/l`, `?47`/`?1047`: a
+  scrollback-free `width*height` buffer, primary untouched), `ESC [ r`
+  scroll region with `ESC [ S`/`T`, `ESC [ L`/`M` insert/delete line,
+  `ESC [ @`/`P`/`X` insert/delete/erase char, `ESC 7`/`ESC 8` (and
+  `CSI s`/`u`) save/restore cursor, `ESC M` reverse index, `ESC [ ? 25`
+  DECTCEM, and a query reply path (`CSI 6n`/`c`/DECRQM → a
+  `terminal_reply` notification the shell writes to the pty master).
+  glyphwire-shell soft-resets (`ESC [ ? 1049 l  ESC [ ? 25 h`) after a
+  child exits. This is the "`less`, `git log`, `man`, `nano`, `fzf`,
   simple `dialog` UIs feel right" tier. Still hand-rolled, still no
-  dependency.
+  dependency. See decisions.md's "VT phase 2 — B1 screen model" and
+  roadmap.md.
 
 - **B2 — full-screen (`vim`, `htop`, `tmux`).** These lean hard on
   DEC private modes, precise scroll-region redraw optimisation, tab-stop

@@ -395,6 +395,11 @@ pub const Subscriptions = struct {
     /// section). One flag covers both: a client that wants to answer
     /// copy-with-nothing-selected also wants pasted text.
     clipboard: bool = false,
+    /// `terminal_reply` server->client notifications -- the bytes a
+    /// `write_text` produced in answer to a `CSI 6n` / DA / DECRQM query
+    /// from the text it mirrored. glyphwire-shell subscribes while a pty
+    /// child is foregrounded and writes them to the pty master.
+    terminal: bool = false,
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
@@ -405,6 +410,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "scroll")) return self.scroll;
         if (std.mem.eql(u8, event, "selection")) return self.selection;
         if (std.mem.eql(u8, event, "clipboard")) return self.clipboard;
+        if (std.mem.eql(u8, event, "terminal")) return self.terminal;
         return false;
     }
 
@@ -419,6 +425,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
             if (std.mem.eql(u8, e, "selection")) s.selection = true;
             if (std.mem.eql(u8, e, "clipboard")) s.clipboard = true;
+            if (std.mem.eql(u8, e, "terminal")) s.terminal = true;
         }
         return s;
     }
@@ -517,8 +524,7 @@ pub const Dispatcher = struct {
     /// `write_text` and a standalone one hit precisely the same handler.
     fn dispatchEnvelope(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
         if (std.mem.eql(u8, envelope.method, "write_text")) {
-            try self.handleWriteText(alloc, envelope.params);
-            return .{};
+            return try self.handleWriteText(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "insert_cells")) {
             try self.handleInsertCells(alloc, envelope.params);
             return .{};
@@ -769,7 +775,7 @@ pub const Dispatcher = struct {
         return id;
     }
 
-    fn handleWriteText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleWriteText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
         const parsed = try std.json.parseFromValue(WriteTextParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
@@ -786,6 +792,15 @@ pub const Dispatcher = struct {
             core.default_style.bg;
         const metadata_id = try self.resolveMetadata(p.metadata_id);
         try layer.writeTextTagged(p.text, fg, bg, metadata_id);
+
+        // A terminal query the text carried (`CSI 6n` / DA / DECRQM):
+        // hand the reply bytes to `"terminal"` subscribers -- glyphwire-
+        // shell writes them to the pty master. See `core.Layer.takeReply`.
+        if (layer.takeReply()) |reply| {
+            const body = try rpc.terminalReplyNotification(alloc, reply);
+            return .{ .broadcast = .{ .event = "terminal_reply", .body = body } };
+        }
+        return .{};
     }
 
     fn handleInsertCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {

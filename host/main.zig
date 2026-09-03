@@ -317,6 +317,11 @@ pub const App = struct {
     /// itself moves the cursor, by `render`'s own check.
     caret_pin: ?struct { row: usize, col: usize, base_scroll: usize } = null,
 
+    /// Previous frame's `screenOwnedByProgram()`, to catch the moment a
+    /// full-screen program takes the screen and snap the scrollback view
+    /// back to the live tail (see `update`).
+    screen_was_owned: bool = false,
+
     /// The GLFW window, kept so the OS clipboard can be read/written from
     /// the main thread (GLFW clipboard calls are main-thread-only, so the
     /// wire `set_clipboard` path can't touch it directly -- it goes
@@ -763,6 +768,17 @@ pub const App = struct {
         self.reportMouseEvents(eng, scrollbar_took_left or select_took_left);
         self.handleRepeatKeys(eng, deltaTimeMs);
         self.handleScroll(eng);
+        // When a full-screen program takes the screen, drop any scrollback
+        // view the user had scrolled to -- its content is about to be
+        // hidden behind the program anyway, and leaving `view_scroll` set
+        // would show the wrong rows the moment the program exits.
+        {
+            const owned = self.screenOwnedByProgram();
+            if (owned and !self.screen_was_owned) {
+                self.server.reportScroll(self.alloc, 0, null) catch {};
+            }
+            self.screen_was_owned = owned;
+        }
         // After both the key/text forwarding and the scroll handlers: a
         // key used this frame releases a mouse-scroll caret pin and snaps
         // the view back to the live tail (see `clearCaretPinForKey`).
@@ -795,9 +811,12 @@ pub const App = struct {
         self.blink_elapsed_ms += delta_ms;
     }
 
-    /// Whether the caret should be painted this frame: always, unless
-    /// blinking is enabled and the phase clock is in its "off" half.
+    /// Whether the caret should be painted this frame: never while the
+    /// root layer has DECTCEM cursor-hide set (`CSI ? 25 l` from a
+    /// foregrounded program), otherwise always unless blinking is enabled
+    /// and the phase clock is in its "off" half.
     fn caretVisible(self: *const App) bool {
+        if (!self.server.ctx.root.cursor_visible) return false;
         if (!self.cursor_blink) return true;
         const period = self.cursor_blink_ms * 2;
         return @mod(self.blink_elapsed_ms, period) < self.cursor_blink_ms;
@@ -854,6 +873,29 @@ pub const App = struct {
     /// scrollback, not tied to any particular OS's wheel step size.
     const scroll_rows_per_tick: f32 = 3.0;
 
+    /// True while a full-screen program owns the root layer's display --
+    /// it's on the alternate screen, has set a DECSTBM scroll region, or
+    /// has set DECCKM application cursor keys (`less -X` / `bat` / git's
+    /// pager, and `vim` / `htop` / `nano` / `fzf`, all set DECCKM;
+    /// `ls` / `cat` / `grep` don't). In that state the host's scrollback
+    /// view is meaningless: scrolling it drags the program's own fixed
+    /// rows (a status line) out of place and reveals stale scrollback
+    /// underneath. The wheel is redirected to the program instead (see
+    /// `handleScroll`), the scrollbar goes inert, and `render` pins the
+    /// view to the live tail.
+    fn screenOwnedByProgram(self: *App) bool {
+        self.server.ctx_mutex.lockUncancelable(self.server.io);
+        defer self.server.ctx_mutex.unlock(self.server.io);
+        return rootOwned(&self.server.ctx.root);
+    }
+
+    /// The `screenOwnedByProgram` predicate on an already-locked root
+    /// layer -- for `render` / `renderScrollbar`, which hold `ctx_mutex`
+    /// themselves (the mutex isn't reentrant).
+    fn rootOwned(root: *const glyphwire.Layer) bool {
+        return root.on_alt or root.regionActive() or root.app_cursor_keys;
+    }
+
     /// Scrolls the root layer's view back into its scrollback on wheel-up,
     /// forward toward the live tail on wheel-down -- the missing piece
     /// that made `cat`ing anything longer than the window blast straight
@@ -865,12 +907,28 @@ pub const App = struct {
     /// -- the wheel, the scrollbar, and glyphwire-shell's browse cursor
     /// all move the same `root.view_scroll` field, which `render` reads
     /// directly each frame.
+    ///
+    /// While a full-screen program owns the screen
+    /// (`screenOwnedByProgram`), the wheel instead sends arrow-key events
+    /// -- xterm's `alternateScroll` -- so a wheel over `less`/`bat` pages
+    /// the program rather than uselessly scrolling a frozen scrollback.
     fn handleScroll(self: *App, eng: *AppRunner.Engine) void {
         if (!eng.inputs.mouse_enabled) return;
         const dy = eng.inputs.mouse.scroll().y;
         if (dy == 0) return;
 
         const delta: i64 = @intFromFloat(@round(dy * scroll_rows_per_tick));
+
+        if (self.screenOwnedByProgram()) {
+            const key: []const u8 = if (delta > 0) "up" else "down";
+            var n: i64 = @intCast(@abs(delta));
+            while (n > 0) : (n -= 1) {
+                self.server.reportKey(self.alloc, key, true) catch break;
+                self.server.reportKey(self.alloc, key, false) catch break;
+            }
+            return;
+        }
+
         // Freeze the caret at its current buffer cell for the duration of
         // this mouse-driven scroll (see `caret_pin`).
         self.pinCaretIfUnpinned();
@@ -936,6 +994,13 @@ pub const App = struct {
     ///   `Server.reportScroll`.
     fn handleScrollbar(self: *App, eng: *AppRunner.Engine) bool {
         if (!eng.inputs.mouse_enabled) return false;
+        // No scrollback to drive while a full-screen program owns the
+        // screen -- leave the left button for the program (mouse
+        // reporting) / selection.
+        if (self.screenOwnedByProgram()) {
+            self.scrollbar_drag = false;
+            return false;
+        }
 
         const pos = eng.inputs.mouse.pos();
         const fb = eng.window_state.framebuffer_size;
@@ -1457,10 +1522,17 @@ pub const App = struct {
         // (they move the selection, not the shell's line) -- don't
         // synthesize repeats the shell would act on.
         if (self.select_mode) return;
-        self.handleArrowRepeat(eng, .up, "up", &self.key_repeat.up, 0, -1, delta_ms);
-        self.handleArrowRepeat(eng, .down, "down", &self.key_repeat.down, 0, 1, delta_ms);
-        self.handleArrowRepeat(eng, .left, "left", &self.key_repeat.left, -1, 0, delta_ms);
-        self.handleArrowRepeat(eng, .right, "right", &self.key_repeat.right, 1, 0, delta_ms);
+        // While a full-screen program owns the screen, its own output
+        // drives `ctx.root.cursor` -- the host must not also nudge it on
+        // an arrow press, or a program that redraws relative to the
+        // cursor (`less`'s `:` prompt at BOF: `\r \x1b[K :`) lands a row
+        // off per keypress. The keys are still forwarded (below / via
+        // `reportKeyEvents`); only the local caret preview is skipped.
+        const preview_caret = !self.screenOwnedByProgram();
+        self.handleArrowRepeat(eng, .up, "up", &self.key_repeat.up, 0, -1, delta_ms, preview_caret);
+        self.handleArrowRepeat(eng, .down, "down", &self.key_repeat.down, 0, 1, delta_ms, preview_caret);
+        self.handleArrowRepeat(eng, .left, "left", &self.key_repeat.left, -1, 0, delta_ms, preview_caret);
+        self.handleArrowRepeat(eng, .right, "right", &self.key_repeat.right, 1, 0, delta_ms, preview_caret);
 
         // Editing keys glyphwire-shell's line editor acts on directly.
         // No root-cursor move -- just the re-broadcast the held key needs
@@ -1480,13 +1552,14 @@ pub const App = struct {
         dcol: i32,
         drow: i32,
         delta_ms: f64,
+        preview_caret: bool,
     ) void {
         if (eng.inputs.keyboard.pressed(key)) {
             state.reset();
-            self.moveCursor(dcol, drow);
+            if (preview_caret) self.moveCursor(dcol, drow);
         } else if (eng.inputs.keyboard.down(key)) {
             if (state.tick(delta_ms)) {
-                self.moveCursor(dcol, drow);
+                if (preview_caret) self.moveCursor(dcol, drow);
                 self.server.reportKeyRepeat(self.alloc, name) catch |err| {
                     std.log.err("reportKeyRepeat({s}) failed: {t}", .{ name, err });
                 };
@@ -1704,7 +1777,13 @@ pub const App = struct {
             self.server.ctx_mutex.lockUncancelable(self.server.io);
             defer self.server.ctx_mutex.unlock(self.server.io);
 
-            self.renderLayer(eng, &self.server.ctx.root, content_pad_px, 0, true, self.server.ctx.root.view_scroll);
+            // Pin the root view to the live tail while a full-screen
+            // program owns the screen (`rootOwned`): `less -X` / `bat` /
+            // git's pager draw on the primary screen, so a stale
+            // `view_scroll` would show old scrollback through their
+            // display and make their status line appear to crawl.
+            const root_view: usize = if (rootOwned(&self.server.ctx.root)) 0 else self.server.ctx.root.view_scroll;
+            self.renderLayer(eng, &self.server.ctx.root, content_pad_px, 0, true, root_view);
             for (self.server.ctx.layer_order.items) |handle| {
                 const layer = self.server.ctx.layers.getPtr(handle) orelse continue;
                 self.renderLayer(
@@ -1832,12 +1911,24 @@ pub const App = struct {
         var history_len: usize = undefined;
         var height: usize = undefined;
         var view_scroll: usize = undefined;
+        var owned: bool = undefined;
         {
             self.server.ctx_mutex.lockUncancelable(self.server.io);
             defer self.server.ctx_mutex.unlock(self.server.io);
             history_len = self.server.ctx.root.history_len;
             height = self.server.ctx.root.height;
             view_scroll = self.server.ctx.root.view_scroll;
+            owned = rootOwned(&self.server.ctx.root);
+        }
+        // While a full-screen program owns the screen there's no
+        // scrollback to indicate -- draw just the inert track gutter so
+        // the content width doesn't jump, no thumb.
+        if (owned) {
+            eng.renderer.drawFilledRect(
+                pixzig.RectF.fromPosSize(fb.x - scrollbar_width_px, 0, scrollbar_width_px, fb.y),
+                pixzig.Color.from(28, 28, 32, 255),
+            );
+            return;
         }
         const geom = scrollbarGeom(fb.x, fb.y, history_len, height, view_scroll);
 

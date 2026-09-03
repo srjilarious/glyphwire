@@ -334,6 +334,48 @@ pub fn reportMouseMoveBroadcastsOnlyOnCellChangeTest(io: std.Io, alloc: std.mem.
     try testz.expectTrue(moved.broadcast != null);
 }
 
+pub fn writeTextWithTerminalQueryBroadcastsReplyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // A mirrored `write_text` carrying `CSI 6n` -> a `terminal_reply`
+    // broadcast with the CPR bytes for a `"terminal"` subscriber to send
+    // to the pty master.
+    const msg =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"\u001b[6n"}}
+    ;
+    const result = try d.handle(alloc, msg);
+    const b = result.broadcast.?;
+    defer alloc.free(b.body);
+    try testz.expectEqualStr("terminal_reply", b.event);
+    try testz.expectTrue(std.mem.indexOf(u8, b.body, "\"method\":\"terminal_reply\"") != null);
+    // Cursor was at 1;1 -> reply "\x1b[1;1R", JSON-escaped in the body.
+    try testz.expectTrue(std.mem.indexOf(u8, b.body, "1;1R") != null);
+
+    // Plain text with no query -> no broadcast.
+    const plain =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi"}}
+    ;
+    const plain_result = try d.handle(alloc, plain);
+    try testz.expectTrue(plain_result.broadcast == null);
+}
+
+pub fn subscribeTerminalEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const sub =
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["terminal"]}}
+    ;
+    const result = try d.handle(alloc, sub);
+    if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(d.subscriptions.terminal);
+}
+
 pub fn subscribeMouseMoveEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

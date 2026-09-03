@@ -1643,13 +1643,247 @@ pub fn writeTextDiscardsUnhandledCsiAndPrivateSequencesTest(io: std.Io, alloc: s
     var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
     defer layer.deinit();
 
-    // `ESC [ ? 25 l` (hide cursor) and `ESC [ 6 n` (device status report)
-    // are recognized as sequences and dropped -- none of their bytes are
-    // drawn, and they don't disturb the cursor.
-    try layer.writeText("\x1b[?25lA\x1b[6nB", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    // An unhandled CSI (`ESC [ 99 z`) and a `>`-prefixed device query
+    // that isn't a DA (`ESC [ > 1 m`) are still recognized and dropped --
+    // none of their bytes are drawn and the cursor is untouched. (`?25` /
+    // `6n` now *do* things -- see the DECTCEM and reply-path tests.)
+    try layer.writeText("\x1b[99zA\x1b[>1mB", glyphwire.default_style.fg, glyphwire.default_style.bg);
     try testz.expectEqualStr("A", layer.cell(0, 0).grapheme());
     try testz.expectEqualStr("B", layer.cell(0, 1).grapheme());
     try testz.expectEqual(layer.cursor.col, 2);
+}
+
+// --- B1 screen model: alt screen, DECTCEM, scroll region, IL/DL, ICH/DCH,
+//     DECSC/DECRC, terminal query replies -------------------------------------
+
+pub fn altScreenIsolatesContentAndCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 4);
+    defer layer.deinit();
+
+    try layer.writeText("primary\x1b[2;3HP", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor.row, 1);
+    try testz.expectEqual(layer.cursor.col, 3);
+
+    // Enter the alt screen: cleared, cursor homed, primary stashed.
+    try layer.writeText("\x1b[?1049h", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.on_alt, true);
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqual(layer.cursor.col, 0);
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+
+    try layer.writeText("ALT", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("A", layer.cell(0, 0).grapheme());
+
+    // Back to primary: its content and cursor are exactly as they were.
+    try layer.writeText("\x1b[?1049l", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.on_alt, false);
+    try testz.expectEqual(layer.cursor.row, 1);
+    try testz.expectEqual(layer.cursor.col, 3);
+    try testz.expectEqualStr("p", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("P", layer.cell(1, 2).grapheme());
+}
+
+pub fn altScreenHasNoScrollbackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 8, 2, 8);
+    defer layer.deinit();
+
+    try layer.writeText("\x1b[?1049h", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    // Three lines on a 2-row alt screen: the first is discarded, not
+    // pushed into history.
+    try layer.writeText("one\ntwo\nthree", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.history_len, 0);
+    try testz.expectEqualStr("t", layer.cell(0, 0).grapheme()); // "two"
+    try testz.expectEqualStr("t", layer.cell(1, 0).grapheme()); // "three"
+}
+
+pub fn dectcemAndDecckmTrackModeStateTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 0);
+    defer layer.deinit();
+
+    // DECTCEM (?25) -> cursor_visible.
+    try testz.expectEqual(layer.cursor_visible, true);
+    try layer.writeText("\x1b[?25l", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor_visible, false);
+    try layer.writeText("\x1b[?25h", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor_visible, true);
+
+    // DECCKM (?1) -> app_cursor_keys, read by the host to tell a
+    // full-screen program owns the primary screen.
+    try testz.expectEqual(layer.app_cursor_keys, false);
+    try layer.writeText("\x1b[?1h", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.app_cursor_keys, true);
+    try layer.writeText("\x1b[?1l", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.app_cursor_keys, false);
+}
+
+pub fn scrollRegionConfinesLineFeedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 6, 5, 6);
+    defer layer.deinit();
+
+    // Rows: 0 "AA", 1 "BB", 2 "CC", 3 "DD", 4 "EE".
+    try layer.writeText("AA\nBB\nCC\nDD\nEE", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    // Region rows 2..4 (1-based 3;5), cursor homed inside it by DECSTBM.
+    try layer.writeText("\x1b[3;5r", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.scroll_top, 2);
+    try testz.expectEqual(layer.scroll_bot, 4);
+    try testz.expectEqual(layer.cursor.row, 2);
+
+    // Move to the bottom margin and line-feed: rows 2..4 scroll up, rows
+    // 0..1 and the scrollback are untouched.
+    try layer.writeText("\x1b[5;1H\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("A", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("B", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("D", layer.cell(2, 0).grapheme()); // was row 3
+    try testz.expectEqualStr("E", layer.cell(3, 0).grapheme()); // was row 4
+    try testz.expectEqual(layer.cell(4, 0).grapheme().len, 0); // blanked
+    try testz.expectEqual(layer.history_len, 0);
+}
+
+pub fn scrollUpDownAndReverseIndexTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 4, 0);
+    defer layer.deinit();
+
+    try layer.writeText("11\n22\n33\n44", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    // SU 1: everything moves up a row, bottom blanked.
+    try layer.writeText("\x1b[S", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("2", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cell(3, 0).grapheme().len, 0);
+    // SD 1: back down, top blanked.
+    try layer.writeText("\x1b[T", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqualStr("2", layer.cell(1, 0).grapheme());
+    // RI at the top margin scrolls down too.
+    try layer.writeText("\x1b[H\x1bM", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqualStr("2", layer.cell(2, 0).grapheme());
+}
+
+pub fn insertAndDeleteLinesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 4, 0);
+    defer layer.deinit();
+
+    try layer.writeText("aa\nbb\ncc\ndd", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    // Cursor to row 1 (0-based), insert one line: bb/cc/dd shift down, a
+    // blank appears at row 1, dd falls off the bottom.
+    try layer.writeText("\x1b[2;1H\x1b[L", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cell(1, 0).grapheme().len, 0);
+    try testz.expectEqualStr("b", layer.cell(2, 0).grapheme());
+    try testz.expectEqualStr("c", layer.cell(3, 0).grapheme());
+
+    // Delete that blank line again: bb/cc climb back, bottom blanks.
+    try layer.writeText("\x1b[M", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("b", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("c", layer.cell(2, 0).grapheme());
+    try testz.expectEqual(layer.cell(3, 0).grapheme().len, 0);
+}
+
+pub fn ichDchEchWireToCellPrimitivesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 0);
+    defer layer.deinit();
+
+    try layer.writeText("abcdef\x1b[1;1H", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    // ICH 2 at col 0: "abcdef" -> "  abcdef" (clipped to width).
+    try layer.writeText("\x1b[2@", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqualStr("a", layer.cell(0, 2).grapheme());
+    // DCH 2 at col 0: back to "abcdef".
+    try layer.writeText("\x1b[2P", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("c", layer.cell(0, 2).grapheme());
+    // ECH 3 at col 2: blanks 3 cells in place without shifting.
+    try layer.writeText("\x1b[1;3H\x1b[3X", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("b", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cell(0, 2).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(0, 4).grapheme().len, 0);
+    try testz.expectEqualStr("f", layer.cell(0, 5).grapheme());
+}
+
+pub fn decscDecrcSaveAndRestoreCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 4, 0);
+    defer layer.deinit();
+
+    try layer.writeText("\x1b[2;4H\x1b7", glyphwire.default_style.fg, glyphwire.default_style.bg); // DECSC
+    try layer.writeText("\x1b[4;9Hxx", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try layer.writeText("\x1b8", glyphwire.default_style.fg, glyphwire.default_style.bg); // DECRC
+    try testz.expectEqual(layer.cursor.row, 1);
+    try testz.expectEqual(layer.cursor.col, 3);
+
+    // `CSI u` restores the same save slot.
+    try layer.writeText("\x1b[1;1H\x1b[u", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor.row, 1);
+    try testz.expectEqual(layer.cursor.col, 3);
+}
+
+pub fn absoluteCursorMovesClampAndNeverScrollTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 8, 4, 6);
+    defer layer.deinit();
+
+    try layer.writeText("r0\nr1\nr2\nr3", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.history_len, 0);
+
+    // A full-screen program parking on (and past) its last row -- e.g.
+    // `less`'s status line -- must clamp, not push the layer into
+    // scrollback a row at a time.
+    try layer.writeText("\x1b[99;1H", glyphwire.default_style.fg, glyphwire.default_style.bg); // CUP past the bottom
+    try layer.writeText("\x1b[50B", glyphwire.default_style.fg, glyphwire.default_style.bg); // CUD past the bottom
+    try layer.writeText("\x1b[40d", glyphwire.default_style.fg, glyphwire.default_style.bg); // VPA past the bottom
+    try testz.expectEqual(layer.cursor.row, 3);
+    try testz.expectEqual(layer.history_len, 0); // nothing scrolled
+    try testz.expectEqualStr("r", layer.cell(0, 0).grapheme()); // row 0 still "r0"
+}
+
+pub fn decstrSoftResetRestoresRegionAndCursorVisibleWithoutMovingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 6, 0);
+    defer layer.deinit();
+
+    // A pager-ish state: scroll region set, cursor hidden, cursor parked
+    // mid-screen, a cursor saved.
+    try layer.writeText("\x1b[2;5r\x1b[?25l\x1b[4;3H\x1b7", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.regionActive(), true);
+    try testz.expectEqual(layer.cursor_visible, false);
+
+    // `CSI ! p` (DECSTR): region back to full, caret shown, saved cursor
+    // dropped -- but the cursor itself does NOT move and the screen isn't
+    // cleared. This is what glyphwire-shell sends after a pty child exits.
+    try layer.writeText("\x1b[!p", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.regionActive(), false);
+    try testz.expectEqual(layer.cursor_visible, true);
+    try testz.expectEqual(layer.saved_cursor, null);
+    // Cursor stayed where `\x1b[4;3H` put it (row 3, col 2).
+    try testz.expectEqual(layer.cursor.row, 3);
+    try testz.expectEqual(layer.cursor.col, 2);
+}
+
+pub fn terminalQueryRepliesAreQueuedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 40, 10, 0);
+    defer layer.deinit();
+
+    // CPR: reports the 1-based cursor position after the "hi".
+    try layer.writeText("\x1b[3;5Hhi\x1b[6n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("\x1b[3;7R", layer.takeReply().?);
+    try testz.expectEqual(layer.takeReply(), null); // drained
+
+    // Primary DA.
+    try layer.writeText("\x1b[c", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("\x1b[?1;2c", layer.takeReply().?);
+
+    // DECRQM for DECTCEM: 2 (reset) after hiding the cursor, 1 (set) after.
+    try layer.writeText("\x1b[?25l\x1b[?25$p", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("\x1b[?25;2$y", layer.takeReply().?);
+    try layer.writeText("\x1b[?25h\x1b[?25$p", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("\x1b[?25;1$y", layer.takeReply().?);
 }
 
 pub fn writeTextNewlineScrollsAtBottomRowTest(io: std.Io, alloc: std.mem.Allocator) !void {

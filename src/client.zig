@@ -1496,6 +1496,12 @@ pub const InputListener = struct {
     /// consumer.
     mouse_move_events: std.ArrayList(MouseMoveEvent) = .empty,
     mouse_move_sem: std.Io.Semaphore = .{},
+    /// Queued `terminal_reply` notifications: owned byte slices (a
+    /// `CSI 6n` / DA / DECRQM answer a mirrored `write_text` produced).
+    /// glyphwire-shell drains these and writes them to the pty master.
+    /// Freed by the consumer (`pollTerminalReply`) or in `deinit`.
+    terminal_reply_events: std.ArrayList([]u8) = .empty,
+    terminal_reply_sem: std.Io.Semaphore = .{},
     /// Queued `resize` notifications (see `ResizeEvent`), same
     /// drain-on-poll shape as `key_events`/`mouse_events`. `last_size`
     /// caches the most recent one for `size()`'s instant read; it stays
@@ -1569,6 +1575,8 @@ pub const InputListener = struct {
         for (self.mouse_events.items) |ev| self.alloc.free(ev.button);
         self.mouse_events.deinit(self.alloc);
         self.mouse_move_events.deinit(self.alloc);
+        for (self.terminal_reply_events.items) |b| self.alloc.free(b);
+        self.terminal_reply_events.deinit(self.alloc);
         self.resize_events.deinit(self.alloc);
         self.scroll_events.deinit(self.alloc);
         self.alloc.destroy(self);
@@ -1647,6 +1655,16 @@ pub const InputListener = struct {
             error.Canceled => |e| return e,
         };
         return self.pollMouseMoveEvent();
+    }
+
+    /// Pops the oldest queued `terminal_reply` (non-blocking). The caller
+    /// owns the returned slice and frees it with the `connect` allocator.
+    /// Only produced while subscribed to `"terminal"`.
+    pub fn pollTerminalReply(self: *InputListener) ?[]u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.terminal_reply_events.items.len == 0) return null;
+        return self.terminal_reply_events.orderedRemove(0);
     }
 
     /// Pops the oldest queued `resize` event, if any (non-blocking) --
@@ -1856,6 +1874,23 @@ pub const InputListener = struct {
             if (self.mouse_move_events.items.len >= 512) self.mouse_move_events.clearRetainingCapacity();
             try self.mouse_move_events.append(self.alloc, .{ .px = p.value.px, .cell = p.value.cell });
             self.mouse_move_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "terminal_reply")) {
+            const p = try std.json.parseFromValue(protocol.TerminalReplyParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const owned = try self.alloc.dupe(u8, p.value.bytes);
+            errdefer self.alloc.free(owned);
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.terminal_reply_events.append(self.alloc, owned);
+            self.terminal_reply_sem.post(self.io);
+            // Wake a consumer parked in `waitInputEvent` (the pty
+            // foreground loop) so a startup `CSI 6n` / DA probe is
+            // answered right away, not after the loop's fallback timeout.
+            self.input_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "scroll")) {
             const P = protocol.ScrollParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
