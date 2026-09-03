@@ -10,6 +10,7 @@ const glob = @import("shell_support").glob;
 const handshake = @import("shell_support").handshake;
 const history = @import("shell_support").history;
 const keyencode = @import("shell_support").keyencode;
+const lineedit = @import("shell_support").lineedit;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -409,4 +410,64 @@ pub fn keyencodeReturnsNullForNonPrintableTest(_: std.Io, _: std.mem.Allocator) 
     try testz.expectEqual(keyencode.toPtyBytes("f5", .{}, &buf), null);
     // Ctrl with a key that has no control-byte mapping is swallowed.
     try testz.expectEqual(keyencode.toPtyBytes("f5", .{ .ctrl = true }, &buf), null);
+}
+
+// ─── lineedit: codepoint / display-width helpers ───────────────────────
+
+pub fn lineeditPrevBoundaryStepsWholeCodepointsTest(_: std.Io, _: std.mem.Allocator) !void {
+    // "日本語": 3 codepoints, 3 bytes each -> 9 bytes total.
+    const buf = "日本語";
+    try testz.expectEqual(lineedit.prevBoundary(buf, 9), @as(usize, 6));
+    try testz.expectEqual(lineedit.prevBoundary(buf, 6), @as(usize, 3));
+    try testz.expectEqual(lineedit.prevBoundary(buf, 3), @as(usize, 0));
+    try testz.expectEqual(lineedit.prevBoundary(buf, 0), @as(usize, 0));
+}
+
+pub fn lineeditNextBoundaryStepsWholeCodepointsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "日本語";
+    try testz.expectEqual(lineedit.nextBoundary(buf, 0), @as(usize, 3));
+    try testz.expectEqual(lineedit.nextBoundary(buf, 3), @as(usize, 6));
+    try testz.expectEqual(lineedit.nextBoundary(buf, 6), @as(usize, 9));
+    try testz.expectEqual(lineedit.nextBoundary(buf, 9), @as(usize, 9));
+}
+
+pub fn lineeditBoundariesWalkMixedAsciiAndWideTest(_: std.Io, _: std.mem.Allocator) !void {
+    // "aあb": a=1 byte, あ=3 bytes, b=1 byte -> boundaries at 0,1,4,5.
+    const buf = "aあb";
+    try testz.expectEqual(buf.len, @as(usize, 5));
+    try testz.expectEqual(lineedit.nextBoundary(buf, 0), @as(usize, 1));
+    try testz.expectEqual(lineedit.nextBoundary(buf, 1), @as(usize, 4));
+    try testz.expectEqual(lineedit.nextBoundary(buf, 4), @as(usize, 5));
+    try testz.expectEqual(lineedit.prevBoundary(buf, 5), @as(usize, 4));
+    try testz.expectEqual(lineedit.prevBoundary(buf, 4), @as(usize, 1));
+    try testz.expectEqual(lineedit.prevBoundary(buf, 1), @as(usize, 0));
+}
+
+pub fn lineeditNextBoundaryAdvancesOnInvalidLeadByteTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A stray 0xFF is not a valid UTF-8 lead byte; advance one byte
+    // rather than looping forever.
+    const buf = "\xff\xff";
+    try testz.expectEqual(lineedit.nextBoundary(buf, 0), @as(usize, 1));
+    try testz.expectEqual(lineedit.nextBoundary(buf, 1), @as(usize, 2));
+}
+
+pub fn lineeditDisplayColSumsWideCharsAsTwoTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "aあb";
+    try testz.expectEqual(lineedit.displayCol(buf, 0), @as(usize, 0));
+    try testz.expectEqual(lineedit.displayCol(buf, 1), @as(usize, 1)); // past "a"
+    try testz.expectEqual(lineedit.displayCol(buf, 4), @as(usize, 3)); // past "aあ"
+    try testz.expectEqual(lineedit.displayCol(buf, 5), @as(usize, 4)); // past "aあb"
+}
+
+pub fn lineeditDisplayColIsByteCountForAsciiTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "ls -l";
+    try testz.expectEqual(lineedit.displayCol(buf, 3), @as(usize, 3));
+    try testz.expectEqual(lineedit.displayCol(buf, buf.len), @as(usize, 5));
+}
+
+pub fn lineeditCellWidthCountsGridCellsNotBytesTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(lineedit.cellWidth("あ"), @as(usize, 2)); // 3 bytes, 2 cells
+    try testz.expectEqual(lineedit.cellWidth("ab"), @as(usize, 2));
+    try testz.expectEqual(lineedit.cellWidth("日本語"), @as(usize, 6));
+    try testz.expectEqual(lineedit.cellWidth(""), @as(usize, 0));
 }

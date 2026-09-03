@@ -14,6 +14,10 @@ pub fn build(b: *std.Build) void {
     const shell_support_mod = b.addModule("shell_support", .{
         .root_source_file = b.path("shell/support.zig"),
     });
+    // `shell/lineedit.zig` imports `glyphwire` for `stringWidth` (East
+    // Asian Width lookup); like `ls_support`, no IO / client / server is
+    // pulled in for the pure width math itself.
+    shell_support_mod.addImport("glyphwire", glyphwire_mod);
 
     // Column-packing math shared by glyphwire-ls and its test runner,
     // same cross-directory-module reason as `shell_support` above. Imports

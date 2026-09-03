@@ -287,6 +287,25 @@ surface.
   connected client isn't notified of a cell-metric change (only new
   `get_cell_metrics` queries see it), and a tiling WM that pins the
   window makes the grid reflow instead of the window resizing.
+- **v1 built — caret shape + blink (host-local):** `assets/conf.lua`'s
+  `config` table also carries `cursor_shape` (`line` \| `block` \| `box` \|
+  `underline`; default `line`, the original left-edge bar), `cursor_blink`
+  (default true), and `cursor_blink_ms` (half-period, default 530, clamped
+  100..5000). Kept host-local for the same reason as the font: the caret is
+  a property of the rendering front end, not the shared grid model, and no
+  wire message reports or sets it. The blink phase resets to solid whenever
+  the grid cursor moves or `view_scroll` changes, so the caret is solid
+  the instant the user does anything and only blinks once things settle
+  (`App.tickBlink`). block/box/underline span both cells when the caret
+  sits on a `wide_lead`.
+- **Fixed — caret drawn while scrolled back:** the caret used to be
+  suppressed whenever `view_scroll != 0`, which hid it during
+  glyphwire-shell's keyboard browse (Up-arrow past the top of the window)
+  and made a scrolled-back `ls` listing un-navigable by keyboard. It is
+  now drawn at its grid cell regardless of the scroll offset — browse
+  moves that same grid cursor onto the visible scrolled-back row, so the
+  caret follows; a pure wheel/scrollbar scroll just leaves it at the live
+  prompt's cell.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline
@@ -1103,6 +1122,19 @@ Asian Width `W`/`F` ranges baked into `core.zig` — **Ambiguous (`A`) is
 treated as narrow** (the wcwidth / non-CJK-locale default). `glyphwire-ls`
 lays its columns out with the same width model (`gridlayout.displayWidth`
 / `truncateToCols`, which never split a wide codepoint).
+
+**Built — glyphwire-shell's line editor is width-aware too:** `Prompt`
+keeps its cursor as a byte offset into the line buffer, but every place
+that turned that offset into a grid column, or a byte count into a
+`insert_cells`/`delete_cells` count, went through `core.stringWidth` (now
+re-exported as `glyphwire.stringWidth`) instead — via the pure
+`shell/lineedit.zig` helpers (`prevBoundary`/`nextBoundary` step whole
+codepoints, `displayCol`/`cellWidth` sum display width). Before this, a
+line with CJK text (reachable via Tab-completing a CJK filename) put the
+caret column three-per-char instead of two, so arrow keys appeared not to
+move it, and backspace/kill/completion freed the wrong cell count.
+`lineedit` is a `shell_support` module so `tests/shell_tests.zig` can
+cover it.
 
 **Open:** grapheme cluster segmentation still needs Unicode text
 segmentation (UAX #29) — width is currently taken from a cluster's base

@@ -1,6 +1,6 @@
 -- glyphwire-host configuration.
 --
--- Read once at startup (see host/main.zig `loadFontConfig`). Every field is
+-- Read once at startup (see host/main.zig `loadConfig`). Every field is
 -- optional; anything left out keeps the built-in default shown below. Delete
 -- this file entirely to use all defaults.
 
@@ -19,4 +19,19 @@ config = {
     -- Starting cell size in pixels. Clamped to 8..72. At runtime,
     -- Ctrl+- / Ctrl++ step it by 2 and Ctrl+0 returns to this value.
     font_size = 20.0,
+
+    -- Caret shape: "line" (a vertical bar at the cell's left edge, the
+    -- default), "block" (fills the cell), "box" (a hollow outline), or
+    -- "underline" (a bar along the cell's bottom). block/box/underline
+    -- cover both cells of a wide (CJK) character.
+    cursor_shape = "line",
+
+    -- Whether the caret blinks. It always shows solid the moment the
+    -- caret moves or the window scrolls, and resumes blinking once things
+    -- settle.
+    cursor_blink = true,
+
+    -- Blink half-period in milliseconds: the caret is shown for this long,
+    -- then hidden for this long. Clamped to 100..5000.
+    cursor_blink_ms = 530.0,
 }

@@ -32,7 +32,7 @@ const scrollback_rows = 1000;
 
 // Font defaults. `assets/conf.lua` (a global `config` table with
 // `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
-// subset) overrides these at startup; see `loadFontConfig`. The primary is
+// subset) overrides these at startup; see `loadConfig`. The primary is
 // Noto Sans Mono CJK: one monospaced face covering Latin, Greek, Cyrillic
 // and CJK, so `ls` of files with Greek/Russian/Japanese names renders
 // without tofu. It's a `.ttc` collection, so `font_face_name` picks the
@@ -61,7 +61,41 @@ const FontConfig = struct {
     size: f32 = font_size_default,
 };
 
+// Width in px of the `.line` caret, and thickness in px of the
+// `.underline` bar and the `.box` outline.
 const cursor_width = 2;
+const cursor_underline_px = 2;
+const cursor_box_line_px = 2;
+
+/// The four caret shapes `assets/conf.lua`'s `cursor_shape` can select.
+/// `line` (a vertical bar at the cell's left edge) is the default and the
+/// original behavior; the rest fill, outline, or underline the cell.
+const CursorShape = enum { line, block, box, underline };
+
+const cursor_shape_default: CursorShape = .line;
+const cursor_blink_default: bool = true;
+// Half-period: the caret is shown for this long, then hidden for this
+// long. ~530ms matches the historical xterm default. Clamped to a sane
+// range when read from config.
+const cursor_blink_ms_default: f64 = 530;
+const cursor_blink_ms_min: f64 = 100;
+const cursor_blink_ms_max: f64 = 5000;
+
+/// Caret appearance, resolved at startup from `conf_lua_path` (see
+/// `loadConfig`). Host-local, like `FontConfig` -- the caret is a property
+/// of the rendering front end, not the shared grid model.
+const CursorConfig = struct {
+    shape: CursorShape = cursor_shape_default,
+    blink: bool = cursor_blink_default,
+    blink_ms: f64 = cursor_blink_ms_default,
+};
+
+/// Everything `loadConfig` resolves from `assets/conf.lua`.
+const HostConfig = struct {
+    font: FontConfig = .{},
+    cursor: CursorConfig = .{},
+};
+
 // Blank margin, in pixels, kept on both sides of the composited layers:
 // one strip against the window's left border, and one between the grid's
 // right edge and the always-on scrollbar. Every layer's screen origin is
@@ -187,6 +221,19 @@ pub const App = struct {
     font_size: f32,
     initial_font_size: f32,
 
+    /// Caret appearance from `assets/conf.lua` (see `CursorConfig`).
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
+    cursor_blink_ms: f64,
+    /// Milliseconds since the caret's blink phase last reset. Advanced by
+    /// `deltaTimeMs` every `update`, zeroed whenever the caret moves or the
+    /// window scrolls (see `tickBlink`) so the caret is solid the instant
+    /// the user does anything and only blinks once things settle.
+    blink_elapsed_ms: f64 = 0,
+    /// The `(row, col, view_scroll)` the blink phase was last reset for --
+    /// compared each `update` to detect caret movement / scrolling.
+    blink_ref: struct { row: usize = 0, col: usize = 0, scroll: usize = 0 } = .{},
+
     /// Font file/size passed to `App.init` -- what `applyFontSize` needs to
     /// repeat the startup `measureFontFileIndexed` at a new size.
     pub const FontRuntime = struct {
@@ -203,6 +250,7 @@ pub const App = struct {
         screenshot_path: ?[]const u8,
         screenshot_delay_ms: f64,
         font: FontRuntime,
+        cursor: CursorConfig,
     ) !*App {
         _ = eng;
         const app = try alloc.create(App);
@@ -217,6 +265,9 @@ pub const App = struct {
             .font_face_index = font.face_index,
             .font_size = font.size,
             .initial_font_size = font.size,
+            .cursor_shape = cursor.shape,
+            .cursor_blink = cursor.blink,
+            .cursor_blink_ms = cursor.blink_ms,
         };
         return app;
     }
@@ -403,7 +454,38 @@ pub const App = struct {
         self.handleArrowKeys(eng, deltaTimeMs);
         self.handleScroll(eng);
 
+        self.tickBlink(deltaTimeMs);
+
         return true;
+    }
+
+    /// Advances the caret's blink phase and resets it whenever the caret
+    /// has moved or the window has scrolled since the last tick -- so the
+    /// caret shows solid the moment anything happens and resumes blinking
+    /// only once it settles. A no-op past the phase advance when
+    /// `cursor_blink` is off. Called at the end of `update`, after every
+    /// caret-moving path (key forwarding, arrow repeat, scroll) has run.
+    fn tickBlink(self: *App, delta_ms: f64) void {
+        const now: @TypeOf(self.blink_ref) = blk: {
+            self.server.ctx_mutex.lockUncancelable(self.server.io);
+            defer self.server.ctx_mutex.unlock(self.server.io);
+            const root = &self.server.ctx.root;
+            break :blk .{ .row = root.cursor.row, .col = root.cursor.col, .scroll = root.view_scroll };
+        };
+        if (now.row != self.blink_ref.row or now.col != self.blink_ref.col or now.scroll != self.blink_ref.scroll) {
+            self.blink_ref = now;
+            self.blink_elapsed_ms = 0;
+            return;
+        }
+        self.blink_elapsed_ms += delta_ms;
+    }
+
+    /// Whether the caret should be painted this frame: always, unless
+    /// blinking is enabled and the phase clock is in its "off" half.
+    fn caretVisible(self: *const App) bool {
+        if (!self.cursor_blink) return true;
+        const period = self.cursor_blink_ms * 2;
+        return @mod(self.blink_elapsed_ms, period) < self.cursor_blink_ms;
     }
 
     /// How many grid rows one full wheel "tick" (`scroll().y` of magnitude
@@ -1033,19 +1115,52 @@ pub const App = struct {
             eng.renderer.end();
         }
 
-        // Cursor caret: a solid bar at the left edge of the cursor's
-        // cell, in its own flushed pass so it sits on top of the text
-        // just drawn (a filled rect in the text pass would be submitted
-        // before the text batch and hidden by it).
-        if (draw_cursor and view_offset == 0 and layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
+        // Cursor caret, in its own flushed pass so it sits on top of the
+        // text just drawn (a filled rect in the text pass would be
+        // submitted before the text batch and hidden by it). Shape and
+        // blink come from `assets/conf.lua` (see `CursorConfig`). Drawn
+        // whatever the scrollback offset -- glyphwire-shell's keyboard
+        // browse moves this same grid cursor onto a visible scrolled-back
+        // row, and the caret has to follow it there (a pure wheel scroll
+        // just leaves the caret at the live prompt's grid cell).
+        if (draw_cursor and self.caretVisible() and layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
             eng.renderer.begin(eng.projMat);
-            const cx = origin_x + @as(i32, @intCast(layer.cursor.col)) * cell_w;
-            const cy = origin_y + @as(i32, @intCast(layer.cursor.row)) * cell_h;
-            eng.renderer.drawFilledRect(
-                pixzig.RectF.fromPosSize(cx, cy, cursor_width, cell_h),
-                pixzig.Color.from(255, 255, 255, 255),
-            );
+            self.drawCaret(eng, layer, origin_x, origin_y, view_offset);
             eng.renderer.end();
+        }
+    }
+
+    /// Paints the caret for `layer` at its current grid cursor. `block`,
+    /// `box`, and `underline` cover the whole cell -- two cells when the
+    /// cursor sits on the lead of a wide (CJK) character -- while `line`
+    /// stays a thin bar at the cell's left edge regardless. Assumes an
+    /// open renderer pass (see the caller).
+    fn drawCaret(self: *const App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize) void {
+        const white = pixzig.Color.from(255, 255, 255, 255);
+        const cx = origin_x + @as(i32, @intCast(layer.cursor.col)) * cell_w;
+        const cy = origin_y + @as(i32, @intCast(layer.cursor.row)) * cell_h;
+
+        const on_wide_lead = layer.viewRow(view_offset, layer.cursor.row)[layer.cursor.col].wide == .wide_lead;
+        const cell_span: i32 = if (on_wide_lead) cell_w * 2 else cell_w;
+
+        switch (self.cursor_shape) {
+            .line => eng.renderer.drawFilledRect(
+                pixzig.RectF.fromPosSize(cx, cy, cursor_width, cell_h),
+                white,
+            ),
+            .block => eng.renderer.drawFilledRect(
+                pixzig.RectF.fromPosSize(cx, cy, cell_span, cell_h),
+                white,
+            ),
+            .box => eng.renderer.drawRect(
+                pixzig.RectF.fromPosSize(cx, cy, cell_span, cell_h),
+                white,
+                cursor_box_line_px,
+            ),
+            .underline => eng.renderer.drawFilledRect(
+                pixzig.RectF.fromPosSize(cx, cy + cell_h - cursor_underline_px, cell_span, cursor_underline_px),
+                white,
+            ),
         }
     }
 
@@ -1187,21 +1302,37 @@ fn luaNumField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?f32 {
     return @floatCast(n);
 }
 
-/// Resolves font settings for this run: starts from the `*_default`
-/// constants and overlays whatever `assets/conf.lua` sets in a global
-/// `config` table (any subset of `font_face`, `font_face_name`,
-/// `font_fallback`, `font_size`). A missing file is the normal case and is
-/// silent; a file that fails to read/parse, or a `config` that isn't a
-/// table, logs a warning and the defaults stand. `font_size` is clamped to
-/// the host's `[min_font_size, max_font_size]`. `gpa` is used only for
-/// transient work (the source buffer, the Lua state); returned strings are
-/// `arena`-allocated so they outlive this call.
-fn loadFontConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) FontConfig {
-    var cfg: FontConfig = .{};
+/// Like `luaStrField`, for a boolean field. Absent or non-boolean -> null.
+fn luaBoolField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?bool {
+    _ = lua.getField(-1, key);
+    defer lua.pop(1);
+    if (!lua.isBoolean(-1)) return null;
+    return lua.toBoolean(-1);
+}
+
+/// Maps `config.cursor_shape`'s string to a `CursorShape`, or null for an
+/// unrecognized value (the caller warns and keeps the default).
+fn cursorShapeFromStr(s: []const u8) ?CursorShape {
+    return std.meta.stringToEnum(CursorShape, s);
+}
+
+/// Resolves everything `assets/conf.lua` controls for this run: starts
+/// from the `*_default` constants and overlays whatever the global
+/// `config` table sets -- font fields (`font_face`, `font_face_name`,
+/// `font_fallback`, `font_size`) and caret fields (`cursor_shape`,
+/// `cursor_blink`, `cursor_blink_ms`), any subset. A missing file is the
+/// normal case and is silent; a file that fails to read/parse, or a
+/// `config` that isn't a table, logs a warning and the defaults stand.
+/// `font_size` is clamped to `[min_font_size, max_font_size]` and
+/// `cursor_blink_ms` to `[cursor_blink_ms_min, cursor_blink_ms_max]`.
+/// `gpa` is used only for transient work (the source buffer, the Lua
+/// state); returned strings are `arena`-allocated so they outlive this call.
+fn loadConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) HostConfig {
+    var cfg: HostConfig = .{};
 
     const src = std.Io.Dir.cwd().readFileAlloc(io, conf_lua_path, gpa, .limited(256 * 1024)) catch |err| {
         if (err != error.FileNotFound)
-            std.log.warn("glyphwire-host: couldn't read {s} ({t}); using font defaults", .{ conf_lua_path, err });
+            std.log.warn("glyphwire-host: couldn't read {s} ({t}); using defaults", .{ conf_lua_path, err });
         return cfg;
     };
     defer gpa.free(src);
@@ -1209,13 +1340,13 @@ fn loadFontConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) 
     defer gpa.free(src_z);
 
     var eng = pixzig.scripting.ScriptEngine.init(gpa) catch |err| {
-        std.log.warn("glyphwire-host: Lua init failed ({t}); using font defaults", .{err});
+        std.log.warn("glyphwire-host: Lua init failed ({t}); using defaults", .{err});
         return cfg;
     };
     defer eng.deinit();
 
     eng.run(src_z) catch |err| {
-        std.log.warn("glyphwire-host: {s} failed to run ({t}); using font defaults", .{ conf_lua_path, err });
+        std.log.warn("glyphwire-host: {s} failed to run ({t}); using defaults", .{ conf_lua_path, err });
         return cfg;
     };
 
@@ -1223,19 +1354,33 @@ fn loadFontConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) 
     _ = lua.getGlobal("config") catch return cfg;
     defer lua.pop(1);
     if (!lua.isTable(-1)) {
-        std.log.warn("glyphwire-host: {s} defines no `config` table; using font defaults", .{conf_lua_path});
+        std.log.warn("glyphwire-host: {s} defines no `config` table; using defaults", .{conf_lua_path});
         return cfg;
     }
 
-    if (luaStrField(lua, arena, "font_face")) |v| cfg.face = v;
-    if (luaStrField(lua, arena, "font_face_name")) |v| cfg.face_name = v;
-    if (luaStrField(lua, arena, "font_fallback")) |v| cfg.fallback = v;
-    if (luaNumField(lua, "font_size")) |v| cfg.size = v;
+    if (luaStrField(lua, arena, "font_face")) |v| cfg.font.face = v;
+    if (luaStrField(lua, arena, "font_face_name")) |v| cfg.font.face_name = v;
+    if (luaStrField(lua, arena, "font_fallback")) |v| cfg.font.fallback = v;
+    if (luaNumField(lua, "font_size")) |v| cfg.font.size = v;
 
-    const clamped = std.math.clamp(cfg.size, min_font_size, max_font_size);
-    if (clamped != cfg.size) {
-        std.log.warn("glyphwire-host: conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.size, clamped });
-        cfg.size = clamped;
+    const clamped = std.math.clamp(cfg.font.size, min_font_size, max_font_size);
+    if (clamped != cfg.font.size) {
+        std.log.warn("glyphwire-host: conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });
+        cfg.font.size = clamped;
+    }
+
+    if (luaStrField(lua, arena, "cursor_shape")) |v| {
+        if (cursorShapeFromStr(v)) |shape| {
+            cfg.cursor.shape = shape;
+        } else {
+            std.log.warn("glyphwire-host: conf.lua cursor_shape '{s}' unknown; keeping '{t}'", .{ v, cfg.cursor.shape });
+        }
+    }
+    if (luaBoolField(lua, "cursor_blink")) |v| cfg.cursor.blink = v;
+    if (luaNumField(lua, "cursor_blink_ms")) |v| {
+        cfg.cursor.blink_ms = std.math.clamp(@as(f64, v), cursor_blink_ms_min, cursor_blink_ms_max);
+        if (cfg.cursor.blink_ms != v)
+            std.log.warn("glyphwire-host: conf.lua cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
     }
 
     return cfg;
@@ -1306,9 +1451,10 @@ pub fn main(init: std.process.Init) !void {
 
     const socket_path = try socketPath(arena, init.environ_map);
 
-    // Font face/size/fallback: `assets/conf.lua` if present, else the
-    // `*_default` constants at the top of this file.
-    const font_cfg = loadFontConfig(arena, alloc, io);
+    // Font face/size/fallback and caret shape/blink: `assets/conf.lua` if
+    // present, else the `*_default` constants at the top of this file.
+    const host_cfg = loadConfig(arena, alloc, io);
+    const font_cfg = host_cfg.font;
 
     // The primary font may be a `.ttc` collection; find the index of the
     // named face inside it so both the metrics measured here and the atlas
@@ -1397,7 +1543,7 @@ pub fn main(init: std.process.Init) !void {
         .path = font_cfg.face,
         .face_index = font_face_index,
         .size = font_cfg.size,
-    });
+    }, host_cfg.cursor);
 
     appRunner.run(app);
 

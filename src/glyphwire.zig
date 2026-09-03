@@ -50,6 +50,7 @@ pub const grapheme_inline_len = core.grapheme_inline_len;
 pub const Cell = core.Cell;
 pub const CellWidth = core.CellWidth;
 pub const codepointWidth = core.codepointWidth;
+pub const stringWidth = core.stringWidth;
 pub const Cursor = core.Cursor;
 pub const tab_width = core.tab_width;
 pub const EscState = core.EscState;

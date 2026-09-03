@@ -7,6 +7,7 @@ const hs = @import("shell_support").handshake;
 const config = @import("shell_support").config;
 const history = @import("shell_support").history;
 const keyencode = @import("shell_support").keyencode;
+const lineedit = @import("shell_support").lineedit;
 const Pty = @import("pty.zig").Pty;
 
 comptime {
@@ -368,13 +369,15 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             if (prompt.browse_pos != null) {
                 try prompt.browseLeft();
             } else {
-                try prompt.moveCursorTo(prompt.cursor -| 1);
+                // Step a whole codepoint, not one byte: a CJK character is
+                // three bytes but one cursor stop (see `lineedit`).
+                try prompt.moveCursorTo(lineedit.prevBoundary(prompt.buffer.items, prompt.cursor));
             }
         } else if (std.mem.eql(u8, ev.key, "right")) {
             if (prompt.browse_pos != null) {
                 try prompt.browseRight();
             } else {
-                try prompt.moveCursorTo(prompt.cursor + 1);
+                try prompt.moveCursorTo(lineedit.nextBoundary(prompt.buffer.items, prompt.cursor));
             }
         } else if (!ctrl and !alt and !super) {
             // A ctrl/alt/super chord that isn't one of the explicit cases
@@ -601,7 +604,7 @@ const Prompt = struct {
     /// entry has no relation to what it's replacing.
     fn setLine(self: *Prompt, text: []const u8) !void {
         try self.setCursorAt(0);
-        if (self.buffer.items.len > 0) try self.client.deleteCells(self.buffer.items.len);
+        if (self.buffer.items.len > 0) try self.client.deleteCells(lineedit.cellWidth(self.buffer.items));
 
         self.buffer.clearRetainingCapacity();
         try self.buffer.appendSlice(self.client.alloc, text);
@@ -658,29 +661,37 @@ const Prompt = struct {
         self.cursor += 1;
     }
 
-    /// Deletes the character before the cursor (backspace).
+    /// Deletes the character before the cursor (backspace) -- a whole
+    /// codepoint, and the one or two grid cells it occupied.
     fn deleteBackward(self: *Prompt) !void {
         if (self.cursor == 0) return;
-        _ = self.buffer.orderedRemove(self.cursor - 1);
-        self.cursor -= 1;
+        const start = lineedit.prevBoundary(self.buffer.items, self.cursor);
+        const cells = lineedit.cellWidth(self.buffer.items[start..self.cursor]);
+        try self.buffer.replaceRange(self.client.alloc, start, self.cursor - start, &.{});
+        self.cursor = start;
         try self.setCursorAt(self.cursor);
-        try self.client.deleteCells(1);
+        try self.client.deleteCells(cells);
     }
 
     /// Deletes the character at the cursor (forward delete) -- distinct
     /// from `deleteBackward` now that the cursor isn't always pinned to
-    /// the end of the line.
+    /// the end of the line. Like `deleteBackward`, acts on a whole
+    /// codepoint and its grid cell(s).
     fn deleteForward(self: *Prompt) !void {
         if (self.cursor >= self.buffer.items.len) return;
-        _ = self.buffer.orderedRemove(self.cursor);
+        const end = lineedit.nextBoundary(self.buffer.items, self.cursor);
+        const cells = lineedit.cellWidth(self.buffer.items[self.cursor..end]);
+        try self.buffer.replaceRange(self.client.alloc, self.cursor, end - self.cursor, &.{});
         try self.setCursorAt(self.cursor);
-        try self.client.deleteCells(1);
+        try self.client.deleteCells(cells);
     }
 
     /// ctrl+u: deletes from the start of the line through the cursor.
     fn killToStart(self: *Prompt) !void {
         if (self.cursor == 0) return;
-        const count = self.cursor;
+        // `delete_cells` counts grid cells, not bytes -- wide chars in the
+        // killed span each freed two.
+        const count = lineedit.cellWidth(self.buffer.items[0..self.cursor]);
         try self.buffer.replaceRange(self.client.alloc, 0, self.cursor, &.{});
         self.cursor = 0;
         try self.setCursorAt(0);
@@ -726,7 +737,7 @@ const Prompt = struct {
                 (self.line_start_row - 1) -| (count - 1)
             else
                 0;
-            self.browse_pos = .{ .row = start_row, .col = self.line_start_col + self.cursor };
+            self.browse_pos = .{ .row = start_row, .col = self.line_start_col + lineedit.displayCol(self.buffer.items, self.cursor) };
             const absorbed = self.line_start_row -| start_row;
             const overshoot = count -| absorbed;
             if (overshoot > 0) try self.scrollWindow(@intCast(overshoot));
@@ -909,7 +920,12 @@ const Prompt = struct {
             const res = try self.client.scrollView(0, null);
             self.view_scroll = res.offset;
         }
-        try self.client.setCursor(self.line_start_row, self.line_start_col + offset);
+        // `offset` is a byte offset into `buffer`; the grid column is the
+        // *display width* of everything left of it -- a wide (CJK) char is
+        // two columns but (usually) three bytes, so the two only coincide
+        // for pure-ASCII lines. See `lineedit`.
+        const col = self.line_start_col + lineedit.displayCol(self.buffer.items, offset);
+        try self.client.setCursor(self.line_start_row, col);
     }
 
     /// Leaves the just-typed line where it already is (it's been live-
@@ -1518,7 +1534,9 @@ const Prompt = struct {
         if (text.len == 0) return;
         try self.buffer.insertSlice(self.client.alloc, self.cursor, text);
         try self.setCursorAt(self.cursor);
-        try self.client.insertCells(text.len);
+        // `insert_cells` opens grid cells, not bytes: a CJK completion
+        // suffix needs two cells per character, not three.
+        try self.client.insertCells(lineedit.cellWidth(text));
         try self.client.writeText(text, null, null);
         self.cursor += text.len;
     }
