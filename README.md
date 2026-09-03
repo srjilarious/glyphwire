@@ -178,6 +178,24 @@ as if typed and entered, before the interactive key loop starts. Combined
 with `--screenshot` this drives a fully automated capture with no
 keystroke injection.
 
+### Font configuration
+
+`glyphwire-host` reads **`assets/conf.lua`** at startup, if present, for a
+global `config` table:
+
+| Field | Default | Notes |
+|---|---|---|
+| `font_face` | `assets/NotoSansCJK-Regular.ttc` | TTF/OTF, or a TTC collection. |
+| `font_face_name` | `Mono CJK JP` | Substring of the face name to pick out of a TTC; ignored for a plain font. |
+| `font_fallback` | `assets/JetBrainsMono-Regular.ttf` | Face used for codepoints the primary lacks. |
+| `font_size` | `20.0` | Starting cell size in px, clamped to 8..72. |
+
+Every field is optional and any omitted one keeps its default; a missing
+file uses all defaults. At runtime **`Ctrl+-`** / **`Ctrl++`** step the
+font size by 2px and **`Ctrl+0`** restores the configured size — the
+window resizes to keep the same column/row count (best effort; a tiling
+WM that pins the window reflows the grid instead).
+
 ## Regenerating the screenshots
 
 ```sh

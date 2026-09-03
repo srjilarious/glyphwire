@@ -29,18 +29,38 @@ var grid_rows: usize = initial_grid_rows;
 const min_grid_cols = 16;
 const min_grid_rows = 4;
 const scrollback_rows = 1000;
-// Primary font: Noto Sans Mono CJK covers Latin, Greek, Cyrillic and CJK
-// from one monospaced face, so `ls` of files with Greek/Russian/Japanese
-// names renders without tofu. It's a `.ttc` collection; `font_face_name`
-// picks the Japanese monospaced face out of it at startup (see `main`).
-const font_path = "assets/NotoSansCJK-Regular.ttc";
-const font_face_name = "Mono CJK JP";
-// A fallback face, tried for any codepoint the primary lacks before the
-// atlas falls back to its `.notdef` (tofu) box. Kept mostly to exercise
-// the fallback chain end to end -- users will be able to pick their own
-// primary font soon, and a Latin-only pick still needs CJK from somewhere.
-const font_fallback_path = "assets/JetBrainsMono-Regular.ttf";
-const font_size: f32 = 20.0;
+
+// Font defaults. `assets/conf.lua` (a global `config` table with
+// `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
+// subset) overrides these at startup; see `loadFontConfig`. The primary is
+// Noto Sans Mono CJK: one monospaced face covering Latin, Greek, Cyrillic
+// and CJK, so `ls` of files with Greek/Russian/Japanese names renders
+// without tofu. It's a `.ttc` collection, so `font_face_name` picks the
+// Japanese monospaced face out of it (a plain `.ttf` ignores the name and
+// uses face 0). The fallback face is tried for any codepoint the primary
+// lacks before the atlas falls back to its `.notdef` (tofu) box.
+const font_path_default = "assets/NotoSansCJK-Regular.ttc";
+const font_face_name_default = "Mono CJK JP";
+const font_fallback_default = "assets/JetBrainsMono-Regular.ttf";
+const font_size_default: f32 = 20.0;
+const conf_lua_path = "assets/conf.lua";
+
+// Runtime font-size (Ctrl+- / Ctrl++ / Ctrl+0) policy. The engine applies
+// whatever size it is handed; the clamp range and step are the host's.
+const min_font_size: f32 = 8.0;
+const max_font_size: f32 = 72.0;
+const font_size_step: f32 = 2.0;
+
+/// Font settings resolved at startup from `conf_lua_path` layered over the
+/// `*_default` constants above. String fields point at `arena`-allocated
+/// (process-lifetime) memory, or the default string literals.
+const FontConfig = struct {
+    face: [:0]const u8 = font_path_default,
+    face_name: []const u8 = font_face_name_default,
+    fallback: [:0]const u8 = font_fallback_default,
+    size: f32 = font_size_default,
+};
+
 const cursor_width = 2;
 // Blank margin, in pixels, kept on both sides of the composited layers:
 // one strip against the window's left border, and one between the grid's
@@ -157,6 +177,24 @@ pub const App = struct {
     screenshot_elapsed_ms: f64 = 0,
     screenshot_done: bool = false,
 
+    /// Primary font file + collection face index, kept so `applyFontSize`
+    /// can re-measure cell metrics at a new size. `font_path` is
+    /// process-lifetime (`arena` or a literal), same as it was passed to
+    /// the renderer.
+    font_path: [:0]const u8,
+    font_face_index: i32,
+    /// Live default-font size in px, and the size Ctrl+0 restores.
+    font_size: f32,
+    initial_font_size: f32,
+
+    /// Font file/size passed to `App.init` -- what `applyFontSize` needs to
+    /// repeat the startup `measureFontFileIndexed` at a new size.
+    pub const FontRuntime = struct {
+        path: [:0]const u8,
+        face_index: i32,
+        size: f32,
+    };
+
     pub fn init(
         alloc: std.mem.Allocator,
         eng: *AppRunner.Engine,
@@ -164,6 +202,7 @@ pub const App = struct {
         shell_exited: *std.atomic.Value(bool),
         screenshot_path: ?[]const u8,
         screenshot_delay_ms: f64,
+        font: FontRuntime,
     ) !*App {
         _ = eng;
         const app = try alloc.create(App);
@@ -174,6 +213,10 @@ pub const App = struct {
             .shell_exited = shell_exited,
             .screenshot_path = screenshot_path,
             .screenshot_delay_ms = screenshot_delay_ms,
+            .font_path = font.path,
+            .font_face_index = font.face_index,
+            .font_size = font.size,
+            .initial_font_size = font.size,
         };
         return app;
     }
@@ -347,6 +390,10 @@ pub const App = struct {
         if (self.screenshot_path != null) self.screenshot_elapsed_ms += deltaTimeMs;
 
         self.syncWindowSize(eng);
+        // After syncWindowSize so a font change (which alters cell_w/cell_h
+        // and then resizes the window) is only reconciled against the
+        // framebuffer on the *next* frame, once both have settled.
+        self.handleFontZoom(eng);
         self.reportKeyEvents(eng);
         // The scrollbar gets first refusal on the left button: a press or
         // drag that belongs to it is consumed here so `reportMouseEvents`
@@ -529,6 +576,92 @@ pub const App = struct {
         grid_rows = rows;
     }
 
+    /// Ctrl+- / Ctrl++ step the font size by `font_size_step` (clamped to
+    /// `[min_font_size, max_font_size]`); Ctrl+0 restores the startup size.
+    /// The matching keys are held back from `reportKeyEvents` while Ctrl is
+    /// down so the shell never sees them.
+    fn handleFontZoom(self: *App, eng: *AppRunner.Engine) void {
+        const kb = &eng.inputs.keyboard;
+        if (!kb.ctrl()) return;
+
+        const target: f32 = if (kb.pressed(.minus) or kb.pressed(.kp_subtract))
+            @max(min_font_size, self.font_size - font_size_step)
+        else if (kb.pressed(.equal) or kb.pressed(.kp_add))
+            @min(max_font_size, self.font_size + font_size_step)
+        else if (kb.pressed(.zero) or kb.pressed(.kp_0))
+            self.initial_font_size
+        else
+            return;
+
+        if (target == self.font_size) return;
+        self.applyFontSize(eng, target);
+    }
+
+    /// Repacks the default font atlas at `size_px`, re-measures the cell
+    /// metrics from the same face, updates `cell_w`/`cell_h` and the
+    /// RPC-visible `ctx.cell_px_*`, and resizes the window so the current
+    /// `grid_cols` x `grid_rows` still fits. Any step failing leaves the
+    /// previous size in place.
+    fn applyFontSize(self: *App, eng: *AppRunner.Engine, size_px: f32) void {
+        const fa = eng.defaultFontAtlas() orelse {
+            std.log.warn("glyphwire-host: no resizable default font atlas", .{});
+            return;
+        };
+
+        // Measure first: if this fails we haven't touched the live atlas.
+        const metrics = pixzig.renderer.measureFontFileIndexed(
+            self.font_path,
+            self.font_face_index,
+            size_px,
+            self.alloc,
+        ) catch |err| {
+            std.log.err("glyphwire-host: re-measuring font at {d}px failed: {t}", .{ size_px, err });
+            return;
+        };
+
+        fa.setFontSize(size_px) catch |err| {
+            std.log.err("glyphwire-host: font atlas resize to {d}px failed: {t}", .{ size_px, err });
+            return;
+        };
+
+        self.font_size = size_px;
+        cell_w = metrics.advance;
+        cell_h = metrics.line_height;
+
+        // Keep the metrics clients query via `get_cell_metrics` (e.g.
+        // glyphwire-shell sizing an image) in step. `ctx_mutex`-guarded
+        // like every other host write to `ctx`. Already-connected clients
+        // are not proactively notified of a cell-size change.
+        self.server.ctx_mutex.lockUncancelable(self.server.io);
+        self.server.ctx.cell_px_w = @intCast(cell_w);
+        self.server.ctx.cell_px_h = @intCast(cell_h);
+        self.server.ctx_mutex.unlock(self.server.io);
+
+        self.resizeWindowForCells(eng);
+    }
+
+    /// Resizes the OS window so a framebuffer of exactly
+    /// `grid_cols` x `grid_rows` cells (plus the scrollbar and side
+    /// padding) fits -- the inverse of `syncWindowSize`'s cell math, so it
+    /// round-trips back to the same cell counts next frame with no
+    /// `reportResize`. The framebuffer -> window ratio handles HiDPI;
+    /// `divCeil` biases the window up so rounding never drops a cell. A
+    /// tiling WM that ignores the request just leaves `syncWindowSize` to
+    /// reflow the grid to whatever size it forces instead.
+    fn resizeWindowForCells(self: *App, eng: *AppRunner.Engine) void {
+        _ = self;
+        const ws = &eng.window_state;
+        const fb = ws.framebuffer_size;
+        if (fb.x <= 0 or fb.y <= 0 or ws.window_size.x <= 0 or ws.window_size.y <= 0) return;
+
+        const target_fb_w = @as(i32, @intCast(grid_cols)) * cell_w + 2 * content_pad_px + scrollbar_width_px;
+        const target_fb_h = @as(i32, @intCast(grid_rows)) * cell_h;
+
+        const win_w = std.math.divCeil(i32, target_fb_w * ws.window_size.x, fb.x) catch return;
+        const win_h = std.math.divCeil(i32, target_fb_h * ws.window_size.y, fb.y) catch return;
+        eng.window.setSize(win_w, win_h);
+    }
+
     /// Moves the grid cursor for each arrow key, clamped to the grid --
     /// generic terminal-style cursor addressing, independent of
     /// glyphwire-shell's line editor (which repositions the cursor itself
@@ -591,10 +724,19 @@ pub const App = struct {
     /// pixzig -- directly against the in-process `Server` (see
     /// `Server.reportKey`), not over a socket connection to itself.
     fn reportKeyEvents(self: *App, eng: *AppRunner.Engine) void {
+        // Ctrl + these are `handleFontZoom`'s shortcuts; swallow them here
+        // so the shell/grid never sees the keystroke.
+        const ctrl_held = eng.inputs.keyboard.ctrl();
         const fields = @typeInfo(pixzig.glfw.Key).@"enum".fields;
         inline for (fields) |field| {
             const key = @field(pixzig.glfw.Key, field.name);
-            if (eng.inputs.keyboard.pressed(key)) {
+            const is_zoom_key = switch (key) {
+                .minus, .equal, .zero, .kp_subtract, .kp_add, .kp_0 => true,
+                else => false,
+            };
+            if (is_zoom_key and ctrl_held) {
+                // Consumed by handleFontZoom; don't forward it.
+            } else if (eng.inputs.keyboard.pressed(key)) {
                 self.server.reportKey(self.alloc, field.name, true) catch |err| {
                     std.log.err("reportKey({s}, true) failed: {t}", .{ field.name, err });
                 };
@@ -1024,6 +1166,81 @@ fn loadIconManifest(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Contex
     }
 }
 
+/// Reads a string field named `key` from the `config` table on the Lua
+/// stack top and returns a process-lifetime (`arena`) copy of it, or null
+/// when the field is absent or not a string. The table stays on the stack;
+/// only the field value pushed here is popped.
+fn luaStrField(lua: *pixzig.ziglua.Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[:0]const u8 {
+    _ = lua.getField(-1, key);
+    defer lua.pop(1);
+    if (!lua.isString(-1)) return null;
+    const s = lua.toString(-1) catch return null;
+    return arena.dupeZ(u8, s) catch null;
+}
+
+/// Like `luaStrField`, for a numeric field.
+fn luaNumField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?f32 {
+    _ = lua.getField(-1, key);
+    defer lua.pop(1);
+    if (!lua.isNumber(-1)) return null;
+    const n = lua.toNumber(-1) catch return null;
+    return @floatCast(n);
+}
+
+/// Resolves font settings for this run: starts from the `*_default`
+/// constants and overlays whatever `assets/conf.lua` sets in a global
+/// `config` table (any subset of `font_face`, `font_face_name`,
+/// `font_fallback`, `font_size`). A missing file is the normal case and is
+/// silent; a file that fails to read/parse, or a `config` that isn't a
+/// table, logs a warning and the defaults stand. `font_size` is clamped to
+/// the host's `[min_font_size, max_font_size]`. `gpa` is used only for
+/// transient work (the source buffer, the Lua state); returned strings are
+/// `arena`-allocated so they outlive this call.
+fn loadFontConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) FontConfig {
+    var cfg: FontConfig = .{};
+
+    const src = std.Io.Dir.cwd().readFileAlloc(io, conf_lua_path, gpa, .limited(256 * 1024)) catch |err| {
+        if (err != error.FileNotFound)
+            std.log.warn("glyphwire-host: couldn't read {s} ({t}); using font defaults", .{ conf_lua_path, err });
+        return cfg;
+    };
+    defer gpa.free(src);
+    const src_z = gpa.dupeZ(u8, src) catch return cfg;
+    defer gpa.free(src_z);
+
+    var eng = pixzig.scripting.ScriptEngine.init(gpa) catch |err| {
+        std.log.warn("glyphwire-host: Lua init failed ({t}); using font defaults", .{err});
+        return cfg;
+    };
+    defer eng.deinit();
+
+    eng.run(src_z) catch |err| {
+        std.log.warn("glyphwire-host: {s} failed to run ({t}); using font defaults", .{ conf_lua_path, err });
+        return cfg;
+    };
+
+    const lua = eng.lua;
+    _ = lua.getGlobal("config") catch return cfg;
+    defer lua.pop(1);
+    if (!lua.isTable(-1)) {
+        std.log.warn("glyphwire-host: {s} defines no `config` table; using font defaults", .{conf_lua_path});
+        return cfg;
+    }
+
+    if (luaStrField(lua, arena, "font_face")) |v| cfg.face = v;
+    if (luaStrField(lua, arena, "font_face_name")) |v| cfg.face_name = v;
+    if (luaStrField(lua, arena, "font_fallback")) |v| cfg.fallback = v;
+    if (luaNumField(lua, "font_size")) |v| cfg.size = v;
+
+    const clamped = std.math.clamp(cfg.size, min_font_size, max_font_size);
+    if (clamped != cfg.size) {
+        std.log.warn("glyphwire-host: conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.size, clamped });
+        cfg.size = clamped;
+    }
+
+    return cfg;
+}
+
 fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
     const dir = environ_map.get("XDG_RUNTIME_DIR") orelse "/tmp";
     const pid = std.os.linux.getpid();
@@ -1089,17 +1306,21 @@ pub fn main(init: std.process.Init) !void {
 
     const socket_path = try socketPath(arena, init.environ_map);
 
-    // The primary font is a `.ttc` collection; find the index of the
-    // Japanese monospaced face inside it so both the metrics measured here
-    // and the atlas packed later (in AppRunner.init) use the same face. A
-    // plain `.ttf` would just be face 0.
+    // Font face/size/fallback: `assets/conf.lua` if present, else the
+    // `*_default` constants at the top of this file.
+    const font_cfg = loadFontConfig(arena, alloc, io);
+
+    // The primary font may be a `.ttc` collection; find the index of the
+    // named face inside it so both the metrics measured here and the atlas
+    // packed later (in AppRunner.init) use the same face. A plain `.ttf`
+    // has no named faces, so this falls through to face 0.
     const font_face_index: i32 = blk: {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, font_path, alloc, .limited(64 * 1024 * 1024)) catch |err| {
-            std.log.err("failed to read font '{s}': {t}", .{ font_path, err });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, font_cfg.face, alloc, .limited(64 * 1024 * 1024)) catch |err| {
+            std.log.err("failed to read font '{s}': {t}", .{ font_cfg.face, err });
             return err;
         };
         defer alloc.free(bytes);
-        break :blk pixzig.renderer.findFaceIndexByName(bytes, font_face_name) orelse 0;
+        break :blk pixzig.renderer.findFaceIndexByName(bytes, font_cfg.face_name) orelse 0;
     };
 
     // Measuring metrics needs only the font's own bytes (stb_truetype's
@@ -1108,7 +1329,7 @@ pub fn main(init: std.process.Init) !void {
     // an atlas texture, which does need one (see AppRunner.init below).
     // That means the window can be sized correctly for whatever font is
     // configured instead of a size tuned by hand for one specific font.
-    const metrics = try pixzig.renderer.measureFontFileIndexed(font_path, font_face_index, font_size, alloc);
+    const metrics = try pixzig.renderer.measureFontFileIndexed(font_cfg.face, font_face_index, font_cfg.size, alloc);
     cell_w = metrics.advance;
     cell_h = metrics.line_height;
 
@@ -1162,17 +1383,21 @@ pub fn main(init: std.process.Init) !void {
             .y = @as(i32, @intCast(grid_rows)) * cell_h,
         },
         .resizable = true,
-        .renderInitOpts = .{ .font = .{ .path = .{ .face = font_path, .size = font_size, .face_index = font_face_index } } },
+        .renderInitOpts = .{ .font = .{ .path = .{ .face = font_cfg.face, .size = font_cfg.size, .face_index = font_face_index } } },
     });
 
     // Register the fallback face: codepoints the primary lacks are drawn
     // from it, and anything neither face has renders as the atlas's tofu
     // box. Non-fatal -- text still works from the primary alone.
-    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, font_fallback_path, 0) catch |err| {
-        std.log.warn("could not add fallback font '{s}': {t}", .{ font_fallback_path, err });
+    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, font_cfg.fallback, 0) catch |err| {
+        std.log.warn("could not add fallback font '{s}': {t}", .{ font_cfg.fallback, err });
     };
 
-    const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited, screenshot_path, screenshot_delay_ms);
+    const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited, screenshot_path, screenshot_delay_ms, .{
+        .path = font_cfg.face,
+        .face_index = font_face_index,
+        .size = font_cfg.size,
+    });
 
     appRunner.run(app);
 

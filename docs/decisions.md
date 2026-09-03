@@ -270,6 +270,23 @@ surface.
 - **Not built — still open:** `create_context`, non-root parenting,
   `clip`/`visibility` properties, a raw wheel-delta `mouse_scroll` event
   stream (distinct from `scroll`, which reports the resolved offset).
+- **v1 built — font config + runtime zoom:** `glyphwire-host` reads
+  `assets/conf.lua` at startup (global `config` table: `font_face`,
+  `font_face_name`, `font_fallback`, `font_size`; any subset, missing file
+  = all defaults). Kept host-local rather than a wire concern — the font
+  is a property of the rendering front end, not the shared grid model, and
+  the shell already has its own separate Lua config
+  (`~/.config/glyphwire/shell.conf`), so no new dependency for it. At
+  runtime `Ctrl+-` / `Ctrl++` / `Ctrl+0` repack the pixzig default font
+  atlas in place (`FontAtlas.setFontSize`, added to pixzig for this) and
+  the host re-measures `cell_w`/`cell_h`, updates `ctx.cell_px_*`, and
+  calls `window.setSize` to keep the same `grid_cols`x`grid_rows` — the
+  inverse of `syncWindowSize`'s cell math, so it round-trips with no
+  `reportResize`. Clamp (8..72) and 2px step live in the host, not the
+  engine, which applies whatever size it is handed. Known gaps: a
+  connected client isn't notified of a cell-metric change (only new
+  `get_cell_metrics` queries see it), and a tiling WM that pins the
+  window makes the grid reflow instead of the window resizing.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline
