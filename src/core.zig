@@ -156,6 +156,20 @@ pub const ImageFormat = enum {
             .gif => "gif",
         };
     }
+
+    /// Maps an image `mimetype` (the form `glyphwire-ls` tags entries
+    /// with) to a variant, or null for an image type this can't
+    /// measure/display -- `image/svg+xml`, `image/webp`. Lets a client
+    /// (glyphwire-shell's click-to-view) decide "is this something
+    /// glyphwire-view can open?" without keeping its own list. `image/jpg`
+    /// is accepted alongside the correct `image/jpeg`.
+    pub fn fromMimetype(mime: []const u8) ?ImageFormat {
+        if (std.mem.eql(u8, mime, "image/png")) return .png;
+        if (std.mem.eql(u8, mime, "image/jpeg") or std.mem.eql(u8, mime, "image/jpg")) return .jpeg;
+        if (std.mem.eql(u8, mime, "image/bmp")) return .bmp;
+        if (std.mem.eql(u8, mime, "image/gif")) return .gif;
+        return null;
+    }
 };
 
 /// A loaded image resource: the raw bytes as received, the container

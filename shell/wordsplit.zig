@@ -113,6 +113,34 @@ pub fn freeArgs(alloc: std.mem.Allocator, args: []const Arg) void {
     alloc.free(args);
 }
 
+/// Wraps `s` in single quotes so `splitArgs` reproduces it as exactly one
+/// literal token no matter what spaces or shell metacharacters it holds --
+/// the inverse of the splitter, used when the shell builds a command line
+/// from a value it didn't get from the user typing it (a clicked
+/// `glyphwire-ls` entry's path, see `Prompt.activateSelectionAt`).
+///
+/// An embedded `'` is emitted as `'\''` -- close the quote, a
+/// backslash-escaped literal quote, reopen -- the standard POSIX idiom.
+/// This shell's splitter round-trips it because a backslash outside quotes
+/// escapes the next byte and adjacent quoted/unquoted runs join into one
+/// token. Caller owns the returned bytes.
+pub fn quoteArg(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    try out.append(alloc, '\'');
+    for (s) |c| {
+        if (c == '\'') {
+            try out.appendSlice(alloc, "'\\''");
+        } else {
+            try out.append(alloc, c);
+        }
+    }
+    try out.append(alloc, '\'');
+
+    return out.toOwnedSlice(alloc);
+}
+
 /// Text-only splitter: quoting/escaping removed, "was quoted" flag
 /// dropped. Returns an owned slice of owned token strings; free with
 /// `freeTokens`.

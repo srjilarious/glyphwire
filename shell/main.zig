@@ -814,19 +814,21 @@ const Prompt = struct {
     /// its `mimetype` (glyphwire-ls tags every entry it draws this way --
     /// see `iconForEntry`'s caller in ls/main.zig), runs a command as if
     /// it had been typed: `cd <path>` for `"directory"`, `glyphwire-view
-    /// <path>` for `"image/png"`. `setLine` both echoes the command and,
-    /// via `setCursorAt`, ends any in-progress browsing before
-    /// `submitLine` runs it -- same path a real typed command takes, so
-    /// e.g. `glyphwire-view`'s own "wait for a keypress before exiting"
-    /// behavior (see view/main.zig) just works, blocking the prompt loop
-    /// exactly like it would for a command the user typed themselves. A
-    /// no-op for anything else (untagged, an unrecognized mimetype, empty
-    /// space) per the "don't guess" policy: nothing should happen on a
-    /// cell that isn't unambiguously actionable. Doesn't handle a `path`
-    /// containing a space -- this shell doesn't support quoted arguments
-    /// anywhere yet (see `runCommand`'s doc comment), so neither does
-    /// this. Shared by `browseEnter` (Enter while browsing) and
-    /// `runPrompt`'s left-click handling.
+    /// <path>` for any image type glyphwire-view can open
+    /// (`core.ImageFormat.fromMimetype` -- PNG/JPEG/BMP/GIF, but not
+    /// `image/svg+xml` or `image/webp`). The `<path>` is single-quoted
+    /// (`wordsplit.quoteArg`) so a name with spaces or shell
+    /// metacharacters survives `dispatchLine`'s re-split. `setLine` both
+    /// echoes the command and, via `setCursorAt`, ends any in-progress
+    /// browsing before `submitLine` runs it -- same path a real typed
+    /// command takes, so e.g. `glyphwire-view`'s own "wait for a keypress
+    /// before exiting" behavior (see view/main.zig) just works, blocking
+    /// the prompt loop exactly like it would for a command the user typed
+    /// themselves. A no-op for anything else (untagged, an unrecognized
+    /// mimetype, empty space) per the "don't guess" policy: nothing should
+    /// happen on a cell that isn't unambiguously actionable. Shared by
+    /// `browseEnter` (Enter while browsing) and `runPrompt`'s left-click
+    /// handling.
     ///
     /// `view_offset` is how many rows of scrollback the host was showing
     /// when `(row, col)` was picked (0 at the live tail) -- forwarded to
@@ -848,13 +850,18 @@ const Prompt = struct {
         const mimetype = parsed.value.mimetype orelse return;
         const path = parsed.value.path orelse return;
 
-        var line_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+        // Single-quote the path so `dispatchLine` re-splits it back into
+        // one token even with spaces / shell metacharacters in the name.
+        const quoted = wordsplit.quoteArg(alloc, path) catch return;
+        defer alloc.free(quoted);
+
         const line = if (std.mem.eql(u8, mimetype, "directory"))
-            std.fmt.bufPrint(&line_buf, "cd {s}", .{path}) catch return
-        else if (std.mem.eql(u8, mimetype, "image/png"))
-            std.fmt.bufPrint(&line_buf, "glyphwire-view {s}", .{path}) catch return
+            std.fmt.allocPrint(alloc, "cd {s}", .{quoted}) catch return
+        else if (glyphwire.ImageFormat.fromMimetype(mimetype) != null)
+            std.fmt.allocPrint(alloc, "glyphwire-view {s}", .{quoted}) catch return
         else
             return;
+        defer alloc.free(line);
 
         try self.setLine(line);
         try self.submitLine();

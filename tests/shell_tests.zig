@@ -90,6 +90,41 @@ pub fn splitArgsFlagsQuotedTokensTest(_: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectTrue(args[4].quoted); // \*   -> literal
 }
 
+// ─── wordsplit.quoteArg ───────────────────────────────────────────────
+
+/// `quoteArg` output must re-split (via `split`) to exactly the one
+/// original token -- that round trip is the whole contract.
+fn expectQuoteArgRoundTrips(alloc: std.mem.Allocator, original: []const u8) !void {
+    const quoted = try wordsplit.quoteArg(alloc, original);
+    defer alloc.free(quoted);
+    const toks = try wordsplit.split(alloc, quoted);
+    defer wordsplit.freeTokens(alloc, toks);
+    try testz.expectEqual(toks.len, 1);
+    try testz.expectEqualStr(original, toks[0]);
+}
+
+pub fn quoteArgWrapsPlainPathTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const quoted = try wordsplit.quoteArg(alloc, "photo.png");
+    defer alloc.free(quoted);
+    try testz.expectEqualStr("'photo.png'", quoted);
+    try expectQuoteArgRoundTrips(alloc, "photo.png");
+}
+
+pub fn quoteArgRoundTripsSpacesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectQuoteArgRoundTrips(alloc, "my holiday pics/beach 2.jpg");
+}
+
+pub fn quoteArgRoundTripsEmbeddedSingleQuoteTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const quoted = try wordsplit.quoteArg(alloc, "it's a photo.gif");
+    defer alloc.free(quoted);
+    try testz.expectEqualStr("'it'\\''s a photo.gif'", quoted);
+    try expectQuoteArgRoundTrips(alloc, "it's a photo.gif");
+}
+
+pub fn quoteArgRoundTripsShellMetacharactersTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectQuoteArgRoundTrips(alloc, "weird $name *.bmp;rm -rf~ (x).png");
+}
+
 // ─── glob.hasWildcard ─────────────────────────────────────────────────
 
 pub fn hasWildcardTest(_: std.Io, _: std.mem.Allocator) !void {

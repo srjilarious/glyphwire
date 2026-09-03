@@ -767,6 +767,16 @@ surface.
   quotes. This is the minimum needed for filenames with spaces (`cat 'my
   file.txt'`) and is the shared front end for alias bodies and (later)
   glob tokens.
+- **A click on a `glyphwire-ls` entry builds a `cd` / `glyphwire-view`
+  line with the path single-quoted** (`wordsplit.quoteArg`, the inverse of
+  the splitter — an embedded `'` becomes `'\''`). `activateSelectionAt`
+  synthesizes a command string that then goes back through the same
+  `dispatchLine` split every typed line does, so without quoting a name
+  with a space or a shell metacharacter would tokenize wrong or, worse,
+  inject. The set of image types a click opens in `glyphwire-view` is
+  whatever `core.ImageFormat.fromMimetype` recognizes (PNG/JPEG/BMP/GIF —
+  not the `image/svg+xml` / `image/webp` entries `glyphwire-ls` also
+  tags), so the shell and the viewer can't drift apart.
 - **`alias` / `unalias` are builtins.** The `alias` table is seeded at
   startup from `shell.conf` (see below) and then mutated for the rest of
   the session by the builtins; a binding made or removed with the builtin

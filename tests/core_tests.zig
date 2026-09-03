@@ -770,6 +770,20 @@ pub fn detectImageFormatSniffsMagicBytesTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectTrue(glyphwire.detectImageFormat("not an image") == null);
 }
 
+pub fn imageFormatFromMimetypeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    try testz.expectEqual(glyphwire.ImageFormat.fromMimetype("image/png").?, .png);
+    try testz.expectEqual(glyphwire.ImageFormat.fromMimetype("image/jpeg").?, .jpeg);
+    try testz.expectEqual(glyphwire.ImageFormat.fromMimetype("image/jpg").?, .jpeg);
+    try testz.expectEqual(glyphwire.ImageFormat.fromMimetype("image/bmp").?, .bmp);
+    try testz.expectEqual(glyphwire.ImageFormat.fromMimetype("image/gif").?, .gif);
+    // Tagged image/... by glyphwire-ls, but glyphwire-view can't open them.
+    try testz.expectTrue(glyphwire.ImageFormat.fromMimetype("image/svg+xml") == null);
+    try testz.expectTrue(glyphwire.ImageFormat.fromMimetype("image/webp") == null);
+    try testz.expectTrue(glyphwire.ImageFormat.fromMimetype("directory") == null);
+}
+
 pub fn contextLoadImageDeclaredFormatMismatchFailsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

@@ -864,9 +864,27 @@ same connection-severing path a malformed PNG already took). **This is a
 wire change** (the `format` field is now load-bearing), so `api.md` +
 `decisions.md` are updated. `glyphwire-view` picks the format by sniffing
 the file's magic bytes (`core.detectImageFormat`), not its extension, and
-its usage / doc comments now say "image" not "PNG". 9 new `core` tests
-(the four parsers + `detectImageFormat` + a declared-format-mismatch
-case), 1 new `dispatch` test (unknown format rejected); 264 pass.
+its usage / doc comments now say "image" not "PNG".
+
+Follow-up in the same branch, both client-local (no wire change):
+
+- **`glyphwire-shell`'s click-to-view opens JPEG/BMP/GIF too, not just
+  PNG.** `activateSelectionAt` matched the literal `"image/png"`; it now
+  runs `glyphwire-view` for any mimetype `core.ImageFormat.fromMimetype`
+  recognizes (new helper — PNG/JPEG/BMP/GIF, deliberately not the
+  `image/svg+xml` / `image/webp` entries `glyphwire-ls` also tags, since
+  the viewer can't render those). `glyphwire-ls` needed no change — its
+  `extension_mimetypes` table already tagged `.jpg`/`.jpeg`/`.gif`/`.bmp`.
+- **The clicked path is single-quoted into the synthesized command line**
+  (`wordsplit.quoteArg`, new — the inverse of `splitArgs`, emitting an
+  embedded `'` as `'\''`). `activateSelectionAt` builds a string that goes
+  back through `dispatchLine`'s split, so a name with a space or a shell
+  metacharacter previously tokenized wrong; now `cd`/`glyphwire-view` on a
+  clicked `my holiday pics/beach 2.jpg` works.
+
+14 new tests total: 9 `core` (the four parsers + `detectImageFormat` +
+`fromMimetype` + declared-format-mismatch + format-stored), 1 `dispatch`
+(unknown format rejected), 4 `shell` (`quoteArg` round trips); 269 pass.
 
 ## Further out (sequencing noted, not detailed yet)
 
