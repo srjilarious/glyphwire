@@ -1451,6 +1451,10 @@ pub const MouseButtonEvent = struct {
     /// is scrolled back resolves to the row actually under the pointer.
     view_offset: usize = 0,
 };
+/// One `mouse_move` notification: the pointer's new pixel + cell
+/// position. No owned memory -- handed back by value like `ResizeEvent`.
+/// Only arrives on a cell change (the server coalesces per-pixel motion).
+pub const MouseMoveEvent = struct { px: PxPos, cell: CellPos };
 /// One `resize` notification: the window's new size in cells. No owned
 /// memory (unlike `KeyEvent.key`), so `pollResizeEvent` hands it back by
 /// value with nothing for the caller to free.
@@ -1484,6 +1488,14 @@ pub const InputListener = struct {
     /// currently down.
     mouse_events: std.ArrayList(MouseButtonEvent) = .empty,
     mouse_sem: std.Io.Semaphore = .{},
+    /// Queued `mouse_move` notifications, same drain-on-poll shape. Motion
+    /// is high-rate even after the server's per-cell coalescing, so the
+    /// queue is capped: a consumer that stops draining (the prompt loop,
+    /// which doesn't care about motion) makes it drop the backlog rather
+    /// than grow without bound. The pty foreground loop is the real
+    /// consumer.
+    mouse_move_events: std.ArrayList(MouseMoveEvent) = .empty,
+    mouse_move_sem: std.Io.Semaphore = .{},
     /// Queued `resize` notifications (see `ResizeEvent`), same
     /// drain-on-poll shape as `key_events`/`mouse_events`. `last_size`
     /// caches the most recent one for `size()`'s instant read; it stays
@@ -1556,6 +1568,7 @@ pub const InputListener = struct {
         self.input_events.deinit(self.alloc);
         for (self.mouse_events.items) |ev| self.alloc.free(ev.button);
         self.mouse_events.deinit(self.alloc);
+        self.mouse_move_events.deinit(self.alloc);
         self.resize_events.deinit(self.alloc);
         self.scroll_events.deinit(self.alloc);
         self.alloc.destroy(self);
@@ -1614,6 +1627,26 @@ pub const InputListener = struct {
             error.Canceled => |e| return e,
         };
         return self.pollMouseButtonEvent();
+    }
+
+    /// Pops the oldest queued `mouse_move` event, if any (non-blocking) --
+    /// see `pollMouseButtonEvent`, the same drain shape. Nothing to free.
+    /// Only produced while subscribed to `"mouse_move"`.
+    pub fn pollMouseMoveEvent(self: *InputListener) ?MouseMoveEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.mouse_move_events.items.len == 0) return null;
+        return self.mouse_move_events.orderedRemove(0);
+    }
+
+    /// Blocks until a `mouse_move` event is queued or `timeout` elapses --
+    /// see `waitMouseButtonEvent`.
+    pub fn waitMouseMoveEvent(self: *InputListener, timeout: std.Io.Timeout) !?MouseMoveEvent {
+        self.mouse_move_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
+            error.Timeout => return null,
+            error.Canceled => |e| return e,
+        };
+        return self.pollMouseMoveEvent();
     }
 
     /// Pops the oldest queued `resize` event, if any (non-blocking) --
@@ -1805,6 +1838,24 @@ pub const InputListener = struct {
             // null (the input queue is untouched), which that loop already
             // treats as an idle tick.
             self.input_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "mouse_move")) {
+            const P = protocol.MouseMoveParams;
+            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
+            self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
+            // Drop the backlog if nothing's draining (see the field doc):
+            // only the newest position matters for the pty consumer, and a
+            // consumer that fell 512+ cells behind isn't tracking a
+            // gesture any more.
+            if (self.mouse_move_events.items.len >= 512) self.mouse_move_events.clearRetainingCapacity();
+            try self.mouse_move_events.append(self.alloc, .{ .px = p.value.px, .cell = p.value.cell });
+            self.mouse_move_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "scroll")) {
             const P = protocol.ScrollParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{

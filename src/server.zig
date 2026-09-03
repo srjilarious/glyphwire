@@ -332,14 +332,26 @@ pub const Server = struct {
     }
 
     /// In-process equivalent of `report_mouse_move` -- see `reportKey`.
-    /// Doesn't broadcast (no live move-event stream, matching
-    /// `handleReportMouseMove`), just keeps `get_input_state`'s cursor
-    /// fields current.
-    pub fn reportMouseMove(self: *Server, px: core.PxPos, cell: core.CellPos) void {
-        self.ctx_mutex.lockUncancelable(self.io);
-        defer self.ctx_mutex.unlock(self.io);
-        self.ctx.input.cursor_px = px;
-        self.ctx.input.cursor_cell = cell;
+    /// Keeps `get_input_state`'s cursor fields current every call, and
+    /// broadcasts a `mouse_move` notification (`{px, cell}`) to
+    /// `"mouse_move"` subscribers only when the pointer crossed into a
+    /// new cell -- matching `handleReportMouseMove` and keeping the
+    /// per-pixel motion the host reports off the wire. Cheap to call
+    /// every frame.
+    pub fn reportMouseMove(self: *Server, alloc: std.mem.Allocator, px: core.PxPos, cell: core.CellPos) !void {
+        const cell_changed = changed: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const before = self.ctx.input.cursor_cell;
+            self.ctx.input.cursor_px = px;
+            self.ctx.input.cursor_cell = cell;
+            break :changed before.row != cell.row or before.col != cell.col;
+        };
+        if (!cell_changed) return;
+
+        const body = try rpc.mouseMoveNotification(alloc, px, cell);
+        defer alloc.free(body);
+        self.broadcast(null, "mouse_move", body);
     }
 
     /// Applies a new window size, in cells, to the context (resizing the

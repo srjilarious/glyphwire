@@ -200,6 +200,16 @@ pub const MouseButtonParams = struct {
     view_offset: usize = 0,
 };
 
+/// `mouse_move` params: the pointer's new pixel and cell position. Sent
+/// only when the cell changed (the host coalesces per-pixel motion),
+/// which is the granularity an xterm mouse report needs anyway. Consumed
+/// by `InputListener`; glyphwire-shell re-encodes it as a mouse report
+/// for a pty child that asked for motion reporting (`?1002` / `?1003`).
+pub const MouseMoveParams = struct {
+    px: PxPos,
+    cell: CellPos,
+};
+
 /// `scroll` params: the root layer's scrollback view offset and the
 /// retained-history maximum it's clamped to.
 pub const ScrollParams = struct { offset: usize, max: usize };

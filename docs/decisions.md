@@ -51,7 +51,7 @@ final.
   that spawns arbitrary commands (`glyphwire-shell`'s `Prompt.runCommand`)
   can't know in advance whether a given command is glyphwire-aware, so it
   defaults to "plain program writing to a terminal": it runs the child on
-  a **pseudo-terminal** (B0, `shell/pty.zig` — see roadmap.md) and
+  a **pseudo-terminal** (B0, `src/pty.zig` — see roadmap.md) and
   forwards each chunk of the master onto the grid via a single
   `write_text` (`Prompt.ptyReaderThread`), letting `Layer.writeText`'s own
   C0 handling and SGR/CSI interpretation (see the styled-text section)
@@ -163,7 +163,26 @@ final.
 - Continuous/analog streams (mouse motion, gamepad axes) may be coalesced
   or dropped under backpressure if the client is slow to consume them.
   Discrete state-change events (press/release, layer lifecycle) are never
-  dropped.
+  dropped. *Implemented:* the `mouse_move` notification (`{px, cell}`) is
+  a coalesced stream — the host reports every pixel of motion in-process
+  but a broadcast only goes out on a **cell** change, and `InputListener`
+  caps its queue and drops the backlog if the consumer stalls. It's a
+  separate subscription (`"mouse_move"`) from `"mouse_button"` so a
+  click-only client isn't firehosed.
+- **pty input path (B0):** while glyphwire-shell has a non-glyphwire
+  child foregrounded on a pseudo-terminal, its foreground loop re-encodes
+  `InputListener` events into the bytes a real terminal would send and
+  writes them to the pty master. It watches the child's own output
+  (`glyphwire.ModeTracker`, sniffing `ESC [ ? Ps h/l`) for the DEC
+  private modes that change that encoding: application cursor keys
+  (`?1`, arrows/Home/End become `ESC O x`), bracketed paste (`?2004`,
+  paste wrapped in `ESC [ 200~`/`201~`), and mouse reporting
+  (`?1000`/`?1002`/`?1003` gate whether button/motion events are sent,
+  `?1006` picks SGR vs. the legacy `ESC [ M` byte triples). `resize`
+  events are forwarded to the pty as `TIOCSWINSZ` so the child gets a
+  live `SIGWINCH`. No wire change — the mode state is local to the
+  shell, sniffed rather than queried. Wheel-to-pty is still open (the
+  shell only sees the resolved scrollback offset, not wheel notches).
 
 ### Object Model
 
@@ -1310,7 +1329,7 @@ surface.
   own trigger token is stopped by a depth guard (`max_depth = 4`).
 - **Only `runCommand` updates the exit/duration state** (`Prompt`'s
   `last_status` / `last_dur_ms` / `have_status`, and `Pty.exit_code`,
-  decoded from `waitpid` in `shell/pty.zig`). The `cd` / `alias` /
+  decoded from `waitpid` in `src/pty.zig`). The `cd` / `alias` /
   `unalias` builtins leave it as the last real program's — the tokens are
   about "the last program", and a builtin has no meaningful exit code
   here. The monotonic timing uses `std.Io.Clock` (`.awake`); this reduced

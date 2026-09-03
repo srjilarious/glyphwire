@@ -36,8 +36,9 @@ of it. `docs/decisions.md` stays the place for *why*.
   wired too: the host window is resizable, `Server.reportResize` resizes
   the root layer bottom-anchored and broadcasts `{cols, rows}` to
   `"resize"` subscribers, `get_property("size")` reads it back.
-  `mouse_move` streaming, `mouse_scroll`, gamepad, and IME are all still
-  open — see Further out.
+  `mouse_move` is a coalesced server→client stream now (broadcast on a
+  cell change, subscribe with `"mouse_move"`); `mouse_scroll` wheel
+  deltas, gamepad, and IME are all still open — see Further out.
 - **Architecture reshaped since Milestone 8:** `glyphwire-host` (the
   pixzig-windowed renderer, formerly `glyphwire-shell`) now owns the
   `Context` and `Server` *in-process* directly — no wire round trip for
@@ -933,7 +934,7 @@ subsection (incl. a "Powerline segments" part); `api.md` is untouched.
   is complete. A single-line powerline right chain is redrawn per
   keystroke + on the idle timeout (so `{time}` ticks); a 2-line prompt
   puts segments on row 1 and input on the last row, untouched by typing.
-- **`shell/pty.zig`**: `Pty` decodes the `waitpid` status into
+- **`src/pty.zig`**: `Pty` decodes the `waitpid` status into
   `exit_code` (exit code, or `128 + signal`); `reaped` / `wait` take
   `*Pty`. `runCommand` records `last_status` / `last_dur_ms` /
   `have_status` for the next prompt (external commands only; timing via
@@ -1399,6 +1400,48 @@ change (deliberately deferred).
   (round-trips through `split`), `flattenNewlinesCollapsesRunsToSingleSpace`
   + `flattenNewlinesLeavesNewlineFreeTextAlone`. 438 pass.
 
+## Shared pty module, live resize, and pty input modes (VT phase 1)
+
+**Done.** First phase of making a non-glyphwire full-screen program more
+usable under the B0 dumb pty. `shell/pty.zig` + `shell/keyencode.zig`
+moved to `src/pty.zig` + `src/key_encode.zig`, re-exported from
+`glyphwire.zig` (`pty` / `key_encode` / `Pty` / `ModeTracker`); the pty
+half is Linux-only with an `error.Unsupported` stub elsewhere, matching
+`file_watcher.zig`'s degrade-off-Linux shape. The foreground pty loop in
+`glyphwire-shell` now:
+
+- forwards `resize` events to the pty as `TIOCSWINSZ`, so a foregrounded
+  child gets a live `SIGWINCH` (was wired but never fed events);
+- sniffs the child's own output for DEC private modes
+  (`glyphwire.ModeTracker`, an `ESC [ ? Ps h/l` scanner whose state
+  survives a chunk boundary) and encodes input to match: application
+  cursor keys (`?1` → `ESC O x`), bracketed paste (`?2004` → wrap in
+  `ESC [ 200~`/`201~`), mouse reporting (`?1000`/`?1002`/`?1003` gate
+  button/motion events, `?1006` picks SGR vs. legacy `ESC [ M`);
+- polls faster (16ms vs. 120ms) while a mouse mode is on so pointer
+  motion isn't a frame behind.
+
+**Wire change:** `report_mouse_move` now also broadcasts a `mouse_move`
+notification (`{px, cell}`), but only on a **cell** change — the host
+already reports every pixel in-process, and an xterm mouse report is
+cell-granular. New `"mouse_move"` subscription (separate from
+`"mouse_button"`); `InputListener` gains `pollMouseMoveEvent` /
+`waitMouseMoveEvent` with a bounded, backlog-dropping queue.
+`Server.reportMouseMove` gained an allocator param.
+
+- **`src/key_encode.zig`**: `toPtyBytes` gained a `CursorKeyMode` param;
+  new `encodeMouse(enc, button, action, col, row, mods, buf)` +
+  `MouseButton` / `MouseAction` / `MouseEncoding` / `mouseButtonFromName`.
+- **`src/pty.zig`**: new `ModeTracker` (pure, platform-independent).
+- **Not done (phase 2):** the `core.Layer` screen model — alt-screen
+  buffer, DECTCEM, scroll region + SU/SD, IL/DL/ICH/DCH/ECH, DECSC/DECRC
+  — and the pty reply path for DSR/DA/DECRQM/OSC queries. Wheel-to-pty is
+  also still open (the shell only sees the resolved scrollback offset).
+- **Tests:** `shell_tests.zig` +6 (application-cursor keys, `encodeMouse`
+  SGR + legacy forms, `ModeTracker` set/reset / multi-param / split
+  feeds), `dispatch_tests.zig` +2 (`mouse_move` broadcasts only on a
+  cell change, `"mouse_move"` subscription). 446 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and
@@ -1422,7 +1465,7 @@ change (deliberately deferred).
     doc and decisions.md for why).
   - **Phase B splits into tiers** (see the investigation doc §7a):
     - **B0 — dumb PTY passthrough — done** (this branch;
-      `shell/pty.zig` + `shell/keyencode.zig`, `runCommand` rewritten;
+      `src/pty.zig` + `src/key_encode.zig`, `runCommand` rewritten;
       no wire or host change). `runCommand` runs each spawned command on
       a pty (`openpty`/`fork`/`setsid`/`TIOCSCTTY`/`execvp` via libc, an
       exec-status pipe for `error.CommandNotFound`). A reader thread

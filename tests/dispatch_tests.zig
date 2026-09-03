@@ -301,6 +301,54 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
     try testz.expectTrue(std.mem.indexOf(u8, release_broadcast.body, "key_up") != null);
 }
 
+pub fn reportMouseMoveBroadcastsOnlyOnCellChangeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const to_2_1 =
+        \\{"jsonrpc":"2.0","method":"report_mouse_move","params":{"px":{"x":12.5,"y":30.0},"cell":{"row":2,"col":1}}}
+    ;
+    const first = try d.handle(alloc, to_2_1);
+    try testz.expectTrue(first.response == null);
+    try testz.expectEqual(ctx.input.cursor_cell.row, @as(usize, 2));
+    const b = first.broadcast.?;
+    defer alloc.free(b.body);
+    try testz.expectEqualStr("mouse_move", b.event);
+    try testz.expectTrue(std.mem.indexOf(u8, b.body, "\"method\":\"mouse_move\"") != null);
+
+    // Same cell, different pixel -> cursor_px updates but no broadcast.
+    const same_cell =
+        \\{"jsonrpc":"2.0","method":"report_mouse_move","params":{"px":{"x":13.0,"y":31.0},"cell":{"row":2,"col":1}}}
+    ;
+    const repeat = try d.handle(alloc, same_cell);
+    try testz.expectTrue(repeat.broadcast == null);
+
+    // New cell -> broadcast again.
+    const to_2_2 =
+        \\{"jsonrpc":"2.0","method":"report_mouse_move","params":{"px":{"x":20.0,"y":31.0},"cell":{"row":2,"col":2}}}
+    ;
+    const moved = try d.handle(alloc, to_2_2);
+    if (moved.broadcast) |bb| alloc.free(bb.body);
+    try testz.expectTrue(moved.broadcast != null);
+}
+
+pub fn subscribeMouseMoveEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const sub =
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["mouse_move"]}}
+    ;
+    const result = try d.handle(alloc, sub);
+    if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(d.subscriptions.mouse_move);
+    try testz.expectFalse(d.subscriptions.mouse_button);
+}
+
 pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

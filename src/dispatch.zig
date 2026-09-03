@@ -371,6 +371,13 @@ pub const Subscriptions = struct {
     /// both (`key` for navigation/chords, `text` for the characters).
     text: bool = false,
     mouse_button: bool = false,
+    /// `mouse_move` server->client notifications (`{px, cell}`), sent on a
+    /// pointer cell change -- see `Server.reportMouseMove` /
+    /// `handleReportMouseMove`. Opt-in on its own because a client that
+    /// only cares about clicks doesn't want the motion firehose;
+    /// glyphwire-shell subscribes while a pty child has motion reporting
+    /// on.
+    mouse_move: bool = false,
     /// `resize` server->client notifications (`{cols, rows}`), sent when
     /// the host window is resized -- see `Server.reportResize`.
     resize: bool = false,
@@ -393,6 +400,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "key")) return self.key;
         if (std.mem.eql(u8, event, "text")) return self.text;
         if (std.mem.eql(u8, event, "mouse_button")) return self.mouse_button;
+        if (std.mem.eql(u8, event, "mouse_move")) return self.mouse_move;
         if (std.mem.eql(u8, event, "resize")) return self.resize;
         if (std.mem.eql(u8, event, "scroll")) return self.scroll;
         if (std.mem.eql(u8, event, "selection")) return self.selection;
@@ -406,6 +414,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "key")) s.key = true;
             if (std.mem.eql(u8, e, "text")) s.text = true;
             if (std.mem.eql(u8, e, "mouse_button")) s.mouse_button = true;
+            if (std.mem.eql(u8, e, "mouse_move")) s.mouse_move = true;
             if (std.mem.eql(u8, e, "resize")) s.resize = true;
             if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
             if (std.mem.eql(u8, e, "selection")) s.selection = true;
@@ -541,8 +550,7 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "report_mouse_button")) {
             return try self.handleReportMouseButton(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "report_mouse_move")) {
-            try self.handleReportMouseMove(alloc, envelope.params);
-            return .{};
+            return try self.handleReportMouseMove(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "subscribe")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleSubscribe(alloc, id, envelope.params) };
@@ -1077,18 +1085,26 @@ pub const Dispatcher = struct {
         return .{ .broadcast = .{ .event = "mouse_button", .body = notif_body } };
     }
 
-    /// Updates the authoritative cursor position only -- no broadcast.
-    /// A live `mouse_move` notification stream isn't built yet (not asked
-    /// for); this just keeps `get_input_state`'s cursor fields current.
-    fn handleReportMouseMove(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    /// Keeps `get_input_state`'s cursor fields current, and -- only when
+    /// the pointer crossed into a new cell -- broadcasts a `mouse_move`
+    /// notification to `"mouse_move"` subscribers. Per-pixel motion
+    /// within one cell is dropped (the host already coalesces most of it,
+    /// and an xterm mouse report is cell-granular anyway).
+    fn handleReportMouseMove(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
         const parsed = try std.json.parseFromValue(ReportMouseMoveParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
         const p = parsed.value;
 
+        const cell_changed = self.ctx.input.cursor_cell.row != p.cell.row or
+            self.ctx.input.cursor_cell.col != p.cell.col;
         self.ctx.input.cursor_px = .{ .x = p.px.x, .y = p.px.y };
         self.ctx.input.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
+        if (!cell_changed) return .{};
+
+        const notif_body = try rpc.mouseMoveNotification(alloc, p.px, p.cell);
+        return .{ .broadcast = .{ .event = "mouse_move", .body = notif_body } };
     }
 
     fn handleSubscribe(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {

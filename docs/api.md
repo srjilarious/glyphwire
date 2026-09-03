@@ -256,11 +256,10 @@ band at a time. See decisions.md's Batch section for the reasoning.
 Two independent, separately-subscribable streams (raw events and mapped
 actions) per decisions.md's Input model. Raw key/mouse-button events are
 implemented end to end (an input-capturing process reports what it sees;
-subscribers get it re-broadcast); `resize` and `scroll` are implemented
-(the host reports its own window-size / scrollback-view changes
-in-process, subscribers get the new value re-broadcast); mouse move as a
-live stream, wheel-delta scroll, gamepad, IME, and action maps are all
-still open.
+subscribers get it re-broadcast); `resize`, `scroll` and `mouse_move` are
+implemented (the host reports its own window-size / scrollback-view /
+pointer changes in-process, subscribers get the new value re-broadcast);
+wheel-delta scroll, gamepad, IME, and action maps are all still open.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
@@ -268,12 +267,12 @@ still open.
 | `report_key` | notification, client→server | `key, pressed` | — | ✅ from whatever process captures input (`glyphwire-host`); see also `Server.reportKey`/`reportKeyRepeat` for a caller reporting in-process rather than over the wire |
 | `report_text` | notification, client→server | `text` (UTF-8 string, ≥1 codepoint) | — | ✅ committed text input, already resolved through the OS keyboard layout / dead keys / IME — the only correct source for a non-US layout, an AltGr combo or CJK. Fanned straight out as `text`; touches no down-set. In-process path: `Server.reportText`. Empty string is dropped |
 | `report_mouse_button` | notification, client→server | `button, pressed, px, cell, view_offset?` | — | ✅ `view_offset` (default 0) is the root layer's scrollback view offset at click time, carried into the `mouse_button` broadcast so a subscriber can resolve `cell` against the right scrolled-back row (see `get_metadata`) |
-| `report_mouse_move` | notification, client→server | `px, cell` | — | ✅ updates `get_input_state`'s cursor fields only, no broadcast — see below |
+| `report_mouse_move` | notification, client→server | `px, cell` | — | ✅ updates `get_input_state`'s cursor fields every call; also fans out a `mouse_move` broadcast, but only when `cell` changed (per-pixel motion within one cell is dropped). In-process path: `Server.reportMouseMove` |
 | `get_input_state` | request | — | `keys_down, mouse_buttons_down, cursor_px, cursor_cell` | ✅ one-time snapshot; `InputListener` is the live-updating equivalent, fed by the notifications below |
 | `key_down` / `key_up` | notification, server→client | `key` | — | ✅ also re-sent (still `key_down`) on typematic repeat for a held key — no separate "this was a repeat" signal on the wire |
 | `text` | notification, server→client | `text` | — | ✅ committed text (see `report_text`). Subscribe with `"text"`. On the client, `InputListener` merges this with `key_down`/`key_up` into one arrival-ordered queue (`pollInputEvent`/`waitInputEvent` → `InputEvent{key,text}`) so "type then Enter" can't reorder |
 | `mouse_button` | notification, server→client | `button, pressed, px, cell, view_offset` | — | ✅ `view_offset` is the scrollback rows shown when the click happened (0 at the live tail) — feed it straight into `get_metadata`'s `view_offset` |
-| `mouse_move` | notification, server→client | position | — | 🔶 no live push stream yet — `report_mouse_move` only updates state, doesn't broadcast |
+| `mouse_move` | notification, server→client | `{px, cell}` | — | ✅ sent on a pointer **cell** change (the host coalesces per-pixel motion, which is also the granularity an xterm mouse report needs). Subscribe with `"mouse_move"` — opt-in on its own so a click-only client doesn't get the motion firehose; `InputListener` (`pollMouseMoveEvent`/`waitMouseMoveEvent`) is the client-side consumer, with a bounded queue that drops its backlog if nothing drains it. glyphwire-shell subscribes session-wide but only consumes it while a pty child has `?1002`/`?1003` motion reporting on |
 | `mouse_scroll` | notification, server→client | delta | — | 🔶 wheel-delta stream; separate from `scroll` below, which reports the resolved scrollback view offset, not raw wheel ticks |
 | `gamepad_*` | notification, server→client | — | — | 🔶 |
 | `resize` | notification, server→client | new `{cols, rows}` | — | ✅ sent when `glyphwire-host`'s (now user-resizable) window changes size, after the root layer and every base-size-tracking layer have been resized (see Property names' `size` above for the bottom-anchored content behavior). Reported in-process by the host via `Server.reportResize`, same path as `reportKey`; subscribe with `"resize"`. `InputListener` (`pollResizeEvent`/`waitResizeEvent`/`size`) is the client-side consumer |
