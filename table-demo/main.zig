@@ -105,8 +105,11 @@ fn run(init: std.process.Init) !void {
     const listener = glyphwire.InputListener.connectFromEnv(init.io, alloc, init.environ_map, &.{"key"}) catch return;
     defer listener.deinit();
     while (true) {
-        const ev = (try listener.waitKeyEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
-        defer alloc.free(ev.key);
-        if (ev.pressed) return;
+        const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
+        defer input_ev.deinit(alloc);
+        switch (input_ev) {
+            .key => |k| if (k.pressed) return,
+            .text => {},
+        }
     }
 }

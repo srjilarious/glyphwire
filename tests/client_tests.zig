@@ -241,6 +241,49 @@ pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Alloca
     try testz.expectTrue(!release.?.pressed);
 }
 
+/// The `text` stream: a `Client.reportText` on one connection reaches a
+/// `"text"`-subscribed `InputListener` on another as a queued `TextEvent`,
+/// with a multi-byte (CJK) payload intact -- the whole point of the
+/// separate stream, since that grapheme is not derivable from a key name.
+pub fn inputListenerQueuesTextEventsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{"text"});
+    defer listener.deinit();
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+    try reporter.reportText("a\u{3042}b"); // "a", HIRAGANA A, "b"
+
+    var ev: ?glyphwire.InputEvent = null;
+    var attempts: usize = 0;
+    while (ev == null and attempts < 100) : (attempts += 1) {
+        ev = listener.pollInputEvent();
+        if (ev == null) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    try testz.expectTrue(ev != null);
+    defer ev.?.deinit(alloc);
+    try testz.expectTrue(ev.? == .text);
+    try testz.expectEqualStr(ev.?.text.text, "a\u{3042}b");
+}
+
 /// A minimal byte stream `pngDimensions` accepts -- see core_tests.zig's
 /// identical fixture. Exercises `Client.loadImage` over a real socket, the
 /// one path that needs the binary side-channel's raw-byte framing (see

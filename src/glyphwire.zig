@@ -15,6 +15,9 @@ pub const InputStateSnapshot = client.InputStateSnapshot;
 pub const ResizeEvent = client.ResizeEvent;
 pub const ScrollEvent = client.ScrollEvent;
 pub const MouseButtonEvent = client.MouseButtonEvent;
+pub const TextEvent = client.TextEvent;
+pub const KeyEvent = client.KeyEvent;
+pub const InputEvent = client.InputEvent;
 pub const PxPos = client.PxPos;
 pub const CellPos = client.CellPos;
 

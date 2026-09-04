@@ -155,6 +155,10 @@ const ReportKeyParams = struct {
     pressed: bool,
 };
 
+const ReportTextParams = struct {
+    text: []const u8,
+};
+
 const ReportMouseButtonParams = struct {
     button: []const u8,
     pressed: bool,
@@ -361,6 +365,11 @@ pub const LoadImageHeader = struct {
 /// other connections.
 pub const Subscriptions = struct {
     key: bool = false,
+    /// `text` server->client notifications (`{text}`), committed text
+    /// input -- see `Server.reportText` / `handleReportText`. A separate
+    /// stream from `key`: a client wanting to edit a line subscribes to
+    /// both (`key` for navigation/chords, `text` for the characters).
+    text: bool = false,
     mouse_button: bool = false,
     /// `resize` server->client notifications (`{cols, rows}`), sent when
     /// the host window is resized -- see `Server.reportResize`.
@@ -373,6 +382,7 @@ pub const Subscriptions = struct {
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
+        if (std.mem.eql(u8, event, "text")) return self.text;
         if (std.mem.eql(u8, event, "mouse_button")) return self.mouse_button;
         if (std.mem.eql(u8, event, "resize")) return self.resize;
         if (std.mem.eql(u8, event, "scroll")) return self.scroll;
@@ -383,6 +393,7 @@ pub const Subscriptions = struct {
         var s: Subscriptions = .{};
         for (events) |e| {
             if (std.mem.eql(u8, e, "key")) s.key = true;
+            if (std.mem.eql(u8, e, "text")) s.text = true;
             if (std.mem.eql(u8, e, "mouse_button")) s.mouse_button = true;
             if (std.mem.eql(u8, e, "resize")) s.resize = true;
             if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
@@ -512,6 +523,8 @@ pub const Dispatcher = struct {
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "report_key")) {
             return try self.handleReportKey(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "report_text")) {
+            return try self.handleReportText(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "report_mouse_button")) {
             return try self.handleReportMouseButton(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "report_mouse_move")) {
@@ -984,6 +997,25 @@ pub const Dispatcher = struct {
 
         const notif_body = try rpc.keyNotification(alloc, p.key, p.pressed);
         return .{ .broadcast = .{ .event = "key", .body = notif_body } };
+    }
+
+    /// A committed-text notification from an input-capturing client (see
+    /// `handleReportKey`). Unlike a key event there's no authoritative
+    /// down-set to update -- text is transient -- so this only fans a
+    /// `text` broadcast out to `"text"` subscribers. An empty string is
+    /// dropped.
+    fn handleReportText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        _ = self;
+        const parsed = try std.json.parseFromValue(ReportTextParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        if (p.text.len == 0) return .{};
+
+        const notif_body = try rpc.textNotification(alloc, p.text);
+        return .{ .broadcast = .{ .event = "text", .body = notif_body } };
     }
 
     fn handleReportMouseButton(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {

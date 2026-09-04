@@ -220,12 +220,12 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
 
     // "nosuchcmd" resolves to nothing in zig-out/bin or $PATH, so Enter
     // reports the failure on the row below rather than crashing the
-    // prompt -- see `Prompt.runCommand`.
-    const cmd_keys = [_][]const u8{ "n", "o", "s", "u", "c", "h", "c", "m", "d", "enter" };
-    for (cmd_keys) |k| {
-        try reporter.reportKey(k, true);
-        try reporter.reportKey(k, false);
-    }
+    // prompt -- see `Prompt.runCommand`. Characters go in as a `text`
+    // notification (what the host sends after resolving the OS layout);
+    // Enter is still a key event.
+    try reporter.reportText("nosuchcmd");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
 
     // The failed-command report lands on row 1 (always at col 0 -- it's
     // written before any prompt prefix); the next prompt starts on row 2
@@ -240,11 +240,10 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     // "e"/"backspace" are even sent, so it doesn't wait for the
     // asynchronous hop through the real shell process at all -- it was
     // passing on stale state.)
-    const edit_keys = [_][]const u8{ "b", "y", "e", "backspace", "z" };
-    for (edit_keys) |k| {
-        try reporter.reportKey(k, true);
-        try reporter.reportKey(k, false);
-    }
+    try reporter.reportText("bye");
+    try reporter.reportKey("backspace", true);
+    try reporter.reportKey("backspace", false);
+    try reporter.reportText("z");
 
     try waitForCell(&reporter, 2, text_col + 2, "z");
 
@@ -411,45 +410,14 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
     }
 }
 
-/// Reports key presses that reproduce typing `text` at the shell prompt --
-/// the reverse of shell/main.zig's `charFromKeyName` table. Only covers
-/// the characters this file's tests actually type (lowercase letters,
-/// digits, `-`, `.`, `/`, `~`), not a general typing simulator.
+/// Types `text` at the shell prompt the way the host does: one `text`
+/// notification carrying the already-layout-resolved characters. The
+/// shell's prompt loop inserts from the `text` stream, so this is all it
+/// takes -- no per-key `charFromKeyName` reverse table any more. Navigation
+/// keys (Enter, Tab, arrows, Backspace) are still sent via `reportKey` by
+/// the callers.
 fn typeText(reporter: *glyphwire.Client, text: []const u8) !void {
-    for (text) |ch| {
-        var one_char_buf: [1]u8 = .{ch};
-        var shift = false;
-        const key: []const u8 = switch (ch) {
-            'a'...'z' => &one_char_buf,
-            ' ' => "space",
-            '0' => "zero",
-            '1' => "one",
-            '2' => "two",
-            '3' => "three",
-            '4' => "four",
-            '5' => "five",
-            '6' => "six",
-            '7' => "seven",
-            '8' => "eight",
-            '9' => "nine",
-            '-' => "minus",
-            '.' => "period",
-            '/' => "slash",
-            '~' => blk: {
-                shift = true;
-                break :blk "grave_accent";
-            },
-            '*' => blk: {
-                shift = true;
-                break :blk "eight";
-            },
-            else => unreachable, // extend the table above if a test needs a new character
-        };
-        if (shift) try reporter.reportKey("left_shift", true);
-        try reporter.reportKey(key, true);
-        try reporter.reportKey(key, false);
-        if (shift) try reporter.reportKey("left_shift", false);
-    }
+    try reporter.reportText(text);
 }
 
 /// Proves `Prompt.runCommand` captures a plain (non-glyphwire-aware)

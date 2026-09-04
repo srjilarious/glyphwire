@@ -50,6 +50,12 @@ pub fn keyRepeatNotification(alloc: std.mem.Allocator, key: []const u8) ![]u8 {
     return notification(alloc, "key_down", protocol.KeyParams{ .key = key });
 }
 
+/// `text` -- committed text input (`text` is a UTF-8 string of one or
+/// more codepoints). Separate from `key_down`; see `protocol.TextParams`.
+pub fn textNotification(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    return notification(alloc, "text", protocol.TextParams{ .text = text });
+}
+
 /// `mouse_button` press/release at `px`/`cell`, carrying the click-time
 /// scrollback `view_offset`.
 pub fn mouseButtonNotification(

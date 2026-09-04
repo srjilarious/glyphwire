@@ -175,6 +175,15 @@ pub const TableStateResult = struct {
 /// name, not a field.
 pub const KeyParams = struct { key: []const u8 };
 
+/// `text` params: a run of committed text input, already resolved through
+/// the OS keyboard layout, dead keys and IME composition -- one or more
+/// Unicode codepoints as a UTF-8 string. Deliberately distinct from
+/// `key_down` (see decisions.md's Input model): a key event carries a
+/// physical key name for chords and navigation; this carries what the
+/// user actually typed, which for a non-US layout, an AltGr combo or a
+/// CJK IME is not derivable from the key name.
+pub const TextParams = struct { text: []const u8 };
+
 /// `mouse_button` params. `view_offset` is the root layer's scrollback
 /// view offset at click time (see `core.Layer.view_scroll`) so a
 /// subscriber resolving `cell` with `get_metadata` can pass the same

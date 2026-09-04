@@ -197,7 +197,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     };
     defer client.deinit();
 
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "mouse_button", "scroll" }) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "scroll" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -281,17 +281,39 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         // same as the mouse queue above.
         while (listener.pollScrollEvent()) |sev| prompt.view_scroll = sev.offset;
 
-        // Blocks until a key event is queued rather than polling on a fixed
-        // interval, so a keystroke gets picked up immediately instead of
-        // waiting out however much of the poll interval was left; the
-        // timeout is just a fallback heartbeat, not load-bearing.
-        const ev = (try listener.waitKeyEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
+        // One ordered stream of key + text events (see `InputEvent`).
+        // Blocks until one is queued rather than polling on a fixed
+        // interval; the timeout is just a fallback heartbeat, not
+        // load-bearing.
+        const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
+
+        // Committed text input -- the characters the user typed, already
+        // resolved through their OS keyboard layout / dead keys / IME.
+        // Taken from the same queue as key events so "type then Enter"
+        // can't reorder. Text only edits the live line, so it's held back
+        // while browsing scrollback, matching how the printable-key path
+        // used to gate on `browse_pos`. The physical key event that
+        // accompanies each keystroke in real host use is a separate
+        // `.key` event and just falls through the handling below doing
+        // nothing.
+        const ev: glyphwire.KeyEvent = switch (input_ev) {
+            .text => |tev| {
+                defer alloc.free(tev.text);
+                if (prompt.browse_pos == null) try prompt.insertText(tev.text);
+                continue;
+            },
+            .key => |kev| kev,
+        };
         defer alloc.free(ev.key);
         if (!ev.pressed) continue; // only key-down drives the prompt
 
+        // Only `ctrl` gates key-event handling now (the ctrl+letter / ctrl+
+        // arrow editing chords below). `alt` / `super` chords have no
+        // explicit cases and no longer need checking: plain characters
+        // come from the `text` stream, and the host doesn't emit `text`
+        // for a genuine modifier chord, so an unhandled alt/super combo
+        // simply does nothing here.
         const ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
-        const alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt");
-        const super = listener.isKeyDown("left_super") or listener.isKeyDown("right_super");
 
         // Tab completion's "list on the second press" needs to know the
         // previous key was also Tab; any other key breaks that streak.
@@ -379,18 +401,15 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             } else {
                 try prompt.moveCursorTo(lineedit.nextBoundary(prompt.buffer.items, prompt.cursor));
             }
-        } else if (!ctrl and !alt and !super) {
-            // A ctrl/alt/super chord that isn't one of the explicit cases
-            // above (e.g. ctrl+c, ctrl+z, alt+f) falls through to here too
-            // -- `charFromKeyName` only looks at the base key and shift,
-            // so without this guard an unhandled chord would still type
-            // its plain character into the line instead of being
-            // swallowed like a real terminal does.
-            const shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift");
-            if (keyencode.charFromKeyName(ev.key, shift)) |ch| {
-                try prompt.insertChar(ch);
-            }
         }
+        // Plain character insertion is not handled here: it comes from the
+        // `.text` branch of the switch above, which is the only correct
+        // source for a non-US layout, an AltGr combo or CJK IME. An
+        // unhandled key event (a bare letter, or a ctrl/alt chord with no
+        // explicit case above like ctrl+c / alt+f) just falls through and
+        // does nothing -- a real terminal swallows those too, and the host
+        // suppresses `text` for genuine modifier chords, so
+        // nothing types.
     }
 }
 
@@ -649,18 +668,6 @@ const Prompt = struct {
         }
     }
 
-    /// Inserts `ch` at the cursor (append, if the cursor's at the end):
-    /// `insert_cells` opens a blank cell there (see `Client.insertCells`),
-    /// then `ch` is written into it -- no retransmitting the rest of the
-    /// line, unlike shifting it around client-side would need.
-    fn insertChar(self: *Prompt, ch: u8) !void {
-        try self.buffer.insert(self.client.alloc, self.cursor, ch);
-        try self.setCursorAt(self.cursor);
-        try self.client.insertCells(1);
-        try self.client.writeText(&[_]u8{ch}, null, null);
-        self.cursor += 1;
-    }
-
     /// Deletes the character before the cursor (backspace) -- a whole
     /// codepoint, and the one or two grid cells it occupied.
     fn deleteBackward(self: *Prompt) !void {
@@ -900,7 +907,7 @@ const Prompt = struct {
 
     /// Positions the server-side cursor at buffer offset `offset` on the
     /// current line.
-    /// Every ordinary editing operation (`moveCursorTo`, `insertChar`,
+    /// Every ordinary editing operation (`moveCursorTo`, `insertText`,
     /// `deleteBackward`/`deleteForward`, `killToStart`, `setLine`,
     /// `clearScreen`) funnels through here to place the real, buffer-offset
     /// cursor -- so clearing `browse_pos` here, unconditionally, is the
@@ -1102,10 +1109,23 @@ const Prompt = struct {
         };
 
         // Foreground: forward keystrokes to the pty until the child exits.
-        // `pty.reaped()` polls (WNOHANG) once per loop; `waitKeyEvent`'s
-        // short timeout bounds how long an exit-with-no-keypress waits.
+        // `pty.reaped()` polls (WNOHANG) once per loop; the wait's short
+        // timeout bounds how long an exit-with-no-keypress waits.
         while (!pty.reaped()) {
-            const ev = (listener.waitKeyEvent(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
+            const input_ev = (listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
+
+            // Typed text (layout/dead-key/IME resolved) goes to the child's
+            // stdin verbatim, exactly as a terminal feeds a pty -- taken
+            // from the same ordered queue as key events so it can't
+            // reorder around an Enter.
+            const ev = switch (input_ev) {
+                .text => |tev| {
+                    defer alloc.free(tev.text);
+                    pty.writeAll(tev.text);
+                    continue;
+                },
+                .key => |kev| kev,
+            };
             defer alloc.free(ev.key);
             if (!ev.pressed) continue;
             const mods = keyencode.Mods{
@@ -1113,6 +1133,11 @@ const Prompt = struct {
                 .shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift"),
                 .alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt"),
             };
+            // A plain printable key (no ctrl/alt) is delivered as a `text`
+            // event, not re-encoded here -- otherwise the child sees it
+            // twice. `toPtyBytes` still handles the named keys (Enter,
+            // arrows, ...) and ctrl/alt combos, which produce no `text`.
+            if (!mods.ctrl and !mods.alt and keyencode.charFromKeyName(ev.key, false) != null) continue;
             var kb: [8]u8 = undefined;
             if (keyencode.toPtyBytes(ev.key, mods, &kb)) |seq| pty.writeAll(seq);
         }
@@ -1526,10 +1551,12 @@ const Prompt = struct {
         return out.toOwnedSlice(alloc);
     }
 
-    /// Inserts a run of characters at the cursor -- the multi-char sibling
-    /// of `insertChar`, used by Tab completion to drop in a completed
-    /// suffix in one `insert_cells` + `write_text` pair instead of a round
-    /// trip per character.
+    /// Inserts a run of characters at the cursor -- used both by the
+    /// prompt loop's `text`-event handler (the characters the user typed)
+    /// and by Tab completion, dropping a whole run in one `insert_cells` +
+    /// `write_text` pair instead of a round trip per character. Cursor and
+    /// grid-cell counts are byte- and display-width-correct, so a CJK or
+    /// combining run lands right.
     fn insertText(self: *Prompt, text: []const u8) !void {
         if (text.len == 0) return;
         try self.buffer.insertSlice(self.client.alloc, self.cursor, text);

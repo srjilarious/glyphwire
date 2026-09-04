@@ -148,7 +148,16 @@ final.
   or both.
 - Text/IME composition input is kept distinct from raw key events — it's
   its own state machine (CJK input composition in particular), not
-  conflated with physical key press/release.
+  conflated with physical key press/release. *Implemented so far:* the
+  `text` notification carries committed text (post-layout, post-dead-key,
+  post-IME) as a UTF-8 string, subscribable separately from `key`. The
+  host sends both a `key_*` event (physical key, for chords/navigation)
+  and a `text` event (the character) for a printable keystroke; a
+  consumer that edits text uses `text` and ignores the key. A live
+  preedit/composition-string stream is still open. On the client the two
+  are merged back into one arrival-ordered queue (`InputListener`'s
+  `InputEvent`) so a "type then Enter" burst can't reorder across the
+  two.
 - Subscription is opt-in per event type (X11 event-mask precedent) so a
   client isn't firehosed with events it never asked for.
 - Continuous/analog streams (mouse motion, gamepad axes) may be coalesced
@@ -1000,8 +1009,8 @@ surface.
   previous arrangement kept a parallel copy of each shape in both files.
   `src/rpc.zig` is a thin companion: `response`/`notification` envelope
   builders plus one builder per input notification (`key_down`/`key_up`,
-  `mouse_button`, `scroll`, `resize`), shared by `dispatch.zig`'s socket
-  handlers and `server.zig`'s in-process reporters. Neither module knows
+  `text`, `mouse_button`, `scroll`, `resize`), shared by `dispatch.zig`'s
+  socket handlers and `server.zig`'s in-process reporters. Neither module knows
   about connections or core state; adding a message still means editing
   the handler and (if the shape is shared) `protocol.zig`, so the message
   catalog stays visible rather than hidden behind a framework.

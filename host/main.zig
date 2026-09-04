@@ -199,6 +199,14 @@ pub const App = struct {
         left: ArrowRepeatState = .{},
         right: ArrowRepeatState = .{},
     } = .{},
+    /// Last-forwarded down/up state of each modifier, indexed
+    /// `[ctrl, alt, shift, super]` -- see `reportModifier`. glyphwire-host
+    /// forwards each modifier once, under its `left_*` name, from pixzig's
+    /// logical modifier state rather than per physical key, so an OS-level
+    /// remap like CapsLock->Control (which pixzig's `keyboard.ctrl()`
+    /// reports but which never arrives as a physical modifier-key press)
+    /// still reaches glyphwire-shell's Ctrl-combo handling.
+    mod_forwarded: [4]bool = .{ false, false, false, false },
     /// Set from `--screenshot <path>`: once `screenshot_elapsed_ms` passes
     /// `screenshot_delay_ms`, `render` writes the composited grid region to
     /// this path (see `captureContentArea`) and `update` quits the next
@@ -446,6 +454,7 @@ pub const App = struct {
         // framebuffer on the *next* frame, once both have settled.
         self.handleFontZoom(eng);
         self.reportKeyEvents(eng);
+        self.reportTextInput(eng);
         // The scrollbar gets first refusal on the left button: a press or
         // drag that belongs to it is consumed here so `reportMouseEvents`
         // doesn't also forward it to the grid as a click.
@@ -805,29 +814,83 @@ pub const App = struct {
     /// `Keyboard.pressed`/`.released`'s edge-detection doc comments in
     /// pixzig -- directly against the in-process `Server` (see
     /// `Server.reportKey`), not over a socket connection to itself.
+    ///
+    /// The eight physical modifier keys (`left_control`, `right_alt`, ...)
+    /// are not forwarded by name from this loop. Each modifier is instead
+    /// forwarded once, under its `left_*` name, from pixzig's logical
+    /// modifier state (`keyboard.ctrl()` / `.alt()` / `.shift()` /
+    /// `.super()`) via `reportModifier`. That state already folds the left
+    /// and right physical keys together, and also picks up OS-level
+    /// modifier remaps -- e.g. CapsLock acting as Control -- which never
+    /// arrive as a physical modifier-key press. Consequence: a held right
+    /// modifier shows up in `get_input_state` as `left_control` etc., not
+    /// `right_control`; nothing in glyphwire distinguishes the two.
     fn reportKeyEvents(self: *App, eng: *AppRunner.Engine) void {
-        // Ctrl + these are `handleFontZoom`'s shortcuts; swallow them here
-        // so the shell/grid never sees the keystroke.
-        const ctrl_held = eng.inputs.keyboard.ctrl();
+        const kb = &eng.inputs.keyboard;
+
+        self.reportModifier(0, "left_control", kb.ctrl());
+        self.reportModifier(1, "left_alt", kb.alt());
+        self.reportModifier(2, "left_shift", kb.shift());
+        self.reportModifier(3, "left_super", kb.super());
+
+        const ctrl_held = kb.ctrl();
         const fields = @typeInfo(pixzig.glfw.Key).@"enum".fields;
         inline for (fields) |field| {
             const key = @field(pixzig.glfw.Key, field.name);
-            const is_zoom_key = switch (key) {
-                .minus, .equal, .zero, .kp_subtract, .kp_add, .kp_0 => true,
+            const skip = switch (key) {
+                // Forwarded by reportModifier above, not per physical key.
+                .left_control, .right_control, .left_alt, .right_alt, .left_shift, .right_shift, .left_super, .right_super => true,
+                // Ctrl + these are `handleFontZoom`'s shortcuts; swallow
+                // them here so the shell/grid never sees the keystroke.
+                .minus, .equal, .zero, .kp_subtract, .kp_add, .kp_0 => ctrl_held,
                 else => false,
             };
-            if (is_zoom_key and ctrl_held) {
-                // Consumed by handleFontZoom; don't forward it.
-            } else if (eng.inputs.keyboard.pressed(key)) {
+            if (skip) {
+                // Consumed elsewhere; don't forward it.
+            } else if (kb.pressed(key)) {
                 self.server.reportKey(self.alloc, field.name, true) catch |err| {
                     std.log.err("reportKey({s}, true) failed: {t}", .{ field.name, err });
                 };
-            } else if (eng.inputs.keyboard.released(key)) {
+            } else if (kb.released(key)) {
                 self.server.reportKey(self.alloc, field.name, false) catch |err| {
                     std.log.err("reportKey({s}, false) failed: {t}", .{ field.name, err });
                 };
             }
         }
+    }
+
+    /// Forwards one modifier's down/up state under `name`, edge-detected
+    /// against `mod_forwarded[idx]` so the in-process `Server` only sees a
+    /// notification when it actually changes. `active` comes from pixzig's
+    /// logical modifier query (see `reportKeyEvents`).
+    fn reportModifier(self: *App, idx: usize, name: []const u8, active: bool) void {
+        if (active == self.mod_forwarded[idx]) return;
+        self.mod_forwarded[idx] = active;
+        self.server.reportKey(self.alloc, name, active) catch |err| {
+            std.log.err("reportKey({s}, {}) failed: {t}", .{ name, active, err });
+        };
+    }
+
+    /// Forwards the text the user actually typed this frame as a `text`
+    /// notification -- pixzig's `keyboard.text()` drains GLFW's char
+    /// callback, so this is already resolved through the OS keyboard
+    /// layout, dead keys and IME composition (a QWERTZ 'z', an AZERTY
+    /// AltGr '@', a committed CJK grapheme). This is a separate stream
+    /// from `reportKeyEvents`: a key event still fires for the same
+    /// keystroke, carrying the physical key name for chords/navigation,
+    /// but the character comes from here. glyphwire-shell's prompt inserts
+    /// from `text` events and ignores the key event for plain typing, so
+    /// there's no double-insertion.
+    ///
+    /// The 256-byte buffer bounds one frame's worth of committed text;
+    /// pixzig caps its own per-frame codepoint buffer well below that.
+    fn reportTextInput(self: *App, eng: *AppRunner.Engine) void {
+        var buf: [256]u8 = undefined;
+        const n = eng.inputs.keyboard.text(&buf);
+        if (n == 0) return;
+        self.server.reportText(self.alloc, buf[0..n]) catch |err| {
+            std.log.err("reportText failed: {t}", .{err});
+        };
     }
 
     /// `skip_left` drops the left button for this frame -- set when

@@ -250,6 +250,15 @@ pub const Client = struct {
         try self.notify("report_key", .{ .key = key, .pressed = pressed });
     }
 
+    /// `report_text(text)` -- a notification. `text` is committed text
+    /// input as a UTF-8 string of one or more codepoints (already resolved
+    /// through the OS keyboard layout / dead keys / IME). Separate from
+    /// `reportKey`: see `protocol.TextParams`. The server fans it out to
+    /// `"text"` subscribers only; it doesn't update any input down-set.
+    pub fn reportText(self: *Client, text: []const u8) !void {
+        try self.notify("report_text", .{ .text = text });
+    }
+
     /// `report_mouse_button(button, pressed, px, cell, view_offset)` -- a
     /// notification. `view_offset` is the root layer's scrollback view
     /// offset at click time (see `core.Layer.view_scroll`); pass 0 from a
@@ -1244,10 +1253,11 @@ pub const InputStateSnapshot = struct {
 
 /// A dedicated, subscribed connection: sends `subscribe(events)` once,
 /// then a background thread continuously reads pushed `key_down`/
-/// `key_up`/`mouse_button` notifications and updates a local,
-/// mutex-guarded cache -- so `isKeyDown`/`isMouseButtonDown`/
-/// `cursorPixel`/`cursorCell` are instant local reads, not a round trip
-/// per call.
+/// `key_up`/`text`/`mouse_button`/`resize`/`scroll` notifications and
+/// updates local, mutex-guarded caches and queues -- so
+/// `isKeyDown`/`isMouseButtonDown`/`cursorPixel`/`cursorCell` are instant
+/// local reads, and `pollInputEvent`/`waitInputEvent` (key + text, one
+/// order) drain without a round trip per call.
 ///
 /// Deliberately a separate connection from `Client`: interleaving
 /// unsolicited push notifications with synchronous request/response
@@ -1259,9 +1269,35 @@ pub const InputStateSnapshot = struct {
 /// One queued, discrete key press/release, in arrival order -- unlike
 /// `InputState`'s down-set (a live cache, good for "is X held right
 /// now"), this is what a line editor needs ("the user just pressed
-/// enter", exactly once). `key` is owned; pop it via `pollKeyEvent` and
-/// free it with the same allocator passed to `InputListener.connect`.
+/// enter", exactly once). `key` is owned; free it with the same allocator
+/// passed to `InputListener.connect`.
 pub const KeyEvent = struct { key: []const u8, pressed: bool };
+/// One queued `text` notification: committed text input (`text` is a
+/// UTF-8 string of one or more codepoints). `text` is owned -- free it
+/// with the same allocator passed to `InputListener.connect`. Distinct
+/// from `KeyEvent`: this is what the user typed, not which physical key
+/// moved -- the only correct source for a non-US layout, an AltGr combo
+/// or CJK IME composition.
+pub const TextEvent = struct { text: []const u8 };
+/// A key or text event, in the one order they arrived off the wire.
+/// `key` and `text` share a timeline -- the host sends `key_down enter`
+/// and the `text` for what preceded it on the same connection -- so a
+/// line editor has to consume them from a single ordered queue
+/// (`pollInputEvent` / `waitInputEvent`), not two, or "type then Enter"
+/// races. Each variant owns its string, freed like the standalone
+/// events above.
+pub const InputEvent = union(enum) {
+    key: KeyEvent,
+    text: TextEvent,
+
+    /// Frees the owned string for whichever variant this is.
+    pub fn deinit(self: InputEvent, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .key => |k| alloc.free(k.key),
+            .text => |t| alloc.free(t.text),
+        }
+    }
+};
 pub const MouseButtonEvent = struct {
     button: []const u8,
     pressed: bool,
@@ -1289,14 +1325,16 @@ pub const InputListener = struct {
     listen_thread: std.Thread,
     mutex: std.Io.Mutex = .init,
     state: core.InputState,
-    key_events: std.ArrayList(KeyEvent) = .empty,
-    /// Posted once per key event appended to `key_events`, so `waitKeyEvent`
-    /// can block until one arrives instead of polling on a timer. Not kept
-    /// in exact sync with `key_events.len` (`pollKeyEvent` drains the queue
-    /// without touching this) -- a stale permit just means a caller of
-    /// `waitKeyEvent` wakes once to an empty queue, no worse than a spurious
-    /// poll.
-    key_sem: std.Io.Semaphore = .{},
+    /// Key and text events in a single arrival-ordered queue (see
+    /// `InputEvent`) -- they share one timeline on the wire, so keeping
+    /// two queues would let "type then Enter" reorder. `input_sem` is
+    /// posted once per append so `waitInputEvent` can block instead of
+    /// polling; it isn't kept in exact sync with the queue length
+    /// (`pollInputEvent` drains without touching it) -- a stale permit
+    /// just wakes one `waitInputEvent` to an empty queue, no worse than a
+    /// spurious poll.
+    input_events: std.ArrayList(InputEvent) = .empty,
+    input_sem: std.Io.Semaphore = .{},
     /// Edge events (button-down and button-up, like `key_events`), not
     /// just the level state `isMouseButtonDown`/`cursorCell` already
     /// tracked -- a click handler (e.g. glyphwire-shell's auto-cd) needs
@@ -1372,8 +1410,8 @@ pub const InputListener = struct {
         self.listen_thread.join();
         self.stream.close(self.io);
         self.state.deinit();
-        for (self.key_events.items) |ev| self.alloc.free(ev.key);
-        self.key_events.deinit(self.alloc);
+        for (self.input_events.items) |ev| ev.deinit(self.alloc);
+        self.input_events.deinit(self.alloc);
         for (self.mouse_events.items) |ev| self.alloc.free(ev.button);
         self.mouse_events.deinit(self.alloc);
         self.resize_events.deinit(self.alloc);
@@ -1387,27 +1425,27 @@ pub const InputListener = struct {
         return self.state.isKeyDown(key);
     }
 
-    /// Pops the oldest queued key event, if any (non-blocking -- callers
-    /// wanting to block should poll this in a short sleep loop, same as
-    /// this file's own tests do). Caller must free `.key` with the same
-    /// allocator passed to `connect`.
-    pub fn pollKeyEvent(self: *InputListener) ?KeyEvent {
+    /// Pops the oldest queued input event (key or text), if any
+    /// (non-blocking). Caller must free the variant's owned string --
+    /// `InputEvent.deinit`, or free `.key.key` / `.text.text` directly --
+    /// with the same allocator passed to `connect`.
+    pub fn pollInputEvent(self: *InputListener) ?InputEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.key_events.items.len == 0) return null;
-        return self.key_events.orderedRemove(0);
+        if (self.input_events.items.len == 0) return null;
+        return self.input_events.orderedRemove(0);
     }
 
-    /// Blocks until a key event is queued or `timeout` elapses (`null` on
-    /// timeout), instead of `pollKeyEvent`'s non-blocking check -- for a
-    /// consumer loop that wants to react immediately rather than re-polling
-    /// on a fixed interval.
-    pub fn waitKeyEvent(self: *InputListener, timeout: std.Io.Timeout) !?KeyEvent {
-        self.key_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
+    /// Blocks until an input event is queued or `timeout` elapses (`null`
+    /// on timeout), instead of `pollInputEvent`'s non-blocking check -- for
+    /// a consumer loop that wants to react immediately rather than
+    /// re-polling on a fixed interval.
+    pub fn waitInputEvent(self: *InputListener, timeout: std.Io.Timeout) !?InputEvent {
+        self.input_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
             error.Timeout => return null,
             error.Canceled => |e| return e,
         };
-        return self.pollKeyEvent();
+        return self.pollInputEvent();
     }
 
     pub fn isMouseButtonDown(self: *InputListener, button: []const u8) bool {
@@ -1584,8 +1622,22 @@ pub const InputListener = struct {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             _ = try self.state.setKey(p.value.key, pressed);
-            try self.key_events.append(self.alloc, .{ .key = owned_key, .pressed = pressed });
-            self.key_sem.post(self.io);
+            try self.input_events.append(self.alloc, .{ .key = .{ .key = owned_key, .pressed = pressed } });
+            self.input_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "text")) {
+            const P = protocol.TextParams;
+            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const owned_text = try self.alloc.dupe(u8, p.value.text);
+            errdefer self.alloc.free(owned_text);
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.input_events.append(self.alloc, .{ .text = .{ .text = owned_text } });
+            self.input_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "mouse_button")) {
             const P = protocol.MouseButtonParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{

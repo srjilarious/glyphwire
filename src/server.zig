@@ -272,6 +272,19 @@ pub const Server = struct {
         self.broadcast(null, "key", body);
     }
 
+    /// In-process equivalent of a connected client's `report_text`
+    /// notification (see `handleReportText`) -- committed text input
+    /// (`text` is a UTF-8 string of one or more codepoints, already
+    /// resolved through the OS layout / dead keys / IME). No `ctx` state
+    /// to touch, so no lock: just fans a `text` notification out to every
+    /// `"text"` subscriber. An empty string is a no-op.
+    pub fn reportText(self: *Server, alloc: std.mem.Allocator, text: []const u8) !void {
+        if (text.len == 0) return;
+        const body = try rpc.textNotification(alloc, text);
+        defer alloc.free(body);
+        self.broadcast(null, "text", body);
+    }
+
     /// In-process equivalent of `report_mouse_button` -- see `reportKey`.
     /// `view_offset` is the root layer's current scrollback view offset
     /// (see `core.Layer.view_scroll`), carried through into the broadcast

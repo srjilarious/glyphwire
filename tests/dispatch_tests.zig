@@ -301,6 +301,35 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
     try testz.expectTrue(std.mem.indexOf(u8, release_broadcast.body, "key_up") != null);
 }
 
+pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // A multi-byte codepoint (an AZERTY 'é') round-trips through JSON into
+    // the broadcast body verbatim.
+    const msg =
+        \\{"jsonrpc":"2.0","method":"report_text","params":{"text":"e\u00e9"}}
+    ;
+    const result = try d.handle(alloc, msg);
+    try testz.expectTrue(result.response == null);
+    const broadcast = result.broadcast.?;
+    defer alloc.free(broadcast.body);
+    try testz.expectEqualStr("text", broadcast.event);
+    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "\"method\":\"text\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "e\u{00e9}") != null);
+
+    // report_text touches no input down-set -- text is transient.
+    try testz.expectEqual(ctx.input.keys_down.count(), 0);
+
+    // An empty string queues nothing.
+    const empty_result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"report_text","params":{"text":""}}
+    );
+    try testz.expectTrue(empty_result.broadcast == null);
+}
+
 pub fn subscribeThenGetInputStateReflectsReportedInputTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
