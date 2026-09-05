@@ -1402,6 +1402,21 @@ surface.
   prompt, wrapping) before running it, so scrollback shows all of it.
   The `insert_cells` / `delete_cells` wire ops are now unused by the
   shell but stay in the protocol.
+- **`renderInputLine`'s box repaint + caret placement go out as one
+  `batch` frame** (`setCursor` to the left edge, `write_text` the row,
+  `setCursor` back to the caret). Otherwise the host renders an
+  in-between frame with the caret parked at the box's left edge — a
+  visible caret "jump" on a history recall / line swap. Same trick the
+  right chain (`drawRightChain`) already uses; the dynamic right chain
+  stays its own trailing batch.
+- **glyphwire-host no longer caret-previews vertical arrows.** The host
+  nudges `ctx.root.cursor` on a held arrow key to hide round-trip
+  latency, but Up/Down at the prompt now mean history recall / break
+  into scrollback, not "move the raw cursor a row" — a local nudge just
+  flashes the caret off the prompt line (and *stuck* off it when the
+  shell has nothing to redraw, e.g. Up at the oldest history entry).
+  Horizontal arrows keep the preview (they do track the live input
+  caret). See host/input.zig `handleRepeatKeys`.
 - **Home / End alias ctrl+a / ctrl+e on the live line** (jump to column
   0 / end of input; via `moveCursorTo` → `setCursorAt` they also end any
   browse and snap the view to the live tail). **While browsing scrollback
@@ -1522,8 +1537,11 @@ surface.
   browse mode.
 - **Ctrl+Up breaks into scrollback browse mode** (a one-row step off the
   input line into a browse cursor, `browse_pos`). Then the arrow keys
-  move the cursor, Ctrl+Up/Ctrl+Down jump `scrollback_jump` rows at a
-  time, Home/End act on the browsed row (`browseHome`/`browseEnd`),
+  move the cursor one row/column, **Ctrl+Up/Ctrl+Down jump
+  `scrollback_jump` rows and Ctrl+Left/Ctrl+Right jump `scrollback_jump`
+  columns** (none of the ctrl+arrows snap back to the prompt while
+  browsing, unlike on the live line where ctrl+Left/Right is a word
+  jump), Home/End act on the browsed row (`browseHome`/`browseEnd`),
   Enter/click acts on whatever `glyphwire-ls` tagged there, and Escape
   returns to the prompt. Ctrl+Down at the prompt does nothing (there's
   nothing below the input line). This is a swap from the earlier binding

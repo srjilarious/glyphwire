@@ -254,15 +254,17 @@
 --
 -- Plain Up / Down recall command history at the prompt. Ctrl+Up breaks
 -- into scrollback browse mode; then the arrow keys move the browse
--- cursor, Home / End jump to the start / end of its row, Enter acts on
--- the entry under it, and Escape returns to the prompt.
+-- cursor one row/column, Ctrl+arrows jump by scrollback_jump, Home / End
+-- go to the start / end of its row, Enter acts on the entry under it,
+-- and Escape returns to the prompt.
 --
 -- scrolloff: rows of context kept between the browse cursor and the
 -- edge of the window while it moves through scrollback (a vim-style
 -- "scrolloff"), clamped at use to leave room for the cursor itself.
 --
--- scrollback_jump: rows Ctrl+Up / Ctrl+Down jump per press while
--- browsing (plain Up / Down still move one row). Must be >= 1.
+-- scrollback_jump: how far Ctrl+Up / Ctrl+Down (rows) and Ctrl+Left /
+-- Ctrl+Right (columns) jump per press while browsing (the bare arrows
+-- still move one). Must be >= 1.
 --
 -- scrollback_type_exits: when true (the default), typing a printable
 -- character while browsing returns to the prompt and inserts it; set
