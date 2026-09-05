@@ -28,6 +28,16 @@ pub fn build(b: *std.Build) void {
     });
     ls_support_mod.addImport("glyphwire", glyphwire_mod);
 
+    // Pure, pixzig-free pieces of glyphwire-host (pixel/cell geometry,
+    // scrollbar math, `host.conf` value clamps, the key-repeat timer) so
+    // the test runner can exercise them without a GLFW/OpenGL link. Same
+    // cross-directory-module reason as `shell_support` / `ls_support`;
+    // imports `glyphwire` only for `CellPos` in `geometry.cellFromPixel`.
+    const host_support_mod = b.addModule("host_support", .{
+        .root_source_file = b.path("host/support.zig"),
+    });
+    host_support_mod.addImport("glyphwire", glyphwire_mod);
+
     const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });
     const pixzig_mod = pixzig_dep.module("pixzig");
 
@@ -60,6 +70,7 @@ pub fn build(b: *std.Build) void {
     tests_exe.root_module.addImport("glyphwire", glyphwire_mod);
     tests_exe.root_module.addImport("shell_support", shell_support_mod);
     tests_exe.root_module.addImport("ls_support", ls_support_mod);
+    tests_exe.root_module.addImport("host_support", host_support_mod);
     // shell_support -> shell/config.zig -> ziglua: the Lua C library and
     // libc have to be linked into the final test binary.
     tests_exe.root_module.linkLibrary(lua_lib);
