@@ -920,6 +920,60 @@ surface.
   written to the grid in red; whatever the interpreter accepted before
   the failing line is still applied (Lua stops at the error point).
 
+#### Prompt templating: `prompt{ ... }`
+- **`shell.conf` can define the prompt as a template string** —
+  `prompt{ left = ..., right = ..., exit = ..., dur = ..., dur_min_ms =
+  N }`, one table argument, every key optional, multiple calls merging key
+  by key (last write wins). String keys must be strings (a number
+  coerces, like `alias`); `dur_min_ms` must be a non-negative number. The
+  parser is `shell/config.zig`'s `luaPrompt` collecting into
+  `config.PromptConfig`; `Prompt.loadStartupConfig` copies the result onto
+  the prompt. Unset everywhere → the built-in `<cwd> > ` prompt is
+  unchanged (`writeDefaultPrefix`). This was chosen over an env var
+  (`$GLYPHWIRE_PROMPT_*`) because the shell already has exactly one config
+  surface and a second one to keep in sync isn't worth it.
+- **The template engine (`shell/prompt_template.zig`) is pure** — no libc,
+  no IO, no glyphwire import; it turns a template plus a `Data` snapshot
+  into an ordered op list (`text` run / `icon` placement), unit-tested in
+  `tests/prompt_template_tests.zig`. `Prompt.emitOps` walks that list,
+  `write_text`ing text and `draw_icon`ing icons; since `draw_icon` doesn't
+  move the server cursor it advances one column by hand after each icon,
+  and re-reads the cursor after each text run so an embedded `\n` (server
+  CR+LF) is handled without local bookkeeping.
+- **Token syntax:** `{name}` interpolates; `{{` / `}}` are literal braces;
+  `\n` `\t` `\\` are unescaped; an unrecognized `{name}` is left
+  **verbatim** so a typo shows rather than vanishing. Fields: `{cwd}`
+  (working dir, `$HOME` collapsed to `~`), `{cwd_full}` (absolute),
+  `{user}` (`$USER`), `{host}` (from `$HOSTNAME` / `/etc/hostname`,
+  resolved once per session), `{icon:NAME}` (a bundled icon by registry
+  name, one cell wide — e.g. `distro-arch`).
+- **`{exit}` and `{dur}` are conditional sections, not raw values** — the
+  request's "show an error code / an icon only on a non-zero exit" and
+  "don't show a duration under 2–3s". `{exit}` expands to the `exit`
+  sub-template, but only when the last **external** command exited
+  non-zero (empty on success, and before any command has run). `{dur}`
+  expands to the `dur` sub-template, but only when the last external
+  command's wall time was `>= dur_min_ms` (default 2000). Inside those
+  sub-templates, `{exit_code}` is the numeric status and `{duration}` is
+  the humanized time (`450ms` / `1.5s` / `2m5s` / `1h1m`); an `exit`
+  section can also carry an `{icon:...}`. A section that references its
+  own trigger token is stopped by a depth guard (`max_depth = 4`).
+- **Only `runCommand` updates the exit/duration state** (`Prompt`'s
+  `last_status` / `last_dur_ms` / `have_status`, and `Pty.exit_code`,
+  decoded from `waitpid` in `shell/pty.zig`). The `cd` / `alias` /
+  `unalias` builtins leave it as the last real program's — the tokens are
+  about "the last program", and a builtin has no meaningful exit code
+  here. The monotonic timing uses `std.Io.Clock` (`.awake`); this reduced
+  std has no `std.time.Timer`.
+- **`prompt.right` is drawn first, right-aligned on the prompt's starting
+  row, then `prompt.left` from column 0.** It's single-line; a long input
+  line will overwrite it (accepted, like starship's transient right
+  prompt). Skipped entirely if its rendered width doesn't fit the grid.
+- **Deferred:** a `prompt` *function* form — `shell.conf` sets a Lua
+  callback that receives the same data items and emits its own draw
+  commands (so it can shell out to `git status` etc.). Recorded in
+  `docs/ideas.md`; the string form above is deliberately the first slice.
+
 #### Persistent command history: `~/.config/glyphwire/history`
 - **Plain text, one command per line, oldest first** — same directory
   resolution as `shell.conf`. Loaded into `Prompt.history` at startup so

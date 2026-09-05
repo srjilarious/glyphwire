@@ -8,7 +8,14 @@ const config = @import("shell_support").config;
 const history = @import("shell_support").history;
 const keyencode = @import("shell_support").keyencode;
 const lineedit = @import("shell_support").lineedit;
+const prompt_template = @import("shell_support").prompt_template;
 const Pty = @import("pty.zig").Pty;
+
+/// The left prompt template used when `shell.conf` configured a prompt
+/// (`prompt.right` and/or the sub-templates) but not `prompt.left`. Byte
+/// for byte the same as the unconfigured default `writeDefaultPrefix`
+/// produces -- an absolute cwd, then `" > "`.
+const default_prompt_left = "{cwd_full} > ";
 
 comptime {
     // The captured-child marker detector keeps its own copy of the
@@ -214,6 +221,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         defer snapshot.deinit();
         prompt.grid_cols = snapshot.cols();
     }
+
+    // For `{host}` in a configured prompt template -- resolved once, it
+    // doesn't change over a session.
+    prompt.resolveHostname();
 
     // Startup config + persistent history, both under
     // `$XDG_CONFIG_HOME/glyphwire` (or `$HOME/.config/glyphwire`). A
@@ -559,6 +570,36 @@ const Prompt = struct {
     /// then. Owned; freed in `deinit`.
     history_path: ?[]const u8 = null,
 
+    /// Prompt templates from `shell.conf`'s `prompt{ ... }` (see
+    /// `shell/prompt_template.zig` and `loadStartupConfig`). All `null`
+    /// means no prompt config -- `writePromptPrefix` then uses the
+    /// built-in `writeDefaultPrefix`. `left`/`right` are the main
+    /// templates; `exit`/`dur` are the sub-templates `{exit}` / `{dur}`
+    /// expand to. Owned dups; freed in `deinit`.
+    prompt_left: ?[]const u8 = null,
+    prompt_right: ?[]const u8 = null,
+    prompt_exit: ?[]const u8 = null,
+    prompt_dur: ?[]const u8 = null,
+    /// Minimum wall-clock run time of the last external command before
+    /// `{dur}` shows anything. `shell.conf`'s `prompt.dur_min_ms`
+    /// overrides this default.
+    dur_min_ms: u64 = 2000,
+
+    /// The last external command's exit status and wall-clock run time,
+    /// plus whether any external command has run this session -- feeds
+    /// `{exit}` / `{exit_code}` / `{dur}` / `{duration}`. Only
+    /// `runCommand` updates these; the `cd` / `alias` / `unalias`
+    /// builtins leave them as the last real program's values.
+    last_status: u8 = 0,
+    last_dur_ms: u64 = 0,
+    have_status: bool = false,
+
+    /// Machine hostname for `{host}`, resolved once by `resolveHostname`
+    /// into `host_buf` (so the slice stays valid for the session). Empty
+    /// until then, or if it couldn't be determined.
+    host: []const u8 = "",
+    host_buf: [64]u8 = undefined,
+
     fn deinit(self: *Prompt) void {
         const alloc = self.client.alloc;
         for (self.history.items) |line| alloc.free(line);
@@ -567,14 +608,50 @@ const Prompt = struct {
         self.buffer.deinit(alloc);
         self.aliases.deinit(alloc);
         if (self.history_path) |p| alloc.free(p);
+        if (self.prompt_left) |s| alloc.free(s);
+        if (self.prompt_right) |s| alloc.free(s);
+        if (self.prompt_exit) |s| alloc.free(s);
+        if (self.prompt_dur) |s| alloc.free(s);
     }
 
-    /// Writes the current directory followed by `> ` at the cursor's
-    /// current position -- reading the directory fresh each time (rather
-    /// than caching it) is what makes a successful `cd` visible on the
-    /// very next prompt. Returns the cursor position right after the
-    /// prefix, for the caller to record as `line_start_row`/`_col`.
+    /// Fills `host`/`host_buf` from `$HOSTNAME` or `/etc/hostname`. Best
+    /// effort: leaves `host` empty (so `{host}` renders nothing) on any
+    /// failure. Called once at startup.
+    fn resolveHostname(self: *Prompt) void {
+        if (self.environ_map.get("HOSTNAME")) |h| {
+            if (h.len > 0 and h.len <= self.host_buf.len) {
+                @memcpy(self.host_buf[0..h.len], h);
+                self.host = self.host_buf[0..h.len];
+                return;
+            }
+        }
+        const bytes = std.Io.Dir.cwd().readFileAlloc(self.client.io, "/etc/hostname", self.client.alloc, .limited(256)) catch return;
+        defer self.client.alloc.free(bytes);
+        const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
+        if (trimmed.len == 0 or trimmed.len > self.host_buf.len) return;
+        @memcpy(self.host_buf[0..trimmed.len], trimmed);
+        self.host = self.host_buf[0..trimmed.len];
+    }
+
+    /// Writes the prompt prefix at the cursor's current position and
+    /// returns the cursor position right after it, for the caller to
+    /// record as `line_start_row`/`_col`. Everything is read fresh each
+    /// time (cwd, exit status, ...) so a `cd` or a failed command shows
+    /// on the very next prompt.
+    ///
+    /// With no `shell.conf` prompt config this is just `writeDefaultPrefix`
+    /// (`<cwd> > `); a configured `prompt.left` / `prompt.right` routes
+    /// through `writeTemplatedPrefix`.
     fn writePromptPrefix(self: *Prompt) !glyphwire.Cursor {
+        if (self.prompt_left == null and self.prompt_right == null) {
+            return self.writeDefaultPrefix();
+        }
+        return self.writeTemplatedPrefix();
+    }
+
+    /// The built-in prompt: the absolute working directory followed by
+    /// `" > "`. Unchanged from before prompt templating existed.
+    fn writeDefaultPrefix(self: *Prompt) !glyphwire.Cursor {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(self.client.io, &cwd_buf) catch 0;
 
@@ -583,6 +660,98 @@ const Prompt = struct {
 
         try self.client.writeText(prefix, null, null);
         return try self.client.getCursor();
+    }
+
+    /// Renders the configured `prompt.left` / `prompt.right` templates
+    /// (see `shell/prompt_template.zig`) against the shell's live state
+    /// and emits them. `prompt.right` is drawn first, right-aligned on
+    /// the prompt's starting row (a long input line will later overwrite
+    /// it -- accepted, like starship's transient right prompt); then
+    /// `prompt.left` is drawn from column 0. Returns the cursor position
+    /// after the left template, where input begins.
+    fn writeTemplatedPrefix(self: *Prompt) !glyphwire.Cursor {
+        const alloc = self.client.alloc;
+
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_full = cwd_buf[0 .. std.process.currentPath(self.client.io, &cwd_buf) catch 0];
+
+        var tilde_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_tilde = self.collapseHome(cwd_full, &tilde_buf);
+
+        const data = prompt_template.Data{
+            .cwd = cwd_tilde,
+            .cwd_full = cwd_full,
+            .user = self.environ_map.get("USER") orelse "",
+            .host = self.host,
+            .last_status = self.last_status,
+            .have_status = self.have_status,
+            .last_dur_ms = self.last_dur_ms,
+            .dur_min_ms = self.dur_min_ms,
+            .exit_section = self.prompt_exit,
+            .dur_section = self.prompt_dur,
+        };
+
+        // The row the caller left the cursor on -- both sections anchor to it.
+        const start = try self.client.getCursor();
+
+        if (self.prompt_right) |rt| {
+            var r = try prompt_template.render(alloc, rt, data);
+            defer r.deinit();
+            const w = prompt_template.opsWidth(r.ops);
+            if (w > 0 and w < self.grid_cols) {
+                try self.client.setCursor(start.row, self.grid_cols - w);
+                try self.emitOps(r.ops, start.row, self.grid_cols - w);
+            }
+            try self.client.setCursor(start.row, 0);
+        }
+
+        var l = try prompt_template.render(alloc, self.prompt_left orelse default_prompt_left, data);
+        defer l.deinit();
+        try self.emitOps(l.ops, start.row, 0);
+
+        return try self.client.getCursor();
+    }
+
+    /// Walks a rendered template's ops, `write_text`ing each text run and
+    /// `draw_icon`ing each icon at the running cell. `draw_icon` doesn't
+    /// move the server cursor, so after an icon the cursor is advanced one
+    /// column by hand; text runs resync from `getCursor` (so a `\n` in a
+    /// run is handled by the server's own CR+LF).
+    fn emitOps(self: *Prompt, ops: []const prompt_template.Op, row: usize, col: usize) !void {
+        var cur_row = row;
+        var cur_col = col;
+        for (ops) |op| switch (op) {
+            .text => |t| {
+                try self.client.writeText(t, null, null);
+                const cur = try self.client.getCursor();
+                cur_row = cur.row;
+                cur_col = cur.col;
+            },
+            .icon => |name| {
+                // A `draw_icon` notification for an unregistered name is
+                // logged and dropped server-side, not returned as an
+                // error, so nothing to handle here beyond the wire write.
+                try self.client.drawIconStyled(cur_row, cur_col, name, .{});
+                cur_col += 1;
+                try self.client.setCursor(cur_row, cur_col);
+            },
+        };
+    }
+
+    /// Returns `path` with a leading `$HOME` replaced by `~` (`~` alone
+    /// for exactly `$HOME`), written into `buf`. Falls back to `path`
+    /// unchanged when there's no `$HOME`, it isn't a prefix, or `buf` is
+    /// too small.
+    fn collapseHome(self: *Prompt, path: []const u8, buf: []u8) []const u8 {
+        const home = self.environ_map.get("HOME") orelse return path;
+        if (home.len == 0 or !std.mem.startsWith(u8, path, home)) return path;
+        if (path.len == home.len) return "~";
+        if (path[home.len] != '/') return path; // `/home/foobar` isn't under `/home/foo`
+        const rest = path[home.len..];
+        if (rest.len + 1 > buf.len) return path;
+        buf[0] = '~';
+        @memcpy(buf[1 .. rest.len + 1], rest);
+        return buf[0 .. rest.len + 1];
     }
 
     /// A fresh prompt: writes the prefix and resets the line -- empty
@@ -1081,6 +1250,10 @@ const Prompt = struct {
         // Size the pty from the grid so a curses-ish child lays out right.
         const size = self.client.getSize() catch glyphwire.LayerSize{ .cols = self.grid_cols, .rows = 24 };
 
+        // Monotonic start time of the whole run, for `{dur}` on the next
+        // prompt (this reduced std has no `std.time.Timer`).
+        const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
+
         var pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows)) catch |err| {
             var buf: [160]u8 = undefined;
             const msg = switch (err) {
@@ -1088,9 +1261,25 @@ const Prompt = struct {
                 else => std.fmt.bufPrint(&buf, "{s}: {t}", .{ argv[0], err }) catch "failed to start command",
             };
             try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+            // Couldn't start it: record a status so `{exit}` reflects the
+            // failure, but no duration (it never ran).
+            self.last_status = if (err == error.CommandNotFound) 127 else 1;
+            self.last_dur_ms = 0;
+            self.have_status = true;
             return;
         };
         defer pty.deinit();
+
+        // Record the run's outcome for the next prompt's `{exit}` / `{dur}`.
+        // Runs before `pty.deinit` (defers are LIFO) so `pty` is still
+        // valid; `pty.exit_code` is set by whichever of `reaped`/`wait`
+        // reaped the child below.
+        defer {
+            const elapsed_ms = started.untilNow(self.client.io).raw.toMilliseconds();
+            self.last_dur_ms = if (elapsed_ms > 0) @intCast(elapsed_ms) else 0;
+            self.last_status = pty.exit_code;
+            self.have_status = true;
+        }
 
         var reader_ctx = PtyReaderCtx{ .prompt = self, .master = pty.master };
         const reader = std.Thread.spawn(.{}, ptyReaderThread, .{&reader_ctx}) catch |err| {
@@ -1350,6 +1539,14 @@ const Prompt = struct {
         for (result.config.aliases.items) |a| {
             try self.aliases.set(alloc, a.name, a.value);
         }
+
+        // Prompt templating: copy owned dups so they outlive `result`.
+        const pc = result.config.prompt;
+        if (pc.left) |s| self.prompt_left = try alloc.dupe(u8, s);
+        if (pc.right) |s| self.prompt_right = try alloc.dupe(u8, s);
+        if (pc.exit) |s| self.prompt_exit = try alloc.dupe(u8, s);
+        if (pc.dur) |s| self.prompt_dur = try alloc.dupe(u8, s);
+        if (pc.dur_min_ms) |ms| self.dur_min_ms = ms;
 
         if (result.err) |msg| {
             var buf: [512]u8 = undefined;

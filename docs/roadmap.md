@@ -886,6 +886,48 @@ Follow-up in the same branch, both client-local (no wire change):
 `fromMimetype` + declared-format-mismatch + format-stored), 1 `dispatch`
 (unknown format rejected), 4 `shell` (`quoteArg` round trips); 269 pass.
 
+## Configurable prompt (template-string form)
+
+`shell.conf` can now define the prompt: `prompt{ left = ..., right = ...,
+exit = ..., dur = ..., dur_min_ms = N }`. All client-local (no wire
+change) — `decisions.md`'s Shell section has a new "Prompt templating"
+subsection; `api.md` is untouched.
+
+- **`shell/prompt_template.zig`** (new, in `shell_support`, pure) parses a
+  template into an ordered op list (`text` / `icon`). Tokens `{cwd}`
+  (`$HOME`→`~`), `{cwd_full}`, `{user}`, `{host}`, `{icon:NAME}`; `{{` /
+  `}}` literal braces; `\n` `\t` `\\` unescaped; an unknown `{token}` left
+  verbatim. `{exit}` / `{dur}` are **conditional sections**: `{exit}`
+  renders the `exit` sub-template only on a non-zero last exit status,
+  `{dur}` renders the `dur` sub-template only when the last command ran
+  `>= dur_min_ms` (default 2000). Inside those, `{exit_code}` and
+  `{duration}` (humanized: `450ms` / `1.5s` / `2m5s`) are the values; a
+  `max_depth` guard stops a self-referential section.
+- **`shell/config.zig`** gained a `prompt{ ... }` binding (one table arg,
+  keys optional, calls merge) → `config.PromptConfig`.
+- **`shell/main.zig`**: `writePromptPrefix` splits into
+  `writeDefaultPrefix` (unchanged `<cwd> > `, used when nothing is
+  configured) and `writeTemplatedPrefix`. `prompt.right` is drawn first,
+  right-aligned on the prompt row (single-line, overwritten by a long
+  input line); `prompt.left` from column 0. `emitOps` advances one cell by
+  hand after each `draw_icon` (which doesn't move the server cursor).
+- **`shell/pty.zig`**: `Pty` now decodes the `waitpid` status into
+  `exit_code` (exit code, or `128 + signal`); `reaped` / `wait` take
+  `*Pty`. `runCommand` records `last_status` / `last_dur_ms` /
+  `have_status` for the next prompt (only external commands; timing via
+  `std.Io.Clock` since this reduced std has no `std.time.Timer`).
+- **Icons:** `assets/icons/distro/{arch,tux,debian,fedora,ubuntu}.png`
+  (simple geometric renderings, not official artwork) added to
+  `core.default_icon_manifest` as `distro-*`.
+- **Tests:** `tests/prompt_template_tests.zig` (new group `prompt`, 26
+  cases) + 5 in `shell_config_tests.zig` for the `prompt{}` binding.
+- **Deferred — the Lua-function prompt.** `shell.conf` sets a callback
+  that receives all the same data items and batches its own draw commands
+  (`draw_icon` / `write_text` / ...), so a prompt can shell out to check
+  git state and such. Recorded in `docs/ideas.md`; the string form here is
+  the deliberate first slice, and the template engine's `Op` list / `Data`
+  snapshot are already the right shape to hand to a Lua callback later.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

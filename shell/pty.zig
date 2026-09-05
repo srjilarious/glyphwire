@@ -57,9 +57,28 @@ const O_CLOEXEC: c_int = 0o2000000; // Linux
 
 pub const SpawnError = error{ OpenptyFailed, PipeFailed, ForkFailed, CommandNotFound };
 
+/// Turns a `waitpid` status word into a single number: the exit code for
+/// a normal `exit()` (`WIFEXITED` -> `WEXITSTATUS`), or `128 + signal`
+/// for a signalled death (`WIFSIGNALED` -> `WTERMSIG`), matching the
+/// convention shells use for `$?`. The macros aren't in this reduced
+/// `std.c`, so the bit math is inline: low 7 bits zero = exited (code in
+/// bits 8..15); low 7 bits in `1..0x7e` = killed by that signal.
+fn decodeWaitStatus(status: c_int) u8 {
+    const s: u32 = @bitCast(status);
+    const term_sig = s & 0x7f;
+    if (term_sig == 0) return @intCast((s >> 8) & 0xff);
+    if (term_sig != 0x7f) return @intCast(128 +| term_sig);
+    return 0; // 0x7f = stopped; not expected with our waitpid flags
+}
+
 pub const Pty = struct {
     master: c.fd_t,
     pid: c.pid_t,
+    /// The child's exit status once it's been reaped (by `reaped` or
+    /// `wait`): the exit code for a normal exit, `128 + signal` for a
+    /// signalled death, `0` before either has reaped it. `shell/main.zig`
+    /// reads this for the prompt's `{exit}` token.
+    exit_code: u8 = 0,
 
     /// Allocates a pty, forks, and in the child: starts a new session,
     /// makes the slave its controlling terminal, wires the slave to
@@ -149,10 +168,13 @@ pub const Pty = struct {
     }
 
     /// Non-blocking reap. True once the child has exited *and* been
-    /// reaped (no zombie left); false while it's still running.
-    pub fn reaped(self: Pty) bool {
+    /// reaped (no zombie left); false while it's still running. On the
+    /// reaping call it decodes the wait status into `exit_code`.
+    pub fn reaped(self: *Pty) bool {
         var status: c_int = undefined;
-        return c.waitpid(self.pid, &status, 1) == self.pid; // WNOHANG
+        if (c.waitpid(self.pid, &status, 1) != self.pid) return false; // WNOHANG
+        self.exit_code = decodeWaitStatus(status);
+        return true;
     }
 
     /// Sends `sig` to the child's process group (negative pid), so a
@@ -162,10 +184,12 @@ pub const Pty = struct {
     }
 
     /// Blocks until the child is reaped -- the error-path counterpart of
-    /// `reaped`, for when the caller can't spin.
-    pub fn wait(self: Pty) void {
+    /// `reaped`, for when the caller can't spin. Decodes the wait status
+    /// into `exit_code`, same as `reaped`.
+    pub fn wait(self: *Pty) void {
         var status: c_int = undefined;
         while (c.waitpid(self.pid, &status, 0) < 0) {}
+        self.exit_code = decodeWaitStatus(status);
     }
 
     /// Closes the master. Call after the child has been reaped.

@@ -17,6 +17,22 @@ pub const AliasDef = struct {
     value: []const u8,
 };
 
+/// The prompt templating a `prompt{ ... }` call declared. `left`/`right`
+/// are the main templates (see `shell/prompt_template.zig` for the token
+/// syntax); `exit`/`dur` are the sub-templates `{exit}` / `{dur}` expand
+/// to. A `null` field was never set (across every `prompt` call) and the
+/// prompt keeps its built-in default for that piece. Every non-null string
+/// is owned by the enclosing `ShellConfig`.
+pub const PromptConfig = struct {
+    left: ?[]const u8 = null,
+    right: ?[]const u8 = null,
+    exit: ?[]const u8 = null,
+    dur: ?[]const u8 = null,
+    /// Minimum last-command run time, in milliseconds, before `{dur}`
+    /// renders anything. `null` -> the prompt's default (2000).
+    dur_min_ms: ?u64 = null,
+};
+
 /// Everything one shell.conf run declared, parsed into Zig data. Owns its
 /// contents; call `deinit` once the caller has copied what it needs.
 pub const ShellConfig = struct {
@@ -25,6 +41,9 @@ pub const ShellConfig = struct {
     /// duplicate name is kept as its own entry, so whoever applies these
     /// (see `Prompt`) gets last-write-wins for free.
     aliases: std.ArrayList(AliasDef) = .empty,
+    /// Prompt templating from `prompt{ ... }` calls. Multiple calls merge
+    /// key by key, last write winning per key.
+    prompt: PromptConfig = .{},
 
     pub fn deinit(self: *ShellConfig) void {
         for (self.aliases.items) |a| {
@@ -32,6 +51,10 @@ pub const ShellConfig = struct {
             self.alloc.free(a.value);
         }
         self.aliases.deinit(self.alloc);
+        if (self.prompt.left) |s| self.alloc.free(s);
+        if (self.prompt.right) |s| self.alloc.free(s);
+        if (self.prompt.exit) |s| self.alloc.free(s);
+        if (self.prompt.dur) |s| self.alloc.free(s);
     }
 };
 
@@ -75,6 +98,9 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) error{OutOfMemory}!L
     lua.pushFunction(ziglua.wrap(luaAlias));
     lua.setGlobal("alias");
 
+    lua.pushFunction(ziglua.wrap(luaPrompt));
+    lua.setGlobal("prompt");
+
     const prev = g_active;
     g_active = &cfg;
     defer g_active = prev;
@@ -102,4 +128,43 @@ fn luaAlias(lua: *Lua) !i32 {
 
     try cfg.aliases.append(cfg.alloc, .{ .name = name_owned, .value = value_owned });
     return 0;
+}
+
+/// `prompt{ left = ..., right = ..., exit = ..., dur = ..., dur_min_ms = N }`
+/// -- one table argument, every key optional. String keys must be strings
+/// (a number coerces, like `alias`; other types raise). `dur_min_ms` must
+/// be a non-negative number. Multiple `prompt` calls merge: a key set
+/// again replaces (and frees) the earlier value, an omitted key is left
+/// as whatever a prior call set.
+fn luaPrompt(lua: *Lua) !i32 {
+    const cfg = g_active orelse return 0;
+    lua.checkType(1, .table);
+
+    try promptStrField(lua, cfg, &cfg.prompt.left, "left");
+    try promptStrField(lua, cfg, &cfg.prompt.right, "right");
+    try promptStrField(lua, cfg, &cfg.prompt.exit, "exit");
+    try promptStrField(lua, cfg, &cfg.prompt.dur, "dur");
+
+    _ = lua.getField(1, "dur_min_ms");
+    defer lua.pop(1);
+    if (!lua.isNoneOrNil(-1)) {
+        const n = lua.checkNumber(-1);
+        if (n < 0) lua.raiseErrorStr("prompt: dur_min_ms must be >= 0", .{});
+        cfg.prompt.dur_min_ms = @as(u64, @intFromFloat(n));
+    }
+    return 0;
+}
+
+/// Reads one string key off the table at stack index 1 into `slot`,
+/// replacing (and freeing) any value a previous `prompt` call left there.
+/// A missing/nil key leaves `slot` untouched.
+fn promptStrField(lua: *Lua, cfg: *ShellConfig, slot: *?[]const u8, key: [:0]const u8) !void {
+    _ = lua.getField(1, key);
+    defer lua.pop(1);
+    if (lua.isNoneOrNil(-1)) return;
+
+    const s = lua.checkString(-1); // raises on a non-string/non-number
+    const owned = try cfg.alloc.dupe(u8, s);
+    if (slot.*) |old| cfg.alloc.free(old);
+    slot.* = owned;
 }

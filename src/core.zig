@@ -2424,6 +2424,15 @@ pub const default_icon_manifest = [_]IconManifestEntry{
     .{ .name = "unknown", .path = "assets/icons/oxygen/unknown.png" },
     .{ .name = "drive", .path = "assets/icons/oxygen/drive.png" },
     .{ .name = "media-optical", .path = "assets/icons/oxygen/media-optical.png" },
+
+    // Distro logos, namespaced `distro-` (same convention as the `notify-`
+    // icons) -- mainly for `{icon:...}` in a configured shell prompt.
+    // Simple geometric renderings, not the official artwork.
+    .{ .name = "distro-arch", .path = "assets/icons/distro/arch.png" },
+    .{ .name = "distro-tux", .path = "assets/icons/distro/tux.png" },
+    .{ .name = "distro-debian", .path = "assets/icons/distro/debian.png" },
+    .{ .name = "distro-fedora", .path = "assets/icons/distro/fedora.png" },
+    .{ .name = "distro-ubuntu", .path = "assets/icons/distro/ubuntu.png" },
 };
 
 /// The default box-drawing tile set, registered into the same `icons`

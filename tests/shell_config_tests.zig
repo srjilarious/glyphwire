@@ -146,3 +146,66 @@ pub fn configReportsRuntimeErrorForNonStringArgTest(_: std.Io, alloc: std.mem.Al
 
     try testz.expectTrue(res.err != null);
 }
+
+// ─── prompt{ ... } binding ────────────────────────────────────────────
+
+pub fn configReadsPromptTableTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt {
+        \\  left = "{cwd} > ",
+        \\  right = "{user}",
+        \\  exit = " [{exit_code}]",
+        \\  dur = " {duration}",
+        \\  dur_min_ms = 3000,
+        \\}
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqualStr("{cwd} > ", res.config.prompt.left.?);
+    try testz.expectEqualStr("{user}", res.config.prompt.right.?);
+    try testz.expectEqualStr(" [{exit_code}]", res.config.prompt.exit.?);
+    try testz.expectEqualStr(" {duration}", res.config.prompt.dur.?);
+    try testz.expectEqual(res.config.prompt.dur_min_ms.?, 3000);
+}
+
+pub fn configPromptDefaultsToAllNullTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "alias('a', 'b')");
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.prompt.left, null);
+    try testz.expectEqual(res.config.prompt.right, null);
+    try testz.expectEqual(res.config.prompt.exit, null);
+    try testz.expectEqual(res.config.prompt.dur, null);
+    try testz.expectEqual(res.config.prompt.dur_min_ms, null);
+}
+
+pub fn configPromptMergesAcrossCallsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt { left = "one", right = "R" }
+        \\prompt { left = "two" }
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    // `left` set twice -> last wins; `right` from the first call is kept.
+    try testz.expectEqualStr("two", res.config.prompt.left.?);
+    try testz.expectEqualStr("R", res.config.prompt.right.?);
+}
+
+pub fn configPromptRejectsNonStringFieldTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { left = {} }");
+    defer res.deinit();
+
+    try testz.expectTrue(res.err != null);
+}
+
+pub fn configPromptRejectsNegativeDurMinTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { dur_min_ms = -5 }");
+    defer res.deinit();
+
+    try testz.expectTrue(res.err != null);
+}
