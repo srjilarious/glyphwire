@@ -602,6 +602,150 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     try waitForCell(&reporter, 3, arrow_col, ">");
 }
 
+/// A two-stage pipeline: `echo hello | tr a-z A-Z`. Only the last stage's
+/// stdout ("HELLO\n") is mirrored onto the grid, at row 1 -- proving the
+/// pipe executor wired `echo`'s stdout into `tr`'s stdin and drained the
+/// tail of the pipeline back to the shell. (See `Prompt.spawnAndPump`.)
+pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pipe-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread3.join();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    try typeText(&reporter, "echo hello | tr a-z A-Z");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // Wait for the last "O" of "HELLO" so the whole word is proven across.
+    try waitForCell(&reporter, 1, 4, "O");
+
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+    for ("HELLO", 0..) |expected_ch, i| {
+        var expected_buf: [1]u8 = .{expected_ch};
+        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, i).grapheme);
+    }
+}
+
+/// `echo saved-line > FILE` -- the pipe executor opens the redirect
+/// target and wires it onto the child's fd 1, so nothing reaches the grid
+/// and the file holds the output. (See `Prompt.resolveRedir` /
+/// `pipeexec.applyRedir`.)
+pub fn shellRedirectsStdoutToAFileTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-redir-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    const out_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-redir-e2e-out-{d}.txt", .{std.Thread.getCurrentId()});
+    defer alloc.free(out_path);
+    std.Io.Dir.deleteFileAbsolute(io, out_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, out_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread3.join();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    const line = try std.fmt.allocPrint(alloc, "echo saved-line > {s}", .{out_path});
+    defer alloc.free(line);
+    try typeText(&reporter, line);
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // Poll for the file: the redirect means no grid output to wait on.
+    var attempts: usize = 0;
+    const contents = while (attempts < 500) : (attempts += 1) {
+        if (std.Io.Dir.cwd().readFileAlloc(io, out_path, alloc, .limited(4096))) |bytes| {
+            if (bytes.len > 0) break bytes;
+            alloc.free(bytes);
+        } else |_| {}
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    } else return error.TimedOutWaitingForRedirectFile;
+    defer alloc.free(contents);
+
+    try testz.expectEqualStr("saved-line\n", contents);
+}
+
 /// After a command whose output scrolls the layer, the next powerline
 /// prompt must settle on a real grid row and stay there -- not keep
 /// creeping down one row per idle tick. `writePowerlinePrefix` used to

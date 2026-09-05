@@ -70,6 +70,24 @@ pub const HostHooks = struct {
     realpath: *const fn (ctx: *anyopaque, path: [:0]const u8, buf: []u8) ?[]const u8,
     /// Write script output onto the grid.
     write: *const fn (ctx: *anyopaque, bytes: []const u8) void,
+    /// Run `line` as a shell command line (pipes, redirects,
+    /// `&&` / `||` / `;` -- the same parser the interactive prompt uses).
+    /// `capture` true (`sh.run`): the collected stdout / stderr are
+    /// appended to `out` / `err` and nothing reaches the grid. `capture`
+    /// false (`sh.exec`): the streams mirror to the grid and `out` / `err`
+    /// are left untouched. `stdin` (may be empty) feeds the first stage of
+    /// the first pipeline. Returns the last pipeline's exit status (2 for
+    /// a syntax error -- its message is in `err` when capturing, on the
+    /// grid otherwise). `out` / `err` belong to the caller
+    /// (`ScriptEngine.alloc`).
+    run_line: *const fn (
+        ctx: *anyopaque,
+        line: []const u8,
+        capture: bool,
+        stdin: []const u8,
+        out: *std.ArrayList(u8),
+        err: *std.ArrayList(u8),
+    ) u8,
     /// True once the user has pressed Ctrl-C since the builtin started --
     /// polled from the interrupt hook while a script runs.
     poll_interrupt: *const fn (ctx: *anyopaque) bool,
@@ -416,6 +434,10 @@ fn installShTable(lua: *Lua) void {
     lua.setField(-2, "cwd");
     lua.pushFunction(ziglua.wrap(shRealpath));
     lua.setField(-2, "realpath");
+    lua.pushFunction(ziglua.wrap(shRun));
+    lua.setField(-2, "run");
+    lua.pushFunction(ziglua.wrap(shExec));
+    lua.setField(-2, "exec");
     lua.setGlobal("sh");
 }
 
@@ -493,6 +515,55 @@ fn shRealpath(lua: *Lua) i32 {
     } else {
         lua.pushNil();
     }
+    return 1;
+}
+
+/// `sh.run(line [, stdin])` -- run `line` as a shell command line and
+/// return `{ code = <exit status>, ok = code == 0, out = <stdout>, err =
+/// <stderr> }`. `line` goes through the same pipe / redirect / `&&` `||`
+/// `;` parser as a typed prompt line, so `sh.run("ps aux | grep x")` and
+/// `sh.run("make && ./run")` both work and read like shell. `stdin`, if
+/// given, is fed to the first stage. A `2>&1` in `line` merges stderr
+/// into `out` (that's just the redirect doing its job). A builtin stage
+/// (`cd`, a `defcmd`) still writes to the grid, not into `out`.
+fn shRun(lua: *Lua) i32 {
+    const e = g_engine orelse return 0;
+    const line = lua.checkString(1);
+    const stdin_s: []const u8 = if (lua.getTop() < 2 or lua.isNil(2)) "" else lua.checkString(2);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(e.alloc);
+    var err: std.ArrayList(u8) = .empty;
+    defer err.deinit(e.alloc);
+
+    const code = e.hooks.run_line(e.hooks.ctx, line, true, stdin_s, &out, &err);
+
+    lua.newTable();
+    lua.pushInteger(@intCast(code));
+    lua.setField(-2, "code");
+    lua.pushBoolean(code == 0);
+    lua.setField(-2, "ok");
+    _ = lua.pushString(out.items);
+    lua.setField(-2, "out");
+    _ = lua.pushString(err.items);
+    lua.setField(-2, "err");
+    return 1;
+}
+
+/// `sh.exec(line)` -- run `line` with its output streamed straight to the
+/// grid (like a typed command), returning just the exit status. The
+/// passthrough counterpart of `sh.run`.
+fn shExec(lua: *Lua) i32 {
+    const e = g_engine orelse return 0;
+    const line = lua.checkString(1);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(e.alloc);
+    var err: std.ArrayList(u8) = .empty;
+    defer err.deinit(e.alloc);
+
+    const code = e.hooks.run_line(e.hooks.ctx, line, false, "", &out, &err);
+    lua.pushInteger(@intCast(code));
     return 1;
 }
 

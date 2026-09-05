@@ -16,6 +16,7 @@ const Tests = blk: {
         testz.Group{ .name = "Table Tests", .tag = "table", .mod = @import("./table_tests.zig") },
         testz.Group{ .name = "End-to-end Tests", .tag = "e2e", .mod = @import("./e2e_tests.zig") },
         testz.Group{ .name = "Shell Tests", .tag = "shell", .mod = @import("./shell_tests.zig") },
+        testz.Group{ .name = "Shell Parse Tests", .tag = "shell-parse", .mod = @import("./shell_parse_tests.zig") },
         testz.Group{ .name = "Shell Config Tests", .tag = "shell-config", .mod = @import("./shell_config_tests.zig") },
         testz.Group{ .name = "Shell Script Engine Tests", .tag = "shell-script", .mod = @import("./shell_script_engine_tests.zig") },
         testz.Group{ .name = "Prompt Template Tests", .tag = "prompt", .mod = @import("./prompt_template_tests.zig") },
