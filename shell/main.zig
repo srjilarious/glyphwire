@@ -22,9 +22,15 @@ const ModeTracker = glyphwire.ModeTracker;
 const default_prompt_left = "{cwd_full} > ";
 
 /// Rows of context kept between the browse cursor and the top/bottom of
-/// the window while walking scrollback with Up/Down, when `shell.conf`'s
-/// `prompt{ scrolloff = N }` isn't set. See `Prompt.scrolloffRows`.
+/// the window while walking scrollback with the arrow keys, when
+/// `shell.conf`'s `prompt{ scrolloff = N }` isn't set. See
+/// `Prompt.scrolloffRows`.
 const default_scrolloff: usize = 8;
+
+/// Rows Ctrl+Up / Ctrl+Down jump per press while browsing scrollback,
+/// when `shell.conf`'s `prompt{ scrollback_jump = N }` isn't set. See
+/// `Prompt.scrollbackJumpRows`.
+const default_scrollback_jump: usize = 5;
 
 /// Per-command wall-clock budget for a `prompt{ commands = { ... } }`
 /// var when its entry doesn't set `timeout_ms`. Kept short: the command
@@ -98,8 +104,9 @@ fn plColor(s: ?[]const u8) ?glyphwire.Color {
 /// relayed through the server, not read directly.
 ///
 /// The prompt supports echo, Enter, real cursor movement and interior
-/// insert/delete (arrow keys, ctrl+a/e/u, ctrl+arrow word jumps, ctrl+up/
-/// down history recall -- see `Prompt`), and now launches a child process
+/// insert/delete (arrow keys, ctrl+a/e/u, ctrl+arrow word jumps, Up/Down
+/// history recall, Ctrl+Up to browse scrollback -- see `Prompt`), and now
+/// launches a child process
 /// per submitted line (see `Prompt.runCommand`). Every child's
 /// stdout/stderr is piped and mirrored onto the grid via `write_text` by
 /// default -- the assumption for any spawned command is "plain program
@@ -484,7 +491,19 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         const ev: glyphwire.KeyEvent = switch (input_ev) {
             .text => |tev| {
                 defer alloc.free(tev.text);
-                if (prompt.browse_pos == null) try prompt.insertText(tev.text);
+                // Off the browse path this just edits the live line. While
+                // browsing scrollback, `scrollback_type_exits` (default
+                // true) decides whether a keystroke snaps back to the
+                // prompt and inserts (`insertText` funnels through
+                // `setCursorAt`, which clears `browse_pos` and the scroll
+                // view) or is ignored until Escape. A lone space is the
+                // exception: while browsing it toggles the mark under the
+                // cursor (handled by the `.key` "space" arm below), so it
+                // must not be consumed as type-to-exit here.
+                const browse_space = prompt.browse_pos != null and std.mem.eql(u8, tev.text, " ");
+                if (!browse_space and (prompt.browse_pos == null or prompt.scrollbackTypeExits())) {
+                    try prompt.insertText(tev.text);
+                }
                 continue;
             },
             .paste => |tev| {
@@ -494,7 +513,9 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
                 // editor is single-line, so newline runs are flattened to
                 // single spaces first -- a pasted file list then reads as
                 // space-separated arguments instead of one unusable blob.
-                if (prompt.browse_pos == null) {
+                // A paste while browsing follows the same
+                // `scrollback_type_exits` rule as typed text.
+                if (prompt.browse_pos == null or prompt.scrollbackTypeExits()) {
                     const flat = try lineedit.flattenNewlines(alloc, tev.text);
                     defer alloc.free(flat);
                     try prompt.insertText(flat);
@@ -572,14 +593,22 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             try prompt.deleteBackward();
         } else if (std.mem.eql(u8, ev.key, "delete")) {
             try prompt.deleteForward();
+        } else if (std.mem.eql(u8, ev.key, "home") and prompt.browse_pos != null) {
+            // Home/End while browsing act on the scrollback row the browse
+            // cursor is on (column 0 / just past its last non-blank cell),
+            // staying in browse mode -- unlike ctrl+a / ctrl+e, which
+            // still snap back to the live prompt in every state.
+            try prompt.browseHome();
+        } else if (std.mem.eql(u8, ev.key, "end") and prompt.browse_pos != null) {
+            try prompt.browseEnd();
         } else if ((ctrl and std.mem.eql(u8, ev.key, "a")) or std.mem.eql(u8, ev.key, "home")) {
-            // Home mirrors ctrl+a in every state: on the live line it goes
-            // to column 0, and while browsing scrollback `moveCursorTo` ->
-            // `setCursorAt` snaps back to the live line first (same as
-            // ctrl+a does today).
+            // On the live line Home mirrors ctrl+a (go to column 0); via
+            // `moveCursorTo` -> `setCursorAt` it also ends any browse and
+            // snaps the view back to the live tail.
             try prompt.moveCursorTo(0);
         } else if ((ctrl and std.mem.eql(u8, ev.key, "e")) or std.mem.eql(u8, ev.key, "end")) {
-            // End mirrors ctrl+e, likewise unaffected by browse mode.
+            // End mirrors ctrl+e on the live line; the browse-mode form is
+            // handled above.
             try prompt.moveCursorTo(prompt.buffer.items.len);
         } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
             try prompt.killToStart();
@@ -587,7 +616,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             try prompt.clearScreen();
         } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
             // Deliberately unaffected by browse mode, unlike ctrl+up/down
-            // above: ctrl+left/right always means "word-jump on the live
+            // below: ctrl+left/right always means "word-jump on the live
             // line," which (via moveCursorTo -> setCursorAt) always snaps
             // browsing back to the prompt first -- there's no "bigger
             // browse step" meaning for these two.
@@ -595,26 +624,33 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
             try prompt.moveCursorTo(prompt.wordRight());
         } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
-            // Ctrl+up means history recall at the prompt (unchanged), but
-            // a bigger browse-step (5 rows) while already browsing --
-            // there's no real "recall history while browsing" case to
-            // preserve, since browsing and editing the live line are
-            // mutually exclusive states.
+            // Ctrl+Up breaks into scrollback browse mode from the live
+            // prompt (a one-row step off the input line); once browsing
+            // it's a bigger jump (`scrollback_jump` rows, default 5) for
+            // scanning a long listing faster.
             if (prompt.browse_pos != null) {
-                try prompt.browseUp(5);
+                try prompt.browseUp(prompt.scrollbackJumpRows());
+            } else {
+                try prompt.browseUp(1);
+            }
+        } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
+            // The mirror jump while browsing. At the live prompt there's
+            // nothing below the input line, so Ctrl+Down does nothing.
+            if (prompt.browse_pos != null) try prompt.browseDown(prompt.scrollbackJumpRows());
+        } else if (std.mem.eql(u8, ev.key, "up")) {
+            // Plain Up: readline-style history recall at the prompt, a
+            // one-row browse step while already in scrollback mode.
+            if (prompt.browse_pos != null) {
+                try prompt.browseUp(1);
             } else {
                 try prompt.historyUp();
             }
-        } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
+        } else if (std.mem.eql(u8, ev.key, "down")) {
             if (prompt.browse_pos != null) {
-                try prompt.browseDown(5);
+                try prompt.browseDown(1);
             } else {
                 try prompt.historyDown();
             }
-        } else if (std.mem.eql(u8, ev.key, "up")) {
-            try prompt.browseUp(1);
-        } else if (std.mem.eql(u8, ev.key, "down")) {
-            try prompt.browseDown(1);
         } else if (std.mem.eql(u8, ev.key, "left")) {
             // Not explicitly asked for, but needed alongside ctrl+left/
             // right: without plain single-character movement too, the
@@ -969,6 +1005,23 @@ const Prompt = struct {
         else
             default_scrolloff;
         return browsescroll.clampScrolloff(want, self.line_start_row);
+    }
+
+    /// Rows a Ctrl+Up / Ctrl+Down jump covers while browsing scrollback
+    /// (see `default_scrollback_jump`): `prompt.scrollback_jump` if set,
+    /// else the default. Floored at 1 so a jump always moves.
+    fn scrollbackJumpRows(self: *Prompt) usize {
+        if (self.promptCfg()) |p| if (p.scrollback_jump) |n| return @max(@as(usize, n), 1);
+        return default_scrollback_jump;
+    }
+
+    /// Whether typing a printable character while browsing scrollback
+    /// ends browse mode and inserts it on the live line (the default),
+    /// vs. being ignored until Escape. Config:
+    /// `prompt{ scrollback_type_exits = false }`.
+    fn scrollbackTypeExits(self: *Prompt) bool {
+        if (self.promptCfg()) |p| if (p.scrollback_type_exits) |b| return b;
+        return true;
     }
 
     /// Fills `host`/`host_buf` from `$HOSTNAME` or `/etc/hostname`. Best
@@ -1782,11 +1835,11 @@ const Prompt = struct {
         try self.renderInputLine();
     }
 
-    /// ctrl+up: recalls the previous (older) history entry, most recent
-    /// first. The first press of a recall stashes the in-progress line in
-    /// `scratch` so `historyDown` can get back to it later; further presses
-    /// just walk `history_index` back, stopping at the oldest entry rather
-    /// than wrapping.
+    /// Up at the prompt: recalls the previous (older) history entry, most
+    /// recent first. The first press of a recall stashes the in-progress
+    /// line in `scratch` so `historyDown` can get back to it later;
+    /// further presses just walk `history_index` back, stopping at the
+    /// oldest entry rather than wrapping.
     fn historyUp(self: *Prompt) !void {
         if (self.history.items.len == 0) return;
 
@@ -1801,7 +1854,7 @@ const Prompt = struct {
         try self.setLine(self.history.items[self.history_index.?]);
     }
 
-    /// ctrl+down: the mirror of `historyUp`. Walking past the newest entry
+    /// Down at the prompt: the mirror of `historyUp`. Walking past the newest entry
     /// restores whatever `historyUp` stashed in `scratch` and clears
     /// `history_index` back to `null` -- "the current scratch one" the line
     /// was on before recall started. A no-op when not currently recalling
@@ -1872,13 +1925,14 @@ const Prompt = struct {
         self.view_max = res.max;
     }
 
-    /// Plain Up (`count == 1`) moves the cursor up into the scrollback
-    /// above the prompt instead of editing anything -- entering "browse"
-    /// mode (`browse_pos`) on the first press, starting directly above
+    /// Moves the cursor up into the scrollback above the prompt instead
+    /// of editing anything. Ctrl+Up enters "browse" mode (`browse_pos`)
+    /// from the live prompt with `count == 1`, starting directly above
     /// wherever the real cursor currently sits so it reads as "look
-    /// straight up from here" rather than jumping to a fixed column.
-    /// Ctrl+Up (`count == 5`, only while already browsing -- see the key
-    /// loop) is a bigger step for scanning a long listing faster.
+    /// straight up from here" rather than jumping to a fixed column;
+    /// while already browsing, plain Up is `count == 1` and Ctrl+Up is
+    /// `count == scrollbackJumpRows()` for scanning a long listing
+    /// faster (see the key loop).
     ///
     /// The browse cursor keeps `scrolloffRows()` rows of context between
     /// itself and the top of the window: once it's that close to the top,
@@ -1911,7 +1965,8 @@ const Prompt = struct {
     }
 
     /// Plain Down (`count == 1`) while browsing moves the browse cursor
-    /// down a row; Ctrl+Down (`count == 5`) is a bigger step. Symmetric
+    /// down a row; Ctrl+Down (`count == scrollbackJumpRows()`) is a
+    /// bigger step. Symmetric
     /// with `browseUp`: the cursor keeps `scrolloffRows()` rows of context
     /// below itself by scrolling the window toward the live tail once it
     /// gets that close to the bottom, and only once the view is back at
@@ -1959,6 +2014,47 @@ const Prompt = struct {
         bp.col = @min(bp.col + 1, self.grid_cols -| 1);
         self.browse_pos = bp;
         try self.client.setCursor(bp.row, bp.col);
+    }
+
+    /// Home while browsing: move the browse cursor to column 0 of the row
+    /// it's on, staying in browse mode. No-op when not browsing.
+    fn browseHome(self: *Prompt) !void {
+        var bp = self.browse_pos orelse return;
+        bp.col = 0;
+        self.browse_pos = bp;
+        try self.client.setCursor(bp.row, bp.col);
+    }
+
+    /// End while browsing: move the browse cursor just past the last
+    /// non-blank cell of the row it's on (a fully blank row -> column 0),
+    /// clamped to the grid width, staying in browse mode. No-op when not
+    /// browsing. Costs one `get_cells` snapshot of the current view --
+    /// acceptable on a key pressed this rarely; there's no lighter
+    /// per-row text query on the wire.
+    fn browseEnd(self: *Prompt) !void {
+        var bp = self.browse_pos orelse return;
+        bp.col = self.rowContentEnd(bp.row) catch bp.col;
+        self.browse_pos = bp;
+        try self.client.setCursor(bp.row, bp.col);
+    }
+
+    /// The column just past the last non-blank cell of window row `row`
+    /// as the view currently sits (`view_scroll`), clamped to
+    /// `grid_cols - 1`. A blank row returns 0. Used by `browseEnd`.
+    fn rowContentEnd(self: *Prompt, row: usize) !usize {
+        var snap = try self.client.getCellsView(self.view_scroll);
+        defer snap.deinit();
+        if (row >= snap.rows()) return 0;
+
+        const cols = snap.cols();
+        var last_content: ?usize = null;
+        var col: usize = 0;
+        while (col < cols) : (col += 1) {
+            const g = snap.cellAt(row, col).grapheme;
+            if (std.mem.trim(u8, g, " ").len != 0) last_content = col;
+        }
+        const end = if (last_content) |lc| lc + 1 else 0;
+        return @min(end, self.grid_cols -| 1);
     }
 
     /// Enter while browsing: looks up whatever cell the browse cursor is
@@ -2777,7 +2873,7 @@ const Prompt = struct {
         self.prompt_config = &eng.cfg;
     }
 
-    /// Loads `~/.config/glyphwire/history` into `self.history` so ctrl+up
+    /// Loads `~/.config/glyphwire/history` into `self.history` so Up-arrow
     /// recall picks up where the last session left off, then records the
     /// file path in `self.history_path` and rewrites the file once
     /// (trimmed to the last `history.max_entries`, consecutive duplicates

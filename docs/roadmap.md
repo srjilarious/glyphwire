@@ -1614,6 +1614,28 @@ the layer actually changes.
   scrollView / resize / cursor property / selection / highlight; stable
   across pure reads).
 
+## Prompt Up/Down history, Ctrl+Up to browse scrollback
+
+**Done.** Swapped the shell prompt's arrow-key model. **Plain Up/Down now
+recall command history** at the prompt (readline-style, `historyUp`/
+`historyDown`), only browsing scrollback once already in browse mode.
+**Ctrl+Up breaks into scrollback browse mode** — a one-row step off the
+input line; while browsing, Ctrl+Up/Ctrl+Down jump `scrollback_jump` rows
+(new `prompt{}` key, default 5, must be ≥ 1), the bare arrows move one
+row, Escape returns to the prompt. **Home/End while browsing act on the
+browsed row** (`browseHome` → column 0, `browseEnd` → just past the last
+non-blank cell, via one `get_cells` snapshot of the current view) instead
+of snapping back the way ctrl+a/ctrl+e still do in every state.
+**Typing while browsing** returns to the prompt and inserts by default; a
+new `prompt{ scrollback_type_exits = false }` keeps browse a strict
+navigation mode. Ctrl+C/Ctrl+D unchanged (still encode to `0x03`/`0x04`
+for a foregrounded pty child; Ctrl+Shift+C/V still copy/paste).
+Client-local, **no wire change** — `decisions.md` Shell +
+"Scrollback browsing" sections updated, `shell.conf.template` documents
+the two new keys. **Tests:** `shell_config_tests.zig` +6 (both keys:
+read / default-null / reject bad value), `e2e_tests.zig` browse-cd test
+updated to press Ctrl+Up first. 485 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and
