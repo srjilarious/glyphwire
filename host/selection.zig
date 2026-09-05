@@ -66,7 +66,7 @@ pub const Selection = struct {
     /// from the wire because `handleKeys` owns it this frame: Ctrl+Shift+
     /// C/V/Space always, and the motion/commit keys while keyboard
     /// selection mode is active.
-    pub fn swallows(self: *const Selection, key: pixzig.glfw.Key, kb: anytype) bool {
+    pub fn swallows(self: *const Selection, key: app_mod.Key, kb: anytype) bool {
         const cs = kb.ctrl() and kb.shift();
         switch (key) {
             .c, .v, .space => if (cs) return true,
@@ -152,7 +152,7 @@ pub const Selection = struct {
     fn selectArrowRepeat(
         self: *Selection,
         eng: *Engine,
-        key: pixzig.glfw.Key,
+        key: app_mod.Key,
         state: *KeyRepeatState,
         dcol: i64,
         drow: i64,

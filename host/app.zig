@@ -29,6 +29,20 @@ pub const AppRunner = pixzig.PixzigAppRunner(App, EngOptions);
 /// `PixzigAppRunner` instantiation.
 pub const Engine = AppRunner.Engine;
 
+/// The active engine backend's key / mouse-button enums and window handle.
+/// Both `glyphwire-host` (upstream pixzig, GLFW) and `glyphwire-host-sdl`
+/// (the vendored `host_eng`, SDL3) are built from this one `host/` tree,
+/// and they name these types in different places: the SDL3 backend groups
+/// its own enums under `pixzig.input`, while upstream pixzig re-exports
+/// zglfw's under `pixzig.glfw` (its own `pixzig.input` holds the
+/// `Keyboard`/`Mouse`/`KeyChord` machinery, not the key enums). Pick
+/// whichever the linked engine actually offers; when the GLFW host goes
+/// away, drop the `pixzig.glfw` arm and use `pixzig.input` directly.
+const backend = if (@hasDecl(pixzig.input, "Key")) pixzig.input else pixzig.glfw;
+pub const Key = backend.Key;
+pub const MouseButton = backend.MouseButton;
+pub const Window = backend.Window;
+
 /// Font file/size passed to `App.init` -- what `window_sizing`'s
 /// `applyFontSize` needs to repeat the startup `measureFontFileIndexed` at
 /// a new size.
@@ -58,7 +72,7 @@ pub const App = struct {
     /// the main thread (GLFW clipboard calls are main-thread-only, so the
     /// wire `set_clipboard` path can't touch it directly -- it goes
     /// through `ctx.clipboard` + `Selection.syncClipboardToOs` instead).
-    window: *pixzig.glfw.Window,
+    window: *Window,
     /// Set by `reapChild` once glyphwire-shell's process actually exits
     /// (normally from its `exit` builtin, but this covers a crash or
     /// external kill just as well) -- the one thing that ends the host,
