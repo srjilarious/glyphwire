@@ -1544,6 +1544,17 @@ grid as a literal character. Fixed narrowly, entirely in `core.zig`:
   a targeted fix for htop's specific symptom, not a step toward a full
   VT model; see decisions.md for the full writeup.
 
+## Function keys (F1-F12) in key_encode
+
+**Done.** `F1`-`F12` had no entry in `key_encode.toPtyBytes`'s `named`
+table at all, so they never reached a pty child — htop's `F10` (quit)
+was silently swallowed. Added the classic xterm/VT220 mapping
+(`kf1`..`kf12`): `F1`-`F4` as SS3, `F5`-`F12` as `CSI n ~`. Named
+uppercase (`"F1"`, not `"f1"`) to match zglfw's `Key` enum field name
+that `host/main.zig` forwards verbatim. **Not done:** `F13`+, a modifier
+held alongside a function key (xterm's modifier-suffixed forms) — see
+decisions.md. **Tests:** `shell_tests.zig` +1. 463 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

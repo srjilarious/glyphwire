@@ -2077,6 +2077,22 @@ entirely in `core.zig`, no wire/host change:
   was a narrowly targeted fix for the specific htop symptom, not a step
   toward a full VT model.
 
+**Decision (function keys in `key_encode.toPtyBytes`):** `F1`-`F12`
+never reached a pty child at all — `toPtyBytes`'s `named` table had no
+entry for them, so htop's `F10` (quit) was silently swallowed. Added the
+classic xterm/VT220 mapping every terminfo entry's `kf1`..`kf12`
+capability expects: `F1`-`F4` as SS3 (`ESC O P`..`ESC O S`, unaffected by
+DECCKM — that only retimes the arrows/Home/End), `F5`-`F12` as `CSI n ~`
+(`15`, `17`-`21`, `23`-`24`, skipping `16`/`22` for the same historical
+VT220 reasons xterm does). Named `"F1"`..`"F12"` (uppercase) to match
+zglfw's `Key` enum field name, which `host/main.zig`'s `reportKeyEvents`
+forwards verbatim over the wire — every other named key in the table
+happens to be lowercase because that's what zglfw calls it, not because
+of a case convention glyphwire imposes. `F13` and up, and a modifier held
+alongside a function key (xterm's modifier-suffixed forms), stay out of
+scope, same as kitty/modifyOtherKeys generally. **Tests:**
+`shell_tests.zig` +1. 463 pass.
+
 **Decision:** `write_text` always replaces a cell's whole style outright
 (fg *and* bg together, per-cell — same "overwrite outright" behavior
 `draw_icon` used to have before `foreground: true`, see the Icon section)

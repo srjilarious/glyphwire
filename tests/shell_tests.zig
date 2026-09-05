@@ -437,6 +437,23 @@ pub fn keyencodeNamedKeysMapToSequencesTest(_: std.Io, _: std.mem.Allocator) !vo
     try testz.expectEqualStr("\x1b[3~", keyencode.toPtyBytes("delete", .{}, .normal, &buf).?);
 }
 
+/// `F1`-`F4` are SS3, unaffected by DECCKM (that only retimes the arrows/
+/// Home/End); `F5`+ are `CSI n ~`. Names are uppercase, matching zglfw's
+/// `Key` enum field name that `host/main.zig` forwards verbatim -- htop's
+/// quit key (`F10`) is the motivating case.
+pub fn keyencodeFunctionKeysMapToXtermSequencesTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [8]u8 = undefined;
+    try testz.expectEqualStr("\x1bOP", keyencode.toPtyBytes("F1", .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1bOS", keyencode.toPtyBytes("F4", .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[15~", keyencode.toPtyBytes("F5", .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[21~", keyencode.toPtyBytes("F10", .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[24~", keyencode.toPtyBytes("F12", .{}, .normal, &buf).?);
+    // Application cursor-key mode doesn't affect function keys.
+    try testz.expectEqualStr("\x1b[21~", keyencode.toPtyBytes("F10", .{}, .application, &buf).?);
+    // F13 and up are still out of scope.
+    try testz.expectTrue(keyencode.toPtyBytes("F13", .{}, .normal, &buf) == null);
+}
+
 /// DECCKM (`ESC [ ? 1 h`): the arrows and Home/End switch to the `ESC O x`
 /// (SS3) form; the `~`-terminated keys don't.
 pub fn keyencodeApplicationCursorKeysTest(_: std.Io, _: std.mem.Allocator) !void {

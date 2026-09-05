@@ -61,13 +61,17 @@ pub const CursorKeyMode = enum { normal, application };
 
 /// The byte sequence a real terminal sends when `key` is pressed with
 /// `mods` held and cursor keys in `cursor_mode`, written into `buf`
-/// (needs 3 bytes; give it more for headroom). Returns null for a key
-/// with nothing to send (a bare modifier, an unhandled function key).
-/// Covers what a line-oriented program or a pager reads: text, Enter
-/// (`CR`), Backspace (`DEL`), Tab, the arrows and navigation keys as
-/// `CSI` (or `SS3` in application-cursor mode) sequences, `Ctrl`-letter
-/// as the matching C0 control byte, and `Alt`-<key> as an `ESC` prefix.
-/// The kitty/modifyOtherKeys protocols are still out of scope for B0.
+/// (needs 5 bytes for `F5`-`F12`; give it more for headroom). Returns
+/// null for a key with nothing to send (a bare modifier, an unhandled
+/// key -- `F13` and up are still out of scope). Covers what a
+/// line-oriented program or a pager reads: text, Enter (`CR`), Backspace
+/// (`DEL`), Tab, the arrows and navigation keys as `CSI` (or `SS3` in
+/// application-cursor mode) sequences, `F1`-`F12` (the classic xterm/
+/// VT220 mapping, unaffected by cursor-key mode), `Ctrl`-letter as the
+/// matching C0 control byte, and `Alt`-<key> as an `ESC` prefix. Function
+/// keys with a modifier held (`Shift-F5`, ...) fall back to the plain
+/// sequence -- xterm's modifier-suffixed forms are out of scope, same as
+/// the kitty/modifyOtherKeys protocols, for B0.
 pub fn toPtyBytes(key: []const u8, mods: Mods, cursor_mode: CursorKeyMode, buf: []u8) ?[]const u8 {
     const eql = std.mem.eql;
 
@@ -91,6 +95,25 @@ pub fn toPtyBytes(key: []const u8, mods: Mods, cursor_mode: CursorKeyMode, buf: 
         .{ .name = "page_up", .seq = "\x1b[5~" },
         .{ .name = "page_down", .seq = "\x1b[6~" },
         .{ .name = "insert", .seq = "\x1b[2~" },
+        // Function keys: the classic xterm/VT220 mapping every terminfo
+        // entry's `kf1`..`kf12` expects. `F1`-`F4` are SS3 (unaffected by
+        // cursor-key mode -- that only applies to the arrows/Home/End
+        // above); `F5` and up are `CSI n ~`, skipping 16 and 22 for the
+        // same historical VT220 reasons xterm does. Named in uppercase
+        // (`"F1"`, not `"f1"`) to match zglfw's `Key` enum field name,
+        // which `host/main.zig`'s `reportKeyEvents` forwards verbatim.
+        .{ .name = "F1", .seq = "\x1bOP" },
+        .{ .name = "F2", .seq = "\x1bOQ" },
+        .{ .name = "F3", .seq = "\x1bOR" },
+        .{ .name = "F4", .seq = "\x1bOS" },
+        .{ .name = "F5", .seq = "\x1b[15~" },
+        .{ .name = "F6", .seq = "\x1b[17~" },
+        .{ .name = "F7", .seq = "\x1b[18~" },
+        .{ .name = "F8", .seq = "\x1b[19~" },
+        .{ .name = "F9", .seq = "\x1b[20~" },
+        .{ .name = "F10", .seq = "\x1b[21~" },
+        .{ .name = "F11", .seq = "\x1b[23~" },
+        .{ .name = "F12", .seq = "\x1b[24~" },
     };
     for (named) |n| {
         if (eql(u8, key, n.name)) {
