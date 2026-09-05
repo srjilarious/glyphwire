@@ -2235,3 +2235,98 @@ pub fn contextClipboardBufferRoundTripsTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqualStr("world!", ctx.clipboardText());
     try testz.expectEqual(ctx.clipboard_serial, 2);
 }
+
+// ── Layer.render_gen (host static-batch invalidation) ────────────────
+//
+// `renderGeneration()` must move on *any* change that alters what the
+// renderer composites -- a superset of `revision` (which is cell content
+// only). glyphwire-host caches a quad batch per layer and rebuilds only
+// when this counter has moved (see host/render.zig).
+
+pub fn renderGenBumpsOnContentWriteTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 4, 4);
+    defer layer.deinit();
+
+    const g0 = layer.renderGeneration();
+    try layer.writeText("hi", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.renderGeneration() != g0);
+
+    const g1 = layer.renderGeneration();
+    layer.clear(0, 0, 1, 2);
+    try testz.expectTrue(layer.renderGeneration() != g1);
+}
+
+pub fn renderGenBumpsOnViewAndResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 6, 2, 8);
+    defer layer.deinit();
+    // Build some history so `scrollView` has room to move.
+    try layer.writeText("abcdefghijklmnop", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const g0 = layer.renderGeneration();
+    _ = layer.scrollView(2, null);
+    try testz.expectTrue(layer.renderGeneration() != g0);
+
+    const g1 = layer.renderGeneration();
+    try layer.resize(10, 3);
+    try testz.expectTrue(layer.renderGeneration() != g1);
+}
+
+pub fn renderGenBumpsOnCursorPropertyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 4, 0);
+    defer layer.deinit();
+
+    const g0 = layer.renderGeneration();
+    layer.setProperty(.{ .cursor = .{ .row = 1, .col = 3 } });
+    try testz.expectTrue(layer.renderGeneration() != g0);
+}
+
+pub fn renderGenBumpsOnSelectionAndHighlightTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 4, 0);
+    defer layer.deinit();
+
+    const g0 = layer.renderGeneration();
+    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 4 });
+    try testz.expectTrue(layer.renderGeneration() != g0);
+
+    const g1 = layer.renderGeneration();
+    layer.updateSelectionActive(.{ .above = 0, .col = 6 });
+    try testz.expectTrue(layer.renderGeneration() != g1);
+
+    const g2 = layer.renderGeneration();
+    layer.clearSelection();
+    try testz.expectTrue(layer.renderGeneration() != g2);
+
+    const g3 = layer.renderGeneration();
+    try layer.setHighlightIds(&.{ 1, 2 });
+    try testz.expectTrue(layer.renderGeneration() != g3);
+
+    const g4 = layer.renderGeneration();
+    try layer.toggleHighlightId(1);
+    try testz.expectTrue(layer.renderGeneration() != g4);
+
+    const g5 = layer.renderGeneration();
+    layer.clearHighlightIds();
+    try testz.expectTrue(layer.renderGeneration() != g5);
+}
+
+pub fn renderGenStableAcrossPureReadsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 8, 3, 4);
+    defer layer.deinit();
+    try layer.writeText("abcdefgh", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const g0 = layer.renderGeneration();
+    _ = layer.viewRow(0, 0);
+    _ = layer.getProperty(.revision);
+    _ = layer.getProperty(.cursor);
+    _ = layer.capacity();
+    _ = layer.renderGeneration();
+    _ = layer.selectionColRange(0);
+    // A no-op `updateSelectionActive` (nothing selected) must not bump.
+    layer.updateSelectionActive(.{ .above = 0, .col = 2 });
+    try testz.expectEqual(layer.renderGeneration(), g0);
+}
