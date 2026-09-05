@@ -8,6 +8,7 @@ const input_mod = @import("input.zig");
 const selection_mod = @import("selection.zig");
 const scroll_mod = @import("scroll.zig");
 const window_sizing_mod = @import("window_sizing.zig");
+const preedit_mod = @import("preedit.zig");
 const render_mod = @import("render.zig");
 
 const CursorConfig = config.CursorConfig;
@@ -61,17 +62,18 @@ pub const FontRuntime = window_sizing_mod.WindowSizing.FontRuntime;
 /// connection keeps working normally.
 ///
 /// The struct is a thin owner: shared handles (`alloc`, `server`,
-/// `window`) plus six concern sub-structs, each of which holds a back
+/// `window`) plus seven concern sub-structs, each of which holds a back
 /// `app` pointer set in `init` (stable: `App` is heap-allocated once and
 /// never moves). `update` is the per-frame orchestrator; `render` forwards
 /// to `renderer`.
 pub const App = struct {
     alloc: std.mem.Allocator,
     server: *glyphwire.server.Server,
-    /// The GLFW window, kept so the OS clipboard can be read/written from
-    /// the main thread (GLFW clipboard calls are main-thread-only, so the
-    /// wire `set_clipboard` path can't touch it directly -- it goes
-    /// through `ctx.clipboard` + `Selection.syncClipboardToOs` instead).
+    /// The platform window, kept so the OS clipboard can be read/written
+    /// from the main thread (both backends' clipboard calls are
+    /// main-thread-only, so the wire `set_clipboard` path can't touch it
+    /// directly -- it goes through `ctx.clipboard` +
+    /// `Selection.syncClipboardToOs` instead).
     window: *Window,
     /// Set by `reapChild` once glyphwire-shell's process actually exits
     /// (normally from its `exit` builtin, but this covers a crash or
@@ -102,6 +104,7 @@ pub const App = struct {
 
     caret: caret_mod.Caret,
     keys: input_mod.KeyInput,
+    preedit: preedit_mod.Preedit,
     selection: selection_mod.Selection,
     scroll: scroll_mod.Scroll,
     window_sizing: window_sizing_mod.WindowSizing,
@@ -131,6 +134,7 @@ pub const App = struct {
                 .blink_ms = cursor.blink_ms,
             },
             .keys = .{ .app = undefined },
+            .preedit = .{ .app = undefined },
             .selection = .{ .app = undefined },
             .scroll = .{ .app = undefined },
             .window_sizing = .{
@@ -151,6 +155,7 @@ pub const App = struct {
         // `self.app.*`.
         app.caret.app = app;
         app.keys.app = app;
+        app.preedit.app = app;
         app.selection.app = app;
         app.scroll.app = app;
         app.window_sizing.app = app;
@@ -222,6 +227,10 @@ pub const App = struct {
         self.caret.reconcilePin();
 
         self.caret.tickBlink(deltaTimeMs);
+        // Last, so the OS text-input area follows wherever every path
+        // above left the caret. Drives the IME candidate window's
+        // placement; no-op on the GLFW backend.
+        self.preedit.syncInputArea(eng);
 
         return true;
     }

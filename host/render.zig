@@ -6,6 +6,7 @@ const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
 const scroll = @import("scroll.zig");
 const selection = @import("selection.zig");
+const preedit_mod = @import("preedit.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
@@ -15,6 +16,14 @@ const Engine = app_mod.Engine;
 const cursor_width = 2;
 const cursor_underline_px = 2;
 const cursor_box_line_px = 2;
+
+/// IME composition overlay: a dark plate behind the in-progress text so
+/// the grid content it covers doesn't show through, and an underline
+/// marking it as uncommitted -- the convention every terminal and text
+/// field uses for preedit. See `drawPreedit`.
+const preedit_bg = pixzig.Color.from(40, 44, 60, 255);
+const preedit_fg = pixzig.Color.from(235, 235, 240, 255);
+const preedit_underline_px = 2;
 
 // ── Static quad batches ───────────────────────────────────────────────
 //
@@ -777,6 +786,9 @@ pub const Renderer = struct {
             // Root caret: on top of root's content, below any popup layer
             // -- matches the old per-layer caret draw order.
             self.drawRootCaret(eng, &server.ctx.root, geometry.content_pad_px, 0, root_view);
+            // IME composition, over both: it covers the cells the caret is
+            // about to write into, so it has to sit above the caret too.
+            self.drawPreedit(eng, &server.ctx.root, geometry.content_pad_px, 0, root_view);
 
             for (server.ctx.layer_order.items) |handle| {
                 _ = server.ctx.layers.getPtr(handle) orelse continue;
@@ -807,21 +819,97 @@ pub const Renderer = struct {
     /// began, clipping off-screen once that cell leaves the viewport.
     fn drawRootCaret(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize) void {
         if (!self.app.caret.visible()) return;
-        var crow: usize = root.cursor.row;
-        var ccol: usize = root.cursor.col;
-        if (self.app.caret.pin) |pin| {
-            const sr = @as(isize, @intCast(pin.row)) +
-                @as(isize, @intCast(view_offset)) -
-                @as(isize, @intCast(pin.base_scroll));
-            if (sr < 0 or sr >= @as(isize, @intCast(root.height))) return;
-            crow = @intCast(sr);
-            ccol = pin.col;
-        }
-        if (crow >= root.height or ccol >= root.width) return;
+        const cell = self.app.caret.screenCell(root, view_offset) orelse return;
 
         eng.renderer.begin(eng.projMat);
-        self.drawCaret(eng, root, origin_x, origin_y, crow, ccol, view_offset);
+        self.drawCaret(eng, root, origin_x, origin_y, cell.row, cell.col, view_offset);
         eng.renderer.end();
+    }
+
+    /// Paints the IME's in-progress composition over the grid, starting at
+    /// the caret cell and running right along the row. Uncommitted text
+    /// never reaches the `text` event stream (that only carries what the
+    /// IME has committed), so without this the user types Japanese into an
+    /// apparently dead terminal and only sees the result on commit.
+    ///
+    /// Drawn cell-aligned using glyphwire's own East Asian Width rules
+    /// rather than the font's advances, so it sits on the same column grid
+    /// as the content underneath. Clipped at the row's right edge -- a
+    /// composition longer than the remaining columns just stops; it is
+    /// transient overlay text, not grid content, and wrapping it would
+    /// have to reflow around content it is about to replace anyway.
+    ///
+    /// Compiles away entirely on the GLFW backend (`Preedit.supported`).
+    fn drawPreedit(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize) void {
+        if (comptime !preedit_mod.Preedit.supported) return;
+
+        const text = self.app.preedit.text(eng);
+        if (text.len == 0) return;
+        const cell = self.app.caret.screenCell(root, view_offset) orelse return;
+
+        const cols_left = root.width - cell.col;
+        const span_cols = @min(preedit_mod.Preedit.cellWidth(text), cols_left);
+        if (span_cols == 0) return;
+
+        const x0 = origin_x + @as(i32, @intCast(cell.col)) * geometry.cell_w;
+        const y0 = origin_y + @as(i32, @intCast(cell.row)) * geometry.cell_h;
+        const span_px = @as(i32, @intCast(span_cols)) * geometry.cell_w;
+
+        eng.renderer.begin(eng.projMat);
+        defer eng.renderer.end();
+
+        eng.renderer.drawFilledRect(
+            pixzig.RectF.fromPosSize(x0, y0, span_px, geometry.cell_h),
+            preedit_bg,
+        );
+
+        // One `drawStringColored` per codepoint so each lands on its own
+        // cell boundary, and so the renderer's `syncAtlasForText` packs
+        // any CJK glyph that isn't in the atlas yet before drawing it.
+        const cursor_byte = self.app.preedit.cursorByte(eng);
+        var cursor_col: ?usize = null;
+        var col = cell.col;
+        var byte: usize = 0;
+        var it = (std.unicode.Utf8View.initUnchecked(text)).iterator();
+        while (it.nextCodepointSlice()) |cp_bytes| {
+            if (cursor_byte) |cb| {
+                if (cursor_col == null and byte >= cb) cursor_col = col;
+            }
+            const cp = std.unicode.utf8Decode(cp_bytes) catch continue;
+            const w: usize = @max(1, glyphwire.codepointWidth(cp));
+            if (col + w > root.width) break;
+            _ = eng.renderer.drawStringColored(cp_bytes, .{
+                .x = origin_x + @as(i32, @intCast(col)) * geometry.cell_w,
+                .y = y0,
+            }, preedit_fg);
+            col += w;
+            byte += cp_bytes.len;
+        }
+        // Cursor at the very end of the composition: the loop never saw a
+        // codepoint at or past it, so it lands on the column after the last.
+        if (cursor_byte != null and cursor_col == null) cursor_col = col;
+
+        eng.renderer.drawFilledRect(
+            pixzig.RectF.fromPosSize(x0, y0 + geometry.cell_h - preedit_underline_px, span_px, preedit_underline_px),
+            preedit_fg,
+        );
+
+        // The IME's own caret inside the composition -- where the next
+        // keystroke lands, which is not necessarily the end (arrow keys
+        // move within a composition before it commits).
+        if (cursor_col) |cc| {
+            if (cc <= root.width) {
+                eng.renderer.drawFilledRect(
+                    pixzig.RectF.fromPosSize(
+                        origin_x + @as(i32, @intCast(cc)) * geometry.cell_w,
+                        y0,
+                        cursor_width,
+                        geometry.cell_h,
+                    ),
+                    preedit_fg,
+                );
+            }
+        }
     }
 
     /// Paints the caret for `layer` at grid cell `(crow, ccol)` (already

@@ -339,9 +339,23 @@ pub const Keyboard = struct {
     prev: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).initEmpty(),
     mods: sdl.SDL_Keymod = 0,
     text_buf: FixedBuffer(1024) = .{},
-    editing_buf: FixedBuffer(1024) = .{},
-    editing_start: i32 = -1,
-    editing_length: i32 = -1,
+
+    /// The IME's in-progress composition ("preedit"), from
+    /// `SDL_EVENT_TEXT_EDITING`. Unlike `text_buf` this is *not* per-tick
+    /// state: it persists across frames for as long as the user is
+    /// composing, is replaced wholesale by each editing event, and is
+    /// cleared when the IME commits (a `SDL_EVENT_TEXT_INPUT`, which
+    /// carries the committed text through `text_buf`) or cancels (an
+    /// editing event with an empty string). The application is expected
+    /// to draw it at the caret -- until it does, typing Japanese/Chinese/
+    /// Korean shows nothing at all until the commit lands.
+    preedit_buf: FixedBuffer(256) = .{},
+    /// Caret position within the composition, as a codepoint index, or -1
+    /// when the IME didn't report one. SDL reports this in codepoints, not
+    /// bytes; `preeditCursorByte` converts. (SDL also reports a selection
+    /// length alongside it, for IMEs that highlight a clause within the
+    /// composition; nothing here draws that, so it isn't kept.)
+    preedit_cursor: i32 = -1,
 
     pub fn set(self: *Keyboard, key: Key, down_value: bool) void {
         if (down_value) {
@@ -393,6 +407,42 @@ pub const Keyboard = struct {
         return n;
     }
 
+    /// The IME's in-progress composition, or an empty slice when nothing
+    /// is being composed. Valid until the next `handleEvent` call.
+    pub fn preedit(self: *const Keyboard) []const u8 {
+        return self.preedit_buf.slice();
+    }
+
+    /// Caret offset within `preedit()` in *bytes*, clamped into range.
+    /// SDL reports it in codepoints; this walks the composition to convert
+    /// so callers can slice the text directly. Null when the IME didn't
+    /// report a position.
+    pub fn preeditCursorByte(self: *const Keyboard) ?usize {
+        if (self.preedit_cursor < 0) return null;
+        const composing = self.preedit_buf.slice();
+        var remaining: usize = @intCast(self.preedit_cursor);
+        var i: usize = 0;
+        while (remaining > 0 and i < composing.len) : (remaining -= 1) {
+            i += std.unicode.utf8ByteSequenceLength(composing[i]) catch return i;
+        }
+        return @min(i, composing.len);
+    }
+
+    fn setPreedit(self: *Keyboard, composing: []const u8, cursor: i32) void {
+        self.preedit_buf.clear();
+        self.preedit_buf.appendSlice(composing);
+        self.preedit_cursor = cursor;
+    }
+
+    fn clearPreedit(self: *Keyboard) void {
+        self.preedit_buf.clear();
+        self.preedit_cursor = -1;
+    }
+
+    /// Ends the tick: the current key state becomes the previous state for
+    /// next tick's edge detection, and this tick's typed text is dropped.
+    /// The preedit deliberately survives -- it belongs to the IME's
+    /// composition, not to one tick.
     pub fn finishTick(self: *Keyboard) void {
         self.prev = self.curr;
         self.text_buf.clear();
@@ -470,12 +520,18 @@ pub const InputManager = struct {
             sdl.SDL_EVENT_TEXT_INPUT => {
                 const text = std.mem.span(event.text.text);
                 self.keyboard.text_buf.appendSlice(text);
+                // A commit ends the composition. SDL doesn't always follow
+                // it with an empty editing event, so drop the preedit here
+                // or the committed text would stay ghosted at the caret.
+                self.keyboard.clearPreedit();
             },
             sdl.SDL_EVENT_TEXT_EDITING => {
-                self.keyboard.editing_buf.clear();
-                self.keyboard.editing_buf.appendSlice(std.mem.span(event.edit.text));
-                self.keyboard.editing_start = event.edit.start;
-                self.keyboard.editing_length = event.edit.length;
+                const composing = if (event.edit.text) |t| std.mem.span(t) else "";
+                if (composing.len == 0) {
+                    self.keyboard.clearPreedit();
+                } else {
+                    self.keyboard.setPreedit(composing, event.edit.start);
+                }
             },
             sdl.SDL_EVENT_MOUSE_MOTION => {
                 self.mouse.raw_pos_value = .{ .x = event.motion.x, .y = event.motion.y };

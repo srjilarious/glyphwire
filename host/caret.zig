@@ -74,6 +74,35 @@ pub const Caret = struct {
         return @mod(self.blink_elapsed_ms, period) < self.blink_ms;
     }
 
+    /// Where the caret sits on screen this frame, as a root-layer cell, or
+    /// null when it has nothing to point at (pinned to a buffer cell that
+    /// has scrolled out of the viewport, or a cursor past the grid bounds).
+    /// Normally just the live grid cursor; a mouse-driven scroll pins it to
+    /// the buffer cell it was on when the scroll began (see `pin`).
+    ///
+    /// `view_offset` is the root view offset already resolved by the caller
+    /// (0 while a full-screen program owns the screen). Callers must hold
+    /// `ctx_mutex` -- this reads `root` without taking it, so it can be
+    /// used from inside `render`'s existing locked section.
+    pub fn screenCell(
+        self: *const Caret,
+        root: *const @import("glyphwire").Layer,
+        view_offset: usize,
+    ) ?struct { row: usize, col: usize } {
+        var crow: usize = root.cursor.row;
+        var ccol: usize = root.cursor.col;
+        if (self.pin) |pin| {
+            const sr = @as(isize, @intCast(pin.row)) +
+                @as(isize, @intCast(view_offset)) -
+                @as(isize, @intCast(pin.base_scroll));
+            if (sr < 0 or sr >= @as(isize, @intCast(root.height))) return null;
+            crow = @intCast(sr);
+            ccol = pin.col;
+        }
+        if (crow >= root.height or ccol >= root.width) return null;
+        return .{ .row = crow, .col = ccol };
+    }
+
     /// Captures `pin` from the root layer's current cursor + view offset,
     /// unless one is already pinned. Called by the host's own scroll paths
     /// (`scroll.handleScroll`, `scroll.handleScrollbar`) just before they
