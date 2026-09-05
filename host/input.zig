@@ -69,9 +69,9 @@ pub const KeyInput = struct {
 
         var any_pressed = false;
         const ctrl_held = kb.ctrl();
-        const fields = @typeInfo(pixzig.glfw.Key).@"enum".fields;
+        const fields = @typeInfo(app_mod.Key).@"enum".fields;
         inline for (fields) |field| {
-            const key = @field(pixzig.glfw.Key, field.name);
+            const key = @field(app_mod.Key, field.name);
             const skip_static = switch (key) {
                 // Forwarded by reportModifier above, not per physical key.
                 .left_control, .right_control, .left_alt, .right_alt, .left_shift, .right_shift, .left_super, .right_super => true,
@@ -166,9 +166,9 @@ pub const KeyInput = struct {
             break :blk server.ctx.root.view_scroll;
         };
 
-        const fields = @typeInfo(pixzig.glfw.MouseButton).@"enum".fields;
+        const fields = @typeInfo(app_mod.MouseButton).@"enum".fields;
         inline for (fields) |field| {
-            const btn = @field(pixzig.glfw.MouseButton, field.name);
+            const btn = @field(app_mod.MouseButton, field.name);
             const is_left = btn == .left;
             if (!(skip_left and is_left)) {
                 if (eng.inputs.mouse.pressed(btn)) {
@@ -233,7 +233,7 @@ pub const KeyInput = struct {
     fn handleArrowRepeat(
         self: *KeyInput,
         eng: *Engine,
-        key: pixzig.glfw.Key,
+        key: app_mod.Key,
         name: []const u8,
         state: *KeyRepeatState,
         dcol: i32,
@@ -263,7 +263,7 @@ pub const KeyInput = struct {
     fn handleEditRepeat(
         self: *KeyInput,
         eng: *Engine,
-        key: pixzig.glfw.Key,
+        key: app_mod.Key,
         name: []const u8,
         state: *KeyRepeatState,
         require_ctrl: bool,

@@ -40,6 +40,37 @@ pub fn build(b: *std.Build) void {
 
     const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });
     const pixzig_mod = pixzig_dep.module("pixzig");
+    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
+    const zopengl = b.dependency("zopengl", .{ .target = target });
+    const zmath = b.dependency("zmath", .{ .target = target });
+    const zstbi = b.dependency("zstbi", .{ .target = target });
+    // `host_eng` is a self-contained SDL3 engine backend (see
+    // host_eng/root.zig). Its C-level pieces are vendored under
+    // host_eng/libs/ and host_eng/pixzig_src/ rather than reached for in
+    // the sibling pixzig checkout, so the backend is pinned as a whole
+    // instead of half-frozen snapshot / half-live `../pixzig` paths.
+    // pixzig's `xml` module is deliberately absent: the only thing that
+    // wanted it was Tiled tilemap loading, which host_eng doesn't carry.
+    const stbtt_translate = b.addTranslateC(.{
+        .root_source_file = b.path("host_eng/libs/stb_truetype/stb_truetype.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    stbtt_translate.addIncludePath(b.path("host_eng/libs/stb_truetype"));
+    const stbtt_mod = b.addModule("host_eng_stb_truetype", .{
+        .root_source_file = b.path("host_eng/libs/stb_truetype/stb_truetype.zig"),
+    });
+    stbtt_mod.addImport("c", stbtt_translate.createModule());
+    stbtt_mod.addCSourceFile(.{
+        .file = b.path("host_eng/libs/stb_truetype/stb_truetype.c"),
+        .flags = &.{"-fno-sanitize=undefined"},
+    });
+    stbtt_mod.addIncludePath(b.path("host_eng/libs/stb_truetype"));
+    const time_c_translate = b.addTranslateC(.{
+        .root_source_file = b.path("host_eng/pixzig_src/time_c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const zargunaught_mod = b.dependency("zargunaught", .{}).module("zargunaught");
 
@@ -50,6 +81,17 @@ pub fn build(b: *std.Build) void {
     const ziglua = b.dependency("ziglua", .{ .target = target, .optimize = optimize, .lang = .lua53 });
     const ziglua_mod = ziglua.module("zlua");
     const lua_lib = ziglua.artifact("lua");
+
+    const host_eng_mod = b.addModule("host_eng", .{
+        .root_source_file = b.path("host_eng/root.zig"),
+    });
+    host_eng_mod.addImport("sdl3", sdl_dep.module("sdl3"));
+    host_eng_mod.addImport("zopengl", zopengl.module("root"));
+    host_eng_mod.addImport("zmath", zmath.module("root"));
+    host_eng_mod.addImport("zstbi", zstbi.module("root"));
+    host_eng_mod.addImport("ziglua", ziglua_mod);
+    host_eng_mod.addImport("stb_truetype", stbtt_mod);
+    host_eng_mod.addImport("c_time", time_c_translate.createModule());
 
     // shell/config.zig lives in this module and imports ziglua; both
     // glyphwire-shell and the test runner pull it in transitively.
@@ -200,6 +242,25 @@ pub fn build(b: *std.Build) void {
 
     const host_step = b.step("host", "Run the glyphwire pixzig-windowed host (spawns glyphwire-shell)");
     host_step.dependOn(&run_host.step);
+
+    const host_sdl_exe = b.addExecutable(.{
+        .name = "glyphwire-host-sdl",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("host/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    host_sdl_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    host_sdl_exe.root_module.addImport("pixzig", host_eng_mod);
+    b.installArtifact(host_sdl_exe);
+
+    const run_host_sdl = b.addRunArtifact(host_sdl_exe);
+    run_host_sdl.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_host_sdl.addArgs(args);
+
+    const host_sdl_step = b.step("host_sdl", "Run the SDL3 glyphwire host (spawns glyphwire-shell)");
+    host_sdl_step.dependOn(&run_host_sdl.step);
 
     const ls_exe = b.addExecutable(.{
         .name = "ls",

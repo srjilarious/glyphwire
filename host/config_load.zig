@@ -7,6 +7,17 @@ const geometry = @import("geometry.zig");
 
 const HostConfig = config.HostConfig;
 
+/// `host.conf` is a Lua script, so this file needs a Lua state -- but
+/// nothing about parsing a config file belongs to the graphics engine, so
+/// it drives `ziglua` directly (`runConfigScript` below) instead of going
+/// through an engine scripting subsystem. It still reaches `ziglua`
+/// through the engine facade rather than importing the module by name:
+/// pixzig ships its own `libs/ziglua` and glyphwire ships another, and
+/// linking both Lua C libraries into one binary would collide. Whichever
+/// engine backend the host is built against supplies the one Lua that
+/// binary actually links.
+const Lua = pixzig.ziglua.Lua;
+
 /// Owned path to glyphwire's config directory (holds `host.conf`).
 /// Shared with glyphwire-shell and glyphwire-ls -- see
 /// `glyphwire.configDirPath`.
@@ -16,7 +27,7 @@ const configDirPath = glyphwire.configDirPath;
 /// stack top and returns a process-lifetime (`arena`) copy of it, or null
 /// when the field is absent or not a string. The table stays on the stack;
 /// only the field value pushed here is popped.
-fn luaStrField(lua: *pixzig.ziglua.Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[:0]const u8 {
+fn luaStrField(lua: *Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[:0]const u8 {
     _ = lua.getField(-1, key);
     defer lua.pop(1);
     if (!lua.isString(-1)) return null;
@@ -25,7 +36,7 @@ fn luaStrField(lua: *pixzig.ziglua.Lua, arena: std.mem.Allocator, key: [:0]const
 }
 
 /// Like `luaStrField`, for a numeric field.
-fn luaNumField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?f32 {
+fn luaNumField(lua: *Lua, key: [:0]const u8) ?f32 {
     _ = lua.getField(-1, key);
     defer lua.pop(1);
     if (!lua.isNumber(-1)) return null;
@@ -34,7 +45,7 @@ fn luaNumField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?f32 {
 }
 
 /// Like `luaStrField`, for a boolean field. Absent or non-boolean -> null.
-fn luaBoolField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?bool {
+fn luaBoolField(lua: *Lua, key: [:0]const u8) ?bool {
     _ = lua.getField(-1, key);
     defer lua.pop(1);
     if (!lua.isBoolean(-1)) return null;
@@ -44,13 +55,29 @@ fn luaBoolField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?bool {
 /// Like `luaNumField`, for a non-negative whole-number field (`grid_cols`,
 /// `grid_rows`, `scrollback_rows`). Absent, non-number, negative, or
 /// non-integral -> null (the caller keeps the default).
-fn luaUintField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?usize {
+fn luaUintField(lua: *Lua, key: [:0]const u8) ?usize {
     _ = lua.getField(-1, key);
     defer lua.pop(1);
     if (!lua.isNumber(-1)) return null;
     const n = lua.toNumber(-1) catch return null;
     if (n < 0 or n != @floor(n)) return null;
     return @intFromFloat(n);
+}
+
+/// Compiles and runs `code` in `lua`. On a compile or runtime error Lua
+/// leaves its message on the stack top; log it and pop before returning so
+/// the caller can fall back to defaults with the state still clean.
+fn runConfigScript(lua: *Lua, code: [:0]const u8) !void {
+    lua.loadString(code) catch {
+        std.log.err("glyphwire-host: {s}", .{lua.toString(-1) catch "?"});
+        lua.pop(1);
+        return error.SyntaxError;
+    };
+    lua.protectedCall(.{ .args = 0, .results = 0, .msg_handler = 0 }) catch {
+        std.log.err("glyphwire-host: {s}", .{lua.toString(-1) catch "?"});
+        lua.pop(1);
+        return error.ScriptError;
+    };
 }
 
 /// Resolves everything `host.conf` controls for this run: starts from the
@@ -98,18 +125,18 @@ pub fn loadConfig(
     const src_z = gpa.dupeZ(u8, src) catch return cfg;
     defer gpa.free(src_z);
 
-    var eng = pixzig.scripting.ScriptEngine.init(gpa) catch |err| {
+    const lua = Lua.init(gpa) catch |err| {
         std.log.warn("glyphwire-host: Lua init failed ({t}); using defaults", .{err});
         return cfg;
     };
-    defer eng.deinit();
+    defer lua.deinit();
+    lua.openLibs();
 
-    eng.run(src_z) catch |err| {
+    runConfigScript(lua, src_z) catch |err| {
         std.log.warn("glyphwire-host: {s} failed to run ({t}); using defaults", .{ config.host_conf_name, err });
         return cfg;
     };
 
-    const lua = eng.lua;
     _ = lua.getGlobal("config") catch return cfg;
     defer lua.pop(1);
     if (!lua.isTable(-1)) {

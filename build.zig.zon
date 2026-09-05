@@ -27,6 +27,22 @@
             .url = "https://www.lua.org/ftp/lua-5.3.6.tar.gz",
             .hash = "N-V-__8AALihEACTeiI1Me9rP-qPZT3BNTELDoSAXn76FIhw",
         },
+        .sdl = .{
+            .url = "git+https://github.com/allyourcodebase/SDL.git#5d74fc4ba994547f7f2f77695c2f301298310d4d",
+            .hash = "sdl-1.0.2+3.4.14-i4QD0SawqQBSVdA6eHm0lX16h_Jwf1vQXxI_lO0-09sY",
+        },
+        .zopengl = .{
+            .url = "git+https://github.com/srjilarious/zopengl.git#7744dae29da953544841cfc370b88fa6ab95a1bc",
+            .hash = "zopengl-0.6.0-dev-5-tnz3-mDgC4jOSi7_5NAxYWY99_SRa5do55-5ivD097",
+        },
+        .zmath = .{
+            .url = "git+https://github.com/zig-gamedev/zmath.git#3a5955b2b72cd081563fbb084eff05bffd1e3fbb",
+            .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
+        },
+        .zstbi = .{
+            .url = "git+https://github.com/srjilarious/zstbi.git#89d30d105bdecd0494324ee9e6197963a9fd769b",
+            .hash = "zstbi-0.11.0-dev-L0Ea_9-XBwDgdQ5UuN7doMZiUzR4fwyzqFAxdmPjXeTF",
+        },
     },
     .paths = .{
         "build.zig",
@@ -38,6 +54,7 @@
         "client",
         "demo",
         "host",
+        "host_eng",
         "ls",
         "view",
         "assets",
