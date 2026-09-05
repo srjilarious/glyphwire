@@ -1621,8 +1621,10 @@ recall command history** at the prompt (readline-style, `historyUp`/
 `historyDown`), only browsing scrollback once already in browse mode.
 **Ctrl+Up breaks into scrollback browse mode** — a one-row step off the
 input line; while browsing, Ctrl+Up/Ctrl+Down jump `scrollback_jump` rows
-(new `prompt{}` key, default 5, must be ≥ 1), the bare arrows move one
-row, Escape returns to the prompt. **Home/End while browsing act on the
+and Ctrl+Left/Ctrl+Right jump `scrollback_jump` columns (new `prompt{}`
+key, default 5, must be ≥ 1), the bare arrows move one row/column,
+Escape returns to the prompt; none of the ctrl+arrows snap back to the
+prompt while browsing. **Home/End while browsing act on the
 browsed row** (`browseHome` → column 0, `browseEnd` → just past the last
 non-blank cell, via one `get_cells` snapshot of the current view) instead
 of snapping back the way ctrl+a/ctrl+e still do in every state.
@@ -1630,11 +1632,22 @@ of snapping back the way ctrl+a/ctrl+e still do in every state.
 new `prompt{ scrollback_type_exits = false }` keeps browse a strict
 navigation mode. Ctrl+C/Ctrl+D unchanged (still encode to `0x03`/`0x04`
 for a foregrounded pty child; Ctrl+Shift+C/V still copy/paste).
+
+Two caret-jump fixes rode along: `renderInputLine`'s box repaint + caret
+placement now go out as **one `batch` frame** (was three, so a recall
+flashed the caret at the box's left edge), and **glyphwire-host stopped
+caret-previewing vertical arrows** in `handleRepeatKeys` — the local
+`ctx.root.cursor` nudge is right for a dumb pty child but wrong for
+Up/Down at the shell prompt (it left the caret stuck off the prompt line
+when the shell had nothing to redraw, e.g. Up at the oldest entry).
+Horizontal arrows keep the preview.
+
 Client-local, **no wire change** — `decisions.md` Shell +
 "Scrollback browsing" sections updated, `shell.conf.template` documents
 the two new keys. **Tests:** `shell_config_tests.zig` +6 (both keys:
 read / default-null / reject bad value), `e2e_tests.zig` browse-cd test
-updated to press Ctrl+Up first. 485 pass.
+updated to press Ctrl+Up first. 490 pass (rebased onto dev's static-quad-
+batch commit, which added +5 core tests).
 
 ## Further out (sequencing noted, not detailed yet)
 

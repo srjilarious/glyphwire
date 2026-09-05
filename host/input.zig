@@ -205,9 +205,19 @@ pub const KeyInput = struct {
         // cursor (`less`'s `:` prompt at BOF: `\r \x1b[K :`) lands a row
         // off per keypress. The keys are still forwarded (below / via
         // `reportKeyEvents`); only the local caret preview is skipped.
+        //
+        // Vertical arrows never get a caret preview: Up/Down at
+        // glyphwire-shell's prompt mean history recall / break-into-
+        // scrollback, not "move the raw cursor one row," and the shell
+        // repositions the caret authoritatively in its redraw -- a local
+        // row nudge here just flashes the caret off the prompt line for a
+        // frame (and stuck there entirely when the shell has nothing to
+        // redraw, e.g. Up at the oldest history entry). Horizontal
+        // arrows keep the preview: it hides the round-trip latency while
+        // moving through the live input line.
         const preview_caret = !self.app.scroll.screenOwnedByProgram();
-        self.handleArrowRepeat(eng, .up, "up", &self.key_repeat.up, 0, -1, delta_ms, preview_caret);
-        self.handleArrowRepeat(eng, .down, "down", &self.key_repeat.down, 0, 1, delta_ms, preview_caret);
+        self.handleArrowRepeat(eng, .up, "up", &self.key_repeat.up, 0, -1, delta_ms, false);
+        self.handleArrowRepeat(eng, .down, "down", &self.key_repeat.down, 0, 1, delta_ms, false);
         self.handleArrowRepeat(eng, .left, "left", &self.key_repeat.left, -1, 0, delta_ms, preview_caret);
         self.handleArrowRepeat(eng, .right, "right", &self.key_repeat.right, 1, 0, delta_ms, preview_caret);
 

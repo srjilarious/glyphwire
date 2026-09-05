@@ -615,14 +615,22 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         } else if (ctrl and std.mem.eql(u8, ev.key, "l")) {
             try prompt.clearScreen();
         } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
-            // Deliberately unaffected by browse mode, unlike ctrl+up/down
-            // below: ctrl+left/right always means "word-jump on the live
-            // line," which (via moveCursorTo -> setCursorAt) always snaps
-            // browsing back to the prompt first -- there's no "bigger
-            // browse step" meaning for these two.
-            try prompt.moveCursorTo(prompt.wordLeft());
+            // While browsing, ctrl+left/right is a bigger horizontal step
+            // (`scrollback_jump` columns), mirroring ctrl+up/down's row
+            // jump -- it does not snap back to the prompt. On the live
+            // line it's the word jump, which (via moveCursorTo ->
+            // setCursorAt) ends any browse.
+            if (prompt.browse_pos != null) {
+                try prompt.browseLeft(prompt.scrollbackJumpRows());
+            } else {
+                try prompt.moveCursorTo(prompt.wordLeft());
+            }
         } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
-            try prompt.moveCursorTo(prompt.wordRight());
+            if (prompt.browse_pos != null) {
+                try prompt.browseRight(prompt.scrollbackJumpRows());
+            } else {
+                try prompt.moveCursorTo(prompt.wordRight());
+            }
         } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
             // Ctrl+Up breaks into scrollback browse mode from the live
             // prompt (a one-row step off the input line); once browsing
@@ -662,7 +670,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // within whatever row is currently being browsed -- see
             // `browseLeft`.
             if (prompt.browse_pos != null) {
-                try prompt.browseLeft();
+                try prompt.browseLeft(1);
             } else {
                 // Step a whole codepoint, not one byte: a CJK character is
                 // three bytes but one cursor stop (see `lineedit`).
@@ -670,7 +678,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             }
         } else if (std.mem.eql(u8, ev.key, "right")) {
             if (prompt.browse_pos != null) {
-                try prompt.browseRight();
+                try prompt.browseRight(1);
             } else {
                 try prompt.moveCursorTo(lineedit.nextBoundary(prompt.buffer.items, prompt.cursor));
             }
@@ -1707,12 +1715,22 @@ const Prompt = struct {
         const total = @min(visible.len + (box_w - w), line_buf.len);
         @memset(line_buf[visible.len..total], ' ');
 
-        try self.client.setCursor(row, left);
-        try self.client.writeText(line_buf[0..total], null, null);
+        // Box repaint + caret placement go out as one `batch` frame, so
+        // the host never renders an intermediate frame with the caret
+        // parked at the box's left edge -- the brief caret "jump" seen on
+        // a history recall or line swap otherwise. Same trick as
+        // `drawRightChain`.
+        var b = self.client.batch();
+        defer b.deinit();
+        try b.setCursor(row, left);
+        try b.writeText(line_buf[0..total], null, null);
+        try b.setCursor(row, self.line_start_col + self.caretCol());
+        var res = try b.send();
+        res.deinit();
 
+        // The dynamic right chain is its own `batch` frame (ending with
+        // its own caret restore); it only redraws when configured.
         if (self.right_dynamic and self.prompt_lines == 1) self.drawRightChain() catch {};
-
-        try self.placeInputCursor();
     }
 
     /// Puts the server cursor at the caret's screen cell -- `line_start_col`
@@ -1996,22 +2014,24 @@ const Prompt = struct {
         try self.client.setCursor(bp.row, bp.col);
     }
 
-    /// Left/Right while browsing: move within whatever row the browse
-    /// cursor is currently on, clamped to the grid's width (`set_property`
-    /// doesn't clamp `col` itself -- see `Layer.setProperty` -- so an
-    /// unclamped move here could park the caret off-grid). No-ops when not
+    /// Left/Right while browsing: move `count` columns within whatever row
+    /// the browse cursor is currently on, clamped to the grid's width
+    /// (`set_property` doesn't clamp `col` itself -- see `Layer.setProperty`
+    /// -- so an unclamped move here could park the caret off-grid). Plain
+    /// Left/Right pass 1; ctrl+Left/Right pass `scrollbackJumpRows()` for a
+    /// bigger step (matching ctrl+Up/Down while browsing). No-ops when not
     /// browsing; the caller is expected to check `browse_pos` first and
     /// call `moveCursorTo` instead (plain line editing) when it's null.
-    fn browseLeft(self: *Prompt) !void {
+    fn browseLeft(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
-        bp.col -|= 1;
+        bp.col -|= count;
         self.browse_pos = bp;
         try self.client.setCursor(bp.row, bp.col);
     }
 
-    fn browseRight(self: *Prompt) !void {
+    fn browseRight(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
-        bp.col = @min(bp.col + 1, self.grid_cols -| 1);
+        bp.col = @min(bp.col + count, self.grid_cols -| 1);
         self.browse_pos = bp;
         try self.client.setCursor(bp.row, bp.col);
     }
