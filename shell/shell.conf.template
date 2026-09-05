@@ -252,11 +252,27 @@
 
 ---- Scrollback browsing ---------------------------------------------
 --
--- Rows of context kept between the browse cursor and the edge of the
--- window while scrolling through scrollback with Up / Down (a vim-style
--- "scrolloff"). Lives under prompt{} because that's the shell's one
--- table binding. Clamped at use to leave room for the cursor itself.
+-- Plain Up / Down recall command history at the prompt. Ctrl+Up breaks
+-- into scrollback browse mode; then the arrow keys move the browse
+-- cursor, Home / End jump to the start / end of its row, Enter acts on
+-- the entry under it, and Escape returns to the prompt.
+--
+-- scrolloff: rows of context kept between the browse cursor and the
+-- edge of the window while it moves through scrollback (a vim-style
+-- "scrolloff"), clamped at use to leave room for the cursor itself.
+--
+-- scrollback_jump: rows Ctrl+Up / Ctrl+Down jump per press while
+-- browsing (plain Up / Down still move one row). Must be >= 1.
+--
+-- scrollback_type_exits: when true (the default), typing a printable
+-- character while browsing returns to the prompt and inserts it; set
+-- false to make browse a strict navigation mode that only Escape ends.
+--
+-- These live under prompt{} because that's the shell's one table
+-- binding.
 --
 -- prompt {
 --     scrolloff = 8,
+--     scrollback_jump = 5,
+--     scrollback_type_exits = true,
 -- }

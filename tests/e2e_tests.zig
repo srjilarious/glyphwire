@@ -896,9 +896,10 @@ fn waitForCursorCol(client: *glyphwire.Client, want_col: usize) !void {
 }
 
 /// End-to-end proof of the browse-mode auto-cd feature (glyphwire-shell's
-/// `Prompt.browseUp`/`browseEnter`, driven by plain Up/Enter): types
-/// `ls <dir>` where `<dir>` contains one subdirectory, waits for the
-/// listing and the next prompt, presses Up enough times to land the browse
+/// `Prompt.browseUp`/`browseEnter`, driven by Ctrl+Up to break in then
+/// Up/Enter): types `ls <dir>` where `<dir>` contains one subdirectory,
+/// waits for the listing and the next prompt, presses Ctrl+Up then Up
+/// enough times to land the browse
 /// cursor back on the subdirectory's row (deterministic here -- a single
 /// entry's icon lands at row 2, per `lsClientWritesEntriesOverRealSocketTest`'s
 /// row-math comment (`writeGrid` leaves a blank leading row), and the next
@@ -987,10 +988,20 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // same cwd (nothing's cd'd yet) so the same arrow_col.
     try waitForCell(&reporter, 6, arrow_col, ">");
 
-    // Four Up presses walk the browse cursor from the prompt row (6) back
-    // up to the entry's row (2).
+    // Ctrl+Up breaks into scrollback browse mode, a one-row step off the
+    // prompt line (row 6 -> row 5). Gate the modifier release on the
+    // cursor actually having moved so the shell's key loop sees `up` with
+    // ctrl still held (isKeyDown is a level cache, not queue-ordered).
+    try reporter.reportKey("left_control", true);
+    try reporter.reportKey("up", true);
+    try reporter.reportKey("up", false);
+    try waitForCursorRow(&reporter, 5);
+    try reporter.reportKey("left_control", false);
+
+    // Three more plain Up presses walk the browse cursor from row 5 up to
+    // the entry's row (2).
     var row_presses: usize = 0;
-    while (row_presses < 4) : (row_presses += 1) {
+    while (row_presses < 3) : (row_presses += 1) {
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }

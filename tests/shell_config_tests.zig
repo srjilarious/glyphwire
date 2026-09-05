@@ -299,6 +299,46 @@ pub fn configPromptRejectsNegativeScrolloffTest(_: std.Io, alloc: std.mem.Alloca
     try testz.expectTrue(res.err != null);
 }
 
+pub fn configReadsScrollbackJumpTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { scrollback_jump = 3 }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.prompt.scrollback_jump.?, @as(u32, 3));
+}
+
+pub fn configScrollbackJumpDefaultsNullWhenUnsetTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { lines = 2 }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.prompt.scrollback_jump, null);
+}
+
+pub fn configPromptRejectsZeroScrollbackJumpTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { scrollback_jump = 0 }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}
+
+pub fn configReadsScrollbackTypeExitsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { scrollback_type_exits = false }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.prompt.scrollback_type_exits.?, false);
+}
+
+pub fn configScrollbackTypeExitsDefaultsNullWhenUnsetTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { lines = 2 }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.prompt.scrollback_type_exits, null);
+}
+
+pub fn configPromptRejectsNonBooleanScrollbackTypeExitsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { scrollback_type_exits = 1 }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}
+
 // ─── prompt{ commands = { ... } } -- on-demand command vars ────────────
 
 pub fn configReadsCommandVarStringFormTest(_: std.Io, alloc: std.mem.Allocator) !void {

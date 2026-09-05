@@ -128,10 +128,18 @@ pub const PromptConfig = struct {
     /// `strftime` format for `{time}` (default `"%H:%M"`).
     time_format: ?[]const u8 = null,
     /// Rows of context to keep between the browse cursor and the edge of
-    /// the window while scrolling through scrollback with Up/Down (a
-    /// vim-style "scrolloff"). `null` -> the built-in default (8). Clamped
-    /// at use to leave room for the cursor itself.
+    /// the window while scrolling through scrollback with the arrow keys
+    /// (a vim-style "scrolloff"). `null` -> the built-in default (8).
+    /// Clamped at use to leave room for the cursor itself.
     scrolloff: ?u32 = null,
+    /// Rows Ctrl+Up / Ctrl+Down jump per press while browsing scrollback
+    /// (plain Up/Down still move one row). `null` -> the built-in default
+    /// (5). Must be >= 1.
+    scrollback_jump: ?u32 = null,
+    /// Whether typing a printable character while browsing scrollback
+    /// ends browse mode and inserts it on the live prompt (`true`, the
+    /// default) or is ignored until Escape (`false`).
+    scrollback_type_exits: ?bool = null,
 };
 
 /// Everything one shell.conf run declared, parsed into Zig data. Owns its
@@ -309,6 +317,21 @@ fn luaPrompt(lua: *Lua) !i32 {
         const n = lua.checkNumber(-1);
         if (n < 0) lua.raiseErrorStr("prompt: scrolloff must be >= 0", .{});
         cfg.prompt.scrolloff = @as(u32, @intFromFloat(@min(n, 1_000_000)));
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "scrollback_jump");
+    if (!lua.isNoneOrNil(-1)) {
+        const n = lua.checkNumber(-1);
+        if (n < 1) lua.raiseErrorStr("prompt: scrollback_jump must be >= 1", .{});
+        cfg.prompt.scrollback_jump = @as(u32, @intFromFloat(@min(n, 1_000_000)));
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "scrollback_type_exits");
+    if (!lua.isNoneOrNil(-1)) {
+        lua.checkType(-1, .boolean);
+        cfg.prompt.scrollback_type_exits = lua.toBoolean(-1);
     }
     lua.pop(1);
 

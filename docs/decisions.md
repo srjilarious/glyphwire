@@ -1402,11 +1402,16 @@ surface.
   prompt, wrapping) before running it, so scrollback shows all of it.
   The `insert_cells` / `delete_cells` wire ops are now unused by the
   shell but stay in the protocol.
-- **Home / End are aliases for ctrl+a / ctrl+e**, in every state — on the
-  live line they jump to column 0 / end of input, and while browsing
-  scrollback they snap back to the live line first (`moveCursorTo` →
-  `setCursorAt`), exactly as the ctrl chords already did. No separate
-  browse-mode meaning, unlike plain Left/Right.
+- **Home / End alias ctrl+a / ctrl+e on the live line** (jump to column
+  0 / end of input; via `moveCursorTo` → `setCursorAt` they also end any
+  browse and snap the view to the live tail). **While browsing scrollback
+  they act on the browsed row instead** — `browseHome` goes to column 0,
+  `browseEnd` goes just past the last non-blank cell of that row (a blank
+  row → column 0), both staying in browse mode. ctrl+a / ctrl+e keep the
+  snap-back-to-prompt meaning in every state. `browseEnd` costs one
+  `get_cells` snapshot of the current view to find where the row's text
+  ends — there's no lighter per-row text query on the wire, and End is
+  pressed rarely enough that it doesn't matter.
 - **A multi-line prompt near the bottom scrolls up-front, once.** After a
   command's output has scrolled the layer the cursor can be within
   `prompt_lines` of the last row. `writePowerlinePrefix` used to just
@@ -1489,7 +1494,7 @@ surface.
 #### Persistent command history: `~/.config/glyphwire/history`
 - **Plain text, one command per line, oldest first** — same directory
   resolution as `shell.conf`. Loaded into `Prompt.history` at startup so
-  ctrl+up recall resumes the previous session.
+  Up-arrow recall resumes the previous session.
 - **Written after every recorded line, not on exit.** An interactive
   session here is almost always *killed* (the host reaps the process;
   `exit` is the only clean path), so buffering until exit would lose the
@@ -1498,7 +1503,7 @@ surface.
   rather than an append + periodic compaction.
 - **Recording rule (`history.shouldRecord`):** non-blank, and not
   identical to the entry right before it (bash `ignoredups`). This is now
-  also applied to the *in-memory* history, so ctrl+up no longer walks
+  also applied to the *in-memory* history, so recall no longer walks
   through a run of the same command. The file is capped to the last
   `history.max_entries` (5000) on every load and every write.
 - Pure parse/serialize/dedup/cap helpers live in `shell/history.zig`
@@ -1510,11 +1515,26 @@ surface.
   works. The e2e tests set it so driving the real `glyphwire-shell`
   binary doesn't append test commands to the developer's history.
 
-#### Scrollback browsing (Up/Down) and `scrolloff`
-- Up/Down with no line to edit walk a browse cursor (`browse_pos`) up
-  into the scrollback above the prompt and back down; Enter/click on a
-  row acts on whatever `glyphwire-ls` tagged there, Escape / any edit
-  key snaps back to the live prompt.
+#### Scrollback browsing (Ctrl+Up) and `scrolloff`
+- **Plain Up/Down recall command history at the prompt** (readline-style,
+  `historyUp`/`historyDown` walking `Prompt.history` with the typed line
+  stashed as scratch). They only browse scrollback once already *in*
+  browse mode.
+- **Ctrl+Up breaks into scrollback browse mode** (a one-row step off the
+  input line into a browse cursor, `browse_pos`). Then the arrow keys
+  move the cursor, Ctrl+Up/Ctrl+Down jump `scrollback_jump` rows at a
+  time, Home/End act on the browsed row (`browseHome`/`browseEnd`),
+  Enter/click acts on whatever `glyphwire-ls` tagged there, and Escape
+  returns to the prompt. Ctrl+Down at the prompt does nothing (there's
+  nothing below the input line). This is a swap from the earlier binding
+  where plain Up/Down browsed and Ctrl+Up recalled history — deliberate
+  entry into a navigation mode reads better than arrows silently meaning
+  two different things depending on whether the line is empty.
+- **Typing while browsing** returns to the prompt and inserts the
+  character by default (`insertText` → `setCursorAt` clears `browse_pos`
+  and the scroll view); `prompt{ scrollback_type_exits = false }` makes
+  browse a strict navigation mode that only Escape ends. A paste follows
+  the same rule.
 - **`browseUp`/`browseDown` keep a vim-style scrolloff margin.** Instead
   of only scrolling the host window once the browse cursor is jammed
   against row 0 (going up) or the prompt row (going down), they start
@@ -1527,6 +1547,8 @@ surface.
   in `prompt{}` because that's the one table binding the shell config
   has; it's clamped at use to half the rows between the top and the
   prompt so there's always room for the cursor to travel.
+  `scrollback_jump` (default `5`, must be ≥ 1) and
+  `scrollback_type_exits` (default `true`) live in the same table.
 - The host side of "a keypress brings the cursor back into view" is the
   caret-pin release in `glyphwire-host` (see Layers → the caret bullet):
   a mouse scroll pins the caret to its buffer cell, and the next
