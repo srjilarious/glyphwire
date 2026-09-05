@@ -1522,6 +1522,19 @@ under the B0 pty; `nvim`/`htop`/`tmux` are still B2 (a real VT model).
   A real VT model (libghostty Terminal API, or vendored ghostty) is the
   call there — see `docs/investigations/libghostty-vt-fallback.md`.
 
+## `glyphwire-host` splits into modules
+
+**Done.** `host/main.zig` (2700+ lines) broke into a thin entry point plus
+per-concern modules — sub-struct decomposition of `App` (`caret` /
+`input` / `selection` / `scroll` / `window_sizing` / `render`), each
+holding a stable `*App` back pointer, plus standalone `config` /
+`config_load` / `geometry` / `icons` / `key_repeat`. `host/support.zig`
+re-exports the `std`/`glyphwire`-only pieces as a `host_support` module
+(wired into build.zig next to `shell_support`) so `tests/host_tests.zig`
+can cover `scrollbarGeom` / `cellFromPixel` / the `host.conf` clamps /
+`KeyRepeatState` without a GLFW link. Pure refactor, no behaviour change.
+Test count 459 → 475.
+
 ## VT100 alternate charset (ACS line drawing)
 
 **Done.** `htop`'s panel borders rendered as stray ASCII letters instead
@@ -1554,6 +1567,52 @@ uppercase (`"F1"`, not `"f1"`) to match zglfw's `Key` enum field name
 that `host/main.zig` forwards verbatim. **Not done:** `F13`+, a modifier
 held alongside a function key (xterm's modifier-suffixed forms) — see
 decisions.md. **Tests:** `shell_tests.zig` +1. 463 pass.
+
+## `glyphwire-host` caches per-layer static quad batches
+
+**Done.** The host no longer regenerates and re-uploads the whole grid's
+vertex data every frame. Each layer's composited output is built once into
+a small set of `pixzig.renderer.StaticQuadBatch`es and re-drawn each frame
+with one `glDrawElements` call apiece; the batches are rebuilt only when
+the layer actually changes.
+
+- **`core.Layer.render_gen`** — a `u64` bumped by `touchRender()` in every
+  `Layer` mutator that alters what the renderer composites: a *superset*
+  of the existing `revision` counter (cell content only) that also covers
+  `scrollView` / `scrollOne`, `resize`, `set_property`, and every
+  selection / highlight edit. Not on the wire — `revision` stays the
+  client-facing "did content change" poll. `renderGeneration()` is the
+  read accessor. The renderer stores the value each batch was built at and
+  compares; it never writes back into `ctx`.
+- **`host/render.zig`** — `Renderer` grew a `LayerBatches` per layer
+  (keyed by handle, `root_layer_handle` for the root): a `color_bg` shape
+  batch (cell colour fills + selection tint + highlight tint), `icon_bg` /
+  `icon_fg` against the shared icon atlas, a `text` glyph batch against
+  the font atlas (glyph quads built directly from `eng.defaultFontAtlas()`
+  — `getChar` / `loadBlocksForText` / `commitTexture`, mirroring
+  `TextRenderer.drawStringColored`'s placement), plus one sprite batch per
+  distinct image handle and per non-atlas icon handle. `syncBatches`
+  (under `ctx_mutex`, from `render`) reaps batches for destroyed layers
+  and rebuilds any layer whose `render_gen` / scrollback view offset /
+  cell size / glyph-atlas epoch has moved. A glyph-atlas grow bumps
+  `text_epoch` and the sync loop re-runs so every layer's text rebuilds at
+  the new UVs within the same frame (bounded — the atlas only doubles a
+  few times before its 8192px cap).
+- **The caret stays immediate** — a single `drawFilledRect`/`drawRect`
+  only while shown, never in a batch, since it blinks on its own clock
+  (`drawRootCaret`). The scrollbar likewise keeps its own
+  `begin`/`end` pass over everything.
+- **pixzig:** one re-export (`renderer.StaticQuadBatch`); no API change.
+  `StaticQuadBatch` already existed for "geometry that doesn't change
+  often".
+- **Still draws + swaps every frame.** Skipping the draw / buffer swap on
+  an unchanged frame (`needsRedraw()` in `gameLoopCore`,
+  `glfwWaitEventsTimeout`, a `glfwPostEmptyEvent` from the server thread
+  on any mutation) is the follow-up — the battery win, but it touches
+  pixzig's loop.
+- **Tests:** `core_tests.zig` +5 (`render_gen` bumps on write / clear /
+  scrollView / resize / cursor property / selection / highlight; stable
+  across pure reads).
 
 ## Further out (sequencing noted, not detailed yet)
 

@@ -1005,6 +1005,19 @@ pub const Layer = struct {
     reply_len: usize = 0,
     /// See `PropertyName.revision`.
     revision: u64 = 0,
+    /// Host-internal render-invalidation counter: bumped by `touchRender`
+    /// on *any* change that alters what glyphwire-host would composite for
+    /// this layer -- a superset of `revision`, which counts only cell
+    /// content. On top of `revision`'s triggers it also moves on a
+    /// scrollback-view change (`scrollView` / `scrollOne`), a `resize`, a
+    /// `set_property` (position), and any selection or highlight edit.
+    /// glyphwire-host caches a static quad batch per layer and only
+    /// rebuilds it when this counter has moved since the batch was last
+    /// built (see `host/render.zig`). Not on the wire -- `revision` is the
+    /// client-facing "did the content change" poll; this one is purely the
+    /// renderer's. Wraps (`+%`); the renderer only ever compares for
+    /// inequality.
+    render_gen: u64 = 0,
     /// See `PropertyName.position`. Zero for the root layer (there's no
     /// wire path that moves it) and for a freshly created layer until its
     /// creator calls `set_property(layer, "position", ...)`.
@@ -1059,6 +1072,20 @@ pub const Layer = struct {
 
     pub fn capacity(self: *const Layer) usize {
         return self.height + self.scrollback_rows;
+    }
+
+    /// Marks this layer's composited output stale so glyphwire-host
+    /// rebuilds its cached quad batch -- see `render_gen`. Called by every
+    /// `Layer` mutator that changes what the renderer would draw.
+    fn touchRender(self: *Layer) void {
+        self.render_gen +%= 1;
+    }
+
+    /// The current value of `render_gen` -- glyphwire-host reads this each
+    /// frame (under `ctx_mutex`) and rebuilds the layer's quad batch when
+    /// it differs from the value the batch was last built at.
+    pub fn renderGeneration(self: *const Layer) u64 {
+        return self.render_gen;
     }
 
     fn physicalRow(self: *const Layer, viewport_row: usize) usize {
@@ -1139,6 +1166,7 @@ pub const Layer = struct {
         var target: i64 = if (offset) |o| @intCast(o) else @intCast(self.view_scroll);
         if (delta) |d| target += d;
         self.view_scroll = @intCast(std.math.clamp(target, 0, @as(i64, @intCast(self.history_len))));
+        self.touchRender();
         return self.view_scroll;
     }
 
@@ -1169,6 +1197,10 @@ pub const Layer = struct {
         if (self.view_scroll > 0) self.view_scroll = @min(self.view_scroll + 1, self.history_len);
         self.viewport_start = (self.viewport_start + 1) % self.capacity();
         for (self.rowSlice(self.physicalRow(self.height - 1))) |*c| c.* = .{};
+        // The scroll primitive under `resolveRow` (explicit rows from
+        // `set_property`/`draw_*`) and every write path; a bump here covers
+        // all of them even where the caller itself doesn't bump.
+        self.touchRender();
     }
 
     /// Resolves an absolute row a caller named (an explicit
@@ -1287,6 +1319,7 @@ pub const Layer = struct {
         self.scroll_bot = new_height - 1;
         if (self.stashed_cursor.row >= new_height) self.stashed_cursor.row = new_height - 1;
         if (self.stashed_cursor.col >= new_width) self.stashed_cursor.col = new_width - 1;
+        self.touchRender();
     }
 
     /// Appends `text` as grapheme clusters starting at the layer's cursor,
@@ -1365,6 +1398,7 @@ pub const Layer = struct {
         self.g0_line_drawing = false;
         self.g1_line_drawing = false;
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// Returns true when `byte` was consumed as a control byte (C0 control
@@ -1627,6 +1661,7 @@ pub const Layer = struct {
             },
         }
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     fn blankRow(row: []Cell) void {
@@ -1666,6 +1701,7 @@ pub const Layer = struct {
         self.scroll_bot = self.height - 1;
         self.on_alt = true;
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// `CSI ? 1049 l` -- back to the primary screen (its scrollback and
@@ -1677,6 +1713,7 @@ pub const Layer = struct {
         self.scroll_top = 0;
         self.scroll_bot = self.height - 1;
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// `CSI 5 n` / `CSI 6 n` -- device status / cursor position report.
@@ -1910,6 +1947,7 @@ pub const Layer = struct {
         for (row[col..][0..n]) |*c| c.* = .{};
         self.sanitizeWidePairs(self.cursor.row);
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// Removes `count` cells at and after the cursor's column, shifting
@@ -1928,6 +1966,7 @@ pub const Layer = struct {
         for (row[col + tail_len ..][0..n]) |*c| c.* = .{};
         self.sanitizeWidePairs(self.cursor.row);
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// Marks cells in `[row, row+row_span) x [col, col+col_span)` (clamped
@@ -1992,6 +2031,7 @@ pub const Layer = struct {
             }
         }
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     fn setCellImage(self: *Layer, row: usize, col: usize, handle: ImageHandle, offset_x: u32, offset_y: u32) void {
@@ -2029,6 +2069,7 @@ pub const Layer = struct {
         } };
         c.metadata_id = opts.metadata_id;
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// Same as `drawIcon`, but sets `Cell.fg_icon` instead of `style.bg`
@@ -2050,6 +2091,7 @@ pub const Layer = struct {
         };
         c.metadata_id = opts.metadata_id;
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// `tag_metadata`: sets exactly one cell's `metadata_id`, touching
@@ -2065,6 +2107,7 @@ pub const Layer = struct {
         if (col >= self.width) return;
         self.cell(resolved_row, col).metadata_id = metadata_id;
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// The 9 resolved tiles a `draw_box` call needs -- corners, edges, and
@@ -2203,6 +2246,7 @@ pub const Layer = struct {
             }
         }
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     /// Resets cells in `[row, row+rows) x [col, col+cols)` (clamped to the
@@ -2223,6 +2267,7 @@ pub const Layer = struct {
             for (self.liveRow(r)[col..col_end]) |*cell_ptr| cell_ptr.* = .{};
         }
         self.revision += 1;
+        self.render_gen +%= 1;
     }
 
     pub fn getProperty(self: *const Layer, name: PropertyName) PropertyValue {
@@ -2243,6 +2288,11 @@ pub const Layer = struct {
             .size => unreachable, // get-only; window size is host-driven, see Context.resize
             .scroll => unreachable, // get-only; move it with scrollView, see PropertyName.scroll
         }
+        // `.position` moves where the layer composites; `.cursor` can scroll
+        // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
+        // caret is an immediate draw either way -- bump unconditionally,
+        // this path is never per-frame.
+        self.touchRender();
     }
 
     // ── Selection ───────────────────────────────────────────────────────
@@ -2257,16 +2307,21 @@ pub const Layer = struct {
     /// `active` the moving one.
     pub fn setSelection(self: *Layer, anchor: SelectionPoint, active: SelectionPoint) void {
         self.selection = .{ .anchor = anchor, .active = active };
+        self.touchRender();
     }
 
     /// Moves the selection's active (moving) end -- a no-op when nothing
     /// is selected, so a stray drag/extend after a `clear` does nothing.
     pub fn updateSelectionActive(self: *Layer, active: SelectionPoint) void {
-        if (self.selection) |*s| s.active = active;
+        if (self.selection) |*s| {
+            s.active = active;
+            self.touchRender();
+        }
     }
 
     pub fn clearSelection(self: *Layer) void {
         self.selection = null;
+        self.touchRender();
     }
 
     /// Whether `id` is currently highlighted -- the per-cell test the
@@ -2286,10 +2341,12 @@ pub const Layer = struct {
         for (self.highlighted_ids.items, 0..) |h, i| {
             if (h == id) {
                 _ = self.highlighted_ids.swapRemove(i);
+                self.touchRender();
                 return;
             }
         }
         try self.highlighted_ids.append(self.alloc, id);
+        self.touchRender();
     }
 
     /// Replaces the whole highlight set with `ids` (`set_highlight`). An
@@ -2297,11 +2354,13 @@ pub const Layer = struct {
     pub fn setHighlightIds(self: *Layer, ids: []const MetadataHandle) !void {
         self.highlighted_ids.clearRetainingCapacity();
         try self.highlighted_ids.appendSlice(self.alloc, ids);
+        self.touchRender();
     }
 
     /// Drops every highlighted id (`clear_highlight`).
     pub fn clearHighlightIds(self: *Layer) void {
         self.highlighted_ids.clearRetainingCapacity();
+        self.touchRender();
     }
 
     /// The cell row `above` rows above the live viewport's top row (see

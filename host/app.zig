@@ -154,9 +154,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        self.renderer.deferred_icons.deinit(self.alloc);
-        self.renderer.image_textures.deinit();
-        self.renderer.icon_uv.deinit();
+        self.renderer.deinit();
         self.alloc.destroy(self);
     }
 
