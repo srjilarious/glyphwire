@@ -1653,6 +1653,53 @@ pub fn writeTextDiscardsUnhandledCsiAndPrivateSequencesTest(io: std.Io, alloc: s
     try testz.expectEqual(layer.cursor.col, 2);
 }
 
+// --- VT100 alternate charset (ACS line drawing) -----------------------------
+
+pub fn writeTextInterpretsXtermStyleAcsCharsetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+
+    // xterm-style `smacs`/`rmacs`: redesignate G0 directly, no SO/SI.
+    // While G0 is line drawing, "qql" draws horizontal-line, horizontal-
+    // line, upper-left-corner; `ESC ( B` (`rmacs`) reverts G0 to ASCII so
+    // the trailing "q" prints literally.
+    try layer.writeText("\x1b(0qql\x1b(Bq", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("\u{2500}", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("\u{2500}", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("\u{250c}", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("q", layer.cell(0, 3).grapheme());
+}
+
+pub fn writeTextInterpretsScreenStyleAcsCharsetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+
+    // screen/tmux-style: designate G1 once (`ESC ) 0`), then shift in/out
+    // with SO (0x0E) / SI (0x0F) around each run of line-drawing bytes.
+    try layer.writeText("\x1b)0\x0ejkl\x0fm", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("\u{2518}", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("\u{2510}", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("\u{250c}", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("m", layer.cell(0, 3).grapheme());
+}
+
+pub fn acsCharsetDoesNotCarryAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+
+    // Designating G0 as line drawing and leaving it shifted in (no
+    // `ESC ( B`) must not bleed into the next `writeText` call -- the
+    // same call-scoped reset as the SGR pen and CSI machine (see
+    // `EscState` / `writeTextSgrColourDoesNotCarryAcrossCallsTest`).
+    try layer.writeText("\x1b(0", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("q", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("q", layer.cell(1, 0).grapheme());
+}
+
 // --- B1 screen model: alt screen, DECTCEM, scroll region, IL/DL, ICH/DCH,
 //     DECSC/DECRC, terminal query replies -------------------------------------
 

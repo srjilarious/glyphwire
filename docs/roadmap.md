@@ -1522,6 +1522,28 @@ under the B0 pty; `nvim`/`htop`/`tmux` are still B2 (a real VT model).
   A real VT model (libghostty Terminal API, or vendored ghostty) is the
   call there — see `docs/investigations/libghostty-vt-fallback.md`.
 
+## VT100 alternate charset (ACS line drawing)
+
+**Done.** `htop`'s panel borders rendered as stray ASCII letters instead
+of box-drawing glyphs — ncurses draws them via the VT100 special
+graphics/line-drawing charset (`ESC ( 0` / SO/SI), which the escape
+machine didn't recognize; a charset-select final byte leaked onto the
+grid as a literal character. Fixed narrowly, entirely in `core.zig`:
+
+- `ESC ( <c>` / `ESC ) <c>` designate G0/G1 (`g0_line_drawing`/
+  `g1_line_drawing`); `SO`/`SI` (0x0E/0x0F, previously dropped) pick
+  which is active (`shift_out`). While active-and-line-drawing, a
+  printable byte `` ` ``..`~` maps through `acsGraphic`'s table (the
+  standard VT220/terminfo `acsc` mapping) to its Unicode glyph. Covers
+  both xterm-style (`smacs`/`rmacs` redesignate G0 directly) and
+  screen/tmux-style (G1 designated once, SO/SI toggles it) terminfo.
+  Call-scoped reset, matching `esc_state`/`pen`.
+- **Tests:** `core_tests.zig` +3. 462 pass.
+- **Not done:** the rest of B2 — tab stops, origin/autowrap modes,
+  keypad application mode, real bold/underline/italic styling. This was
+  a targeted fix for htop's specific symptom, not a step toward a full
+  VT model; see decisions.md for the full writeup.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

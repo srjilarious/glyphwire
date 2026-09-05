@@ -583,6 +583,51 @@ const wide_ranges = [_][2]u21{
     .{ 0x20000, 0x2FFFD }, .{ 0x30000, 0x3FFFD },
 };
 
+/// Maps a byte of the VT100 "special graphics and line drawing" set
+/// (`Layer.g0_line_drawing` / `g1_line_drawing`, designated by `ESC ( 0` /
+/// `ESC ) 0`) to its Unicode glyph. Only `` ` ``..`~` (0x60..0x7e) are part
+/// of the set; callers must not pass anything outside that range. Table
+/// per the DEC VT220 reference manual (table 2-4), reproduced verbatim by
+/// the Linux console (`console_codes(4)`) and ncurses/terminfo's `acsc`
+/// capability -- this is the same mapping every terminal that supports the
+/// set uses.
+fn acsGraphic(byte: u8) u21 {
+    return switch (byte) {
+        '`' => 0x25c6, // ◆ diamond
+        'a' => 0x2592, // ▒ medium shade
+        'b' => 0x2409, // ␉ HT symbol
+        'c' => 0x240c, // ␌ FF symbol
+        'd' => 0x240d, // ␍ CR symbol
+        'e' => 0x240a, // ␊ LF symbol
+        'f' => 0x00b0, // ° degree
+        'g' => 0x00b1, // ± plus-minus
+        'h' => 0x2424, // ␤ NL symbol
+        'i' => 0x240b, // ␋ VT symbol
+        'j' => 0x2518, // ┘ lower-right corner
+        'k' => 0x2510, // ┐ upper-right corner
+        'l' => 0x250c, // ┌ upper-left corner
+        'm' => 0x2514, // └ lower-left corner
+        'n' => 0x253c, // ┼ crossing lines
+        'o' => 0x23ba, // ⎺ scan line 1
+        'p' => 0x23bb, // ⎻ scan line 3
+        'q' => 0x2500, // ─ horizontal line
+        'r' => 0x23bc, // ⎼ scan line 7
+        's' => 0x23bd, // ⎽ scan line 9
+        't' => 0x251c, // ├ left T
+        'u' => 0x2524, // ┤ right T
+        'v' => 0x2534, // ┴ bottom T
+        'w' => 0x252c, // ┬ top T
+        'x' => 0x2502, // │ vertical line
+        'y' => 0x2264, // ≤ less-or-equal
+        'z' => 0x2265, // ≥ greater-or-equal
+        '{' => 0x03c0, // π pi
+        '|' => 0x2260, // ≠ not equal
+        '}' => 0x00a3, // £ pound sterling
+        '~' => 0x00b7, // · middle dot
+        else => byte, // not part of the set -- callers never pass this
+    };
+}
+
 /// Display width, in terminal cells, of a single codepoint: 2 for East
 /// Asian Wide/Fullwidth, 1 otherwise. Not grapheme-aware -- a cluster's
 /// width is taken from its base codepoint (combining marks and ZWJ emoji
@@ -780,6 +825,17 @@ pub const tab_width: usize = 8;
 ///  - **interprets** a handful of `ESC [ ...` cursor/erase finals:
 ///    `A`/`B`/`C`/`D` (cursor up/down/right/left), `G` (column),
 ///    `H`/`f` (row;col), `J` (erase in display), `K` (erase in line).
+///  - **interprets** VT100 charset designation/shift: `ESC ( <c>` / `ESC )
+///    <c>` designate G0/G1 as the special graphics and line-drawing set
+///    (`c == '0'`) or plain ASCII (anything else), and `SO`/`SI` (0x0E/
+///    0x0F) shift which of G0/G1 is active. While the active set is line
+///    drawing, printable bytes `` ` ``..`~` (0x60..0x7e) are mapped to
+///    their Unicode box-drawing/symbol glyph (`acsGraphic`) instead of
+///    printed literally -- see `g0_line_drawing`/`g1_line_drawing`. This is
+///    what `smacs`/`rmacs` (xterm-style, redesignates G0 directly) and
+///    `screen`/`tmux`-style (SO/SI over a G1 designated once) both compile
+///    down to, and it's how ncurses draws panel borders when it isn't
+///    using UTF-8 line-drawing glyphs directly.
 ///  - **discards** every other `ESC [ ...` (CSI) final and every
 ///    `ESC ] ... ` / `ESC P|X|^|_ ... ` (OSC and other string-terminated)
 ///    sequence, same as the old stripper -- recognized well enough to
@@ -807,6 +863,10 @@ pub const EscState = enum {
     /// Inside a string-terminated sequence (`ESC ]`, `ESC P`, `ESC X`,
     /// `ESC ^`, `ESC _`) -- consume until BEL (0x07) or ST (`ESC \`).
     string,
+    /// Saw `ESC (`; the next byte designates G0 (`g0_line_drawing`).
+    charset_g0,
+    /// Saw `ESC )`; the next byte designates G1 (`g1_line_drawing`).
+    charset_g1,
 };
 
 /// A layer's cell grid is a fixed-capacity ring buffer of
@@ -876,6 +936,22 @@ pub const Layer = struct {
     /// alongside `esc_state` at the end of every `writeText` call.
     csi_buf: [48]u8 = undefined,
     csi_len: usize = 0,
+    /// True after `SO` (0x0E) shifted G1 into GL; false (the default, and
+    /// after `SI` / 0x0F) means G0 is active. Which set is actually line
+    /// drawing while active is `g0_line_drawing`/`g1_line_drawing`. Reset
+    /// to `false` at the end of every `writeText` call, matching
+    /// `esc_state`/`pen`'s call-scoped reset -- see `EscState`.
+    shift_out: bool = false,
+    /// True while G0 is designated as the VT100 special graphics/
+    /// line-drawing set (`ESC ( 0`) rather than US-ASCII (`ESC ( B`, the
+    /// default). xterm-style terminfo (`smacs`/`rmacs`) toggles this
+    /// directly and never sends SO/SI. Reset to `false` at the end of
+    /// every `writeText` call -- see `EscState`.
+    g0_line_drawing: bool = false,
+    /// Same as `g0_line_drawing` but for G1 (`ESC ) 0` / `ESC ) B`).
+    /// screen/tmux-style terminfo designates this once and shifts into it
+    /// with SO/SI (`shift_out`) instead of redesignating G0.
+    g1_line_drawing: bool = false,
     /// Scratch SGR "pen" built up from `ESC [ ... m` sequences while a
     /// single `writeText` call runs -- see `SgrPen`. Reset to `.{}` at
     /// the *start* of every `writeTextTagged` call, so a colour is
@@ -1263,8 +1339,18 @@ pub const Layer = struct {
         var it = view.iterator();
         while (it.nextCodepointSlice()) |cp_bytes| {
             if (cp_bytes.len == 1 and try self.consumeControl(cp_bytes[0])) continue;
-            const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
             const eff = self.pen.resolve(fg, bg);
+            // While the shifted-in charset is line drawing, a byte in
+            // `` ` ``..`~` names a box-drawing/symbol glyph, not itself --
+            // see `EscState`'s charset paragraph and `acsGraphic`.
+            const line_drawing = if (self.shift_out) self.g1_line_drawing else self.g0_line_drawing;
+            if (line_drawing and cp_bytes.len == 1 and cp_bytes[0] >= '`' and cp_bytes[0] <= '~') {
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(acsGraphic(cp_bytes[0]), &buf) catch unreachable;
+                self.putAtCursor(buf[0..n], 1, eff.fg, eff.bg, metadata_id);
+                continue;
+            }
+            const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
             self.putAtCursor(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, metadata_id);
         }
         // Don't carry a half-consumed `ESC ...` sequence into the next
@@ -1275,6 +1361,9 @@ pub const Layer = struct {
         // See `EscState`.
         self.esc_state = .ground;
         self.csi_len = 0;
+        self.shift_out = false;
+        self.g0_line_drawing = false;
+        self.g1_line_drawing = false;
         self.revision += 1;
     }
 
@@ -1303,8 +1392,10 @@ pub const Layer = struct {
             0x08 => { // BS: back one column, non-destructive; a no-op at column 0
                 if (self.cursor.col > 0) self.cursor.col -= 1;
             },
-            // Every other C0 byte (NUL, BEL, SO..SUB, FS..US) and DEL: dropped.
-            0x00...0x07, 0x0e...0x1a, 0x1c...0x1f, 0x7f => {},
+            0x0e => self.shift_out = true, // SO -- invoke G1 into GL
+            0x0f => self.shift_out = false, // SI -- invoke G0 into GL
+            // Every other C0 byte (NUL, BEL, DLE..SUB, FS..US) and DEL: dropped.
+            0x00...0x07, 0x10...0x1a, 0x1c...0x1f, 0x7f => {},
             else => return false, // printable
         }
         return true;
@@ -1350,10 +1441,10 @@ pub const Layer = struct {
                     self.lineFeed();
                     self.esc_state = .ground;
                 },
+                '(' => self.esc_state = .charset_g0, // designate G0, next byte
+                ')' => self.esc_state = .charset_g1, // designate G1, next byte
                 // Anything else is a short two-byte escape (or the ST
-                // half of `ESC \`) -- it ends here. A charset-select
-                // third byte (`ESC ( B`) would leak its final byte;
-                // acceptable for output that isn't supposed to be VT100.
+                // half of `ESC \`) -- it ends here.
                 else => self.esc_state = .ground,
             },
             .csi => {
@@ -1373,6 +1464,17 @@ pub const Layer = struct {
                 0x07 => self.esc_state = .ground, // BEL terminator
                 0x1b => self.esc_state = .esc, // ESC of an `ESC \` (ST) terminator
                 else => {},
+            },
+            // `0` is the VT100 special graphics/line-drawing set; anything
+            // else (`B` for US-ASCII, or any other 94-charset final) is
+            // treated as plain ASCII. See `g0_line_drawing`/`g1_line_drawing`.
+            .charset_g0 => {
+                self.g0_line_drawing = byte == '0';
+                self.esc_state = .ground;
+            },
+            .charset_g1 => {
+                self.g1_line_drawing = byte == '0';
+                self.esc_state = .ground;
             },
         }
     }

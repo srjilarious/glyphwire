@@ -2046,6 +2046,37 @@ and simple full-screen TUIs usable under the B0 pty; real
   screen) and content appeared to crawl as the user scrolled the host
   view.
 
+**Decision (VT100 alternate charset / ACS line drawing):** `htop`'s panel
+borders rendered as stray ASCII letters (`l`, `q`, `k`, `j`, ...) instead
+of box-drawing glyphs — ncurses draws them via the VT100 "special
+graphics and line drawing" charset, which glyphwire's escape machine
+didn't recognize at all: `ESC ( <c>` fell through to the generic
+short-escape case and the charset-final byte itself leaked onto the grid
+as a literal character (see the old comment this replaced). Added,
+entirely in `core.zig`, no wire/host change:
+
+- `ESC ( <c>` / `ESC ) <c>` designate G0/G1 (`Layer.g0_line_drawing` /
+  `g1_line_drawing`) as line drawing (`c == '0'`) or ASCII (anything
+  else, `'B'` in practice). `SO`/`SI` (0x0E/0x0F) pick which of G0/G1 is
+  active (`Layer.shift_out`) — previously dropped as inert C0 bytes.
+- While the active set is line drawing, `writeText` maps a printable byte
+  in `` ` ``..`~` through `acsGraphic`'s table (the standard VT220/
+  `console_codes(4)`/terminfo `acsc` mapping) to its Unicode glyph instead
+  of printing it literally.
+- Covers both idioms real terminfo entries use: xterm-style `smacs`/
+  `rmacs` (`\E(0`/`\E(B`, redesignates G0 directly, no SO/SI) and
+  screen/tmux-style (`\E)0` once, then `^N`/`^O` around each run).
+- Charset state resets to ASCII/G0 at the end of every `writeText` call,
+  matching `esc_state`/`pen`'s existing call-scoped reset (same
+  rationale: a `smacs` left un-closed by a chunk boundary must not poison
+  glyphwire-shell's own prompt).
+- **Tests:** `core_tests.zig` +3 (xterm-style, screen-style, no
+  cross-call bleed). 462 pass.
+- **Not covered:** the rest of B2 (tab stops, origin/autowrap modes,
+  keypad application mode, real bold/underline/italic styling) — this
+  was a narrowly targeted fix for the specific htop symptom, not a step
+  toward a full VT model.
+
 **Decision:** `write_text` always replaces a cell's whole style outright
 (fg *and* bg together, per-cell — same "overwrite outright" behavior
 `draw_icon` used to have before `foreground: true`, see the Icon section)
