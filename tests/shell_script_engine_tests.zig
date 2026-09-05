@@ -37,6 +37,7 @@ const TestHost = struct {
             .realpath = tRealpath,
             .write = tWrite,
             .poll_interrupt = tPollInterrupt,
+            .run_line = tRunLine,
         };
     }
 
@@ -97,6 +98,28 @@ fn tWrite(ctx: *anyopaque, bytes: []const u8) void {
 fn tPollInterrupt(ctx: *anyopaque) bool {
     const self: *TestHost = @ptrCast(@alignCast(ctx));
     return self.interrupt;
+}
+
+/// Stub pipeline runner: the real one forks processes, out of scope for a
+/// unit test. Echoes `line` into `out` when capturing so `sh.run`'s table
+/// shape can still be asserted; always "succeeds".
+fn tRunLine(
+    ctx: *anyopaque,
+    line: []const u8,
+    capture: bool,
+    stdin: []const u8,
+    out: *std.ArrayList(u8),
+    err: *std.ArrayList(u8),
+) u8 {
+    const self: *TestHost = @ptrCast(@alignCast(ctx));
+    _ = err;
+    if (capture) {
+        out.appendSlice(self.alloc, line) catch {};
+        out.appendSlice(self.alloc, stdin) catch {};
+    } else {
+        self.out.appendSlice(self.alloc, line) catch {};
+    }
+    return 0;
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
@@ -271,6 +294,51 @@ pub fn ctrlCInterruptsALongRunningBuiltinTest(io: std.Io, alloc: std.mem.Allocat
     const code = eng.runCommand("spin", &.{});
     try testz.expectEqual(code, @as(u8, 1));
     try testz.expectTrue(std.mem.indexOf(u8, host.output(), "interrupted") != null);
+}
+
+// ─── sh.run / sh.exec ────────────────────────────────────────────────
+
+pub fn shRunReturnsAResultTableTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    // `tRunLine` echoes the command line into `out` and reports success,
+    // so this exercises the binding's table shape without forking.
+    try eng.runConf(
+        \\defcmd('probe', function()
+        \\  local r = sh.run('echo hello')
+        \\  print(tostring(r.code) .. ':' .. tostring(r.ok) .. ':' .. r.out)
+        \\end)
+    );
+    _ = eng.runCommand("probe", &.{});
+    try testz.expectEqualStr("0:true:echo hello\n", host.output());
+}
+
+pub fn shRunFeedsItsStdinArgumentTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf(
+        \\defcmd('probe', function()
+        \\  print(sh.run('cat', 'PIPED').out)
+        \\end)
+    );
+    _ = eng.runCommand("probe", &.{});
+    try testz.expectEqualStr("catPIPED\n", host.output());
+}
+
+pub fn shExecReturnsJustTheStatusTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf("defcmd('runit', function() return sh.exec('anything') end)");
+    try testz.expectEqual(eng.runCommand("runit", &.{}), @as(u8, 0));
 }
 
 pub fn pathSeparatorNamesAreNeverBuiltinsTest(io: std.Io, alloc: std.mem.Allocator) !void {

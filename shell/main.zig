@@ -1,6 +1,8 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const wordsplit = @import("shell_support").wordsplit;
+const parse = @import("shell_support").parse;
+const pipeexec = @import("shell_support").pipeexec;
 const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
 const hs = @import("shell_support").handshake;
@@ -20,6 +22,10 @@ const ModeTracker = glyphwire.ModeTracker;
 /// for byte the same as the unconfigured default `writeDefaultPrefix`
 /// produces -- an absolute cwd, then `" > "`.
 const default_prompt_left = "{cwd_full} > ";
+
+/// The red glyphwire-shell uses for every error line it prints onto the
+/// grid itself (a bad `cd`, a spawn failure, a pipeline syntax error).
+const err_color = glyphwire.Color{ .r = 255, .g = 85, .b = 85 };
 
 /// Rows of context kept between the browse cursor and the top/bottom of
 /// the window while walking scrollback with the arrow keys, when
@@ -63,6 +69,18 @@ const c = struct {
     /// Resolves `path` against the filesystem into `resolved` (must be at
     /// least `PATH_MAX`); returns `resolved` on success, null otherwise.
     extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
+    extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
+    extern "c" fn close(fd: c_int) c_int;
+    extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
+    extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
+};
+
+/// `signal(2)` just for the one-shot SIGPIPE ignore in `main`. Linux
+/// constants; the shell is Linux-only in practice (pty / pipeexec).
+const csig = struct {
+    extern "c" fn signal(sig: c_int, handler: usize) usize;
+    const SIGPIPE: c_int = 13;
+    const SIG_IGN: usize = 1;
 };
 
 /// libc time formatting for the prompt's `{time}` token -- this reduced
@@ -132,6 +150,12 @@ pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+
+    // A pipeline writes to a child's stdin fd (`pipeexec`); when that
+    // child has already exited the write raises SIGPIPE, which would kill
+    // the shell. Ignore it process-wide and take the EPIPE return
+    // instead -- nothing here streams to a pipe it must not outlive.
+    _ = csig.signal(csig.SIGPIPE, csig.SIG_IGN);
 
     // Must run before *any* std.process.spawn/replace call below (both
     // the exec path a few lines down and everything Prompt.runCommand
@@ -2377,18 +2401,24 @@ const Prompt = struct {
         try self.showPrompt();
     }
 
-    /// Runs whatever the just-committed line (`self.buffer`) names -- the
-    /// `alias`/`unalias`/`cd`/`exit` builtins, or an external command via
-    /// `runCommand`.
+    /// Runs whatever the just-committed line (`self.buffer`) names.
     ///
-    /// Order matches bash: word-splitting is quote-aware
-    /// (`wordsplit.splitArgs`: single/double quotes and backslash
-    /// escapes), then a leading alias is expanded (`expandAliases`), then
-    /// `*` globs (`expandGlobs`), then builtin/command dispatch -- so an
-    /// `alias`-defined name reaches exactly the same dispatch a typed
-    /// name would. `alias` itself is handled off the raw line ahead of
-    /// splitting -- its value has rest-of-line semantics
-    /// (`wordsplit.parseAliasDef`), unlike every other argument.
+    /// The line goes through `parse.parse` first (pipes, redirects,
+    /// `&&` / `||` / `;`). A *bare* command -- one stage, no redirects --
+    /// keeps the original PTY-backed path (`dispatchBareCommand` ->
+    /// `runCommand`): interactive full-screen programs, the glyphwire
+    /// handshake and `{dur}` timing all depend on it. Anything with an
+    /// operator runs through the pipe-based executor (`runLine` ->
+    /// `runPipeline`). `alias NAME=VALUE` is still handled off the raw
+    /// line ahead of the parser -- its value has rest-of-line semantics
+    /// (`wordsplit.parseAliasDef`) the tokenizer would destroy.
+    ///
+    /// Within each command: quote-aware splitting, then alias expansion
+    /// (`expandAliases`), then `*` globs (`expandGlobs`), then
+    /// builtin / `$PATH` dispatch -- bash order. A core or script builtin
+    /// (`cd`, `exit`, a `defcmd`) works as a whole stage in an
+    /// `&&` / `||` / `;` chain, but not as one stage of a `|` pipeline
+    /// (see `runPipeline`).
     fn dispatchLine(self: *Prompt) !void {
         const alloc = self.client.alloc;
         const trimmed = std.mem.trimStart(u8, self.buffer.items, " \t");
@@ -2399,17 +2429,48 @@ const Prompt = struct {
             return self.doAlias(self.buffer.items);
         }
 
-        const words = try wordsplit.splitArgs(alloc, self.buffer.items);
-        defer wordsplit.freeArgs(alloc, words);
-        if (words.len == 0) return;
+        switch (try parse.parse(alloc, self.buffer.items)) {
+            .err => |msg| {
+                defer alloc.free(msg);
+                try self.client.writeText(msg, err_color, null);
+                self.last_status = 2;
+                self.last_dur_ms = 0;
+                self.have_status = true;
+            },
+            .ok => |ok_line| {
+                var line = ok_line;
+                defer line.deinit();
+                if (line.segments.len == 0) return; // blank / whitespace only
 
-        const expanded = try self.expandAliases(words);
+                if (line.isBareCommand()) {
+                    try self.dispatchBareCommand(line.segments[0].pipeline.commands[0]);
+                    return;
+                }
+
+                const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
+                const status = try self.runLine(line);
+                const elapsed_ms = started.untilNow(self.client.io).raw.toMilliseconds();
+                self.last_status = status;
+                self.last_dur_ms = if (elapsed_ms > 0) @intCast(elapsed_ms) else 0;
+                self.have_status = true;
+            },
+        }
+    }
+
+    /// The bare-command path: the pre-pipeline dispatch, unchanged in
+    /// behavior from before pipelines existed. `cmd` is always a single
+    /// stage with no redirects (`Line.isBareCommand`).
+    fn dispatchBareCommand(self: *Prompt, cmd: parse.Command) !void {
+        const alloc = self.client.alloc;
+
+        var args = try alloc.alloc(wordsplit.Arg, cmd.words.len);
+        defer alloc.free(args);
+        for (cmd.words, cmd.quoted, 0..) |w, q, i| args[i] = .{ .text = w, .quoted = q };
+
+        const expanded = try self.expandAliases(args);
         defer wordsplit.freeArgs(alloc, expanded);
         if (expanded.len == 0) return;
 
-        // Glob expansion happens after alias expansion (bash order) and
-        // drops the per-token "was quoted" flag, so it's the last step
-        // before dispatch.
         const argv = try self.expandGlobs(expanded);
         defer wordsplit.freeTokens(alloc, argv);
         if (argv.len == 0) return;
@@ -2427,6 +2488,472 @@ const Prompt = struct {
         } else {
             try self.runCommand(argv);
         }
+    }
+
+    /// Walks a parsed line's segments left to right, running each
+    /// pipeline whose `&&` / `||` / `;` link permits it given the running
+    /// exit status. Returns the status of the last pipeline actually run
+    /// (0 if a chain short-circuited before running anything). Interactive
+    /// path only -- `sh.run` / `sh.exec` drive `runPipeline` directly.
+    fn runLine(self: *Prompt, line: parse.Line) !u8 {
+        var status: u8 = 0;
+        for (line.segments) |seg| {
+            const run = switch (seg.sep) {
+                .first, .semi => true,
+                .and_then => status == 0,
+                .or_else => status != 0,
+            };
+            if (!run) continue;
+            status = try self.runPipeline(seg.pipeline, .interactive);
+            if (self.should_exit) return status;
+        }
+        return status;
+    }
+
+    /// Where a running pipeline's output goes and where its stdin / Ctrl-C
+    /// come from.
+    const PipeSink = union(enum) {
+        /// A typed line: mirror stdout+stderr to the grid, forward
+        /// `Prompt.listener` keystrokes to stage 0, Ctrl-C -> SIGINT.
+        interactive,
+        /// `sh.exec("...")`: mirror to the grid, stdin is `/dev/null`, no
+        /// keystroke forwarding; Ctrl-C still interrupts.
+        script_grid,
+        /// `sh.run("...")`: collect stdout / stderr into buffers, feed
+        /// `stdin` to stage 0 then close it.
+        capture: *Capture,
+    };
+
+    const Capture = struct {
+        out: *std.ArrayList(u8),
+        err_buf: *std.ArrayList(u8),
+        stdin: []const u8,
+    };
+
+    /// Runs one `|`-pipeline. A single-stage pipeline naming a builtin is
+    /// dispatched in-process (so `cd x && ls` works); a builtin as one
+    /// stage of a real `|` pipeline is rejected with a message (see
+    /// docs/decisions.md, Shell). Everything else -- one external command
+    /// with redirects, or two-plus stages -- goes to `pipeexec.spawn`.
+    /// Returns the last stage's exit status (bash semantics, no
+    /// `pipefail`).
+    fn runPipeline(self: *Prompt, pl: parse.Pipeline, sink: PipeSink) !u8 {
+        const alloc = self.client.alloc;
+
+        if (pl.commands.len == 1) {
+            const argv = try self.resolveArgv(pl.commands[0]);
+            defer wordsplit.freeTokens(alloc, argv);
+            if (argv.len == 0) return 0;
+            if (self.isBuiltinName(argv[0])) {
+                // Redirects on a builtin are parsed but not applied in v1.
+                return self.runBuiltin(argv);
+            }
+            return self.spawnAndPump(pl.commands, &.{argv}, sink);
+        }
+
+        var argvs = try alloc.alloc([]const []const u8, pl.commands.len);
+        for (argvs) |*a| a.* = &.{};
+        defer {
+            for (argvs) |a| wordsplit.freeTokens(alloc, a);
+            alloc.free(argvs);
+        }
+        for (pl.commands, 0..) |cmd, i| {
+            argvs[i] = try self.resolveArgv(cmd);
+            if (argvs[i].len == 0) {
+                try self.client.writeText("pipeline: empty command", err_color, null);
+                return 2;
+            }
+            if (self.isBuiltinName(argvs[i][0])) {
+                var buf: [160]u8 = undefined;
+                const m = std.fmt.bufPrint(&buf, "{s}: not supported inside a pipeline", .{argvs[i][0]}) catch
+                    "builtin not supported inside a pipeline";
+                try self.client.writeText(m, err_color, null);
+                return 2;
+            }
+        }
+        return self.spawnAndPump(pl.commands, argvs, sink);
+    }
+
+    /// alias-expands then glob-expands one parsed command into an owned
+    /// argv (`wordsplit.freeTokens` to free). The per-token "quoted" flag
+    /// is carried into `expandGlobs` so a quoted `*` stays literal.
+    fn resolveArgv(self: *Prompt, cmd: parse.Command) ![]const []const u8 {
+        const alloc = self.client.alloc;
+        var args = try alloc.alloc(wordsplit.Arg, cmd.words.len);
+        defer alloc.free(args);
+        for (cmd.words, cmd.quoted, 0..) |w, q, i| args[i] = .{ .text = w, .quoted = q };
+
+        const expanded = try self.expandAliases(args);
+        defer wordsplit.freeArgs(alloc, expanded);
+        return self.expandGlobs(expanded);
+    }
+
+    fn isBuiltinName(self: *Prompt, name: []const u8) bool {
+        if (std.mem.eql(u8, name, "exit") or std.mem.eql(u8, name, "unalias") or
+            std.mem.eql(u8, name, "cd") or std.mem.eql(u8, name, "alias")) return true;
+        if (self.script_engine) |eng| return eng.hasCommand(name);
+        return false;
+    }
+
+    /// Dispatches a builtin that is the sole stage of its pipeline. `cd` /
+    /// `unalias` report their own errors onto the grid and are treated as
+    /// status 0 here; `alias` mid-chain isn't supported (its rest-of-line
+    /// value is already gone by parse time).
+    fn runBuiltin(self: *Prompt, argv: []const []const u8) !u8 {
+        if (std.mem.eql(u8, argv[0], "exit")) {
+            self.should_exit = true;
+            return 0;
+        }
+        if (std.mem.eql(u8, argv[0], "unalias")) {
+            try self.doUnalias(argv[1..]);
+            return 0;
+        }
+        if (std.mem.eql(u8, argv[0], "cd")) {
+            try self.doCd(argv[1..]);
+            return 0;
+        }
+        if (std.mem.eql(u8, argv[0], "alias")) {
+            try self.client.writeText("alias: only supported as a standalone command", err_color, null);
+            return 2;
+        }
+        if (self.script_engine) |eng| {
+            if (eng.hasCommand(argv[0])) return eng.runCommand(argv[0], argv[1..]);
+        }
+        return 127;
+    }
+
+    /// Builds `pipeexec.Stage`s for `commands` (already resolved to
+    /// `argvs`), spawns them, and pumps output / input / Ctrl-C until the
+    /// last stage exits. All heap scratch is freed before returning; the
+    /// children hold their own copies. Reports a spawn failure onto the
+    /// grid and returns 127.
+    fn spawnAndPump(
+        self: *Prompt,
+        commands: []const parse.Command,
+        argvs: []const []const []const u8,
+        sink: PipeSink,
+    ) !u8 {
+        const alloc = self.client.alloc;
+        const n = commands.len;
+
+        // NUL-terminated strings referenced by the argv arrays and the
+        // redirect targets; freed after the spawn.
+        var zbufs: std.ArrayList([:0]u8) = .empty;
+        defer {
+            for (zbufs.items) |b| alloc.free(b);
+            zbufs.deinit(alloc);
+        }
+        var argv_arrays: std.ArrayList([]?[*:0]const u8) = .empty;
+        defer {
+            for (argv_arrays.items) |a| alloc.free(a);
+            argv_arrays.deinit(alloc);
+        }
+        var redir_store: std.ArrayList(pipeexec.Redir) = .empty;
+        defer redir_store.deinit(alloc);
+        var redir_counts = try alloc.alloc(usize, n);
+        defer alloc.free(redir_counts);
+
+        const stages = try alloc.alloc(pipeexec.Stage, n);
+        defer alloc.free(stages);
+
+        for (commands, argvs, 0..) |cmd, argv, i| {
+            const arr = try alloc.alloc(?[*:0]const u8, argv.len + 1);
+            try argv_arrays.append(alloc, arr);
+            for (argv, 0..) |a, k| {
+                const exp = self.expandTilde(a) catch a;
+                const z = try alloc.dupeZ(u8, exp);
+                if (exp.ptr != a.ptr) alloc.free(exp);
+                try zbufs.append(alloc, z);
+                arr[k] = z.ptr;
+            }
+            arr[argv.len] = null;
+
+            redir_counts[i] = cmd.redirs.len;
+            for (cmd.redirs) |r| {
+                const pr = (try self.resolveRedir(r, &zbufs)) orelse return 2;
+                try redir_store.append(alloc, pr);
+            }
+            stages[i] = .{ .argv = @ptrCast(arr.ptr), .redirs = &.{} };
+        }
+        // Slice the flat redirect store per stage now that no more
+        // appends can move it.
+        {
+            var off: usize = 0;
+            for (stages, 0..) |*s, i| {
+                s.redirs = redir_store.items[off..][0..redir_counts[i]];
+                off += redir_counts[i];
+            }
+        }
+
+        // stage-0 stdin: a pipe (write end kept for keystrokes / a fed
+        // string) for the interactive and capture sinks; `/dev/null` for
+        // `sh.exec`.
+        var devnull_fd: c_int = -1;
+        const stage0_stdin: i32 = switch (sink) {
+            .script_grid => blk: {
+                devnull_fd = c.open("/dev/null", 0, 0);
+                break :blk devnull_fd;
+            },
+            else => -1,
+        };
+
+        var sp = pipeexec.spawn(alloc, stages, .{ .stage0_stdin = stage0_stdin }) catch |e| {
+            if (devnull_fd >= 0) _ = c.close(devnull_fd);
+            const m = switch (e) {
+                error.Unsupported => "pipelines need Linux",
+                error.OutOfMemory => return error.OutOfMemory,
+                else => "pipeline: could not start",
+            };
+            try self.client.writeText(m, err_color, null);
+            return 127;
+        };
+        if (devnull_fd >= 0) _ = c.close(devnull_fd); // the child dup'd it
+        defer sp.deinit(alloc);
+
+        try self.pumpPipeline(&sp, sink);
+        return sp.exit_code;
+    }
+
+    /// Turns a parsed redirect into a `pipeexec.Redir`. Resolves a `~`
+    /// and (for an unquoted target) a single glob match; a multi-match
+    /// glob is an "ambiguous redirect" reported onto the grid, and the
+    /// function returns null to mean "abort this pipeline". The target's
+    /// NUL-terminated storage is appended to `zbufs`.
+    fn resolveRedir(
+        self: *Prompt,
+        r: parse.Redir,
+        zbufs: *std.ArrayList([:0]u8),
+    ) !?pipeexec.Redir {
+        const alloc = self.client.alloc;
+        if (r.mode == .dup) {
+            return .{ .fd = r.fd, .mode = .dup, .dup_fd = r.dup_fd };
+        }
+
+        const tilded = self.expandTilde(r.path) catch r.path;
+        defer if (tilded.ptr != r.path.ptr) alloc.free(tilded);
+
+        var chosen: []const u8 = tilded;
+        var matched: ?[]const []const u8 = null;
+        defer if (matched) |m| wordsplit.freeTokens(alloc, m);
+        if (!r.path_quoted and glob.hasWildcard(tilded)) {
+            const one = [_]wordsplit.Arg{.{ .text = tilded, .quoted = false }};
+            const m = try self.expandGlobs(&one);
+            matched = m;
+            if (m.len > 1) {
+                try self.client.writeText("ambiguous redirect", err_color, null);
+                return null;
+            }
+            if (m.len == 1) chosen = m[0];
+        }
+
+        const z = try alloc.dupeZ(u8, chosen);
+        try zbufs.append(alloc, z);
+        return .{
+            .fd = r.fd,
+            .mode = switch (r.mode) {
+                .read => .read,
+                .write => .write,
+                .append => .append,
+                .dup => unreachable,
+            },
+            .path = z.ptr,
+            .also_stderr = r.also_stderr,
+        };
+    }
+
+    /// Drives a spawned pipeline to completion: drains its stdout / stderr
+    /// pipes onto the grid (or into capture buffers), feeds stdin, and
+    /// turns Ctrl-C into a group SIGINT. Non-blocking `poll` throughout so
+    /// output appears as it happens; a 20 ms poll timeout paces the
+    /// non-interactive sinks and `listener.waitInputEvent` paces the
+    /// interactive one.
+    fn pumpPipeline(self: *Prompt, sp: *pipeexec.Spawned, sink: PipeSink) !void {
+        var buf: [4096]u8 = undefined;
+
+        var stdin_rest: []const u8 = switch (sink) {
+            .capture => |cap| cap.stdin,
+            else => &.{},
+        };
+        if (sink == .capture and stdin_rest.len == 0 and sp.stdin_w >= 0) {
+            _ = c.close(sp.stdin_w);
+            sp.stdin_w = -1;
+        }
+
+        while (true) {
+            _ = self.drainPipeOnce(sp, sink, &buf, 0);
+
+            switch (sink) {
+                .interactive => {
+                    if (try self.forwardKeystroke(sp)) sp.signal(std.posix.SIG.INT);
+                },
+                .capture => {
+                    if (stdin_rest.len > 0 and sp.stdin_w >= 0) {
+                        const w = c.write(sp.stdin_w, stdin_rest.ptr, stdin_rest.len);
+                        if (w > 0) stdin_rest = stdin_rest[@intCast(w)..];
+                        if (w < 0 or stdin_rest.len == 0) {
+                            _ = c.close(sp.stdin_w);
+                            sp.stdin_w = -1;
+                        }
+                    }
+                    if (self.pollPipeInterrupt()) sp.signal(std.posix.SIG.INT);
+                },
+                .script_grid => {
+                    if (self.pollPipeInterrupt()) sp.signal(std.posix.SIG.INT);
+                },
+            }
+
+            if (sp.reapAll()) {
+                // Every writer is gone: the pipes EOF promptly. Flush
+                // what's buffered and stop.
+                while (sp.stdout_r >= 0 or sp.stderr_r >= 0) {
+                    if (!self.drainPipeOnce(sp, sink, &buf, 50)) break;
+                }
+                break;
+            }
+
+            if (sink != .interactive) {
+                // A plain sleep when there's nothing to read (all fds
+                // redirected to files); `poll` with a timeout doubles as
+                // one even with an empty set.
+                var pf: [2]std.posix.pollfd = undefined;
+                var nf: usize = 0;
+                if (sp.stdout_r >= 0) {
+                    pf[nf] = .{ .fd = sp.stdout_r, .events = std.posix.POLL.IN, .revents = 0 };
+                    nf += 1;
+                }
+                if (sp.stderr_r >= 0) {
+                    pf[nf] = .{ .fd = sp.stderr_r, .events = std.posix.POLL.IN, .revents = 0 };
+                    nf += 1;
+                }
+                _ = std.posix.poll(pf[0..nf], 20) catch 0;
+            }
+        }
+    }
+
+    /// One non-blocking drain of `sp`'s stdout / stderr read ends.
+    /// `timeout_ms` is passed to `poll` (0 for a pure poll). Returns true
+    /// if it read any bytes -- the post-exit flush loop uses that to know
+    /// when the pipes are truly empty.
+    fn drainPipeOnce(
+        self: *Prompt,
+        sp: *pipeexec.Spawned,
+        sink: PipeSink,
+        buf: *[4096]u8,
+        timeout_ms: i32,
+    ) bool {
+        var pf: [2]std.posix.pollfd = undefined;
+        var slot: [2]i32 = undefined;
+        var nf: usize = 0;
+        if (sp.stdout_r >= 0) {
+            pf[nf] = .{ .fd = sp.stdout_r, .events = std.posix.POLL.IN, .revents = 0 };
+            slot[nf] = 1;
+            nf += 1;
+        }
+        if (sp.stderr_r >= 0) {
+            pf[nf] = .{ .fd = sp.stderr_r, .events = std.posix.POLL.IN, .revents = 0 };
+            slot[nf] = 2;
+            nf += 1;
+        }
+        if (nf == 0) return false;
+
+        _ = std.posix.poll(pf[0..nf], timeout_ms) catch return false;
+
+        var read_any = false;
+        for (pf[0..nf], slot[0..nf]) |p, which| {
+            if (p.revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR) == 0) continue;
+            const fd = if (which == 1) sp.stdout_r else sp.stderr_r;
+            if (fd < 0) continue;
+            const nr = c.read(fd, buf, buf.len);
+            if (nr <= 0) {
+                _ = c.close(fd);
+                if (which == 1) sp.stdout_r = -1 else sp.stderr_r = -1;
+                continue;
+            }
+            read_any = true;
+            const chunk = buf[0..@intCast(nr)];
+            switch (sink) {
+                .capture => |cap| {
+                    const dst = if (which == 2) cap.err_buf else cap.out;
+                    dst.appendSlice(self.client.alloc, chunk) catch {};
+                },
+                else => self.client.writeText(chunk, null, null) catch {},
+            }
+        }
+        return read_any;
+    }
+
+    /// Interactive pipeline stdin: waits briefly for one input event and
+    /// forwards it to stage 0. Returns true if the event was Ctrl-C (the
+    /// caller SIGINTs the group); Ctrl-D closes stage 0's stdin. Simpler
+    /// than `runCommand`'s pty loop -- no mode tracking, mouse or resize,
+    /// since a pipe has no line discipline to match.
+    fn forwardKeystroke(self: *Prompt, sp: *pipeexec.Spawned) !bool {
+        const listener = self.listener orelse return false;
+        const alloc = self.client.alloc;
+
+        const ev = (listener.waitInputEvent(.{
+            .duration = .{ .raw = .fromMilliseconds(25), .clock = .awake },
+        }) catch null) orelse return false;
+
+        switch (ev) {
+            .text => |tev| {
+                defer alloc.free(tev.text);
+                if (sp.stdin_w >= 0) _ = c.write(sp.stdin_w, tev.text.ptr, tev.text.len);
+                return false;
+            },
+            .paste => |tev| {
+                defer alloc.free(tev.text);
+                if (sp.stdin_w >= 0) _ = c.write(sp.stdin_w, tev.text.ptr, tev.text.len);
+                return false;
+            },
+            .copy_request => return false,
+            .key => |kev| {
+                defer alloc.free(kev.key);
+                if (!kev.pressed) return false;
+                const ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
+                if (ctrl and std.mem.eql(u8, kev.key, "c")) return true;
+                if (ctrl and std.mem.eql(u8, kev.key, "d")) {
+                    if (sp.stdin_w >= 0) {
+                        _ = c.close(sp.stdin_w);
+                        sp.stdin_w = -1;
+                    }
+                    return false;
+                }
+                const mods = keyencode.Mods{
+                    .ctrl = ctrl,
+                    .shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift"),
+                    .alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt"),
+                };
+                // A plain printable key already arrived as `.text`.
+                if (!mods.ctrl and !mods.alt and keyencode.charFromKeyName(kev.key, false) != null)
+                    return false;
+                var kb: [8]u8 = undefined;
+                if (keyencode.toPtyBytes(kev.key, mods, .normal, &kb)) |seq| {
+                    if (sp.stdin_w >= 0) _ = c.write(sp.stdin_w, seq.ptr, seq.len);
+                }
+                return false;
+            },
+        }
+    }
+
+    /// Drains pending input events (dropped as type-ahead) while a
+    /// non-interactive pipeline runs, returning true the moment it sees
+    /// Ctrl-C -- the same shape as `hookPollInterrupt`.
+    fn pollPipeInterrupt(self: *Prompt) bool {
+        const listener = self.listener orelse return false;
+        var hit = false;
+        while (listener.pollInputEvent()) |iev| switch (iev) {
+            .key => |kev| {
+                defer self.client.alloc.free(kev.key);
+                if (kev.pressed and std.mem.eql(u8, kev.key, "c") and
+                    (listener.isKeyDown("left_control") or listener.isKeyDown("right_control")))
+                    hit = true;
+            },
+            .text => |tev| self.client.alloc.free(tev.text),
+            .paste => |tev| self.client.alloc.free(tev.text),
+            .copy_request => {},
+        };
+        return hit;
     }
 
     /// If `argv[0]` names a script builtin (a `defcmd` registration or a
@@ -2848,6 +3375,7 @@ const Prompt = struct {
             .realpath = hookRealpath,
             .write = hookWrite,
             .poll_interrupt = hookPollInterrupt,
+            .run_line = hookRunLine,
         };
     }
 
@@ -3347,5 +3875,55 @@ fn hookPollInterrupt(ctx: *anyopaque) bool {
         .copy_request => {},
     };
     return hit;
+}
+
+/// `sh.run` / `sh.exec` -- parse `line` and run its segments through the
+/// same `runPipeline` the interactive prompt uses, with the pipe
+/// executor's capture (`sh.run`) or grid-streaming (`sh.exec`) sink.
+/// `stdin` feeds only the first pipeline actually run.
+fn hookRunLine(
+    ctx: *anyopaque,
+    line: []const u8,
+    capture: bool,
+    stdin: []const u8,
+    out: *std.ArrayList(u8),
+    err_buf: *std.ArrayList(u8),
+) u8 {
+    const self: *Prompt = @ptrCast(@alignCast(ctx));
+    const alloc = self.client.alloc;
+
+    switch (parse.parse(alloc, line) catch return 2) {
+        .err => |msg| {
+            defer alloc.free(msg);
+            if (capture) {
+                err_buf.appendSlice(alloc, msg) catch {};
+            } else {
+                self.client.writeText(msg, err_color, null) catch {};
+            }
+            return 2;
+        },
+        .ok => |ok_line| {
+            var parsed = ok_line;
+            defer parsed.deinit();
+            if (parsed.segments.len == 0) return 0;
+
+            var cap = Prompt.Capture{ .out = out, .err_buf = err_buf, .stdin = stdin };
+            var status: u8 = 0;
+            var fed = false;
+            for (parsed.segments) |seg| {
+                const run = switch (seg.sep) {
+                    .first, .semi => true,
+                    .and_then => status == 0,
+                    .or_else => status != 0,
+                };
+                if (!run) continue;
+                if (fed) cap.stdin = "";
+                const sink: Prompt.PipeSink = if (capture) .{ .capture = &cap } else .script_grid;
+                status = self.runPipeline(seg.pipeline, sink) catch return status;
+                fed = true;
+            }
+            return status;
+        },
+    }
 }
 

@@ -7,6 +7,7 @@ pub const dispatch = @import("dispatch.zig");
 pub const server = @import("server.zig");
 pub const client = @import("client.zig");
 pub const pty = @import("pty.zig");
+pub const pipeexec = @import("pipeexec.zig");
 pub const key_encode = @import("key_encode.zig");
 
 pub const Pty = pty.Pty;

@@ -11,6 +11,7 @@
 //! ziglua and the test runner links the Lua C library.
 
 pub const wordsplit = @import("wordsplit.zig");
+pub const parse = @import("parse.zig");
 pub const complete = @import("complete.zig");
 pub const glob = @import("glob.zig");
 pub const handshake = @import("handshake.zig");
@@ -20,6 +21,7 @@ pub const config = @import("config.zig");
 pub const script_engine = @import("script_engine.zig");
 pub const keyencode = @import("glyphwire").key_encode;
 pub const pty = @import("glyphwire").pty;
+pub const pipeexec = @import("glyphwire").pipeexec;
 pub const prompt_template = @import("prompt_template.zig");
 pub const browsescroll = @import("browsescroll.zig");
 pub const openaction = @import("openaction.zig");

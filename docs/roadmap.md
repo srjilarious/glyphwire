@@ -1649,6 +1649,44 @@ read / default-null / reject bad value), `e2e_tests.zig` browse-cd test
 updated to press Ctrl+Up first. 490 pass (rebased onto dev's static-quad-
 batch commit, which added +5 core tests).
 
+## Shell pipelines, redirects, `&&` / `||` / `;`, and `sh.run` / `sh.exec`
+
+**Done.** `glyphwire-shell` understands the operators every POSIX-ish
+shell shares. `ps aux | grep glyphwire`, `cc main.c 2>&1 | less`,
+`make && ./run || echo failed`, `echo hi > out.txt` all work.
+
+- **`shell/parse.zig`** (new, in `shell_support`, pure) — a parser layer
+  above `wordsplit`: raw line → `Line` → `Segment`s (`&&` / `||` / `;`) →
+  `Pipeline` (`|`) → `Command` (argv + redirects). Quote-aware operator
+  recognition; no whitespace needed around operators; `2>err`-style fd
+  designators. Arena-backed tree, syntax errors returned as a
+  ready-to-print message. Rejects (by name) background `&`, heredocs,
+  `<<<`, `|&`, process substitution, subshells, arbitrary fd numbers.
+- **`src/pipeexec.zig`** (new, in the `glyphwire` module, Linux-only) —
+  the pipe-based counterpart to `pty.zig`: forks N stages wired with
+  `pipe(2)`, one process group, and hands the parent the fds to pump
+  (stage-0 stdin write end, last-stage stdout read end, one shared
+  stderr read end). Applies `<` / `>` / `>>` / `2>&1` / `&>` redirects in
+  the child after the pipe wiring (bash order).
+- **`shell/main.zig`** — `dispatchLine` parses first; a *bare* command
+  (one stage, no redirects) keeps the PTY path (`runCommand` — interactive
+  programs, the handshake, `{dur}`), everything else goes through
+  `runLine` → `runPipeline` → `spawnAndPump` → `pumpPipeline`. Ctrl-C →
+  group SIGINT, Ctrl-D closes stage-0 stdin. A builtin works as a whole
+  `&&` / `||` / `;` link but is rejected as a `|` stage. Exit status is
+  the last stage's (no `pipefail`). `SIGPIPE` is ignored process-wide.
+- **`sh.run(line [, stdin])` / `sh.exec(line)`** — the `sh` table gains
+  two functions that run a command-line string through the same parser +
+  executor. `sh.run` captures (`{ code, ok, out, err }`); `sh.exec`
+  streams to the grid and returns the status. Makes a `.lua` script read
+  like shell. New `HostHooks.run_line`.
+- **Tests:** `shell_parse_tests.zig` (new, 26 — pipelines, no-space
+  operators, redirect forms, fd designators, quoted-operator literals,
+  every rejected construct, dangling/empty-stage errors);
+  `shell_script_engine_tests.zig` +3 (`sh.run` table shape, stdin arg,
+  `sh.exec` status); `e2e_tests.zig` +2 (a real two-stage pipeline; a
+  redirect to a file). 522 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

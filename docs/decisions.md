@@ -1181,6 +1181,50 @@ surface.
   a line is. Every other builtin (`cd`, `exit`, `unalias`) is dispatched
   from the post-split, post-alias-expansion argv.
 
+#### Pipelines, redirects, `&&` / `||` / `;`
+- **A second parser layer above `wordsplit`.** `shell/parse.zig` takes
+  the raw line and produces a small tree — `Line` → `Segment`s (linked by
+  `&&` / `||` / `;`) → `Pipeline` (`|`-separated `Command`s) → `Command`
+  (argv words + redirects). It reuses `wordsplit`'s quote/escape rules
+  byte for byte; the only addition is that an *unquoted* operator lexeme
+  ends the current word. Operators don't need surrounding whitespace
+  (`ps aux|grep x`, `echo hi>out`, `a&&b`), and a lone digit immediately
+  before `>` / `<` is the source-fd designator (`2>err`), both matching
+  bash. The tree is arena-backed, so `line.deinit()` is one free; a
+  syntax error comes back as a ready-to-print message, not a Zig error.
+- **v1 operator set:** `|`, `<`, `>`, `>>`, `2>`, `2>>`, `1>`, `1>>`,
+  `2>&1` / `1>&2`, `&>` / `&>>`, `&&`, `||`, `;` (trailing `;` allowed).
+  Deliberately rejected with a message naming the construct: background
+  `&` / job control, heredocs `<<`, here-strings `<<<`, `|&`, process
+  substitution `<(...)`, subshells `( )` / groups `{ }`, arbitrary fd
+  numbers (`3>&1`).
+- **Two executors, split on shape.** A *bare* command — one stage, no
+  redirects — keeps the original `runCommand` path: a real PTY
+  (`pty.zig`), so `vim` / `less` / `htop` stay interactive, the glyphwire
+  handshake still works, and `{dur}` timing is unchanged. Anything with a
+  `|`, a redirect, or `&&` / `||` / `;` goes through `pipeexec.zig`:
+  ordinary `pipe(2)`s between stages, one process group, stdout of the
+  last stage + a shared stderr pipe drained onto the grid, stage 0's
+  stdin fed from forwarded keystrokes (Ctrl-C → group SIGINT, Ctrl-D
+  closes it). Piped stages see `!isatty()` and lose auto-colour, exactly
+  as in bash. A pipeline stage does **not** get handshake detection — a
+  glyphwire-aware program only draws its own output when run bare.
+- **Builtins run as a whole `&&` / `||` / `;` link but not as a `|`
+  stage.** `cd /tmp && ls` works; `history | grep foo` is an error
+  (`<name>: not supported inside a pipeline`). Keeping the pipe executor
+  to just external processes is the simplification; a builtin needs its
+  output on the grid, which a mid-pipeline stage can't have.
+- **Exit status = last stage's status** (no `pipefail`); `&&` / `||`
+  short-circuit on it and it feeds `{exit}` / `{dur}` for the whole line.
+  A redirect target gets `~` expansion and a single glob match; a
+  multi-match glob target is an "ambiguous redirect" error, matching
+  bash. Redirects on a builtin are parsed but not applied. A `2>&1` and
+  a `>` are evaluated left to right (`> out 2>&1` differs from
+  `2>&1 > out`), like bash.
+- **Alias bodies stay word-lists.** A `|` inside an alias value is passed
+  through literally (it was already, pre-pipelines) rather than
+  re-parsed as a pipeline — noted as a known limitation, not a goal.
+
 #### Tab completion
 - **Filenames only, bash-style two-press behaviour.** Tab completes the
   word under the cursor against the directory named by its leading
@@ -1607,6 +1651,20 @@ surface.
   with no prompt cooperation. `sh.getenv` reads that live map;
   `sh.cwd` / `sh.realpath` are the two path helpers Lua's stdlib lacks.
   Everything else (path joining, file reads) is left to stock Lua.
+- **`sh.run` / `sh.exec` make Lua a shell scripting language.** Both take
+  a *command-line string* and run it through the exact same
+  `shell/parse.zig` + `runPipeline` the interactive prompt uses, so
+  `sh.run("ps aux | grep glyphwire")` and `sh.exec("make && ./run")`
+  read like shell and `|` / redirects / `&&` / `||` / `;` all just work.
+  `sh.run(line [, stdin])` captures — it returns
+  `{ code, ok = code==0, out, err }` (`stdin`, if given, feeds the first
+  stage; a `2>&1` in the string merges stderr into `out`). `sh.exec(line)`
+  is the passthrough form: output streams to the grid like a typed line,
+  and it returns just the status. Chosen over a structured
+  `sh.pipe({{...}})` API because the string form composes cleanly and a
+  `.lua` script stays legible; a builtin stage inside such a string still
+  writes to the grid rather than into `out` (the same
+  builtin-in-a-pipeline limitation).
 - **The stdlib is open, with three edits.** `print` and `io.write` are
   re-pointed at the grid; `os.exit` is replaced with a function that
   raises a catchable error (a script must not be able to kill the
