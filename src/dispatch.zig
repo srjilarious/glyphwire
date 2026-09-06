@@ -46,6 +46,22 @@ pub const DispatchError = error{
     /// A `set_split_children` entry named both a layer and a split, or
     /// neither.
     InvalidSplitChild,
+    /// `create_context` / `destroy_context` / `activate_context` /
+    /// `adopt_context` named a context that doesn't exist.
+    UnknownContext,
+    /// `destroy_context` named the root context, which has no lifecycle
+    /// (mirrors `UnknownLayer` for the root layer).
+    RootContextImmutable,
+    /// A socket connection issued `destroy_context` for a context it
+    /// doesn't own (never created and never `adopt_context`'d). Like
+    /// `LayerPermissionDenied`: `destroy_context` is a notification, so
+    /// server.zig logs this and the context is left intact.
+    ContextPermissionDenied,
+    /// A context-management message reached a `Dispatcher` with no
+    /// `Session` behind it (a bare `Dispatcher.init` -- tests, or a
+    /// headless caller from before multi-context). Nothing in production
+    /// hits this.
+    NoContextSession,
 };
 
 const Envelope = struct {
@@ -146,6 +162,22 @@ const CreateLayerParams = struct {
 };
 
 const CreateLayerResult = struct { handle: core.LayerHandle };
+
+/// `create_context`: an independent, full-window context (its own root
+/// layer, split tree, layers, tables -- see `core.Session`). `width` /
+/// `height` default to the current visible context's size. Shown
+/// immediately.
+const CreateContextParams = struct {
+    width: ?usize = null,
+    height: ?usize = null,
+    scrollback_rows: usize = 0,
+};
+
+const CreateContextResult = struct { context: core.ContextHandle };
+
+/// `destroy_context` / `activate_context` / `adopt_context` -- all just
+/// name one context handle.
+const ContextHandleParams = struct { context: core.ContextHandle };
 
 const DestroyLayerParams = struct {
     layer: core.LayerHandle,
@@ -508,6 +540,12 @@ pub const Subscriptions = struct {
     /// from the text it mirrored. glyphwire-shell subscribes while a pty
     /// child is foregrounded and writes them to the pty master.
     terminal: bool = false,
+    /// `context` server->client notifications (`{context, cols, rows}`),
+    /// sent when the visible context changes (`create_context` /
+    /// `activate_context` / `destroy_context`, or the disconnect-cull
+    /// auto-restore). A client managing its own context subscribes to
+    /// learn it's been backgrounded or brought back.
+    context: bool = false,
     /// Not a broadcast stream like the rest: subscribing to `"error"` just
     /// tells this connection's `Dispatcher` to start recording its own
     /// failed notifications into a ring (see `Dispatcher.error_ring`),
@@ -527,6 +565,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "selection")) return self.selection;
         if (std.mem.eql(u8, event, "clipboard")) return self.clipboard;
         if (std.mem.eql(u8, event, "terminal")) return self.terminal;
+        if (std.mem.eql(u8, event, "context")) return self.context;
         if (std.mem.eql(u8, event, "error")) return self.error_events;
         return false;
     }
@@ -545,6 +584,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "selection")) s.selection = true;
             if (std.mem.eql(u8, e, "clipboard")) s.clipboard = true;
             if (std.mem.eql(u8, e, "terminal")) s.terminal = true;
+            if (std.mem.eql(u8, e, "context")) s.context = true;
             if (std.mem.eql(u8, e, "error")) s.error_events = true;
         }
         return s;
@@ -643,7 +683,24 @@ const ErrorEntry = struct {
 };
 
 pub const Dispatcher = struct {
+    /// The context this connection is currently acting on -- every
+    /// `layer?`-scoped message resolves against it. It starts as the
+    /// context that was visible when the connection was accepted (a
+    /// connection *inherits* the visible context) and is retargeted by
+    /// `create_context` to the new context. `activate_context` does
+    /// *not* move it -- that message only changes which context is on
+    /// screen, so a client can background itself and keep drawing. A
+    /// cached pointer, kept live against `session` by `syncActiveContext`
+    /// (its context could be `destroy_context`'d by another owner).
     ctx: *core.Context,
+    /// The multi-context registry, or null for a bare `Dispatcher.init`
+    /// (tests / headless callers that predate multi-context). When null,
+    /// every context-management message reports `NoContextSession`.
+    session: ?*core.Session = null,
+    /// Handle of `ctx` -- mirrored onto the `Connection` after each
+    /// `handle` so `Server.broadcast` can withhold raw input from a
+    /// backgrounded connection. Root context by default.
+    active_ctx: core.ContextHandle = core.root_context_handle,
     /// This connection's current subscriptions; see `Subscriptions`. Not
     /// persisted anywhere else -- server.zig mirrors it onto its own
     /// per-connection record after each `handle` call so the fan-out
@@ -679,9 +736,31 @@ pub const Dispatcher = struct {
     }
 
     /// Like `init`, but for a dispatcher serving a real socket connection
-    /// whose id participates in layer ownership (see `conn_id`).
-    pub fn initForConnection(ctx: *core.Context, conn_id: core.ConnId) Dispatcher {
-        return .{ .ctx = ctx, .conn_id = conn_id };
+    /// whose id participates in layer/context ownership (see `conn_id`).
+    /// The connection inherits whatever context is visible now. Call
+    /// under the server's `ctx_mutex` -- it reads the visibility stack.
+    pub fn initForConnection(session: *core.Session, conn_id: core.ConnId) Dispatcher {
+        return .{
+            .ctx = session.visibleContext(),
+            .session = session,
+            .active_ctx = session.visibleStackTop(),
+            .conn_id = conn_id,
+        };
+    }
+
+    /// Keeps `ctx` live: if this connection's `active_ctx` was destroyed
+    /// by another owner (`adopt_context` + `destroy_context` elsewhere),
+    /// fall back to whatever is visible. Runs at the top of every
+    /// dispatch, under `ctx_mutex`, so the stack reads are safe. A no-op
+    /// for a sessionless `Dispatcher`.
+    fn syncActiveContext(self: *Dispatcher) void {
+        const session = self.session orelse return;
+        if (session.contextPtr(self.active_ctx)) |c| {
+            self.ctx = c;
+        } else {
+            self.active_ctx = session.visibleStackTop();
+            self.ctx = session.visibleContext();
+        }
     }
 
     /// Handles one decoded frame body. See `HandleResult`.
@@ -741,6 +820,7 @@ pub const Dispatcher = struct {
     /// does too. Split from `handle` so a batched sub-message and a
     /// standalone one hit precisely the same handler.
     fn dispatchCatalog(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
+        self.syncActiveContext();
         if (std.mem.eql(u8, envelope.method, "write_text")) {
             return try self.handleWriteText(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "insert_cells")) {
@@ -769,6 +849,19 @@ pub const Dispatcher = struct {
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "adopt_layer")) {
             try self.handleAdoptLayer(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "create_context")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return try self.handleCreateContext(alloc, id, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "destroy_context")) {
+            return try self.handleDestroyContext(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "activate_context")) {
+            return try self.handleActivateContext(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "attach_context")) {
+            try self.handleAttachContext(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "adopt_context")) {
+            try self.handleAdoptContext(alloc, envelope.params);
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "create_split")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
@@ -1227,6 +1320,137 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         if (self.conn_id) |cid| {
             self.ctx.addLayerOwner(parsed.value.layer, cid) catch return DispatchError.UnknownLayer;
+        }
+    }
+
+    // ── Contexts ────────────────────────────────────────────────────────
+
+    /// The `context` broadcast (`{context, cols, rows}`) every
+    /// context-management message ends with, naming whatever context is
+    /// visible now and the size of its root layer -- so a subscriber can
+    /// tell "I'm on screen" from "I've been backgrounded" without a
+    /// follow-up request. Sessionless dispatchers never get here (the
+    /// handlers reject those before building it).
+    fn contextBroadcast(self: *Dispatcher, alloc: std.mem.Allocator) !HandleResult {
+        const session = self.session.?;
+        const visible = session.visibleContext();
+        const body = try rpc.contextNotification(
+            alloc,
+            session.visibleStackTop(),
+            visible.root.width,
+            visible.root.height,
+        );
+        return .{ .broadcast = .{ .event = "context", .body = body } };
+    }
+
+    /// `create_context`: a fresh independent context (see `core.Session`),
+    /// shown immediately. Retargets this connection onto it -- every
+    /// later `layer?`-scoped message from this connection now resolves
+    /// against the new context, not the shell's. The connection is
+    /// recorded as first owner, so the context (and everything in it) is
+    /// culled if the connection closes without `destroy_context`.
+    fn handleCreateContext(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const parsed = try std.json.parseFromValue(CreateContextParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const new_handle = try session.createContext(p.width, p.height, p.scrollback_rows);
+        if (self.conn_id) |cid| session.addContextOwner(new_handle, cid) catch {};
+        self.active_ctx = new_handle;
+        self.ctx = session.contextPtr(new_handle).?;
+
+        var result = try self.contextBroadcast(alloc);
+        result.response = try rpc.response(alloc, id, CreateContextResult{ .context = new_handle });
+        return result;
+    }
+
+    /// `destroy_context`: frees a context and everything in it, dropping
+    /// it from the visibility stack (if it was visible, the context under
+    /// it becomes visible -- the alt-screen auto-restore). Ownership-
+    /// checked exactly like `destroy_layer`: honored only from a
+    /// connection that owns the context (`ContextPermissionDenied`
+    /// otherwise, logged and dropped by server.zig). The root context
+    /// reports `RootContextImmutable`. An in-process caller bypasses the
+    /// check.
+    fn handleDestroyContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const parsed = try std.json.parseFromValue(ContextHandleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const target = parsed.value.context;
+
+        if (self.conn_id) |cid| {
+            // The root handle falls through to `RootContextImmutable`
+            // below rather than being reported as a permission problem
+            // (it's in `contexts` but never owned).
+            if (target != core.root_context_handle and
+                session.contexts.contains(target) and
+                !session.contextHasOwner(target, cid))
+                return DispatchError.ContextPermissionDenied;
+        }
+        session.destroyContext(target) catch |err| return switch (err) {
+            error.RootContextImmutable => DispatchError.RootContextImmutable,
+            error.UnknownContext => DispatchError.UnknownContext,
+        };
+        // If this connection just destroyed its own active context, fall
+        // back to whatever is visible now.
+        self.syncActiveContext();
+        return try self.contextBroadcast(alloc);
+    }
+
+    /// `activate_context`: makes a context visible without changing which
+    /// context this connection *draws* on. A client backgrounds itself by
+    /// activating the root context, and un-backgrounds by activating its
+    /// own handle again. `UnknownContext` for an unknown handle; a no-op
+    /// if it's already visible.
+    fn handleActivateContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const parsed = try std.json.parseFromValue(ContextHandleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        session.activateContext(parsed.value.context) catch return DispatchError.UnknownContext;
+        return try self.contextBroadcast(alloc);
+    }
+
+    /// `attach_context`: retargets this connection onto an *existing*
+    /// context (`create_context` does this for a new one) -- every later
+    /// `layer?`-scoped message resolves against it, and, for a subscribed
+    /// connection, the raw input streams it receives now follow that
+    /// context's visibility. The primitive a paired `InputListener` uses
+    /// to join the context its `Client` created, and the same mechanism a
+    /// future `GLYPHWIRE_CTX`-inheriting connection would use at startup.
+    /// `UnknownContext` for an unknown handle; ownership is untouched
+    /// (attaching isn't adopting). A no-op for a sessionless dispatcher's
+    /// caller other than the error.
+    fn handleAttachContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const parsed = try std.json.parseFromValue(ContextHandleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const target = parsed.value.context;
+        self.ctx = session.contextPtr(target) orelse return DispatchError.UnknownContext;
+        self.active_ctx = target;
+    }
+
+    /// `adopt_context`: adds this connection to a context's owner set, so
+    /// it outlives its original creator disconnecting (and this
+    /// connection may then `destroy_context` it). `UnknownContext` for an
+    /// unknown or root handle; a no-op for an in-process caller. The
+    /// context-level mirror of `adopt_layer`.
+    fn handleAdoptContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const parsed = try std.json.parseFromValue(ContextHandleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        if (self.conn_id) |cid| {
+            session.addContextOwner(parsed.value.context, cid) catch return DispatchError.UnknownContext;
         }
     }
 

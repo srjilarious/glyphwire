@@ -121,8 +121,10 @@ pub const WindowSizing = struct {
         server.ctx_mutex.lockUncancelable(server.io);
         // `setCellMetrics`, not a pair of field writes: it also re-derives
         // the pixel position of every cell-placed layer against the new
-        // metrics (see `core.PropertyName.cell_position`).
-        server.ctx.setCellMetrics(@intCast(geometry.cell_w), @intCast(geometry.cell_h));
+        // metrics (see `core.PropertyName.cell_position`). Applied to
+        // every context -- a font-size step is session-wide, so a
+        // backgrounded context is caught up too.
+        server.session.setCellMetricsAll(@intCast(geometry.cell_w), @intCast(geometry.cell_h));
         server.ctx_mutex.unlock(server.io);
 
         self.resizeWindowForCells(eng);

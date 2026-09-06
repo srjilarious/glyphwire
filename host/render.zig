@@ -199,6 +199,12 @@ pub const Renderer = struct {
     /// UV moved). Each `LayerBatches` records the epoch it built at; a
     /// mismatch forces a rebuild of that layer's text.
     text_epoch: u64 = 0,
+    /// The session's visibility change-counter (`Server.visibleContextGen`)
+    /// as of the last `syncBatches`. When it moves, a different context
+    /// is on screen -- its layers reuse handle numbers the old one's
+    /// cached batches are keyed by, so every batch is dropped and rebuilt
+    /// against the new context.
+    last_visible_gen: u64 = 0,
 
     pub fn deinit(self: *Renderer) void {
         const alloc = self.app.alloc;
@@ -239,7 +245,11 @@ pub const Renderer = struct {
         {
             var seen = std.AutoHashMap(glyphwire.ImageHandle, void).init(alloc);
             defer seen.deinit();
-            var it = self.app.server.ctx.icons.valueIterator();
+            // Icons live only on the root context (host startup populates
+            // it); a `create_context` context resolves the same handles
+            // through `Context.asset_fallback`, so the atlas is always
+            // built from the root's catalog regardless of what's visible.
+            var it = self.app.server.session.rootContext().icons.valueIterator();
             while (it.next()) |h| {
                 if ((try seen.getOrPut(h.*)).found_existing) continue;
                 try handles.append(alloc, h.*);
@@ -261,7 +271,7 @@ pub const Renderer = struct {
             alloc.free(items);
         }
         for (handles.items) |handle| {
-            const entry = self.app.server.ctx.images.get(handle) orelse continue;
+            const entry = self.app.server.session.rootContext().images.get(handle) orelse continue;
             var image = host_eng.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
                 std.log.warn("glyphwire-host: icon handle {d} failed to decode for the atlas: {t}", .{ handle, err });
                 continue;
@@ -352,7 +362,7 @@ pub const Renderer = struct {
     /// has seen it -- see `image_textures`'s doc comment.
     fn textureForImage(self: *Renderer, eng: *Engine, handle: glyphwire.ImageHandle) ?*host_eng.Texture {
         const managed = self.image_textures.get(handle) orelse blk: {
-            const entry = self.app.server.ctx.images.get(handle) orelse return null;
+            const entry = self.app.server.ctx.imageEntry(handle) orelse return null;
             var image = host_eng.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
                 std.log.err("glyphwire-host: failed to decode image handle {d}: {t}", .{ handle, err });
                 return null;
@@ -398,6 +408,21 @@ pub const Renderer = struct {
         if (!self.ensureShaders(eng)) return;
         const server = self.app.server;
         const fa = eng.defaultFontAtlas();
+
+        // A context switch invalidates the whole cache: the newly-visible
+        // context's layers reuse the same handle numbers, so a batch left
+        // over from the old context would be composited for an unrelated
+        // layer.
+        const vgen = server.visibleContextGen();
+        if (vgen != self.last_visible_gen) {
+            self.last_visible_gen = vgen;
+            var it = self.layer_batches.valueIterator();
+            while (it.next()) |lb| {
+                lb.*.deinit(self.app.alloc);
+                self.app.alloc.destroy(lb.*);
+            }
+            self.layer_batches.clearRetainingCapacity();
+        }
 
         // Reap batches whose layer no longer exists.
         {
@@ -669,7 +694,7 @@ pub const Renderer = struct {
     /// interior cell still fills exactly `cell_px` on screen and the
     /// image's right/bottom edge cell is the only partial one.
     fn emitImageCell(self: *Renderer, eng: *Engine, lb: *LayerBatches, img: glyphwire.ImageBg, px: i32, py: i32) void {
-        const entry = self.app.server.ctx.images.get(img.handle) orelse return;
+        const entry = self.app.server.ctx.imageEntry(img.handle) orelse return;
         if (img.offset_x >= entry.width or img.offset_y >= entry.height) return;
 
         const tex = self.textureForImage(eng, img.handle) orelse return;
@@ -723,7 +748,7 @@ pub const Renderer = struct {
     /// the handle's own texture into an `icon_fallback` batch. Scaling /
     /// alignment / `src_*` mapping match the old `drawIconCell`.
     fn emitIconCell(self: *Renderer, eng: *Engine, lb: *LayerBatches, icon: glyphwire.IconBg, px: i32, py: i32, foreground: bool, has_icon_atlas: bool) void {
-        const entry = self.app.server.ctx.images.get(icon.handle) orelse return;
+        const entry = self.app.server.ctx.imageEntry(icon.handle) orelse return;
         if (entry.width == 0 or entry.height == 0) return;
 
         const atlas_uv: ?host_eng.RectF = if (has_icon_atlas) self.icon_uv.get(icon.handle) else null;

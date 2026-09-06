@@ -2127,7 +2127,9 @@ pub fn createLayerOverConnectionRecordsOwnerTest(io: std.Io, alloc: std.mem.Allo
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer ctx.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&ctx, 7);
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7);
 
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
@@ -2144,15 +2146,17 @@ pub fn destroyLayerFromNonOwnerConnectionIsRejectedTest(io: std.Io, alloc: std.m
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
 
-    var owner = dispatch.Dispatcher.initForConnection(&ctx, 7);
+    var owner = dispatch.Dispatcher.initForConnection(&session, 7);
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
     ;
     const created = try owner.handle(alloc, create);
     if (created.response) |r| alloc.free(r);
 
-    var other = dispatch.Dispatcher.initForConnection(&ctx, 8);
+    var other = dispatch.Dispatcher.initForConnection(&session, 8);
     const destroy =
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
@@ -2164,7 +2168,9 @@ pub fn destroyLayerFromOwnerConnectionSucceedsTest(io: std.Io, alloc: std.mem.Al
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer ctx.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&ctx, 7);
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7);
 
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
@@ -2183,15 +2189,17 @@ pub fn adoptLayerLetsSecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Al
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
 
-    var creator = dispatch.Dispatcher.initForConnection(&ctx, 7);
+    var creator = dispatch.Dispatcher.initForConnection(&session, 7);
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
     ;
     const created = try creator.handle(alloc, create);
     if (created.response) |r| alloc.free(r);
 
-    var adopter = dispatch.Dispatcher.initForConnection(&ctx, 8);
+    var adopter = dispatch.Dispatcher.initForConnection(&session, 8);
     const adopt =
         \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":1}}
     ;
@@ -2210,7 +2218,9 @@ pub fn adoptLayerUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer ctx.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&ctx, 8);
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 8);
 
     const adopt =
         \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":999}}
@@ -2222,6 +2232,8 @@ pub fn inProcessDispatcherBypassesLayerOwnershipTest(io: std.Io, alloc: std.mem.
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
 
     // No connection id: `init`, not `initForConnection`.
     var in_process = dispatch.Dispatcher.init(&ctx);
@@ -2233,7 +2245,7 @@ pub fn inProcessDispatcherBypassesLayerOwnershipTest(io: std.Io, alloc: std.mem.
 
     // The in-process layer has no owners, so a real connection can't
     // destroy it...
-    var conn = dispatch.Dispatcher.initForConnection(&ctx, 9);
+    var conn = dispatch.Dispatcher.initForConnection(&session, 9);
     const destroy =
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
@@ -2377,4 +2389,217 @@ pub fn getErrorsRecordsBatchedNotificationFailureTest(io: std.Io, alloc: std.mem
     defer alloc.free(body);
     try testz.expectTrue(std.mem.indexOf(u8, body, "\"method\":\"destroy_layer\"") != null);
     try testz.expectTrue(std.mem.indexOf(u8, body, "\"code\":\"UnknownLayer\"") != null);
+}
+
+// ── Context management: create/destroy/activate/attach/adopt ───────────
+
+pub fn createContextRetargetsTheConnectionAndBroadcastsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7);
+
+    const result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    defer if (result.response) |r| alloc.free(r);
+    defer if (result.broadcast) |b| alloc.free(b.body);
+
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"context\":1") != null);
+    try testz.expectTrue(result.broadcast != null);
+    try testz.expectTrue(std.mem.eql(u8, result.broadcast.?.event, "context"));
+    try testz.expectTrue(std.mem.indexOf(u8, result.broadcast.?.body, "\"context\":1") != null);
+
+    // The dispatcher now points at the new context, and it's visible.
+    try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, 1));
+    try testz.expectEqual(session.visibleStackTop(), @as(glyphwire.ContextHandle, 1));
+    try testz.expectEqual(session.contextPtr(1).?, d.ctx);
+}
+
+pub fn writeTextAfterCreateContextLandsOnTheNewContextNotRootTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7);
+
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi"}}
+    );
+
+    // The shell's root context is untouched; the new context has it.
+    try testz.expectEqual(root.root.cell(0, 0).grapheme_len, @as(u8, 0));
+    try testz.expectTrue(std.mem.eql(u8, session.contextPtr(1).?.root.cell(0, 0).grapheme(), "h"));
+}
+
+pub fn destroyContextFromNonOwnerIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var owner = dispatch.Dispatcher.initForConnection(&session, 7);
+    const created = try owner.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    var other = dispatch.Dispatcher.initForConnection(&session, 8);
+    try testz.expectError(other.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
+    ), dispatch.DispatchError.ContextPermissionDenied);
+    try testz.expectTrue(session.contextPtr(1) != null);
+}
+
+pub fn destroyContextFromOwnerRestoresThePreviousVisibleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7);
+
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    const gone = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
+    );
+    defer if (gone.broadcast) |b| alloc.free(b.body);
+    try testz.expectTrue(gone.broadcast != null);
+    try testz.expectEqual(session.visibleStackTop(), glyphwire.root_context_handle);
+    // The dispatcher fell back to the visible (root) context.
+    try testz.expectEqual(d.active_ctx, glyphwire.root_context_handle);
+    try testz.expectEqual(d.ctx, &root);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":0}}
+    ), dispatch.DispatchError.RootContextImmutable);
+}
+
+pub fn activateContextChangesVisibilityNotWhichContextTheConnectionDrawsOnTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7);
+
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    // Background self: show root, but keep drawing on context 1.
+    const bg = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"activate_context","params":{"context":0}}
+    );
+    if (bg.broadcast) |b| alloc.free(b.body);
+    try testz.expectEqual(session.visibleStackTop(), glyphwire.root_context_handle);
+    try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, 1));
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"x"}}
+    );
+    try testz.expectTrue(std.mem.eql(u8, session.contextPtr(1).?.root.cell(0, 0).grapheme(), "x"));
+    try testz.expectEqual(root.root.cell(0, 0).grapheme_len, @as(u8, 0));
+
+    // Restore self.
+    const fg = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"activate_context","params":{"context":1}}
+    );
+    if (fg.broadcast) |b| alloc.free(b.body);
+    try testz.expectEqual(session.visibleStackTop(), @as(glyphwire.ContextHandle, 1));
+}
+
+pub fn attachContextRetargetsWithoutOwningTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var creator = dispatch.Dispatcher.initForConnection(&session, 7);
+    const created = try creator.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    // A second connection (a paired listener) attaches -- retargeted, but
+    // not an owner, so it can't destroy it.
+    var listener = dispatch.Dispatcher.initForConnection(&session, 8);
+    _ = try listener.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_context","params":{"context":1}}
+    );
+    try testz.expectEqual(listener.active_ctx, @as(glyphwire.ContextHandle, 1));
+    try testz.expectTrue(!session.contextHasOwner(1, 8));
+
+    try testz.expectError(listener.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
+    ), dispatch.DispatchError.ContextPermissionDenied);
+
+    try testz.expectError(listener.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_context","params":{"context":999}}
+    ), dispatch.DispatchError.UnknownContext);
+}
+
+pub fn adoptContextLetsASecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var creator = dispatch.Dispatcher.initForConnection(&session, 7);
+    const created = try creator.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    var adopter = dispatch.Dispatcher.initForConnection(&session, 8);
+    _ = try adopter.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"adopt_context","params":{"context":1}}
+    );
+    try testz.expectTrue(session.contextHasOwner(1, 7));
+    try testz.expectTrue(session.contextHasOwner(1, 8));
+
+    const gone = try adopter.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
+    );
+    if (gone.broadcast) |b| alloc.free(b.body);
+    try testz.expectTrue(session.contextPtr(1) == null);
+}
+
+pub fn contextMessagesOnASessionlessDispatcherReportNoContextSessionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    ), dispatch.DispatchError.NoContextSession);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"activate_context","params":{"context":1}}
+    ), dispatch.DispatchError.NoContextSession);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_context","params":{"context":1}}
+    ), dispatch.DispatchError.NoContextSession);
 }

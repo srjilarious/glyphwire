@@ -66,6 +66,11 @@ pub const Ui = struct {
     ed: *Editor,
     tree: Tree,
 
+    /// zoe's own context -- an alt-screen-style full-window surface, not
+    /// a set of layers stacked over the shell's scrollback. Everything
+    /// below (layers, splits) lives in it, and `destroyContext` on exit
+    /// tears the whole thing down and drops visibility back to the shell.
+    context: glyphwire.ContextHandle,
     tree_layer: glyphwire.LayerHandle,
     buffer_layer: glyphwire.LayerHandle,
     status_layer: glyphwire.LayerHandle,
@@ -102,6 +107,14 @@ pub const Ui = struct {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
 
+        // A dedicated context for the editor, shown immediately. From
+        // here on every layer/split call on `client` targets it, not the
+        // shell's context. The paired listener joins it too so its input
+        // subscriptions follow this context's visibility.
+        const context = try client.createContext(null, null, 0);
+        errdefer client.destroyContext(context) catch {};
+        try listener.attachContext(context);
+
         const size = try client.getSize();
 
         // Content sizes are provisional: every `layout` notification
@@ -123,6 +136,7 @@ pub const Ui = struct {
             .listener = listener,
             .ed = ed,
             .tree = try Tree.init(alloc, io, root_dir),
+            .context = context,
             .tree_layer = tree_layer,
             .buffer_layer = buffer_layer,
             .status_layer = status_layer,
@@ -148,19 +162,15 @@ pub const Ui = struct {
     }
 
     /// Tears down what `init` built on the server, not just this
-    /// process's own memory -- otherwise the split tree and its layers
-    /// outlive the connection that made them: nothing else ever destroys
-    /// them, so the host keeps compositing zoe's last frame over the
-    /// shell forever after zoe exits. Best-effort (the connection may
-    /// already be going away) and order matters: the root has to stop
-    /// pointing at `root_split` before the splits themselves can go.
+    /// process's own memory -- otherwise zoe's context (and every layer,
+    /// split and table in it) outlives the connection that made it and
+    /// the host keeps compositing zoe's last frame over the shell.
+    /// Destroying the context does all of that in one call and pops
+    /// visibility back to the shell; the connection closing would cull it
+    /// anyway (see `Client.destroyContext`), this just makes the switch
+    /// immediate. Best-effort -- the connection may already be going away.
     pub fn deinit(self: *Ui) void {
-        self.client.setRootSplit(null) catch {};
-        self.client.destroySplit(self.pane_split) catch {};
-        self.client.destroySplit(self.root_split) catch {};
-        self.client.destroyLayer(self.tree_layer) catch {};
-        self.client.destroyLayer(self.buffer_layer) catch {};
-        self.client.destroyLayer(self.status_layer) catch {};
+        self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
         self.alloc.destroy(self);
     }

@@ -255,6 +255,12 @@ pub const TerminalReplyParams = struct { bytes: []const u8 };
 /// `resize` params: the new host window size, in cells.
 pub const ResizeParams = struct { cols: usize, rows: usize };
 
+/// `context` params: the now-visible context's handle and the size of
+/// its root layer (in cells). A client that manages its own context
+/// (zoe) uses the handle to tell "I'm the one on screen now" from "I've
+/// been backgrounded"; `cols`/`rows` save it a follow-up `get_property`.
+pub const ContextParams = struct { context: u32, cols: usize, rows: usize };
+
 // ─── Selection & clipboard ───────────────────────────────────────────────
 
 /// One end of a selection on the wire -- mirrors `core.SelectionPoint`.

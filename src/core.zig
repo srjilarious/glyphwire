@@ -3436,10 +3436,11 @@ pub const InputState = struct {
     }
 };
 
-/// Fixed id for the single auto-created context this slice's server ever
-/// has. There's no `create_context` yet (decisions.md, Object Model), so
-/// server and clients just agree on this sentinel out of band rather than
-/// negotiating it over the wire.
+/// String id the host/shell put in `GLYPHWIRE_CTX` for a connecting
+/// client to inherit -- the wire-level discovery half of the multi-context
+/// model is still deferred (a connection just inherits whichever context
+/// is visible at connect time; see `Session`), so this stays an
+/// out-of-band sentinel. It names the root context (`root_context_handle`).
 pub const default_context_id = "0";
 
 /// Derives an icon's catalog name from its path under the bundled
@@ -3638,6 +3639,29 @@ pub const Context = struct {
     /// the serial it last pushed to the OS to know when to push again,
     /// without diffing the bytes every frame.
     clipboard_serial: u64 = 0,
+    /// The connections that own this context, for lifecycle culling --
+    /// the exact mirror of `Layer.owners` / `connection_owned`, one level
+    /// up. Populated only for a context created over a socket via
+    /// `create_context`: `Session.createContext` leaves it empty and
+    /// `connection_owned` false, and the dispatcher then calls
+    /// `Session.addContextOwner` with the creating connection's id.
+    /// `adopt_context` adds more. When the set drains to empty because
+    /// every owning connection disconnected, the context is destroyed
+    /// and, if it was visible, the session falls back to the
+    /// previously-visible one -- the alt-screen auto-restore,
+    /// generalised (see `Session`). Never populated for the root
+    /// context, which has no lifecycle.
+    owners: std.AutoHashMap(ConnId, void),
+    connection_owned: bool = false,
+    /// A read-only asset source consulted when this context's own
+    /// `icons` / `images` don't have a name/handle -- set by
+    /// `Session.createContext` to the session's root context, so a
+    /// full-screen program's own context resolves the same `draw_icon`
+    /// names the host populated on the shell's context without every
+    /// context re-loading (or copying) the bundled icon bytes. Null for
+    /// the root context itself and for any standalone `Context` (tests,
+    /// `server/main.zig` before a `Session` wraps it).
+    asset_fallback: ?*Context = null,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Context {
         return .{
@@ -3649,10 +3673,12 @@ pub const Context = struct {
             .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
             .icons = std.StringHashMap(ImageHandle).init(alloc),
             .metadata = std.AutoHashMap(MetadataHandle, Metadata).init(alloc),
+            .owners = std.AutoHashMap(ConnId, void).init(alloc),
         };
     }
 
     pub fn deinit(self: *Context) void {
+        self.owners.deinit();
         self.root.deinit();
         var layer_it = self.layers.valueIterator();
         while (layer_it.next()) |l| l.deinit();
@@ -4294,9 +4320,27 @@ pub const Context = struct {
         try self.icons.put(owned, handle);
     }
 
-    /// `draw_icon`'s name -> handle lookup. Null for an unregistered name.
+    /// `draw_icon`'s name -> handle lookup. Falls back to
+    /// `asset_fallback`'s catalog (the session's root context -- see that
+    /// field) for a name this context never registered itself, so a
+    /// `create_context` context resolves the host's bundled icons.
+    /// Null for a name unknown to both.
     pub fn iconHandle(self: *const Context, name: []const u8) ?ImageHandle {
-        return self.icons.get(name);
+        if (self.icons.get(name)) |h| return h;
+        if (self.asset_fallback) |f| return f.icons.get(name);
+        return null;
+    }
+
+    /// A loaded image's stored entry (raw bytes + measured dimensions),
+    /// consulting `asset_fallback` for a handle this context never loaded
+    /// itself -- the icon catalog `iconHandle` falls back to resolves its
+    /// handles against the root context's `images`, so the renderer and
+    /// the draw handlers have to look there too. Null for a handle
+    /// unknown to both.
+    pub fn imageEntry(self: *const Context, handle: ImageHandle) ?ImageEntry {
+        if (self.images.get(handle)) |e| return e;
+        if (self.asset_fallback) |f| return f.images.get(handle);
+        return null;
     }
 
     /// `load_image`: stores `bytes` verbatim and reads their natural
@@ -4316,9 +4360,274 @@ pub const Context = struct {
     }
 
     /// `get_image_info`: natural pixel dimensions, or null for an unknown
-    /// handle.
+    /// handle. Falls back to `asset_fallback` like `imageEntry`.
     pub fn imageInfo(self: *const Context, handle: ImageHandle) ?ImageInfo {
-        const entry = self.images.get(handle) orelse return null;
+        const entry = self.imageEntry(handle) orelse return null;
         return .{ .width = entry.width, .height = entry.height };
+    }
+
+    /// Records `conn` as an owner of this context (see `owners`). Adding
+    /// an id already present is a no-op. Marks the context
+    /// `connection_owned` so a later drain to zero owners culls it.
+    pub fn addOwner(self: *Context, conn: ConnId) !void {
+        try self.owners.put(conn, {});
+        self.connection_owned = true;
+    }
+
+    /// Whether `conn` owns this context -- the check `destroy_context`
+    /// makes before honouring a request from a socket connection.
+    pub fn hasOwner(self: *const Context, conn: ConnId) bool {
+        return self.owners.contains(conn);
+    }
+};
+
+// ─── Sessions ───────────────────────────────────────────────────────────
+//
+// The server holds exactly one `Session`. It owns every `Context` and
+// tracks which one is visible -- generalising the classic terminal
+// alt-screen (`smcup`/`rmcup`) from a single alternate buffer to N
+// independent, persistent contexts (decisions.md's Object Model). Only
+// the top of the visibility stack is rendered; switching away never
+// destroys a context, so a shell's prompt and scrollback are still
+// there, untouched, when a full-screen editor's context is dismissed.
+
+pub const ContextHandle = u32;
+
+/// Handle of the session's root context -- the one the server starts
+/// with (the shell's). Always exists, is never culled, and can't be
+/// destroyed; it sits permanently at the bottom of the visibility stack
+/// so there is always something to fall back to. Exactly
+/// `root_layer_handle`'s role, one level up.
+pub const root_context_handle: ContextHandle = 0;
+
+pub const ContextError = error{
+    UnknownContext,
+    /// `destroy_context` named the root context, which has no lifecycle.
+    RootContextImmutable,
+};
+
+pub const Session = struct {
+    alloc: std.mem.Allocator,
+    /// Every context, keyed by handle. Key 0 is the root context, whose
+    /// backing memory the *caller* of `init` owns; keys >= 1 are
+    /// `create_context` contexts this session allocated and frees in
+    /// `deinit`. Values are pointers so a handler (or a `Dispatcher`) can
+    /// hold a `*Context` across a later `createContext` that rehashes
+    /// this map.
+    contexts: std.AutoHashMap(ContextHandle, *Context),
+    next_context_handle: ContextHandle = 1,
+    /// Visibility history, bottom (index 0, always the root context) to
+    /// top (the currently-visible context). `activate` moves a handle to
+    /// the top; `create` pushes; destroying or culling the visible
+    /// context pops back to whatever was under it.
+    visible_stack: std.ArrayList(ContextHandle) = .empty,
+    /// Denormalised copies of the top-of-stack handle and a
+    /// change-counter, kept so lock-free readers (glyphwire-host's render
+    /// loop polling for a switch, `Server.broadcast` deciding whether a
+    /// backgrounded connection should see an input event) never touch
+    /// `visible_stack` -- which is only ever mutated under the server's
+    /// `ctx_mutex`. `visible_gen` is a counter, not a flag, so a switch
+    /// that happens between two polls is never missed.
+    visible_handle: std.atomic.Value(ContextHandle) = .init(root_context_handle),
+    visible_gen: std.atomic.Value(u64) = .init(0),
+
+    /// Wraps an already-created root context. The caller keeps ownership
+    /// of `root`'s memory and stays responsible for `root.deinit()`;
+    /// this session frees only the contexts it creates itself.
+    pub fn init(alloc: std.mem.Allocator, root: *Context) !Session {
+        var contexts = std.AutoHashMap(ContextHandle, *Context).init(alloc);
+        errdefer contexts.deinit();
+        try contexts.put(root_context_handle, root);
+
+        var stack: std.ArrayList(ContextHandle) = .empty;
+        errdefer stack.deinit(alloc);
+        try stack.append(alloc, root_context_handle);
+
+        return .{ .alloc = alloc, .contexts = contexts, .visible_stack = stack };
+    }
+
+    pub fn deinit(self: *Session) void {
+        var it = self.contexts.iterator();
+        while (it.next()) |e| {
+            if (e.key_ptr.* == root_context_handle) continue;
+            e.value_ptr.*.deinit();
+            self.alloc.destroy(e.value_ptr.*);
+        }
+        self.contexts.deinit();
+        self.visible_stack.deinit(self.alloc);
+    }
+
+    /// The root context -- the asset source every other context falls
+    /// back to, and the one that is always visible when nothing else is.
+    pub fn rootContext(self: *Session) *Context {
+        return self.contexts.get(root_context_handle).?;
+    }
+
+    /// The currently-visible context (top of the stack). Never null:
+    /// the root context can't leave the stack.
+    pub fn visibleContext(self: *Session) *Context {
+        return self.contexts.get(self.visibleStackTop()).?;
+    }
+
+    /// The visible context's handle, read straight off the stack (call
+    /// under `ctx_mutex`). Lock-free readers use `visible_handle` instead.
+    pub fn visibleStackTop(self: *const Session) ContextHandle {
+        return self.visible_stack.items[self.visible_stack.items.len - 1];
+    }
+
+    pub fn contextPtr(self: *Session, handle: ContextHandle) ?*Context {
+        return self.contexts.get(handle);
+    }
+
+    /// Re-publishes `visible_handle` / `visible_gen` from the stack after
+    /// any visibility change, and re-lays-out the now-visible context's
+    /// split tree -- a context backgrounded across a window resize had
+    /// its root layer caught up by `resizeAll` but its tree's cached
+    /// rects left stale, and `layoutSplits` is idempotent and cheap.
+    /// Every mutator below ends with this.
+    fn republishVisible(self: *Session) void {
+        self.visible_handle.store(self.visibleStackTop(), .monotonic);
+        _ = self.visible_gen.fetchAdd(1, .monotonic);
+        self.visibleContext().layoutSplits(null, null) catch {};
+    }
+
+    /// `create_context`: allocates a fresh context (defaulting to the
+    /// root context's current size) and makes it visible immediately.
+    /// The caller records the creating connection as first owner via
+    /// `addContextOwner`.
+    pub fn createContext(
+        self: *Session,
+        width: ?usize,
+        height: ?usize,
+        scrollback_rows: usize,
+    ) !ContextHandle {
+        const root = self.rootContext();
+
+        const ctx = try self.alloc.create(Context);
+        errdefer self.alloc.destroy(ctx);
+        ctx.* = try Context.init(
+            self.alloc,
+            width orelse root.root.width,
+            height orelse root.root.height,
+            scrollback_rows,
+        );
+        errdefer ctx.deinit();
+        ctx.cell_px_w = root.cell_px_w;
+        ctx.cell_px_h = root.cell_px_h;
+        ctx.asset_fallback = root;
+
+        const handle = self.next_context_handle;
+        try self.contexts.put(handle, ctx);
+        errdefer _ = self.contexts.remove(handle);
+        try self.visible_stack.append(self.alloc, handle);
+        self.next_context_handle += 1;
+        self.republishVisible();
+        return handle;
+    }
+
+    /// Adds `conn` to `handle`'s owner set (see `Context.owners`). Errors
+    /// `UnknownContext` for an unknown or the root handle -- the root
+    /// context has no lifecycle to participate in.
+    pub fn addContextOwner(self: *Session, handle: ContextHandle, conn: ConnId) !void {
+        if (handle == root_context_handle) return ContextError.UnknownContext;
+        const ctx = self.contexts.get(handle) orelse return ContextError.UnknownContext;
+        try ctx.addOwner(conn);
+    }
+
+    /// Whether `conn` owns `handle` (false for the root or any unknown
+    /// handle) -- the `destroy_context` ownership check.
+    pub fn contextHasOwner(self: *Session, handle: ContextHandle, conn: ConnId) bool {
+        if (handle == root_context_handle) return false;
+        const ctx = self.contexts.get(handle) orelse return false;
+        return ctx.hasOwner(conn);
+    }
+
+    /// `activate_context`: makes `handle` the visible context by moving
+    /// it to the top of the visibility stack (it stays in the stack once,
+    /// wherever it already was, rather than being pushed again). Errors
+    /// `UnknownContext` for an unknown handle. A no-op (but not an error)
+    /// if `handle` is already visible.
+    pub fn activateContext(self: *Session, handle: ContextHandle) !void {
+        if (!self.contexts.contains(handle)) return ContextError.UnknownContext;
+        if (self.visibleStackTop() == handle) return;
+        for (self.visible_stack.items, 0..) |h, i| {
+            if (h == handle) {
+                _ = self.visible_stack.orderedRemove(i);
+                break;
+            }
+        }
+        try self.visible_stack.append(self.alloc, handle);
+        self.republishVisible();
+    }
+
+    /// `destroy_context`: frees `handle` and every layer, split, table
+    /// and image it held (`Context.deinit`), and drops it from the
+    /// visibility stack -- if it was visible, the context under it
+    /// becomes visible. Errors `RootContextImmutable` for the root
+    /// handle, `UnknownContext` for anything else unknown.
+    pub fn destroyContext(self: *Session, handle: ContextHandle) ContextError!void {
+        if (handle == root_context_handle) return ContextError.RootContextImmutable;
+        const removed = self.contexts.fetchRemove(handle) orelse return ContextError.UnknownContext;
+        removed.value.deinit();
+        self.alloc.destroy(removed.value);
+        self.dropFromStack(handle);
+        self.republishVisible();
+    }
+
+    /// Drops `conn` from every connection-owned context's owner set; any
+    /// context left with no owners is destroyed (the root context is
+    /// never connection-owned, so it is never reached here) and its
+    /// handle appended to `culled` (caller-owned, expected empty on
+    /// entry). Called from `server.zig` when a connection closes, under
+    /// `ctx_mutex` -- the one path that reaps a context a program left
+    /// behind when it died without `destroy_context`, exactly as
+    /// `Context.removeConnectionOwnership` does for layers one level
+    /// down.
+    pub fn reapConnection(self: *Session, conn: ConnId, culled: *std.ArrayList(ContextHandle)) !void {
+        var it = self.contexts.iterator();
+        while (it.next()) |e| {
+            if (e.key_ptr.* == root_context_handle) continue;
+            const ctx = e.value_ptr.*;
+            if (!ctx.connection_owned) continue;
+            _ = ctx.owners.remove(conn);
+            if (ctx.owners.count() == 0) try culled.append(self.alloc, e.key_ptr.*);
+        }
+        // Destroy in a second pass: `destroyContext` mutates
+        // `self.contexts`, which can't happen while the iterator is live.
+        for (culled.items) |h| {
+            if (self.contexts.fetchRemove(h)) |removed| {
+                removed.value.deinit();
+                self.alloc.destroy(removed.value);
+                self.dropFromStack(h);
+            }
+        }
+        if (culled.items.len > 0) self.republishVisible();
+    }
+
+    /// Resizes every context's root layer (and every base-size-tracking
+    /// layer) to a new window size -- the window is a session-wide fact,
+    /// so a context that was backgrounded during the resize is caught up
+    /// too rather than showing a stale grid when it next becomes
+    /// visible. Each `Context.resize` is a cheap no-op when its size is
+    /// already current.
+    pub fn resizeAll(self: *Session, width: usize, height: usize) !void {
+        var it = self.contexts.valueIterator();
+        while (it.next()) |ctx| try ctx.*.resize(width, height);
+    }
+
+    /// Applies new cell pixel metrics to every context (see
+    /// `Context.setCellMetrics`) -- like `resizeAll`, a font-size step is
+    /// session-wide.
+    pub fn setCellMetricsAll(self: *Session, cell_px_w: u32, cell_px_h: u32) void {
+        var it = self.contexts.valueIterator();
+        while (it.next()) |ctx| ctx.*.setCellMetrics(cell_px_w, cell_px_h);
+    }
+
+    fn dropFromStack(self: *Session, handle: ContextHandle) void {
+        var i: usize = self.visible_stack.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.visible_stack.items[i] == handle) _ = self.visible_stack.orderedRemove(i);
+        }
     }
 };
