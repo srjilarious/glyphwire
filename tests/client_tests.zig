@@ -470,6 +470,43 @@ pub fn clientSelectionAndClipboardRoundTripTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectEqualStr("board contents", clip);
 }
 
+/// A layer created over a connection is culled when that connection
+/// closes without `destroy_layer` -- the crash-recovery path from
+/// decisions.md's Layer ownership & lifecycle section. Joining the server
+/// thread is the barrier: `acceptOne` only returns once `serveConnection`
+/// has fully unwound, and the disconnect cull runs in that unwind, so the
+/// assertion afterward is race-free.
+pub fn clientLayerCulledWhenCreatorDisconnectsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    errdefer thread.join();
+
+    {
+        var client = try glyphwire.Client.connect(io, alloc, socket_path);
+        errdefer client.deinit();
+
+        const h = try client.createLayer(6, 2, 0);
+        try testz.expectEqual(h, 1);
+
+        // The program dies without cleaning up after itself.
+        client.deinit();
+    }
+
+    thread.join();
+
+    try testz.expectEqual(ctx.layers.count(), 0);
+    try testz.expectTrue(ctx.layerPtr(1) == null);
+}
+
 fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
     server.acceptOne(alloc) catch |err| {
         std.debug.print("test server connection failed: {t}\n", .{err});

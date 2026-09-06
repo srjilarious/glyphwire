@@ -12,6 +12,12 @@ const protocol = @import("protocol.zig");
 /// for exactly that lifetime.
 pub const Connection = struct {
     stream: std.Io.net.Stream,
+    /// This connection's identity for layer ownership (see `core.ConnId`),
+    /// assigned from `Server.next_conn_id` when the connection is accepted.
+    /// Handed to the connection's `Dispatcher` and, on disconnect, to
+    /// `Context.removeConnectionOwnership` so any layer this connection
+    /// solely owned is culled.
+    id: core.ConnId,
     /// Guards writes to `stream`: this connection's own thread writes
     /// responses to its own requests, but another connection's dispatch
     /// may concurrently push a subscribed notification to it too.
@@ -71,6 +77,11 @@ pub const Server = struct {
     /// spawns threads this struct itself is responsible for reaping. See
     /// `deinit`.
     connection_threads: std.ArrayList(std.Thread) = .empty,
+    /// Source of `Connection.id` values -- a plain monotonic counter,
+    /// bumped once per accepted connection. Starts at 1 so 0 is never a
+    /// live connection id. Atomic because `serveForever` accepts on one
+    /// thread while `acceptOne` (tests) may run on another.
+    next_conn_id: std.atomic.Value(core.ConnId) = .init(1),
 
     pub fn bind(io: std.Io, ctx: *core.Context, socket_path: []const u8) !Server {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
@@ -133,11 +144,11 @@ pub const Server = struct {
         var stream = stream_in;
         defer stream.close(self.io);
 
-        var conn: Connection = .{ .stream = stream };
+        var conn: Connection = .{ .stream = stream, .id = self.next_conn_id.fetchAdd(1, .monotonic) };
         try self.registerConnection(alloc, &conn);
-        defer self.unregisterConnection(&conn);
+        defer self.unregisterConnection(alloc, &conn);
 
-        var d = dispatch.Dispatcher.init(self.ctx);
+        var d = dispatch.Dispatcher.initForConnection(self.ctx, conn.id);
         var decoder: wire.FrameDecoder = .{};
         defer decoder.deinit(alloc);
 
@@ -212,11 +223,31 @@ pub const Server = struct {
         try self.connections.append(alloc, conn);
     }
 
-    fn unregisterConnection(self: *Server, conn: *Connection) void {
-        self.registry_mutex.lockUncancelable(self.io);
-        defer self.registry_mutex.unlock(self.io);
-        if (std.mem.indexOfScalar(*Connection, self.connections.items, conn)) |idx| {
-            _ = self.connections.swapRemove(idx);
+    fn unregisterConnection(self: *Server, alloc: std.mem.Allocator, conn: *Connection) void {
+        {
+            self.registry_mutex.lockUncancelable(self.io);
+            defer self.registry_mutex.unlock(self.io);
+            if (std.mem.indexOfScalar(*Connection, self.connections.items, conn)) |idx| {
+                _ = self.connections.swapRemove(idx);
+            }
+        }
+
+        // Cull any layer this connection solely owned. A crashed or
+        // killed client's socket is closed by the kernel, so this is the
+        // one path that reaps the layers a program left behind when it
+        // died without calling `destroy_layer` -- see decisions.md's
+        // Layer ownership & lifecycle section.
+        var culled: std.ArrayList(core.LayerHandle) = .empty;
+        defer culled.deinit(alloc);
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            self.ctx.removeConnectionOwnership(conn.id, &culled) catch |err| {
+                std.log.err("glyphwire: layer cull for closed connection {d} failed: {t}", .{ conn.id, err });
+            };
+        }
+        for (culled.items) |h| {
+            std.log.debug("glyphwire: culled orphaned layer {d} (owning connection {d} closed)", .{ h, conn.id });
         }
     }
 

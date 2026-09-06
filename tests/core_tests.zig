@@ -2847,3 +2847,95 @@ pub fn splitCycleStopsAtTheDepthCapTest(io: std.Io, alloc: std.mem.Allocator) !v
     try ctx.layoutSplits(null, null);
     try testz.expectTrue(ctx.splits.getPtr(split).?.laid_out);
 }
+
+// ── Layer ownership & lifecycle culling (see `core.ConnId`) ──────────────
+
+pub fn addLayerOwnerThenHasOwnerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+
+    const h = try ctx.createLayer(null, null, 0);
+    // A freshly created layer has no connection owner yet.
+    try testz.expectTrue(!ctx.layerHasOwner(h, 1));
+
+    try ctx.addLayerOwner(h, 1);
+    try testz.expectTrue(ctx.layerHasOwner(h, 1));
+    try testz.expectTrue(!ctx.layerHasOwner(h, 2));
+
+    // The root handle is never connection-owned.
+    try testz.expectTrue(!ctx.layerHasOwner(glyphwire.root_layer_handle, 1));
+    // Neither is an unknown handle.
+    try testz.expectTrue(!ctx.layerHasOwner(999, 1));
+}
+
+pub fn addLayerOwnerUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+
+    try testz.expectError(ctx.addLayerOwner(999, 1), error.UnknownLayer);
+    // The root layer has no lifecycle and can't be owned.
+    try testz.expectError(ctx.addLayerOwner(glyphwire.root_layer_handle, 1), error.UnknownLayer);
+}
+
+pub fn removeConnectionOwnershipCullsSoleOwnedLayerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+
+    const h = try ctx.createLayer(null, null, 0);
+    try ctx.addLayerOwner(h, 7);
+
+    var culled: std.ArrayList(glyphwire.LayerHandle) = .empty;
+    defer culled.deinit(alloc);
+
+    // A different connection closing leaves the layer alone.
+    try ctx.removeConnectionOwnership(8, &culled);
+    try testz.expectEqual(culled.items.len, 0);
+    try testz.expectTrue(ctx.layerPtr(h) != null);
+
+    // The owning connection closing culls it.
+    try ctx.removeConnectionOwnership(7, &culled);
+    try testz.expectEqual(culled.items.len, 1);
+    try testz.expectEqual(culled.items[0], h);
+    try testz.expectTrue(ctx.layerPtr(h) == null);
+}
+
+pub fn removeConnectionOwnershipKeepsLayerWithRemainingOwnerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+
+    const h = try ctx.createLayer(null, null, 0);
+    try ctx.addLayerOwner(h, 1);
+    try ctx.addLayerOwner(h, 2);
+
+    var culled: std.ArrayList(glyphwire.LayerHandle) = .empty;
+    defer culled.deinit(alloc);
+
+    try ctx.removeConnectionOwnership(1, &culled);
+    try testz.expectEqual(culled.items.len, 0);
+    try testz.expectTrue(ctx.layerPtr(h) != null);
+
+    try ctx.removeConnectionOwnership(2, &culled);
+    try testz.expectEqual(culled.items.len, 1);
+    try testz.expectTrue(ctx.layerPtr(h) == null);
+}
+
+pub fn removeConnectionOwnershipLeavesInProcessLayersAloneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+
+    // Created in-process: no `addLayerOwner`, so never connection-owned.
+    const h = try ctx.createLayer(null, null, 0);
+
+    var culled: std.ArrayList(glyphwire.LayerHandle) = .empty;
+    defer culled.deinit(alloc);
+
+    try ctx.removeConnectionOwnership(1, &culled);
+    try ctx.removeConnectionOwnership(2, &culled);
+    try testz.expectEqual(culled.items.len, 0);
+    try testz.expectTrue(ctx.layerPtr(h) != null);
+}
