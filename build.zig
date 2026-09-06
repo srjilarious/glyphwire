@@ -38,6 +38,14 @@ pub fn build(b: *std.Build) void {
     });
     host_support_mod.addImport("glyphwire", glyphwire_mod);
 
+    // zoe's editor core (gap buffer, motions, the modal state machine)
+    // shared by the `zoe` binary and its test runner -- same
+    // cross-directory-module reason as `shell_support` / `ls_support`.
+    // Pure: no glyphwire client, no engine, no IO.
+    const zoe_support_mod = b.addModule("zoe_support", .{
+        .root_source_file = b.path("zoe/support.zig"),
+    });
+
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const zopengl = b.dependency("zopengl", .{ .target = target });
     const zmath = b.dependency("zmath", .{ .target = target });
@@ -109,6 +117,7 @@ pub fn build(b: *std.Build) void {
     tests_exe.root_module.addImport("shell_support", shell_support_mod);
     tests_exe.root_module.addImport("ls_support", ls_support_mod);
     tests_exe.root_module.addImport("host_support", host_support_mod);
+    tests_exe.root_module.addImport("zoe_support", zoe_support_mod);
     // `host_eng_tests` exercises the SDL3 backend's Keyboard/Mouse state
     // machines and its two wire-visible enums. They need no window and no
     // GL context -- but the module does drag libSDL3.a into the test
@@ -268,6 +277,25 @@ pub fn build(b: *std.Build) void {
 
     const ls_step = b.step("ls", "Run the glyphwire ls client (directory listing over the wire)");
     ls_step.dependOn(&run_ls.step);
+
+    const zoe_exe = b.addExecutable(.{
+        .name = "zoe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zoe/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    zoe_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    zoe_exe.root_module.addImport("zoe_support", zoe_support_mod);
+    b.installArtifact(zoe_exe);
+
+    const run_zoe = b.addRunArtifact(zoe_exe);
+    run_zoe.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_zoe.addArgs(args);
+
+    const zoe_step = b.step("zoe", "Run the zoe editor (headless core driver for now -- see docs/investigations/zoe-editor.md)");
+    zoe_step.dependOn(&run_zoe.step);
 
     const view_exe = b.addExecutable(.{
         .name = "glyphwire-view",

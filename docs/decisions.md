@@ -327,6 +327,55 @@ surface.
   incoming output so the rows being read stay put until history eviction
   forces a drift. The scrollbar was chosen always-visible (a persistent
   position indicator) with track-clicks paging one screenful.
+- **v1 built — multi-pane layout (`size`, `visibility`, stacking,
+  `cell_position`):** four gaps that only showed up once a program wanted
+  *several* layers at once rather than one popup over the shell (zoe, the
+  editor — see `docs/investigations/zoe-editor.md`). Each is a small
+  addition to the existing property/handle machinery rather than a new
+  object:
+  - **`size` is settable on a non-root layer.** A sidebar-plus-buffer TUI
+    has to reflow both panes when a `resize` arrives, and the only way to
+    do that before was `destroy_layer` + `create_layer`, which throws
+    away the layer's handle, its tables, its metadata ids and its
+    content, and forces every client-side reference to be rebuilt.
+    Setting it goes through `Layer.resize`, so a pane resize is
+    bottom-anchored exactly like a window resize. It also clears
+    `tracks_context_size`: a client that names its own size has taken
+    over the layout, and must not then be dragged around by the next
+    window resize. Get-only for the **root** layer, whose size the host
+    owns — that half is unchanged.
+  - **`visibility`** (previously 🔶) is now built, non-root only. A
+    hidden layer keeps its cells, tables and cached quad batch; the
+    renderer skips it in both the sync and draw passes, so a toggled file
+    tree costs nothing to bring back and doesn't lose its scroll position
+    or its metadata ids. Hiding the root layer is refused for the same
+    reason `destroy_layer` refuses it: it would blank the session with no
+    wire path back.
+  - **`raise_layer` / `lower_layer`.** Compositing order was creation
+    order, which is fine for one notification popup and wrong the moment
+    a completion popup created at startup has to sit over a tree created
+    later. Two notifications rather than a `z_index` property: the model
+    is already an ordered list (`Context.layer_order`), and X11's
+    stacking-relative-to-a-sibling is the precedent glyphwire already
+    borrows from for input masks. Order is read live each frame, so a
+    restack invalidates no cached batch.
+  - **`cell_position`.** Position stays pixel-precise as the primitive —
+    the smooth-animation argument above is unchanged — but a TUI lays
+    itself out in cells, and doing the conversion client-side means
+    reading `get_cell_metrics`, multiplying, and then redoing it on every
+    font-size change (which no notification announces). Resolving it
+    server-side makes the placement *sticky*: `Context.setCellMetrics`
+    re-derives the pixel position of every cell-placed layer, so
+    glyphwire-host's Ctrl+`+` / Ctrl+`-` keeps a sidebar on its column
+    instead of leaving it half a cell off. A pixel `position` write
+    un-sticks it. This is also why the host now calls `setCellMetrics`
+    rather than assigning `ctx.cell_px_w`/`cell_px_h` directly.
+
+  A fifth candidate — routing input *to* a focused layer — was
+  deliberately **not** added: input is broadcast to subscribers, and a
+  multi-layer program is one process that already knows which of its own
+  panes has focus. A focus concept only earns its place once two separate
+  processes draw into the same context.
 - **Not built — still open:** `create_context`, non-root parenting,
   `clip`/`visibility` properties, a raw wheel-delta `mouse_scroll` event
   stream (distinct from `scroll`, which reports the resolved offset).

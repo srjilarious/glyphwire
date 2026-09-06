@@ -19,6 +19,10 @@ const rpc = @import("rpc.zig");
 pub const DispatchError = error{
     UnknownMethod,
     UnknownProperty,
+    /// The property name is known but this layer refuses a write to it --
+    /// `size` / `visibility` on the root layer, or any get-only property.
+    /// See `core.PropertyError.ReadOnlyProperty`.
+    ReadOnlyProperty,
     NotARequest,
     UnknownImage,
     UnknownIcon,
@@ -67,10 +71,12 @@ const CellCountParams = struct {
 };
 
 /// Params shared by `set_property`/`get_property`. Not every field is
-/// meaningful for every `property` value -- `row`/`col` for `"cursor"`,
-/// `x`/`y` for `"position"` -- the handler picks which subset to read
-/// once it knows `property`, the same "flexible bag, dispatched on a
-/// string" shape `ClearParams` already uses for its own optional fields.
+/// meaningful for every `property` value -- `row`/`col` for `"cursor"`
+/// and `"cell_position"`, `x`/`y` for `"position"`, `cols`/`rows` for
+/// `"size"`, `visible` for `"visibility"` -- the handler picks which
+/// subset to read once it knows `property`, the same "flexible bag,
+/// dispatched on a string" shape `ClearParams` already uses for its own
+/// optional fields.
 const PropertyParams = struct {
     layer: ?core.LayerHandle = null,
     property: []const u8,
@@ -78,13 +84,18 @@ const PropertyParams = struct {
     col: usize = 0,
     x: f32 = 0,
     y: f32 = 0,
+    cols: usize = 0,
+    rows: usize = 0,
+    visible: bool = true,
 };
 
 const CursorResult = struct { row: usize, col: usize };
 const RevisionResult = struct { revision: u64 };
 const PositionResult = struct { x: f32, y: f32 };
+const CellPositionResult = struct { row: usize, col: usize };
 const SizeResult = struct { cols: usize, rows: usize };
 const ScrollResult = struct { offset: usize, max: usize };
+const VisibilityResult = struct { visible: bool };
 
 /// `scroll_view` params: `offset` (absolute target, rows) and/or `delta`
 /// (added after), both optional -- omitting both is a pure query. See
@@ -114,6 +125,21 @@ const CreateLayerResult = struct { handle: core.LayerHandle };
 
 const DestroyLayerParams = struct {
     layer: core.LayerHandle,
+};
+
+/// `raise_layer` / `lower_layer`: `layer` moves in the compositing order,
+/// `above` / `below` names the layer it lands next to. Both references are
+/// optional -- omitted means "all the way to the top" / "all the way to
+/// the bottom". Two field names rather than one shared `ref` so the JSON
+/// reads the way the message does.
+const RaiseLayerParams = struct {
+    layer: core.LayerHandle,
+    above: ?core.LayerHandle = null,
+};
+
+const LowerLayerParams = struct {
+    layer: core.LayerHandle,
+    below: ?core.LayerHandle = null,
 };
 
 const CreateMetadataParams = struct {
@@ -549,6 +575,12 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "destroy_layer")) {
             try self.handleDestroyLayer(alloc, envelope.params);
             return .{};
+        } else if (std.mem.eql(u8, envelope.method, "raise_layer")) {
+            try self.handleRaiseLayer(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "lower_layer")) {
+            try self.handleLowerLayer(alloc, envelope.params);
+            return .{};
         } else if (std.mem.eql(u8, envelope.method, "report_key")) {
             return try self.handleReportKey(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "report_text")) {
@@ -827,15 +859,28 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
-        const layer = try self.resolveLayer(p.layer);
 
-        if (std.mem.eql(u8, p.property, "cursor")) {
-            layer.setProperty(.{ .cursor = .{ .row = p.row, .col = p.col } });
-        } else if (std.mem.eql(u8, p.property, "position")) {
-            layer.setProperty(.{ .position = .{ .x = p.x, .y = p.y } });
-        } else {
+        const value: core.PropertyValue = if (std.mem.eql(u8, p.property, "cursor"))
+            .{ .cursor = .{ .row = p.row, .col = p.col } }
+        else if (std.mem.eql(u8, p.property, "position"))
+            .{ .position = .{ .x = p.x, .y = p.y } }
+        else if (std.mem.eql(u8, p.property, "cell_position"))
+            .{ .cell_position = .{ .row = p.row, .col = p.col } }
+        else if (std.mem.eql(u8, p.property, "size"))
+            .{ .size = .{ .cols = p.cols, .rows = p.rows } }
+        else if (std.mem.eql(u8, p.property, "visibility"))
+            .{ .visibility = p.visible }
+        else
             return DispatchError.UnknownProperty;
-        }
+
+        // `Context.setLayerProperty` (not `Layer`'s own) owns the root
+        // guards, the cell-metric resolution and `size`'s reallocation.
+        self.ctx.setLayerProperty(p.layer, value) catch |err| return switch (err) {
+            error.UnknownLayer => DispatchError.UnknownLayer,
+            error.ReadOnlyProperty => DispatchError.ReadOnlyProperty,
+            error.UnknownProperty => DispatchError.UnknownProperty,
+            error.OutOfMemory => error.OutOfMemory,
+        };
     }
 
     fn handleGetProperty(
@@ -860,6 +905,17 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "position")) {
             const pos = layer.getProperty(.position).position;
             return try rpc.response(alloc, id, PositionResult{ .x = pos.x, .y = pos.y });
+        } else if (std.mem.eql(u8, p.property, "cell_position")) {
+            // Needs the session's cell metrics, so it goes through the
+            // context rather than the resolved layer -- see
+            // `core.Context.getLayerProperty`.
+            const value = self.ctx.getLayerProperty(p.layer, .cell_position) catch
+                return DispatchError.UnknownLayer;
+            const cell = value.cell_position;
+            return try rpc.response(alloc, id, CellPositionResult{ .row = cell.row, .col = cell.col });
+        } else if (std.mem.eql(u8, p.property, "visibility")) {
+            const visible = layer.getProperty(.visibility).visibility;
+            return try rpc.response(alloc, id, VisibilityResult{ .visible = visible });
         } else if (std.mem.eql(u8, p.property, "size")) {
             const sz = layer.getProperty(.size).size;
             return try rpc.response(alloc, id, SizeResult{ .cols = sz.cols, .rows = sz.rows });
@@ -893,6 +949,30 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         self.ctx.destroyLayer(parsed.value.layer) catch return DispatchError.UnknownLayer;
+    }
+
+    /// `raise_layer`: restacks a layer toward the top of the compositing
+    /// order (see `Context.raiseLayer`). The root layer is always the
+    /// bottom of the stack and isn't in the order at all, so naming it as
+    /// `layer` or `above` reports `UnknownLayer`.
+    fn handleRaiseLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(RaiseLayerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.raiseLayer(parsed.value.layer, parsed.value.above) catch
+            return DispatchError.UnknownLayer;
+    }
+
+    /// `lower_layer`: the mirror of `raise_layer` (see
+    /// `Context.lowerLayer`).
+    fn handleLowerLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(LowerLayerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.lowerLayer(parsed.value.layer, parsed.value.below) catch
+            return DispatchError.UnknownLayer;
     }
 
     /// `create_metadata`: stores `json` verbatim (see `Context.createMetadata`

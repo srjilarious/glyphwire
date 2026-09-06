@@ -2330,3 +2330,158 @@ pub fn renderGenStableAcrossPureReadsTest(io: std.Io, alloc: std.mem.Allocator) 
     layer.updateSelectionActive(.{ .above = 0, .col = 2 });
     try testz.expectEqual(layer.renderGeneration(), g0);
 }
+
+// ─── Layer geometry, visibility and stacking ────────────────────────────
+
+pub fn setLayerSizeResizesAndTakesOverLayoutTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+
+    // Created with no explicit size, so it was tracking the context...
+    const pane = try ctx.createLayer(null, null, 0);
+    try testz.expectTrue(ctx.layerPtr(pane).?.tracks_context_size);
+
+    // ...until the client sets its own size, which is the client saying
+    // it owns the layout from here on.
+    try ctx.setLayerProperty(pane, .{ .size = .{ .cols = 12, .rows = 20 } });
+    try testz.expectEqual(ctx.layerPtr(pane).?.width, 12);
+    try testz.expectFalse(ctx.layerPtr(pane).?.tracks_context_size);
+
+    try ctx.resize(60, 30);
+    try testz.expectEqual(ctx.layerPtr(pane).?.width, 12);
+    try testz.expectEqual(ctx.layerPtr(pane).?.height, 20);
+}
+
+pub fn setLayerSizeClampsDegenerateDimensionsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    const pane = try ctx.createLayer(10, 10, 0);
+
+    try ctx.setLayerProperty(pane, .{ .size = .{ .cols = 0, .rows = 0 } });
+    try testz.expectEqual(ctx.layerPtr(pane).?.width, 1);
+    try testz.expectEqual(ctx.layerPtr(pane).?.height, 1);
+}
+
+pub fn rootRefusesSizeAndVisibilityWritesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+
+    // The host owns the window size, and a hidden root would blank the
+    // session with no wire path back.
+    try testz.expectError(ctx.setLayerProperty(null, .{ .size = .{ .cols = 5, .rows = 5 } }), error.ReadOnlyProperty);
+    try testz.expectError(ctx.setLayerProperty(null, .{ .visibility = false }), error.ReadOnlyProperty);
+    try testz.expectEqual(ctx.root.width, 40);
+    try testz.expectTrue(ctx.root.visible);
+}
+
+pub fn layerVisibilityTogglesWithoutLosingContentTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    const tree = try ctx.createLayer(20, 20, 0);
+
+    const layer = ctx.layerPtr(tree).?;
+    try layer.writeText("src/", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try ctx.setLayerProperty(tree, .{ .visibility = false });
+    try testz.expectFalse((try ctx.getLayerProperty(tree, .visibility)).visibility);
+    // Hiding is a compositing decision, not a destruction: the cells stay.
+    try testz.expectEqualStr(ctx.layerPtr(tree).?.cell(0, 0).grapheme(), "s");
+
+    try ctx.setLayerProperty(tree, .{ .visibility = true });
+    try testz.expectTrue((try ctx.getLayerProperty(tree, .visibility)).visibility);
+}
+
+pub fn cellPositionResolvesAgainstCellMetricsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    ctx.setCellMetrics(10, 20);
+
+    const pane = try ctx.createLayer(20, 20, 0);
+    try ctx.setLayerProperty(pane, .{ .cell_position = .{ .row = 2, .col = 3 } });
+    try testz.expectEqual(ctx.layerPtr(pane).?.pos.x, 30.0);
+    try testz.expectEqual(ctx.layerPtr(pane).?.pos.y, 40.0);
+
+    // A font-size change re-derives it, so the layer keeps its column
+    // instead of drifting off the grid.
+    ctx.setCellMetrics(14, 28);
+    try testz.expectEqual(ctx.layerPtr(pane).?.pos.x, 42.0);
+    try testz.expectEqual(ctx.layerPtr(pane).?.pos.y, 56.0);
+
+    const cell = (try ctx.getLayerProperty(pane, .cell_position)).cell_position;
+    try testz.expectEqual(cell.row, 2);
+    try testz.expectEqual(cell.col, 3);
+}
+
+pub fn pixelPositionUnsticksCellPlacementTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    ctx.setCellMetrics(10, 20);
+
+    const pane = try ctx.createLayer(20, 20, 0);
+    try ctx.setLayerProperty(pane, .{ .cell_position = .{ .row = 1, .col = 1 } });
+    try ctx.setLayerProperty(pane, .{ .position = .{ .x = 7, .y = 9 } });
+
+    ctx.setCellMetrics(20, 40);
+    try testz.expectEqual(ctx.layerPtr(pane).?.pos.x, 7.0);
+
+    // A pixel-placed layer still answers `cell_position`, with the cell
+    // its corner lands in.
+    const cell = (try ctx.getLayerProperty(pane, .cell_position)).cell_position;
+    try testz.expectEqual(cell.row, 0);
+    try testz.expectEqual(cell.col, 0);
+}
+
+pub fn raiseAndLowerLayerRestackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+
+    const a = try ctx.createLayer(4, 4, 0);
+    const b = try ctx.createLayer(4, 4, 0);
+    const c = try ctx.createLayer(4, 4, 0);
+    try testz.expectEqual(ctx.layer_order.items[0], a);
+    try testz.expectEqual(ctx.layer_order.items[2], c);
+
+    // To the top, then to the bottom.
+    try ctx.raiseLayer(a, null);
+    try testz.expectEqual(ctx.layer_order.items[2], a);
+    try ctx.lowerLayer(a, null);
+    try testz.expectEqual(ctx.layer_order.items[0], a);
+
+    // Directly above a named layer.
+    try ctx.raiseLayer(a, b);
+    try testz.expectEqual(ctx.layer_order.items[0], b);
+    try testz.expectEqual(ctx.layer_order.items[1], a);
+    try testz.expectEqual(ctx.layer_order.items[2], c);
+
+    // Below a named layer.
+    try ctx.lowerLayer(c, b);
+    try testz.expectEqual(ctx.layer_order.items[0], c);
+}
+
+pub fn restackingRejectsUnknownHandlesIntactTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    const a = try ctx.createLayer(4, 4, 0);
+    const b = try ctx.createLayer(4, 4, 0);
+
+    // The root is never in the stacking order, so it's unknown here.
+    try testz.expectError(ctx.raiseLayer(glyphwire.root_layer_handle, null), error.UnknownLayer);
+    try testz.expectError(ctx.raiseLayer(a, 999), error.UnknownLayer);
+
+    // A rejected restack leaves the order exactly as it was.
+    try testz.expectEqual(ctx.layer_order.items.len, 2);
+    try testz.expectEqual(ctx.layer_order.items[0], a);
+    try testz.expectEqual(ctx.layer_order.items[1], b);
+
+    // Raising a layer above itself is a no-op, not an error.
+    try ctx.raiseLayer(a, a);
+    try testz.expectEqual(ctx.layer_order.items[0], a);
+}
