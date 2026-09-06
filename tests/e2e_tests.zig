@@ -19,6 +19,26 @@ fn sandboxShellConfig(env: *std.process.Environ.Map, alloc: std.mem.Allocator) !
     try env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
 }
 
+/// `std.process.spawn` only reports whether the *fork* itself succeeded --
+/// a missing or misnamed executable then fails in the forked child at
+/// `execve`, which exits 127 while this call still hands back a `Child` as
+/// though all were well. Every spawn in this file launches a freshly-built
+/// repo binary by an absolute `zig-out/bin/...` path; when one of those
+/// names goes stale (a binary gets renamed and a test isn't updated -- the
+/// `glyphwire-shell` -> `gw-shell` rename did this to most of these tests
+/// at once) the silent no-op child means no client ever connects and the
+/// test's poll loop runs out its whole budget before failing with a
+/// misleading `TimedOutWaitingForCell`. Checking argv[0] exists first
+/// turns that into an immediate `error.TestBinaryMissing` naming the path.
+fn spawnChecked(io: std.Io, options: std.process.SpawnOptions) !std.process.Child {
+    const exe_path = options.argv[0];
+    std.Io.Dir.accessAbsolute(io, exe_path, .{}) catch |err| {
+        std.debug.print("e2e: required binary not found: {s} ({t})\n", .{ exe_path, err });
+        return error.TestBinaryMissing;
+    };
+    return std.process.spawn(io, options);
+}
+
 /// Proves real inter-process discovery still works end to end: a separately
 /// spawned OS process (the real `glyphwire-demo` binary, not a library call)
 /// finds a socket purely via the `GLYPHWIRE_SOCK` env var and writes several
@@ -53,16 +73,13 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    // errdefer, not a plain trailing statement: an early `try` failure
-    // below (child.wait, the exit-code assertion) must still join this
-    // thread, or it's left running against this function's
-    // about-to-be-invalid stack and per-test allocator once the function
-    // returns -- corrupting a later, unrelated test's memory
-    // nondeterministically. On the success path this is joined explicitly
-    // instead (see below), deliberately before reading ctx directly, so
-    // errdefer never fires there.
-    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    errdefer thread.join();
+    // One accept loop, not a joined `serveOne` worker -- a fixed worker
+    // count deadlocks `join()` if the spawned client never connects (see
+    // shellPromptEchoesTypedInputTest). No barrier is lost: the demo
+    // client's `Client.deinit` does a final `get_property` round trip
+    // before it exits, so once `child.wait` below returns, every write it
+    // made has already been applied to `ctx`.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -73,7 +90,7 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
     defer environ_map.deinit();
     try environ_map.put("GLYPHWIRE_SOCK", socket_path);
 
-    var child = try std.process.spawn(io, .{
+    var child = try spawnChecked(io, .{
         .argv = &.{demo_path},
         .environ_map = &environ_map,
     });
@@ -82,8 +99,6 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
         .exited => |code| try testz.expectEqual(code, 0),
         else => return error.TestUnexpectedResult,
     }
-
-    thread.join();
 
     // "glyphwire" written at row 0, col 0 in cyan (see demo/main.zig).
     const c00 = ctx.root.cell(0, 0);
@@ -117,16 +132,15 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
     }
 }
 
-fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
-    server.acceptOne(alloc) catch |err| {
-        std.debug.print("test server connection failed: {t}\n", .{err});
-    };
-}
-
-/// Accepts connections forever instead of a fixed, easy-to-miscount
-/// number of `acceptOne` calls -- see `shellExpandsTildeInCommandArgsTest`
-/// for why getting that count wrong is a real, silent-hang-shaped bug.
-/// Not joined by its caller: it only returns once the listener closes.
+/// The server side of every e2e test: one accept loop, spawned once per
+/// test and never joined -- it only returns once `srv.deinit` closes the
+/// listener. Replaced the old per-test sets of fixed-count `serveOne`
+/// (`acceptOne`) worker threads: a hand-counted worker set that guesses
+/// low leaves a real connection unserved (a silent hang), and one that
+/// guesses high leaves a worker stuck in `accept()` so `defer
+/// thread.join()` deadlocks the whole run when a spawned client fails to
+/// start. `serveForever` needs no count. See
+/// `shellExpandsTildeInCommandArgsTest` for the original bite.
 fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
     server.serveForever(alloc) catch |err| {
         std.log.err("test server stopped: {t}", .{err});
@@ -157,29 +171,17 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    // Three connections need to be concurrently alive: the shell's own
-    // Client (writing) and InputListener (subscribed) connections, held
-    // for its whole run, plus this test's reporter connection -- see
-    // server_tests.zig's broadcast test for why that needs one thread per
-    // connection each blocked in its own acceptOne, not one thread
-    // serving connections sequentially.
-    //
-    // Teardown is all `defer`, in the reverse of acquisition order
-    // (threads joined last, since each thread's acceptOne only returns
-    // once its own connection closes), so it runs correctly on *every*
-    // exit path -- including an early `try`/`return error` from, say,
-    // waitForCell timing out below. A previous version of this test used
-    // plain statements at the end instead; when a wait timed out, that
-    // skipped cleanup entirely and leaked threads still referencing this
-    // function's about-to-be-invalid stack and per-test allocator,
-    // corrupting a *later* test's memory nondeterministically (segfault/
-    // hang symptoms that didn't point back to their real cause).
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One `serveForever` accept loop rather than a hand-counted set of
+    // joined `serveOne` workers. Three connections have to be alive at
+    // once here (the shell's own Client and InputListener, plus this
+    // test's reporter), but a *fixed* worker count is a silent-hang
+    // footgun: if a spawned client fails to start, the surplus worker
+    // sits in `accept()` forever and `defer thread.join()` deadlocks the
+    // whole run (closing the listener does not wake a blocked `accept`).
+    // `serveForever` needs no count and isn't joined -- it ends when
+    // `srv.deinit` closes the listener. Same pattern as
+    // shellExpandsTildeInCommandArgsTest below.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -193,7 +195,7 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
 
     // No args: triggers the interactive prompt rather than exec'ing into
     // a given command -- see shell/main.zig.
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -282,12 +284,9 @@ pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc:
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One accept loop, not a fixed count of joined workers -- see
+    // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     // A throwaway config dir with a powerline shell.conf. One segment,
     // literal text "AB" (no `{cwd}` etc.), a distinctive blue bg.
@@ -313,7 +312,7 @@ pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc:
     try shell_env.put("GLYPHWIRE_NO_HISTORY", "1");
     try shell_env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -370,12 +369,9 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One accept loop, not a fixed count of joined workers -- see
+    // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -387,7 +383,7 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
     try sandboxShellConfig(&shell_env, alloc);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -426,18 +422,15 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
 /// candidate is drawn as dim text after the caret. The line buffer is not
 /// changed; this is only a repaint-time hint.
 ///
-/// DISABLED 2026-09-06 (context-lifecycle branch): this test hangs
-/// indefinitely -- its `waitForCell(">")` never resolves because it
-/// spawns `zig-out/bin/glyphwire-shell` (line below), a path that no
-/// longer exists since the shell binary was renamed to `gw-shell` (every
-/// other shell e2e test here already uses `gw-shell`). The spawn silently
-/// produces no shell, so the prompt never appears and the poll loop spins
-/// forever, blocking the whole e2e run. Pre-existing, unrelated to the
-/// context work -- left as a no-discovery function (name doesn't end in
-/// `Test`) rather than deleted so the revisit is a one-liner: fix the
-/// binary name, then re-check the dim-colour timing assertions still
-/// pass, then rename back to `...Test`.
-pub fn shellShowsInlineCompletionHintAfterIdle_DISABLED(_: std.Io, alloc: std.mem.Allocator) !void {
+/// Was "disabled" 2026-09-06 with a `_DISABLED` suffix -- but testz's
+/// `discoverTests` keys off the function signature, not the name, so it
+/// kept running and just spawned the stale `zig-out/bin/glyphwire-shell`
+/// path (the shell binary is `gw-shell` now). That missing binary was a
+/// big part of why the e2e run hung on a clean checkout. Fixed here:
+/// correct `gw-shell` path; `spawnChecked` now also fails a rename like
+/// this fast instead of leaving it to time out. (testz's real skip
+/// mechanism is a `skip_` name prefix, for next time.)
+pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -452,16 +445,13 @@ pub fn shellShowsInlineCompletionHintAfterIdle_DISABLED(_: std.Io, alloc: std.me
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One accept loop, not a fixed count of joined workers -- see
+    // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -469,7 +459,7 @@ pub fn shellShowsInlineCompletionHintAfterIdle_DISABLED(_: std.Io, alloc: std.me
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
     try sandboxShellConfig(&shell_env, alloc);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -563,12 +553,9 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One accept loop, not a fixed count of joined workers -- see
+    // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -586,7 +573,7 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
     defer alloc.free(new_path);
     try shell_env.put("PATH", new_path);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -651,16 +638,11 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    // Three connections, same as shellPromptEchoesTypedInputTest: the
-    // shell's own Client and InputListener, plus this test's reporter.
-    // `echo` itself never connects -- it's a plain program, the whole
-    // point of this test.
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One accept loop, not a fixed worker count -- see
+    // shellPromptEchoesTypedInputTest. (`echo` itself never connects; the
+    // live connections are the shell's Client + InputListener and this
+    // test's reporter.)
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -680,7 +662,7 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     defer alloc.free(new_path);
     try shell_env.put("PATH", new_path);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -740,12 +722,9 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One accept loop, not a fixed count of joined workers -- see
+    // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -761,7 +740,7 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
     defer alloc.free(new_path);
     try shell_env.put("PATH", new_path);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -812,12 +791,9 @@ pub fn shellRedirectsStdoutToAFileTest(_: std.Io, alloc: std.mem.Allocator) !voi
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One accept loop, not a fixed count of joined workers -- see
+    // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -833,7 +809,7 @@ pub fn shellRedirectsStdoutToAFileTest(_: std.Io, alloc: std.mem.Allocator) !voi
     defer alloc.free(new_path);
     try shell_env.put("PATH", new_path);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -887,12 +863,9 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
-    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread1.join();
-    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread2.join();
-    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    defer thread3.join();
+    // One accept loop, not a fixed count of joined workers -- see
+    // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     // Config: a 2-line powerline prompt with a right chain (so the idle
     // refresh path is active), plus a 40-line file to `cat`.
@@ -939,7 +912,7 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
     defer alloc.free(new_path);
     try shell_env.put("PATH", new_path);
 
-    var shell_child = try std.process.spawn(io, .{ .argv = &.{shell_path}, .environ_map = &shell_env });
+    var shell_child = try spawnChecked(io, .{ .argv = &.{shell_path}, .environ_map = &shell_env });
     defer shell_child.kill(io);
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
@@ -1072,7 +1045,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     defer alloc.free(new_path);
     try shell_env.put("PATH", new_path);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -1224,7 +1197,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     defer alloc.free(new_path);
     try shell_env.put("PATH", new_path);
 
-    var shell_child = try std.process.spawn(io, .{
+    var shell_child = try spawnChecked(io, .{
         .argv = &.{shell_path},
         .environ_map = &shell_env,
     });
@@ -1354,8 +1327,9 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    errdefer thread.join();
+    // One accept loop -- see the demo test above; `child.wait` plus the
+    // ls client's own `Client.deinit` round trip is the write barrier.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -1366,7 +1340,7 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
     defer environ_map.deinit();
     try environ_map.put("GLYPHWIRE_SOCK", socket_path);
 
-    var child = try std.process.spawn(io, .{
+    var child = try spawnChecked(io, .{
         .argv = &.{ ls_path, tmp_name },
         .environ_map = &environ_map,
     });
@@ -1375,8 +1349,6 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
         .exited => |code| try testz.expectEqual(code, 0),
         else => return error.TestUnexpectedResult,
     }
-
-    thread.join();
 
     // `writeGrid` now packs entries into columns across the layer width
     // (column-major, like `ls -C`) instead of one per row. Each entry's
@@ -1429,8 +1401,9 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
-    errdefer thread.join();
+    // One accept loop -- see the demo test above; `child.wait` plus the
+    // ls client's own `Client.deinit` round trip is the write barrier.
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
@@ -1446,7 +1419,7 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
     defer environ_map.deinit();
     try environ_map.put("GLYPHWIRE_SOCK", socket_path);
 
-    var child = try std.process.spawn(io, .{
+    var child = try spawnChecked(io, .{
         .argv = &.{ ls_path, file_operand, dir_operand },
         .environ_map = &environ_map,
     });
@@ -1455,7 +1428,6 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
         .exited => |code| try testz.expectEqual(code, 0),
         else => return error.TestUnexpectedResult,
     }
-    thread.join();
 
     // The loose file block is first, headerless. `writeGrid` leaves a
     // blank leading row, so it lands on row 1: its name is the operand

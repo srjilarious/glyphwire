@@ -631,6 +631,14 @@ pub fn createTableOnAnotherConnectionDefaultsToFirstConnectionsCursorTest(io: st
     var shell_conn = try glyphwire.Client.connect(io, alloc, socket_path);
     defer shell_conn.deinit();
     try shell_conn.setCursor(5, 3);
+    // `setCursor` is a notification -- fire-and-forget. Force it through
+    // connection A's dispatch before connection B creates its table below:
+    // dispatch is strictly in-order and mutex-guarded, so a round trip on
+    // *this* connection can't be answered until the `setCursor` ahead of
+    // it has been applied. Without this barrier `createTable` on `ls_conn`
+    // races connection A's dispatch and intermittently reads the cursor
+    // still at its default (0, 0).
+    _ = try shell_conn.getRevision();
 
     // Connection B: the "ls" -- a separate connection, deliberately not
     // reusing shell_conn, so this can't accidentally pass by relying on

@@ -115,6 +115,18 @@ final.
   follow directly on the socket. `format` is parsed (`png`/`jpeg`/`bmp`/
   `gif`) and picks the header parser used to measure the image — see the
   Image section.
+- The Zig `Client`'s request path reads the response frame with a
+  deadline (`Client.read_timeout`, default 30s, via `io.operateTimeout`
+  on the `net_read` op — `Stream.read` has no timeout form). Every method
+  on `Client` is a synchronous send-then-wait-one-frame round trip
+  against a mutex-guarded, strictly-in-order dispatcher, so a legitimate
+  response is milliseconds away; a read that stalls that long means the
+  peer is wedged or gone, and blocking forever there just converts a dead
+  server into a hung client (or, in the test suites that drive a
+  library-bound `Server` on background threads, a hung test *process*).
+  Notifications and the `InputListener` event stream are unaffected — a
+  subscribed client legitimately waits arbitrarily long for the next
+  event.
 
 ### Protocol shape
 - Fully duplex on one connection. Input (key/mouse/gamepad/resize) flows

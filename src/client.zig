@@ -45,6 +45,18 @@ pub const Client = struct {
     stream: std.Io.net.Stream,
     decoder: wire.FrameDecoder = .{},
     next_id: i64 = 1,
+    /// Ceiling on how long a single `readFrame` (i.e. any `request`) will
+    /// block waiting for the server's response frame before giving up with
+    /// `error.Timeout`. Every method on this type is a synchronous
+    /// send-then-wait-for-one-frame round trip against a mutex-guarded,
+    /// strictly-in-order dispatcher, so a legitimate response is always a
+    /// few milliseconds away -- a read that stalls for this long means the
+    /// peer is wedged or gone, and blocking forever there just turns a
+    /// dead server into a hung client (or, in the test suites that drive a
+    /// library-bound `Server`, a hung test process). 30s is far past any
+    /// real round trip while still bounded; a test that wants to *assert*
+    /// the timeout fires can shorten this field after `connect`.
+    read_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(30_000), .clock = .awake } },
 
     pub const ConnectError = std.Io.net.UnixAddress.InitError || std.Io.net.UnixAddress.ConnectError;
     pub const NoSessionError = error{NoSession};
@@ -1380,14 +1392,21 @@ pub const Client = struct {
     };
 
     /// Reads and returns exactly one complete frame's body (caller frees
-    /// with `self.alloc`), blocking on the socket until one arrives.
+    /// with `self.alloc`), blocking on the socket until one arrives or
+    /// `read_timeout` elapses (`error.Timeout`) -- see that field. Routed
+    /// through `io.operateTimeout` rather than `stream.read` so the
+    /// deadline actually bounds the syscall; `stream.read` has no timeout
+    /// form.
     fn readFrame(self: *Client) ![]u8 {
         while (true) {
             if (try self.decoder.next(self.alloc)) |body| return body;
 
             var read_buf: [4096]u8 = undefined;
             var data: [1][]u8 = .{&read_buf};
-            const n = try self.stream.read(self.io, &data);
+            const n = try (try self.io.operateTimeout(.{ .net_read = .{
+                .socket_handle = self.stream.socket.handle,
+                .data = &data,
+            } }, self.read_timeout)).net_read;
             if (n == 0) return error.ConnectionClosed;
             try self.decoder.feed(self.alloc, read_buf[0..n]);
         }
