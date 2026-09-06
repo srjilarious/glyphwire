@@ -520,6 +520,71 @@ pub const Client = struct {
         try self.notify("set_property", .{ .layer = layer, .property = "position", .x = x, .y = y });
     }
 
+    /// `set_property(layer, "cell_position", {row, col})` -- a
+    /// notification. The same placement as `setLayerPosition` but in grid
+    /// cells, and *sticky*: the server re-derives the pixel position when
+    /// the cell metrics change, so a layer placed this way stays on its
+    /// column across a font-size change. See
+    /// `core.PropertyName.cell_position`.
+    pub fn setLayerCellPosition(self: *Client, layer: core.LayerHandle, row: usize, col: usize) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "cell_position", .row = row, .col = col });
+    }
+
+    /// `get_property(layer?, "cell_position")` -- the cell a layer's
+    /// top-left corner sits on.
+    pub fn getLayerCellPosition(self: *Client, layer: ?core.LayerHandle) !CellPos {
+        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .layer = layer, .property = "cell_position" });
+        defer parsed.deinit();
+        return .{ .row = parsed.value.result.row, .col = parsed.value.result.col };
+    }
+
+    /// `set_property(layer, "size", {cols, rows})` -- a notification.
+    /// Resizes a `createLayer` layer's cell grid, bottom-anchored like
+    /// every other resize (see `core.Layer.resize`). This is how a
+    /// multi-pane TUI reflows its panes on a `resize` notification
+    /// without destroying and rebuilding them. Rejected for the root
+    /// layer, whose size the host owns.
+    pub fn setLayerSize(self: *Client, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "size", .cols = cols, .rows = rows });
+    }
+
+    /// `get_property(layer, "size")` on a non-root layer -- see `getSize`
+    /// for the root-layer (i.e. window-size) version.
+    pub fn getLayerSize(self: *Client, layer: core.LayerHandle) !core.LayerSize {
+        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .layer = layer, .property = "size" });
+        defer parsed.deinit();
+        return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
+    }
+
+    /// `set_property(layer, "visibility", {visible})` -- a notification.
+    /// Hides or shows a layer without destroying it: its cells, tables
+    /// and metadata ids all survive, glyphwire-host just stops
+    /// compositing it. Rejected for the root layer.
+    pub fn setLayerVisible(self: *Client, layer: core.LayerHandle, visible: bool) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "visibility", .visible = visible });
+    }
+
+    /// `get_property(layer?, "visibility")`.
+    pub fn getLayerVisible(self: *Client, layer: ?core.LayerHandle) !bool {
+        var parsed = try self.request(struct { visible: bool }, "get_property", .{ .layer = layer, .property = "visibility" });
+        defer parsed.deinit();
+        return parsed.value.result.visible;
+    }
+
+    /// `raise_layer(layer, above?)` -- a notification. Moves `layer` up
+    /// the compositing order: directly above `above`, or to the very top
+    /// when it's null. Creation order is only the *initial* stacking, so
+    /// this is what puts a completion popup created early back over a
+    /// sidebar created later.
+    pub fn raiseLayer(self: *Client, layer: core.LayerHandle, above: ?core.LayerHandle) !void {
+        try self.notify("raise_layer", .{ .layer = layer, .above = above });
+    }
+
+    /// `lower_layer(layer, below?)` -- the mirror of `raiseLayer`.
+    pub fn lowerLayer(self: *Client, layer: core.LayerHandle, below: ?core.LayerHandle) !void {
+        try self.notify("lower_layer", .{ .layer = layer, .below = below });
+    }
+
     /// `write_text(layer, text, fg?, bg?)` on a non-root layer -- see
     /// `writeText` for the root-layer version.
     pub fn writeTextOn(self: *Client, layer: core.LayerHandle, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {

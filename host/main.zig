@@ -155,8 +155,7 @@ pub fn main(init: std.process.Init) !void {
     // stay tied to this file's own cell_w/cell_h (now measured from
     // `font_path` above) rather than silently relying on the default
     // matching -- see Context's doc comment on cell_px_w/cell_px_h.
-    ctx.cell_px_w = @intCast(geometry.cell_w);
-    ctx.cell_px_h = @intCast(geometry.cell_h);
+    ctx.setCellMetrics(@intCast(geometry.cell_w), @intCast(geometry.cell_h));
     icons.loadIconsFromDir(io, alloc, &ctx, "assets/icons", "", true);
     // The file-type icon set (`file/*`, aliased `oxygen/*`) comes from
     // whichever `assets/icons/filetype/<theme>/` `host.conf`'s

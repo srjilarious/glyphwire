@@ -127,7 +127,7 @@ sequenceDiagram
 |---|---|---|
 | **Styled text** | `write_text` (`fg`, `bg`, `transparent_bg`, `metadata_id`) | Truecolor per run with no escape-sequence quoting or state leakage. C0 control bytes and a Phase-A subset of SGR/CSI escapes are still interpreted, so plain programs piped through a PTY render correctly, but a glyphwire-aware program never has to emit them. |
 | **Cell editing** | `insert_cells`, `delete_cells`, `clear` | ECMA-48 ICH/DCH so a line editor edits in place instead of retransmitting a whole line; `clear` resets a region (or the screen) to blank without painting spaces over content. |
-| **Layers** | `create_layer`, `destroy_layer`, `get_property` / `set_property` (`cursor`, `position`, `size`, `revision`, `scroll`) | A popup, notification, or HUD is its own addressable surface with a pixel-precise position you can animate — it composites over the shell's scrollback without disturbing it. Every draw message takes an optional `layer`; omit it and you get the root. |
+| **Layers** | `create_layer`, `destroy_layer`, `raise_layer` / `lower_layer`, `get_property` / `set_property` (`cursor`, `position`, `cell_position`, `size`, `visibility`, `revision`, `scroll`) | A popup, notification, or HUD is its own addressable surface with a pixel-precise position you can animate — it composites over the shell's scrollback without disturbing it. A multi-pane TUI gets the rest of what it needs from the same handle: resize a pane in place on a window resize, hide one without losing its content, restack them, and place them on the cell grid so they survive a font-size change. Every draw message takes an optional `layer`; omit it and you get the root. |
 | **Scrollback & resize** | `scroll_view`, `resize` / `scroll` notifications, `get_cells` with `view_offset` | The ring-buffer scrollback is readable over the wire, so a client can inspect exactly what's on screen while the host is scrolled back (how a click in scrollback resolves to the right cell). Window resize is bottom-anchored and non-destructive. |
 | **Images** | `load_image` (binary side-channel), `get_image_info`, `draw_image`, `get_cell_metrics` | Show real bitmaps in the grid — an image viewer, TUI background art — placed at natural size and clipped, not stretched. Binary bytes ride a length-prefixed side channel, never base64 in JSON. |
 | **Icons** | `draw_icon` (`scale` fit / natural / stretch, `h_align` / `v_align`, `max_w` / `max_h`, `foreground`) | A bundled named catalog (a selectable file-type icon theme — Oxygen / Material / Papirus — behind `file/*`, plus Devicon language/tool + distro logos) so every tool doesn't reload its own "folder" / "audio file" art. `foreground: true` composites over a background instead of replacing it. |
@@ -158,7 +158,7 @@ zig build package         # build just the shipped programs (host, shell,
 
 Individual run steps: `zig build shell`, `zig build ls`, `zig build demo`,
 `zig build table_demo`, `zig build view`, `zig build notify`,
-`zig build server`, `zig build client`.
+`zig build server`, `zig build client`, `zig build zoe`.
 
 The `.github/workflows/linux-package.yml` workflow runs `zig build package`
 in ReleaseSafe on every push and pull request, uploading a
@@ -245,6 +245,7 @@ name and its shell command there to capture a new one.
 | `host_eng/` | The SDL3 + OpenGL engine backend the host is built on. |
 | `shell/` | `glyphwire-shell` — line editor, command launcher, PTY, Lua startup config, history. |
 | `ls/`, `view/`, `notify/`, `demo/`, `table-demo/`, `client/` | Client programs. |
+| `zoe/` | `zoe` — a vim-like modal editor, glyphwire's first multi-layer TUI. Phase 1 (the editor core) is built; the UI is not wired up yet. See `docs/investigations/zoe-editor.md`. |
 | `server/` | Standalone socket server (host embeds its own; this is for testing). |
-| `tests/` | testz suite — `core`, `wire`, `dispatch`, `table`, `server`, `client`, `shell`, `ls`, `e2e`, ... |
+| `tests/` | testz suite — `core`, `wire`, `dispatch`, `table`, `server`, `client`, `shell`, `ls`, `zoe`, `e2e`, ... |
 | `docs/` | `decisions.md`, `api.md`, `roadmap.md`, `investigations/`. |

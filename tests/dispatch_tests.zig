@@ -1692,3 +1692,139 @@ pub fn subscribeAcceptsSelectionAndClipboardTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectTrue(d.subscriptions.selection);
     try testz.expectTrue(d.subscriptions.clipboard);
 }
+
+// ─── Layer geometry, visibility and stacking over the wire ──────────────
+
+/// Runs one JSON body through the framing round trip and the dispatcher,
+/// asserting it produced no response (i.e. it was a notification).
+fn notifyThrough(alloc: std.mem.Allocator, d: *dispatch.Dispatcher, body: []const u8) !void {
+    const decoded = try roundTripThroughWire(alloc, body);
+    defer alloc.free(decoded);
+    try testz.expectTrue((try d.handle(alloc, decoded)).response == null);
+}
+
+pub fn setPropertySizeResizesANonRootLayerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const pane = try ctx.createLayer(null, null, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"size","cols":24,"rows":10}}
+    );
+
+    try testz.expectEqual(ctx.layerPtr(pane).?.width, 24);
+    try testz.expectEqual(ctx.layerPtr(pane).?.height, 10);
+    // The root is untouched -- the host owns the window size.
+    try testz.expectEqual(ctx.root.width, 80);
+}
+
+pub fn setPropertySizeOnRootIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const body =
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"property":"size","cols":5,"rows":5}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, body);
+    defer alloc.free(decoded);
+
+    try testz.expectError(d.handle(alloc, decoded), error.ReadOnlyProperty);
+    try testz.expectEqual(ctx.root.width, 80);
+}
+
+pub fn visibilityPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    _ = try ctx.createLayer(20, 20, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"visibility","visible":false}}
+    );
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":4,"method":"get_property","params":{"layer":1,"property":"visibility"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+
+    const Response = struct { id: i64, result: struct { visible: bool } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.id, 4);
+    try testz.expectFalse(parsed.value.result.visible);
+}
+
+pub fn cellPositionPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    ctx.setCellMetrics(9, 18);
+    var d = dispatch.Dispatcher.init(&ctx);
+    const pane = try ctx.createLayer(20, 20, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"cell_position","row":3,"col":4}}
+    );
+    try testz.expectEqual(ctx.layerPtr(pane).?.pos.x, 36.0);
+    try testz.expectEqual(ctx.layerPtr(pane).?.pos.y, 54.0);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":5,"method":"get_property","params":{"layer":1,"property":"cell_position"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+
+    const Response = struct { id: i64, result: struct { row: usize, col: usize } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.result.row, 3);
+    try testz.expectEqual(parsed.value.result.col, 4);
+}
+
+pub fn raiseAndLowerLayerNotificationsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const a = try ctx.createLayer(4, 4, 0);
+    const b = try ctx.createLayer(4, 4, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"raise_layer","params":{"layer":1}}
+    );
+    try testz.expectEqual(ctx.layer_order.items[1], a);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"lower_layer","params":{"layer":1,"below":2}}
+    );
+    try testz.expectEqual(ctx.layer_order.items[0], a);
+    try testz.expectEqual(ctx.layer_order.items[1], b);
+}
+
+pub fn raiseLayerRejectsAnUnknownHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const body =
+        \\{"jsonrpc":"2.0","method":"raise_layer","params":{"layer":42}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, body);
+    defer alloc.free(decoded);
+    try testz.expectError(d.handle(alloc, decoded), error.UnknownLayer);
+}

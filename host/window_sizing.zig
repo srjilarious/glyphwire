@@ -119,8 +119,10 @@ pub const WindowSizing = struct {
         // are not proactively notified of a cell-size change.
         const server = self.app.server;
         server.ctx_mutex.lockUncancelable(server.io);
-        server.ctx.cell_px_w = @intCast(geometry.cell_w);
-        server.ctx.cell_px_h = @intCast(geometry.cell_h);
+        // `setCellMetrics`, not a pair of field writes: it also re-derives
+        // the pixel position of every cell-placed layer against the new
+        // metrics (see `core.PropertyName.cell_position`).
+        server.ctx.setCellMetrics(@intCast(geometry.cell_w), @intCast(geometry.cell_h));
         server.ctx_mutex.unlock(server.io);
 
         self.resizeWindowForCells(eng);

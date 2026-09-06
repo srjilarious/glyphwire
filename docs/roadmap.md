@@ -1687,6 +1687,59 @@ shell shares. `ps aux | grep glyphwire`, `cc main.c 2>&1 | less`,
   `sh.exec` status); `e2e_tests.zig` +2 (a real two-stage pipeline; a
   redirect to a file). 522 pass.
 
+## zoe: multi-pane layer properties, and the editor core
+
+**Done (phase 0 + 1 of `docs/investigations/zoe-editor.md`).** zoe is a
+vim-like modal editor and glyphwire's first real TUI. This landed the
+protocol gaps a multi-pane program hits, plus the editor's headless core.
+The UI is not wired up yet — that's phase 2.
+
+- **Layer `size` is settable on a non-root layer** —
+  `set_property(layer, "size", {cols, rows})`. A sidebar-plus-buffer TUI
+  has to reflow both panes on a `resize`, and destroy-and-recreate loses
+  the layer's handle, tables, metadata ids and content. Goes through
+  `Layer.resize`, so it's bottom-anchored like a window resize; clears
+  `tracks_context_size` (the client owns the layout now); clamps a zero
+  dimension to 1; refused on the root, whose size the host owns.
+- **`visibility`** (was 🔶) — `set_property(layer, "visibility",
+  {visible})`. A hidden layer keeps its cells, tables and *cached quad
+  batch*; `host/render.zig` skips it in both the sync and draw passes, so
+  a toggled file tree costs no rebuild and loses no scroll position.
+  Refused on the root for the same reason `destroy_layer` is.
+- **`raise_layer` / `lower_layer`** — compositing order was creation
+  order. Both take an optional reference handle (`above` / `below`);
+  omitted means all the way to the top / bottom. Two notifications rather
+  than a `z_index` property, since the model is already an ordered list.
+  Order is read live each frame, so a restack invalidates no batch.
+- **`cell_position`** — `set_property(layer, "cell_position", {row,
+  col})`, resolved server-side against `Context.cell_px_w`/`cell_px_h`
+  and *sticky*: `Context.setCellMetrics` re-derives every cell-placed
+  layer's pixel position, so a Ctrl+`+` font step keeps a sidebar on its
+  column. `host/main.zig` and `host/window_sizing.zig` now call
+  `setCellMetrics` instead of assigning the two fields directly. A pixel
+  `position` write un-sticks it.
+- **`core.PropertyError.ReadOnlyProperty`** (new) plus
+  `Context.setLayerProperty` / `getLayerProperty` — the single entry
+  point the dispatcher uses, owning the root guards, the cell-metric
+  resolution and `size`'s reallocation. `Layer`'s own pair stays for what
+  a layer can decide alone.
+- **`zoe/`** (new) — `buffer.zig` (gap buffer + line index),
+  `motion.zig` (pure cursor motions), `editor.zig` (modes, counts,
+  `d`-operator, `:` command line), `keys.zig` (vim-notation key scripts),
+  `support.zig` (the `zoe_support` module), `main.zig` (a headless driver
+  until phase 2). No IO in the core: `:w` returns an `Outcome` the host
+  carries out.
+- **Input path** — the editor consumes glyphwire's two streams as they
+  are: normal-mode commands off `feedText` (so `j` is "down" on any
+  layout, and IME commit text just works), Escape and the arrows off
+  `feedKey` by name.
+- **Tests:** `zoe_tests.zig` (new, 50 — gap-buffer gap moves and
+  straddling reads, line index, codepoint-stepping motions, vim's sticky
+  column, `w`/`b`/`e` word classes and the empty-line rule, every
+  implemented command and operator-motion pair, and the command line);
+  `core_tests.zig` +8 and `dispatch_tests.zig` +6 for the layer
+  properties and restacking. 599 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

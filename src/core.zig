@@ -771,10 +771,29 @@ pub const PropertyName = enum {
     /// rather than cell-snapped: smooth animation, e.g. sliding a
     /// notification layer on/off screen, needs sub-cell steps).
     position,
-    /// Viewport size in cells (`{cols, rows}`). Get-only: a client reads
-    /// it (and, if subscribed, gets a `resize` notification when it
-    /// changes) but can't set it -- the host owns the window size, see
-    /// `Context.resize`.
+    /// The same placement as `position`, but expressed in whole grid
+    /// cells (`{row, col}`) and resolved against the session's cell
+    /// metrics (`Context.cell_px_w`/`cell_px_h`). A TUI lays itself out
+    /// on the cell grid, and a layer placed this way stays laid out: the
+    /// context re-derives its pixel `pos` whenever the cell metrics
+    /// change (`Context.setCellMetrics`), so a sidebar stays snapped to
+    /// column 0 across a font-size change instead of drifting. Setting
+    /// `position` in pixels un-sticks it again -- pixel placement is the
+    /// primitive, this is the sticky convenience on top. Goes through
+    /// `Context.setLayerProperty`/`getLayerProperty`, not `Layer`'s own
+    /// pair, since only the context knows the metrics.
+    cell_position,
+    /// Viewport size in cells (`{cols, rows}`). Settable on a
+    /// `create_layer` layer -- a TUI that splits the window into a
+    /// sidebar and a buffer pane has to reflow both on a `resize`
+    /// notification, and destroying and recreating the layers would throw
+    /// away their handles, tables and content. Get-only for the **root**
+    /// layer, whose size the host owns (see `Context.resize`); an attempt
+    /// reports `PropertyError.ReadOnlyProperty`. Setting it also clears
+    /// `Layer.tracks_context_size` -- a client that picks its own size
+    /// has taken over the layout. Goes through
+    /// `Context.setLayerProperty`, which owns the root check and the
+    /// reallocation.
     size,
     /// Scrollback view offset in rows (`{offset, max}`) -- how far the
     /// on-screen view is scrolled back into this layer's history (0 is
@@ -784,17 +803,35 @@ pub const PropertyName = enum {
     /// mirroring how `size` is read-only here and only moved by the
     /// host-driven resize path. See `Layer.view_scroll` / `Layer.scrollView`.
     scroll,
+    /// Whether glyphwire-host composites this layer at all
+    /// (`{visible: bool}`). A hidden layer keeps every cell, table and
+    /// handle it had; the renderer just skips it. That's what a toggled
+    /// sidebar wants -- `destroy_layer` plus a rebuild loses the tree's
+    /// scroll position and its metadata ids for nothing. Settable on a
+    /// `create_layer` layer only: hiding the **root** layer would blank
+    /// the session with no wire path back, the same reason
+    /// `destroy_layer` refuses it, so root reports
+    /// `PropertyError.ReadOnlyProperty`.
+    visibility,
 };
 
 pub const PropertyValue = union(PropertyName) {
     cursor: Cursor,
     revision: u64,
     position: PxPos,
+    cell_position: CellPos,
     size: LayerSize,
     scroll: LayerScroll,
+    visibility: bool,
 };
 
-pub const PropertyError = error{UnknownProperty};
+pub const PropertyError = error{
+    UnknownProperty,
+    /// The property exists but this layer won't accept a write to it --
+    /// `size` and `visibility` on the root layer, whose geometry and
+    /// visibility the host owns. See each one's doc comment above.
+    ReadOnlyProperty,
+};
 
 /// A server-generated handle for a layer created via `create_layer`.
 /// `root_layer_handle` (0) always refers to the context's root layer,
@@ -1022,6 +1059,11 @@ pub const Layer = struct {
     /// wire path that moves it) and for a freshly created layer until its
     /// creator calls `set_property(layer, "position", ...)`.
     pos: PxPos = .{},
+    /// See `PropertyName.cell_position`. Non-null when `pos` above was
+    /// last derived from a *cell* position rather than set in pixels, in
+    /// which case `Context.setCellMetrics` re-derives `pos` from it on a
+    /// font-size change. A pixel `set_property(position)` clears it.
+    pos_cells: ?CellPos = null,
     /// Tables painted onto this layer (`create_table`), keyed by handle --
     /// decisions.md's Table section: a table is a component of a layer,
     /// not a parallel object tree like `Context.layers` is. A table's
@@ -1043,6 +1085,9 @@ pub const Layer = struct {
     /// explicit size (e.g. a 45x3 notification popup) keeps that size.
     /// See `Context.resize`.
     tracks_context_size: bool = false,
+    /// See `PropertyName.visibility`. Always true for the root layer --
+    /// nothing can set it there.
+    visible: bool = true,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Layer {
         const total_rows = height + scrollback_rows;
@@ -2275,8 +2320,10 @@ pub const Layer = struct {
             .cursor => .{ .cursor = self.cursor },
             .revision => .{ .revision = self.revision },
             .position => .{ .position = self.pos },
+            .cell_position => unreachable, // needs the cell metrics; see Context.getLayerProperty
             .size => .{ .size = .{ .cols = self.width, .rows = self.height } },
             .scroll => .{ .scroll = .{ .offset = self.view_scroll, .max = self.history_len } },
+            .visibility => .{ .visibility = self.visible },
         };
     }
 
@@ -2284,9 +2331,15 @@ pub const Layer = struct {
         switch (value) {
             .cursor => |c| self.cursor = .{ .row = self.resolveRow(c.row), .col = c.col },
             .revision => unreachable, // get-only; see PropertyName.revision
-            .position => |p| self.pos = p,
-            .size => unreachable, // get-only; window size is host-driven, see Context.resize
+            .position => |p| {
+                self.pos = p;
+                // An explicit pixel placement replaces a sticky cell one.
+                self.pos_cells = null;
+            },
+            .cell_position => unreachable, // needs the cell metrics; see Context.setLayerProperty
+            .size => unreachable, // reallocates and is root-guarded; see Context.setLayerProperty
             .scroll => unreachable, // get-only; move it with scrollView, see PropertyName.scroll
+            .visibility => |v| self.visible = v,
         }
         // `.position` moves where the layer composites; `.cursor` can scroll
         // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
@@ -3376,6 +3429,150 @@ pub const Context = struct {
         while (it.next()) |layer| {
             if (layer.tracks_context_size) try layer.resize(width, height);
         }
+    }
+
+    /// Changes the session's cell pixel metrics -- what `get_cell_metrics`
+    /// reports -- and re-derives the pixel `pos` of every layer that was
+    /// placed in cells (`PropertyName.cell_position`). glyphwire-host
+    /// calls this rather than assigning `cell_px_w`/`cell_px_h` directly
+    /// so a font-size step (Ctrl+`+` / Ctrl+`-`) doesn't leave a
+    /// cell-placed sidebar sitting half a cell off its column.
+    pub fn setCellMetrics(self: *Context, cell_px_w: u32, cell_px_h: u32) void {
+        if (cell_px_w == self.cell_px_w and cell_px_h == self.cell_px_h) return;
+        self.cell_px_w = cell_px_w;
+        self.cell_px_h = cell_px_h;
+        var it = self.layers.valueIterator();
+        while (it.next()) |layer| {
+            const cell = layer.pos_cells orelse continue;
+            layer.pos = self.pixelPosForCell(cell);
+            layer.touchRender();
+        }
+    }
+
+    /// The top-left pixel of grid cell `cell`, under the current metrics.
+    fn pixelPosForCell(self: *const Context, cell: CellPos) PxPos {
+        const w: usize = self.cell_px_w;
+        const h: usize = self.cell_px_h;
+        return .{
+            .x = @floatFromInt(cell.col * w),
+            .y = @floatFromInt(cell.row * h),
+        };
+    }
+
+    /// `get_property` with the context in scope: everything `Layer`'s own
+    /// `getProperty` answers, plus `cell_position`, which needs the
+    /// session's cell metrics. `UnknownLayer` for a destroyed or
+    /// never-created handle; `null`/`root_layer_handle` are the root, as
+    /// everywhere else.
+    pub fn getLayerProperty(self: *Context, handle: ?LayerHandle, name: PropertyName) LayerError!PropertyValue {
+        const layer = self.layerPtr(handle) orelse return LayerError.UnknownLayer;
+        if (name != .cell_position) return layer.getProperty(name);
+        // A layer placed in cells reports back exactly what was set; one
+        // placed in pixels reports the cell its top-left corner lands in,
+        // so the getter always has an answer.
+        if (layer.pos_cells) |cell| return .{ .cell_position = cell };
+        const w: f32 = @floatFromInt(@max(self.cell_px_w, 1));
+        const h: f32 = @floatFromInt(@max(self.cell_px_h, 1));
+        return .{ .cell_position = .{
+            .row = @intFromFloat(@max(layer.pos.y, 0) / h),
+            .col = @intFromFloat(@max(layer.pos.x, 0) / w),
+        } };
+    }
+
+    pub const SetPropertyError = LayerError || PropertyError || std.mem.Allocator.Error;
+
+    /// `set_property` with the context in scope -- the single entry point
+    /// the dispatcher uses. Owns the three things a `Layer` can't decide
+    /// alone: which properties the root layer refuses (`size`,
+    /// `visibility`), the cell-metric resolution `cell_position` needs,
+    /// and the reallocation `size` performs. Everything else is forwarded
+    /// to `Layer.setProperty`.
+    pub fn setLayerProperty(self: *Context, handle: ?LayerHandle, value: PropertyValue) SetPropertyError!void {
+        const is_root = (handle orelse root_layer_handle) == root_layer_handle;
+        const layer = self.layerPtr(handle) orelse return LayerError.UnknownLayer;
+        switch (value) {
+            .size => |sz| {
+                if (is_root) return PropertyError.ReadOnlyProperty;
+                // A zero-width or zero-height grid has no representation
+                // here (`Layer.init` needs at least one row to seat the
+                // scroll region), so a degenerate request is clamped
+                // rather than rejected -- same spirit as `scroll_view`
+                // clamping an out-of-range offset.
+                const cols = @max(sz.cols, 1);
+                const rows = @max(sz.rows, 1);
+                if (cols == layer.width and rows == layer.height) return;
+                try layer.resize(cols, rows);
+                // The client owns this layer's geometry from here on, so
+                // a later window resize must not drag it around too.
+                layer.tracks_context_size = false;
+            },
+            .visibility => |v| {
+                if (is_root) return PropertyError.ReadOnlyProperty;
+                layer.setProperty(.{ .visibility = v });
+            },
+            .cell_position => |cell| {
+                layer.pos = self.pixelPosForCell(cell);
+                layer.pos_cells = cell;
+                layer.touchRender();
+            },
+            .revision, .scroll => return PropertyError.ReadOnlyProperty,
+            .cursor, .position => layer.setProperty(value),
+        }
+    }
+
+    /// `raise_layer`: moves `handle` up the compositing order
+    /// (`layer_order` -- later entries draw on top). With `above` given it
+    /// lands directly above that layer; omitted, it goes to the very top.
+    /// The root layer is never in `layer_order` (it is always the bottom
+    /// of the stack), so naming it as either handle reports
+    /// `UnknownLayer`, same as `destroy_layer`.
+    pub fn raiseLayer(self: *Context, handle: LayerHandle, above: ?LayerHandle) LayerError!void {
+        return self.reorderLayer(handle, above, .above);
+    }
+
+    /// `lower_layer`: the mirror of `raiseLayer` -- directly below
+    /// `below`, or all the way to the bottom of the stack when omitted.
+    pub fn lowerLayer(self: *Context, handle: LayerHandle, below: ?LayerHandle) LayerError!void {
+        return self.reorderLayer(handle, below, .below);
+    }
+
+    /// Compositing order only: nothing about a layer's cached quad batch
+    /// depends on where it sits in the stack (glyphwire-host walks
+    /// `layer_order` live each frame), so no `touchRender` here.
+    fn reorderLayer(
+        self: *Context,
+        handle: LayerHandle,
+        ref: ?LayerHandle,
+        dir: enum { above, below },
+    ) LayerError!void {
+        // "Above itself" is a no-op, not an error -- and taking it early
+        // keeps the removal below from hiding the reference handle.
+        if (ref) |r| if (r == handle) return;
+
+        const from = self.layerOrderIndex(handle) orelse return LayerError.UnknownLayer;
+        _ = self.layer_order.orderedRemove(from);
+
+        const target: usize = if (ref) |r| blk: {
+            const ri = self.layerOrderIndex(r) orelse {
+                // Put it back before reporting: a bad reference handle
+                // shouldn't silently restack the layer it named.
+                self.layer_order.insertAssumeCapacity(from, handle);
+                return LayerError.UnknownLayer;
+            };
+            break :blk if (dir == .above) ri + 1 else ri;
+        } else switch (dir) {
+            .above => self.layer_order.items.len,
+            .below => 0,
+        };
+        // The list just lost an element, so it has room for this one.
+        self.layer_order.insertAssumeCapacity(target, handle);
+    }
+
+    fn layerOrderIndex(self: *const Context, handle: LayerHandle) ?usize {
+        for (self.layer_order.items, 0..) |h, i| {
+            if (h == handle) return i;
+        }
+        return null;
     }
 
     /// Resolves a wire-level layer handle to its `Layer` -- `null` (an

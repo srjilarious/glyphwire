@@ -417,6 +417,9 @@ pub const Renderer = struct {
 
             for (server.ctx.layer_order.items) |handle| {
                 const layer = server.ctx.layers.getPtr(handle) orelse continue;
+                // A hidden layer keeps its cached batch (it is not stale,
+                // just unseen), so showing it again costs no rebuild.
+                if (!layer.visible) continue;
                 const ox = @as(i32, @intFromFloat(@round(layer.pos.x))) + geometry.content_pad_px;
                 const oy: i32 = @intFromFloat(@round(layer.pos.y));
                 self.syncOneLayer(eng, fa, handle, layer, ox, oy, 0);
@@ -791,7 +794,8 @@ pub const Renderer = struct {
             self.drawPreedit(eng, &server.ctx.root, geometry.content_pad_px, 0, root_view);
 
             for (server.ctx.layer_order.items) |handle| {
-                _ = server.ctx.layers.getPtr(handle) orelse continue;
+                const layer = server.ctx.layers.getPtr(handle) orelse continue;
+                if (!layer.visible) continue;
                 self.drawLayerBatches(eng, handle);
             }
         }
