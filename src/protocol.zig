@@ -327,3 +327,23 @@ pub const ClipboardTextParams = struct { text: []const u8 };
 
 /// `get_clipboard` result.
 pub const ClipboardResult = struct { text: []const u8 };
+
+/// One entry in a `get_errors` result: a notification this connection
+/// sent that failed in its handler. `method` is the notification's
+/// method, `code` the `DispatchError` name (e.g. `"LayerPermissionDenied"`,
+/// `"UnknownLayer"`), `seq` a per-connection monotonic counter.
+pub const DispatchErrorEntry = struct {
+    method: []const u8,
+    code: []const u8,
+    seq: u64,
+};
+
+/// `get_errors` result: the connection's buffered failed-notification
+/// records (oldest first, at most `dispatch.error_ring_capacity`) and
+/// `dropped` -- how many were lost to a full ring since the last
+/// `get_errors`. Reading drains the ring. See decisions.md's Error
+/// reporting section.
+pub const ErrorsResult = struct {
+    errors: []const DispatchErrorEntry,
+    dropped: u64,
+};

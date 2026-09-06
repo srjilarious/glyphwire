@@ -501,6 +501,12 @@ pub const Subscriptions = struct {
     /// from the text it mirrored. glyphwire-shell subscribes while a pty
     /// child is foregrounded and writes them to the pty master.
     terminal: bool = false,
+    /// Not a broadcast stream like the rest: subscribing to `"error"` just
+    /// tells this connection's `Dispatcher` to start recording its own
+    /// failed notifications into a ring (see `Dispatcher.error_ring`),
+    /// which the client pulls with `get_errors`. Named `_events` because
+    /// `error` is a keyword.
+    error_events: bool = false,
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
@@ -514,6 +520,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "selection")) return self.selection;
         if (std.mem.eql(u8, event, "clipboard")) return self.clipboard;
         if (std.mem.eql(u8, event, "terminal")) return self.terminal;
+        if (std.mem.eql(u8, event, "error")) return self.error_events;
         return false;
     }
 
@@ -531,6 +538,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "selection")) s.selection = true;
             if (std.mem.eql(u8, e, "clipboard")) s.clipboard = true;
             if (std.mem.eql(u8, e, "terminal")) s.terminal = true;
+            if (std.mem.eql(u8, e, "error")) s.error_events = true;
         }
         return s;
     }
@@ -601,6 +609,32 @@ pub fn isNotification(alloc: std.mem.Allocator, body: []const u8) !bool {
     return parsed.value.id == null;
 }
 
+/// How many recent notification-dispatch errors a connection's ring
+/// holds once it has subscribed to `"error"` (see `Dispatcher.recordError`
+/// / `handleGetErrors`). Small on purpose: a client polls `get_errors`
+/// between batches of work, and the `dropped` count in the reply tells it
+/// if it fell behind -- keeping every error indefinitely would just be an
+/// unbounded leak for a client that subscribed and never drained.
+pub const error_ring_capacity = 5;
+
+/// One entry in a `Dispatcher`'s error ring. Self-contained (no owned
+/// slices): `method` is copied into a fixed inline buffer and `code` is a
+/// `@errorName` string, which is static -- so the ring needs no allocator
+/// and the `Dispatcher` needs no `deinit`.
+const ErrorEntry = struct {
+    method_buf: [24]u8 = undefined,
+    method_len: u8 = 0,
+    /// The `DispatchError` name, e.g. `"LayerPermissionDenied"`.
+    code: []const u8 = "",
+    /// Per-connection monotonic counter, assigned when the error is
+    /// recorded. Lets a client order errors and notice gaps.
+    seq: u64 = 0,
+
+    fn method(self: *const ErrorEntry) []const u8 {
+        return self.method_buf[0..self.method_len];
+    }
+};
+
 pub const Dispatcher = struct {
     ctx: *core.Context,
     /// This connection's current subscriptions; see `Subscriptions`. Not
@@ -608,6 +642,22 @@ pub const Dispatcher = struct {
     /// per-connection record after each `handle` call so the fan-out
     /// logic can consult it without this type knowing about connections.
     subscriptions: Subscriptions = .{},
+    /// Ring of recent failed-notification records, populated only while
+    /// this connection is subscribed to `"error"` (see `recordError`).
+    /// A notification (standalone or batched) that errors in its handler
+    /// otherwise vanishes -- no response, no severed connection -- so this
+    /// is how a client that opted in can find out after the fact. Drained
+    /// by `get_errors`. `error` isn't a legal field name, hence the `_ev`.
+    error_ring: [error_ring_capacity]ErrorEntry = [_]ErrorEntry{.{}} ** error_ring_capacity,
+    error_ring_start: usize = 0,
+    error_ring_len: usize = 0,
+    /// Monotonic per-connection error counter (last value assigned to an
+    /// `ErrorEntry.seq`). Never reset -- only the ring contents are.
+    error_seq: u64 = 0,
+    /// Count of errors evicted because the ring was full since the last
+    /// drain. Returned by `get_errors` as `dropped`, then reset to 0 with
+    /// the ring -- so it always means "lost since you last checked".
+    error_dropped: u64 = 0,
     /// The identity of the socket connection this dispatcher serves, or
     /// null for an in-process caller with no connection (the headless
     /// `server/main.zig`, tests, glyphwire-host driving the `Context`
@@ -636,12 +686,54 @@ pub const Dispatcher = struct {
         return self.dispatchEnvelope(alloc, parsed.value);
     }
 
-    /// Dispatches an already-parsed envelope against the message catalog.
-    /// Split out from `handle` so `handleBatch` can route each of a
-    /// `batch`'s sub-messages through the exact same catalog without
-    /// re-serializing them into frame bodies first -- a batched
-    /// `write_text` and a standalone one hit precisely the same handler.
+    /// Routes an already-parsed envelope through `dispatchCatalog` and, on
+    /// error, records it in the connection's ring when the message was a
+    /// notification (`id == null`) and the connection subscribed to
+    /// `"error"`. A failed notification is otherwise silent -- no
+    /// response, and (unlike a failed request) the connection isn't
+    /// severed -- so this is the only place a client can learn about one.
+    /// The error still propagates: server.zig / `handleBatch` keep logging
+    /// and swallowing it exactly as before. `handleBatch` calls this per
+    /// sub-message, so batched notification failures are recorded too.
     fn dispatchEnvelope(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
+        return self.dispatchCatalog(alloc, envelope) catch |err| {
+            if (envelope.id == null and self.subscriptions.error_events) {
+                self.recordError(envelope.method, err);
+            }
+            return err;
+        };
+    }
+
+    /// Records one failed notification into the error ring (see
+    /// `Dispatcher.error_ring`). When the ring is full the oldest entry is
+    /// dropped and `error_dropped` is bumped. `code` is `@errorName(err)`,
+    /// a static string, and `method` is copied into the entry's inline
+    /// buffer (truncated at 24 bytes, which no real method name reaches),
+    /// so nothing here allocates.
+    fn recordError(self: *Dispatcher, method: []const u8, err: anyerror) void {
+        self.error_seq += 1;
+
+        const slot = (self.error_ring_start + self.error_ring_len) % error_ring_capacity;
+        if (self.error_ring_len == error_ring_capacity) {
+            self.error_ring_start = (self.error_ring_start + 1) % error_ring_capacity;
+            self.error_dropped += 1;
+        } else {
+            self.error_ring_len += 1;
+        }
+
+        const e = &self.error_ring[slot];
+        const n = @min(method.len, e.method_buf.len);
+        @memcpy(e.method_buf[0..n], method[0..n]);
+        e.method_len = @intCast(n);
+        e.code = @errorName(err);
+        e.seq = self.error_seq;
+    }
+
+    /// The big message-catalog if/else chain. Everything routes through
+    /// `dispatchEnvelope` above (which adds error recording); `handleBatch`
+    /// does too. Split from `handle` so a batched sub-message and a
+    /// standalone one hit precisely the same handler.
+    fn dispatchCatalog(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
         if (std.mem.eql(u8, envelope.method, "write_text")) {
             return try self.handleWriteText(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "insert_cells")) {
@@ -780,6 +872,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "get_clipboard")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleGetClipboard(alloc, id) };
+        } else if (std.mem.eql(u8, envelope.method, "get_errors")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetErrors(alloc, id) };
         } else if (std.mem.eql(u8, envelope.method, "batch")) {
             return try self.handleBatch(alloc, envelope.id, envelope.params);
         }
@@ -2062,5 +2157,29 @@ pub const Dispatcher = struct {
 
     fn handleGetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
         return try rpc.response(alloc, id, protocol.ClipboardResult{ .text = self.ctx.clipboardText() });
+    }
+
+    /// `get_errors`: returns this connection's buffered failed-notification
+    /// records (oldest first) plus `dropped` -- how many were lost to a
+    /// full ring since the last call -- then drains the ring. Empty and
+    /// `dropped: 0` for a connection that never subscribed to `"error"`,
+    /// since nothing gets recorded in that case. See
+    /// `Dispatcher.recordError` and decisions.md's Error reporting section.
+    fn handleGetErrors(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        var entries: std.ArrayList(protocol.DispatchErrorEntry) = .empty;
+        defer entries.deinit(alloc);
+        var i: usize = 0;
+        while (i < self.error_ring_len) : (i += 1) {
+            const e = &self.error_ring[(self.error_ring_start + i) % error_ring_capacity];
+            try entries.append(alloc, .{ .method = e.method(), .code = e.code, .seq = e.seq });
+        }
+
+        const body = try rpc.response(alloc, id, protocol.ErrorsResult{ .errors = entries.items, .dropped = self.error_dropped });
+
+        // Drain: the reply is built, so these are now delivered.
+        self.error_ring_start = 0;
+        self.error_ring_len = 0;
+        self.error_dropped = 0;
+        return body;
     }
 };

@@ -1091,6 +1091,18 @@ pub const Client = struct {
         return try self.alloc.dupe(u8, parsed.value.result.text);
     }
 
+    /// `get_errors()` -- a request. Returns, and drains, this connection's
+    /// ring of recent failed notifications (see `ErrorReport`). Only
+    /// meaningful after `subscribe(&.{"error"})` on this same connection --
+    /// otherwise the server records nothing and this always comes back
+    /// empty. A notification (`writeText`, `destroyLayer`, ...) that the
+    /// server rejects is otherwise silent; poll this between batches of
+    /// work to notice one, and check `dropped` to see if the ring
+    /// overflowed since the last call.
+    pub fn getErrors(self: *Client) !ErrorReport {
+        return .{ .parsed = try self.request(protocol.ErrorsResult, "get_errors", .{}) };
+    }
+
     fn colorToJson(c: ?core.Color) ?protocol.Color {
         const v = c orelse return null;
         return .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a };
@@ -1486,6 +1498,28 @@ pub const CellsSnapshot = struct {
                 break :blk .narrow;
             },
         };
+    }
+};
+
+/// Owns the parsed JSON backing a `get_errors` response. `entries()` and
+/// each entry's strings borrow that arena, so keep the report alive while
+/// reading it; `deinit` frees it. See `Client.getErrors`.
+pub const ErrorReport = struct {
+    parsed: std.json.Parsed(ResponseOf(protocol.ErrorsResult)),
+
+    pub fn deinit(self: *ErrorReport) void {
+        self.parsed.deinit();
+    }
+
+    /// The buffered failed-notification records, oldest first.
+    pub fn entries(self: *const ErrorReport) []const protocol.DispatchErrorEntry {
+        return self.parsed.value.result.errors;
+    }
+
+    /// How many records were lost to a full ring since the previous
+    /// `get_errors` on this connection.
+    pub fn dropped(self: *const ErrorReport) u64 {
+        return self.parsed.value.result.dropped;
     }
 };
 

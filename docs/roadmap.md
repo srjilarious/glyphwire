@@ -1856,7 +1856,47 @@ forgot to tear down the layers it created.
   adopt unknown handle, in-process dispatcher bypasses the check);
   `client_tests.zig` +1 (real socket: create a layer, drop the
   connection, join the server thread as the barrier, assert the layer is
-  gone). 547 pass.
+  gone). 661 pass (with the error-ring entry below, rebased onto dev's
+  zoe / panes work).
+
+## Subscribe to `"error"`, pull failures with `get_errors`
+
+**Done.** A notification that fails in its handler is otherwise silent —
+no response, no severed connection, just a host-side log. A connection
+that calls `subscribe(["error", ...])` now gets its own failures
+recorded into a small ring, drained by a `get_errors` request. Grew out
+of the `destroy_layer` ownership check above: `LayerPermissionDenied` on
+a notification had nowhere to go.
+
+- **`dispatch.zig`** — `Subscriptions.error_events` (wire name `"error"`).
+  `Dispatcher` gains a fixed `[5]ErrorEntry` ring (`error_ring_capacity`,
+  exported) + start/len/seq/dropped counters — no allocator, no
+  `deinit`: `method` is copied into a 24-byte inline buffer, `code` is
+  the static `@errorName`. `dispatchEnvelope` is now a thin wrapper that
+  calls the renamed `dispatchCatalog` and, on error, calls `recordError`
+  when `envelope.id == null and subscriptions.error_events`; the error
+  still propagates so server.zig / `handleBatch` log and swallow it
+  exactly as before. `handleBatch` routes each sub-message through the
+  wrapper, so batched notification failures are recorded too. New
+  `get_errors` request → `handleGetErrors` returns
+  `{errors: [{method, code, seq}], dropped}` oldest-first and drains the
+  ring (start/len/dropped back to 0).
+- **`protocol.zig`** — `DispatchErrorEntry` + `ErrorsResult` (shared
+  shape, imported by both ends).
+- **`client.zig`** — `Client.getErrors` → `ErrorReport` (owns the parsed
+  response like `HighlightSnapshot`; `entries()` / `dropped()`). Enable
+  with the existing `Client.subscribe(&.{"error"})`.
+- **Decisions:** pull-only (fits the synchronous `Client`; a pushed
+  `error` frame would interleave with its request/response reads);
+  ring of 5, drop-oldest, `dropped` is the fell-behind signal; opt-in so
+  the default path is unchanged. See decisions.md's new Error reporting
+  section. This is the interim path until real JSON-RPC error responses
+  (Milestone 0).
+- **Tests:** `dispatch_tests.zig` +6 (subscribe sets the flag; nothing
+  recorded without the subscription; a failed `destroy_layer` shows up
+  with method/code/seq; `get_errors` drains; 7-into-5 drops the oldest
+  two and reports `dropped: 2` then resets; a batched failure is
+  recorded). 661 pass.
 
 ## Further out (sequencing noted, not detailed yet)
 
