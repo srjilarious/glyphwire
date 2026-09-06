@@ -4,6 +4,7 @@ const testz = @import("testz");
 // The engine-free pieces of glyphwire-host, reached through the
 // `host_support` module (see build.zig) -- no window, no GL. The engine
 // backend's own tests live in `host_eng_tests.zig`.
+const glyphwire = @import("glyphwire");
 const hs = @import("host_support");
 const geometry = hs.geometry;
 const config = hs.config;
@@ -143,4 +144,98 @@ pub fn keyRepeatResetReturnsToDelayTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(st.held_ms, 0.0);
     try testz.expectEqual(st.next_repeat_ms, key_repeat.key_repeat_delay_ms);
     try testz.expectFalse(st.tick(key_repeat.key_repeat_delay_ms - 1));
+}
+
+// ─── geometry.paneScrollbars ──────────────────────────────────────────
+
+const pane_rect: geometry.RectPx = .{ .x = 100, .y = 50, .w = 300, .h = 200 };
+
+fn barState(vertical: bool, horizontal: bool, row: usize, col: usize, max_row: usize, max_col: usize) glyphwire.ScrollbarState {
+    return .{
+        .vertical = vertical,
+        .horizontal = horizontal,
+        .row = row,
+        .col = col,
+        .max_row = max_row,
+        .max_col = max_col,
+    };
+}
+
+pub fn paneScrollbarsOmittedWhenNotOptedInTest(_: std.Io, _: std.mem.Allocator) !void {
+    const bars = geometry.paneScrollbars(pane_rect, barState(false, false, 0, 0, 100, 100), 30, 20, 130, 120);
+    try testz.expectTrue(bars.vertical == null);
+    try testz.expectTrue(bars.horizontal == null);
+}
+
+pub fn paneScrollbarsOmittedWhenNothingToScrollTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Opted in, but the viewport covers the content -- a bar that can't
+    // move shouldn't be drawn.
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, true, 0, 0, 0, 0), 30, 20, 30, 20);
+    try testz.expectTrue(bars.vertical == null);
+    try testz.expectTrue(bars.horizontal == null);
+}
+
+pub fn paneVerticalBarSitsOnTheRightEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 0, 0, 80, 0), 30, 20, 30, 100);
+    const v = bars.vertical.?;
+    try testz.expectEqual(v.track.x, 400.0 - geometry.pane_scrollbar_px);
+    try testz.expectEqual(v.track.y, 50.0);
+    // No horizontal bar to make room for, so the track is the full height.
+    try testz.expectEqual(v.track.h, 200.0);
+    // Viewport is 20 of 100 rows, so the thumb is a fifth of the track,
+    // flush at the top for offset 0.
+    try testz.expectEqual(v.thumb.h, 40.0);
+    try testz.expectEqual(v.thumb.y, 50.0);
+}
+
+pub fn paneVerticalThumbTravelsWithTheOffsetTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Fully scrolled: the thumb is flush at the bottom of its travel.
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 80, 0, 80, 0), 30, 20, 30, 100);
+    const v = bars.vertical.?;
+    try testz.expectEqual(v.thumb.y, 50.0 + 200.0 - 40.0);
+
+    // Halfway along.
+    const mid = geometry.paneScrollbars(pane_rect, barState(true, false, 40, 0, 80, 0), 30, 20, 30, 100);
+    try testz.expectEqual(mid.vertical.?.thumb.y, 50.0 + 80.0);
+}
+
+pub fn paneBarsMakeRoomForEachOtherTest(_: std.Io, _: std.mem.Allocator) !void {
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, true, 0, 0, 80, 70), 30, 20, 100, 100);
+    const v = bars.vertical.?;
+    const h = bars.horizontal.?;
+    // Each track stops short of the other so they don't overlap in the
+    // corner.
+    try testz.expectEqual(v.track.h, 200.0 - geometry.pane_scrollbar_px);
+    try testz.expectEqual(h.track.w, 300.0 - geometry.pane_scrollbar_px);
+    try testz.expectEqual(h.track.y, 50.0 + 200.0 - geometry.pane_scrollbar_px);
+}
+
+pub fn paneThumbNeverShrinksBelowTheMinimumTest(_: std.Io, _: std.mem.Allocator) !void {
+    // 20 rows visible out of 100_000: the honest fraction would be a
+    // fraction of a pixel, so the thumb is floored at something grabbable.
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 0, 0, 99_980, 0), 30, 20, 30, 100_000);
+    try testz.expectEqual(bars.vertical.?.thumb.h, geometry.scrollbar_min_thumb_px);
+}
+
+// ─── geometry.layerRect / cellRectPx ──────────────────────────────────
+
+pub fn layerRectCoversTheViewportNotTheContentTest(_: std.Io, _: std.mem.Allocator) !void {
+    geometry.cell_w = 10;
+    geometry.cell_h = 20;
+    // A pane at (40px, 60px) showing 30x15 cells of a much bigger grid.
+    const r = geometry.layerRect(.{ .x = 40, .y = 60 }, 30, 15);
+    try testz.expectEqual(r.x, 40.0 + @as(f32, @floatFromInt(geometry.content_pad_px)));
+    try testz.expectEqual(r.y, 60.0);
+    try testz.expectEqual(r.w, 300.0);
+    try testz.expectEqual(r.h, 300.0);
+}
+
+pub fn cellRectPxConvertsADividerBandTest(_: std.Io, _: std.mem.Allocator) !void {
+    geometry.cell_w = 10;
+    geometry.cell_h = 20;
+    const r = geometry.cellRectPx(.{ .row = 2, .col = 20, .cols = 1, .rows = 38 });
+    try testz.expectEqual(r.x, 200.0 + @as(f32, @floatFromInt(geometry.content_pad_px)));
+    try testz.expectEqual(r.y, 40.0);
+    try testz.expectEqual(r.w, 10.0);
+    try testz.expectEqual(r.h, 760.0);
 }

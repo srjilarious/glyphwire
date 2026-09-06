@@ -2485,3 +2485,365 @@ pub fn restackingRejectsUnknownHandlesIntactTest(io: std.Io, alloc: std.mem.Allo
     try ctx.raiseLayer(a, a);
     try testz.expectEqual(ctx.layer_order.items[0], a);
 }
+
+// ─── Layer viewport and scroll offset ───────────────────────────────────
+
+pub fn viewportDefaultsToTheWholeContentGridTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 40, 10, 0);
+    defer layer.deinit();
+
+    // Every layer that predates viewports behaves as one covering all of
+    // its content: nothing to scroll, no offset.
+    try testz.expectEqual(layer.viewportCols(), 40);
+    try testz.expectEqual(layer.viewportRows(), 10);
+    try testz.expectFalse(layer.scrollsAnywhere());
+    try testz.expectEqual(layer.maxScroll().row, 0);
+    try testz.expectEqual(layer.maxScroll().col, 0);
+}
+
+pub fn viewportClampsToTheContentTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 40, 10, 0);
+    defer layer.deinit();
+
+    // A viewport bigger than the content is pointless, so it's clamped --
+    // there's no scrolling into blank space.
+    layer.setProperty(.{ .viewport = .{ .cols = 100, .rows = 100 } });
+    try testz.expectEqual(layer.viewportCols(), 40);
+    try testz.expectEqual(layer.viewportRows(), 10);
+    try testz.expectFalse(layer.scrollsAnywhere());
+}
+
+pub fn viewportSmallerThanContentScrollsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // A file tree: 90 columns of names, 500 entries, shown 30x40 at a time.
+    var layer = try glyphwire.Layer.init(alloc, 90, 500, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .viewport = .{ .cols = 30, .rows = 40 } });
+
+    try testz.expectTrue(layer.scrollsAnywhere());
+    try testz.expectEqual(layer.maxScroll().row, 460);
+    try testz.expectEqual(layer.maxScroll().col, 60);
+}
+
+pub fn scrollOffsetClampsToMaxTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 90, 500, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .viewport = .{ .cols = 30, .rows = 40 } });
+
+    const landed = layer.setScrollOffset(.{ .row = 9999, .col = 9999 });
+    try testz.expectEqual(landed.row, 460);
+    try testz.expectEqual(landed.col, 60);
+    try testz.expectEqual(layer.scroll_off.row, 460);
+}
+
+pub fn scrollOffsetBySaturatesAtBothEndsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 100, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .viewport = .{ .cols = 20, .rows = 10 } });
+
+    _ = layer.scrollOffsetBy(5, 0);
+    try testz.expectEqual(layer.scroll_off.row, 5);
+    // Past the top is 0, not a wrap into a huge usize.
+    _ = layer.scrollOffsetBy(-50, 0);
+    try testz.expectEqual(layer.scroll_off.row, 0);
+    _ = layer.scrollOffsetBy(1000, 0);
+    try testz.expectEqual(layer.scroll_off.row, 90);
+}
+
+pub fn shrinkingContentReclampsScrollTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 100, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .viewport = .{ .cols = 20, .rows = 10 } });
+    _ = layer.setScrollOffset(.{ .row = 90 });
+
+    // The content shrank under the viewport; the offset can't stay past
+    // the end of it.
+    try layer.resize(20, 30);
+    try testz.expectEqual(layer.scroll_off.row, 20);
+
+    // Same when the viewport grows instead.
+    layer.setProperty(.{ .viewport = .{ .cols = 20, .rows = 25 } });
+    try testz.expectEqual(layer.scroll_off.row, 5);
+}
+
+pub fn scrollbarStateReportsDerivedMaximaTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 50, 200, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .viewport = .{ .cols = 20, .rows = 20 } });
+    layer.setProperty(.{ .scrollbars = .{
+        .vertical = true,
+        .horizontal = false,
+        .row = 0,
+        .col = 0,
+        .max_row = 0,
+        .max_col = 0,
+    } });
+    _ = layer.setScrollOffset(.{ .row = 7, .col = 3 });
+
+    const st = layer.scrollbarState();
+    try testz.expectTrue(st.vertical);
+    try testz.expectFalse(st.horizontal);
+    try testz.expectEqual(st.row, 7);
+    try testz.expectEqual(st.col, 3);
+    // Derived, never taken from what the client sent.
+    try testz.expectEqual(st.max_row, 180);
+    try testz.expectEqual(st.max_col, 30);
+}
+
+// ─── Split layout ───────────────────────────────────────────────────────
+
+/// The pane arrangement zoe uses: a tree beside a buffer, with a
+/// one-row statusline underneath both.
+fn buildEditorLayout(ctx: *glyphwire.Context) !struct {
+    root: glyphwire.SplitHandle,
+    panes: glyphwire.SplitHandle,
+    tree: glyphwire.LayerHandle,
+    buffer: glyphwire.LayerHandle,
+    status: glyphwire.LayerHandle,
+} {
+    const tree = try ctx.createLayer(30, 200, 0);
+    const buffer = try ctx.createLayer(200, 500, 0);
+    const status = try ctx.createLayer(200, 1, 0);
+
+    const panes = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(panes, &.{
+        .{ .target = .{ .layer = tree }, .size = .{ .fixed = 20 } },
+        .{ .target = .{ .layer = buffer }, .size = .{ .weight = 1 } },
+    });
+
+    const root = try ctx.createSplit(.column);
+    try ctx.setSplitChildren(root, &.{
+        .{ .target = .{ .split = panes }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .layer = status }, .size = .{ .fixed = 1 } },
+    });
+    try ctx.setRootSplit(root);
+
+    return .{ .root = root, .panes = panes, .tree = tree, .buffer = buffer, .status = status };
+}
+
+pub fn splitLayoutPlacesPanesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    const l = try buildEditorLayout(&ctx);
+
+    var changed: std.ArrayList(glyphwire.LayerBounds) = .empty;
+    defer changed.deinit(alloc);
+    try ctx.layoutSplits(&changed, null);
+
+    // Column split: the fixed 1-row statusline is measured first, the
+    // nested row split takes the other 38 (one row goes to the divider).
+    const status = ctx.layerPtr(l.status).?;
+    try testz.expectEqual(status.pos_cells.?.row, 39);
+    try testz.expectEqual(status.viewportRows(), 1);
+    try testz.expectEqual(status.viewportCols(), 100);
+
+    // Row split: a fixed 20-column tree, a divider, then the rest.
+    const tree = ctx.layerPtr(l.tree).?;
+    try testz.expectEqual(tree.pos_cells.?.col, 0);
+    try testz.expectEqual(tree.viewportCols(), 20);
+    try testz.expectEqual(tree.viewportRows(), 38);
+
+    const buffer = ctx.layerPtr(l.buffer).?;
+    try testz.expectEqual(buffer.pos_cells.?.col, 21);
+    try testz.expectEqual(buffer.viewportCols(), 79);
+    try testz.expectEqual(buffer.viewportRows(), 38);
+
+    try testz.expectEqual(changed.items.len, 3);
+}
+
+pub fn splitLayoutIsIdempotentTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    _ = try buildEditorLayout(&ctx);
+
+    var first: std.ArrayList(glyphwire.LayerBounds) = .empty;
+    defer first.deinit(alloc);
+    try ctx.layoutSplits(&first, null);
+    try testz.expectEqual(first.items.len, 3);
+
+    // Re-running with nothing changed reports nothing -- what makes it
+    // safe for the host to re-walk the tree for divider geometry alone.
+    var second: std.ArrayList(glyphwire.LayerBounds) = .empty;
+    defer second.deinit(alloc);
+    try ctx.layoutSplits(&second, null);
+    try testz.expectEqual(second.items.len, 0);
+}
+
+pub fn splitLayoutFollowsAWindowResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    const l = try buildEditorLayout(&ctx);
+    try ctx.layoutSplits(null, null);
+
+    try ctx.resize(60, 20);
+    var changed: std.ArrayList(glyphwire.LayerBounds) = .empty;
+    defer changed.deinit(alloc);
+    try ctx.layoutSplits(&changed, null);
+
+    const status = ctx.layerPtr(l.status).?;
+    try testz.expectEqual(status.pos_cells.?.row, 19);
+    try testz.expectEqual(status.viewportCols(), 60);
+
+    // The fixed tree keeps its 20 columns; the weighted buffer absorbs
+    // the loss, which is the whole point of the two sizing modes.
+    try testz.expectEqual(ctx.layerPtr(l.tree).?.viewportCols(), 20);
+    try testz.expectEqual(ctx.layerPtr(l.buffer).?.viewportCols(), 39);
+}
+
+pub fn splitDividersAreReportedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    _ = try buildEditorLayout(&ctx);
+
+    var dividers: std.ArrayList(glyphwire.DividerRect) = .empty;
+    defer dividers.deinit(alloc);
+    try ctx.layoutSplits(null, &dividers);
+
+    // One per split with two children: the vertical band between tree and
+    // buffer, and the horizontal one above the statusline.
+    try testz.expectEqual(dividers.items.len, 2);
+
+    var vertical_cols: usize = 0;
+    var horizontal_rows: usize = 0;
+    for (dividers.items) |d| switch (d.axis) {
+        .row => {
+            vertical_cols = d.rect.col;
+            try testz.expectEqual(d.rect.cols, 1);
+            try testz.expectEqual(d.rect.rows, 38);
+        },
+        .column => {
+            horizontal_rows = d.rect.row;
+            try testz.expectEqual(d.rect.rows, 1);
+            try testz.expectEqual(d.rect.cols, 100);
+        },
+    };
+    try testz.expectEqual(vertical_cols, 20);
+    try testz.expectEqual(horizontal_rows, 38);
+}
+
+pub fn moveDividerResizesAFixedPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    const l = try buildEditorLayout(&ctx);
+    try ctx.layoutSplits(null, null);
+
+    // Dragging the tree/buffer divider right by 6 cells: the tree is
+    // `fixed`, so its cell count changes and the weighted buffer absorbs
+    // the difference.
+    try ctx.moveDivider(l.panes, 0, 6);
+    try ctx.layoutSplits(null, null);
+    try testz.expectEqual(ctx.layerPtr(l.tree).?.viewportCols(), 26);
+    try testz.expectEqual(ctx.layerPtr(l.buffer).?.viewportCols(), 73);
+}
+
+pub fn moveDividerKeepsCombinedWeightTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 10, 0);
+    defer ctx.deinit();
+    const left = try ctx.createLayer(200, 10, 0);
+    const right = try ctx.createLayer(200, 10, 0);
+
+    const split = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(split, &.{
+        .{ .target = .{ .layer = left }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .layer = right }, .size = .{ .weight = 1 } },
+    });
+    try ctx.setRootSplit(split);
+    try ctx.layoutSplits(null, null);
+
+    // 99 usable columns, split evenly: 49 / 50.
+    try testz.expectEqual(ctx.layerPtr(left).?.viewportCols(), 49);
+
+    try ctx.moveDivider(split, 0, 20);
+    try ctx.layoutSplits(null, null);
+    const l_cols = ctx.layerPtr(left).?.viewportCols();
+    const r_cols = ctx.layerPtr(right).?.viewportCols();
+    try testz.expectEqual(l_cols, 69);
+    // The pair still fills the split exactly -- the combined weight was
+    // preserved, so nothing leaked out to the rest of the tree.
+    try testz.expectEqual(l_cols + r_cols, 99);
+}
+
+pub fn moveDividerWontSqueezeAPaneToNothingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 10, 0);
+    defer ctx.deinit();
+    const left = try ctx.createLayer(200, 10, 0);
+    const right = try ctx.createLayer(200, 10, 0);
+
+    const split = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(split, &.{
+        .{ .target = .{ .layer = left }, .size = .{ .fixed = 20 } },
+        .{ .target = .{ .layer = right }, .size = .{ .weight = 1 } },
+    });
+    try ctx.setRootSplit(split);
+    try ctx.layoutSplits(null, null);
+
+    // A pane dragged to zero could never be grabbed back, so the drag
+    // stops one cell short of that at each end.
+    try ctx.moveDivider(split, 0, -500);
+    try ctx.layoutSplits(null, null);
+    try testz.expectEqual(ctx.layerPtr(left).?.viewportCols(), 1);
+
+    try ctx.moveDivider(split, 0, 500);
+    try ctx.layoutSplits(null, null);
+    try testz.expectEqual(ctx.layerPtr(right).?.viewportCols(), 1);
+}
+
+pub fn destroyingTheRootSplitDropsTheLayoutTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    const l = try buildEditorLayout(&ctx);
+    try ctx.layoutSplits(null, null);
+
+    try ctx.destroySplit(l.root);
+    try testz.expectTrue(ctx.root_split == null);
+
+    // The layers survive their container, keeping the bounds they had --
+    // a destroyed split frees the arrangement, not the panes.
+    try testz.expectEqual(ctx.layerPtr(l.status).?.viewportRows(), 1);
+    try testz.expectTrue(ctx.layerPtr(l.tree) != null);
+
+    // And laying out again does nothing at all.
+    var changed: std.ArrayList(glyphwire.LayerBounds) = .empty;
+    defer changed.deinit(alloc);
+    try ctx.layoutSplits(&changed, null);
+    try testz.expectEqual(changed.items.len, 0);
+}
+
+pub fn splitRejectsUnknownHandlesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+
+    try testz.expectError(ctx.setRootSplit(77), error.UnknownSplit);
+    try testz.expectError(ctx.destroySplit(77), error.UnknownSplit);
+    try testz.expectError(ctx.setSplitChildren(77, &.{}), error.UnknownSplit);
+    try testz.expectTrue(ctx.root_split == null);
+}
+
+pub fn splitCycleStopsAtTheDepthCapTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+
+    // A split containing itself: the layout walk has to terminate rather
+    // than recurse until the stack runs out.
+    const split = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(split, &.{.{ .target = .{ .split = split } }});
+    try ctx.setRootSplit(split);
+    try ctx.layoutSplits(null, null);
+    try testz.expectTrue(ctx.splits.getPtr(split).?.laid_out);
+}

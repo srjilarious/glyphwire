@@ -83,6 +83,138 @@ pub fn scrollbarGeom(fb_w: i32, fb_h: i32, history_len: usize, height: usize, vi
     };
 }
 
+
+// ── Pane geometry ───────────────────────────────────────────────────────
+//
+// The block above is the *window's* scrollbar, hard against the right
+// edge and driven by the root layer's scrollback. Everything below is for
+// a layer's own bounds: a pane inside a split tree, drawn where the
+// layout put it, with its own scrollbars over its own content grid.
+
+/// A rectangle in window pixels.
+pub const RectPx = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+
+    pub fn contains(self: RectPx, px: f32, py: f32) bool {
+        return px >= self.x and px < self.x + self.w and
+            py >= self.y and py < self.y + self.h;
+    }
+};
+
+/// Thickness of a pane's scrollbar. Thinner than the window's own bar:
+/// it sits *inside* the content rather than in a reserved gutter, so it
+/// should cost as few columns of text as possible.
+pub const pane_scrollbar_px: f32 = 8;
+
+/// A pane scrollbar, ready to draw: the track and the thumb inside it.
+pub const PaneScrollbarGeom = struct {
+    track: RectPx,
+    thumb: RectPx,
+};
+
+/// Both of a pane's bars, either of which may be absent (not opted into,
+/// or nothing to scroll on that axis).
+pub const PaneScrollbars = struct {
+    vertical: ?PaneScrollbarGeom = null,
+    horizontal: ?PaneScrollbarGeom = null,
+};
+
+/// The window-pixel rect a layer's *viewport* occupies -- its position
+/// plus the content margin, sized by the viewport rather than the content
+/// grid behind it.
+pub fn layerRect(pos: glyphwire.PxPos, view_cols: usize, view_rows: usize) RectPx {
+    return .{
+        .x = @round(pos.x) + @as(f32, @floatFromInt(content_pad_px)),
+        .y = @round(pos.y),
+        .w = @floatFromInt(@as(i32, @intCast(view_cols)) * cell_w),
+        .h = @floatFromInt(@as(i32, @intCast(view_rows)) * cell_h),
+    };
+}
+
+/// A cell rectangle (a divider band, a pane) in window pixels.
+pub fn cellRectPx(rect: glyphwire.CellRect) RectPx {
+    return .{
+        .x = @as(f32, @floatFromInt(@as(i32, @intCast(rect.col)) * cell_w + content_pad_px)),
+        .y = @floatFromInt(@as(i32, @intCast(rect.row)) * cell_h),
+        .w = @floatFromInt(@as(i32, @intCast(rect.cols)) * cell_w),
+        .h = @floatFromInt(@as(i32, @intCast(rect.rows)) * cell_h),
+    };
+}
+
+/// Thumb extent and start along a track of `track_len` pixels: the thumb
+/// is the visible fraction of the content, positioned by how far `offset`
+/// has travelled toward `max`. Floored at `scrollbar_min_thumb_px` so a
+/// very long document still leaves something to grab.
+fn thumbSpan(track_len: f32, visible: usize, total: usize, offset: usize, max: usize) struct { start: f32, len: f32 } {
+    if (total == 0 or track_len <= 0) return .{ .start = 0, .len = track_len };
+    const frac = @as(f32, @floatFromInt(visible)) / @as(f32, @floatFromInt(total));
+    var len = track_len * frac;
+    len = std.math.clamp(len, @min(scrollbar_min_thumb_px, track_len), track_len);
+
+    const travel = @max(track_len - len, 0);
+    const start = if (max > 0)
+        travel * (@as(f32, @floatFromInt(offset)) / @as(f32, @floatFromInt(max)))
+    else
+        0;
+    return .{ .start = std.math.clamp(start, 0, travel), .len = len };
+}
+
+/// Where a pane's scrollbars sit inside `rect`.
+///
+/// `state` carries the opt-in flags and the offsets; `view_*` is the
+/// viewport in cells and `content_*` the content grid behind it. A bar is
+/// omitted when it wasn't opted into, or when the axis has nothing to
+/// scroll -- a pane wider than its content shouldn't grow a bar that
+/// can't move. When both are shown, each track stops short of the other
+/// so they don't overlap in the corner.
+pub fn paneScrollbars(
+    rect: RectPx,
+    state: glyphwire.ScrollbarState,
+    view_cols: usize,
+    view_rows: usize,
+    content_cols: usize,
+    content_rows: usize,
+) PaneScrollbars {
+    const want_v = state.vertical and state.max_row > 0;
+    const want_h = state.horizontal and state.max_col > 0;
+    if (!want_v and !want_h) return .{};
+
+    const v_inset: f32 = if (want_h) pane_scrollbar_px else 0;
+    const h_inset: f32 = if (want_v) pane_scrollbar_px else 0;
+
+    var out: PaneScrollbars = .{};
+    if (want_v) {
+        const track: RectPx = .{
+            .x = rect.x + rect.w - pane_scrollbar_px,
+            .y = rect.y,
+            .w = pane_scrollbar_px,
+            .h = @max(rect.h - v_inset, 0),
+        };
+        const span = thumbSpan(track.h, view_rows, content_rows, state.row, state.max_row);
+        out.vertical = .{
+            .track = track,
+            .thumb = .{ .x = track.x, .y = track.y + span.start, .w = track.w, .h = span.len },
+        };
+    }
+    if (want_h) {
+        const track: RectPx = .{
+            .x = rect.x,
+            .y = rect.y + rect.h - pane_scrollbar_px,
+            .w = @max(rect.w - h_inset, 0),
+            .h = pane_scrollbar_px,
+        };
+        const span = thumbSpan(track.w, view_cols, content_cols, state.col, state.max_col);
+        out.horizontal = .{
+            .track = track,
+            .thumb = .{ .x = track.x + span.start, .y = track.y, .w = span.len, .h = track.h },
+        };
+    }
+    return out;
+}
+
 /// Converts a pixel position (window-local, matching what
 /// `eng.inputs.mouse.pos()` reports since host doesn't set a scaled
 /// `logicalSize`) to a grid cell position, clamped to the grid bounds.

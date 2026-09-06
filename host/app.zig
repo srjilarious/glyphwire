@@ -10,6 +10,7 @@ const scroll_mod = @import("scroll.zig");
 const window_sizing_mod = @import("window_sizing.zig");
 const preedit_mod = @import("preedit.zig");
 const render_mod = @import("render.zig");
+const panes_mod = @import("panes.zig");
 
 const CursorConfig = config.CursorConfig;
 
@@ -101,6 +102,7 @@ pub const App = struct {
     preedit: preedit_mod.Preedit,
     selection: selection_mod.Selection,
     scroll: scroll_mod.Scroll,
+    panes: panes_mod.Panes,
     window_sizing: window_sizing_mod.WindowSizing,
     renderer: render_mod.Renderer,
 
@@ -131,6 +133,7 @@ pub const App = struct {
             .preedit = .{ .app = undefined },
             .selection = .{ .app = undefined },
             .scroll = .{ .app = undefined },
+            .panes = .{ .app = undefined },
             .window_sizing = .{
                 .app = undefined,
                 .font_path = font.path,
@@ -152,6 +155,7 @@ pub const App = struct {
         app.preedit.app = app;
         app.selection.app = app;
         app.scroll.app = app;
+        app.panes.app = app;
         app.window_sizing.app = app;
         app.renderer.app = app;
 
@@ -167,6 +171,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.panes.deinit();
         self.renderer.deinit();
         self.alloc.destroy(self);
     }
@@ -198,9 +203,18 @@ pub const App = struct {
         // drag that belongs to it is consumed here so `reportMouseEvents`
         // doesn't also forward it to the grid as a click. Mouse
         // drag-selection gets second refusal, for the same reason.
-        const scrollbar_took_left = self.scroll.handleScrollbar(eng);
-        const select_took_left = self.selection.handleMouseSelection(eng, scrollbar_took_left);
-        self.keys.reportMouseEvents(eng, scrollbar_took_left or select_took_left);
+        // A divider drag gets first refusal of all: it sits *over* the
+        // panes, so a press on the band between two of them is a resize,
+        // never a click into either.
+        const divider_took_left = self.panes.handleMouse(eng);
+        // Then a pane's own scrollbar, which sits inside a pane and so
+        // covers the window bar wherever the two overlap.
+        const pane_bar_took_left = !divider_took_left and self.scroll.handlePaneScrollbar(eng);
+        const chrome_took_left = divider_took_left or pane_bar_took_left;
+        const scrollbar_took_left = !chrome_took_left and self.scroll.handleScrollbar(eng);
+        const took_left = chrome_took_left or scrollbar_took_left;
+        const select_took_left = self.selection.handleMouseSelection(eng, took_left);
+        self.keys.reportMouseEvents(eng, took_left or select_took_left);
         self.keys.handleRepeatKeys(eng, deltaTimeMs);
         self.scroll.handleScroll(eng);
         // When a full-screen program takes the screen, drop any scrollback

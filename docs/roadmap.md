@@ -1740,6 +1740,67 @@ The UI is not wired up yet — that's phase 2.
   `core_tests.zig` +8 and `dispatch_tests.zig` +6 for the layer
   properties and restacking. 599 pass.
 
+## Panes: content vs. viewport, per-layer scrolling, and a split tree
+
+**Done (phase 2's protocol half — see
+`docs/investigations/zoe-editor.md`).** Everything a multi-pane TUI needs
+from the host that the earlier layer properties didn't cover: a pane that
+shows part of its content, scrollbars per pane, and a server-side pane
+tree with draggable dividers.
+
+- **`viewport` + `scroll_offset`** — a layer's cell grid is its
+  *content*; `viewport` (`{cols, rows}`, zero = all of it) is the window
+  the host draws, and `scroll_offset` (`{row, col}`) is where that window
+  sits. A file tree becomes a 90×500 layer shown through a 30×40
+  viewport instead of a 30×40 layer the client rewrites per scroll tick.
+  Clamped server-side to `size - viewport`; re-clamped on a `resize` or a
+  viewport change. `host/render.zig`'s `rebuildLayer` walks the viewport
+  instead of the whole grid (the selection tint had to learn the same
+  offset), and nothing changes for a layer without one.
+- **Deliberately a separate axis from `scroll`** — that one stays the
+  terminal scrollback ring (live-tail anchored, `history_len` maximum).
+  The two compose; a pane with `scrollback_rows: 0` only uses the new
+  one. Collapsing them would have rewritten glyphwire-shell's browse
+  cursor for no gain.
+- **`scrollbars`** — opt-in per axis, drawn inside the layer's own
+  bounds, vertical *and* horizontal (long filenames in a tree are the
+  case that motivated horizontal). `geometry.paneScrollbars` is the pure
+  geometry; `Scroll.handlePaneScrollbar` owns thumb drag and track
+  paging; the wheel routes to the topmost scrollable pane under the
+  pointer (`panes.scrollablePaneAt`) and falls through to the root layer
+  when there isn't one. Shift+wheel is horizontal. The window's own
+  right-edge bar is untouched.
+- **Split tree** — `create_split` (`row` / `column`), `set_split_children`,
+  `set_root_split`, `destroy_split`, `move_divider`. Children are sized
+  by `weight` (a share of the remainder) or `fixed` (exact cells), fixed
+  measured first — that's what lets a one-row statusline sit beside a
+  pane that takes "the rest". `Context.layoutSplits` computes every
+  pane's `cell_position` + `viewport`, optionally collecting the changed
+  bounds and the divider bands in the same walk; a cycle stops at
+  `max_split_depth`. The root layer is never a child: panes cover it, and
+  the shell's scrollback is intact underneath when they go away.
+- **`host/panes.zig`** (new) — the host's side of the tree: a divider
+  cache keyed on `Context.layout_gen`, hit-testing, and the drag, which
+  tracks total travel from the grab point (not per-frame deltas) so a
+  clamped drag still tracks the pointer on the way back. Dividers get
+  first refusal of the left button, ahead of pane scrollbars, the window
+  scrollbar and selection.
+- **`layout` notification** — one per re-layout for the whole tree, only
+  the panes that moved, silent when nothing did. Its own subscription;
+  `scroll_offset` rides the existing `"scroll"` one.
+  `InputListener.pollLayoutEvent` / `pollScrollOffsetEvent` are the
+  client-side consumers (the layout event owns its slice).
+- **Tests:** `core_tests.zig` +17 (viewport clamping, scroll saturation,
+  re-clamp on resize, the editor pane arrangement's exact geometry,
+  idempotent re-layout, resize behaviour of fixed vs. weighted children,
+  divider rects, both `move_divider` modes and its minimum-pane clamp,
+  destroy semantics, a self-referential split); `dispatch_tests.zig` +10
+  (each property over the wire, server-side clamping, the split messages
+  and their `layout` broadcast, malformed children, unknown handles,
+  subscriptions); `host_tests.zig` +8 (`paneScrollbars` thumb size and
+  travel, both-bars insets, the minimum thumb, `layerRect` /
+  `cellRectPx`). 634 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

@@ -33,6 +33,12 @@ pub const DispatchError = error{
     InvalidTableOption,
     TableRowShapeMismatch,
     UnsupportedImageFormat,
+    UnknownSplit,
+    /// `create_split`'s `axis` wasn't `"row"` or `"column"`.
+    InvalidSplitAxis,
+    /// A `set_split_children` entry named both a layer and a split, or
+    /// neither.
+    InvalidSplitChild,
 };
 
 const Envelope = struct {
@@ -87,6 +93,8 @@ const PropertyParams = struct {
     cols: usize = 0,
     rows: usize = 0,
     visible: bool = true,
+    vertical: bool = false,
+    horizontal: bool = false,
 };
 
 const CursorResult = struct { row: usize, col: usize };
@@ -96,6 +104,15 @@ const CellPositionResult = struct { row: usize, col: usize };
 const SizeResult = struct { cols: usize, rows: usize };
 const ScrollResult = struct { offset: usize, max: usize };
 const VisibilityResult = struct { visible: bool };
+const ScrollOffsetResult = struct { row: usize, col: usize, max_row: usize, max_col: usize };
+const ScrollbarsResult = struct {
+    vertical: bool,
+    horizontal: bool,
+    row: usize,
+    col: usize,
+    max_row: usize,
+    max_col: usize,
+};
 
 /// `scroll_view` params: `offset` (absolute target, rows) and/or `delta`
 /// (added after), both optional -- omitting both is a pure query. See
@@ -140,6 +157,41 @@ const RaiseLayerParams = struct {
 const LowerLayerParams = struct {
     layer: core.LayerHandle,
     below: ?core.LayerHandle = null,
+};
+
+const CreateSplitParams = struct {
+    /// `"row"` (children left to right) or `"column"` (top to bottom).
+    axis: []const u8,
+};
+
+const CreateSplitResult = struct { handle: core.SplitHandle };
+
+const DestroySplitParams = struct { split: core.SplitHandle };
+
+/// One entry of `set_split_children`. `layer` and `split` are the two
+/// possible targets and exactly one must be given; `weight` and `fixed`
+/// are the two possible sizes and at most one (defaulting to an equal
+/// weight). Four optional fields rather than a tagged shape because
+/// that's what JSON round-trips cleanly through `parseFromValue` without
+/// a custom parser -- the validation is here instead.
+const SplitChildParams = struct {
+    layer: ?core.LayerHandle = null,
+    split: ?core.SplitHandle = null,
+    weight: ?f32 = null,
+    fixed: ?usize = null,
+};
+
+const SetSplitChildrenParams = struct {
+    split: core.SplitHandle,
+    children: []const SplitChildParams,
+};
+
+const SetRootSplitParams = struct { split: ?core.SplitHandle = null };
+
+const MoveDividerParams = struct {
+    split: core.SplitHandle,
+    index: usize,
+    delta: i64,
 };
 
 const CreateMetadataParams = struct {
@@ -410,8 +462,17 @@ pub const Subscriptions = struct {
     /// `scroll` server->client notifications (`{offset, max}`), sent when
     /// the root layer's scrollback view offset moves -- see
     /// `Server.reportScroll` (mouse wheel / scrollbar) and
-    /// `handleScrollView` (another client's browse cursor).
+    /// `handleScrollView` (another client's browse cursor). Also covers
+    /// `scroll_offset` (a *layer's* viewport moving over its content
+    /// grid): one flag, because a client that wants to know when the view
+    /// moved wants both kinds.
     scroll: bool = false,
+    /// `layout` server->client notifications, sent when the split tree is
+    /// re-laid-out and some pane's bounds changed -- a window resize or a
+    /// divider drag. Its own flag rather than folding into `resize`: the
+    /// payload is per-layer bounds, and a client with no panes shouldn't
+    /// have to parse them.
+    layout: bool = false,
     /// `selection` server->client notifications (`SelectionState`), sent
     /// when a layer's selection changes -- see `handleSetSelection` and
     /// `Server.setSelection`.
@@ -434,6 +495,8 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "mouse_move")) return self.mouse_move;
         if (std.mem.eql(u8, event, "resize")) return self.resize;
         if (std.mem.eql(u8, event, "scroll")) return self.scroll;
+        if (std.mem.eql(u8, event, "scroll_offset")) return self.scroll;
+        if (std.mem.eql(u8, event, "layout")) return self.layout;
         if (std.mem.eql(u8, event, "selection")) return self.selection;
         if (std.mem.eql(u8, event, "clipboard")) return self.clipboard;
         if (std.mem.eql(u8, event, "terminal")) return self.terminal;
@@ -449,6 +512,8 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "mouse_move")) s.mouse_move = true;
             if (std.mem.eql(u8, e, "resize")) s.resize = true;
             if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
+            if (std.mem.eql(u8, e, "scroll_offset")) s.scroll = true;
+            if (std.mem.eql(u8, e, "layout")) s.layout = true;
             if (std.mem.eql(u8, e, "selection")) s.selection = true;
             if (std.mem.eql(u8, e, "clipboard")) s.clipboard = true;
             if (std.mem.eql(u8, e, "terminal")) s.terminal = true;
@@ -575,6 +640,17 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "destroy_layer")) {
             try self.handleDestroyLayer(alloc, envelope.params);
             return .{};
+        } else if (std.mem.eql(u8, envelope.method, "create_split")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleCreateSplit(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "destroy_split")) {
+            return try self.handleDestroySplit(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "set_split_children")) {
+            return try self.handleSetSplitChildren(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "set_root_split")) {
+            return try self.handleSetRootSplit(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "move_divider")) {
+            return try self.handleMoveDivider(alloc, envelope.params);
         } else if (std.mem.eql(u8, envelope.method, "raise_layer")) {
             try self.handleRaiseLayer(alloc, envelope.params);
             return .{};
@@ -870,6 +946,22 @@ pub const Dispatcher = struct {
             .{ .size = .{ .cols = p.cols, .rows = p.rows } }
         else if (std.mem.eql(u8, p.property, "visibility"))
             .{ .visibility = p.visible }
+        else if (std.mem.eql(u8, p.property, "viewport"))
+            .{ .viewport = .{ .cols = p.cols, .rows = p.rows } }
+        else if (std.mem.eql(u8, p.property, "scroll_offset"))
+            .{ .scroll_offset = .{ .row = p.row, .col = p.col } }
+        else if (std.mem.eql(u8, p.property, "scrollbars"))
+            // The other four `ScrollbarState` fields are derived, so
+            // whatever a client sends for them is ignored -- see
+            // `core.PropertyName.scrollbars`.
+            .{ .scrollbars = .{
+                .vertical = p.vertical,
+                .horizontal = p.horizontal,
+                .row = 0,
+                .col = 0,
+                .max_row = 0,
+                .max_col = 0,
+            } }
         else
             return DispatchError.UnknownProperty;
 
@@ -916,6 +1008,28 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "visibility")) {
             const visible = layer.getProperty(.visibility).visibility;
             return try rpc.response(alloc, id, VisibilityResult{ .visible = visible });
+        } else if (std.mem.eql(u8, p.property, "viewport")) {
+            const vp = layer.getProperty(.viewport).viewport;
+            return try rpc.response(alloc, id, SizeResult{ .cols = vp.cols, .rows = vp.rows });
+        } else if (std.mem.eql(u8, p.property, "scroll_offset")) {
+            const off = layer.getProperty(.scroll_offset).scroll_offset;
+            const max = layer.maxScroll();
+            return try rpc.response(alloc, id, ScrollOffsetResult{
+                .row = off.row,
+                .col = off.col,
+                .max_row = max.row,
+                .max_col = max.col,
+            });
+        } else if (std.mem.eql(u8, p.property, "scrollbars")) {
+            const sb = layer.getProperty(.scrollbars).scrollbars;
+            return try rpc.response(alloc, id, ScrollbarsResult{
+                .vertical = sb.vertical,
+                .horizontal = sb.horizontal,
+                .row = sb.row,
+                .col = sb.col,
+                .max_row = sb.max_row,
+                .max_col = sb.max_col,
+            });
         } else if (std.mem.eql(u8, p.property, "size")) {
             const sz = layer.getProperty(.size).size;
             return try rpc.response(alloc, id, SizeResult{ .cols = sz.cols, .rows = sz.rows });
@@ -949,6 +1063,103 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         self.ctx.destroyLayer(parsed.value.layer) catch return DispatchError.UnknownLayer;
+    }
+
+    /// Re-lays-out the split tree and, if any pane's bounds moved, builds
+    /// the `layout` broadcast for it. Every split mutation ends here, so
+    /// a client never has to ask what the change did to its panes.
+    fn relayout(self: *Dispatcher, alloc: std.mem.Allocator) !HandleResult {
+        var changed: std.ArrayList(core.LayerBounds) = .empty;
+        defer changed.deinit(alloc);
+        // `layoutSplits` appends through the context's allocator, which is
+        // the same one the server hands dispatch.
+        try self.ctx.layoutSplits(&changed, null);
+        if (changed.items.len == 0) return .{};
+
+        const bounds = try alloc.alloc(protocol.LayoutBounds, changed.items.len);
+        defer alloc.free(bounds);
+        for (changed.items, 0..) |b, i| {
+            bounds[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+        }
+        const body = try rpc.layoutNotification(alloc, bounds);
+        return .{ .broadcast = .{ .event = "layout", .body = body } };
+    }
+
+    fn handleCreateSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(CreateSplitParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        const axis = std.meta.stringToEnum(core.SplitAxis, parsed.value.axis) orelse
+            return DispatchError.InvalidSplitAxis;
+        const split_handle = try self.ctx.createSplit(axis);
+        return try rpc.response(alloc, id, CreateSplitResult{ .handle = split_handle });
+    }
+
+    fn handleDestroySplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(DestroySplitParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.destroySplit(parsed.value.split) catch return DispatchError.UnknownSplit;
+        return try self.relayout(alloc);
+    }
+
+    fn handleSetSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(SetSplitChildrenParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const children = try alloc.alloc(core.SplitChild, p.children.len);
+        defer alloc.free(children);
+        for (p.children, 0..) |c, i| {
+            // Exactly one target; naming both (or neither) is a malformed
+            // child rather than something to guess at.
+            const target: core.SplitChild.Target = if (c.layer) |h| blk: {
+                if (c.split != null) return DispatchError.InvalidSplitChild;
+                break :blk .{ .layer = h };
+            } else if (c.split) |h|
+                .{ .split = h }
+            else
+                return DispatchError.InvalidSplitChild;
+
+            const size: core.SplitChild.Size = if (c.fixed) |f|
+                .{ .fixed = f }
+            else if (c.weight) |w|
+                .{ .weight = w }
+            else
+                .{ .weight = 1 };
+
+            children[i] = .{ .target = target, .size = size };
+        }
+
+        self.ctx.setSplitChildren(p.split, children) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => DispatchError.UnknownSplit,
+        };
+        return try self.relayout(alloc);
+    }
+
+    fn handleSetRootSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(SetRootSplitParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.setRootSplit(parsed.value.split) catch return DispatchError.UnknownSplit;
+        return try self.relayout(alloc);
+    }
+
+    fn handleMoveDivider(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(MoveDividerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        self.ctx.moveDivider(p.split, p.index, p.delta) catch return DispatchError.UnknownSplit;
+        return try self.relayout(alloc);
     }
 
     /// `raise_layer`: restacks a layer toward the top of the compositing

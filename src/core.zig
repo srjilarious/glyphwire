@@ -758,6 +758,27 @@ pub const LayerSize = struct { cols: usize, rows: usize };
 /// retained in total. `offset == 0` is the live tail.
 pub const LayerScroll = struct { offset: usize, max: usize };
 
+/// How much of a layer's content grid the host actually draws -- see
+/// `PropertyName.viewport`. Zero on an axis means "all of it", which is
+/// every layer that existed before viewports did.
+pub const Viewport = struct { cols: usize, rows: usize };
+
+/// Which scrollbars glyphwire-host draws for a layer, and how far each
+/// one can travel. `max_row`/`max_col` are derived (content minus
+/// viewport) rather than set, so a client can't put the thumb somewhere
+/// the content doesn't go.
+pub const ScrollbarState = struct {
+    vertical: bool,
+    horizontal: bool,
+    row: usize,
+    col: usize,
+    max_row: usize,
+    max_col: usize,
+};
+
+/// Opt-in per axis -- see `PropertyName.scrollbars`.
+pub const Scrollbars = struct { vertical: bool = false, horizontal: bool = false };
+
 pub const PropertyName = enum {
     cursor,
     /// Bumped once per `writeText` call; a cheap poll a renderer client can
@@ -813,6 +834,44 @@ pub const PropertyName = enum {
     /// `destroy_layer` refuses it, so root reports
     /// `PropertyError.ReadOnlyProperty`.
     visibility,
+    /// The window of this layer's **content grid** that glyphwire-host
+    /// draws, in cells (`{cols, rows}`). Zero on an axis means the whole
+    /// content grid on that axis -- the default, and what every layer did
+    /// before this existed, so the concept costs nothing until a client
+    /// asks for it.
+    ///
+    /// This is what makes a pane distinct from its content: a file tree
+    /// with 500 entries and a longest name of 90 columns is a 90x500
+    /// layer (`size`) shown through a 30x40 viewport, and the host scrolls
+    /// the window over it. The alternative -- the client redrawing 40 rows
+    /// on every scroll tick -- puts a wire round trip in the middle of a
+    /// mouse wheel.
+    ///
+    /// A viewport larger than the content is clamped to the content, so
+    /// there is no way to scroll into blank space.
+    viewport,
+    /// Where the `viewport` sits within the content grid (`{row, col}`),
+    /// clamped to `size - viewport` on each axis. This is the layer's
+    /// scroll position, and the host moves it directly on a wheel tick or
+    /// a scrollbar drag (broadcasting `scroll_offset`) rather than asking
+    /// the client to.
+    ///
+    /// Distinct from `scroll`, which is the *scrollback ring* view --
+    /// how far back into a terminal-style history the live viewport is
+    /// looking. The two compose: `scroll` picks which rows are live,
+    /// `scroll_offset` picks the window over them. A layer created with
+    /// `scrollback_rows: 0` (every pane in a TUI) only ever uses this one.
+    scroll_offset,
+    /// Which scrollbars the host draws inside this layer's bounds
+    /// (`{vertical, horizontal}`), opt-in per axis. Get returns the full
+    /// `ScrollbarState` -- the two flags plus the current offset and its
+    /// maximum on each axis, which is everything needed to draw or
+    /// interpret a bar.
+    ///
+    /// Opt-in rather than automatic: a statusline or a popup can easily
+    /// have content wider than its pane and should still not sprout a
+    /// scrollbar.
+    scrollbars,
 };
 
 pub const PropertyValue = union(PropertyName) {
@@ -823,6 +882,9 @@ pub const PropertyValue = union(PropertyName) {
     size: LayerSize,
     scroll: LayerScroll,
     visibility: bool,
+    viewport: Viewport,
+    scroll_offset: CellPos,
+    scrollbars: ScrollbarState,
 };
 
 pub const PropertyError = error{
@@ -1088,6 +1150,17 @@ pub const Layer = struct {
     /// See `PropertyName.visibility`. Always true for the root layer --
     /// nothing can set it there.
     visible: bool = true,
+    /// See `PropertyName.viewport`. 0 on an axis means the whole content
+    /// grid on that axis; read them through `viewportCols`/`viewportRows`,
+    /// which resolve the default and clamp to the content.
+    viewport_cols: usize = 0,
+    viewport_rows: usize = 0,
+    /// See `PropertyName.scroll_offset` -- the viewport's top-left within
+    /// the content grid. Always within `maxScroll` (every writer goes
+    /// through `setScrollOffset`, and `resize` re-clamps).
+    scroll_off: CellPos = .{},
+    /// See `PropertyName.scrollbars`.
+    scrollbars: Scrollbars = .{},
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Layer {
         const total_rows = height + scrollback_rows;
@@ -1117,6 +1190,76 @@ pub const Layer = struct {
 
     pub fn capacity(self: *const Layer) usize {
         return self.height + self.scrollback_rows;
+    }
+
+    /// Drawn width in cells: the viewport if one is set, else the whole
+    /// content grid -- never more than the content, so there is no
+    /// scrolling into blank space.
+    pub fn viewportCols(self: *const Layer) usize {
+        if (self.viewport_cols == 0) return self.width;
+        return @min(self.viewport_cols, self.width);
+    }
+
+    /// Drawn height in cells -- see `viewportCols`.
+    pub fn viewportRows(self: *const Layer) usize {
+        if (self.viewport_rows == 0) return self.height;
+        return @min(self.viewport_rows, self.height);
+    }
+
+    /// The largest legal `scroll_off` on each axis: how much content the
+    /// viewport can't show at once. Both zero when the viewport covers
+    /// the whole content, which is what makes `scrollsAnywhere` false and
+    /// leaves the scrollbars inert.
+    pub fn maxScroll(self: *const Layer) CellPos {
+        return .{
+            .row = self.height - self.viewportRows(),
+            .col = self.width - self.viewportCols(),
+        };
+    }
+
+    /// Whether either axis has content the viewport can't reach.
+    pub fn scrollsAnywhere(self: *const Layer) bool {
+        const max = self.maxScroll();
+        return max.row > 0 or max.col > 0;
+    }
+
+    /// Moves the viewport, clamped to `maxScroll`, and returns where it
+    /// landed. The single writer for `scroll_off` -- the wheel, a
+    /// scrollbar drag and `set_property` all come through here, so the
+    /// clamp can't be bypassed.
+    pub fn setScrollOffset(self: *Layer, off: CellPos) CellPos {
+        const max = self.maxScroll();
+        const next: CellPos = .{ .row = @min(off.row, max.row), .col = @min(off.col, max.col) };
+        if (next.row != self.scroll_off.row or next.col != self.scroll_off.col) {
+            self.scroll_off = next;
+            self.touchRender();
+        }
+        return next;
+    }
+
+    /// Relative move, saturating at both ends -- what a wheel tick and an
+    /// arrow key both want.
+    pub fn scrollOffsetBy(self: *Layer, d_row: i64, d_col: i64) CellPos {
+        const row: i64 = @as(i64, @intCast(self.scroll_off.row)) + d_row;
+        const col: i64 = @as(i64, @intCast(self.scroll_off.col)) + d_col;
+        return self.setScrollOffset(.{
+            .row = @intCast(@max(row, 0)),
+            .col = @intCast(@max(col, 0)),
+        });
+    }
+
+    /// Everything the host needs to draw this layer's scrollbars, and the
+    /// answer to `get_property(layer, "scrollbars")`.
+    pub fn scrollbarState(self: *const Layer) ScrollbarState {
+        const max = self.maxScroll();
+        return .{
+            .vertical = self.scrollbars.vertical,
+            .horizontal = self.scrollbars.horizontal,
+            .row = self.scroll_off.row,
+            .col = self.scroll_off.col,
+            .max_row = max.row,
+            .max_col = max.col,
+        };
     }
 
     /// Marks this layer's composited output stale so glyphwire-host
@@ -1364,6 +1507,9 @@ pub const Layer = struct {
         self.scroll_bot = new_height - 1;
         if (self.stashed_cursor.row >= new_height) self.stashed_cursor.row = new_height - 1;
         if (self.stashed_cursor.col >= new_width) self.stashed_cursor.col = new_width - 1;
+        // A smaller content grid can leave the viewport parked past the
+        // end of it (see `maxScroll`).
+        _ = self.setScrollOffset(self.scroll_off);
         self.touchRender();
     }
 
@@ -2324,6 +2470,9 @@ pub const Layer = struct {
             .size => .{ .size = .{ .cols = self.width, .rows = self.height } },
             .scroll => .{ .scroll = .{ .offset = self.view_scroll, .max = self.history_len } },
             .visibility => .{ .visibility = self.visible },
+            .viewport => .{ .viewport = .{ .cols = self.viewportCols(), .rows = self.viewportRows() } },
+            .scroll_offset => .{ .scroll_offset = self.scroll_off },
+            .scrollbars => .{ .scrollbars = self.scrollbarState() },
         };
     }
 
@@ -2340,6 +2489,15 @@ pub const Layer = struct {
             .size => unreachable, // reallocates and is root-guarded; see Context.setLayerProperty
             .scroll => unreachable, // get-only; move it with scrollView, see PropertyName.scroll
             .visibility => |v| self.visible = v,
+            .viewport => |v| {
+                self.viewport_cols = v.cols;
+                self.viewport_rows = v.rows;
+                // A smaller content window can strand the scroll offset
+                // past its new maximum.
+                _ = self.setScrollOffset(self.scroll_off);
+            },
+            .scroll_offset => |off| _ = self.setScrollOffset(off),
+            .scrollbars => |sb| self.scrollbars = .{ .vertical = sb.vertical, .horizontal = sb.horizontal },
         }
         // `.position` moves where the layer composites; `.cursor` can scroll
         // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
@@ -3128,7 +3286,15 @@ pub const PxPos = struct { x: f32 = 0, y: f32 = 0 };
 /// size -- see decisions.md's Cell/Layer sections. Whoever reports it
 /// (glyphwire-host, which owns the font/cell metrics) computes this, not
 /// the headless server -- see `InputState`'s doc comment.
-pub const CellPos = struct { row: usize = 0, col: usize = 0 };
+pub const CellPos = struct {
+    row: usize = 0,
+    col: usize = 0,
+
+    /// A signed cell offset -- what a wheel tick or an arrow key applies
+    /// to a scroll position. Separate from `CellPos` because a position
+    /// can't be negative but a movement can.
+    pub const Delta = struct { row: i64 = 0, col: i64 = 0 };
+};
 
 /// Authoritative input state for a session: which keys/mouse buttons are
 /// currently down, and the last known cursor position. Belongs on
@@ -3239,6 +3405,108 @@ pub fn iconName(rel_path: []const u8) ?[]const u8 {
     return rel_path[0 .. rel_path.len - ".png".len];
 }
 
+
+// ─── Splits ─────────────────────────────────────────────────────────────
+//
+// A split tree is the host's answer to "where do the panes go". A client
+// that wants a sidebar beside a buffer beside a statusline describes the
+// arrangement once; the host computes every layer's bounds from it, keeps
+// them correct across a window resize, and owns the divider drag. See
+// decisions.md's Layer section for why this lives server-side rather than
+// each TUI re-implementing pane math.
+//
+// The tree lays out over the whole context. The **root layer is never a
+// split child** -- it is the shell's scrollback, drawn underneath at a
+// fixed origin, and a full-screen program's panes simply cover it (the
+// alt-screen story, without needing `create_context`).
+
+pub const SplitHandle = u32;
+
+pub const SplitError = error{
+    UnknownSplit,
+    /// A split named itself, directly or through a cycle, and the layout
+    /// walk hit `max_split_depth`.
+    SplitTooDeep,
+};
+
+/// Which way a split's children run.
+pub const SplitAxis = enum {
+    /// Left to right, separated by vertical dividers.
+    row,
+    /// Top to bottom, separated by horizontal dividers.
+    column,
+};
+
+/// A rectangle in grid cells.
+pub const CellRect = struct {
+    row: usize = 0,
+    col: usize = 0,
+    cols: usize = 0,
+    rows: usize = 0,
+
+    pub fn contains(self: CellRect, row: usize, col: usize) bool {
+        return row >= self.row and row < self.row + self.rows and
+            col >= self.col and col < self.col + self.cols;
+    }
+};
+
+/// One child of a split: what to place, and how big it is along the
+/// parent's axis.
+pub const SplitChild = struct {
+    target: Target,
+    size: Size = .{ .weight = 1 },
+
+    pub const Target = union(enum) { layer: LayerHandle, split: SplitHandle };
+
+    /// `fixed` children are measured first and `weight` children share
+    /// what's left. That's what lets a one-row statusline sit beside a
+    /// pane that takes "the rest" without the client recomputing a
+    /// fraction every time the window changes height.
+    pub const Size = union(enum) { weight: f32, fixed: usize };
+};
+
+pub const Split = struct {
+    axis: SplitAxis,
+    children: std.ArrayList(SplitChild) = .empty,
+    /// The cell rect this split occupied at the last `layoutSplits`.
+    /// `moveDivider` needs it to turn a drag in cells back into sizes,
+    /// and there is nowhere else to get it: a split has no size of its
+    /// own until the tree is laid out.
+    last_rect: CellRect = .{},
+    laid_out: bool = false,
+
+    pub fn deinit(self: *Split, alloc: std.mem.Allocator) void {
+        self.children.deinit(alloc);
+    }
+};
+
+/// One layer's laid-out bounds, as carried by a `layout` notification.
+pub const LayerBounds = struct {
+    layer: LayerHandle,
+    row: usize,
+    col: usize,
+    cols: usize,
+    rows: usize,
+};
+
+/// A draggable band between two children of a split.
+pub const DividerRect = struct {
+    split: SplitHandle,
+    /// The divider *after* child `index`, so `index` and `index + 1` are
+    /// the pair it separates and `index` is always a valid child.
+    index: usize,
+    axis: SplitAxis,
+    rect: CellRect,
+};
+
+/// Recursion cap for the layout walk. A tree this deep is a bug or a
+/// cycle; either way the walk stops rather than smashing the stack.
+pub const max_split_depth: usize = 16;
+
+/// Smallest extent a divider drag will leave a pane, in cells. Below
+/// this a pane can't show anything and can't be grabbed back.
+pub const min_pane_cells: usize = 1;
+
 pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
@@ -3256,6 +3524,25 @@ pub const Context = struct {
     /// a renderer should draw in.
     layer_order: std.ArrayList(LayerHandle) = .empty,
     next_layer_handle: LayerHandle = 1,
+    /// Split containers, keyed by handle -- the pane tree (see the Splits
+    /// section above). Empty, and `root_split` null, for every client
+    /// that positions its layers by hand, which is all of them until one
+    /// asks for a tree.
+    splits: std.AutoHashMap(SplitHandle, Split),
+    next_split_handle: SplitHandle = 1,
+    /// The split that fills the context, if any. Null means no split
+    /// layout at all: layers stay wherever `position` / `cell_position`
+    /// put them.
+    root_split: ?SplitHandle = null,
+    /// Cells of gap between two children of a split -- the band a mouse
+    /// grabs to resize them. One cell is wide enough to hit and cheap to
+    /// draw.
+    divider_cells: usize = 1,
+    /// Bumped whenever the split tree or the context size changes, i.e.
+    /// whenever a previously computed layout (and its divider rects) went
+    /// stale. glyphwire-host caches the divider geometry it hit-tests
+    /// against and recomputes only when this moves.
+    layout_gen: u64 = 0,
     input: InputState,
     images: std.AutoHashMap(ImageHandle, ImageEntry),
     next_image_handle: ImageHandle = 1,
@@ -3295,6 +3582,7 @@ pub const Context = struct {
             .alloc = alloc,
             .root = try Layer.init(alloc, width, height, scrollback_rows),
             .layers = std.AutoHashMap(LayerHandle, Layer).init(alloc),
+            .splits = std.AutoHashMap(SplitHandle, Split).init(alloc),
             .input = InputState.init(alloc),
             .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
             .icons = std.StringHashMap(ImageHandle).init(alloc),
@@ -3308,6 +3596,9 @@ pub const Context = struct {
         while (layer_it.next()) |l| l.deinit();
         self.layers.deinit();
         self.layer_order.deinit(self.alloc);
+        var split_it = self.splits.valueIterator();
+        while (split_it.next()) |sp| sp.deinit(self.alloc);
+        self.splits.deinit();
         self.input.deinit();
         var it = self.images.valueIterator();
         while (it.next()) |entry| self.alloc.free(entry.bytes);
@@ -3424,6 +3715,9 @@ pub const Context = struct {
     /// which the host treats as fatal anyway.
     pub fn resize(self: *Context, width: usize, height: usize) !void {
         if (width == self.root.width and height == self.root.height) return;
+        // Any previously computed split layout (and its divider rects) is
+        // now stale -- see `layout_gen`.
+        self.layout_gen +%= 1;
         try self.root.resize(width, height);
         var it = self.layers.valueIterator();
         while (it.next()) |layer| {
@@ -3516,7 +3810,7 @@ pub const Context = struct {
                 layer.touchRender();
             },
             .revision, .scroll => return PropertyError.ReadOnlyProperty,
-            .cursor, .position => layer.setProperty(value),
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars => layer.setProperty(value),
         }
     }
 
@@ -3573,6 +3867,264 @@ pub const Context = struct {
             if (h == handle) return i;
         }
         return null;
+    }
+
+
+    // ── Splits ──────────────────────────────────────────────────────────
+
+    /// `create_split`: an empty container. It draws nothing and lays out
+    /// nothing until it is given children and reached from `root_split`.
+    pub fn createSplit(self: *Context, axis: SplitAxis) !SplitHandle {
+        const handle = self.next_split_handle;
+        try self.splits.put(handle, .{ .axis = axis });
+        self.next_split_handle += 1;
+        self.layout_gen +%= 1;
+        return handle;
+    }
+
+    /// `destroy_split`: frees the container. Its children are *not*
+    /// destroyed -- a layer outlives the pane it was sitting in, and a
+    /// nested split is a separate handle its creator may still want. A
+    /// destroyed `root_split` clears the root, dropping the whole layout
+    /// back to hand-positioned layers.
+    pub fn destroySplit(self: *Context, handle: SplitHandle) SplitError!void {
+        var removed = self.splits.fetchRemove(handle) orelse return SplitError.UnknownSplit;
+        removed.value.deinit(self.alloc);
+        if (self.root_split == handle) self.root_split = null;
+        self.layout_gen +%= 1;
+    }
+
+    /// `set_split_children`: replaces the child list wholesale. One
+    /// message rather than insert/remove/reorder, because a client
+    /// rebuilding a pane arrangement always knows the whole new list and
+    /// the incremental forms would each need their own index semantics.
+    pub fn setSplitChildren(self: *Context, handle: SplitHandle, children: []const SplitChild) !void {
+        const split = self.splits.getPtr(handle) orelse return SplitError.UnknownSplit;
+        split.children.clearRetainingCapacity();
+        try split.children.appendSlice(self.alloc, children);
+        self.layout_gen +%= 1;
+    }
+
+    /// `set_root_split`: which split fills the context. Null tears the
+    /// layout down without destroying anything.
+    pub fn setRootSplit(self: *Context, handle: ?SplitHandle) SplitError!void {
+        if (handle) |h| {
+            if (!self.splits.contains(h)) return SplitError.UnknownSplit;
+        }
+        self.root_split = handle;
+        self.layout_gen +%= 1;
+    }
+
+    /// Recomputes every layer's position and viewport from the split
+    /// tree. Both outputs are optional: pass `changed` to collect the
+    /// layers whose bounds actually moved (what a `layout` notification
+    /// carries), and `dividers` to collect the draggable bands (what the
+    /// host hit-tests and draws).
+    ///
+    /// Idempotent, and cheap enough to re-run for the divider geometry
+    /// alone -- a re-run with unchanged inputs appends nothing to
+    /// `changed`. A no-op when there is no root split.
+    pub fn layoutSplits(
+        self: *Context,
+        changed: ?*std.ArrayList(LayerBounds),
+        dividers: ?*std.ArrayList(DividerRect),
+    ) !void {
+        const root = self.root_split orelse return;
+        try self.layoutSplit(root, .{
+            .row = 0,
+            .col = 0,
+            .cols = self.root.width,
+            .rows = self.root.height,
+        }, changed, dividers, 0);
+    }
+
+    fn layoutSplit(
+        self: *Context,
+        handle: SplitHandle,
+        rect: CellRect,
+        changed: ?*std.ArrayList(LayerBounds),
+        dividers: ?*std.ArrayList(DividerRect),
+        depth: usize,
+    ) !void {
+        // A cycle or a pathologically deep tree stops here rather than
+        // running off the stack -- see `max_split_depth`.
+        if (depth >= max_split_depth) return;
+        const split = self.splits.getPtr(handle) orelse return;
+        split.last_rect = rect;
+        split.laid_out = true;
+
+        const n = split.children.items.len;
+        if (n == 0) return;
+
+        const extents = try self.alloc.alloc(usize, n);
+        defer self.alloc.free(extents);
+        self.childExtents(split, rect, extents);
+
+        var pos: usize = if (split.axis == .row) rect.col else rect.row;
+        for (split.children.items, 0..) |child, i| {
+            const extent = extents[i];
+            const child_rect: CellRect = if (split.axis == .row)
+                .{ .row = rect.row, .col = pos, .cols = extent, .rows = rect.rows }
+            else
+                .{ .row = pos, .col = rect.col, .cols = rect.cols, .rows = extent };
+
+            switch (child.target) {
+                .layer => |h| try self.applyBounds(h, child_rect, changed),
+                .split => |h| try self.layoutSplit(h, child_rect, changed, dividers, depth + 1),
+            }
+
+            pos += extent;
+            if (i + 1 < n) {
+                if (dividers) |out| {
+                    const band: CellRect = if (split.axis == .row)
+                        .{ .row = rect.row, .col = pos, .cols = self.divider_cells, .rows = rect.rows }
+                    else
+                        .{ .row = pos, .col = rect.col, .cols = rect.cols, .rows = self.divider_cells };
+                    try out.append(self.alloc, .{
+                        .split = handle,
+                        .index = i,
+                        .axis = split.axis,
+                        .rect = band,
+                    });
+                }
+                pos += self.divider_cells;
+            }
+        }
+    }
+
+    /// Splits `rect`'s extent along the split's axis across its children:
+    /// `fixed` children take their cells first, `weight` children share
+    /// what's left. The last weighted child absorbs the rounding
+    /// remainder, so the children plus dividers always fill the split
+    /// exactly rather than leaving a stray blank column.
+    ///
+    /// `out.len` must equal the child count.
+    fn childExtents(self: *const Context, split: *const Split, rect: CellRect, out: []usize) void {
+        const n = split.children.items.len;
+        const axis_total: usize = if (split.axis == .row) rect.cols else rect.rows;
+        var remaining = axis_total -| (n - 1) * self.divider_cells;
+
+        var fixed_total: usize = 0;
+        var weight_total: f32 = 0;
+        var last_weighted: ?usize = null;
+        for (split.children.items, 0..) |c, i| switch (c.size) {
+            .fixed => |f| fixed_total += f,
+            .weight => |w| {
+                weight_total += @max(w, 0);
+                last_weighted = i;
+            },
+        };
+        const flexible = remaining -| fixed_total;
+
+        var flexible_used: usize = 0;
+        for (split.children.items, 0..) |child, i| {
+            const want: usize = switch (child.size) {
+                .fixed => |f| f,
+                .weight => |w| blk: {
+                    if (weight_total <= 0) break :blk 0;
+                    if (i == last_weighted.?) break :blk flexible -| flexible_used;
+                    const share_f = @as(f32, @floatFromInt(flexible)) * (@max(w, 0) / weight_total);
+                    const share: usize = @intFromFloat(@floor(share_f));
+                    flexible_used += share;
+                    break :blk share;
+                },
+            };
+            // Clamped against what's actually left: a client whose fixed
+            // children over-subscribe the window gets truncation at the
+            // end rather than panes drawn outside it.
+            out[i] = @min(want, remaining);
+            remaining -= out[i];
+        }
+    }
+
+    /// Places one layer at `rect` -- position in cells, viewport to the
+    /// pane's size. The layer's *content* size is left alone: a file tree
+    /// taller than its pane is the whole point of the viewport, and the
+    /// client owns how much content there is.
+    fn applyBounds(self: *Context, handle: LayerHandle, rect: CellRect, changed: ?*std.ArrayList(LayerBounds)) !void {
+        // The root layer is drawn at a fixed origin and is never a pane --
+        // see the Splits section's note.
+        if (handle == root_layer_handle) return;
+        const layer = self.layers.getPtr(handle) orelse return;
+
+        const moved = layer.pos_cells == null or
+            layer.pos_cells.?.row != rect.row or
+            layer.pos_cells.?.col != rect.col;
+        const resized = layer.viewport_cols != rect.cols or layer.viewport_rows != rect.rows;
+        if (!moved and !resized) return;
+
+        if (moved) {
+            layer.pos_cells = .{ .row = rect.row, .col = rect.col };
+            layer.pos = self.pixelPosForCell(layer.pos_cells.?);
+            layer.touchRender();
+        }
+        if (resized) layer.setProperty(.{ .viewport = .{ .cols = rect.cols, .rows = rect.rows } });
+
+        if (changed) |out| {
+            try out.append(self.alloc, .{
+                .layer = handle,
+                .row = rect.row,
+                .col = rect.col,
+                .cols = rect.cols,
+                .rows = rect.rows,
+            });
+        }
+    }
+
+    /// `move_divider`: drags the band after child `index` by `delta`
+    /// cells along the split's axis, growing one neighbour and shrinking
+    /// the other. This is what a mouse drag on a divider does; a client
+    /// can send it too (a keyboard "grow this pane" binding).
+    ///
+    /// How the sizes change depends on how the pair was declared, so that
+    /// a drag doesn't silently convert a pane's sizing mode: a `fixed`
+    /// neighbour keeps its cells and just gets more or fewer of them, and
+    /// a `weight` pair keeps its combined weight and re-splits it by the
+    /// new ratio (so the rest of the tree is undisturbed).
+    pub fn moveDivider(self: *Context, handle: SplitHandle, index: usize, delta: i64) SplitError!void {
+        const split = self.splits.getPtr(handle) orelse return SplitError.UnknownSplit;
+        if (!split.laid_out) return;
+        const n = split.children.items.len;
+        if (index + 1 >= n) return;
+        if (delta == 0) return;
+
+        const extents = self.alloc.alloc(usize, n) catch return;
+        defer self.alloc.free(extents);
+        self.childExtents(split, split.last_rect, extents);
+
+        const before = extents[index];
+        const after = extents[index + 1];
+        const pair = before + after;
+        if (pair < 2 * min_pane_cells) return;
+
+        // Clamp the drag so neither neighbour is squeezed out of
+        // existence -- a pane at zero cells can't be grabbed back.
+        const lo: i64 = @intCast(min_pane_cells);
+        const hi: i64 = @intCast(pair - min_pane_cells);
+        const want: i64 = @as(i64, @intCast(before)) + delta;
+        const new_before: usize = @intCast(std.math.clamp(want, lo, hi));
+        const new_after = pair - new_before;
+        if (new_before == before) return;
+
+        const a = &split.children.items[index];
+        const b = &split.children.items[index + 1];
+        const wa: ?f32 = switch (a.size) { .weight => |w| @max(w, 0), .fixed => null };
+        const wb: ?f32 = switch (b.size) { .weight => |w| @max(w, 0), .fixed => null };
+
+        // A fixed neighbour just gets a new cell count. A weighted one
+        // next to a fixed one needs no change at all -- it already
+        // absorbs whatever the fixed one leaves.
+        if (wa == null) a.size = .{ .fixed = new_before };
+        if (wb == null) b.size = .{ .fixed = new_after };
+        if (wa != null and wb != null) {
+            const total_w = wa.? + wb.?;
+            if (total_w <= 0) return;
+            const frac = @as(f32, @floatFromInt(new_before)) / @as(f32, @floatFromInt(pair));
+            a.size = .{ .weight = total_w * frac };
+            b.size = .{ .weight = total_w * (1 - frac) };
+        }
+
+        self.layout_gen +%= 1;
     }
 
     /// Resolves a wire-level layer handle to its `Layer` -- `null` (an

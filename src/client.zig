@@ -571,6 +571,96 @@ pub const Client = struct {
         return parsed.value.result.visible;
     }
 
+    /// `set_property(layer, "viewport", {cols, rows})` -- a notification.
+    /// How much of the layer's content grid the host draws; zero on an
+    /// axis means all of it. This is what makes a pane a *window onto*
+    /// its content rather than the whole of it -- see
+    /// `core.PropertyName.viewport`. A layer inside a split tree has this
+    /// set for it by the layout.
+    pub fn setLayerViewport(self: *Client, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "viewport", .cols = cols, .rows = rows });
+    }
+
+    /// `get_property(layer?, "viewport")`.
+    pub fn getLayerViewport(self: *Client, layer: ?core.LayerHandle) !core.Viewport {
+        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .layer = layer, .property = "viewport" });
+        defer parsed.deinit();
+        return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
+    }
+
+    /// `set_property(layer, "scroll_offset", {row, col})` -- a
+    /// notification. Where the viewport sits in the content grid, clamped
+    /// server-side to what the content actually has.
+    pub fn setLayerScrollOffset(self: *Client, layer: core.LayerHandle, row: usize, col: usize) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "scroll_offset", .row = row, .col = col });
+    }
+
+    /// `get_property(layer?, "scroll_offset")` -- the offset plus each
+    /// axis's maximum, so a caller can tell how much slack is left
+    /// without a second request.
+    pub fn getLayerScrollOffset(self: *Client, layer: ?core.LayerHandle) !ScrollOffsetState {
+        var parsed = try self.request(ScrollOffsetState, "get_property", .{ .layer = layer, .property = "scroll_offset" });
+        defer parsed.deinit();
+        return parsed.value.result;
+    }
+
+    /// `set_property(layer, "scrollbars", {vertical, horizontal})` -- a
+    /// notification. Opt in per axis; the host draws the bars inside the
+    /// layer's own bounds and drives `scroll_offset` from them.
+    pub fn setLayerScrollbars(self: *Client, layer: core.LayerHandle, vertical: bool, horizontal: bool) !void {
+        try self.notify("set_property", .{
+            .layer = layer,
+            .property = "scrollbars",
+            .vertical = vertical,
+            .horizontal = horizontal,
+        });
+    }
+
+    /// `get_property(layer?, "scrollbars")` -- the flags plus the current
+    /// offset and maximum on each axis.
+    pub fn getLayerScrollbars(self: *Client, layer: ?core.LayerHandle) !core.ScrollbarState {
+        var parsed = try self.request(core.ScrollbarState, "get_property", .{ .layer = layer, .property = "scrollbars" });
+        defer parsed.deinit();
+        return parsed.value.result;
+    }
+
+    /// `create_split(axis)` -- a request. An empty pane container; give
+    /// it children with `setSplitChildren` and make it the layout with
+    /// `setRootSplit`.
+    pub fn createSplit(self: *Client, axis: core.SplitAxis) !core.SplitHandle {
+        var parsed = try self.request(struct { handle: core.SplitHandle }, "create_split", .{ .axis = @tagName(axis) });
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    /// `destroy_split(split)` -- a notification. Frees the container; its
+    /// children (layers and nested splits) survive.
+    pub fn destroySplit(self: *Client, split: core.SplitHandle) !void {
+        try self.notify("destroy_split", .{ .split = split });
+    }
+
+    /// `set_split_children(split, children)` -- a notification. Replaces
+    /// the child list wholesale. Each entry names a layer *or* a nested
+    /// split, and is sized either by `weight` (a share of what's left) or
+    /// `fixed` (that many cells along the split's axis).
+    pub fn setSplitChildren(self: *Client, split: core.SplitHandle, children: []const SplitChildInput) !void {
+        try self.notify("set_split_children", .{ .split = split, .children = children });
+    }
+
+    /// `set_root_split(split?)` -- a notification. Which split fills the
+    /// window; null tears the layout down without destroying anything.
+    pub fn setRootSplit(self: *Client, split: ?core.SplitHandle) !void {
+        try self.notify("set_root_split", .{ .split = split });
+    }
+
+    /// `move_divider(split, index, delta)` -- a notification. Drags the
+    /// band after child `index` by `delta` cells. glyphwire-host sends
+    /// this for a mouse drag; a client sends it for a keyboard "grow this
+    /// pane" binding.
+    pub fn moveDivider(self: *Client, split: core.SplitHandle, index: usize, delta: i64) !void {
+        try self.notify("move_divider", .{ .split = split, .index = index, .delta = delta });
+    }
+
     /// `raise_layer(layer, above?)` -- a notification. Moves `layer` up
     /// the compositing order: directly above `above`, or to the very top
     /// when it's null. Creation order is only the *initial* stacking, so
@@ -1524,6 +1614,86 @@ pub const MouseMoveEvent = struct { px: PxPos, cell: CellPos };
 /// memory (unlike `KeyEvent.key`), so `pollResizeEvent` hands it back by
 /// value with nothing for the caller to free.
 pub const ResizeEvent = struct { cols: usize, rows: usize };
+
+/// `get_property(layer, "scroll_offset")`'s result -- where the viewport
+/// sits and how far it can go on each axis.
+pub const ScrollOffsetState = struct {
+    row: usize,
+    col: usize,
+    max_row: usize,
+    max_col: usize,
+};
+
+/// One `set_split_children` entry, in the shape the wire wants: exactly
+/// one of `layer`/`split`, and at most one of `weight`/`fixed`. The
+/// constructors below are the ergonomic way to build them.
+pub const SplitChildInput = struct {
+    layer: ?core.LayerHandle = null,
+    split: ?core.SplitHandle = null,
+    weight: ?f32 = null,
+    fixed: ?usize = null,
+
+    /// A layer taking a share of whatever the fixed siblings leave.
+    pub fn layerWeighted(handle: core.LayerHandle, weight: f32) SplitChildInput {
+        return .{ .layer = handle, .weight = weight };
+    }
+
+    /// A layer with an exact extent along the split's axis -- a one-row
+    /// statusline, a fixed-width gutter.
+    pub fn layerFixed(handle: core.LayerHandle, cells: usize) SplitChildInput {
+        return .{ .layer = handle, .fixed = cells };
+    }
+
+    /// A nested split taking a share.
+    pub fn splitWeighted(handle: core.SplitHandle, weight: f32) SplitChildInput {
+        return .{ .split = handle, .weight = weight };
+    }
+
+    /// A nested split with an exact extent.
+    pub fn splitFixed(handle: core.SplitHandle, cells: usize) SplitChildInput {
+        return .{ .split = handle, .fixed = cells };
+    }
+};
+
+/// A `scroll_offset` notification: a layer's viewport moved over its
+/// content grid (the host's wheel or scrollbar, or another client's
+/// `set_property`). Carries the handle, unlike `ScrollEvent`, which is
+/// always the root layer's scrollback.
+pub const ScrollOffsetEvent = struct {
+    layer: core.LayerHandle,
+    row: usize,
+    col: usize,
+    max_row: usize,
+    max_col: usize,
+};
+
+/// One pane's bounds from a `layout` notification.
+pub const LayoutBounds = struct {
+    layer: core.LayerHandle,
+    row: usize,
+    col: usize,
+    cols: usize,
+    rows: usize,
+};
+
+/// A `layout` notification: every pane whose bounds changed after the
+/// split tree was re-laid-out. Owns `layers`; `pollLayoutEvent` hands
+/// ownership to the caller, which must call `deinit`.
+pub const LayoutEvent = struct {
+    layers: []LayoutBounds,
+
+    pub fn deinit(self: LayoutEvent, alloc: std.mem.Allocator) void {
+        alloc.free(self.layers);
+    }
+
+    /// This event's bounds for `layer`, or null if it wasn't in it.
+    pub fn boundsFor(self: LayoutEvent, layer: core.LayerHandle) ?LayoutBounds {
+        for (self.layers) |b| {
+            if (b.layer == layer) return b;
+        }
+        return null;
+    }
+};
 /// One `scroll` notification: the root layer's scrollback view offset
 /// (`offset` rows shown above the live viewport, out of `max` retained).
 /// No owned memory -- handed back by value like `ResizeEvent`.
@@ -1582,6 +1752,16 @@ pub const InputListener = struct {
     scroll_events: std.ArrayList(ScrollEvent) = .empty,
     scroll_sem: std.Io.Semaphore = .{},
     last_scroll: ?ScrollEvent = null,
+    /// Queued `scroll_offset` notifications -- a *layer's* viewport
+    /// moving over its content, as opposed to `scroll_events`' root
+    /// scrollback. Same drain-on-poll shape; no owned memory.
+    scroll_offset_events: std.ArrayList(ScrollOffsetEvent) = .empty,
+    scroll_offset_sem: std.Io.Semaphore = .{},
+    /// Queued `layout` notifications. Each owns its `layers` slice, so an
+    /// undrained queue is freed in `deinit` and a drained one transfers
+    /// ownership to the caller (`pollLayoutEvent`).
+    layout_events: std.ArrayList(LayoutEvent) = .empty,
+    layout_sem: std.Io.Semaphore = .{},
 
     /// Connects, subscribes to `events`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
@@ -1643,6 +1823,9 @@ pub const InputListener = struct {
         for (self.terminal_reply_events.items) |b| self.alloc.free(b);
         self.terminal_reply_events.deinit(self.alloc);
         self.resize_events.deinit(self.alloc);
+        self.scroll_offset_events.deinit(self.alloc);
+        for (self.layout_events.items) |ev| ev.deinit(self.alloc);
+        self.layout_events.deinit(self.alloc);
         self.scroll_events.deinit(self.alloc);
         self.alloc.destroy(self);
     }
@@ -1734,6 +1917,25 @@ pub const InputListener = struct {
 
     /// Pops the oldest queued `resize` event, if any (non-blocking) --
     /// see `pollKeyEvent`, the same drain shape. Nothing to free.
+    /// Next queued `scroll_offset` event, or null -- see
+    /// `pollResizeEvent` for the drain shape. Nothing to free.
+    pub fn pollScrollOffsetEvent(self: *InputListener) ?ScrollOffsetEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.scroll_offset_events.items.len == 0) return null;
+        return self.scroll_offset_events.orderedRemove(0);
+    }
+
+    /// Next queued `layout` event, or null. **The caller owns the result**
+    /// and must `deinit` it -- unlike the other pollers, this one carries
+    /// a slice.
+    pub fn pollLayoutEvent(self: *InputListener) ?LayoutEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.layout_events.items.len == 0) return null;
+        return self.layout_events.orderedRemove(0);
+    }
+
     pub fn pollResizeEvent(self: *InputListener) ?ResizeEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -1969,6 +2171,41 @@ pub const InputListener = struct {
             self.last_scroll = ev;
             try self.scroll_events.append(self.alloc, ev);
             self.scroll_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "scroll_offset")) {
+            const p = try std.json.parseFromValue(protocol.ScrollOffsetParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const ev: ScrollOffsetEvent = .{
+                .layer = p.value.layer,
+                .row = p.value.row,
+                .col = p.value.col,
+                .max_row = p.value.max_row,
+                .max_col = p.value.max_col,
+            };
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.scroll_offset_events.append(self.alloc, ev);
+            self.scroll_offset_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "layout")) {
+            const p = try std.json.parseFromValue(protocol.LayoutParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            // The parsed slice lives in `p`'s arena, so it's copied out
+            // before that's freed -- the event outlives this frame.
+            const owned = try self.alloc.alloc(LayoutBounds, p.value.layers.len);
+            errdefer self.alloc.free(owned);
+            for (p.value.layers, 0..) |b, i| {
+                owned[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+            }
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.layout_events.append(self.alloc, .{ .layers = owned });
+            self.layout_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "resize")) {
             const P = protocol.ResizeParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
