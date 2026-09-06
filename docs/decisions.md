@@ -446,6 +446,39 @@ surface.
     silent — which is what makes the layout walk safe for the host to
     re-run purely to recover divider geometry. `Context.layout_gen` is
     the cache key the host uses to avoid even that most frames.
+- **v1 built — layer ownership & lifecycle:** every `create_layer` over a
+  socket connection records that connection as the layer's first
+  **owner**. `adopt_layer` adds more owners (one process handing ongoing
+  responsibility for a layer to another). When a connection closes — a
+  clean exit, `kill`, or a crash: the kernel closes the socket either way
+  — the server drops it from every layer's owner set and destroys any
+  layer left with no owners (`Context.removeConnectionOwnership`, run in
+  the connection's teardown under `ctx_mutex`). This is what keeps a
+  program that dies without calling `destroy_layer` from leaving its
+  content stuck on the host. The common case is unaffected: the shell
+  keeps one long-lived connection open for its whole session, so a layer
+  it created stays until it explicitly destroys it, and `glyphwire-ls` /
+  `glyphwire-view` write into the root layer rather than creating their
+  own. **Decisions:** *identity is per-connection*, a plain counter
+  assigned at `accept` (`core.ConnId` / `Server.next_conn_id`), not a
+  `SO_PEERCRED` PID — a program keeps a single connection open for its
+  lifetime so "the process that created it" is naturally satisfied, and a
+  reconnecting client owning nothing from its previous connection matches
+  the auto-restore-on-disconnect precedent above. *Liveness is the socket
+  itself* — no PID poller / `/proc` watcher; socket close is delivered by
+  the kernel on process death, so it already covers crash, `kill -9`, and
+  clean exit, with no polling interval or PID-reuse hazard. *Culling is
+  unconditional* — there's no `persist` opt-out on `create_layer`; a
+  layer meant to outlive its creator's connection is `adopt_layer`'d by
+  another live connection instead. *`destroy_layer` is ownership-checked*
+  — a non-owner connection's call returns `LayerPermissionDenied`.
+  Because `destroy_layer` is a notification with no response channel,
+  server.zig turns that into a logged warning and leaves the layer
+  intact; a real JSON-RPC error *response* still needs the unbuilt
+  error-response path (roadmap Milestone 0). *Out of scope:*
+  `release_layer` / disowning without disconnecting (a process releases
+  by closing its connection), ownership transfer as a distinct operation
+  (adopt + let the original drop covers it), admin override.
 - **Not built — still open:** `create_context`, non-root parenting,
   `clip`/`visibility` properties, a raw wheel-delta `mouse_scroll` event
   stream (distinct from `scroll`, which reports the resolved offset).
@@ -1925,11 +1958,13 @@ surface.
   still 🔶 planned/⬜ open rather than built — `subscribe` and
   `bind_actions` in particular don't have a decided request-vs-notification
   shape yet.
-- **Multi-process layer ownership.** Single foreground owner per grid
-  (classic shell model) vs. multiple concurrent processes owning separate
-  regions (tmux-pane-like, negotiated over the protocol) — explicitly
-  scoped out of v1, needs confirming it stays deferred rather than
-  creeping in.
+- **Multi-process layer ownership.** *Partially resolved* — see the Layer
+  section's "layer ownership & lifecycle" bullet: per-connection ownership
+  of individual layers (`create_layer` / `adopt_layer` / cull-on-
+  disconnect) is built. Still deferred: a single foreground owner per
+  *grid* (classic shell model) vs. multiple concurrent processes owning
+  separate *regions* (tmux-pane-like, negotiated) — the region model is
+  still scoped out of v1.
 - **Resource/handle ID scheme.** Server-generated vs. client-supplied IDs
   for layers, animations, images — leaning server-generated, not final.
 - **Color interpolation space for animation.** Leaning toward a perceptual

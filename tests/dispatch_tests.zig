@@ -2091,3 +2091,127 @@ pub fn scrollAndLayoutAreSubscribableTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectTrue(d.subscriptions.scroll);
     try testz.expectTrue(d.subscriptions.has("scroll_offset"));
 }
+
+// ── Layer ownership: create records an owner, destroy enforces it, ──────
+//    adopt adds a co-owner (see `core.ConnId` / `Dispatcher.conn_id`).
+
+pub fn createLayerOverConnectionRecordsOwnerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&ctx, 7);
+
+    const create =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
+    ;
+    const result = try d.handle(alloc, create);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"handle\":1") != null);
+
+    try testz.expectTrue(ctx.layerHasOwner(1, 7));
+    try testz.expectTrue(!ctx.layerHasOwner(1, 8));
+}
+
+pub fn destroyLayerFromNonOwnerConnectionIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    var owner = dispatch.Dispatcher.initForConnection(&ctx, 7);
+    const create =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
+    ;
+    const created = try owner.handle(alloc, create);
+    if (created.response) |r| alloc.free(r);
+
+    var other = dispatch.Dispatcher.initForConnection(&ctx, 8);
+    const destroy =
+        \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
+    ;
+    try testz.expectError(other.handle(alloc, destroy), dispatch.DispatchError.LayerPermissionDenied);
+    try testz.expectTrue(ctx.layerPtr(1) != null);
+}
+
+pub fn destroyLayerFromOwnerConnectionSucceedsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&ctx, 7);
+
+    const create =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
+    ;
+    const created = try d.handle(alloc, create);
+    if (created.response) |r| alloc.free(r);
+
+    const destroy =
+        \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, destroy)).response == null);
+    try testz.expectTrue(ctx.layerPtr(1) == null);
+}
+
+pub fn adoptLayerLetsSecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    var creator = dispatch.Dispatcher.initForConnection(&ctx, 7);
+    const create =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
+    ;
+    const created = try creator.handle(alloc, create);
+    if (created.response) |r| alloc.free(r);
+
+    var adopter = dispatch.Dispatcher.initForConnection(&ctx, 8);
+    const adopt =
+        \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":1}}
+    ;
+    try testz.expectTrue((try adopter.handle(alloc, adopt)).response == null);
+    try testz.expectTrue(ctx.layerHasOwner(1, 7));
+    try testz.expectTrue(ctx.layerHasOwner(1, 8));
+
+    const destroy =
+        \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
+    ;
+    try testz.expectTrue((try adopter.handle(alloc, destroy)).response == null);
+    try testz.expectTrue(ctx.layerPtr(1) == null);
+}
+
+pub fn adoptLayerUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&ctx, 8);
+
+    const adopt =
+        \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":999}}
+    ;
+    try testz.expectError(d.handle(alloc, adopt), dispatch.DispatchError.UnknownLayer);
+}
+
+pub fn inProcessDispatcherBypassesLayerOwnershipTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    // No connection id: `init`, not `initForConnection`.
+    var in_process = dispatch.Dispatcher.init(&ctx);
+    const create =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
+    ;
+    const created = try in_process.handle(alloc, create);
+    if (created.response) |r| alloc.free(r);
+
+    // The in-process layer has no owners, so a real connection can't
+    // destroy it...
+    var conn = dispatch.Dispatcher.initForConnection(&ctx, 9);
+    const destroy =
+        \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
+    ;
+    try testz.expectError(conn.handle(alloc, destroy), dispatch.DispatchError.LayerPermissionDenied);
+
+    // ...but the in-process dispatcher itself still can.
+    try testz.expectTrue((try in_process.handle(alloc, destroy)).response == null);
+    try testz.expectTrue(ctx.layerPtr(1) == null);
+}

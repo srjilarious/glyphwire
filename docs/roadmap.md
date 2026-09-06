@@ -172,7 +172,17 @@ corner" case.
   it needs to iterate the layer registry once this lands. Sequence this
   with whoever's driving that file.
 
-## Phase 2: Layer lifecycle (`delete_layer`, ownership)
+## Phase 2: Layer lifecycle (`delete_layer`, ownership) — done
+
+**Landed** — see the "Layer ownership: cull orphaned layers on
+disconnect" log entry below for what was actually built. Resolutions
+against the plan sketched here: identity is **per-connection** (the
+counter option); the headline shifted from "only the creator may delete"
+to **cull a layer once every owning connection has disconnected** (the
+crash-recovery case the user hit), with `adopt_layer` added for
+co-ownership and `destroy_layer`'s ownership check landing as a logged
+`LayerPermissionDenied` rather than a JSON-RPC error response (that path
+is still Milestone 0). The original plan text is kept below for context.
 
 **Goal:** `delete_layer(layer)` — but only the connection that created
 it may delete it, per your requirement. This is decisions.md's open
@@ -1800,6 +1810,53 @@ tree with draggable dividers.
   subscriptions); `host_tests.zig` +8 (`paneScrollbars` thumb size and
   travel, both-bars insets, the minimum thumb, `layerRect` /
   `cellRectPx`). 634 pass.
+
+## Layer ownership: cull orphaned layers on disconnect
+
+**Done.** A program that creates a layer and then crashes (or is
+`kill -9`'d, or just exits without `destroy_layer`) no longer leaves its
+content stuck on the host — the server tracks which connections own each
+layer and culls a layer once every owner has disconnected. Closes
+roadmap Phase 2. The bug that prompted it: a vim-like editor worktree
+forgot to tear down the layers it created.
+
+- **`core.zig`** — new `ConnId = u64`. `Layer` gains `owners:
+  AutoHashMap(ConnId, void)` + `connection_owned: bool` (the latter tells
+  "all owners disconnected, cull it" apart from "in-process layer, never
+  had an owner"). `Context.addLayerOwner` / `layerHasOwner` /
+  `removeConnectionOwnership(conn, *ArrayList(LayerHandle))` — the last
+  drops `conn` from every connection-owned layer, destroys any left
+  ownerless (two-pass: collect handles, then `destroyLayer`, since that
+  mutates `self.layers`), and reports the culled handles.
+- **`dispatch.zig`** — `Dispatcher` gains `conn_id: ?ConnId` +
+  `initForConnection`; `init` (no id) still means an in-process caller
+  that owns nothing and skips the checks. `create_layer` records the
+  connection as owner; new `adopt_layer` notification adds another;
+  `destroy_layer` now returns the new `DispatchError.LayerPermissionDenied`
+  when a connection that doesn't own the layer asks to destroy it (an
+  unknown handle still falls through to `UnknownLayer`).
+- **`server.zig`** — `Connection` gains `id`, assigned from a new atomic
+  `Server.next_conn_id` counter at accept and handed to
+  `initForConnection`. `unregisterConnection` (already the connection's
+  teardown hook, and a crashed client's socket is closed by the kernel)
+  now also calls `removeConnectionOwnership` under `ctx_mutex` and logs
+  each culled handle. No new wire notification for the cull — the host
+  re-renders from the context each frame, so a culled layer just stops
+  being drawn, matching how plain `destroy_layer` already works.
+- **`client.zig`** — `Client.adoptLayer`; `destroyLayer`'s doc notes the
+  ownership check and that a clean exit needn't call it.
+- **Decisions:** per-connection identity (not `SO_PEERCRED`); socket
+  close as the only liveness signal (no PID poller); unconditional
+  culling (no `persist` opt-out — use `adopt_layer` from another live
+  connection instead). See decisions.md's Layer section.
+- **Tests:** `core_tests.zig` +5 (owner add/query, unknown-handle error,
+  cull on sole owner leaving, keep with a remaining owner, in-process
+  layers untouched); `dispatch_tests.zig` +6 (owner recorded on create,
+  non-owner destroy rejected, owner destroy works, adopt then destroy,
+  adopt unknown handle, in-process dispatcher bypasses the check);
+  `client_tests.zig` +1 (real socket: create a layer, drop the
+  connection, join the server thread as the barrier, assert the layer is
+  gone). 547 pass.
 
 ## Further out (sequencing noted, not detailed yet)
 

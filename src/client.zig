@@ -499,9 +499,22 @@ pub const Client = struct {
 
     /// `destroy_layer(layer)` -- a notification. Frees a layer created by
     /// `createLayer` and drops it from compositing; there's nothing more
-    /// to do afterward, including no need to `clear` it first.
+    /// to do afterward, including no need to `clear` it first. The server
+    /// honors this only from a connection that owns the layer (created it,
+    /// or `adoptLayer`'d it); a non-owner's call is logged and ignored.
+    /// You don't have to call this on a clean exit either -- the server
+    /// culls a layer once every connection that owned it has disconnected.
     pub fn destroyLayer(self: *Client, layer: core.LayerHandle) !void {
         try self.notify("destroy_layer", .{ .layer = layer });
+    }
+
+    /// `adopt_layer(layer)` -- a notification. Adds this connection to
+    /// `layer`'s set of owners, so the layer outlives its original
+    /// creator disconnecting for as long as this connection stays up, and
+    /// this connection may itself `destroyLayer` it. Use it when one
+    /// process hands ongoing responsibility for a layer to another.
+    pub fn adoptLayer(self: *Client, layer: core.LayerHandle) !void {
+        try self.notify("adopt_layer", .{ .layer = layer });
     }
 
     /// `set_property(layer, "cursor", {row, col})` on a non-root layer --

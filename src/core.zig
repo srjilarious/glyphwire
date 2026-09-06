@@ -902,6 +902,20 @@ pub const PropertyError = error{
 pub const LayerHandle = u32;
 pub const root_layer_handle: LayerHandle = 0;
 
+/// Identity of one accepted socket connection, assigned by `server.zig` at
+/// `accept` time (a plain incrementing counter -- see `Server.next_conn_id`).
+/// Used only for layer ownership: `create_layer` records the creating
+/// connection's id as the layer's first owner, `adopt_layer` adds more,
+/// and when a connection closes every layer it solely owned is culled (see
+/// `Context.removeConnectionOwnership`). A reconnecting client gets a fresh
+/// id and owns nothing from its previous connection -- deliberately, per
+/// decisions.md's "auto-restore-on-disconnect is a fresh identity"
+/// precedent. In-process callers (glyphwire-host driving the `Context`
+/// directly, the headless `server/main.zig`, tests) have no connection and
+/// pass no id: layers they create are never connection-owned and never
+/// auto-culled.
+pub const ConnId = u64;
+
 pub const LayerError = error{UnknownLayer};
 
 /// Columns between horizontal tab stops for `\t` handling in
@@ -1161,6 +1175,21 @@ pub const Layer = struct {
     scroll_off: CellPos = .{},
     /// See `PropertyName.scrollbars`.
     scrollbars: Scrollbars = .{},
+    /// The connections that own this layer, for lifecycle culling (see
+    /// `ConnId` and `Context.removeConnectionOwnership`). Populated only
+    /// for layers created over a socket connection: `Context.createLayer`
+    /// leaves it empty and `connection_owned` false, and the dispatcher
+    /// then calls `Context.addLayerOwner` with the creating connection's
+    /// id. `adopt_layer` adds further ids. When the set drains to empty
+    /// because every owning connection has disconnected, the layer is
+    /// destroyed.
+    owners: std.AutoHashMap(ConnId, void),
+    /// True once this layer has had at least one connection owner (via
+    /// `Context.addLayerOwner`). Distinguishes a layer whose owners have
+    /// all disconnected (empty `owners`, cull it) from an in-process layer
+    /// that never had a connection owner in the first place (also empty
+    /// `owners`, but must be left alone).
+    connection_owned: bool = false,
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Layer {
         const total_rows = height + scrollback_rows;
@@ -1172,6 +1201,7 @@ pub const Layer = struct {
             .width = width,
             .height = height,
             .tables = std.AutoHashMap(TableHandle, Table).init(alloc),
+            .owners = std.AutoHashMap(ConnId, void).init(alloc),
             .scrollback_rows = scrollback_rows,
             .buf = buf,
             .scroll_bot = height - 1,
@@ -1186,6 +1216,7 @@ pub const Layer = struct {
         self.tables.deinit();
         self.table_order.deinit(self.alloc);
         self.highlighted_ids.deinit(self.alloc);
+        self.owners.deinit();
     }
 
     pub fn capacity(self: *const Layer) usize {
@@ -3697,6 +3728,51 @@ pub const Context = struct {
                 break;
             }
         }
+    }
+
+    /// Records `conn` as an owner of `handle` (see `ConnId`). Called by
+    /// the dispatcher for the connection that issued `create_layer`, and
+    /// again for each connection that later issues `adopt_layer`. Marks
+    /// the layer `connection_owned` so a later drain to zero owners culls
+    /// it rather than leaving it (see `removeConnectionOwnership`). Adding
+    /// an id already present is a no-op. Errors `UnknownLayer` for an
+    /// unknown or root handle -- the root layer has no lifecycle.
+    pub fn addLayerOwner(self: *Context, handle: LayerHandle, conn: ConnId) !void {
+        if (handle == root_layer_handle) return LayerError.UnknownLayer;
+        const layer = self.layers.getPtr(handle) orelse return LayerError.UnknownLayer;
+        try layer.owners.put(conn, {});
+        layer.connection_owned = true;
+    }
+
+    /// Whether `conn` owns `handle` -- the check `destroy_layer` makes
+    /// before honoring a request from a socket connection. False for the
+    /// root handle and for any unknown handle (neither is connection-owned).
+    pub fn layerHasOwner(self: *Context, handle: LayerHandle, conn: ConnId) bool {
+        if (handle == root_layer_handle) return false;
+        const layer = self.layers.getPtr(handle) orelse return false;
+        return layer.owners.contains(conn);
+    }
+
+    /// Drops `conn` from every connection-owned layer's owner set; any
+    /// layer left with no owners is destroyed and its handle appended to
+    /// `culled` (caller-owned, expected empty on entry -- server.zig logs
+    /// the entries). Called from `server.zig` when a connection closes,
+    /// under `ctx_mutex`. Layers that were never connection-owned (created
+    /// in-process) are skipped entirely. On an allocation failure while
+    /// recording a culled handle this returns the error with the layer
+    /// already destroyed but not reported -- an OOM path the host treats
+    /// as fatal anyway.
+    pub fn removeConnectionOwnership(self: *Context, conn: ConnId, culled: *std.ArrayList(LayerHandle)) !void {
+        var it = self.layers.iterator();
+        while (it.next()) |entry| {
+            const layer = entry.value_ptr;
+            if (!layer.connection_owned) continue;
+            _ = layer.owners.remove(conn);
+            if (layer.owners.count() == 0) try culled.append(self.alloc, entry.key_ptr.*);
+        }
+        // Destroy in a second pass: `destroyLayer` mutates `self.layers`,
+        // which can't happen while the iterator above is live.
+        for (culled.items) |h| self.destroyLayer(h) catch {};
     }
 
     /// Changes the context's base size -- the width/height a

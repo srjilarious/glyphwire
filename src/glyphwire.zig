@@ -88,6 +88,7 @@ pub const LayerBounds = core.LayerBounds;
 pub const DividerRect = core.DividerRect;
 pub const Layer = core.Layer;
 pub const LayerHandle = core.LayerHandle;
+pub const ConnId = core.ConnId;
 pub const root_layer_handle = core.root_layer_handle;
 pub const default_context_id = core.default_context_id;
 pub const Context = core.Context;

@@ -27,6 +27,13 @@ pub const DispatchError = error{
     UnknownImage,
     UnknownIcon,
     UnknownLayer,
+    /// A socket connection issued `destroy_layer` for a layer it doesn't
+    /// own (never created and never `adopt_layer`'d) -- see
+    /// `handleDestroyLayer`. `destroy_layer` is a notification with no
+    /// response channel, so server.zig turns this into a logged warning
+    /// and the layer is left intact; a real JSON-RPC error response would
+    /// need the still-unbuilt error-response path (roadmap Milestone 0).
+    LayerPermissionDenied,
     InvalidIconOption,
     UnknownMetadata,
     UnknownTable,
@@ -192,6 +199,13 @@ const MoveDividerParams = struct {
     split: core.SplitHandle,
     index: usize,
     delta: i64,
+};
+
+/// `adopt_layer` params -- same single-handle shape as `destroy_layer`,
+/// kept as its own type so the two messages stay independently
+/// documented.
+const AdoptLayerParams = struct {
+    layer: core.LayerHandle,
 };
 
 const CreateMetadataParams = struct {
@@ -594,9 +608,23 @@ pub const Dispatcher = struct {
     /// per-connection record after each `handle` call so the fan-out
     /// logic can consult it without this type knowing about connections.
     subscriptions: Subscriptions = .{},
+    /// The identity of the socket connection this dispatcher serves, or
+    /// null for an in-process caller with no connection (the headless
+    /// `server/main.zig`, tests, glyphwire-host driving the `Context`
+    /// directly). Threads through to layer ownership: a non-null id is
+    /// recorded as the owner on `create_layer` / `adopt_layer` and
+    /// checked on `destroy_layer`; a null id owns nothing and bypasses
+    /// the `destroy_layer` ownership check entirely. See `core.ConnId`.
+    conn_id: ?core.ConnId = null,
 
     pub fn init(ctx: *core.Context) Dispatcher {
         return .{ .ctx = ctx };
+    }
+
+    /// Like `init`, but for a dispatcher serving a real socket connection
+    /// whose id participates in layer ownership (see `conn_id`).
+    pub fn initForConnection(ctx: *core.Context, conn_id: core.ConnId) Dispatcher {
+        return .{ .ctx = ctx, .conn_id = conn_id };
     }
 
     /// Handles one decoded frame body. See `HandleResult`.
@@ -639,6 +667,9 @@ pub const Dispatcher = struct {
             return .{ .response = try self.handleCreateLayer(alloc, id, envelope.params) };
         } else if (std.mem.eql(u8, envelope.method, "destroy_layer")) {
             try self.handleDestroyLayer(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "adopt_layer")) {
+            try self.handleAdoptLayer(alloc, envelope.params);
             return .{};
         } else if (std.mem.eql(u8, envelope.method, "create_split")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
@@ -1041,7 +1072,11 @@ pub const Dispatcher = struct {
     }
 
     /// `create_layer`: allocates a fresh layer parented to the root (see
-    /// `Context.createLayer`) and returns its handle.
+    /// `Context.createLayer`) and returns its handle. When this dispatcher
+    /// serves a real connection (`conn_id` set), that connection is
+    /// recorded as the layer's first owner, so the layer is culled if the
+    /// connection later closes without destroying it (see
+    /// `Context.removeConnectionOwnership`).
     fn handleCreateLayer(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
         const parsed = try std.json.parseFromValue(CreateLayerParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
@@ -1050,19 +1085,47 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         const layer_handle = try self.ctx.createLayer(p.width, p.height, p.scrollback_rows);
+        if (self.conn_id) |cid| self.ctx.addLayerOwner(layer_handle, cid) catch {};
         return try rpc.response(alloc, id, CreateLayerResult{ .handle = layer_handle });
     }
 
     /// `destroy_layer`: frees a layer and drops it from compositing (see
     /// `Context.destroyLayer`). Errors (an unknown handle, or the root's)
     /// surface as `DispatchError.UnknownLayer` via `core.LayerError`'s own
-    /// single member.
+    /// single member. When this dispatcher serves a real connection, that
+    /// connection must own the layer (created it, or `adopt_layer`'d it) --
+    /// otherwise `DispatchError.LayerPermissionDenied`, which server.zig
+    /// logs and drops without touching the layer. An in-process caller
+    /// (`conn_id` null) bypasses the check.
     fn handleDestroyLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
         const parsed = try std.json.parseFromValue(DestroyLayerParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
-        self.ctx.destroyLayer(parsed.value.layer) catch return DispatchError.UnknownLayer;
+        const layer_handle = parsed.value.layer;
+        if (self.conn_id) |cid| {
+            // An unknown handle falls through to the UnknownLayer path
+            // below rather than being reported as a permission problem.
+            if (self.ctx.layers.contains(layer_handle) and !self.ctx.layerHasOwner(layer_handle, cid))
+                return DispatchError.LayerPermissionDenied;
+        }
+        self.ctx.destroyLayer(layer_handle) catch return DispatchError.UnknownLayer;
+    }
+
+    /// `adopt_layer`: adds this connection to `layer`'s owner set, so the
+    /// layer survives its original creator disconnecting as long as this
+    /// connection stays up, and this connection may itself `destroy_layer`
+    /// it. Errors `UnknownLayer` for an unknown or root handle. A no-op
+    /// for an in-process caller (`conn_id` null) -- it owns nothing and
+    /// needs no ownership to act.
+    fn handleAdoptLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(AdoptLayerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        if (self.conn_id) |cid| {
+            self.ctx.addLayerOwner(parsed.value.layer, cid) catch return DispatchError.UnknownLayer;
+        }
     }
 
     /// Re-lays-out the split tree and, if any pane's bounds moved, builds
