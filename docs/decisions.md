@@ -130,6 +130,41 @@ final.
   feel instant" — see the deferred capability-cache idea below, which
   turned out to be solving a smaller problem than this does.
 
+### Error reporting
+- **No JSON-RPC error responses yet** (roadmap Milestone 0). A request
+  that errors severs the connection; a notification that errors is
+  logged host-side and swallowed. That leaves a notification's sender —
+  the fire-and-forget majority of the client→server catalog — with no
+  way to learn its `destroy_layer` / `write_text` / `draw_*` was
+  rejected.
+- **Interim: a per-connection error ring, opt-in via `subscribe("error")`,
+  pulled with `get_errors`.** Chosen over the alternatives:
+  - *Promote each notification to a request* — a synchronous round trip
+    on every draw call to serve a rare error, and a wire-shape change to
+    dozens of messages. No.
+  - *Push an `error` notification* — the connection that sends the
+    failing notification is the synchronous `Client` (the async
+    `InputListener` is a separate connection), and interleaving pushed
+    frames with `Client`'s request/response reads is the thing that
+    architecture avoids. A pull ring fits `Client` as-is.
+  - JSON-RPC itself offers nothing here — the spec explicitly says a
+    notification's sender can't be told about errors; the only lever is
+    request/response.
+- **Ring of 5, drop-oldest, drained by `get_errors`.** A client polls
+  between batches of work; `get_errors` returns the buffered
+  `{method, code, seq}` records oldest-first plus a `dropped` count (how
+  many were lost to a full ring since the last call) and clears the ring.
+  Small and lossy on purpose — keeping every error indefinitely for a
+  client that subscribed and never drained is just a leak; `dropped` is
+  the signal that you fell behind. `code` is the `DispatchError` name
+  (`"LayerPermissionDenied"`, `"UnknownLayer"`, …); `seq` is a
+  per-connection monotonic counter for ordering / gap detection.
+- **Opt-in.** Nothing is recorded until the connection subscribes to
+  `"error"`, so the default path stays allocation-free and
+  behaviour-identical. Batched sub-message failures are recorded too
+  (they route through the same dispatch path). When real error responses
+  land, this stays as the mechanism for the fire-and-forget case.
+
 ### Capability negotiation
 - LSP-style `initialize` / `initialized` handshake: both sides exchange
   nested capability objects before any feature-gated message is sent.

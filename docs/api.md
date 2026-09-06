@@ -281,6 +281,21 @@ band at a time. See decisions.md's Batch section for the reasoning.
   broadcast is suppressed, so a batch is really for draw / layer / table
   / metadata commands.
 
+## Error reporting
+
+A notification that fails in its handler is otherwise invisible to its
+sender — there's no response, and (unlike a failed request) the
+connection isn't severed; the server just logs it. A connection that
+wants to know can **subscribe to `"error"`** and pull the failures it
+caused with `get_errors`. No JSON-RPC error *responses* exist yet
+(roadmap Milestone 0) — this is the interim visibility path. See
+decisions.md's Error reporting section.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `subscribe` with `"error"` in `events` | request | — | — | ✅ turns on per-connection error capture: from here on, any notification this connection sends that errors in its handler (standalone or inside a `batch`) is recorded in a ring of the last **5**. Not a broadcast stream — nothing is pushed |
+| `get_errors` | request | *(none)* | `{errors: [{method, code, seq}], dropped}` | ✅ returns the ring oldest-first, then **drains** it. `method` is the failed notification's method, `code` the `DispatchError` name (e.g. `"LayerPermissionDenied"`, `"UnknownLayer"`), `seq` a per-connection monotonic counter. `dropped` is how many records were lost to a full ring since the last `get_errors`. Empty with `dropped: 0` for a connection that never subscribed to `"error"` |
+
 ## Animation
 
 | Message | Kind | Params | Result | Status |

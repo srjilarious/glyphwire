@@ -2215,3 +2215,138 @@ pub fn inProcessDispatcherBypassesLayerOwnershipTest(io: std.Io, alloc: std.mem.
     try testz.expectTrue((try in_process.handle(alloc, destroy)).response == null);
     try testz.expectTrue(ctx.layerPtr(1) == null);
 }
+
+// ── Error ring: a client subscribes to "error", then pulls the failed ───
+//    notifications it sent with get_errors (see Dispatcher.recordError).
+
+const bad_destroy =
+    \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":999}}
+;
+const subscribe_error =
+    \\{"jsonrpc":"2.0","id":9,"method":"subscribe","params":{"events":["error"]}}
+;
+const get_errors =
+    \\{"jsonrpc":"2.0","id":1,"method":"get_errors","params":{}}
+;
+
+fn drainErrors(d: *dispatch.Dispatcher, alloc: std.mem.Allocator) ![]u8 {
+    const r = try d.handle(alloc, get_errors);
+    return r.response.?;
+}
+
+pub fn subscribeErrorSetsTheFlagTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const ack = (try d.handle(alloc, subscribe_error)).response.?;
+    alloc.free(ack);
+    try testz.expectTrue(d.subscriptions.error_events);
+}
+
+pub fn getErrorsRecordsNothingWithoutSubscriptionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // The notification still fails -- it's just not recorded anywhere.
+    try testz.expectError(d.handle(alloc, bad_destroy), dispatch.DispatchError.UnknownLayer);
+
+    const body = try drainErrors(&d, alloc);
+    defer alloc.free(body);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"errors\":[]") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"dropped\":0") != null);
+}
+
+pub fn getErrorsReturnsFailedNotificationWhenSubscribedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const ack = (try d.handle(alloc, subscribe_error)).response.?;
+    alloc.free(ack);
+
+    try testz.expectError(d.handle(alloc, bad_destroy), dispatch.DispatchError.UnknownLayer);
+
+    const body = try drainErrors(&d, alloc);
+    defer alloc.free(body);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"method\":\"destroy_layer\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"code\":\"UnknownLayer\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"seq\":1") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"dropped\":0") != null);
+}
+
+pub fn getErrorsDrainsTheRingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const ack = (try d.handle(alloc, subscribe_error)).response.?;
+    alloc.free(ack);
+    try testz.expectError(d.handle(alloc, bad_destroy), dispatch.DispatchError.UnknownLayer);
+
+    const first = try drainErrors(&d, alloc);
+    defer alloc.free(first);
+    try testz.expectEqual(std.mem.count(u8, first, "\"method\""), 1);
+
+    const second = try drainErrors(&d, alloc);
+    defer alloc.free(second);
+    try testz.expectTrue(std.mem.indexOf(u8, second, "\"errors\":[]") != null);
+}
+
+pub fn getErrorsRingDropsOldestBeyondCapacityTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const ack = (try d.handle(alloc, subscribe_error)).response.?;
+    alloc.free(ack);
+
+    // Seven failures into a five-slot ring: the first two are dropped.
+    var n: usize = 0;
+    while (n < 7) : (n += 1) {
+        try testz.expectError(d.handle(alloc, bad_destroy), dispatch.DispatchError.UnknownLayer);
+    }
+
+    const body = try drainErrors(&d, alloc);
+    defer alloc.free(body);
+    try testz.expectEqual(std.mem.count(u8, body, "\"method\""), dispatch.error_ring_capacity);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"dropped\":2") != null);
+    // Oldest kept is seq 3, newest is seq 7.
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"seq\":3") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"seq\":7") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"seq\":2") == null);
+
+    // dropped resets with the drain.
+    const after = try drainErrors(&d, alloc);
+    defer alloc.free(after);
+    try testz.expectTrue(std.mem.indexOf(u8, after, "\"dropped\":0") != null);
+}
+
+pub fn getErrorsRecordsBatchedNotificationFailureTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const ack = (try d.handle(alloc, subscribe_error)).response.?;
+    alloc.free(ack);
+
+    // Notification-form batch: sub-message failures are logged and
+    // skipped by handleBatch, and (because it routes through
+    // dispatchEnvelope) also recorded.
+    const batch =
+        \\{"jsonrpc":"2.0","method":"batch","params":{"messages":[{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":999}}]}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, batch)).response == null);
+
+    const body = try drainErrors(&d, alloc);
+    defer alloc.free(body);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"method\":\"destroy_layer\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"code\":\"UnknownLayer\"") != null);
+}
