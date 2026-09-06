@@ -421,6 +421,113 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqualStr("/", snapshot.cellAt(0, text_col + 6).grapheme);
 }
 
+/// Same candidate path as the Tab completion test, but without pressing
+/// Tab: after the prompt sits idle for ~500ms, the first completion
+/// candidate is drawn as dim text after the caret. The line buffer is not
+/// changed; this is only a repaint-time hint.
+pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shell-hint-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread3.join();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    const text_col = cwd_len + 3;
+
+    try waitForCell(&reporter, 0, arrow_col, ">");
+    try typeText(&reporter, "ls sr");
+    try waitForCell(&reporter, 0, text_col + 4, "r");
+
+    try waitForCell(&reporter, 0, text_col + 6, "/");
+
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+    const hinted_c = snapshot.cellAt(0, text_col + 5);
+    const hinted_slash = snapshot.cellAt(0, text_col + 6);
+    try testz.expectEqualStr("c", hinted_c.grapheme);
+    try testz.expectEqualStr("/", hinted_slash.grapheme);
+    try testz.expectEqual(hinted_c.fg.r, 120);
+    try testz.expectEqual(hinted_c.fg.g, 120);
+    try testz.expectEqual(hinted_c.fg.b, 120);
+    try testz.expectEqual(hinted_slash.fg.r, 120);
+    try testz.expectEqual(hinted_slash.fg.g, 120);
+    try testz.expectEqual(hinted_slash.fg.b, 120);
+
+    const cur = try reporter.getCursor();
+    try testz.expectEqual(cur.row, @as(usize, 0));
+    try testz.expectEqual(cur.col, text_col + 5);
+
+    try reporter.reportKey("left", true);
+    try reporter.reportKey("left", false);
+    try waitForCursorCol(&reporter, text_col + 4);
+
+    var left_snapshot = try reporter.getCells();
+    defer left_snapshot.deinit();
+    const left_c = left_snapshot.cellAt(0, text_col + 5);
+    const left_slash = left_snapshot.cellAt(0, text_col + 6);
+    try testz.expectEqualStr("c", left_c.grapheme);
+    try testz.expectEqualStr("/", left_slash.grapheme);
+    try testz.expectEqual(left_c.fg.r, 120);
+    try testz.expectEqual(left_slash.fg.r, 120);
+
+    try reporter.reportKey("right", true);
+    try reporter.reportKey("right", false);
+    try waitForCursorCol(&reporter, text_col + 5);
+
+    var right_snapshot = try reporter.getCells();
+    defer right_snapshot.deinit();
+    const right_c = right_snapshot.cellAt(0, text_col + 5);
+    const right_slash = right_snapshot.cellAt(0, text_col + 6);
+    try testz.expectEqualStr("c", right_c.grapheme);
+    try testz.expectEqualStr("/", right_slash.grapheme);
+    try testz.expectEqual(right_c.fg.r, 120);
+    try testz.expectEqual(right_slash.fg.r, 120);
+
+    try reporter.reportKey("right", true);
+    try reporter.reportKey("right", false);
+    try waitForCursorCol(&reporter, text_col + 7);
+
+    var accepted = try reporter.getCells();
+    defer accepted.deinit();
+    try testz.expectEqualStr("c", accepted.cellAt(0, text_col + 5).grapheme);
+    try testz.expectEqualStr("/", accepted.cellAt(0, text_col + 6).grapheme);
+}
+
 /// Drives the real glyphwire-shell binary through a `*` glob expansion:
 /// types `echo *.zon` at the prompt and presses Enter. The shell's cwd
 /// (this repo's root, same assumption the other shell e2e tests make)
