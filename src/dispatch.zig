@@ -815,170 +815,150 @@ pub const Dispatcher = struct {
         e.seq = self.error_seq;
     }
 
-    /// The big message-catalog if/else chain. Everything routes through
-    /// `dispatchEnvelope` above (which adds error recording); `handleBatch`
-    /// does too. Split from `handle` so a batched sub-message and a
-    /// standalone one hit precisely the same handler.
+    /// Uniform signature every catalog entry is adapted to. `anyerror`
+    /// rather than a spelled-out set: the branches this replaced already
+    /// raised a mix of `DispatchError`, JSON parse errors and
+    /// `Allocator.Error`, and `dispatchEnvelope` catches all of them the
+    /// same way. Routing through a function-pointer table also breaks the
+    /// `batch` -> `handleBatch` -> `dispatchEnvelope` -> catalog
+    /// error-set cycle for free (the reason `handleBatch` still spells out
+    /// its own return set).
+    const CatalogFn = *const fn (*Dispatcher, std.mem.Allocator, Envelope) anyerror!HandleResult;
+
+    /// Adapts a `!HandleResult` handler taking `(alloc, params)`.
+    fn catResult(comptime f: anytype) CatalogFn {
+        return &struct {
+            fn call(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) anyerror!HandleResult {
+                return try f(self, alloc, envelope.params);
+            }
+        }.call;
+    }
+
+    /// Adapts a `!void` handler taking `(alloc, params)` -- a
+    /// fire-and-forget notification, so the reply is always the empty
+    /// result.
+    fn catVoid(comptime f: anytype) CatalogFn {
+        return &struct {
+            fn call(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) anyerror!HandleResult {
+                try f(self, alloc, envelope.params);
+                return .{};
+            }
+        }.call;
+    }
+
+    /// Adapts a `!HandleResult` handler taking `(alloc, id, params)`: the
+    /// message must be a request (carry an `id`).
+    fn catResultId(comptime f: anytype) CatalogFn {
+        return &struct {
+            fn call(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) anyerror!HandleResult {
+                const id = envelope.id orelse return DispatchError.NotARequest;
+                return try f(self, alloc, id, envelope.params);
+            }
+        }.call;
+    }
+
+    /// Adapts a `![]u8` (JSON response bytes) handler taking
+    /// `(alloc, id, params)`: request-only, wrapped as `.response`.
+    fn catBytesId(comptime f: anytype) CatalogFn {
+        return &struct {
+            fn call(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) anyerror!HandleResult {
+                const id = envelope.id orelse return DispatchError.NotARequest;
+                return .{ .response = try f(self, alloc, id, envelope.params) };
+            }
+        }.call;
+    }
+
+    /// Adapts a `![]u8` handler taking `(alloc, id)`: request-only, reads
+    /// no params.
+    fn catBytesIdNoParams(comptime f: anytype) CatalogFn {
+        return &struct {
+            fn call(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) anyerror!HandleResult {
+                const id = envelope.id orelse return DispatchError.NotARequest;
+                return .{ .response = try f(self, alloc, id) };
+            }
+        }.call;
+    }
+
+    /// `batch` alone: it needs the raw `id` (request *or* notification
+    /// form) plus `params`, not the `(alloc, params)` shape the adapters
+    /// above assume.
+    fn catBatch(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) anyerror!HandleResult {
+        return try self.handleBatch(alloc, envelope.id, envelope.params);
+    }
+
+    /// Method name -> handler. A compile-time perfect-hash map built from
+    /// the adapters above; replaces what was a ~60-branch `if/else` chain
+    /// of `std.mem.eql` on `envelope.method`. Adding a message is one row
+    /// here. `dispatchEnvelope` (error recording) and `handleBatch` both
+    /// route through `dispatchCatalog`, so a batched sub-message and a
+    /// standalone one still hit precisely the same handler.
+    const catalog = std.StaticStringMap(CatalogFn).initComptime(.{
+        .{ "write_text", catResult(handleWriteText) },
+        .{ "insert_cells", catVoid(handleInsertCells) },
+        .{ "delete_cells", catVoid(handleDeleteCells) },
+        .{ "set_property", catVoid(handleSetProperty) },
+        .{ "get_property", catBytesId(handleGetProperty) },
+        .{ "get_cells", catBytesId(handleGetCells) },
+        .{ "scroll_view", catResultId(handleScrollView) },
+        .{ "create_layer", catBytesId(handleCreateLayer) },
+        .{ "destroy_layer", catVoid(handleDestroyLayer) },
+        .{ "adopt_layer", catVoid(handleAdoptLayer) },
+        .{ "create_context", catResultId(handleCreateContext) },
+        .{ "destroy_context", catResult(handleDestroyContext) },
+        .{ "activate_context", catResult(handleActivateContext) },
+        .{ "attach_context", catVoid(handleAttachContext) },
+        .{ "adopt_context", catVoid(handleAdoptContext) },
+        .{ "create_split", catBytesId(handleCreateSplit) },
+        .{ "destroy_split", catResult(handleDestroySplit) },
+        .{ "set_split_children", catResult(handleSetSplitChildren) },
+        .{ "set_root_split", catResult(handleSetRootSplit) },
+        .{ "move_divider", catResult(handleMoveDivider) },
+        .{ "raise_layer", catVoid(handleRaiseLayer) },
+        .{ "lower_layer", catVoid(handleLowerLayer) },
+        .{ "report_key", catResult(handleReportKey) },
+        .{ "report_text", catResult(handleReportText) },
+        .{ "report_mouse_button", catResult(handleReportMouseButton) },
+        .{ "report_mouse_move", catResult(handleReportMouseMove) },
+        .{ "subscribe", catBytesId(handleSubscribe) },
+        .{ "get_input_state", catBytesIdNoParams(handleGetInputState) },
+        .{ "get_image_info", catBytesId(handleGetImageInfo) },
+        .{ "draw_image", catVoid(handleDrawImage) },
+        .{ "draw_icon", catVoid(handleDrawIcon) },
+        .{ "tag_metadata", catVoid(handleTagMetadata) },
+        .{ "draw_box", catVoid(handleDrawBox) },
+        .{ "clear", catVoid(handleClear) },
+        .{ "get_cell_metrics", catBytesIdNoParams(handleGetCellMetrics) },
+        .{ "create_metadata", catBytesId(handleCreateMetadata) },
+        .{ "destroy_metadata", catVoid(handleDestroyMetadata) },
+        .{ "get_metadata", catBytesId(handleGetMetadata) },
+        .{ "create_table", catBytesId(handleCreateTable) },
+        .{ "destroy_table", catVoid(handleDestroyTable) },
+        .{ "table_set_rows", catVoid(handleTableSetRows) },
+        .{ "table_set_sort", catVoid(handleTableSetSort) },
+        .{ "table_set_style", catVoid(handleTableSetStyle) },
+        .{ "table_get_state", catBytesId(handleTableGetState) },
+        .{ "set_selection", catResult(handleSetSelection) },
+        .{ "update_selection", catResult(handleUpdateSelection) },
+        .{ "clear_selection", catResult(handleClearSelection) },
+        .{ "get_selection", catBytesId(handleGetSelection) },
+        .{ "get_selection_text", catBytesId(handleGetSelectionText) },
+        .{ "toggle_highlight", catBytesId(handleToggleHighlight) },
+        .{ "set_highlight", catBytesId(handleSetHighlight) },
+        .{ "clear_highlight", catBytesId(handleClearHighlight) },
+        .{ "get_highlight", catBytesId(handleGetHighlight) },
+        .{ "set_clipboard", catVoid(handleSetClipboard) },
+        .{ "get_clipboard", catBytesIdNoParams(handleGetClipboard) },
+        .{ "get_errors", catBytesIdNoParams(handleGetErrors) },
+        .{ "batch", &catBatch },
+    });
+
+    /// Looks the method up in `catalog` and runs its handler. Split from
+    /// `handle` so a batched sub-message and a standalone one hit
+    /// precisely the same handler.
     fn dispatchCatalog(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
         self.syncActiveContext();
-        if (std.mem.eql(u8, envelope.method, "write_text")) {
-            return try self.handleWriteText(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "insert_cells")) {
-            try self.handleInsertCells(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "delete_cells")) {
-            try self.handleDeleteCells(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "set_property")) {
-            try self.handleSetProperty(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "get_property")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetProperty(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "get_cells")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetCells(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "scroll_view")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return try self.handleScrollView(alloc, id, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "create_layer")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleCreateLayer(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "destroy_layer")) {
-            try self.handleDestroyLayer(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "adopt_layer")) {
-            try self.handleAdoptLayer(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "create_context")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return try self.handleCreateContext(alloc, id, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "destroy_context")) {
-            return try self.handleDestroyContext(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "activate_context")) {
-            return try self.handleActivateContext(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "attach_context")) {
-            try self.handleAttachContext(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "adopt_context")) {
-            try self.handleAdoptContext(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "create_split")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleCreateSplit(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "destroy_split")) {
-            return try self.handleDestroySplit(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "set_split_children")) {
-            return try self.handleSetSplitChildren(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "set_root_split")) {
-            return try self.handleSetRootSplit(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "move_divider")) {
-            return try self.handleMoveDivider(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "raise_layer")) {
-            try self.handleRaiseLayer(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "lower_layer")) {
-            try self.handleLowerLayer(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "report_key")) {
-            return try self.handleReportKey(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "report_text")) {
-            return try self.handleReportText(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "report_mouse_button")) {
-            return try self.handleReportMouseButton(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "report_mouse_move")) {
-            return try self.handleReportMouseMove(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "subscribe")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleSubscribe(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "get_input_state")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetInputState(alloc, id) };
-        } else if (std.mem.eql(u8, envelope.method, "get_image_info")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetImageInfo(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "draw_image")) {
-            try self.handleDrawImage(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "draw_icon")) {
-            try self.handleDrawIcon(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "tag_metadata")) {
-            try self.handleTagMetadata(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "draw_box")) {
-            try self.handleDrawBox(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "clear")) {
-            try self.handleClear(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "get_cell_metrics")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetCellMetrics(alloc, id) };
-        } else if (std.mem.eql(u8, envelope.method, "create_metadata")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleCreateMetadata(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "destroy_metadata")) {
-            try self.handleDestroyMetadata(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "get_metadata")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetMetadata(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "create_table")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleCreateTable(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "destroy_table")) {
-            try self.handleDestroyTable(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "table_set_rows")) {
-            try self.handleTableSetRows(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "table_set_sort")) {
-            try self.handleTableSetSort(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "table_set_style")) {
-            try self.handleTableSetStyle(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "table_get_state")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleTableGetState(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "set_selection")) {
-            return try self.handleSetSelection(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "update_selection")) {
-            return try self.handleUpdateSelection(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "clear_selection")) {
-            return try self.handleClearSelection(alloc, envelope.params);
-        } else if (std.mem.eql(u8, envelope.method, "get_selection")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetSelection(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "get_selection_text")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetSelectionText(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "toggle_highlight")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleToggleHighlight(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "set_highlight")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleSetHighlight(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "clear_highlight")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleClearHighlight(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "get_highlight")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetHighlight(alloc, id, envelope.params) };
-        } else if (std.mem.eql(u8, envelope.method, "set_clipboard")) {
-            try self.handleSetClipboard(alloc, envelope.params);
-            return .{};
-        } else if (std.mem.eql(u8, envelope.method, "get_clipboard")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetClipboard(alloc, id) };
-        } else if (std.mem.eql(u8, envelope.method, "get_errors")) {
-            const id = envelope.id orelse return DispatchError.NotARequest;
-            return .{ .response = try self.handleGetErrors(alloc, id) };
-        } else if (std.mem.eql(u8, envelope.method, "batch")) {
-            return try self.handleBatch(alloc, envelope.id, envelope.params);
-        }
-        return DispatchError.UnknownMethod;
+        const handler = catalog.get(envelope.method) orelse return DispatchError.UnknownMethod;
+        return handler(self, alloc, envelope);
     }
 
     /// A `batch` sub-message method that can't run inside a batch,
