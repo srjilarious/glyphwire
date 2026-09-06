@@ -376,6 +376,76 @@ surface.
   multi-layer program is one process that already knows which of its own
   panes has focus. A focus concept only earns its place once two separate
   processes draw into the same context.
+- **v1 built — content vs. viewport, per-layer scrolling, and a split
+  tree.** The multi-pane properties above put panes *somewhere*; these
+  answer the two questions that come straight after — what does a pane
+  show when its content is bigger than it, and who decides where the
+  panes go.
+  - **A layer's cell grid is its *content*; what the host draws is its
+    *viewport*.** `viewport` (`{cols, rows}`, zero meaning "all of it")
+    and `scroll_offset` (`{row, col}`, the window's top-left within the
+    content) split what used to be one thing. A file tree is then a
+    90×500 layer shown through a 30×40 viewport rather than a 30×40 layer
+    the client rewrites on every scroll tick — which matters because the
+    alternative puts a wire round trip in the middle of a mouse wheel.
+    The host clamps `scroll_offset` to `size - viewport`, so a client
+    cannot park the viewport off the end of its own content, and a
+    `resize` or a viewport change re-clamps rather than stranding it.
+  - **This is deliberately *not* the same axis as `scroll`.** The
+    existing `scroll`/`scroll_view` pair is the terminal-style scrollback
+    ring: how far back into retained history the live viewport is
+    looking, anchored at the live tail. `scroll_offset` is a window over
+    the content grid, anchored at the top. They compose (`scroll` picks
+    which rows are live, `scroll_offset` the window over them), and a
+    pane created with `scrollback_rows: 0` — every pane in a TUI — only
+    ever uses the second. Collapsing them into one property was
+    considered and rejected: the two have different origins and different
+    maxima, and re-anchoring the root layer's scrollback would have
+    rewritten glyphwire-shell's browse cursor for no gain.
+  - **Scrollbars are per-layer and opt-in per axis.** `scrollbars`
+    (`{vertical, horizontal}`) makes the host draw bars inside a layer's
+    own bounds, driving `scroll_offset` from wheel, thumb drag and track
+    page. Opt-in because a statusline or a popup can easily have content
+    wider than its pane and should not sprout a bar; and a bar is skipped
+    anyway on an axis with no slack, so a wheel over a pane with nothing
+    to scroll falls through to the shell's scrollback underneath instead
+    of being silently swallowed. The window's own right-edge bar is
+    untouched — it is the root layer's scrollback and keeps its gutter.
+    Horizontal is real, not decorative: a tree with long filenames is
+    exactly the case that motivated it.
+  - **The split tree lives server-side.** `create_split` /
+    `set_split_children` / `set_root_split` / `move_divider`: a client
+    describes the arrangement once and the host computes every pane's
+    bounds, re-computes them on a window resize, and owns the divider
+    drag. The alternative — the client computing bounds and pushing
+    `cell_position` + `viewport` per pane — was the initial plan and was
+    rejected on two counts: a drag would round-trip every mouse-move
+    through the client to move a divider that is pure geometry, and every
+    TUI would re-implement the same pane maths slightly differently.
+    Making it a real object also gives the host somewhere to hit-test,
+    which a pile of independently positioned layers doesn't have.
+  - **Two sizing modes, because one isn't enough.** A child is `weight`
+    (a share of what's left) or `fixed` (exact cells along the axis).
+    Pure ratios can't express a one-row statusline without the client
+    recomputing a fraction on every resize; pure fixed sizes can't
+    express "the buffer takes the rest". Fixed children are measured
+    first and the last weighted child absorbs the rounding remainder, so
+    children plus dividers always fill the split exactly rather than
+    leaving a stray blank column. A drag preserves whichever mode each
+    neighbour declared — a fixed pane gets a new cell count, a weighted
+    pair keeps its *combined* weight and re-splits it — so resizing two
+    panes never disturbs the rest of the tree.
+  - **The root layer is never a split child.** It's the shell's
+    scrollback, drawn at a fixed origin; a full-screen program's panes
+    simply cover it. That gives the alt-screen story (the shell is still
+    there, untouched, when the program exits) without `create_context`
+    having to exist yet.
+  - **`layout` is one notification for the whole tree**, not one per
+    pane, so a client redraws once against a consistent set of bounds.
+    It carries only what moved, and a re-layout that changes nothing is
+    silent — which is what makes the layout walk safe for the host to
+    re-run purely to recover divider geometry. `Context.layout_gen` is
+    the cache key the host uses to avoid even that most frames.
 - **Not built — still open:** `create_context`, non-root parenting,
   `clip`/`visibility` properties, a raw wheel-delta `mouse_scroll` event
   stream (distinct from `scroll`, which reports the resolved offset).

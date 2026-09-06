@@ -89,6 +89,31 @@ pub fn scrollNotification(alloc: std.mem.Allocator, offset: usize, max: usize) !
     return notification(alloc, "scroll", protocol.ScrollParams{ .offset = offset, .max = max });
 }
 
+/// `scroll_offset` -- a layer's viewport moved over its content grid.
+/// See `protocol.ScrollOffsetParams`; delivered to `"scroll"`
+/// subscribers, same as the root layer's `scroll`.
+pub fn scrollOffsetNotification(
+    alloc: std.mem.Allocator,
+    layer: core.LayerHandle,
+    row: usize,
+    col: usize,
+    max_row: usize,
+    max_col: usize,
+) ![]u8 {
+    return notification(alloc, "scroll_offset", protocol.ScrollOffsetParams{
+        .layer = layer,
+        .row = row,
+        .col = col,
+        .max_row = max_row,
+        .max_col = max_col,
+    });
+}
+
+/// `layout` -- the panes whose bounds changed after a split re-layout.
+pub fn layoutNotification(alloc: std.mem.Allocator, layers: []const protocol.LayoutBounds) ![]u8 {
+    return notification(alloc, "layout", protocol.LayoutParams{ .layers = layers });
+}
+
 /// `terminal_reply` -- `bytes` are a terminal query answer a `write_text`
 /// produced (see `core.Layer.takeReply`), for a `"terminal"` subscriber
 /// to write to the pty master.

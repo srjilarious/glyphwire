@@ -1696,11 +1696,15 @@ pub fn subscribeAcceptsSelectionAndClipboardTest(io: std.Io, alloc: std.mem.Allo
 // ─── Layer geometry, visibility and stacking over the wire ──────────────
 
 /// Runs one JSON body through the framing round trip and the dispatcher,
-/// asserting it produced no response (i.e. it was a notification).
+/// asserting it produced no response (i.e. it was a notification). Any
+/// broadcast it did produce is freed here -- the real caller is
+/// `Server.serveConnection`, which owns that body.
 fn notifyThrough(alloc: std.mem.Allocator, d: *dispatch.Dispatcher, body: []const u8) !void {
     const decoded = try roundTripThroughWire(alloc, body);
     defer alloc.free(decoded);
-    try testz.expectTrue((try d.handle(alloc, decoded)).response == null);
+    const result = try d.handle(alloc, decoded);
+    if (result.broadcast) |b| alloc.free(b.body);
+    try testz.expectTrue(result.response == null);
 }
 
 pub fn setPropertySizeResizesANonRootLayerTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1827,4 +1831,263 @@ pub fn raiseLayerRejectsAnUnknownHandleTest(io: std.Io, alloc: std.mem.Allocator
     const decoded = try roundTripThroughWire(alloc, body);
     defer alloc.free(decoded);
     try testz.expectError(d.handle(alloc, decoded), error.UnknownLayer);
+}
+
+// ─── Viewport, scroll offset and splits over the wire ───────────────────
+
+pub fn viewportAndScrollOffsetRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const pane = try ctx.createLayer(90, 500, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"viewport","cols":30,"rows":40}}
+    );
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"scroll_offset","row":100,"col":10}}
+    );
+    try testz.expectEqual(ctx.layerPtr(pane).?.scroll_off.row, 100);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":9,"method":"get_property","params":{"layer":1,"property":"scroll_offset"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+
+    const Response = struct {
+        id: i64,
+        result: struct { row: usize, col: usize, max_row: usize, max_col: usize },
+    };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.result.row, 100);
+    try testz.expectEqual(parsed.value.result.col, 10);
+    try testz.expectEqual(parsed.value.result.max_row, 460);
+    try testz.expectEqual(parsed.value.result.max_col, 60);
+}
+
+pub fn scrollOffsetIsClampedServerSideTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const pane = try ctx.createLayer(40, 100, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"viewport","cols":40,"rows":10}}
+    );
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"scroll_offset","row":9999,"col":9999}}
+    );
+
+    // A client can't park the viewport off the end of its own content.
+    try testz.expectEqual(ctx.layerPtr(pane).?.scroll_off.row, 90);
+    try testz.expectEqual(ctx.layerPtr(pane).?.scroll_off.col, 0);
+}
+
+pub fn scrollbarsPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    _ = try ctx.createLayer(90, 500, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"viewport","cols":30,"rows":40}}
+    );
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"scrollbars","vertical":true,"horizontal":true}}
+    );
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":11,"method":"get_property","params":{"layer":1,"property":"scrollbars"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+
+    const Response = struct {
+        result: struct {
+            vertical: bool,
+            horizontal: bool,
+            row: usize,
+            col: usize,
+            max_row: usize,
+            max_col: usize,
+        },
+    };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectTrue(parsed.value.result.vertical);
+    try testz.expectTrue(parsed.value.result.horizontal);
+    try testz.expectEqual(parsed.value.result.max_row, 460);
+}
+
+pub fn createSplitReturnsAHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const msg =
+        \\{"jsonrpc":"2.0","id":2,"method":"create_split","params":{"axis":"row"}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, msg);
+    defer alloc.free(decoded);
+    const body = (try d.handle(alloc, decoded)).response.?;
+    defer alloc.free(body);
+
+    const Response = struct { result: struct { handle: glyphwire.SplitHandle } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.result.handle, 1);
+    try testz.expectEqual(ctx.splits.getPtr(1).?.axis, .row);
+}
+
+pub fn createSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const msg =
+        \\{"jsonrpc":"2.0","id":2,"method":"create_split","params":{"axis":"diagonal"}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, msg);
+    defer alloc.free(decoded);
+    try testz.expectError(d.handle(alloc, decoded), error.InvalidSplitAxis);
+}
+
+pub fn splitChildrenLayOutAndBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const tree = try ctx.createLayer(30, 200, 0);
+    _ = try ctx.createLayer(200, 500, 0);
+    _ = try ctx.createSplit(.row);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_split_children","params":{"split":1,"children":[{"layer":1,"fixed":20},{"layer":2,"weight":1}]}}
+    );
+
+    // Nothing is laid out until a root split is named, so the broadcast
+    // comes with `set_root_split`, not before it.
+    const msg =
+        \\{"jsonrpc":"2.0","method":"set_root_split","params":{"split":1}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, msg);
+    defer alloc.free(decoded);
+    const result = try d.handle(alloc, decoded);
+    const broadcast = result.broadcast.?;
+    defer alloc.free(broadcast.body);
+    try testz.expectEqualStr(broadcast.event, "layout");
+
+    const Notif = struct {
+        method: []const u8,
+        params: struct {
+            layers: []const struct { layer: u32, row: usize, col: usize, cols: usize, rows: usize },
+        },
+    };
+    const parsed = try std.json.parseFromSlice(Notif, alloc, broadcast.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqualStr(parsed.value.method, "layout");
+    try testz.expectEqual(parsed.value.params.layers.len, 2);
+    try testz.expectEqual(parsed.value.params.layers[0].cols, 20);
+    try testz.expectEqual(parsed.value.params.layers[1].col, 21);
+    try testz.expectEqual(ctx.layerPtr(tree).?.viewportCols(), 20);
+}
+
+pub fn splitChildRejectsAnAmbiguousTargetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    _ = try ctx.createLayer(10, 10, 0);
+    _ = try ctx.createSplit(.row);
+
+    // Both a layer and a split named in one child: malformed, not
+    // something to pick a winner for.
+    const both =
+        \\{"jsonrpc":"2.0","method":"set_split_children","params":{"split":1,"children":[{"layer":1,"split":1}]}}
+    ;
+    const both_decoded = try roundTripThroughWire(alloc, both);
+    defer alloc.free(both_decoded);
+    try testz.expectError(d.handle(alloc, both_decoded), error.InvalidSplitChild);
+
+    const neither =
+        \\{"jsonrpc":"2.0","method":"set_split_children","params":{"split":1,"children":[{"weight":1}]}}
+    ;
+    const neither_decoded = try roundTripThroughWire(alloc, neither);
+    defer alloc.free(neither_decoded);
+    try testz.expectError(d.handle(alloc, neither_decoded), error.InvalidSplitChild);
+}
+
+pub fn moveDividerOverTheWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const tree = try ctx.createLayer(30, 200, 0);
+    _ = try ctx.createLayer(200, 500, 0);
+    const split = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(split, &.{
+        .{ .target = .{ .layer = 1 }, .size = .{ .fixed = 20 } },
+        .{ .target = .{ .layer = 2 }, .size = .{ .weight = 1 } },
+    });
+    try ctx.setRootSplit(split);
+    try ctx.layoutSplits(null, null);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"move_divider","params":{"split":1,"index":0,"delta":5}}
+    );
+    try testz.expectEqual(ctx.layerPtr(tree).?.viewportCols(), 25);
+}
+
+pub fn splitMessagesRejectUnknownHandlesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const msg =
+        \\{"jsonrpc":"2.0","method":"set_root_split","params":{"split":42}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, msg);
+    defer alloc.free(decoded);
+    try testz.expectError(d.handle(alloc, decoded), error.UnknownSplit);
+}
+
+pub fn scrollAndLayoutAreSubscribableTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const msg =
+        \\{"jsonrpc":"2.0","id":3,"method":"subscribe","params":{"events":["layout","scroll_offset"]}}
+    ;
+    const decoded = try roundTripThroughWire(alloc, msg);
+    defer alloc.free(decoded);
+    const body = (try d.handle(alloc, decoded)).response.?;
+    defer alloc.free(body);
+
+    try testz.expectTrue(d.subscriptions.layout);
+    // `scroll_offset` rides the `scroll` subscription -- a client that
+    // wants to know the view moved wants both kinds.
+    try testz.expectTrue(d.subscriptions.scroll);
+    try testz.expectTrue(d.subscriptions.has("scroll_offset"));
 }

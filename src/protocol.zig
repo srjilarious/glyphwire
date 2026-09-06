@@ -214,6 +214,35 @@ pub const MouseMoveParams = struct {
 /// retained-history maximum it's clamped to.
 pub const ScrollParams = struct { offset: usize, max: usize };
 
+/// `scroll_offset` params: a layer's viewport moved over its content
+/// grid -- the host's wheel or scrollbar drag, or another client's
+/// `set_property`. Carries the handle (unlike `scroll`, which is always
+/// the root layer's scrollback) plus the axis maxima, so a subscriber can
+/// redraw or size its own indicator without a follow-up request.
+pub const ScrollOffsetParams = struct {
+    layer: core.LayerHandle,
+    row: usize,
+    col: usize,
+    max_row: usize,
+    max_col: usize,
+};
+
+/// One layer's bounds inside a `layout` notification.
+pub const LayoutBounds = struct {
+    layer: core.LayerHandle,
+    row: usize,
+    col: usize,
+    cols: usize,
+    rows: usize,
+};
+
+/// `layout` params: every pane whose bounds changed, after the split tree
+/// was re-laid-out (a window resize or a divider drag). One notification
+/// for the whole tree rather than one per pane, so a client redraws once
+/// against a consistent set of bounds instead of N times against
+/// partially-updated ones.
+pub const LayoutParams = struct { layers: []const LayoutBounds };
+
 /// `terminal_reply` params: the bytes a `write_text` produced in answer
 /// to a terminal query (`CSI 6n` cursor-position, `CSI c` device
 /// attributes, DECRQM) in the text it mirrored. All printable ASCII in

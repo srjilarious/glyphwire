@@ -142,6 +142,17 @@ pub const DeferredIcon = struct {
     foreground: bool,
 };
 
+/// The divider band between two split children. Deliberately lighter than
+/// the window scrollbar's track: a divider reads as a seam between panes,
+/// not as chrome hanging off the edge of the window.
+const divider_color = host_eng.Color.from(58, 58, 66, 255);
+
+/// A pane scrollbar's track and thumb. The track is nearly transparent --
+/// it sits over content rather than in a reserved gutter, so it should
+/// register as a hint until the thumb is grabbed.
+const pane_track_color = host_eng.Color.from(40, 40, 46, 140);
+const pane_thumb_color = host_eng.Color.from(120, 120, 130, 220);
+
 /// All of the host's drawing: per-layer static quad batches, the icon
 /// atlas, image / icon cells, the caret, the scrollbar, and the
 /// `--screenshot` readback. Owns the GPU-texture caches and the batch
@@ -509,10 +520,19 @@ pub const Renderer = struct {
         // Phase 1: pack every glyph this layer shows into the atlas, then
         // upload once. A grow re-normalizes every glyph UV, so bump
         // `text_epoch` -- `syncBatches`'s loop then rebuilds the rest.
+        // The layer's *viewport* -- the window of its content grid that is
+        // actually drawn (see `core.PropertyName.viewport`). For every
+        // layer without one this is the whole grid at offset zero, which
+        // is why the loops below read the same as they always did.
+        const vp_cols = layer.viewportCols();
+        const vp_rows = layer.viewportRows();
+        const off = layer.scroll_off;
+
         if (fa) |f| {
             var row: usize = 0;
-            while (row < layer.height) : (row += 1) {
-                for (layer.viewRow(view_offset, row)) |*c| {
+            while (row < vp_rows) : (row += 1) {
+                const cells = layer.viewRow(view_offset, off.row + row);
+                for (cells[off.col .. off.col + vp_cols]) |*c| {
                     const g = c.grapheme();
                     if (g.len > 0) f.loadBlocksForText(g);
                 }
@@ -526,11 +546,11 @@ pub const Renderer = struct {
         const any_highlight = layer.highlighted_ids.items.len > 0;
 
         var row: usize = 0;
-        while (row < layer.height) : (row += 1) {
-            const cells = layer.viewRow(view_offset, row);
+        while (row < vp_rows) : (row += 1) {
+            const cells = layer.viewRow(view_offset, off.row + row);
             var col: usize = 0;
-            while (col < layer.width) : (col += 1) {
-                const c = &cells[col];
+            while (col < vp_cols) : (col += 1) {
+                const c = &cells[off.col + col];
                 const px = origin_x + @as(i32, @intCast(col)) * geometry.cell_w;
                 const py = origin_y + @as(i32, @intCast(row)) * geometry.cell_h;
 
@@ -586,11 +606,17 @@ pub const Renderer = struct {
         // highlight tint.
         if (layer.selection != null) {
             var srow: usize = 0;
-            while (srow < layer.height) : (srow += 1) {
-                const above: i64 = @as(i64, @intCast(view_offset)) - @as(i64, @intCast(srow));
+            while (srow < vp_rows) : (srow += 1) {
+                // The selection is keyed on *content* rows, so the
+                // viewport's own scroll offset has to go back in before
+                // asking, and come back out of the drawn column span.
+                const above: i64 = @as(i64, @intCast(view_offset)) - @as(i64, @intCast(off.row + srow));
                 const range = layer.selectionColRange(above) orelse continue;
-                const x0 = origin_x + @as(i32, @intCast(range.start)) * geometry.cell_w;
-                const rect_w = @as(i32, @intCast(range.end - range.start)) * geometry.cell_w;
+                const start = @max(range.start, off.col);
+                const end = @min(range.end, off.col + vp_cols);
+                if (end <= start) continue;
+                const x0 = origin_x + @as(i32, @intCast(start - off.col)) * geometry.cell_w;
+                const rect_w = @as(i32, @intCast(end - start)) * geometry.cell_w;
                 const y0 = origin_y + @as(i32, @intCast(srow)) * geometry.cell_h;
                 addRect(
                     &lb.color_bg,
@@ -800,9 +826,13 @@ pub const Renderer = struct {
             }
         }
 
-        // Scrollbar: its own begin/end so its GL draws sit over every
-        // layer, text included.
+        // Chrome: its own begin/end so these GL draws sit over every
+        // layer, text included. Divider bands first, then the panes' own
+        // scrollbars (which sit inside a pane and so must not be painted
+        // over by its neighbour's divider), then the window scrollbar.
         eng.renderer.begin(eng.projMat);
+        self.renderDividers(eng);
+        self.renderPaneScrollbars(eng);
         self.renderScrollbar(eng);
         eng.renderer.end();
 
@@ -1017,6 +1047,77 @@ pub const Renderer = struct {
             return;
         };
         std.log.info("glyphwire-host: wrote screenshot {s} ({d}x{d})", .{ path, uw, uh });
+    }
+
+    /// The bands between split children, drawn as a flat separator. Their
+    /// geometry comes from `App.panes`' cache, which the mouse handler
+    /// already refreshes each frame -- see `panes.Panes.syncLocked`.
+    fn renderDividers(self: *Renderer, eng: *Engine) void {
+        const server = self.app.server;
+        {
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            self.app.panes.syncLocked();
+        }
+        for (self.app.panes.dividers.items) |d| {
+            const r = geometry.cellRectPx(d.rect);
+            eng.renderer.drawFilledRect(
+                host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
+                divider_color,
+            );
+        }
+    }
+
+    /// Each visible layer's own scrollbars, drawn inside its viewport
+    /// bounds -- distinct from `renderScrollbar`, which is the window's
+    /// bar for the root layer's scrollback. Opt-in per axis
+    /// (`core.PropertyName.scrollbars`) and skipped entirely on an axis
+    /// with nothing to scroll, so this is a no-op for every session that
+    /// isn't running a TUI.
+    fn renderPaneScrollbars(self: *Renderer, eng: *Engine) void {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+
+        for (server.ctx.layer_order.items) |handle| {
+            const layer = server.ctx.layers.getPtr(handle) orelse continue;
+            if (!layer.visible) continue;
+            const state = layer.scrollbarState();
+            if (!state.vertical and !state.horizontal) continue;
+
+            const rect = geometry.layerRect(layer.pos, layer.viewportCols(), layer.viewportRows());
+            const bars = geometry.paneScrollbars(
+                rect,
+                state,
+                layer.viewportCols(),
+                layer.viewportRows(),
+                layer.width,
+                layer.height,
+            );
+            if (bars.vertical) |v| drawBar(eng, v);
+            if (bars.horizontal) |h| drawBar(eng, h);
+        }
+    }
+
+    fn drawBar(eng: *Engine, bar: geometry.PaneScrollbarGeom) void {
+        eng.renderer.drawFilledRect(
+            host_eng.RectF{
+                .l = bar.track.x,
+                .t = bar.track.y,
+                .r = bar.track.x + bar.track.w,
+                .b = bar.track.y + bar.track.h,
+            },
+            pane_track_color,
+        );
+        eng.renderer.drawFilledRect(
+            host_eng.RectF{
+                .l = bar.thumb.x + 1,
+                .t = bar.thumb.y + 1,
+                .r = bar.thumb.x + bar.thumb.w - 1,
+                .b = bar.thumb.y + bar.thumb.h - 1,
+            },
+            pane_thumb_color,
+        );
     }
 
     /// The always-on scrollbar over the right edge: a dark track with a

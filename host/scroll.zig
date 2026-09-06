@@ -3,6 +3,7 @@ const glyphwire = @import("glyphwire");
 
 const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
+const panes_mod = @import("panes.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
@@ -38,7 +39,177 @@ pub const Scroll = struct {
     scrollbar_drag: bool = false,
     scrollbar_grab_dy: f32 = 0,
 
+    /// The pane scrollbar thumb currently being dragged, if any -- the
+    /// per-layer counterpart of `scrollbar_drag`. `grab` is the pixel
+    /// offset between the pointer and the thumb's leading edge at grab
+    /// time, on the bar's own axis, so the thumb tracks the pointer
+    /// without jumping.
+    pane_drag: ?PaneDrag = null,
+
+    pub const PaneDrag = struct {
+        layer: glyphwire.LayerHandle,
+        vertical: bool,
+        grab: f32,
+    };
+
+    /// One pane's bar geometry, resolved under `ctx_mutex` so the
+    /// interaction code below can work from a snapshot instead of holding
+    /// the lock across a whole drag.
+    const PaneBars = struct {
+        layer: glyphwire.LayerHandle,
+        state: glyphwire.ScrollbarState,
+        bars: geometry.PaneScrollbars,
+    };
+
+    /// The pane whose scrollbar (either axis) contains `(px, py)`.
+    /// Topmost first, same reason as `panes.scrollablePaneAt`.
+    fn paneBarAt(self: *Scroll, px: f32, py: f32) ?PaneBars {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+
+        var i = server.ctx.layer_order.items.len;
+        while (i > 0) {
+            i -= 1;
+            const handle = server.ctx.layer_order.items[i];
+            const layer = server.ctx.layers.getPtr(handle) orelse continue;
+            if (!layer.visible) continue;
+            const state = layer.scrollbarState();
+            if (!state.vertical and !state.horizontal) continue;
+
+            const rect = geometry.layerRect(layer.pos, layer.viewportCols(), layer.viewportRows());
+            const bars = geometry.paneScrollbars(
+                rect,
+                state,
+                layer.viewportCols(),
+                layer.viewportRows(),
+                layer.width,
+                layer.height,
+            );
+            if (bars.vertical) |v| {
+                if (v.track.contains(px, py)) return .{ .layer = handle, .state = state, .bars = bars };
+            }
+            if (bars.horizontal) |h| {
+                if (h.track.contains(px, py)) return .{ .layer = handle, .state = state, .bars = bars };
+            }
+        }
+        return null;
+    }
+
+    /// The bar geometry for a pane currently being dragged. Re-read each
+    /// frame rather than cached with the drag: the pane can be resized
+    /// (or the font zoomed) mid-drag, and a stale track would send the
+    /// thumb somewhere the content isn't.
+    fn paneBarsFor(self: *Scroll, handle: glyphwire.LayerHandle) ?PaneBars {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+
+        const layer = server.ctx.layers.getPtr(handle) orelse return null;
+        const state = layer.scrollbarState();
+        const rect = geometry.layerRect(layer.pos, layer.viewportCols(), layer.viewportRows());
+        return .{
+            .layer = handle,
+            .state = state,
+            .bars = geometry.paneScrollbars(
+                rect,
+                state,
+                layer.viewportCols(),
+                layer.viewportRows(),
+                layer.width,
+                layer.height,
+            ),
+        };
+    }
+
+    /// Maps a thumb's leading edge to a scroll offset: how far along its
+    /// travel the thumb sits, times how far the content can go.
+    fn offsetFromThumb(lead: f32, track_start: f32, track_len: f32, thumb_len: f32, max: usize) usize {
+        const travel = @max(track_len - thumb_len, 0);
+        if (travel <= 0 or max == 0) return 0;
+        const frac = std.math.clamp((lead - track_start) / travel, 0, 1);
+        return @intFromFloat(@round(frac * @as(f32, @floatFromInt(max))));
+    }
+
+    /// Pane scrollbars get the left button before the window's own bar
+    /// does, since they sit inside the panes that cover it. Same
+    /// true-means-consumed contract as `handleScrollbar`.
+    pub fn handlePaneScrollbar(self: *Scroll, eng: *app_mod.Engine) bool {
+        if (!eng.inputs.mouse_enabled) return false;
+        const pos = eng.inputs.mouse.pos();
+
+        if (eng.inputs.mouse.pressed(.left)) {
+            const hit = self.paneBarAt(pos.x, pos.y) orelse return false;
+            // Vertical wins a corner overlap; it is the axis a pointer in
+            // the bottom-right corner of a pane is far more likely to
+            // have been reaching for.
+            if (hit.bars.vertical) |v| {
+                if (v.track.contains(pos.x, pos.y)) {
+                    if (v.thumb.contains(pos.x, pos.y)) {
+                        self.pane_drag = .{ .layer = hit.layer, .vertical = true, .grab = pos.y - v.thumb.y };
+                    } else {
+                        // One viewport-height page toward the click.
+                        self.pagePane(hit, true, pos.y < v.thumb.y);
+                    }
+                    return true;
+                }
+            }
+            if (hit.bars.horizontal) |h| {
+                if (h.track.contains(pos.x, pos.y)) {
+                    if (h.thumb.contains(pos.x, pos.y)) {
+                        self.pane_drag = .{ .layer = hit.layer, .vertical = false, .grab = pos.x - h.thumb.x };
+                    } else {
+                        self.pagePane(hit, false, pos.x < h.thumb.x);
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        const drag = self.pane_drag orelse return false;
+        if (!eng.inputs.mouse.down(.left)) {
+            self.pane_drag = null;
+            return true;
+        }
+
+        const live = self.paneBarsFor(drag.layer) orelse {
+            self.pane_drag = null;
+            return true;
+        };
+        if (drag.vertical) {
+            const v = live.bars.vertical orelse return true;
+            const offset = offsetFromThumb(pos.y - drag.grab, v.track.y, v.track.h, v.thumb.h, live.state.max_row);
+            self.movePane(drag.layer, .{ .row = offset, .col = live.state.col });
+        } else {
+            const h = live.bars.horizontal orelse return true;
+            const offset = offsetFromThumb(pos.x - drag.grab, h.track.x, h.track.w, h.thumb.w, live.state.max_col);
+            self.movePane(drag.layer, .{ .row = live.state.row, .col = offset });
+        }
+        return true;
+    }
+
+    /// A track click: one viewport-worth toward the pointer.
+    fn pagePane(self: *Scroll, hit: PaneBars, vertical: bool, backward: bool) void {
+        const server = self.app.server;
+        const page: i64 = page: {
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            const layer = server.ctx.layers.getPtr(hit.layer) orelse break :page 1;
+            const n = if (vertical) layer.viewportRows() else layer.viewportCols();
+            break :page @intCast(@max(n, 2) - 1);
+        };
+        const step: i64 = if (backward) -page else page;
+        const delta: glyphwire.CellPos.Delta = if (vertical) .{ .row = step } else .{ .col = step };
+        server.reportScrollOffset(self.app.alloc, hit.layer, null, delta) catch {};
+    }
+
+    fn movePane(self: *Scroll, handle: glyphwire.LayerHandle, off: glyphwire.CellPos) void {
+        self.app.server.reportScrollOffset(self.app.alloc, handle, off, null) catch {};
+    }
+
     /// True while a full-screen program owns the root layer's display.
+
     /// Takes a short `ctx_mutex` snapshot; see `rootOwned` for the
     /// predicate and why it's separated out.
     pub fn screenOwnedByProgram(self: *Scroll) bool {
@@ -66,10 +237,45 @@ pub const Scroll = struct {
     /// the program rather than uselessly scrolling a frozen scrollback.
     pub fn handleScroll(self: *Scroll, eng: *Engine) void {
         if (!eng.inputs.mouse_enabled) return;
-        const dy = eng.inputs.mouse.scroll().y;
-        if (dy == 0) return;
+        const wheel = eng.inputs.mouse.scroll();
+        if (wheel.y == 0 and wheel.x == 0) return;
 
-        const delta: i64 = @intFromFloat(@round(dy * geometry.scroll_rows_per_tick));
+        // Shift+wheel is horizontal, the convention every browser and
+        // editor uses -- and the only horizontal scroll available on a
+        // mouse with no tilt wheel.
+        const shifted = eng.inputs.keyboard.shift();
+        const wheel_y: f32 = if (shifted) 0 else wheel.y;
+        const wheel_x: f32 = if (shifted) -wheel.y else wheel.x;
+
+        const delta: i64 = @intFromFloat(@round(wheel_y * geometry.scroll_rows_per_tick));
+        const delta_x: i64 = @intFromFloat(@round(wheel_x * geometry.scroll_rows_per_tick));
+
+        // A scrollable pane under the pointer takes the wheel first: in a
+        // TUI the panes cover the root layer, and a wheel over a file tree
+        // means the tree, not the shell's scrollback behind it. A pane
+        // with nothing to scroll doesn't match, so the wheel falls through
+        // to the root exactly as it did before splits existed.
+        const pane = pane: {
+            const server = self.app.server;
+            const pos = eng.inputs.mouse.pos();
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            break :pane panes_mod.scrollablePaneAt(server.ctx, pos.x, pos.y);
+        };
+        if (pane) |hit| {
+            // Wheel *up* shows earlier content, which is a *smaller*
+            // offset -- the opposite sign from the root layer's
+            // scrollback, where a bigger offset means further back.
+            self.app.server.reportScrollOffset(self.app.alloc, hit.layer, null, .{
+                .row = -delta,
+                .col = delta_x,
+            }) catch |err| {
+                std.log.err("glyphwire-host: reportScrollOffset(wheel) failed: {t}", .{err});
+            };
+            return;
+        }
+
+        if (delta == 0) return;
 
         if (self.screenOwnedByProgram()) {
             const key: []const u8 = if (delta > 0) "up" else "down";

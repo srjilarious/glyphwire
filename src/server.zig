@@ -3,6 +3,7 @@ const core = @import("core.zig");
 const wire = @import("wire.zig");
 const dispatch = @import("dispatch.zig");
 const rpc = @import("rpc.zig");
+const protocol = @import("protocol.zig");
 
 /// Tracks one accepted connection long enough for *other* connections'
 /// dispatch to push a notification to it -- see `Server.broadcastToOthers`.
@@ -373,6 +374,79 @@ pub const Server = struct {
         const body = try rpc.resizeNotification(alloc, cols, rows);
         defer alloc.free(body);
         self.broadcast(null, "resize", body);
+
+        // The window changing size re-lays-out any split tree, which is a
+        // separate notification: `resize` is "the window is this big now",
+        // `layout` is "and here is where each of your panes ended up".
+        try self.reportLayout(alloc);
+    }
+
+    /// Re-lays-out the split tree against the current context size and
+    /// broadcasts a `layout` notification for every pane whose bounds
+    /// moved. Silent when there is no split tree, or when the layout came
+    /// out identical -- which is what makes it safe to call after any
+    /// change that *might* have moved something.
+    pub fn reportLayout(self: *Server, alloc: std.mem.Allocator) !void {
+        var changed: std.ArrayList(core.LayerBounds) = .empty;
+        defer changed.deinit(alloc);
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            try self.ctx.layoutSplits(&changed, null);
+        }
+        if (changed.items.len == 0) return;
+
+        const bounds = try alloc.alloc(protocol.LayoutBounds, changed.items.len);
+        defer alloc.free(bounds);
+        for (changed.items, 0..) |b, i| {
+            bounds[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+        }
+
+        const body = try rpc.layoutNotification(alloc, bounds);
+        defer alloc.free(body);
+        self.broadcast(null, "layout", body);
+    }
+
+    /// In-process equivalent of `set_property(layer, "scroll_offset")` --
+    /// glyphwire-host's mouse wheel and scrollbar drags over a pane. Pass
+    /// `offset` for an absolute move or `delta` for a relative one (the
+    /// wheel); both clamp through `Layer.setScrollOffset`. Broadcasts a
+    /// `scroll_offset` notification only when the viewport actually moved,
+    /// so a wheel spun against the end of the content is silent.
+    pub fn reportScrollOffset(
+        self: *Server,
+        alloc: std.mem.Allocator,
+        layer_handle: core.LayerHandle,
+        offset: ?core.CellPos,
+        delta: ?core.CellPos.Delta,
+    ) !void {
+        const result = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const layer = self.ctx.layerPtr(layer_handle) orelse return;
+            const before = layer.scroll_off;
+            var after = before;
+            if (offset) |o| after = layer.setScrollOffset(o);
+            if (delta) |d| after = layer.scrollOffsetBy(d.row, d.col);
+            const max = layer.maxScroll();
+            break :blk .{
+                .changed = after.row != before.row or after.col != before.col,
+                .off = after,
+                .max = max,
+            };
+        };
+        if (!result.changed) return;
+
+        const body = try rpc.scrollOffsetNotification(
+            alloc,
+            layer_handle,
+            result.off.row,
+            result.off.col,
+            result.max.row,
+            result.max.col,
+        );
+        defer alloc.free(body);
+        self.broadcast(null, "scroll_offset", body);
     }
 
     // ── Selection & clipboard (in-process, for glyphwire-host) ──────────
