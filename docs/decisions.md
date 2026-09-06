@@ -169,6 +169,38 @@ final.
   caps its queue and drops the backlog if the consumer stalls. It's a
   separate subscription (`"mouse_move"`) from `"mouse_button"` so a
   click-only client isn't firehosed.
+- **The wire's key and mouse-button names come from the engine
+  backend's enums, which are now SDL3's** (`host_eng/input.zig`).
+  `host/input.zig` forwards each key and button by `@tagName`, so those
+  field names *are* protocol, and `src/key_encode.zig` matches on the
+  same strings. Two consequences of retiring the GLFW backend: `F25` and
+  `world_1`/`world_2` are gone (GLFW declared them; no SDL keycode maps
+  to any of them, and the SDL3 branch's placeholder
+  `SDLK_EXECUTE => .F25` was an invention), and the two side mouse
+  buttons are `x1`/`x2` rather than GLFW's `four`/`five` — GLFW's
+  `six`..`eight`, which no platform ever reported, are gone with them.
+  `left`/`right`/`middle` and every key name a terminal actually uses are
+  unchanged, so nothing in glyphwire or glyphwire-shell moved. The names
+  are *keycode*-derived, not scancode: on a Dvorak or AZERTY layout a key
+  reports the identity on its keycap, which is what a terminal wants and
+  what other terminals do.
+- **IME composition is host-local and never crosses the wire.** SDL3
+  hands the host the in-progress composition (`SDL_EVENT_TEXT_EDITING`)
+  and the host draws it at the caret itself; only the IME's *commit*
+  reaches the wire, as an ordinary `text` notification. The keys the IME
+  consumes while composing (Space to convert, Enter to commit) never
+  surface as `SDL_EVENT_KEY_DOWN` at all, so there is nothing to filter
+  out of the key stream and no risk of Enter-to-commit also running the
+  command line — verified with a Japanese IME. A live preedit *stream*
+  on the wire, for a client that wants to draw its own, is still open.
+- **Key and button state is dropped on window focus loss.** SDL is
+  polled, so the down-sets are event-driven and latch: a key held as the
+  window loses focus never sees its key-up, and would stay down forever
+  in `get_input_state` (and keep synthesizing typematic repeats). The
+  host clears both the current and the previous tick's state on
+  `SDL_EVENT_WINDOW_FOCUS_LOST`, the previous one too so the resync
+  doesn't read as a `released` edge and put a key-up on the wire for a
+  key-down the subscriber never saw.
 - **pty input path (B0):** while glyphwire-shell has a non-glyphwire
   child foregrounded on a pseudo-terminal, its foreground loop re-encodes
   `InputListener` events into the bytes a real terminal would send and
@@ -311,8 +343,8 @@ surface.
   the font is a property of the rendering front end, not the shared grid
   model, and the shell already has its own separate Lua config
   (`~/.config/glyphwire/shell.conf`), so no new dependency for it. At
-  runtime `Ctrl+-` / `Ctrl++` / `Ctrl+0` repack the pixzig default font
-  atlas in place (`FontAtlas.setFontSize`, added to pixzig for this) and
+  runtime `Ctrl+-` / `Ctrl++` / `Ctrl+0` repack the engine's default font
+  atlas in place (`FontAtlas.setFontSize`) and
   the host re-measures `cell_w`/`cell_h`, updates `ctx.cell_px_*`, and
   calls `window.setSize` to keep the same `grid_cols`x`grid_rows` — the
   inverse of `syncWindowSize`'s cell math, so it round-trips with no
@@ -364,13 +396,13 @@ surface.
   to the live tail, so a keypress brings the cursor back into view) or by
   the client itself moving the cursor / scrolling back to the pin point
   (`reconcileCaretPin`, no view change — the client is driving).
-- **Typematic key repeat extended (host-local):** pixzig's `Keyboard`
-  only edge-detects, so `glyphwire-host` already synthesized held-key
+- **Typematic key repeat extended (host-local):** the engine's
+  `Keyboard` only edge-detects, so `glyphwire-host` already synthesized held-key
   repeat for the four arrows (`App.key_repeat`, `Server.reportKeyRepeat`
   → another `key_down`). That set now also covers **Backspace**,
   **Delete** and **Ctrl+U** — the editing keys glyphwire-shell's line
   editor acts on that ride the key stream rather than the `text` stream
-  (where character-key repeats already arrive via GLFW's char callback).
+  (where character-key repeats already arrive as fresh text events).
   Ctrl+left/right word motion already repeated through the arrow path;
   Enter and Tab stay single-shot. No wire change — a repeat is just an
   extra `key_down`, same as before.
@@ -586,7 +618,7 @@ surface.
   `glyphwire-icon-atlas` texture; `App.icon_uv` maps each icon's image
   handle to its normalized sub-rect. Every icon draw — a `draw_box`
   border, an `ls` icon grid, a powerline prompt — then samples that one
-  texture instead of rebinding the GL texture per icon (pixzig's sprite
+  texture instead of rebinding the GL texture per icon (the sprite
   batch flushes on a texture change, so a screen of distinct icon
   textures was a flush per icon). `load_image` user images
   (`glyphwire-view`) are *not* in the atlas — they keep their own
@@ -639,7 +671,7 @@ surface.
   grapheme, so it's always on top, with the same tile-vs-defer split
   `style.bg`'s `.icon` case already uses for `.natural`'s overflow.
 - **`fg_icon` renders through the overlay batch, not the sprite batch.**
-  `pixzig.Renderer` buffers each frame's draw calls into per-kind
+  the engine's `Renderer` buffers each frame's draw calls into per-kind
   batches and flushes them in a fixed order at `end()` — sprites, then
   shapes (`drawFilledRect`), then overlays, then text — so painter's
   order between a sprite and a `drawFilledRect` is *not* the call order:
@@ -1005,10 +1037,10 @@ surface.
   `set_clipboard` / `get_clipboard` but that buffer. glyphwire-host treats
   it as the source of truth: it pushes to the OS clipboard whenever
   `clipboard_serial` changes (a client's `set_clipboard`, or its own
-  selection copy) and refreshes it from the OS on paste. GLFW clipboard
+  selection copy) and refreshes it from the OS on paste. SDL clipboard
   calls are main-thread-only, so the wire path can't touch the OS directly
   — going through the buffer + a once-per-frame `syncClipboardToOs` keeps
-  every GLFW call on the render thread. Consequence: a wire `get_clipboard`
+  every SDL call on the render thread. Consequence: a wire `get_clipboard`
   only sees OS-clipboard changes another app made once the host has synced
   (on its next copy/paste) — acceptable for the interplay this feature is
   about, not a general OS-clipboard mirror.
@@ -1291,9 +1323,9 @@ surface.
 
 #### Startup config: `~/.config/glyphwire/shell.conf`
 - **The config is a Lua script**, run once at prompt startup. The Lua
-  library is vendored from pixzig (`libs/ziglua`, Lua 5.3) so
-  glyphwire-shell can embed an interpreter without depending on the whole
-  pixzig engine (GLFW/OpenGL) — only `glyphwire-host` links pixzig.
+  library is vendored in-tree (`libs/ziglua`, Lua 5.3) so
+  glyphwire-shell can embed an interpreter without depending on the
+  engine (SDL3/OpenGL) — only `glyphwire-host` links `host_eng`.
 - **Directory:** `$GLYPHWIRE_CONFIG_DIR` verbatim when set, else
   `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`. A missing
   file is not an error — the shell just starts with nothing configured.
@@ -1303,8 +1335,7 @@ surface.
   it produces a `config.ShellConfig` struct (`shell/config.zig`); the Lua
   bindings append into that, and `Prompt.loadStartupConfig` folds the
   result into the prompt afterwards. This keeps the apply step in one
-  place and makes the parser unit-testable without a running shell —
-  mirrors how pixzig parses a Lua config into a Zig structure. New
+  place and makes the parser unit-testable without a running shell. New
   bindings add a field to `ShellConfig` and a collector in `config.load`.
 - **First binding: `alias(name, value)`.** Both arguments are strings
   (numbers coerce, like stock Lua; other types raise). Each call is
@@ -2183,10 +2214,12 @@ capability expects: `F1`-`F4` as SS3 (`ESC O P`..`ESC O S`, unaffected by
 DECCKM — that only retimes the arrows/Home/End), `F5`-`F12` as `CSI n ~`
 (`15`, `17`-`21`, `23`-`24`, skipping `16`/`22` for the same historical
 VT220 reasons xterm does). Named `"F1"`..`"F12"` (uppercase) to match
-zglfw's `Key` enum field name, which `host/main.zig`'s `reportKeyEvents`
-forwards verbatim over the wire — every other named key in the table
-happens to be lowercase because that's what zglfw calls it, not because
-of a case convention glyphwire imposes. `F13` and up, and a modifier held
+the engine `Key` enum's field name, which `host/input.zig`'s
+`reportKeyEvents` forwards verbatim over the wire — every other named key
+in the table happens to be lowercase because that's what the enum calls
+it, not because of a case convention glyphwire imposes. (Written against
+zglfw's enum originally; `host_eng/input.zig` kept the same spellings
+through the SDL3 port for exactly this reason.) `F13` and up, and a modifier held
 alongside a function key (xterm's modifier-suffixed forms), stay out of
 scope, same as kitty/modifyOtherKeys generally. **Tests:**
 `shell_tests.zig` +1. 463 pass.

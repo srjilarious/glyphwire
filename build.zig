@@ -28,9 +28,9 @@ pub fn build(b: *std.Build) void {
     });
     ls_support_mod.addImport("glyphwire", glyphwire_mod);
 
-    // Pure, pixzig-free pieces of glyphwire-host (pixel/cell geometry,
+    // Pure, engine-free pieces of glyphwire-host (pixel/cell geometry,
     // scrollbar math, `host.conf` value clamps, the key-repeat timer) so
-    // the test runner can exercise them without a GLFW/OpenGL link. Same
+    // the test runner can exercise them without an SDL/OpenGL link. Same
     // cross-directory-module reason as `shell_support` / `ls_support`;
     // imports `glyphwire` only for `CellPos` in `geometry.cellFromPixel`.
     const host_support_mod = b.addModule("host_support", .{
@@ -38,19 +38,15 @@ pub fn build(b: *std.Build) void {
     });
     host_support_mod.addImport("glyphwire", glyphwire_mod);
 
-    const pixzig_dep = b.dependency("pixzig", .{ .target = target, .optimize = optimize, .build_examples = false });
-    const pixzig_mod = pixzig_dep.module("pixzig");
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const zopengl = b.dependency("zopengl", .{ .target = target });
     const zmath = b.dependency("zmath", .{ .target = target });
     const zstbi = b.dependency("zstbi", .{ .target = target });
-    // `host_eng` is a self-contained SDL3 engine backend (see
-    // host_eng/root.zig). Its C-level pieces are vendored under
-    // host_eng/libs/ and host_eng/pixzig_src/ rather than reached for in
-    // the sibling pixzig checkout, so the backend is pinned as a whole
-    // instead of half-frozen snapshot / half-live `../pixzig` paths.
-    // pixzig's `xml` module is deliberately absent: the only thing that
-    // wanted it was Tiled tilemap loading, which host_eng doesn't carry.
+    // `host_eng` is glyphwire's own SDL3 + OpenGL engine backend (see
+    // host_eng/root.zig) -- windowing, input, the renderer and the
+    // resource manager, and nothing else. Its C-level pieces are vendored
+    // under host_eng/libs/ and host_eng/engine/, so the whole backend is
+    // pinned in-tree with no sibling checkout to keep in step.
     const stbtt_translate = b.addTranslateC(.{
         .root_source_file = b.path("host_eng/libs/stb_truetype/stb_truetype.h"),
         .target = target,
@@ -67,7 +63,7 @@ pub fn build(b: *std.Build) void {
     });
     stbtt_mod.addIncludePath(b.path("host_eng/libs/stb_truetype"));
     const time_c_translate = b.addTranslateC(.{
-        .root_source_file = b.path("host_eng/pixzig_src/time_c.h"),
+        .root_source_file = b.path("host_eng/engine/time_c.h"),
         .target = target,
         .optimize = optimize,
     });
@@ -77,7 +73,7 @@ pub fn build(b: *std.Build) void {
     // Vendored Lua 5.3 (libs/ziglua) -- glyphwire-shell embeds a Lua state
     // to run ~/.config/glyphwire/shell.conf. `zlua` already links the Lua
     // C library into itself in ziglua's own build.zig; `lua_lib` is linked
-    // onto each consuming executable explicitly, mirroring pixzig.
+    // onto each consuming executable explicitly.
     const ziglua = b.dependency("ziglua", .{ .target = target, .optimize = optimize, .lang = .lua53 });
     const ziglua_mod = ziglua.module("zlua");
     const lua_lib = ziglua.artifact("lua");
@@ -113,6 +109,12 @@ pub fn build(b: *std.Build) void {
     tests_exe.root_module.addImport("shell_support", shell_support_mod);
     tests_exe.root_module.addImport("ls_support", ls_support_mod);
     tests_exe.root_module.addImport("host_support", host_support_mod);
+    // `host_eng_tests` exercises the SDL3 backend's Keyboard/Mouse state
+    // machines and its two wire-visible enums. They need no window and no
+    // GL context -- but the module does drag libSDL3.a into the test
+    // binary, which is the price of catching a renamed key before it
+    // reaches the protocol.
+    tests_exe.root_module.addImport("host_eng", host_eng_mod);
     // shell_support -> shell/config.zig -> ziglua: the Lua C library and
     // libc have to be linked into the final test binary.
     tests_exe.root_module.linkLibrary(lua_lib);
@@ -233,34 +235,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     host_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    host_exe.root_module.addImport("pixzig", pixzig_mod);
+    host_exe.root_module.addImport("host_eng", host_eng_mod);
     b.installArtifact(host_exe);
 
     const run_host = b.addRunArtifact(host_exe);
     run_host.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_host.addArgs(args);
 
-    const host_step = b.step("host", "Run the glyphwire pixzig-windowed host (spawns glyphwire-shell)");
+    const host_step = b.step("host", "Run the SDL3-windowed glyphwire host (spawns glyphwire-shell)");
     host_step.dependOn(&run_host.step);
-
-    const host_sdl_exe = b.addExecutable(.{
-        .name = "glyphwire-host-sdl",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("host/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    host_sdl_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    host_sdl_exe.root_module.addImport("pixzig", host_eng_mod);
-    b.installArtifact(host_sdl_exe);
-
-    const run_host_sdl = b.addRunArtifact(host_sdl_exe);
-    run_host_sdl.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_host_sdl.addArgs(args);
-
-    const host_sdl_step = b.step("host_sdl", "Run the SDL3 glyphwire host (spawns glyphwire-shell)");
-    host_sdl_step.dependOn(&run_host_sdl.step);
 
     const ls_exe = b.addExecutable(.{
         .name = "ls",

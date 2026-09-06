@@ -1,15 +1,20 @@
+//! The namespace shim: one place for `root.zig`, `input.zig`,
+//! `window.zig` and `platform_sdl.zig` to reach the backend-independent
+//! engine pieces under `engine/` and the third-party modules, without
+//! each of them spelling out relative paths.
+
 pub const stbi = @import("zstbi");
 pub const zopengl = @import("zopengl");
 pub const gl = zopengl.bindings;
 pub const zmath = @import("zmath");
 pub const ziglua = @import("ziglua");
 
-pub const common = @import("pixzig_src/common.zig");
-pub const renderer = @import("pixzig_src/renderer.zig");
-pub const shaders = @import("pixzig_src/renderer/shaders.zig");
-pub const textures = @import("pixzig_src/renderer/textures.zig");
-pub const resources = @import("pixzig_src/resources.zig");
-pub const system = @import("pixzig_src/system.zig");
+pub const common = @import("engine/common.zig");
+pub const renderer = @import("engine/renderer.zig");
+pub const shaders = @import("engine/renderer/shaders.zig");
+pub const textures = @import("engine/renderer/textures.zig");
+pub const resources = @import("engine/resources.zig");
+pub const system = @import("engine/system.zig");
 
 pub const Texture = textures.Texture;
 pub const TextureImage = textures.TextureImage;
@@ -29,11 +34,18 @@ pub const ScalePolicy = @import("viewport.zig").ScalePolicy;
 
 pub const InputOptions = struct {
     mouse: bool = true,
+    /// Rejected at compile time when non-zero: host_eng carries no gamepad
+    /// support. Kept in the struct so a caller that sets it gets a clear
+    /// error rather than silent nothing.
     numGamepads: u8 = 0,
+    /// Whether to arm the OS text-input machinery on the window. This is
+    /// what makes `Keyboard.text()` produce anything and what enables IME
+    /// composition (`Keyboard.preedit()`), so it defaults on -- a terminal
+    /// front end has no use for a window that can't be typed into.
+    textInput: bool = true,
 };
 
-pub const PixzigEngineOptions = struct {
-    defaultIcon: bool = true,
+pub const EngineOptions = struct {
     vsyncEnabled: bool = true,
     gameScale: f32 = 1.0,
     updateStepHz: f64 = 120.0,
@@ -43,7 +55,7 @@ pub const PixzigEngineOptions = struct {
     manifestOpts: ?type = null,
 };
 
-pub const PixzigEngineInitOptions = struct {
+pub const EngineInitOptions = struct {
     fullscreen: bool = false,
     windowSize: Vec2I = .{ .x = 800, .y = 480 },
     resizable: bool = true,

@@ -1,8 +1,9 @@
 const std = @import("std");
 const testz = @import("testz");
 
-// The pixzig-free pieces of glyphwire-host, reached through the
-// `host_support` module (see build.zig) -- no window, no GL.
+// The engine-free pieces of glyphwire-host, reached through the
+// `host_support` module (see build.zig) -- no window, no GL. The engine
+// backend's own tests live in `host_eng_tests.zig`.
 const hs = @import("host_support");
 const geometry = hs.geometry;
 const config = hs.config;

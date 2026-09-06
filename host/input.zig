@@ -1,5 +1,5 @@
 const std = @import("std");
-const pixzig = @import("pixzig");
+const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
@@ -9,14 +9,14 @@ const App = app_mod.App;
 const Engine = app_mod.Engine;
 const KeyRepeatState = key_repeat.KeyRepeatState;
 
-/// Forwards keyboard / text / mouse events from pixzig's per-frame input
+/// Forwards keyboard / text / mouse events from the engine's per-frame input
 /// state to the in-process `Server`, and synthesizes the typematic key
 /// repeats the OS repeat doesn't reach the host as fresh events. Owns the
 /// per-key hold timers and the last-forwarded modifier / mouse state.
 pub const KeyInput = struct {
     app: *App,
 
-    last_mouse_px: pixzig.Vec2F = .{ .x = -1, .y = -1 },
+    last_mouse_px: host_eng.Vec2F = .{ .x = -1, .y = -1 },
 
     /// Per-key hold timers for the keys glyphwire-host synthesizes
     /// typematic repeats for -- the four arrows (which also move the root
@@ -35,21 +35,21 @@ pub const KeyInput = struct {
 
     /// Last-forwarded down/up state of each modifier, indexed
     /// `[ctrl, alt, shift, super]` -- see `reportModifier`. glyphwire-host
-    /// forwards each modifier once, under its `left_*` name, from pixzig's
-    /// logical modifier state rather than per physical key, so an OS-level
-    /// remap like CapsLock->Control (which pixzig's `keyboard.ctrl()`
+    /// forwards each modifier once, under its `left_*` name, from the
+    /// engine's logical modifier state rather than per physical key, so an
+    /// OS-level remap like CapsLock->Control (which `keyboard.ctrl()`
     /// reports but which never arrives as a physical modifier-key press)
     /// still reaches glyphwire-shell's Ctrl-combo handling.
     mod_forwarded: [4]bool = .{ false, false, false, false },
 
     /// Reports every key that changed down/up state this frame -- see
     /// `Keyboard.pressed`/`.released`'s edge-detection doc comments in
-    /// pixzig -- directly against the in-process `Server` (see
+    /// `host_eng/input.zig` -- directly against the in-process `Server` (see
     /// `Server.reportKey`), not over a socket connection to itself.
     ///
     /// The eight physical modifier keys (`left_control`, `right_alt`, ...)
     /// are not forwarded by name from this loop. Each modifier is instead
-    /// forwarded once, under its `left_*` name, from pixzig's logical
+    /// forwarded once, under its `left_*` name, from the engine's logical
     /// modifier state (`keyboard.ctrl()` / `.alt()` / `.shift()` /
     /// `.super()`) via `reportModifier`. That state already folds the left
     /// and right physical keys together, and also picks up OS-level
@@ -104,8 +104,8 @@ pub const KeyInput = struct {
 
     /// Forwards one modifier's down/up state under `name`, edge-detected
     /// against `mod_forwarded[idx]` so the in-process `Server` only sees a
-    /// notification when it actually changes. `active` comes from pixzig's
-    /// logical modifier query (see `reportKeyEvents`).
+    /// notification when it actually changes. `active` comes from the
+    /// engine's logical modifier query (see `reportKeyEvents`).
     pub fn reportModifier(self: *KeyInput, idx: usize, name: []const u8, active: bool) void {
         if (active == self.mod_forwarded[idx]) return;
         self.mod_forwarded[idx] = active;
@@ -115,10 +115,12 @@ pub const KeyInput = struct {
     }
 
     /// Forwards the text the user actually typed this frame as a `text`
-    /// notification -- pixzig's `keyboard.text()` drains GLFW's char
-    /// callback, so this is already resolved through the OS keyboard
-    /// layout, dead keys and IME composition (a QWERTZ 'z', an AZERTY
-    /// AltGr '@', a committed CJK grapheme). This is a separate stream
+    /// notification -- `keyboard.text()` hands back the UTF-8 SDL
+    /// delivered on `SDL_EVENT_TEXT_INPUT`, so this is already resolved
+    /// through the OS keyboard layout, dead keys and IME composition (a
+    /// QWERTZ 'z', an AZERTY AltGr '@', a committed CJK grapheme). Keys
+    /// the IME consumes during a composition never surface as key events
+    /// at all, so nothing has to filter them out. This is a separate stream
     /// from `reportKeyEvents`: a key event still fires for the same
     /// keystroke, carrying the physical key name for chords/navigation,
     /// but the character comes from here. glyphwire-shell's prompt inserts
@@ -126,7 +128,7 @@ pub const KeyInput = struct {
     /// there's no double-insertion.
     ///
     /// The 256-byte buffer bounds one frame's worth of committed text;
-    /// pixzig caps its own per-frame codepoint buffer well below that.
+    /// `Keyboard`'s own per-frame text buffer is capped well below that.
     pub fn reportTextInput(self: *KeyInput, eng: *Engine) bool {
         var buf: [256]u8 = undefined;
         const n = eng.inputs.keyboard.text(&buf);
@@ -193,7 +195,7 @@ pub const KeyInput = struct {
     /// here via `reportKeyRepeat`, since `reportKey`/`setKey` would see no
     /// state change on a key that's already down and drop it. (Character
     /// keys repeat fine already -- their repeats come in on the `text`
-    /// stream via GLFW's char callback.)
+    /// stream as fresh `SDL_EVENT_TEXT_INPUT` events.)
     pub fn handleRepeatKeys(self: *KeyInput, eng: *Engine, delta_ms: f64) void {
         // In keyboard selection mode the arrows/edit keys are swallowed
         // (they move the selection, not the shell's line) -- don't

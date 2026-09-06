@@ -117,7 +117,7 @@ fn plColor(s: ?[]const u8) ?glyphwire.Color {
 /// command (`glyphwire-shell <command> [args...]`, unchanged from
 /// milestone 5) or, given no command, runs the interactive prompt itself
 /// -- see decisions.md, Discovery & Connection. Deliberately has no
-/// pixzig dependency: input arrives as wire-level key events (see
+/// engine dependency: input arrives as wire-level key events (see
 /// src/client.zig's `InputListener`), captured by glyphwire-host and
 /// relayed through the server, not read directly.
 ///
@@ -139,7 +139,7 @@ fn plColor(s: ?[]const u8) ?glyphwire.Color {
 /// prompt shows the current directory before `> ` so a `cd` actually
 /// taking effect is visible. `exit` is a builtin too -- typing it is the
 /// only way to quit, deliberately unlike the escape-quits-immediately
-/// convention most pixzig examples/games use, which would kill an
+/// convention most game examples use, which would kill an
 /// interactive shell session out from under whatever's running in it;
 /// `glyphwire-host` watches for this process actually exiting (see
 /// host/main.zig's `reapChild`) rather than listening for a keypress

@@ -3,7 +3,7 @@
 //! bindings (right now just `alias(name, value)`) append into that struct
 //! rather than touching the live prompt, so `shell/main.zig` can apply the
 //! parsed result in one place and the parsing itself is unit-testable
-//! without a running shell. Mirrors how pixzig parses a Lua config into a
+//! without a running shell. Mirrors how the engine parses a Lua config into a
 //! Zig structure; new bindings add a field here and a collector in `load`.
 //!
 //! `load` spins up a throwaway Lua state for a one-shot parse (this is
@@ -194,7 +194,7 @@ pub const LoadResult = struct {
 /// callbacks. Set only while a config run is in flight (`load` here, or a
 /// `shell.conf` run inside `script_engine`) -- the shell runs
 /// single-threaded, so a module-level pointer is enough (same pattern as
-/// pixzig's `sequencer.SeqScriptingContext`).
+/// `script_engine.g_engine`).
 var g_active: ?*ShellConfig = null;
 
 /// Pushes the `alias` and `prompt` bindings as globals on `lua`. Split

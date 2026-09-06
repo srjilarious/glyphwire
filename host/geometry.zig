@@ -29,7 +29,7 @@ pub const min_grid_rows = 4;
 pub const content_pad_px: i32 = 2;
 
 // Cell size in pixels, set from the loaded font's own metrics at startup
-// -- see `main`. `var` (not `const`) because `pixzig.renderer.measureFontFile`
+// -- see `main`. `var` (not `const`) because `renderer.measureFontFile`
 // has to run before the window exists (see the comment there), so these
 // can't be comptime/const like the rest of this block.
 pub var cell_w: i32 = undefined;

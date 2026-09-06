@@ -8,18 +8,15 @@
             .url = "https://github.com/srjilarious/testz/archive/refs/tags/v1.4.0.tar.gz",
             .hash = "testz-1.4.0-abaPydnMAQAJayUfCw4dw1MdiaiOS_A_iJGm1qES0bQo",
         },
-        .pixzig = .{
-            .path = "../pixzig",
-        },
         .zargunaught = .{
             .url = "https://github.com/srjilarious/zargunaught/archive/refs/tags/v1.2.1.tar.gz",
             .hash = "zargunaught-1.2.1-aoeNIzTpAAArdAo7Hjp1FfdI6BYKPlZMRL2YRP6kc2UN",
         },
-        // Vendored from pixzig/libs/ziglua so glyphwire-shell can embed a
-        // Lua 5.3 state for ~/.config/glyphwire/shell.conf without pulling
-        // in the whole pixzig engine (GLFW/OpenGL). `lua53` is ziglua's
-        // own lazy dependency, listed here so `zig build --fetch` grabs
-        // the Lua source tarball too -- mirrors pixzig's build.zig.zon.
+        // Vendored Lua 5.3 so glyphwire-shell can embed a Lua state for
+        // ~/.config/glyphwire/shell.conf without pulling in the whole
+        // engine (SDL3/OpenGL). `lua53` is ziglua's own lazy dependency,
+        // listed here so `zig build --fetch` grabs the Lua source tarball
+        // too.
         .ziglua = .{
             .path = "libs/ziglua",
         },

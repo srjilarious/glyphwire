@@ -1,5 +1,5 @@
 const std = @import("std");
-const pixzig = @import("pixzig");
+const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
 const config = @import("config.zig");
@@ -35,7 +35,7 @@ pub const WindowSizing = struct {
     /// context currently has, pushes it through `Server.reportResize` --
     /// which resizes the root layer (and every base-size-tracking layer)
     /// bottom-anchored, then broadcasts a `resize` notification to any
-    /// subscribed client (e.g. glyphwire-shell). `pixzig`'s
+    /// subscribed client (e.g. glyphwire-shell). The engine's
     /// `refreshWindowState` (called each frame by the app runner before
     /// this) has already rebuilt the viewport/projection for the new
     /// framebuffer, so `render` just draws the larger or smaller grid.
@@ -94,7 +94,7 @@ pub const WindowSizing = struct {
         };
 
         // Measure first: if this fails we haven't touched the live atlas.
-        const metrics = pixzig.renderer.measureFontFileIndexed(
+        const metrics = host_eng.renderer.measureFontFileIndexed(
             self.font_path,
             self.font_face_index,
             size_px,

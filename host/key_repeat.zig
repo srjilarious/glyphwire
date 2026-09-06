@@ -9,9 +9,9 @@ pub const key_repeat_delay_ms: f64 = 500;
 pub const key_repeat_interval_ms: f64 = 40;
 
 /// Tracks how long one key has been continuously held, to drive its
-/// typematic repeat -- pixzig's `Keyboard` only edge-detects `pressed`/
-/// `released`, no built-in hold-duration, so the host has to track this
-/// itself.
+/// typematic repeat -- the engine's `Keyboard` only edge-detects
+/// `pressed`/`released`, with no built-in hold duration, so the host has
+/// to track this itself.
 pub const KeyRepeatState = struct {
     held_ms: f64 = 0,
     next_repeat_ms: f64 = key_repeat_delay_ms,

@@ -1,6 +1,6 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const pixzig = @import("pixzig");
+const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
 const config = @import("config.zig");
@@ -8,12 +8,12 @@ const config_load = @import("config_load.zig");
 const geometry = @import("geometry.zig");
 const icons = @import("icons.zig");
 
-pub const panic = pixzig.system.panic;
-pub const std_options = pixzig.system.std_options;
+pub const panic = host_eng.system.panic;
+pub const std_options = host_eng.system.std_options;
 
 /// glyphwire-host entry point. This file is deliberately thin: startup
 /// wiring (config, fonts, icons, the in-process `Server` + its thread, the
-/// glyphwire-shell child) and then handing off to `pixzig`'s app runner.
+/// glyphwire-shell child) and then handing off to the engine's app runner.
 /// Everything the running window does lives in `app.App` and the concern
 /// sub-structs it owns (`caret.zig`, `input.zig`, `selection.zig`,
 /// `scroll.zig`, `window_sizing.zig`, `render.zig`); the values `host.conf`
@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
             return err;
         };
         defer alloc.free(bytes);
-        break :blk pixzig.renderer.findFaceIndexByName(bytes, font_cfg.face_name) orelse 0;
+        break :blk host_eng.renderer.findFaceIndexByName(bytes, font_cfg.face_name) orelse 0;
     };
 
     // Measuring metrics needs only the font's own bytes (stb_truetype's
@@ -145,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
     // an atlas texture, which does need one (see AppRunner.init below).
     // That means the window can be sized correctly for whatever font is
     // configured instead of a size tuned by hand for one specific font.
-    const metrics = try pixzig.renderer.measureFontFileIndexed(font_cfg.face, font_face_index, font_cfg.size, alloc);
+    const metrics = try host_eng.renderer.measureFontFileIndexed(font_cfg.face, font_face_index, font_cfg.size, alloc);
     geometry.cell_w = metrics.advance;
     geometry.cell_h = metrics.line_height;
 
