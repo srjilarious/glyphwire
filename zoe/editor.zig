@@ -58,6 +58,10 @@ pub const Outcome = union(enum) {
     quit: struct { force: bool },
     /// `:wq` / `:x` -- write, then quit if the write succeeded.
     write_quit: ?[]const u8,
+    /// `:e <path>` -- replace the buffer with that file. Borrows
+    /// `Editor.cmd_arg` like `write` does. A bare `:e` (reload the
+    /// current file) carries null.
+    edit: ?[]const u8,
 };
 
 pub const Editor = struct {
@@ -132,6 +136,23 @@ pub const Editor = struct {
         const msg = std.fmt.allocPrint(self.alloc, fmt, args) catch return;
         defer self.alloc.free(msg);
         self.status.appendSlice(self.alloc, msg) catch {};
+    }
+
+    /// Replaces the buffer's contents and its path, resetting the cursor
+    /// and the modified flag -- `:e`, and opening a file from the tree.
+    /// The caller has already read the bytes; this does no IO, same as
+    /// everything else here.
+    pub fn loadText(self: *Editor, text: []const u8, path: ?[]const u8) !void {
+        var fresh = try Buffer.initFromText(self.alloc, text);
+        errdefer fresh.deinit();
+        if (path) |p| try self.setPath(p);
+
+        self.buf.deinit();
+        self.buf = fresh;
+        self.cursor = 0;
+        self.sticky_col = 0;
+        self.mode = .normal;
+        self.resetPending();
     }
 
     /// Replaces `path` with a copy of `new_path` -- what `:w <name>` does
@@ -576,6 +597,14 @@ pub const Editor = struct {
 
         const eq = std.mem.eql;
         if (eq(u8, name, "w") or eq(u8, name, "write")) return .{ .write = arg_opt };
+        if (eq(u8, name, "e") or eq(u8, name, "edit")) {
+            if (self.buf.dirty) {
+                self.setStatus("E37: No write since last change (add ! to override)", .{});
+                return .none;
+            }
+            return .{ .edit = arg_opt };
+        }
+        if (eq(u8, name, "e!") or eq(u8, name, "edit!")) return .{ .edit = arg_opt };
         if (eq(u8, name, "wq") or eq(u8, name, "x")) return .{ .write_quit = arg_opt };
         if (eq(u8, name, "q!") or eq(u8, name, "quit!")) return .{ .quit = .{ .force = true } };
         if (eq(u8, name, "wq!") or eq(u8, name, "x!")) return .{ .write_quit = arg_opt };

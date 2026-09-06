@@ -45,6 +45,13 @@ pub fn build(b: *std.Build) void {
     const zoe_support_mod = b.addModule("zoe_support", .{
         .root_source_file = b.path("zoe/support.zig"),
     });
+    // `zoe/ui.zig` is the glyphwire client half of the editor, and
+    // `zoe/tree.zig` uses `stringWidth` for its column maths; the editor
+    // core itself still pulls in nothing.
+    zoe_support_mod.addImport("glyphwire", glyphwire_mod);
+    // The tree pane reuses glyphwire-ls's name -> icon mapping rather
+    // than growing a second copy of it.
+    zoe_support_mod.addImport("ls_support", ls_support_mod);
 
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const zopengl = b.dependency("zopengl", .{ .target = target });
