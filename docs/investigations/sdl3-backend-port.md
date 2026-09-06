@@ -262,9 +262,11 @@ its own port.
   `numGamepads`. `SDL_Gamepad` + `SDL_EVENT_GAMEPAD_*` is a genuinely
   better API than GLFW's joystick polling; glyphwire just has no use for
   either.
-- **Emscripten** — the GL ES branch in `init` was kept, but
-  `AppRunner.run`'s `web.setMainLoop` export was dropped. SDL3 has its
-  own emscripten story; this needs deciding, not copying.
+- **Emscripten** — the GL ES branch in `init` was kept (it now asks for
+  the ES *profile* too, rather than requesting a contradictory GL 2.0
+  core context), but `AppRunner.run`'s `web.setMainLoop` export was
+  dropped. SDL3 has its own emscripten story; this needs deciding, not
+  copying. Nothing builds this path today.
 - **`Camera2D`, `imgui.zig`, `console.zig`, flecs, `sequencer`,
   `a_star`, `collision`, `gamestate`, `tile/`** — untouched, and none of
   them touch GLFW, so they come along unchanged.

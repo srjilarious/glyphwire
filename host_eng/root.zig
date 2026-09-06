@@ -150,13 +150,23 @@ pub fn EngineType(comptime engOpts: EngineOptions) type {
             if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO | sdl.SDL_INIT_EVENTS)) return platform_mod.sdlError(error.SdlInitFailed);
             errdefer sdl.SDL_Quit();
 
-            const gl_major: c_int = if (builtin.target.os.tag == .emscripten) 2 else 4;
-            const gl_minor: c_int = if (builtin.target.os.tag == .emscripten) 0 else 5;
+            const gl_major: c_int, const gl_minor: c_int = if (builtin.target.os.tag == .emscripten)
+                .{ 2, 0 }
+            else
+                .{ 4, 5 };
 
             if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_MAJOR_VERSION, gl_major)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
             if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_MINOR_VERSION, gl_minor)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
-            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_PROFILE_MASK, sdl.SDL_GL_CONTEXT_PROFILE_CORE)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
-            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_FLAGS, sdl.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
+            if (builtin.target.os.tag == .emscripten) {
+                // WebGL comes through SDL's GLES profile; the core and
+                // forward-compatible flags the desktop path sets are not
+                // valid there, and asking for 2.0 *core* is a contradiction
+                // SDL would have had to refuse.
+                if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_PROFILE_MASK, sdl.SDL_GL_CONTEXT_PROFILE_ES)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
+            } else {
+                if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_PROFILE_MASK, sdl.SDL_GL_CONTEXT_PROFILE_CORE)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
+                if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_FLAGS, sdl.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
+            }
             if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_DOUBLEBUFFER, 1)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
 
             const window = try platform_mod.Window.create(allocator, title, options, engOpts.inputOpts.textInput);
