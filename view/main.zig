@@ -1,13 +1,13 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 
-/// glyphwire-view: a minimal client that loads an image file (PNG, JPEG,
+/// gw-view: a minimal client that loads an image file (PNG, JPEG,
 /// BMP, or GIF) and draws it as a sprite spanning the cells it needs -- the
 /// first real exercise of Image support (`load_image`/`get_image_info`/
 /// `draw_image`) end to end, see docs/roadmap.md's Phase 3. The container
 /// format is sniffed from the file's magic bytes (`detectImageFormat`),
 /// not its extension, and sent as `load_image`'s `format` so the server
-/// reads the right header; glyphwire-host's stb_image decodes all four.
+/// reads the right header; glyphwire's stb_image decodes all four.
 /// Computes `row_span`/`col_span` from the image's natural pixel size
 /// (`get_image_info`) and the session's fixed cell metrics
 /// (`get_cell_metrics`) -- aspect-ratio-aware placement is the client's job
@@ -15,12 +15,12 @@ const glyphwire = @import("glyphwire");
 ///
 /// Draws the image and exits as soon as the pixels are on the grid -- no
 /// keypress wait. `draw_image` is a request, so by the time it returns
-/// the server has the cells and any client rendering them (glyphwire-host)
+/// the server has the cells and any client rendering them (glyphwire)
 /// will paint them on its next frame; nothing further needs this process
-/// alive. Launched from glyphwire-shell's prompt (the common case) the
+/// alive. Launched from gw-shell's prompt (the common case) the
 /// image simply stays on screen and the prompt returns immediately;
-/// launched directly as glyphwire-host's exec'd child (`glyphwire-host
-/// glyphwire-view <path>`, replacing glyphwire-shell -- see
+/// launched directly as glyphwire's exec'd child (`glyphwire
+/// gw-view <path>`, replacing gw-shell -- see
 /// shell/main.zig's exec path), this process exiting ends the host, so
 /// the window closes right after the image is drawn.
 pub fn main(init: std.process.Init) !void {
@@ -29,13 +29,13 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(alloc);
 
     if (args.len < 2) {
-        return fallback(io, "usage: glyphwire-view <image>   (PNG, JPEG, BMP, or GIF)\n");
+        return fallback(io, "usage: gw-view <image>   (PNG, JPEG, BMP, or GIF)\n");
     }
     const path = args[1];
 
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024 * 1024)) catch |err| {
         var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "glyphwire-view: couldn't read '{s}': {t}\n", .{ path, err }) catch "glyphwire-view: couldn't read the given path\n";
+        const msg = std.fmt.bufPrint(&buf, "gw-view: couldn't read '{s}': {t}\n", .{ path, err }) catch "gw-view: couldn't read the given path\n";
         return fallback(io, msg);
     };
     defer alloc.free(bytes);
@@ -45,12 +45,12 @@ pub fn main(init: std.process.Init) !void {
     // wrong hint fails the request.
     const format = glyphwire.detectImageFormat(bytes) orelse {
         var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "glyphwire-view: '{s}' isn't a PNG, JPEG, BMP, or GIF\n", .{path}) catch "glyphwire-view: unsupported image format\n";
+        const msg = std.fmt.bufPrint(&buf, "gw-view: '{s}' isn't a PNG, JPEG, BMP, or GIF\n", .{path}) catch "gw-view: unsupported image format\n";
         return fallback(io, msg);
     };
 
     var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
-        return fallback(io, "glyphwire-view: no session, falling back to plain output\n");
+        return fallback(io, "gw-view: no session, falling back to plain output\n");
     };
     defer client.deinit();
 

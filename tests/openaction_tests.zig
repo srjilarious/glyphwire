@@ -19,7 +19,7 @@ pub fn resolveDefaultDirectoryTest(_: std.Io, _: std.mem.Allocator) !void {
 
 pub fn resolveDefaultImagePngTest(_: std.Io, _: std.mem.Allocator) !void {
     const a = openaction.resolve(&.{}, .{ .kind = "file", .path = "/p.png", .mimetype = "image/png" });
-    try expectCommand(a, "glyphwire-view {selections}");
+    try expectCommand(a, "gw-view {selections}");
 }
 
 pub fn resolveUnknownFileYieldsNothingTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -51,7 +51,7 @@ pub fn resolveMatchIsSpecificityFirstThenUserOverDefaultTest(_: std.Io, _: std.m
     try expectCommand(webp, "feh {selections}");
 
     const png = openaction.resolve(&user, .{ .kind = "file", .path = "/p.png", .mimetype = "image/png" });
-    try expectCommand(png, "glyphwire-view {selections}");
+    try expectCommand(png, "gw-view {selections}");
 }
 
 pub fn resolveExactBeatsGroupWithinUserTableTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -95,9 +95,9 @@ pub fn expandSelQuotesSinglePathTest(_: std.Io, alloc: std.mem.Allocator) !void 
 }
 
 pub fn expandSelectionsJoinsQuotedPathsTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    const out = try openaction.expand(alloc, "glyphwire-view {selections}", &.{ "/a.png", "/b c.png" });
+    const out = try openaction.expand(alloc, "gw-view {selections}", &.{ "/a.png", "/b c.png" });
     defer alloc.free(out);
-    try testz.expectEqualStr(out, "glyphwire-view '/a.png' '/b c.png'");
+    try testz.expectEqualStr(out, "gw-view '/a.png' '/b c.png'");
 }
 
 pub fn expandSelectionsAcceptsASinglePathTest(_: std.Io, alloc: std.mem.Allocator) !void {

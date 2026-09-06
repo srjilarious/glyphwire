@@ -118,8 +118,8 @@ fn plColor(s: ?[]const u8) ?glyphwire.Color {
     return .{ .r = p.r, .g = p.g, .b = p.b };
 }
 
-/// glyphwire-shell: sets up discovery, then either execs into a given
-/// command (`glyphwire-shell <command> [args...]`, unchanged from
+/// gw-shell: sets up discovery, then either execs into a given
+/// command (`gw-shell <command> [args...]`, unchanged from
 /// milestone 5) or, given no command, runs the interactive prompt itself
 /// -- see decisions.md, Discovery & Connection. Deliberately has no
 /// engine dependency: input arrives as wire-level key events (see
@@ -136,7 +136,7 @@ fn plColor(s: ?[]const u8) ?glyphwire.Color {
 /// writing to a terminal" until proven otherwise. A child that's actually
 /// "glyphwire compatible" (inherits `GLYPHWIRE_SOCK`/`GLYPHWIRE_CTX` and
 /// draws to the grid itself over its own connection, the same way
-/// `glyphwire-demo` or `glyphwire-ls` do) opts out of the mirroring
+/// `glyphwire-demo` or `gw-ls` do) opts out of the mirroring
 /// automatically: `Client.connect` signals the handshake as part of
 /// connecting, with no separate call for a glyphwire-aware program to
 /// remember -- see `Prompt.pumpChildOutput`. `cd` is a builtin (see `Prompt.doCd`) rather than spawned, since
@@ -146,7 +146,7 @@ fn plColor(s: ?[]const u8) ?glyphwire.Color {
 /// only way to quit, deliberately unlike the escape-quits-immediately
 /// convention most game examples use, which would kill an
 /// interactive shell session out from under whatever's running in it;
-/// `glyphwire-host` watches for this process actually exiting (see
+/// `glyphwire` watches for this process actually exiting (see
 /// host/main.zig's `reapChild`) rather than listening for a keypress
 /// itself. Any key chorded with ctrl/alt/super that isn't one of the
 /// sequences above is swallowed rather than typed literally into the
@@ -185,9 +185,9 @@ pub fn main(init: std.process.Init) !void {
     return error.ExecFailed;
 }
 
-/// Prepends `<startup cwd>/zig-out/bin` to `PATH` -- a dev-mode
-/// convenience so typing `ls` or `glyphwire-demo` at the prompt finds
-/// binaries built alongside glyphwire-shell itself, the same way an
+/// Prepends the installed binary dir to `PATH` -- a dev-mode
+/// convenience so typing `gw-ls` or `glyphwire-demo` at the prompt finds
+/// binaries built alongside gw-shell itself, the same way an
 /// installed program's sibling binaries would already be on `$PATH`.
 /// Deliberately mutates *this* process's real environment (`libc`
 /// `setenv`, like `spawnOwnServer` already does for the discovery vars)
@@ -205,16 +205,18 @@ pub fn main(init: std.process.Init) !void {
 /// rescans, so a `setenv` after that first call has no effect on argv[0]
 /// resolution for any spawn after it either.
 fn prependZigOutBinToPath(io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) !void {
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = std.process.currentPath(io, &cwd_buf) catch return;
+    const bin_dir = if (environ_map.get("GLYPHWIRE_BIN_DIR")) |dir|
+        dir
+    else
+        std.process.executableDirPathAlloc(io, alloc) catch return;
     const old_path = environ_map.get("PATH") orelse "";
-    const new_path = try std.fmt.allocPrintSentinel(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], old_path }, 0);
+    const new_path = try std.fmt.allocPrintSentinel(alloc, "{s}:{s}", .{ bin_dir, old_path }, 0);
     defer alloc.free(new_path);
     if (c.setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
 }
 
 /// Sets up its own server and discovery env vars (GLYPHWIRE_SOCK isn't
-/// already inherited -- standalone use, e.g. `zig build shell -- <cmd>`
+/// already inherited -- standalone use, e.g. `zig build gw-shell -- <cmd>`
 /// with no host), exactly like the original milestone-5 launcher.
 /// Returns the socket path directly rather than relying on the caller to
 /// re-read `environ_map`: std.process.spawn (used by the interactive
@@ -2202,13 +2204,13 @@ const Prompt = struct {
 
     /// Resolves the `open_actions` command for one entry and runs it as if
     /// typed. The user's `shell.conf` table is checked first, then the
-    /// built-in defaults (`cd` into a directory, `glyphwire-view` an
+    /// built-in defaults (`cd` into a directory, `gw-view` an
     /// image) -- see `shell/openaction.zig`. A no-op when nothing matches,
     /// per the "don't guess" policy: an unrecognized file type does
     /// nothing rather than guessing. `setLine` echoes the command and,
     /// via `setCursorAt`, ends any browsing / snaps the view back to the
     /// live tail before `submitLine` runs it -- the same path a typed
-    /// command takes, so e.g. `glyphwire-view`'s "wait for a keypress"
+    /// command takes, so e.g. `gw-view`'s "wait for a keypress"
     /// blocks the prompt loop exactly as it would for a real command.
     ///
     /// `view_offset` is how far the host was scrolled back when

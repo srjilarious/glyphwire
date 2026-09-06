@@ -65,15 +65,15 @@ for scene in "${wanted[@]}"; do
     echo "==> $scene  ->  $png   (commands: $cmds)"
 
     GLYPHWIRE_SHELL_SCRIPT="$tmp_script" \
-        timeout "$host_timeout" ./zig-out/bin/glyphwire-host \
+        timeout "$host_timeout" ./zig-out/bin/glyphwire \
         --screenshot "$png" --screenshot-delay-ms "$delay_ms" \
         || echo "warning: host exited non-zero for '$scene'" >&2
 
     # The host exits itself once the shot is taken; the spawned shell and
     # any command it ran get orphaned, so clean them up before the next run.
-    pkill -f 'zig-out/bin/glyphwire-shell' 2>/dev/null || true
+    pkill -f 'zig-out/bin/gw-shell' 2>/dev/null || true
     pkill -f 'zig-out/bin/glyphwire-demo' 2>/dev/null || true
-    pkill -f 'zig-out/bin/ls' 2>/dev/null || true
+    pkill -f 'zig-out/bin/gw-ls' 2>/dev/null || true
 
     if [[ -f "$png" ]]; then
         echo "    wrote $(du -h "$png" | cut -f1)  $png"

@@ -183,7 +183,7 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -304,7 +304,7 @@ pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc:
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -379,7 +379,7 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -560,7 +560,7 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -652,7 +652,7 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -737,7 +737,7 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -809,7 +809,7 @@ pub fn shellRedirectsStdoutToAFileTest(_: std.Io, alloc: std.mem.Allocator) !voi
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -914,7 +914,7 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -1018,7 +1018,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
 
     // serveForever (not a fixed count of acceptOne threads, the pattern
     // the other e2e tests in this file use): this test's own reporter,
-    // the shell's Client + InputListener, *and* glyphwire-ls's own Client
+    // the shell's Client + InputListener, *and* gw-ls's own Client
     // once the typed command spawns it all need servicing, and getting a
     // fixed accept-thread count wrong is exactly the kind of bug that
     // doesn't fail loudly -- it hangs. An earlier version of this test
@@ -1040,7 +1040,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -1053,8 +1053,8 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     // $HOME this test just created the marker directory under.
     try shell_env.put("HOME", home);
     // Same dev-mode PATH convenience shell/main.zig's own
-    // prependZigOutBinToPath gives itself, so plain "ls" (typed below)
-    // resolves to the real glyphwire-ls binary this test just built.
+    // prependZigOutBinToPath gives itself, so "gw-ls" (typed below)
+    // resolves to the real binary this test just built.
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
     const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
     defer alloc.free(new_path);
@@ -1073,12 +1073,12 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     try waitForCell(&reporter, 0, arrow_col, ">");
 
     var cmd_buf: [128]u8 = undefined;
-    const cmd = try std.fmt.bufPrint(&cmd_buf, "ls ~/{s}", .{dir_name});
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "gw-ls ~/{s}", .{dir_name});
     try typeText(&reporter, cmd);
     try reporter.reportKey("enter", true);
     try reporter.reportKey("enter", false);
 
-    // If ~/ expanded correctly, glyphwire-ls lists the marker directory
+    // If ~/ expanded correctly, gw-ls lists the marker directory
     // and "marker.txt" lands on row 2 starting at ls/main.zig's
     // icon_col_width -- 4 at this ctx's default 12x12 cell metrics, see
     // lsClientWritesEntriesOverRealSocketTest's comment for the formula
@@ -1195,12 +1195,12 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     defer srv.deinit(alloc);
     // serveForever, not a fixed accept-thread count -- see
     // shellExpandsTildeInCommandArgsTest's comment on why: this test also
-    // spawns glyphwire-ls as a grandchild via the typed `ls` command.
+    // spawns gw-ls as a grandchild via the typed command.
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
 
     var shell_env = std.process.Environ.Map.init(alloc);
@@ -1225,7 +1225,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     try waitForCell(&reporter, 0, arrow_col, ">");
 
     var cmd_buf: [128]u8 = undefined;
-    const cmd = try std.fmt.bufPrint(&cmd_buf, "ls {s}", .{dir_path});
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "gw-ls {s}", .{dir_path});
     try typeText(&reporter, cmd);
     try reporter.reportKey("enter", true);
     try reporter.reportKey("enter", false);
@@ -1347,7 +1347,7 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const ls_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/ls", .{cwd_buf[0..cwd_len]});
+    const ls_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-ls", .{cwd_buf[0..cwd_len]});
     defer alloc.free(ls_path);
 
     var environ_map = std.process.Environ.Map.init(alloc);
@@ -1422,7 +1422,7 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    const ls_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/ls", .{cwd_buf[0..cwd_len]});
+    const ls_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-ls", .{cwd_buf[0..cwd_len]});
     defer alloc.free(ls_path);
 
     const file_operand = try std.fmt.allocPrint(alloc, "{s}/zeta.txt", .{tmp_name});

@@ -1,8 +1,8 @@
 name: Linux Package
 
 # Builds and packages the user-facing glyphwire programs for Linux
-# x86_64: glyphwire-host, glyphwire-shell, glyphwire-notify, glyphwire-demo,
-# glyphwire-view and ls (via the `zig build package` step). The
+# x86_64: glyphwire, gw-shell, glyphwire-notify, glyphwire-demo,
+# gw-view and gw-ls (via the `zig build package` step). The
 # server/client/table-demo tools and the test runner are deliberately left
 # out.
 #
@@ -60,22 +60,21 @@ jobs:
         working-directory: glyphwire
         run: zig build tests
 
-      # Layout mirrors a dev checkout: binaries sit next to `assets/` so the
-      # host resolves its default font paths ("assets/...") relative to the
-      # extracted directory. The example conf files live inside assets/ and
-      # come along with the recursive copy.
+      # Layout mirrors an install prefix: bin/ for commands, and
+      # share/glyphwire/assets/ for runtime assets. The host resolves this
+      # through ../share/glyphwire/assets relative to its executable.
       - name: Stage package
         working-directory: glyphwire
         run: |
           pkg="glyphwire-linux-x86_64"
-          mkdir -p "$pkg"
-          cp zig-out/bin/glyphwire-host   "$pkg/"
-          cp zig-out/bin/glyphwire-shell  "$pkg/"
-          cp zig-out/bin/glyphwire-notify "$pkg/"
-          cp zig-out/bin/glyphwire-demo   "$pkg/"
-          cp zig-out/bin/glyphwire-view   "$pkg/"
-          cp zig-out/bin/ls               "$pkg/"
-          cp -r assets                    "$pkg/assets"
+          mkdir -p "$pkg/bin" "$pkg/share/glyphwire"
+          cp zig-out/bin/glyphwire        "$pkg/bin/"
+          cp zig-out/bin/gw-shell         "$pkg/bin/"
+          cp zig-out/bin/glyphwire-notify "$pkg/bin/"
+          cp zig-out/bin/glyphwire-demo   "$pkg/bin/"
+          cp zig-out/bin/gw-view          "$pkg/bin/"
+          cp zig-out/bin/gw-ls            "$pkg/bin/"
+          cp -r zig-out/share/glyphwire/assets "$pkg/share/glyphwire/assets"
           cp README.md                    "$pkg/"
           tar czf "$pkg.tar.gz" "$pkg"
           tar tzf "$pkg.tar.gz"

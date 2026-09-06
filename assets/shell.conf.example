@@ -1,4 +1,4 @@
--- Example glyphwire-shell config.
+-- Example gw-shell config.
 --
 -- Copy to ~/.config/glyphwire/shell.conf (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
@@ -8,10 +8,10 @@
 alias("ll", "ls -l")
 alias("gs", "git status")
 
--- What activating a glyphwire-ls entry runs. Key is an exact mimetype,
+-- What activating a gw-ls entry runs. Key is an exact mimetype,
 -- a "group/*", or a kind keyword ("directory"/"file"/"symlink"/"other"),
 -- matched most-specific first; merged over the built-in defaults (cd into
--- a directory, glyphwire-view an image). {sel} = one shell-quoted path,
+-- a directory, gw-view an image). {sel} = one shell-quoted path,
 -- {selections} = one or more. Ctrl+click marks several to open at once.
 open_actions{
     ["text/*"] = "code {sel}",
@@ -60,7 +60,7 @@ open_actions{
 -- the segments on the first row
 -- and the input line (prefixed with `input`) on the last -- so a right
 -- side with the time never moves as you type.  The \u{E0Bx} glyphs need
--- a Nerd Font; glyphwire-host bundles a Powerline-range fallback.
+-- a Nerd Font; glyphwire bundles a Powerline-range fallback.
 
 prompt {
     left_segments = {

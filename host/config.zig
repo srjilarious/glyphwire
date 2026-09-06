@@ -10,9 +10,9 @@ const geometry = @import("geometry.zig");
 // the Japanese monospaced face out of it (a plain `.ttf` ignores the name
 // and uses face 0). The fallback face is tried for any codepoint the
 // primary lacks before the atlas falls back to its `.notdef` (tofu) box.
-pub const font_path_default = "assets/NotoSansCJK-Regular.ttc";
+pub const font_path_default = "NotoSansCJK-Regular.ttc";
 pub const font_face_name_default = "Mono CJK JP";
-pub const font_fallback_default = "assets/JetBrainsMono-Regular.ttf";
+pub const font_fallback_default = "JetBrainsMono-Regular.ttf";
 pub const font_size_default: f32 = 20.0;
 
 // Basename of the host's startup config inside glyphwire's config
@@ -24,7 +24,7 @@ pub const host_conf_name = "host.conf";
 // Always-registered extra fallback: a tiny pyftsubset of a Nerd Font to
 // the Powerline range (U+E0A0-E0D7), for a configured powerline shell
 // prompt's separator / cap glyphs.
-pub const powerline_symbols_font = "assets/PowerlineSymbols-subset.ttf";
+pub const powerline_symbols_font = "PowerlineSymbols-subset.ttf";
 
 // Runtime font-size (Ctrl+- / Ctrl++ / Ctrl+0) policy. The engine applies
 // whatever size it is handed; the clamp range and step are the host's.
@@ -90,7 +90,7 @@ pub const HostConfig = struct {
     font: FontConfig = .{},
     cursor: CursorConfig = .{},
     grid: GridConfig = .{},
-    /// Which bundled file-type icon set (`assets/icons/filetype/<name>/`)
+    /// Which bundled file-type icon set (`<asset-dir>/icons/filetype/<name>/`)
     /// backs the canonical `file/*` names glyphwire-ls draws with -- one
     /// of `oxygen` (default), `papirus`, `material`. An unknown value
     /// warns and falls back to `oxygen`. `arena`-owned when set from

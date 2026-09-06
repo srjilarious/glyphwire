@@ -48,14 +48,14 @@ pub const Action = struct {
 
 /// Shipped defaults, overridable per key by a `shell.conf` `open_actions`
 /// entry. Kept intentionally small: auto-`cd` into a directory, and hand
-/// an image to glyphwire-view (only the formats it actually decodes --
+/// an image to gw-view (only the formats it actually decodes --
 /// PNG / JPEG / GIF / BMP, not svg or webp).
 pub const default_actions = [_]Action{
     .{ .key = "directory", .commands = &.{"cd {sel}"} },
-    .{ .key = "image/png", .commands = &.{"glyphwire-view {selections}"} },
-    .{ .key = "image/jpeg", .commands = &.{"glyphwire-view {selections}"} },
-    .{ .key = "image/gif", .commands = &.{"glyphwire-view {selections}"} },
-    .{ .key = "image/bmp", .commands = &.{"glyphwire-view {selections}"} },
+    .{ .key = "image/png", .commands = &.{"gw-view {selections}"} },
+    .{ .key = "image/jpeg", .commands = &.{"gw-view {selections}"} },
+    .{ .key = "image/gif", .commands = &.{"gw-view {selections}"} },
+    .{ .key = "image/bmp", .commands = &.{"gw-view {selections}"} },
 };
 
 fn matchExact(key: []const u8, entry: Entry) bool {

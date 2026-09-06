@@ -8,7 +8,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/glyphwire.zig"),
     });
 
-    // Pure prompt helpers shared by glyphwire-shell and its test runner
+    const installed_assets_step = b.addInstallDirectory(.{
+        .source_dir = b.path("assets"),
+        .install_dir = .{ .custom = "share/glyphwire" },
+        .install_subdir = "assets",
+    });
+    b.getInstallStep().dependOn(&installed_assets_step.step);
+
+    // Pure prompt helpers shared by gw-shell and its test runner
     // (a Zig module can't be reached across directories via relative
     // `@import`, so tests/ can't pull shell/ files in directly).
     const shell_support_mod = b.addModule("shell_support", .{
@@ -19,7 +26,7 @@ pub fn build(b: *std.Build) void {
     // pulled in for the pure width math itself.
     shell_support_mod.addImport("glyphwire", glyphwire_mod);
 
-    // Column-packing math shared by glyphwire-ls and its test runner,
+    // Column-packing math shared by gw-ls and its test runner,
     // same cross-directory-module reason as `shell_support` above. Imports
     // `glyphwire` only for `codepointWidth` (East Asian Width lookup) --
     // still no IO / client / server pulled in for the math itself.
@@ -28,7 +35,7 @@ pub fn build(b: *std.Build) void {
     });
     ls_support_mod.addImport("glyphwire", glyphwire_mod);
 
-    // Pure, engine-free pieces of glyphwire-host (pixel/cell geometry,
+    // Pure, engine-free pieces of glyphwire (pixel/cell geometry,
     // scrollbar math, `host.conf` value clamps, the key-repeat timer) so
     // the test runner can exercise them without an SDL/OpenGL link. Same
     // cross-directory-module reason as `shell_support` / `ls_support`;
@@ -85,7 +92,7 @@ pub fn build(b: *std.Build) void {
 
     const zargunaught_mod = b.dependency("zargunaught", .{}).module("zargunaught");
 
-    // Vendored Lua 5.3 (libs/ziglua) -- glyphwire-shell embeds a Lua state
+    // Vendored Lua 5.3 (libs/ziglua) -- gw-shell embeds a Lua state
     // to run ~/.config/glyphwire/shell.conf. `zlua` already links the Lua
     // C library into itself in ziglua's own build.zig; `lua_lib` is linked
     // onto each consuming executable explicitly.
@@ -105,7 +112,7 @@ pub fn build(b: *std.Build) void {
     host_eng_mod.addImport("c_time", time_c_translate.createModule());
 
     // shell/config.zig lives in this module and imports ziglua; both
-    // glyphwire-shell and the test runner pull it in transitively.
+    // gw-shell and the test runner pull it in transitively.
     shell_support_mod.addImport("ziglua", ziglua_mod);
     // ls/config.zig (glyphwire-ls's ls.conf parser) does the same -- so
     // `ls_support` is no longer strictly dependency-free, but the width
@@ -167,7 +174,7 @@ pub fn build(b: *std.Build) void {
     server_step.dependOn(&run_server.step);
 
     const shell_exe = b.addExecutable(.{
-        .name = "glyphwire-shell",
+        .name = "gw-shell",
         .root_module = b.createModule(.{
             .root_source_file = b.path("shell/main.zig"),
             .target = target,
@@ -183,9 +190,10 @@ pub fn build(b: *std.Build) void {
 
     const run_shell = b.addRunArtifact(shell_exe);
     run_shell.step.dependOn(b.getInstallStep());
+    run_shell.setEnvironmentVariable("GLYPHWIRE_BIN_DIR", b.getInstallPath(.bin, ""));
     if (b.args) |args| run_shell.addArgs(args);
 
-    const shell_step = b.step("shell", "Run the glyphwire shell launcher");
+    const shell_step = b.step("gw-shell", "Run the glyphwire shell launcher");
     shell_step.dependOn(&run_shell.step);
 
     const client_exe = b.addExecutable(.{
@@ -261,7 +269,7 @@ pub fn build(b: *std.Build) void {
     table_demo_step.dependOn(&run_table_demo.step);
 
     const host_exe = b.addExecutable(.{
-        .name = "glyphwire-host",
+        .name = "glyphwire",
         .root_module = b.createModule(.{
             .root_source_file = b.path("host/main.zig"),
             .target = target,
@@ -274,13 +282,15 @@ pub fn build(b: *std.Build) void {
 
     const run_host = b.addRunArtifact(host_exe);
     run_host.step.dependOn(b.getInstallStep());
+    run_host.setEnvironmentVariable("GLYPHWIRE_ASSET_DIR", b.getInstallPath(.{ .custom = "share/glyphwire" }, "assets"));
+    run_host.setEnvironmentVariable("GLYPHWIRE_BIN_DIR", b.getInstallPath(.bin, ""));
     if (b.args) |args| run_host.addArgs(args);
 
-    const host_step = b.step("host", "Run the SDL3-windowed glyphwire host (spawns glyphwire-shell)");
+    const host_step = b.step("glyphwire", "Run the SDL3-windowed glyphwire host (spawns gw-shell)");
     host_step.dependOn(&run_host.step);
 
     const ls_exe = b.addExecutable(.{
-        .name = "ls",
+        .name = "gw-ls",
         .root_module = b.createModule(.{
             .root_source_file = b.path("ls/main.zig"),
             .target = target,
@@ -300,7 +310,7 @@ pub fn build(b: *std.Build) void {
     run_ls.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_ls.addArgs(args);
 
-    const ls_step = b.step("ls", "Run the glyphwire ls client (directory listing over the wire)");
+    const ls_step = b.step("gw-ls", "Run the glyphwire ls client (directory listing over the wire)");
     ls_step.dependOn(&run_ls.step);
 
     const zoe_exe = b.addExecutable(.{
@@ -323,7 +333,7 @@ pub fn build(b: *std.Build) void {
     zoe_step.dependOn(&run_zoe.step);
 
     const view_exe = b.addExecutable(.{
-        .name = "glyphwire-view",
+        .name = "gw-view",
         .root_module = b.createModule(.{
             .root_source_file = b.path("view/main.zig"),
             .target = target,
@@ -337,7 +347,7 @@ pub fn build(b: *std.Build) void {
     run_view.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_view.addArgs(args);
 
-    const view_step = b.step("view", "Run the glyphwire image-viewer client (glyphwire-view <image.png>)");
+    const view_step = b.step("gw-view", "Run the glyphwire image-viewer client (gw-view <image.png>)");
     view_step.dependOn(&run_view.step);
 
     const notify_exe = b.addExecutable(.{
@@ -358,13 +368,21 @@ pub fn build(b: *std.Build) void {
     const notify_step = b.step("notify", "Run the glyphwire notification client (glyphwire-notify <message>)");
     notify_step.dependOn(&run_notify.step);
 
-    // `zig build package` installs just the user-facing programs that ship
-    // in the Linux release tarball -- host, shell, notify, demo, view, ls --
-    // without also building the test runner or the internal server/client
-    // tools that plain `zig build` pulls in. The CI packaging job
+    // `zig build package` installs just the user-facing programs and
+    // bundled assets that ship in the Linux release tarball -- glyphwire,
+    // gw-shell, notify, demo, gw-view, gw-ls, and assets -- without also
+    // building the test runner or the internal server/client tools that
+    // plain `zig build` pulls in. The CI packaging job
     // (.github/workflows/linux-package.yml) drives this step.
-    const package_step = b.step("package", "Install the shipped programs (host, shell, notify, demo, view, ls) into zig-out/bin");
+    const package_step = b.step("package", "Install the shipped programs and assets into zig-out");
     for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, ls_exe }) |exe| {
         package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
+    package_step.dependOn(&installed_assets_step.step);
+
+    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-view, gw-ls, and assets under the selected prefix");
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, view_exe, ls_exe }) |exe| {
+        install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+    }
+    install_local_step.dependOn(&installed_assets_step.step);
 }
