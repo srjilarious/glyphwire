@@ -3092,16 +3092,25 @@ const Prompt = struct {
             while (listener.pollResizeEvent()) |rev| new_size = rev;
             if (new_size) |rev| pty.resize(@intCast(rev.cols), @intCast(rev.rows));
 
+            // Once the handshake resolves an aware child, it's drawing
+            // over its own wire connection and never reads its own stdin
+            // -- forwarding anything into its pty would just sit unread
+            // or, worse, come back as a kernel-line-discipline echo (the
+            // pty's termios is never put in raw/no-echo mode for it) that
+            // the block below would then pass straight through to this
+            // process's own real stdout as if the child had printed it.
+            const is_aware = awareState(&reader_ctx) orelse false;
+
             // Mouse: encode to the child when it asked for reporting,
             // otherwise drain the queues so `InputListener` doesn't sit
             // full while a command runs.
-            pumpPtyMouse(alloc, listener, &pty, &modes);
+            if (!is_aware) pumpPtyMouse(alloc, listener, &pty, &modes);
 
             // Terminal query replies (`CSI 6n` / DA / DECRQM) the host
             // parsed out of the child's own output on the way to the grid.
             while (listener.pollTerminalReply()) |reply| {
                 defer alloc.free(reply);
-                pty.writeAll(reply);
+                if (!is_aware) pty.writeAll(reply);
             }
 
             // Poll faster while a mouse-mode TUI is foregrounded so
@@ -3109,6 +3118,16 @@ const Prompt = struct {
             // lazy.
             const wait_ms: i64 = if (modes.mouseReporting()) 16 else 120;
             const input_ev = (listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(wait_ms), .clock = .awake } }) catch null) orelse continue;
+
+            if (is_aware) {
+                switch (input_ev) {
+                    .text => |tev| alloc.free(tev.text),
+                    .paste => |tev| alloc.free(tev.text),
+                    .key => |kev| alloc.free(kev.key),
+                    .copy_request => {},
+                }
+                continue;
+            }
 
             // Typed text (layout/dead-key/IME resolved) goes to the child's
             // stdin verbatim, exactly as a terminal feeds a pty -- taken
@@ -3179,7 +3198,20 @@ const Prompt = struct {
         /// Fed every master chunk so the foreground loop can see the DEC
         /// private modes the child sets.
         modes: *ModeTracker,
+        /// Set once the handshake resolves: 0 = still unknown, 1 = aware,
+        /// 2 = plain. The foreground loop below reads this to stop
+        /// forwarding keystrokes/mouse/replies into an aware child's pty
+        /// -- see `runCommand`'s use of `awareState`.
+        aware: std.atomic.Value(u8) = .init(0),
     };
+
+    fn awareState(ctx: *const PtyReaderCtx) ?bool {
+        return switch (ctx.aware.load(.acquire)) {
+            1 => true,
+            2 => false,
+            else => null,
+        };
+    }
 
     /// Reads the pty master and mirrors it onto the grid via `write_text`
     /// with the default foreground -- `Layer.writeText` interprets the
@@ -3224,6 +3256,7 @@ const Prompt = struct {
                 pending.appendSlice(alloc, chunk) catch break;
                 aware = hs.aware(pending.items);
                 if (aware == null) continue; // still a prefix of the marker
+                ctx.aware.store(if (aware.?) 1 else 2, .release);
                 const body = if (aware.?) pending.items[hs.marker.len..] else pending.items;
                 emitChunk(self, &real_out, aware.?, body);
                 pending.clearRetainingCapacity();
