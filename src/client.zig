@@ -332,22 +332,26 @@ pub const Client = struct {
         return .{ .width = parsed.value.result.width, .height = parsed.value.result.height };
     }
 
-    /// `draw_image(handle, row?, col?, row_span, col_span)` -- a
-    /// notification. Places the image at its natural pixel size, anchored
-    /// at `(row, col)` (defaulting to the layer's cursor when either is
-    /// omitted, same as `write_text`'s documented convention), clipped to
-    /// the given span rather than stretched to fill it — see decisions.md's
-    /// Image section. Aspect-ratio-aware placement (choosing `row_span`/
-    /// `col_span` to match the image's shape) is the caller's job;
-    /// `getImageInfo` plus `getCellMetrics` give it what it needs to
-    /// compute that.
-    pub fn drawImage(self: *Client, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize) !void {
+    /// `draw_image(handle, row?, col?, row_span, col_span, scale)` -- a
+    /// notification. Places the image anchored at `(row, col)` (defaulting
+    /// to the layer's cursor when either is omitted, same as `write_text`'s
+    /// documented convention), clipped to the given span rather than
+    /// stretched to fill it — see decisions.md's Image section. `scale` is
+    /// the uniform factor the image is drawn at: `1.0` is its natural pixel
+    /// size (the original behavior); `< 1.0` shrinks it (glyphwire-view
+    /// passes `target_width_px / image_width_px` for `--size fit-width`).
+    /// Aspect-ratio-aware placement (choosing `row_span`/`col_span` to
+    /// match the image's *scaled* shape) is the caller's job; `getImageInfo`
+    /// plus `getCellMetrics` and `getSize` give it what it needs to compute
+    /// that.
+    pub fn drawImage(self: *Client, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize, scale: f32) !void {
         try self.notify("draw_image", .{
             .handle = handle,
             .row = row,
             .col = col,
             .row_span = row_span,
             .col_span = col_span,
+            .scale = scale,
         });
     }
 

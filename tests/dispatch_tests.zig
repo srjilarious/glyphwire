@@ -614,10 +614,38 @@ pub fn drawImageMarksRootLayerCellsTest(io: std.Io, alloc: std.mem.Allocator) !v
 
     try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.handle, 1);
     try testz.expectEqual(ctx.root.cell(0, 1).style.bg.image.offset_x, 12);
+    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.scale, 1.0);
     switch (ctx.root.cell(1, 0).style.bg) {
         .color => {},
         .image, .icon => return error.TestUnexpectedResult,
     }
+}
+
+/// `draw_image`'s optional `scale` (glyphwire-view's `--size fit-width`):
+/// each covered cell samples `cell_px / scale` source pixels, so the
+/// stored per-cell offsets step by that, and the scale rides along on
+/// every cell for the renderer.
+pub fn drawImageScaleShrinksSourceStepAndRecordsScaleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(96, 24); // renders 48x12px at scale 0.5 -> 4x1 cells
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_image","params":{"handle":1,"row":0,"col":0,"row_span":1,"col_span":4,"scale":0.5}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, draw_message)).response == null);
+
+    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.offset_x, 0);
+    try testz.expectEqual(ctx.root.cell(0, 1).style.bg.image.offset_x, 24);
+    try testz.expectEqual(ctx.root.cell(0, 2).style.bg.image.offset_x, 48);
+    try testz.expectEqual(ctx.root.cell(0, 3).style.bg.image.offset_x, 72);
+    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.scale, 0.5);
+    try testz.expectEqual(ctx.root.cell(0, 3).style.bg.image.scale, 0.5);
 }
 
 /// draw_image with row/col omitted anchors at the layer's current cursor

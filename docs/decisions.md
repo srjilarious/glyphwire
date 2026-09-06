@@ -634,14 +634,34 @@ surface.
   pixels are marked as image-backed. Superseded from an earlier "naive
   fit, stretch to fill" decision — stretching reads badly for the actual
   v1 use cases (viewing an image, TUI background art), and isn't worth
-  keeping as the default just to avoid clipping. Stretching may return as
-  an opt-in mode later; not needed now.
+  keeping as the default just to avoid clipping. Stretching (aspect *not*
+  preserved) may still return as an opt-in mode later; not needed now.
+- **`draw_image` takes an optional `scale` (default `1.0`) — a uniform,
+  aspect-preserving shrink, distinct from the stretch-to-fill idea
+  above.** `glyphwire-view` now fits an image to the width of the layer
+  it lands on by default: it reads the layer's cell width
+  (`get_property("size")`), turns it into a pixel width via the fixed cell
+  metrics, and sends `scale = target_width_px / image_width_px` (never
+  `> 1` — an image already no wider than the layer is left at natural
+  size), still computing `row_span`/`col_span` itself from the scaled
+  dimensions. `--size full` sends no scale and keeps the natural-size
+  placement. The wire carries the resolved factor, not a "fit" *intent*,
+  so it does not reflow on a later window resize — the client would have
+  to redraw; a server-tracked fit intent is a possible later refinement,
+  not built now. It stays consistent with "aspect-ratio-aware placement is
+  the client's job" (next bullet): the client still owns the span math,
+  `scale` just lets the render stage shrink what would otherwise be
+  clipped.
 - Per-cell storage stays a resource reference, not a stored sub-image: a
-  cell within the span holds `{handle, offset}` (the pixel offset into the
-  source image that cell should display), computed from the cell's
-  position relative to the draw call's anchor. The host resolves `handle +
-  offset` against the actual texture at render time — no per-cell tile is
-  ever extracted or cached as its own resource.
+  cell within the span holds `{handle, offset, scale}` (the *source*-pixel
+  offset into the image that cell should display, plus the draw's scale
+  factor), computed from the cell's position relative to the draw call's
+  anchor. At `scale < 1` a cell's offset steps by `cell_px / scale` source
+  pixels instead of `cell_px`, since the fixed cell grid has to span a
+  rendered image that's now smaller; the host resolves `handle + offset`
+  against the actual texture at render time and draws that slice back down
+  at `scale` — no per-cell tile is ever extracted or cached as its own
+  resource.
 - Aspect-ratio-aware placement is the **client's** job, not the server's —
   a client that cares queries the image's natural pixel dimensions
   (`get_image_info`) plus the session's fixed cell pixel metrics, and
