@@ -48,6 +48,18 @@ fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator
     };
 }
 
+/// Registered on the `Server` as its wake hook (see
+/// `Server.setWakeCallback`): a socket client's dispatch runs on that
+/// connection's own thread, so after it may have changed the grid it
+/// nudges the render loop -- which is otherwise parked in
+/// `SDL_WaitEvent` when the terminal is idle (`EngOptions.redrawOnDemand`)
+/// -- to wake and re-check `App.needsRedraw`. `ctx` is the `*Engine` handed
+/// to `setWakeCallback` below.
+fn wakeRenderLoop(ctx: ?*anyopaque) void {
+    const eng: *app_mod.Engine = @ptrCast(@alignCast(ctx.?));
+    eng.wakeEventLoop();
+}
+
 fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
     const dir = environ_map.get("XDG_RUNTIME_DIR") orelse "/tmp";
     const pid = std.os.linux.getpid();
@@ -278,6 +290,14 @@ pub fn main(init: std.process.Init) !void {
         .face_index = font_face_index,
         .size = font_cfg.size,
     }, host_cfg.cursor);
+
+    // The render loop only repaints on demand (`EngOptions.redrawOnDemand`)
+    // and parks in `SDL_WaitEvent` when idle; this lets the server's
+    // connection threads break that wait after a client draws to the grid.
+    // Registered here, after the window/engine exists -- any grid change a
+    // client made during the startup gap is still picked up by the first
+    // frame, which always draws.
+    srv.setWakeCallback(appRunner.engine, wakeRenderLoop);
 
     appRunner.run(app);
 

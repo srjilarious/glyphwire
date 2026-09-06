@@ -9,6 +9,7 @@ const hs = @import("host_support");
 const geometry = hs.geometry;
 const config = hs.config;
 const key_repeat = hs.key_repeat;
+const redraw = hs.redraw;
 
 // ─── geometry.scrollbarGeom ───────────────────────────────────────────
 
@@ -238,4 +239,90 @@ pub fn cellRectPxConvertsADividerBandTest(_: std.Io, _: std.mem.Allocator) !void
     try testz.expectEqual(r.y, 40.0);
     try testz.expectEqual(r.w, 10.0);
     try testz.expectEqual(r.h, 760.0);
+}
+
+// ─── redraw.contextSig ───────────────────────────────────────────────
+//
+// The `Context`-derived half of the host's "only draw when something
+// changed" check (see `host/redraw.zig`). A `std.meta.eql` compare of the
+// returned value is what `App.needsRedraw` gates the frame on.
+
+pub fn contextSigStableWhenNothingChangesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 8);
+    defer ctx.deinit();
+    try ctx.root.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const a = redraw.contextSig(&ctx);
+    const b = redraw.contextSig(&ctx);
+    try testz.expectTrue(std.meta.eql(a, b));
+}
+
+pub fn contextSigMovesOnCellWriteTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 8);
+    defer ctx.deinit();
+
+    const before = redraw.contextSig(&ctx);
+    try ctx.root.writeText("x", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    const after = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(before, after));
+}
+
+pub fn contextSigMovesOnScrollViewTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 4, 2, 8);
+    defer ctx.deinit();
+    // 3 content rows over a 2-row viewport => one row of scrollback.
+    try ctx.root.writeText("aaaabbbbcccc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const at_tail = redraw.contextSig(&ctx);
+    _ = ctx.root.scrollView(null, 1);
+    const scrolled = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(at_tail, scrolled));
+}
+
+pub fn contextSigMovesWhenALayerIsCreatedTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+
+    const before = redraw.contextSig(&ctx);
+    _ = try ctx.createLayer(10, 5, 0);
+    const after = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(before, after));
+}
+
+pub fn contextSigMovesOnRaiseLayerWithNoContentChangeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    const a = try ctx.createLayer(10, 5, 0);
+    _ = try ctx.createLayer(10, 5, 0);
+
+    // Reordering the compositing stack deliberately doesn't bump any
+    // layer's render_gen (the host reads layer_order live), so the topo
+    // hash is the only thing that can catch it.
+    const before = redraw.contextSig(&ctx);
+    try ctx.raiseLayer(a, null);
+    const after = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(before, after));
+}
+
+pub fn contextSigMovesOnVisibilityToggleTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    const tree = try ctx.createLayer(10, 5, 0);
+
+    const shown = redraw.contextSig(&ctx);
+    try ctx.setLayerProperty(tree, .{ .visibility = false });
+    const hidden = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(shown, hidden));
+}
+
+pub fn contextSigMovesWhenAFullScreenProgramTakesTheScreenTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    const before = redraw.contextSig(&ctx);
+    // `CSI ? 1049 h` -- enter the alt screen. `rootScreenOwned` flips,
+    // which the signature carries in root_view's top bit.
+    try ctx.root.writeText("\x1b[?1049h", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    const owned = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(before, owned));
 }

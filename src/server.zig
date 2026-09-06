@@ -102,6 +102,34 @@ pub const Server = struct {
     /// thread while `acceptOne` (tests) may run on another.
     next_conn_id: std.atomic.Value(core.ConnId) = .init(1),
 
+    /// Optional "the context may have changed" hook. A front end that only
+    /// draws on demand (glyphwire-host -- see decisions.md's "Redraw on
+    /// change") registers one via `setWakeCallback` so a socket client's
+    /// dispatch, which runs on that connection's own thread, can nudge the
+    /// render loop out of its wait. Left null for the headless server and
+    /// for any front end that repaints every frame regardless -- the
+    /// server core never depends on it being set.
+    wake_fn: ?*const fn (?*anyopaque) void = null,
+    wake_ctx: ?*anyopaque = null,
+
+    /// Registers the `setWakeCallback` hook described on `wake_fn`. Call it
+    /// once at startup; `wake_ctx` is passed straight back to `wake_fn` on
+    /// every invocation.
+    pub fn setWakeCallback(self: *Server, wake_ctx: ?*anyopaque, wake_fn: *const fn (?*anyopaque) void) void {
+        self.wake_ctx = wake_ctx;
+        self.wake_fn = wake_fn;
+    }
+
+    /// Fires the registered wake hook, if any. Called after every frame a
+    /// socket connection dispatches -- the in-process `report*` helpers
+    /// below don't need it, since whatever calls those (the host's own
+    /// update loop) re-checks its redraw state the same iteration anyway.
+    /// A spurious wake (a read-only `get_cells`, say) is harmless: the
+    /// front end just re-evaluates and goes back to waiting.
+    fn wake(self: *Server) void {
+        if (self.wake_fn) |f| f(self.wake_ctx);
+    }
+
     /// `ctx` becomes the session's root context (handle
     /// `core.root_context_handle`). The caller keeps ownership of its
     /// memory -- `Session.deinit` frees only the contexts
@@ -215,6 +243,7 @@ pub const Server = struct {
                     };
                     defer alloc.free(resp);
                     try conn.send(self.io, resp);
+                    self.wake();
                     continue;
                 }
 
@@ -254,6 +283,7 @@ pub const Server = struct {
                     defer alloc.free(b.body);
                     self.broadcast(&conn, b.event, b.body);
                 }
+                self.wake();
             }
         }
     }

@@ -53,6 +53,17 @@ pub const EngineOptions = struct {
     audioOpts: struct { enabled: bool = false } = .{},
     inputOpts: InputOptions = .{},
     manifestOpts: ?type = null,
+    /// Draw only when something changed instead of every iteration. With
+    /// this on, the loop blocks in `SDL_WaitEvent(Timeout)` when idle and
+    /// calls `AppData.render` + `swapBuffers` only when `AppData.needsRedraw`
+    /// says a repaint is due; `AppData` must also expose
+    /// `idleTimeoutMs() ?f64` (how long the loop may block before waking to
+    /// re-check state a background thread might have changed -- null to
+    /// block until an OS event or an `Engine.wakeEventLoop` call). Off by
+    /// default: a game repaints continuously. glyphwire-host turns it on --
+    /// a terminal is static most of the time. See decisions.md's "Redraw
+    /// on change".
+    redrawOnDemand: bool = false,
 };
 
 pub const EngineInitOptions = struct {

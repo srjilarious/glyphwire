@@ -2061,6 +2061,43 @@ surface.
   the handler and (if the shape is shared) `protocol.zig`, so the message
   catalog stays visible rather than hidden behind a framework.
 
+### Redraw on change
+- **The host draws only when something changed.** A terminal is static
+  most of the time, so `glyphwire-host` blocks in the event loop when idle
+  and repaints only on a real change — a grid mutation, a resize, a font
+  zoom, a scroll, a caret blink, an IME composition. This is
+  `host_eng`'s `EngineOptions.redrawOnDemand` (off by default — a game
+  repaints every frame; the host opts in). Builds on the per-layer static
+  quad batches, which already made "did this layer change" a cheap
+  `render_gen` comparison.
+- **The server signals change through an injected callback, not by
+  calling SDL.** `Server.setWakeCallback(ctx, fn)` — fired after every
+  frame a socket connection dispatches, because that work runs on the
+  connection's own thread and can't nudge the render loop directly. The
+  host registers a callback that pushes an `SDL_EVENT_USER`; the headless
+  server and any alternate front end simply never register one, and the
+  server core has no windowing dependency. Rejected: the server calling
+  `SDL_PushEvent` itself (couples the core to a windowing library),
+  and a fully polled loop with a short timeout (wakes 60×/s doing
+  nothing).
+- **Change detection is a per-frame snapshot compare, not dirty flags.**
+  `App.needsRedraw` builds a value fingerprint each frame under
+  `ctx_mutex` — a wrapping sum of every layer's `render_gen`, a rolling
+  hash of `layer_order` + per-layer visibility (`raise_layer` /
+  `lower_layer` / show / hide don't move `render_gen`), the root view
+  offset, plus host-local bits (framebuffer size, cell size, caret
+  cell/visibility/shape, an FNV hash of the IME preedit, a
+  screenshot-pending flag) — and compares it to the last drawn frame's.
+  The `Context`-derived half is `host/redraw.zig` (`contextSig`), pure and
+  unit-tested. Rejected: a `dirty` bool set at every mutation site plus a
+  `Context` hook for the server thread — more call sites touched, easy to
+  miss one, and the snapshot is already cheap.
+- **A blinking caret still forces a redraw.** The caret blinks on its own
+  clock, so `App.idleTimeoutMs` returns a bounded wait (~`blink_ms`) while
+  `cursor_blink` is on, and the phase flip shows up in the fingerprint.
+  Pausing the blink on focus loss (hold it solid, stop waking entirely)
+  is a noted future refinement, not v1.
+
 ### Deferred: capability caching
 - Considered: a server-side cache (never client-side — the client must
   stay unaware caching exists at all) keyed by the connecting binary's
