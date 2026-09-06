@@ -1,32 +1,36 @@
 //! `zoe` -- a modal editor for glyphwire.
 //!
-//! **The UI is not wired up yet.** This slice is the headless core (see
-//! `docs/investigations/zoe-editor.md` for the plan and what comes next),
-//! so `main` is a driver for it rather than an editor you can sit in: it
-//! loads a file, replays a vim-notation key script against the real
-//! `feedText`/`feedKey` input path, and prints the resulting buffer. That
-//! makes the core exercisable by hand -- and `:w` actually writes -- while
-//! the layer/rendering half is still being built.
+//! Launched from a glyphwire-aware shell it connects to the display
+//! server and runs the real UI (`ui.zig`): a file tree beside the buffer
+//! with a statusline under both, laid out by a host-side split tree.
+//! Launched from anywhere else -- no `GLYPHWIRE_SOCK` -- it falls back to
+//! the headless driver, which replays a vim-notation key script against
+//! the editor core and prints the result. That fallback is how the core
+//! is exercised by hand and in CI, where there is no window.
 
 const std = @import("std");
+const glyphwire = @import("glyphwire");
 const zoe = @import("zoe_support");
 
 const usage =
     \\usage: zoe [--keys <script>] [--quiet] [file]
     \\
-    \\  --keys <script>  Replay a vim-notation key script against the buffer,
-    \\                   e.g. 'ihello<esc>dd' or '3jA world<esc>:w<cr>'.
-    \\  --quiet          Don't print the buffer afterwards.
+    \\  --keys <script>  Headless: replay a vim-notation key script against
+    \\                   the buffer, e.g. 'ihello<esc>dd' or ':w<cr>'.
+    \\  --quiet          Headless: don't print the buffer afterwards.
     \\
-    \\The interactive glyphwire UI is not built yet; this drives the editor
-    \\core headlessly. See docs/investigations/zoe-editor.md.
+    \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
+    \\glyphwire display server. Ctrl+W switches panes, Ctrl+N toggles the
+    \\file tree. See docs/investigations/zoe-editor.md.
     \\
 ;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
-    const args = try init.minimal.args.toSlice(alloc);
+    // Arena, not `alloc`: process-lifetime, freed automatically on exit --
+    // see `server/main.zig`'s identical `args` allocation.
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var script: ?[]const u8 = null;
     var path: ?[]const u8 = null;
@@ -64,11 +68,17 @@ pub fn main(init: std.process.Init) !void {
     var ed = try zoe.Editor.initFromText(alloc, text, path);
     defer ed.deinit();
 
+    // `--keys` always means the headless driver, even under a display
+    // server: it's how the core is tested, and a script racing a live UI
+    // would be neither.
+    if (script == null) {
+        if (try runUi(alloc, io, &ed, init.environ_map)) return;
+    }
+
     if (script) |s| {
-        const outcome = try zoe.keys.feed(&ed, s);
-        switch (outcome) {
+        switch (try zoe.keys.feed(&ed, s)) {
             .none, .quit => {},
-            .write, .write_quit => |target| try save(io, &ed, target),
+            .write, .write_quit, .edit => |target| try headlessSave(io, &ed, target),
         }
     }
 
@@ -85,9 +95,45 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-/// Carries out an `Outcome.write` -- the editor core never touches the
-/// filesystem itself, so this is the whole of `:w`.
-fn save(io: std.Io, ed: *zoe.Editor, target: ?[]const u8) !void {
+/// Connects and runs the UI. False when there's no display server to
+/// connect to, which is the caller's cue to fall back to headless.
+fn runUi(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ed: *zoe.Editor,
+    environ: *const std.process.Environ.Map,
+) !bool {
+    var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch return false;
+    defer client.deinit();
+
+    // Two connections: one for requests and drawing, one subscribed for
+    // notifications. `layout` and `scroll_offset` are what the split tree
+    // and the tree pane's scrollbars report back on.
+    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, environ, &.{
+        "key",
+        "text",
+        "clipboard",
+        "resize",
+        "scroll",
+        "layout",
+        "mouse_button",
+    }) catch return false;
+    defer listener.deinit();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const cwd = cwd_buf[0..cwd_len];
+
+    const ui = try zoe.Ui.init(alloc, io, &client, listener, ed, cwd);
+    defer ui.deinit();
+
+    try ui.run();
+    return true;
+}
+
+/// The headless `:w` -- the UI has its own, since it also refreshes the
+/// statusline.
+fn headlessSave(io: std.Io, ed: *zoe.Editor, target: ?[]const u8) !void {
     const dest = target orelse ed.path orelse {
         ed.setStatus("E32: No file name", .{});
         return;

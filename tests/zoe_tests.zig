@@ -495,3 +495,138 @@ pub fn commandLineBackspaceOverTheColonLeavesTest(_: std.Io, alloc: std.mem.Allo
     _ = try keys.feed(&ed, ":w<bs><bs>");
     try testz.expectEqual(ed.mode, .normal);
 }
+
+// ─── Editor: :e and loadText ────────────────────────────────────────────
+
+pub fn editorLoadTextReplacesTheBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "old\ncontent", "a.txt");
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jll");
+
+    try ed.loadText("brand new", "b.txt");
+    try expectText(alloc, &ed.buf, "brand new");
+    try testz.expectEqualStr(ed.path.?, "b.txt");
+    // A fresh file starts at the top, unmodified, in normal mode.
+    try testz.expectEqual(ed.cursor, 0);
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectFalse(ed.buf.dirty);
+}
+
+pub fn commandLineEditReturnsAnOutcomeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+
+    switch (try keys.feed(&ed, ":e notes.md<cr>")) {
+        .edit => |path| try testz.expectEqualStr(path.?, "notes.md"),
+        else => try testz.fail(),
+    }
+}
+
+pub fn commandLineEditRefusesADirtyBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "iy<esc>");
+
+    // Same rule `:q` has -- unsaved work isn't discarded silently.
+    switch (try keys.feed(&ed, ":e other<cr>")) {
+        .none => {},
+        else => try testz.fail(),
+    }
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E37:"));
+
+    switch (try keys.feed(&ed, ":e! other<cr>")) {
+        .edit => |path| try testz.expectEqualStr(path.?, "other"),
+        else => try testz.fail(),
+    }
+}
+
+// ─── Tree flattening ────────────────────────────────────────────────────
+//
+// The tree's directory reads need a filesystem, so these build the
+// flattened list directly -- which is the part the pane actually renders
+// and the part expand/collapse has to get right.
+
+fn fakeEntry(alloc: std.mem.Allocator, name: []const u8, is_dir: bool, depth: usize) !zoe.tree.Entry {
+    return .{
+        .name = try alloc.dupe(u8, name),
+        .path = try alloc.dupe(u8, name),
+        .is_dir = is_dir,
+        .depth = depth,
+    };
+}
+
+/// `src/` expanded, holding `core.zig` and a nested `sub/` with one file
+/// in it, then a top-level `README`.
+fn fakeTree(alloc: std.mem.Allocator) !zoe.Tree {
+    var t: zoe.Tree = .{ .alloc = alloc, .root = try alloc.dupe(u8, "/tmp") };
+    try t.entries.append(alloc, try fakeEntry(alloc, "src", true, 0));
+    t.entries.items[0].expanded = true;
+    try t.entries.append(alloc, try fakeEntry(alloc, "core.zig", false, 1));
+    try t.entries.append(alloc, try fakeEntry(alloc, "sub", true, 1));
+    t.entries.items[2].expanded = true;
+    try t.entries.append(alloc, try fakeEntry(alloc, "deep.zig", false, 2));
+    try t.entries.append(alloc, try fakeEntry(alloc, "README", false, 0));
+    return t;
+}
+
+pub fn treeWidestColsIncludesIndentAndIconTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var t = try fakeTree(alloc);
+    defer t.deinit();
+
+    // "deep.zig" at depth 2: 2*2 indent + 2 icon + 8 name.
+    try testz.expectEqual(t.widestCols(), 14);
+    try testz.expectEqual(t.at(0).?.cols(), 5);
+}
+
+pub fn treeCollapseRemovesTheWholeSubtreeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var t = try fakeTree(alloc);
+    defer t.deinit();
+    try testz.expectEqual(t.len(), 5);
+
+    // Collapsing `src` takes its nested `sub/` and that directory's own
+    // child with it -- everything deeper, not just the immediate children.
+    try t.toggle(io, 0);
+    try testz.expectEqual(t.len(), 2);
+    try testz.expectEqualStr(t.at(0).?.name, "src");
+    try testz.expectFalse(t.at(0).?.expanded);
+    try testz.expectEqualStr(t.at(1).?.name, "README");
+}
+
+pub fn treeCollapseOnAFileIsANoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var t = try fakeTree(alloc);
+    defer t.deinit();
+
+    try t.toggle(io, 4); // README
+    try testz.expectEqual(t.len(), 5);
+}
+
+pub fn treeCollapsePullsTheCursorBackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var t = try fakeTree(alloc);
+    defer t.deinit();
+    t.cursor = 4;
+
+    try t.toggle(io, 0);
+    // The cursor was past the end of the shortened list.
+    try testz.expectEqual(t.cursor, 1);
+}
+
+// ─── Column slicing for the buffer pane ─────────────────────────────────
+
+pub fn sliceColsClipsToTheViewportTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(zoe.ui.sliceCols("abcdefgh", 0, 4), "abcd");
+    try testz.expectEqualStr(zoe.ui.sliceCols("abcdefgh", 2, 3), "cde");
+    // Past the end of the line is empty, not an error.
+    try testz.expectEqualStr(zoe.ui.sliceCols("abc", 10, 4), "");
+}
+
+pub fn sliceColsCountsDisplayWidthTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Three double-width characters: six columns, nine bytes. Asking for
+    // four columns gets two of them, not four bytes through the middle of
+    // one.
+    const cjk = "\u{65e5}\u{672c}\u{8a9e}";
+    try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 0, 4), "\u{65e5}\u{672c}");
+    // A double-width character straddling the right edge is dropped
+    // rather than half-drawn.
+    try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 0, 3), "\u{65e5}");
+    try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 2, 2), "\u{672c}");
+}
