@@ -206,6 +206,24 @@ pub fn build(b: *std.Build) void {
     const client_step = b.step("client", "Run the glyphwire test client");
     client_step.dependOn(&run_client.step);
 
+    const probe_exe = b.addExecutable(.{
+        .name = "glyphwire-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("debug/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    probe_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    b.installArtifact(probe_exe);
+
+    const run_probe = b.addRunArtifact(probe_exe);
+    run_probe.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_probe.addArgs(args);
+
+    const probe_step = b.step("probe", "Run glyphwire-probe against GLYPHWIRE_SOCK");
+    probe_step.dependOn(&run_probe.step);
+
     const demo_exe = b.addExecutable(.{
         .name = "glyphwire-demo",
         .root_module = b.createModule(.{
