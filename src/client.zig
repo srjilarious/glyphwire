@@ -521,6 +521,64 @@ pub const Client = struct {
         try self.notify("adopt_layer", .{ .layer = layer });
     }
 
+    /// `create_context(width?, height?, scrollback_rows)` -- a request.
+    /// Allocates a fresh, independent full-window context (its own root
+    /// layer, split tree, layers -- see decisions.md's Object Model and
+    /// `core.Session`) and shows it immediately: an alt-screen-style
+    /// model for a full-screen program that doesn't want to just layer
+    /// panes over the shell's scrollback. `width`/`height` default to the
+    /// visible context's current size. From here on every `layer?`-scoped
+    /// call on *this* `Client` targets the new context. This connection
+    /// owns it, so it's torn down (with everything in it) if the
+    /// connection closes without `destroyContext`. Returns its handle,
+    /// for `activateContext`.
+    pub fn createContext(self: *Client, width: ?usize, height: ?usize, scrollback_rows: usize) !core.ContextHandle {
+        var parsed = try self.request(struct { context: core.ContextHandle }, "create_context", .{
+            .width = width,
+            .height = height,
+            .scrollback_rows = scrollback_rows,
+        });
+        defer parsed.deinit();
+        return parsed.value.result.context;
+    }
+
+    /// `destroy_context(context)` -- a notification. Frees a context
+    /// created by `createContext` and everything in it, and (if it was
+    /// visible) drops visibility back to whatever context was under it --
+    /// the alt-screen auto-restore. Honored only from a connection that
+    /// owns the context. Like `destroyLayer`, you don't have to call this
+    /// on a clean exit: the server culls the context once every owning
+    /// connection has disconnected.
+    pub fn destroyContext(self: *Client, context: core.ContextHandle) !void {
+        try self.notify("destroy_context", .{ .context = context });
+    }
+
+    /// `activate_context(context)` -- a notification. Makes `context` the
+    /// one on screen *without* changing which context this `Client`
+    /// draws on. A program backgrounds itself by activating
+    /// `glyphwire.root_context_handle` and restores itself by activating
+    /// its own handle again.
+    pub fn activateContext(self: *Client, context: core.ContextHandle) !void {
+        try self.notify("activate_context", .{ .context = context });
+    }
+
+    /// `adopt_context(context)` -- a notification. The context-level
+    /// mirror of `adoptLayer`: adds this connection to `context`'s owner
+    /// set so it outlives its creator disconnecting.
+    pub fn adoptContext(self: *Client, context: core.ContextHandle) !void {
+        try self.notify("adopt_context", .{ .context = context });
+    }
+
+    /// `attach_context(context)` -- a notification. Retargets this
+    /// connection onto an existing context without creating or owning it
+    /// -- every later `layer?`-scoped call resolves against it. `create_context`
+    /// already does this for the context it makes; use `attachContext`
+    /// for a second connection that needs to act on the same context (a
+    /// paired `InputListener` -- see `InputListener.attachContext`).
+    pub fn attachContext(self: *Client, context: core.ContextHandle) !void {
+        try self.notify("attach_context", .{ .context = context });
+    }
+
     /// `set_property(layer, "cursor", {row, col})` on a non-root layer --
     /// see `setCursor` for the root-layer version. `write_text` is always
     /// cursor-implicit (no `row`/`col` params of its own), so placing text
@@ -1750,6 +1808,12 @@ pub const LayoutEvent = struct {
 /// No owned memory -- handed back by value like `ResizeEvent`.
 pub const ScrollEvent = struct { offset: usize, max: usize };
 
+/// One `context` notification: the now-visible context's handle and the
+/// size of its root layer. A client that manages its own context
+/// compares `context` against its own handle to tell "I'm on screen"
+/// from "I've been backgrounded (or culled)". No owned memory.
+pub const ContextEvent = struct { context: core.ContextHandle, cols: usize, rows: usize };
+
 pub const InputListener = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
@@ -1813,6 +1877,14 @@ pub const InputListener = struct {
     /// ownership to the caller (`pollLayoutEvent`).
     layout_events: std.ArrayList(LayoutEvent) = .empty,
     layout_sem: std.Io.Semaphore = .{},
+    /// Queued `context` notifications (see `ContextEvent`), same
+    /// drain-on-poll shape as `resize_events`. `last_context` caches the
+    /// most recent for `visibleContext()`'s instant read; null until the
+    /// first `context` arrives. Only produced while subscribed to
+    /// `"context"`.
+    context_events: std.ArrayList(ContextEvent) = .empty,
+    context_sem: std.Io.Semaphore = .{},
+    last_context: ?ContextEvent = null,
 
     /// Connects, subscribes to `events`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
@@ -1878,6 +1950,7 @@ pub const InputListener = struct {
         for (self.layout_events.items) |ev| ev.deinit(self.alloc);
         self.layout_events.deinit(self.alloc);
         self.scroll_events.deinit(self.alloc);
+        self.context_events.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -2043,6 +2116,34 @@ pub const InputListener = struct {
         return self.last_scroll;
     }
 
+    /// Pops the oldest queued `context` event, if any (non-blocking) --
+    /// see `pollResizeEvent`, the same drain shape. Nothing to free.
+    pub fn pollContextEvent(self: *InputListener) ?ContextEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.context_events.items.len == 0) return null;
+        return self.context_events.orderedRemove(0);
+    }
+
+    /// Blocks until a `context` event is queued or `timeout` elapses --
+    /// see `waitResizeEvent`.
+    pub fn waitContextEvent(self: *InputListener, timeout: std.Io.Timeout) !?ContextEvent {
+        self.context_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
+            error.Timeout => return null,
+            error.Canceled => |e| return e,
+        };
+        return self.pollContextEvent();
+    }
+
+    /// The most recently pushed visible-context event, or null if none
+    /// has arrived yet -- a live-cache read (like `size`), independent of
+    /// whether `pollContextEvent` has drained the queue.
+    pub fn visibleContext(self: *InputListener) ?ContextEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.last_context;
+    }
+
     pub fn cursorPixel(self: *InputListener) PxPos {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -2053,6 +2154,29 @@ pub const InputListener = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return .{ .row = self.state.cursor_cell.row, .col = self.state.cursor_cell.col };
+    }
+
+    /// Sends `attach_context(context)` on this listener's own connection
+    /// so the raw input streams it's subscribed to (`key`/`text`/
+    /// `mouse_*`) follow that context's visibility -- once its `Client`
+    /// has `createContext`'d, its paired listener calls this with the
+    /// same handle, and then a backgrounded context's listener stops
+    /// receiving keystrokes meant for whatever is now on screen.
+    /// Fire-and-forget (a notification, no ack); safe to call while the
+    /// reader thread is running (nothing else writes this connection).
+    pub fn attachContext(self: *InputListener, context: core.ContextHandle) !void {
+        const Msg = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8 = "attach_context",
+            params: struct { context: core.ContextHandle },
+        };
+        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .params = .{ .context = context } }, .{});
+        defer self.alloc.free(body);
+
+        var write_buf: [256]u8 = undefined;
+        var w = self.stream.writer(self.io, &write_buf);
+        try wire.writeFrame(&w.interface, body);
+        try w.interface.flush();
     }
 
     fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8) !void {
@@ -2270,6 +2394,18 @@ pub const InputListener = struct {
             self.last_size = ev;
             try self.resize_events.append(self.alloc, ev);
             self.resize_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "context")) {
+            const p = try std.json.parseFromValue(protocol.ContextParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const ev: ContextEvent = .{ .context = p.value.context, .cols = p.value.cols, .rows = p.value.rows };
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.last_context = ev;
+            try self.context_events.append(self.alloc, ev);
+            self.context_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "paste")) {
             const p = try std.json.parseFromValue(protocol.ClipboardTextParams, self.alloc, parsed.value.params, .{
                 .ignore_unknown_fields = true,

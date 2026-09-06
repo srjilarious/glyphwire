@@ -117,6 +117,7 @@ fn runUi(
         "scroll",
         "layout",
         "mouse_button",
+        "context",
     }) catch return false;
     defer listener.deinit();
 

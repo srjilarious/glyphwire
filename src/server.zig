@@ -26,6 +26,12 @@ pub const Connection = struct {
     /// kept here (not read from the `Dispatcher`) so `broadcastToOthers`
     /// can consult it without needing a `Dispatcher` per connection.
     subscriptions: dispatch.Subscriptions = .{},
+    /// Mirrors `Dispatcher.active_ctx` after each `handle` call, same as
+    /// `subscriptions` -- so `broadcast` can withhold a raw input event
+    /// (`key`/`text`/`mouse_*`) from a connection whose context isn't the
+    /// one currently visible. Starts at the root context (what a fresh
+    /// connection inherits).
+    active_ctx: core.ContextHandle = core.root_context_handle,
 
     fn send(self: *Connection, io: std.Io, body: []const u8) !void {
         self.write_mutex.lockUncancelable(io);
@@ -57,6 +63,19 @@ pub const Connection = struct {
 /// with no in-process owner at all, just serving connections.
 pub const Server = struct {
     io: std.Io,
+    /// Every context the server holds, and which one is visible (see
+    /// `core.Session`). Owned by value: `bind` wraps the caller's root
+    /// `Context` in a fresh single-context session, and `create_context`
+    /// grows it.
+    session: core.Session,
+    /// The currently-visible context -- a cached, always-live pointer
+    /// into `session` (never null; the root context can't leave the
+    /// visibility stack). Re-pointed under `ctx_mutex` on every
+    /// visibility change, so every existing `server.ctx.*` access (the
+    /// host's caret/scroll/selection/render, the in-process `report*`
+    /// methods) keeps meaning "the context on screen right now" with no
+    /// change. Dispatch does *not* go through this -- a connection acts
+    /// on its own `Dispatcher.ctx`, which may be a backgrounded context.
     ctx: *core.Context,
     listener: std.Io.net.Server,
     /// Guards every `Dispatcher.handle` call: concurrent connections all
@@ -83,10 +102,15 @@ pub const Server = struct {
     /// thread while `acceptOne` (tests) may run on another.
     next_conn_id: std.atomic.Value(core.ConnId) = .init(1),
 
+    /// `ctx` becomes the session's root context (handle
+    /// `core.root_context_handle`). The caller keeps ownership of its
+    /// memory -- `Session.deinit` frees only the contexts
+    /// `create_context` adds.
     pub fn bind(io: std.Io, ctx: *core.Context, socket_path: []const u8) !Server {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
         const listener = try addr.listen(io, .{});
-        return .{ .io = io, .ctx = ctx, .listener = listener };
+        const session = try core.Session.init(ctx.alloc, ctx);
+        return .{ .io = io, .session = session, .ctx = ctx, .listener = listener };
     }
 
     /// Joins every `serveForever`-spawned connection thread before freeing
@@ -105,6 +129,9 @@ pub const Server = struct {
 
         self.listener.deinit(self.io);
         self.connections.deinit(alloc);
+        // Frees every `create_context` context and the session's own
+        // bookkeeping; the root context is the caller's to deinit.
+        self.session.deinit();
     }
 
     /// Accepts connections forever, serving each one on its own thread so
@@ -148,7 +175,14 @@ pub const Server = struct {
         try self.registerConnection(alloc, &conn);
         defer self.unregisterConnection(alloc, &conn);
 
-        var d = dispatch.Dispatcher.initForConnection(self.ctx, conn.id);
+        // `initForConnection` reads the visibility stack to inherit the
+        // context that's visible now -- take `ctx_mutex` so it can't race
+        // another connection's `create_context`.
+        var d = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            break :blk dispatch.Dispatcher.initForConnection(&self.session, conn.id);
+        };
         var decoder: wire.FrameDecoder = .{};
         defer decoder.deinit(alloc);
 
@@ -187,7 +221,13 @@ pub const Server = struct {
                 const handle_result = blk: {
                     self.ctx_mutex.lockUncancelable(self.io);
                     defer self.ctx_mutex.unlock(self.io);
-                    break :blk d.handle(alloc, body);
+                    const r = d.handle(alloc, body);
+                    // A `create_context` / `activate_context` /
+                    // `destroy_context` in this frame may have moved the
+                    // visible context -- keep `self.ctx` (the host's view
+                    // and the in-process `report*` path) pointing at it.
+                    self.ctx = self.session.visibleContext();
+                    break :blk r;
                 };
 
                 // A notification's dispatch error (e.g. draw_icon naming
@@ -204,6 +244,7 @@ pub const Server = struct {
                     return err;
                 };
                 conn.subscriptions = d.subscriptions;
+                conn.active_ctx = d.active_ctx;
 
                 if (result.response) |r| {
                     defer alloc.free(r);
@@ -239,15 +280,47 @@ pub const Server = struct {
         // Layer ownership & lifecycle section.
         var culled: std.ArrayList(core.LayerHandle) = .empty;
         defer culled.deinit(alloc);
+        var culled_ctx: std.ArrayList(core.ContextHandle) = .empty;
+        defer culled_ctx.deinit(alloc);
+        var context_switched = false;
         {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            self.ctx.removeConnectionOwnership(conn.id, &culled) catch |err| {
-                std.log.err("glyphwire: layer cull for closed connection {d} failed: {t}", .{ conn.id, err });
+            // Layers this connection solely owned, across *every* context
+            // (a client may have created layers on more than one).
+            var it = self.session.contexts.valueIterator();
+            while (it.next()) |ctx| {
+                ctx.*.removeConnectionOwnership(conn.id, &culled) catch |err| {
+                    std.log.err("glyphwire: layer cull for closed connection {d} failed: {t}", .{ conn.id, err });
+                };
+            }
+            // Then contexts this connection solely owned -- destroying one
+            // takes its layers/splits/tables with it. A visible context
+            // going this way pops visibility back to whatever was under
+            // it: the alt-screen auto-restore on a program's exit.
+            const visible_before = self.session.visibleStackTop();
+            self.session.reapConnection(conn.id, &culled_ctx) catch |err| {
+                std.log.err("glyphwire: context cull for closed connection {d} failed: {t}", .{ conn.id, err });
             };
+            self.ctx = self.session.visibleContext();
+            context_switched = self.session.visibleStackTop() != visible_before;
         }
         for (culled.items) |h| {
             std.log.debug("glyphwire: culled orphaned layer {d} (owning connection {d} closed)", .{ h, conn.id });
+        }
+        for (culled_ctx.items) |h| {
+            std.log.debug("glyphwire: culled orphaned context {d} (owning connection {d} closed)", .{ h, conn.id });
+        }
+        if (context_switched) {
+            self.reportContext(alloc) catch |err| {
+                std.log.err("glyphwire: context notification after cull failed: {t}", .{err});
+            };
+            // The restored context may have missed a window resize while
+            // it was backgrounded -- re-lay-out its tree against the
+            // current size now that it's the one on screen.
+            self.reportLayout(alloc) catch |err| {
+                std.log.err("glyphwire: layout after context cull failed: {t}", .{err});
+            };
         }
     }
 
@@ -260,13 +333,64 @@ pub const Server = struct {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
 
+        // Raw input streams reach only the connection whose context is on
+        // screen -- a backgrounded full-screen editor shouldn't see the
+        // keystrokes meant for the shell that's now visible, and vice
+        // versa. Every other event (`resize`, `layout`, `scroll`,
+        // `selection`, `context`, ...) still fans out to all subscribers:
+        // a backgrounded client wants to know its panes moved so it can
+        // redraw before it's shown again. `visible_handle` is the
+        // lock-free denormalised copy of the visibility-stack top.
+        const gated = isVisibleGatedEvent(event);
+        const visible = self.session.visible_handle.load(.monotonic);
+
         for (self.connections.items) |other| {
             if (sender != null and other == sender.?) continue;
             if (!other.subscriptions.has(event)) continue;
+            if (gated and other.active_ctx != visible) continue;
             other.send(self.io, body) catch |err| {
                 std.log.err("glyphwire broadcast to a connection failed: {t}", .{err});
             };
         }
+    }
+
+    /// Whether `event` is a raw input stream that only the visible
+    /// context's client should receive (see `broadcast`).
+    fn isVisibleGatedEvent(event: []const u8) bool {
+        return std.mem.eql(u8, event, "key") or
+            std.mem.eql(u8, event, "text") or
+            std.mem.eql(u8, event, "mouse_button") or
+            std.mem.eql(u8, event, "mouse_move");
+    }
+
+    /// The session's visibility change-counter (see
+    /// `core.Session.visible_gen`) -- glyphwire-host polls this each
+    /// frame and, when it moves, drops its per-layer render-batch cache
+    /// so it starts compositing the newly-visible context cleanly.
+    pub fn visibleContextGen(self: *Server) u64 {
+        return self.session.visible_gen.load(.monotonic);
+    }
+
+    /// Fans a `context` notification (`{context, cols, rows}` -- the
+    /// now-visible context's handle and size) out to every `"context"`
+    /// subscriber. Sent by `create_context` / `activate_context` /
+    /// `destroy_context` and by the disconnect-cull path when a visible
+    /// context goes away. glyphwire-host learns of the switch in-process
+    /// (`visibleContextGen`); this is for other clients (e.g. a shell
+    /// that wants to pause its own output while backgrounded).
+    pub fn reportContext(self: *Server, alloc: std.mem.Allocator) !void {
+        const info = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            break :blk .{
+                .handle = self.session.visibleStackTop(),
+                .cols = self.ctx.root.width,
+                .rows = self.ctx.root.height,
+            };
+        };
+        const body = try rpc.contextNotification(alloc, info.handle, info.cols, info.rows);
+        defer alloc.free(body);
+        self.broadcast(null, "context", body);
     }
 
     /// In-process equivalent of a connected client's `report_key` request
@@ -399,7 +523,11 @@ pub const Server = struct {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             if (cols == self.ctx.root.width and rows == self.ctx.root.height) return;
-            try self.ctx.resize(cols, rows);
+            // Every context tracks the one window, so a backgrounded one
+            // is resized too rather than showing a stale grid when it's
+            // next made visible (`Session.resizeAll` is a no-op per
+            // context whose size is already current).
+            try self.session.resizeAll(cols, rows);
         }
 
         const body = try rpc.resizeNotification(alloc, cols, rows);

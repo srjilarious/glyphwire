@@ -271,18 +271,23 @@ surface.
   when a fullscreen program's context is dismissed and the shell's
   context becomes visible again.
 - A connecting program gets a context one of two ways: **inherit**
-  (default — a small program just uses its parent's context) or
+  (default — it acts on whichever context is visible when it connects) or
   **create_context** (explicit request, for something like a fullscreen
-  editor that wants its own).
+  editor that wants its own). `attach_context` retargets a connection
+  onto an existing context after the fact — a program's second
+  connection (a subscribed `InputListener` paired with its `Client`) uses
+  it to join the context the first one created.
 - When the program owning the currently-visible context disconnects, the
   server automatically switches visibility back to the previously-visible
   context — mirrors how alt-screen auto-restores on program exit today,
   generalized to a history instead of a single slot.
-- Discovery carries two things, not one: socket path **and** context id,
-  as two separate env vars (`GLYPHWIRE_SOCK`, `GLYPHWIRE_CTX`) rather than
-  packed into a single string. This lets a program inherit a *specific*
-  context explicitly rather than guessing "whatever's currently visible,"
-  which matters once multiple contexts can coexist.
+- **Built** — see "v1 built — context lifecycle" in the Layers section
+  for the message set, the ownership/cull rules (mirroring layers), the
+  root-context invariant, and the input-gating decision. Discovery still
+  carries two env vars (`GLYPHWIRE_SOCK`, `GLYPHWIRE_CTX`), but nothing
+  parses `GLYPHWIRE_CTX` yet — inherit-the-visible plus `attach_context`
+  covers the current need; honouring the env var to inherit a *specific*
+  context at connect time is the remaining piece.
 
 **Layer**
 - Belongs to a context, positioned in a tree (parent-relative); most
@@ -470,11 +475,11 @@ surface.
     neighbour declared — a fixed pane gets a new cell count, a weighted
     pair keeps its *combined* weight and re-splits it — so resizing two
     panes never disturbs the rest of the tree.
-  - **The root layer is never a split child.** It's the shell's
-    scrollback, drawn at a fixed origin; a full-screen program's panes
-    simply cover it. That gives the alt-screen story (the shell is still
-    there, untouched, when the program exits) without `create_context`
-    having to exist yet.
+  - **The root layer is never a split child.** It's a context's own
+    scrollback, drawn at a fixed origin; a split tree's panes cover it.
+    Within one context this gives an in-place alt-screen (a full-screen
+    program's panes over the shell's scrollback); `create_context` (below)
+    is for a program that wants its *own* whole surface instead.
   - **`layout` is one notification for the whole tree**, not one per
     pane, so a client redraws once against a consistent set of bounds.
     It carries only what moved, and a re-layout that changes nothing is
@@ -514,9 +519,71 @@ surface.
   `release_layer` / disowning without disconnecting (a process releases
   by closing its connection), ownership transfer as a distinct operation
   (adopt + let the original drop covers it), admin override.
-- **Not built — still open:** `create_context`, non-root parenting,
-  `clip`/`visibility` properties, a raw wheel-delta `mouse_scroll` event
-  stream (distinct from `scroll`, which reports the resolved offset).
+- **v1 built — context lifecycle (`create_context` and friends):** the
+  server holds one `core.Session` — a registry of `Context`s plus a
+  **visibility stack**, only the top of which glyphwire-host renders.
+  This is the alt-screen model generalised from one alternate buffer to
+  N persistent contexts (see the Object Model's Context section); the
+  motivating client is `zoe`, which wants its own whole surface rather
+  than panes stacked over the shell's scrollback.
+  - **The root context** (handle `0`, `core.root_context_handle`) is the
+    one the server starts with. It's never culled, can't be destroyed,
+    and is permanently the bottom of the visibility stack — there is
+    always something to fall back to, exactly `root_layer_handle`'s role
+    one level down.
+  - **A connection inherits the visible context** at `accept`, and every
+    `layer?`-scoped message resolves against its *current* context —
+    per-connection ambient state (`Dispatcher.active_ctx`), not a
+    `context?` param bolted onto thirty messages. `create_context`
+    retargets the issuing connection onto the new context;
+    `attach_context` retargets it onto an existing one (the primitive a
+    paired `InputListener` uses to join the context its `Client` made,
+    and the same mechanism a future `GLYPHWIRE_CTX`-honouring connection
+    would use at startup — that env var is written by the host/shell but
+    not yet parsed).
+  - **`create_context` shows the new context immediately** and makes the
+    caller its first owner. **`activate_context`** moves an existing
+    context to the top of the stack *without* changing which context the
+    caller draws on — so a client backgrounds itself by activating the
+    root context and restores itself by activating its own handle again.
+  - **Ownership & culling mirror layers exactly.** `create_context`
+    records the connection as owner, `adopt_context` adds more, and when
+    a connection closes every context it solely owned is destroyed
+    (`Session.reapConnection`, run in the same teardown as the layer
+    cull, under `ctx_mutex`) — taking every layer, split and table in it
+    with it. A visible context going this way pops visibility to
+    whatever was under it: the classic alt-screen auto-restore on a
+    program's exit, now a real history rather than a single slot.
+    `destroy_context` is ownership-checked (`ContextPermissionDenied`
+    for a non-owner, logged-and-dropped like `destroy_layer`;
+    `RootContextImmutable` for handle 0).
+  - **Who may create / activate:** anyone. This was the open item; the
+    answer for a single-user local session is that there's no privilege
+    boundary to enforce — a connection can create a context, activate
+    any context, and attach to any context. Ownership gates *destruction*
+    only.
+  - **Raw input follows visibility.** `key` / `text` / `mouse_button` /
+    `mouse_move` reach only the connection whose current context is the
+    visible one, so a backgrounded full-screen editor stops eating the
+    keystrokes meant for the shell. Every other server→client event
+    (`resize`, `layout`, `scroll`, `selection`, the new `context`
+    notification) still fans out to all subscribers, so a backgrounded
+    client can keep its panes current for when it's shown again.
+  - **Assets aren't copied per context.** A `create_context` context's
+    `icons`/`images` fall back to the root context's catalog
+    (`Context.asset_fallback`), so `draw_icon` names the host registered
+    at startup resolve without every context re-loading the bundled
+    bytes.
+  - **The host learns of a switch in-process** via a change-counter
+    (`Session.visible_gen`, polled each frame) — on a bump it drops its
+    per-layer render-batch cache, since the newly-visible context's
+    layers reuse the same handle numbers. Other clients get the wire
+    `context` notification.
+- **Not built — still open:** non-root layer parenting, `clip` property,
+  a raw wheel-delta `mouse_scroll` event stream (distinct from `scroll`,
+  which reports the resolved offset), `GLYPHWIRE_CTX`-based discovery
+  (the env var exists but inherit-the-visible + `attach_context` covers
+  the need for now).
 - **v1 built — font config + runtime zoom:** `glyphwire-host` runs
   `~/.config/glyphwire/host.conf` at startup (global `config` table:
   `font_face`, `font_face_name`, `font_fallback`, `font_size`; any subset,
@@ -2052,11 +2119,14 @@ surface.
 - **Session/socket lifecycle** — multiple concurrent servers, reconnection
   behavior after a server crash or restart, persisted vs. ephemeral socket
   paths. Not discussed yet.
-- **Context creation/activation policy** — `create_context` and
-  auto-restore-on-disconnect are decided (see Object Model), but who's
-  allowed to create or activate a context, and what happens if a
-  background context's owner tries to act on a context that isn't
-  currently visible, isn't worked out yet.
+- **Context creation/activation policy** — *resolved and built* (see
+  "v1 built — context lifecycle" in the Layers section). `create_context`
+  / `destroy_context` / `activate_context` / `attach_context` /
+  `adopt_context` exist; any connection may create, activate or attach
+  (no privilege boundary in a single-user local session), ownership
+  gates destruction only, and a connection acting on a background
+  context it's attached to works fine — draws land there, only the raw
+  input streams are gated to the visible context.
 
 ## In Progress: Text Writing & Styling
 

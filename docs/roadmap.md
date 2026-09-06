@@ -1898,6 +1898,76 @@ a notification had nowhere to go.
   two and reports `dropped: 2` then resets; a batched failure is
   recorded). 661 pass.
 
+## Context lifecycle: `create_context` and the visibility stack
+
+**Done.** A full-screen program (`zoe` is the motivating one) can now
+take its *own* whole surface instead of layering panes over the shell's
+scrollback — the alt-screen model generalised from one alternate buffer
+to N persistent contexts. Cleanup mirrors layer ownership exactly: a
+context is culled when every owning connection has disconnected.
+
+- **`core.zig`** — new `Session` (owned by value on `Server`): a
+  `AutoHashMap(ContextHandle, *Context)` (contexts heap-boxed for stable
+  pointers across a `create_context` rehash) plus a `visible_stack`
+  (bottom = root context, top = visible) and denormalised atomics
+  `visible_handle` / `visible_gen` for lock-free readers. `createContext`
+  / `destroyContext` / `activateContext` / `addContextOwner` /
+  `contextHasOwner` / `reapConnection(conn, *ArrayList(ContextHandle))` /
+  `resizeAll` / `setCellMetricsAll`. `Context` gains `owners` +
+  `connection_owned` (mirroring `Layer`) and `asset_fallback: ?*Context`
+  — `iconHandle` / `imageEntry` / `imageInfo` consult it, so a created
+  context resolves the root's icon catalog without copying bytes. Handle
+  `0` (`root_context_handle`) is the root context: never culled, can't be
+  destroyed, permanently the bottom of the stack.
+- **`dispatch.zig`** — `Dispatcher` gains `session: ?*Session` +
+  `active_ctx: ContextHandle`; `ctx` is now a cached pointer at the
+  connection's *current* context, kept live by `syncActiveContext` at the
+  top of every dispatch. `initForConnection` takes the `*Session` and
+  inherits the visible context. New handlers: `create_context` (request,
+  retargets + owns + shows), `destroy_context` (ownership-checked →
+  `ContextPermissionDenied` / `RootContextImmutable` / `UnknownContext`),
+  `activate_context` (visibility only, doesn't move `active_ctx`),
+  `attach_context` (retarget onto an existing context, no ownership — the
+  primitive a paired listener uses), `adopt_context`. Each ends with a
+  `context` broadcast. New `Subscriptions.context`.
+- **`server.zig`** — `Server` owns `session: core.Session` (built from
+  the root `ctx` in `bind`, signature unchanged) and keeps `ctx` as a
+  cached pointer at the *visible* context, re-pointed under `ctx_mutex`
+  after every dispatch and in the cull path. `Connection` mirrors
+  `active_ctx`; `broadcast` withholds `key`/`text`/`mouse_*` from a
+  connection whose context isn't visible. `unregisterConnection` also
+  runs `session.reapConnection` (and re-broadcasts `context` + `layout`
+  on an auto-restore). `reportResize` → `session.resizeAll`;
+  `visibleContextGen` for the host.
+- **`client.zig`** — `Client.createContext` / `destroyContext` /
+  `activateContext` / `attachContext` / `adoptContext`; `InputListener`
+  gains a `context` event queue (`pollContextEvent` / `waitContextEvent`
+  / `visibleContext`) and `attachContext` (writes `attach_context` on its
+  own connection so its input subscriptions follow the context).
+- **`host/render.zig`** — `Renderer` tracks `last_visible_gen`; on a bump
+  it drops the whole per-layer batch cache (the new context reuses handle
+  numbers). Icon-atlas build reads the root context explicitly.
+  `host/window_sizing.zig` → `session.setCellMetricsAll`.
+- **`zoe/ui.zig`** — `Ui.init` calls `client.createContext()` first and
+  `listener.attachContext(handle)`; everything else (layers, split tree)
+  is unchanged, it just lands in zoe's context. `Ui.deinit` is now a
+  single `destroyContext` (cascades) instead of tearing down each
+  split/layer by hand.
+- **Decisions:** anyone may create/activate/attach (no privilege
+  boundary in a single-user session); ownership gates destruction only;
+  raw input follows visibility, everything else fans out regardless;
+  `create_context` shows immediately, `activate_context` is
+  visibility-only; assets fall back to the root context rather than being
+  copied. `GLYPHWIRE_CTX`-based discovery is still deferred. See
+  decisions.md's "v1 built — context lifecycle".
+- **Tests:** `core_tests.zig` +9 (visible stack, create defaults +
+  fallback catalog, activate reorders, destroy restores, root immutable,
+  `reapConnection` culls / leaves root, `resizeAll`);
+  `dispatch_tests.zig` +8 (create retargets + broadcasts, write lands on
+  the new context, non-owner destroy rejected, owner destroy restores,
+  activate ≠ retarget, attach without owning, adopt-then-destroy,
+  sessionless → `NoContextSession`).
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

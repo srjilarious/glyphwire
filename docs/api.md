@@ -18,15 +18,44 @@ reading this.
 
 ## Context
 
-No context-management message exists yet. A connecting program gets its
-context purely through discovery (`GLYPHWIRE_CTX` env var, inherited)
-today; the server auto-creates exactly one context at startup.
+A **context** is an independent, full-window surface — its own root
+layer, split tree, layers, tables (see decisions.md's Object Model and
+`core.Session`). The server holds one `Session`: a registry of contexts
+plus a **visibility stack**, only the top of which glyphwire-host
+renders. This generalises the classic terminal alt-screen
+(`smcup`/`rmcup`) from one alternate buffer to N persistent contexts —
+switching away never destroys one, so a shell's prompt and scrollback
+are untouched under a full-screen editor and reappear when it exits.
+
+The **root context** (handle `0`, `core.root_context_handle`) is the one
+the server starts with — the shell's. It's never culled, can't be
+destroyed, and sits permanently at the bottom of the visibility stack.
+
+A connection **inherits** whichever context is visible when it's
+accepted, and every `layer?`-scoped message it sends resolves against
+its *current* context. `create_context` and `attach_context` change
+which context that is (per-connection ambient state, not a param on
+every message). `GLYPHWIRE_CTX` is set by the host/shell but nothing
+parses it yet — inherit-the-visible + `attach_context` is the discovery
+path for now.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| *(inherit)* | — | *(implicit via `GLYPHWIRE_CTX`)* | — | ✅ |
-| `create_context` | request | `width?, height?` | context handle | 🔶 |
-| *(activate a background context)* | — | — | — | ⬜ open item: who's allowed to activate a context that isn't currently visible isn't decided |
+| *(inherit)* | — | — | — | ✅ a new connection acts on whatever context is visible at accept time |
+| `create_context` | request | `width?, height?, scrollback_rows?` | `{context}` (handle) | ✅ allocates a fresh context (its root layer defaults to the visible context's size), **shows it immediately**, and retargets the issuing connection onto it — later `layer?`-scoped messages from this connection now draw on the new context, not the shell's. The connection becomes its first **owner**: the context (and everything in it) is culled once every owning connection disconnects, so a full-screen program that dies without `destroy_context` doesn't leave its surface stuck on screen. Icons/images resolve through the root context's catalog, so `draw_icon` names the host registered still work |
+| `destroy_context` | notification | `context` | — | ✅ frees a context and every layer/split/table/image in it; if it was visible, visibility pops to whatever context was under it (the alt-screen auto-restore). **Ownership-checked** like `destroy_layer`: honored only from a connection that owns the context (created it, or `adopt_context`'d it) — a non-owner's call reports `ContextPermissionDenied` and nothing is touched. The root context reports `RootContextImmutable`; an unknown handle `UnknownContext`. An in-process caller bypasses the check |
+| `activate_context` | notification | `context` | — | ✅ makes `context` the visible one **without** changing which context the issuing connection draws on — a client backgrounds itself by activating the root context (handle `0`) and restores itself by activating its own handle again. Moves the handle to the top of the visibility stack (it's there once, wherever it was). `UnknownContext` for an unknown handle; a no-op if it's already visible |
+| `attach_context` | notification | `context` | — | ✅ retargets the issuing connection onto an *existing* context (`create_context` does this for a new one) — every later `layer?`-scoped message resolves against it, and, for a subscribed connection, the raw input streams it receives now follow that context's visibility. The primitive a paired `InputListener` uses to join the context its `Client` created. Ownership is untouched (attaching isn't adopting). `UnknownContext` for an unknown handle |
+| `adopt_context` | notification | `context` | — | ✅ adds the issuing connection to `context`'s owner set, so it outlives its original creator disconnecting as long as this connection stays up (and this connection may then `destroy_context` it). The context-level mirror of `adopt_layer`. `UnknownContext` for an unknown or root handle |
+
+Raw input events (`key`, `text`, `mouse_button`, `mouse_move`) are
+delivered **only to connections whose current context is the visible
+one** — a backgrounded full-screen editor stops receiving keystrokes
+meant for the shell that's now on screen, and vice versa. Every other
+server→client event (`resize`, `layout`, `scroll`, `selection`,
+`context`, …) still fans out to all subscribers regardless, so a
+backgrounded client can keep its panes current for when it's shown
+again.
 
 ## Layer
 
@@ -331,6 +360,7 @@ wheel-delta scroll, gamepad, IME, and action maps are all still open.
 | `scroll` | notification, server→client | `{offset, max}` | — | ✅ sent whenever the root layer's scrollback view offset moves — the host's mouse wheel / scrollbar (`Server.reportScroll`) or another client's `scroll_view` (e.g. glyphwire-shell's browse cursor). Subscribe with `"scroll"`; `InputListener` (`pollScrollEvent`/`waitScrollEvent`/`scroll`) is the client-side consumer. See Property names' `scroll` above |
 | `scroll_offset` | notification, server→client | `{layer, row, col, max_row, max_col}` | — | ✅ a **layer's** viewport moved over its content grid — the host's wheel over that pane, a drag on its scrollbar, or another client's `set_property`. Carries the handle, unlike `scroll`, which is always the root layer's scrollback; carries the maxima so a subscriber can redraw without a follow-up request. Sent only when the offset actually moved, so a wheel spun against the end of the content is silent. Rides the `"scroll"` subscription (a client that wants to know the view moved wants both kinds); `InputListener.pollScrollOffsetEvent` is the client-side consumer |
 | `layout` | notification, server→client | `{layers: [{layer, row, col, cols, rows}]}` | — | ✅ every pane whose bounds changed after the split tree was re-laid-out — a window resize, a divider drag, or any of the Splits messages above. One notification for the whole tree rather than one per pane, so a client redraws once against a consistent set of bounds instead of N times against partially-updated ones. Subscribe with `"layout"` — its own flag rather than folding into `resize`, since a client with no panes shouldn't have to parse per-layer bounds. `InputListener.pollLayoutEvent` is the consumer, and **the caller owns the returned event** (it carries a slice) |
+| `context` | notification, server→client | `{context, cols, rows}` | — | ✅ the visible context changed — `create_context` / `activate_context` / `destroy_context`, or the disconnect-cull auto-restore. `context` is the now-visible context's handle, `cols`/`rows` its root layer's size. A client that manages its own context compares `context` against its own handle to tell "I'm on screen" from "I've been backgrounded (or culled)". Subscribe with `"context"`; `InputListener` (`pollContextEvent`/`waitContextEvent`/`visibleContext`) is the client-side consumer |
 | `selection` | notification, server→client | `{active, anchor?: {above, col}, active_end?: {above, col}}` | — | ✅ sent whenever a layer's selection changes (any of `set_selection`/`update_selection`/`clear_selection`, or glyphwire-host's in-process path). Subscribe with `"selection"`. See the Selection & Clipboard section |
 | `copy_request` | notification, server→client | *(none)* | — | ✅ the copy shortcut (Ctrl+Shift+C) was pressed with nothing selected — a subscriber that owns editable text (glyphwire-shell) answers with `set_clipboard`. Subscribe with `"clipboard"` |
 | `paste` | notification, server→client | `{text}` | — | ✅ committed clipboard text to insert (Ctrl+Shift+V). Distinct from `text` so a client can treat it differently — glyphwire-shell inserts it literally, newlines included, without submitting. Subscribe with `"clipboard"`; on the client it arrives on the same ordered queue as `key`/`text` (`InputEvent{paste}`), and `copy_request` as `InputEvent.copy_request` |

@@ -126,6 +126,14 @@ pub fn resizeNotification(alloc: std.mem.Allocator, cols: usize, rows: usize) ![
     return notification(alloc, "resize", protocol.ResizeParams{ .cols = cols, .rows = rows });
 }
 
+/// `context` -- the visible context changed to `context` (its handle),
+/// whose root layer is `cols` x `rows`. Sent by `create_context` /
+/// `activate_context` / `destroy_context` and by the disconnect-cull
+/// auto-restore.
+pub fn contextNotification(alloc: std.mem.Allocator, context: core.ContextHandle, cols: usize, rows: usize) ![]u8 {
+    return notification(alloc, "context", protocol.ContextParams{ .context = context, .cols = cols, .rows = rows });
+}
+
 /// `selection` -- a layer's selection changed (from `set_selection` /
 /// `update_selection` / `clear_selection`, or the host's in-process
 /// path). `sel` null means the selection was cleared.
