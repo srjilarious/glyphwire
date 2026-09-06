@@ -341,6 +341,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     view_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    view_exe.root_module.addImport("zargunaught", zargunaught_mod);
     b.installArtifact(view_exe);
 
     const run_view = b.addRunArtifact(view_exe);

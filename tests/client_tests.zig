@@ -330,7 +330,7 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(info.width, 24);
     try testz.expectEqual(info.height, 12);
 
-    try client.drawImage(handle, 0, 0, 1, 2);
+    try client.drawImage(handle, 0, 0, 1, 2, 1.0);
 
     var snapshot = try client.getCells();
     defer snapshot.deinit();
@@ -339,6 +339,7 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectTrue(c00.bg == null);
     try testz.expectEqual(c00.bg_image.?.handle, handle);
     try testz.expectEqual(c00.bg_image.?.offset_x, 0);
+    try testz.expectEqual(c00.bg_image.?.scale, 1.0);
 
     const c01 = snapshot.cellAt(0, 1);
     try testz.expectEqual(c01.bg_image.?.offset_x, 12);

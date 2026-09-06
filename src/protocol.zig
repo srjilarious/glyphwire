@@ -21,10 +21,12 @@ pub const CellPos = core.CellPos;
 /// can send `{r,g,b}` and omit it.
 pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
 
-/// An image background reference in a `get_cells` cell -- the handle plus
-/// the sub-image offset the cell samples from (see `core.ImageBg`). Only
-/// the handle crosses the wire, never the pixels.
-pub const ImageBg = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32 };
+/// An image background reference in a `get_cells` cell -- the handle, the
+/// sub-image pixel offset the cell samples from, and the uniform scale the
+/// image is drawn at (`1.0` for a natural-size draw, `< 1.0` when it was
+/// shrunk to fit a target width -- see `core.ImageBg`). Only these cross
+/// the wire, never the pixels.
+pub const ImageBg = struct { handle: core.ImageHandle, offset_x: u32, offset_y: u32, scale: f32 = 1.0 };
 
 /// An icon background/foreground reference in a `get_cells` cell (see
 /// `core.IconBg`). `scale`/`h_align`/`v_align` are the `@tagName` strings

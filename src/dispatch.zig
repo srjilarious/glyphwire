@@ -291,6 +291,13 @@ const DrawImageParams = struct {
     col: ?usize = null,
     row_span: usize,
     col_span: usize,
+    /// Uniform scale the image is drawn at -- `1.0` (the default) is the
+    /// original natural-size placement; `< 1.0` shrinks it (glyphwire-view
+    /// asks for `target_width_px / image_width_px` so the image fits the
+    /// layer's width). The client still computes `row_span`/`col_span` to
+    /// match the scaled size -- aspect-ratio-aware placement stays its job
+    /// per decisions.md. A non-positive value is treated as `1.0`.
+    scale: f32 = 1.0,
 };
 
 const TagMetadataParams = struct {
@@ -1423,7 +1430,7 @@ pub const Dispatcher = struct {
                     .image, .icon => null,
                 };
                 const bg_image: ?protocol.ImageBg = switch (cell.style.bg) {
-                    .image => |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y },
+                    .image => |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y, .scale = img.scale },
                     .color, .icon => null,
                 };
                 const bg_icon: ?protocol.IconBg = switch (cell.style.bg) {
@@ -1641,6 +1648,7 @@ pub const Dispatcher = struct {
             info.height,
             self.ctx.cell_px_w,
             self.ctx.cell_px_h,
+            p.scale,
         );
     }
 

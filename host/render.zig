@@ -657,29 +657,54 @@ pub const Renderer = struct {
     /// One cell's portion of an image background -- the sub-rect of the
     /// source texture starting at `img.offset_x/y`, sized to whatever fits
     /// both the cell and the image's remaining pixels, never stretched
+    /// beyond the aspect-preserving `img.scale` the draw asked for
     /// (decisions.md's Image section). Emitted into that image handle's
     /// own `images` batch.
+    ///
+    /// At `img.scale == 1` the cell samples one cell's worth of source
+    /// pixels and draws them 1:1 (the original behavior). At `scale < 1`
+    /// it samples `cell_px / scale` source pixels -- proportionally more,
+    /// since the fixed cell grid has to cover a rendered image that's now
+    /// smaller -- and draws that slice back down at `scale`, so an
+    /// interior cell still fills exactly `cell_px` on screen and the
+    /// image's right/bottom edge cell is the only partial one.
     fn emitImageCell(self: *Renderer, eng: *Engine, lb: *LayerBatches, img: glyphwire.ImageBg, px: i32, py: i32) void {
         const entry = self.app.server.ctx.images.get(img.handle) orelse return;
         if (img.offset_x >= entry.width or img.offset_y >= entry.height) return;
 
         const tex = self.textureForImage(eng, img.handle) orelse return;
 
-        const avail_w: i32 = @min(geometry.cell_w, @as(i32, @intCast(entry.width - img.offset_x)));
-        const avail_h: i32 = @min(geometry.cell_h, @as(i32, @intCast(entry.height - img.offset_y)));
-        if (avail_w <= 0 or avail_h <= 0) return;
+        const s: f32 = if (img.scale > 0) img.scale else 1.0;
+        const cell_w_f: f32 = @floatFromInt(geometry.cell_w);
+        const cell_h_f: f32 = @floatFromInt(geometry.cell_h);
+        const rem_w_f: f32 = @floatFromInt(entry.width - img.offset_x);
+        const rem_h_f: f32 = @floatFromInt(entry.height - img.offset_y);
+
+        // Source pixels this cell reaches into, capped at the image's edge.
+        const src_w_px: f32 = @min(cell_w_f / s, rem_w_f);
+        const src_h_px: f32 = @min(cell_h_f / s, rem_h_f);
+        if (src_w_px <= 0 or src_h_px <= 0) return;
+
+        // On-screen size: a full cell for interior cells, less only where
+        // the image ran out before the cell did.
+        const dest_w: f32 = src_w_px * s;
+        const dest_h: f32 = src_h_px * s;
 
         const img_w_f: f32 = @floatFromInt(entry.width);
         const img_h_f: f32 = @floatFromInt(entry.height);
         const src = host_eng.RectF{
             .l = @as(f32, @floatFromInt(img.offset_x)) / img_w_f,
             .t = @as(f32, @floatFromInt(img.offset_y)) / img_h_f,
-            .r = @as(f32, @floatFromInt(img.offset_x + @as(u32, @intCast(avail_w)))) / img_w_f,
-            .b = @as(f32, @floatFromInt(img.offset_y + @as(u32, @intCast(avail_h)))) / img_h_f,
+            .r = (@as(f32, @floatFromInt(img.offset_x)) + src_w_px) / img_w_f,
+            .b = (@as(f32, @floatFromInt(img.offset_y)) + src_h_px) / img_h_f,
         };
 
+        const px_f: f32 = @floatFromInt(px);
+        const py_f: f32 = @floatFromInt(py);
+        const dest = host_eng.RectF{ .l = px_f, .t = py_f, .r = px_f + dest_w, .b = py_f + dest_h };
+
         const batch = self.texBatchFor(&lb.images, img.handle, tex) orelse return;
-        addSprite(batch, host_eng.RectF.fromPosSize(px, py, avail_w, avail_h), src);
+        addSprite(batch, dest, src);
     }
 
     /// `.natural`-scale icons can overflow into cells not yet emitted, so

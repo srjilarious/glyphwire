@@ -34,15 +34,26 @@ pub const Metadata = struct {
     json: []u8,
 };
 
-/// A cell's image-backed background: which loaded image, and the pixel
-/// offset into that image this cell should display. `draw_image` computes
-/// this per cell from the draw call's anchor -- see `Layer.drawImage` --
-/// rather than a sub-image ever being extracted or cached as its own
-/// resource (decisions.md's Image section).
+/// A cell's image-backed background: which loaded image, the pixel offset
+/// into that image this cell should display, and the uniform scale factor
+/// the image is drawn at. `draw_image` computes all three per cell from
+/// the draw call's anchor -- see `Layer.drawImage` -- rather than a
+/// sub-image ever being extracted or cached as its own resource
+/// (decisions.md's Image section).
+///
+/// `offset_x`/`offset_y` are always in *source* image pixels. `scale` is
+/// `1.0` for a natural-size draw (the original behavior, and the default),
+/// `< 1.0` when the client asked the image shrunk to fit a target width
+/// (glyphwire-view's `--size fit-width`). At `scale != 1` each covered
+/// cell samples `cell_px / scale` source pixels and the renderer draws
+/// that slice scaled back down into the cell -- see `Layer.drawImage` and
+/// host/render.zig's `emitImageCell`. Upscaling (`scale > 1`) is never
+/// requested by a client but the math doesn't forbid it.
 pub const ImageBg = struct {
     handle: ImageHandle,
     offset_x: u32,
     offset_y: u32,
+    scale: f32 = 1.0,
 };
 
 /// How an icon's source image is sized against its anchor cell:
@@ -2200,6 +2211,17 @@ pub const Layer = struct {
     /// (from `pngDimensions`), `cell_px_w`/`cell_px_h` the session's fixed
     /// cell pixel metrics (`Context.cell_px_w`/`cell_px_h`).
     ///
+    /// `scale` is the uniform factor the image is drawn at: `1.0` (the
+    /// natural-size original behavior) means each cell samples exactly one
+    /// cell's worth of source pixels; `< 1.0` (glyphwire-view's
+    /// `--size fit-width`, which shrinks the image to the layer's width)
+    /// means each cell samples `cell_px / scale` source pixels, so the
+    /// same fixed cell grid still covers the whole, now-smaller rendered
+    /// image. The per-cell `offset_x`/`offset_y` stored are always source
+    /// pixels; the renderer (host/render.zig's `emitImageCell`) reads
+    /// `scale` back to know how far into the source each cell reaches and
+    /// how small to draw it. A non-positive `scale` is treated as `1.0`.
+    ///
     /// A cell the image doesn't actually reach -- its computed offset
     /// falls at or past the image's own edge, i.e. the image is smaller
     /// than the requested span -- is left untouched rather than blanked,
@@ -2227,7 +2249,16 @@ pub const Layer = struct {
         img_h: u32,
         cell_px_w: u32,
         cell_px_h: u32,
+        scale: f32,
     ) void {
+        const s: f32 = if (scale > 0) scale else 1.0;
+        // Source pixels each cell samples along each axis. At `s == 1` this
+        // is exactly `cell_px`, so `src_step * k` lands on the same
+        // integers `k * cell_px` did before scale existed and every
+        // natural-size draw is unchanged.
+        const src_step_x: f32 = @as(f32, @floatFromInt(cell_px_w)) / s;
+        const src_step_y: f32 = @as(f32, @floatFromInt(cell_px_h)) / s;
+
         const col_end = @min(col + col_span, self.width);
         var display_row = self.resolveRow(row);
 
@@ -2241,23 +2272,23 @@ pub const Layer = struct {
                 }
             }
 
-            const offset_y = @as(u32, @intCast(img_row)) * cell_px_h;
+            const offset_y: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(img_row)) * src_step_y));
             if (offset_y >= img_h) break;
 
             var c = col;
             while (c < col_end) : (c += 1) {
-                const offset_x = @as(u32, @intCast(c - col)) * cell_px_w;
+                const offset_x: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(c - col)) * src_step_x));
                 if (offset_x >= img_w) continue;
 
-                self.setCellImage(display_row, c, handle, offset_x, offset_y);
+                self.setCellImage(display_row, c, handle, offset_x, offset_y, s);
             }
         }
         self.revision += 1;
         self.render_gen +%= 1;
     }
 
-    fn setCellImage(self: *Layer, row: usize, col: usize, handle: ImageHandle, offset_x: u32, offset_y: u32) void {
-        self.cell(row, col).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y } };
+    fn setCellImage(self: *Layer, row: usize, col: usize, handle: ImageHandle, offset_x: u32, offset_y: u32, scale: f32) void {
+        self.cell(row, col).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y, .scale = scale } };
     }
 
     /// `scale`/`h_align`/`v_align` default to the original fit-and-center

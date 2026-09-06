@@ -818,7 +818,7 @@ pub fn layerDrawImageMarksCoveredCellsWithOffsetsTest(io: std.Io, alloc: std.mem
     defer layer.deinit();
 
     // A 2x2-cell span at 12px cells covers a 24x24px image exactly.
-    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12);
+    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12, 1.0);
 
     const c00 = layer.cell(1, 1).style.bg;
     const c01 = layer.cell(1, 2).style.bg;
@@ -854,7 +854,7 @@ pub fn layerDrawImageLeavesCellsBeyondImageBoundsUntouchedTest(io: std.Io, alloc
     // A 12x12px image (one cell) drawn into a 2x2-cell span: only the
     // top-left cell is actually covered -- the other three cells the
     // image doesn't reach should be left as they were.
-    layer.drawImage(1, 0, 2, 2, 2, 12, 12, 12, 12);
+    layer.drawImage(1, 0, 2, 2, 2, 12, 12, 12, 12, 1.0);
 
     try testz.expectEqual(layer.cell(0, 2).style.bg.image.handle, 1);
     switch (layer.cell(0, 3).style.bg) {
@@ -882,7 +882,7 @@ pub fn layerDrawImageScrollsInsteadOfClippingRowSpanPastBottomTest(io: std.Io, a
     // place (which would mean nothing actually scrolled).
     layer.cell(0, 0).style.bg = .{ .color = .{ .r = 9, .g = 9, .b = 9 } };
 
-    layer.drawImage(1, 1, 0, 3, 1, 10, 30, 10, 10);
+    layer.drawImage(1, 1, 0, 3, 1, 10, 30, 10, 10, 1.0);
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_y, 0);
     try testz.expectEqual(layer.cell(1, 0).style.bg.image.offset_y, 10);
@@ -893,6 +893,67 @@ pub fn layerDrawImageScrollsInsteadOfClippingRowSpanPastBottomTest(io: std.Io, a
         .color => |c| try testz.expectEqual(c.r, 9),
         .image, .icon => return error.TestUnexpectedResult,
     }
+}
+
+pub fn layerDrawImageScaledStepsSourceOffsetsByCellOverScaleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 6, 6, 0);
+    defer layer.deinit();
+
+    // A 96x48px image at scale 0.5 renders 48x24px -- 4x2 cells at 12px.
+    // Each cell samples cell_px / scale = 24 source pixels, so the stored
+    // per-cell offsets step by 24, not 12, and every cell records the
+    // scale for the renderer.
+    layer.drawImage(1, 0, 0, 2, 4, 96, 48, 12, 12, 0.5);
+
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_x, 0);
+    try testz.expectEqual(layer.cell(0, 1).style.bg.image.offset_x, 24);
+    try testz.expectEqual(layer.cell(0, 2).style.bg.image.offset_x, 48);
+    try testz.expectEqual(layer.cell(0, 3).style.bg.image.offset_x, 72);
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_y, 0);
+    try testz.expectEqual(layer.cell(1, 0).style.bg.image.offset_y, 24);
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.scale, 0.5);
+    try testz.expectEqual(layer.cell(1, 3).style.bg.image.scale, 0.5);
+}
+
+pub fn layerDrawImageScaledStopsAtImageEdgeInSourceSpaceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 8, 8, 0);
+    defer layer.deinit();
+
+    // A 60x12px image at scale 0.5 samples 24 source px per cell, so only
+    // cells 0, 1 and 2 (offsets 0, 24, 48) actually reach the image; a
+    // col_span of 5 leaves cells 3 and 4 (offset 96, past width 60)
+    // untouched -- the same "cell past the image's edge is left as it was"
+    // contract the unscaled path has.
+    layer.drawImage(1, 0, 0, 1, 5, 60, 12, 12, 12, 0.5);
+
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_x, 0);
+    try testz.expectEqual(layer.cell(0, 1).style.bg.image.offset_x, 24);
+    try testz.expectEqual(layer.cell(0, 2).style.bg.image.offset_x, 48);
+    switch (layer.cell(0, 3).style.bg) {
+        .color => {},
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+    switch (layer.cell(0, 4).style.bg) {
+        .color => {},
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+}
+
+pub fn layerDrawImageScaleOfOneMatchesUnscaledOffsetsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // scale 1.0 must be byte-identical to the pre-scale behavior: a 2x2
+    // span over a 24x24px image at 12px cells still steps offsets by 12.
+    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12, 1.0);
+
+    try testz.expectEqual(layer.cell(1, 1).style.bg.image.offset_x, 0);
+    try testz.expectEqual(layer.cell(1, 2).style.bg.image.offset_x, 12);
+    try testz.expectEqual(layer.cell(2, 1).style.bg.image.offset_y, 12);
+    try testz.expectEqual(layer.cell(1, 1).style.bg.image.scale, 1.0);
 }
 
 pub fn layerDrawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !void {

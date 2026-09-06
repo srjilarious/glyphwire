@@ -1,5 +1,6 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const zargs = @import("zargunaught");
 
 /// gw-view: a minimal client that loads an image file (PNG, JPEG,
 /// BMP, or GIF) and draws it as a sprite spanning the cells it needs -- the
@@ -8,10 +9,22 @@ const glyphwire = @import("glyphwire");
 /// format is sniffed from the file's magic bytes (`detectImageFormat`),
 /// not its extension, and sent as `load_image`'s `format` so the server
 /// reads the right header; glyphwire's stb_image decodes all four.
-/// Computes `row_span`/`col_span` from the image's natural pixel size
-/// (`get_image_info`) and the session's fixed cell metrics
-/// (`get_cell_metrics`) -- aspect-ratio-aware placement is the client's job
-/// per decisions.md; `draw_image` itself only clips, never stretches.
+///
+/// By default the image is scaled down (aspect preserved) to fit the
+/// width of the layer it lands on -- `get_property("size")` gives the
+/// layer's cell width, the fixed cell metrics turn that into a pixel
+/// width, and `draw_image`'s `scale` carries the ratio; an image already
+/// no wider than the layer is left at natural size (never upscaled).
+/// `--size full` opts back into natural pixel size (the original
+/// behavior). Either way this client still computes `row_span`/`col_span`
+/// from the *scaled* dimensions -- aspect-ratio-aware placement is the
+/// client's job per decisions.md.
+///
+/// Arg parsing is zargunaught, the same library and pattern glyphwire-ls
+/// uses (`zargs.ArgParser` + `hasOption`/`optionVal`/`positional`), rather
+/// than a hand-rolled slice walk -- `parser.deinit()` + `args.deinit()`
+/// also plug the small `init.minimal.args.toSlice` leak the old loop left
+/// on exit.
 ///
 /// Draws the image and exits as soon as the pixels are on the grid -- no
 /// keypress wait. `draw_image` is a request, so by the time it returns
@@ -26,12 +39,56 @@ const glyphwire = @import("glyphwire");
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
-    const args = try init.minimal.args.toSlice(alloc);
 
-    if (args.len < 2) {
-        return fallback(io, "usage: gw-view <image>   (PNG, JPEG, BMP, or GIF)\n");
+    var parser = try zargs.ArgParser.init(alloc, .{
+        .name = "gw-view",
+        .description = "Loads an image (PNG, JPEG, BMP, or GIF) and draws it over a glyphwire connection.",
+        .opts = &.{
+            .{
+                .longName = "size",
+                .shortName = "s",
+                .description = "Scaling mode: 'fit-width' (the default) shrinks the image to the layer's width, leaving one already narrower at its own size; 'full' draws it at natural pixel size",
+                .minNumParams = 1,
+                .maxNumParams = 1,
+            },
+            .{ .longName = "help", .shortName = "h", .description = "Print this help and exit" },
+        },
+    });
+    defer parser.deinit();
+
+    var args = parser.parse(init.minimal.args) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "gw-view: error parsing args: {t}\n", .{err}) catch "gw-view: error parsing args\n";
+        return fallback(io, msg);
+    };
+    defer args.deinit();
+
+    if (args.hasOption("help")) {
+        var stdout = try zargs.print.Printer.stdout(alloc);
+        defer stdout.deinit();
+        var help = try zargs.help.HelpFormatter.init(&parser, stdout, zargs.help.DefaultTheme, alloc);
+        defer help.deinit();
+        help.printHelpText() catch |err| std.debug.print("gw-view: error printing help: {t}\n", .{err});
+        try stdout.flush();
+        return;
     }
-    const path = args[1];
+
+    // Resolve the scaling mode before touching the file or the connection
+    // so a bad `--size` value fails fast.
+    const SizeMode = enum { fit_width, full };
+    const size_mode: SizeMode = blk: {
+        const v = args.optionVal("size") orelse break :blk .fit_width;
+        if (std.mem.eql(u8, v, "fit-width")) break :blk .fit_width;
+        if (std.mem.eql(u8, v, "full")) break :blk .full;
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "gw-view: unknown --size '{s}' (want 'fit-width' or 'full')\n", .{v}) catch "gw-view: unknown --size value\n";
+        return fallback(io, msg);
+    };
+
+    if (args.positional.items.len < 1) {
+        return fallback(io, "usage: gw-view [--size fit-width|full] <image>   (PNG, JPEG, BMP, or GIF)\n");
+    }
+    const path = args.positional.items[0];
 
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024 * 1024)) catch |err| {
         var buf: [512]u8 = undefined;
@@ -58,8 +115,27 @@ pub fn main(init: std.process.Init) !void {
     const info = try client.getImageInfo(handle);
     const metrics = try client.getCellMetrics();
 
-    const cols = (info.width + metrics.w - 1) / metrics.w;
-    const rows = (info.height + metrics.h - 1) / metrics.h;
+    // Natural-size placement: the cell span the image needs at scale 1.0,
+    // and the scale `draw_image` gets. `--size full` stops here.
+    var scale: f32 = 1.0;
+    var cols: usize = (info.width + metrics.w - 1) / metrics.w;
+    var rows: usize = (info.height + metrics.h - 1) / metrics.h;
+
+    if (size_mode == .fit_width) {
+        const layer_size = try client.getSize();
+        const target_w: usize = layer_size.cols * metrics.w;
+        // Never upscale: an image already within the layer's width keeps
+        // its natural size and scale 1.0.
+        if (target_w > 0 and info.width > target_w) {
+            const img_w_f: f32 = @floatFromInt(info.width);
+            scale = @as(f32, @floatFromInt(target_w)) / img_w_f;
+            const disp_h: f32 = @as(f32, @floatFromInt(info.height)) * scale;
+            const cell_h_f: f32 = @floatFromInt(metrics.h);
+            cols = layer_size.cols;
+            rows = @intFromFloat(@ceil(disp_h / cell_h_f));
+            if (rows == 0) rows = 1;
+        }
+    }
 
     // Draw at the cursor rather than a fixed (0, 0) -- like a real inline
     // image viewer (iTerm2's imgcat, kitty's icat), the image should land
@@ -68,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
     // image instead of overlapping it. Same get-cursor/draw/set-cursor
     // shape glyphwire-ls uses per entry -- see its writeGrid doc comment.
     const cur = try client.getCursor();
-    try client.drawImage(handle, null, null, rows, cols);
+    try client.drawImage(handle, null, null, rows, cols, scale);
 
     // `cur.row + rows` is the target row *before* `drawImage` ran, but an
     // image tall enough to reach the layer's bottom edge already scrolled
