@@ -1,6 +1,6 @@
--- glyphwire-host configuration template.
+-- glyphwire configuration template.
 --
--- This is the full reference for `host.conf`, the file glyphwire-host runs
+-- This is the full reference for `host.conf`, the file glyphwire runs
 -- once at startup (see host/main.zig `loadConfig`). Copy it to one of:
 --
 --   $GLYPHWIRE_CONFIG_DIR/host.conf
@@ -30,11 +30,12 @@
 --
 --     ---- Fonts --------------------------------------------------------
 --
---     -- Primary font file. A relative path resolves against
---     -- glyphwire-host's working directory (the repo root in dev mode),
---     -- not this config file's directory; an absolute path also works. A
---     -- TTF/OTF, or a TTC collection (then set `font_face_name`).
---     font_face = "assets/NotoSansCJK-Regular.ttc",
+--     -- Primary font file. The built-in default is resolved under
+--     -- GLYPHWIRE_ASSET_DIR when set, otherwise under
+--     -- ../share/glyphwire/assets relative to the glyphwire executable.
+--     -- Use an explicit absolute path for a custom TTF/OTF, or a TTC
+--     -- collection (then set `font_face_name`).
+--     font_face = "NotoSansCJK-Regular.ttc",
 --
 --     -- For a TTC: a substring of the desired face's name
 --     -- (case-sensitive). Ignored for a plain TTF/OTF. Falls back to
@@ -43,7 +44,7 @@
 --
 --     -- Face tried for any codepoint the primary font lacks, before the
 --     -- atlas falls back to its .notdef (tofu) box.
---     font_fallback = "assets/JetBrainsMono-Regular.ttf",
+--     font_fallback = "JetBrainsMono-Regular.ttf",
 --
 --     -- Starting cell size in pixels. Clamped to 8..72. At runtime,
 --     -- Ctrl+- / Ctrl++ step it by 2 and Ctrl+0 returns to this value.

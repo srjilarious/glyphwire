@@ -1,6 +1,6 @@
--- glyphwire-shell configuration template.
+-- gw-shell configuration template.
 --
--- This is the full reference for `shell.conf`, the file glyphwire-shell
+-- This is the full reference for `shell.conf`, the file gw-shell
 -- runs once at startup (see shell/config.zig `load`). Copy it to one of:
 --
 --   $GLYPHWIRE_CONFIG_DIR/shell.conf
@@ -36,8 +36,8 @@
 ---- Open actions -----------------------------------------------------
 --
 -- open_actions{ [key] = command } -- what runs when you activate a
--- glyphwire-ls entry (click it, or press Enter/Space while browsing).
--- glyphwire-ls tags each entry with its `kind` ("file" / "directory" /
+-- gw-ls entry (click it, or press Enter/Space while browsing).
+-- gw-ls tags each entry with its `kind` ("file" / "directory" /
 -- "symlink" / "other") and, for a file, a real `mimetype`; the key is
 -- matched most-specific first:
 --
@@ -51,10 +51,10 @@
 --
 --   open_actions{
 --     ["directory"]  = "cd {sel}",
---     ["image/png"]  = "glyphwire-view {selections}",
---     ["image/jpeg"] = "glyphwire-view {selections}",
---     ["image/gif"]  = "glyphwire-view {selections}",
---     ["image/bmp"]  = "glyphwire-view {selections}",
+--     ["image/png"]  = "gw-view {selections}",
+--     ["image/jpeg"] = "gw-view {selections}",
+--     ["image/gif"]  = "gw-view {selections}",
+--     ["image/bmp"]  = "gw-view {selections}",
 --   }
 --
 -- The command is a template. `{sel}` expands to one shell-quoted path
@@ -203,7 +203,7 @@
 -- "!{is_repo}").  Segments are joined with `sep` (fg = the left
 -- segment's bg, bg = the right segment's bg -- the powerline trick) and
 -- capped with head / tail / right_head.  The \u{E0Bx} glyphs need a Nerd
--- Font; glyphwire-host bundles a Powerline-range fallback face.
+-- Font; glyphwire bundles a Powerline-range fallback face.
 --
 -- A worked two-line powerline setup (a distro badge + user + cwd on the
 -- left; an error segment, a slow-command segment, and a clock on the

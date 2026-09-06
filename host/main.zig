@@ -11,9 +11,9 @@ const icons = @import("icons.zig");
 pub const panic = host_eng.system.panic;
 pub const std_options = host_eng.system.std_options;
 
-/// glyphwire-host entry point. This file is deliberately thin: startup
+/// glyphwire entry point. This file is deliberately thin: startup
 /// wiring (config, fonts, icons, the in-process `Server` + its thread, the
-/// glyphwire-shell child) and then handing off to the engine's app runner.
+/// gw-shell child) and then handing off to the engine's app runner.
 /// Everything the running window does lives in `app.App` and the concern
 /// sub-structs it owns (`caret.zig`, `input.zig`, `selection.zig`,
 /// `scroll.zig`, `window_sizing.zig`, `render.zig`); the values `host.conf`
@@ -25,8 +25,7 @@ pub const std_options = host_eng.system.std_options;
 /// `geometry.grid_cols` / `grid_rows` track its live size. `host.conf`'s
 /// `grid_cols` / `grid_rows` (and `--grid-cols` / `--grid-rows`, which win
 /// over the file) override the initial size here in `main`.
-
-/// Waits for glyphwire-shell to exit, then flags `shell_exited` so
+/// Waits for gw-shell to exit, then flags `shell_exited` so
 /// `App.update` ends the window loop -- the shell process actually
 /// terminating (via its `exit` builtin, a crash, or an external kill) is
 /// what quits the host now, not a keypress. Not joined by `main`, same as
@@ -40,7 +39,7 @@ fn reapChild(io: std.Io, child_in: std.process.Child, shell_exited: *std.atomic.
 
 /// Runs `Server.serveForever` for the lifetime of the process, on its own
 /// thread -- not joined, same as the reaped child processes below: it
-/// keeps serving glyphwire-shell (and any other socket client) for as long
+/// keeps serving gw-shell (and any other socket client) for as long
 /// as the process runs, and there's nothing to hand its result to once the
 /// window/render loop below is what actually keeps the process alive.
 fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
@@ -55,14 +54,46 @@ fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.
     return std.fmt.allocPrint(alloc, "{s}/glyphwire-{d}.sock", .{ dir, pid });
 }
 
-/// Resolves a sibling binary built alongside this one (zig-out/bin/<name>)
-/// by absolute path. They're not on $PATH in dev mode, so a bare argv[0]
-/// (relying on std.process.spawn's PATH search) would fail to resolve --
-/// see shell/main.zig's demo-path comment for the same issue.
-fn resolveSibling(alloc: std.mem.Allocator, io: std.Io, name: []const u8) ![]const u8 {
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    return std.fmt.allocPrint(alloc, "{s}/zig-out/bin/{s}", .{ cwd_buf[0..cwd_len], name });
+/// Resolves a sibling binary from this process's executable directory. The
+/// `zig build glyphwire` run step sets `GLYPHWIRE_BIN_DIR` because Zig may
+/// execute the just-built binary from its cache rather than `zig-out/bin`;
+/// installed runs use the executable directory directly.
+fn resolveSibling(alloc: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map, name: []const u8) ![]const u8 {
+    if (environ_map.get("GLYPHWIRE_BIN_DIR")) |dir| {
+        return std.fs.path.join(alloc, &.{ dir, name });
+    }
+    const exe_dir = try std.process.executableDirPathAlloc(io, alloc);
+    return std.fs.path.join(alloc, &.{ exe_dir, name });
+}
+
+/// Resolves bundled assets. Runtime intentionally has two ways to find
+/// them: an explicit environment override, then the installed
+/// `<prefix>/bin/glyphwire` -> `<prefix>/share/glyphwire/assets` layout.
+fn resolveAssetDir(alloc: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map) ![]const u8 {
+    if (environ_map.get("GLYPHWIRE_ASSET_DIR")) |dir| {
+        return alloc.dupe(u8, dir);
+    }
+    const exe_dir = try std.process.executableDirPathAlloc(io, alloc);
+    return std.fs.path.resolve(alloc, &.{ exe_dir, "..", "share", "glyphwire", "assets" });
+}
+
+fn bundledAssetPath(alloc: std.mem.Allocator, asset_dir: []const u8, rel_path: []const u8) ![:0]const u8 {
+    return std.fs.path.joinZ(alloc, &.{ asset_dir, rel_path });
+}
+
+fn resolveDefaultAssetPath(
+    alloc: std.mem.Allocator,
+    asset_dir: []const u8,
+    path: [:0]const u8,
+    default_rel_path: []const u8,
+) ![:0]const u8 {
+    const legacy_prefix = "assets/";
+    if (std.mem.eql(u8, path, default_rel_path) or
+        (std.mem.startsWith(u8, path, legacy_prefix) and std.mem.eql(u8, path[legacy_prefix.len..], default_rel_path)))
+    {
+        return bundledAssetPath(alloc, asset_dir, default_rel_path);
+    }
+    return path;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -77,6 +108,7 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
+    const asset_dir = try resolveAssetDir(arena, io, init.environ_map);
 
     // Font face/size/fallback, caret shape/blink, and initial grid size /
     // scrollback: `~/.config/glyphwire/host.conf` if present, else the
@@ -84,13 +116,15 @@ pub fn main(init: std.process.Init) !void {
     // a `--grid-cols` / `--grid-rows` flag can still override `host.conf`'s
     // `grid_cols` / `grid_rows`.
     const host_cfg = config_load.loadConfig(arena, alloc, io, init.environ_map);
-    const font_cfg = host_cfg.font;
+    var font_cfg = host_cfg.font;
+    font_cfg.face = try resolveDefaultAssetPath(arena, asset_dir, font_cfg.face, config.font_path_default);
+    font_cfg.fallback = try resolveDefaultAssetPath(arena, asset_dir, font_cfg.fallback, config.font_fallback_default);
     if (host_cfg.grid.cols) |v| geometry.grid_cols = v;
     if (host_cfg.grid.rows) |v| geometry.grid_rows = v;
     if (host_cfg.grid.scrollback) |v| config.scrollback_rows = v;
 
     // Host-only options are pulled out here; everything else is forwarded
-    // to glyphwire-shell (an empty forward list = the shell's own
+    // to gw-shell (an empty forward list = the shell's own
     // interactive prompt, its no-args mode, rather than exec'ing a child).
     //   --screenshot <path>          write the grid region to <path> (PNG) then quit
     //   --screenshot-delay-ms <n>    wait n ms before capturing (default 2500)
@@ -156,19 +190,21 @@ pub fn main(init: std.process.Init) !void {
     // `font_path` above) rather than silently relying on the default
     // matching -- see Context's doc comment on cell_px_w/cell_px_h.
     ctx.setCellMetrics(@intCast(geometry.cell_w), @intCast(geometry.cell_h));
-    icons.loadIconsFromDir(io, alloc, &ctx, "assets/icons", "", true);
+    const icons_dir = try std.fs.path.join(arena, &.{ asset_dir, "icons" });
+    icons.loadIconsFromDir(io, alloc, &ctx, icons_dir, "", true);
     // The file-type icon set (`file/*`, aliased `oxygen/*`) comes from
-    // whichever `assets/icons/filetype/<theme>/` `host.conf`'s
+    // whichever `<asset-dir>/icons/filetype/<theme>/` `host.conf`'s
     // `icon_theme` names -- Oxygen by default, else Papirus / Material.
     // An unknown or missing theme falls back to Oxygen.
     {
-        const theme_dir = try std.fmt.allocPrint(arena, "assets/icons/filetype/{s}", .{host_cfg.icon_theme});
+        const theme_dir = try std.fs.path.join(arena, &.{ asset_dir, "icons", "filetype", host_cfg.icon_theme });
         var ok = icons.loadFiletypeTheme(io, alloc, &ctx, theme_dir);
         if (!ok and !std.mem.eql(u8, host_cfg.icon_theme, config.default_icon_theme)) {
-            std.log.warn("glyphwire-host: icon_theme '{s}' not found under assets/icons/filetype/; using '{s}'", .{ host_cfg.icon_theme, config.default_icon_theme });
-            ok = icons.loadFiletypeTheme(io, alloc, &ctx, "assets/icons/filetype/" ++ config.default_icon_theme);
+            const default_theme_dir = try std.fs.path.join(arena, &.{ asset_dir, "icons", "filetype", config.default_icon_theme });
+            std.log.warn("glyphwire: icon_theme '{s}' not found under {s}; using '{s}'", .{ host_cfg.icon_theme, theme_dir, config.default_icon_theme });
+            ok = icons.loadFiletypeTheme(io, alloc, &ctx, default_theme_dir);
         }
-        if (!ok) std.log.warn("glyphwire-host: no file-type icon theme loaded (assets/icons/filetype/ missing?)", .{});
+        if (!ok) std.log.warn("glyphwire: no file-type icon theme loaded under {s}/icons/filetype", .{asset_dir});
     }
     // User icons: new names and overrides of the bundled set, from
     // `~/.config/glyphwire/icons/` (same config dir as `host.conf`, see
@@ -183,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
     // `.listen()` inside `bind` is synchronous -- the socket is already
     // accept-ready (kernel-queued, even before `serveForever`'s thread
     // starts calling `accept`) by the time this returns, so unlike the
-    // old separate-process design, glyphwire-shell can be spawned right
+    // old separate-process design, gw-shell can be spawned right
     // below with no wait-for-socket-ready polling loop needed.
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
@@ -193,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
     try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
 
-    const shell_path = try resolveSibling(arena, io, "glyphwire-shell");
+    const shell_path = try resolveSibling(arena, io, init.environ_map, "gw-shell");
     const shell_argv = try std.mem.concat(arena, []const u8, &.{ &.{shell_path}, shell_child_argv });
 
     // Left false (no other way to quit) if the spawn itself fails --
@@ -202,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.process.spawn(io, .{ .argv = shell_argv, .environ_map = &shell_env })) |shell_child| {
         _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child, &shell_exited });
     } else |err| {
-        std.log.err("failed to spawn glyphwire-shell: {t}", .{err});
+        std.log.err("failed to spawn gw-shell: {t}", .{err});
     }
 
     // Font atlas packing (unlike the metrics measured above) does need a GL
@@ -232,8 +268,9 @@ pub fn main(init: std.process.Init) !void {
     // fallback, so a configured powerline shell prompt's separator /
     // rounded-cap glyphs render even though neither the CJK primary nor a
     // plain-Latin fallback covers that Private Use range.
-    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, config.powerline_symbols_font, 0) catch |err| {
-        std.log.warn("could not add powerline symbols font '{s}': {t}", .{ config.powerline_symbols_font, err });
+    const powerline_symbols_path = try bundledAssetPath(arena, asset_dir, config.powerline_symbols_font);
+    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, powerline_symbols_path, 0) catch |err| {
+        std.log.warn("could not add powerline symbols font '{s}': {t}", .{ powerline_symbols_path, err });
     };
 
     const app = try app_mod.App.init(alloc, appRunner.engine, &srv, &shell_exited, screenshot_path, screenshot_delay_ms, .{

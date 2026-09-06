@@ -477,7 +477,7 @@ pub fn configSegmentWhenExprNegationIsKeptTest(_: std.Io, alloc: std.mem.Allocat
 
 pub fn configOpenActionsStringValueTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var res = try config.load(alloc,
-        \\open_actions { ["directory"] = "cd {sel}", ["image/png"] = "glyphwire-view {selections}" }
+        \\open_actions { ["directory"] = "cd {sel}", ["image/png"] = "gw-view {selections}" }
     );
     defer res.deinit();
 
@@ -493,7 +493,7 @@ pub fn configOpenActionsStringValueTest(_: std.Io, alloc: std.mem.Allocator) !vo
             try testz.expectEqualStr("cd {sel}", a.commands[0]);
         } else if (std.mem.eql(u8, a.key, "image/png")) {
             saw_png = true;
-            try testz.expectEqualStr("glyphwire-view {selections}", a.commands[0]);
+            try testz.expectEqualStr("gw-view {selections}", a.commands[0]);
         }
     }
     try testz.expectTrue(saw_dir and saw_png);
