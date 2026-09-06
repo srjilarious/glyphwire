@@ -1615,11 +1615,9 @@ the layer actually changes.
 - **pixzig:** one re-export (`renderer.StaticQuadBatch`); no API change.
   `StaticQuadBatch` already existed for "geometry that doesn't change
   often".
-- **Still draws + swaps every frame.** Skipping the draw / buffer swap on
-  an unchanged frame (`needsRedraw()` in `gameLoopCore`,
-  `glfwWaitEventsTimeout`, a `glfwPostEmptyEvent` from the server thread
-  on any mutation) is the follow-up — the battery win, but it touches
-  pixzig's loop.
+- **Still draws + swaps every frame** — the follow-up (skip the draw /
+  swap on an unchanged frame) landed separately, see *Redraw only when
+  something changed* below.
 - **Tests:** `core_tests.zig` +5 (`render_gen` bumps on write / clear /
   scrollView / resize / cursor property / selection / highlight; stable
   across pure reads).
@@ -1967,6 +1965,62 @@ context is culled when every owning connection has disconnected.
   the new context, non-owner destroy rejected, owner destroy restores,
   activate ≠ retarget, attach without owning, adopt-then-destroy,
   sessionless → `NoContextSession`).
+
+## Redraw only when something changed
+
+**Done.** The static-quad-batch cache above stopped the per-frame vertex
+*upload*, but `AppRunner.gameLoopCore` still called `render` +
+`swapBuffers` every iteration, vsync-paced at ~60 Hz forever. Now an idle
+terminal blocks in the event loop and does not repaint at all.
+
+- **`host_eng` — event-driven loop.** New `EngineOptions.redrawOnDemand`
+  (off by default: a game repaints continuously; `host/app.zig` turns it
+  on). With it set, `gameLoopCore` blocks in a new `Engine.waitEvents`
+  (`SDL_WaitEvent`, or `SDL_WaitEventTimeout` when the app passes a
+  bounded `idleTimeoutMs()`) at the top of each iteration, and calls
+  `render` + `swapBuffers` only when `AppData.needsRedraw()` returns true.
+  `delta` is clamped to `MaxCatchupMs` (100 ms) before feeding the
+  fixed-step accumulator so a long idle block doesn't unleash a burst of
+  update steps. The first frame always draws (a `drew_once` guard skips
+  the wait until then).
+- **`Engine.wakeEventLoop`** pushes an empty `SDL_EVENT_USER` — safe from
+  any thread — so a loop parked in `waitEvents` comes back and
+  re-evaluates. `pollEvents` swallows that event type.
+- **`server.zig` — a wake callback, not an SDL dependency.** New
+  `Server.setWakeCallback(ctx, fn)` / private `wake()`, fired after every
+  frame a socket connection dispatches (that work runs on the
+  connection's own thread, so it can't nudge the render loop directly).
+  Left null for the headless server and any repaint-every-frame front
+  end — the server core never depends on it. `host/main.zig` registers a
+  callback that routes to `Engine.wakeEventLoop`.
+- **`host/redraw.zig` (new, pure — in `host_support`).** `ContextSig` +
+  `contextSig(ctx)`: a no-alloc value fingerprint of everything the
+  renderer composites in the shared model — a wrapping sum of every
+  layer's `render_gen`, a rolling hash of `layer_order` + per-layer
+  `visible` (catches `raise_layer` / `lower_layer` / show / hide, none of
+  which move `render_gen`), and the root view offset + full-screen-owned
+  bit.
+- **`App.needsRedraw` / `idleTimeoutMs`.** `needsRedraw` compares a
+  `RedrawSig` (the `ContextSig` plus framebuffer size, cell size, caret
+  cell/visibility/shape, an FNV hash of the IME preedit, and a
+  screenshot-pending flag) against the last drawn frame's, under
+  `ctx_mutex`. `idleTimeoutMs` returns null (block until an OS event or a
+  server wake) unless a `--screenshot` capture is pending or
+  `cursor_blink` is on — the blink clock then needs the loop back on its
+  own ~`blink_ms` schedule so `needsRedraw` can see the phase flip.
+  Focus-loss blink pause (hold the caret solid, stop waking) is a noted
+  future refinement.
+- **Decisions:** front end signals the change through an injected callback
+  rather than the server calling SDL, so a headless server and an
+  alternate front end stay possible; per-frame snapshot compare rather
+  than dirty flags threaded through every mutation site; a blinking caret
+  still forces a redraw. See decisions.md's new *Redraw on change*
+  section.
+- **Tests:** `host_tests.zig` +8 (`contextSig` stable across reads; moves
+  on cell write / `scrollView` / layer create / `raiseLayer` with no
+  content change / visibility toggle / alt-screen entry). `server_tests.zig`
+  +2 (wake callback fires on socket dispatch; dispatch still works with no
+  callback registered).
 
 ## Further out (sequencing noted, not detailed yet)
 

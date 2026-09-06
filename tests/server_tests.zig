@@ -339,3 +339,93 @@ pub fn badNotificationDoesNotSeverTheConnectionTest(io: std.Io, alloc: std.mem.A
     try testz.expectEqual(parsed.value.result.col, 2);
     try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
 }
+
+/// A counter for `wakeCallbackFiresOnSocketDispatchTest`. File-scope
+/// because `setWakeCallback` takes a bare fn pointer; the `?*anyopaque`
+/// context is the test's own local `std.atomic.Value(u32)`.
+fn countWake(ctx: ?*anyopaque) void {
+    const c: *std.atomic.Value(u32) = @ptrCast(@alignCast(ctx.?));
+    _ = c.fetchAdd(1, .monotonic);
+}
+
+/// A front end that only redraws on demand (glyphwire-host) registers a
+/// wake hook so a socket client's dispatch -- which runs on that
+/// connection's thread -- can nudge the render loop. Every dispatched
+/// frame fires it; a second round trip on the same connection is the sync
+/// point that proves the first one's wake ran.
+pub fn wakeCallbackFiresOnSocketDispatchTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-wake-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    var wake_count: std.atomic.Value(u32) = .init(0);
+    srv.setWakeCallback(&wake_count, countWake);
+
+    const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer accept_thread.join();
+
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+
+    // A notification (no id): dispatched, no response frame.
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi"}}
+    );
+    try w.interface.flush();
+
+    // The server handles one frame at a time per connection, so by the
+    // time this request's response is in hand the earlier notification's
+    // post-dispatch `wake()` has run.
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":2,"method":"get_property","params":{"property":"cursor"}}
+    );
+    try w.interface.flush();
+    const r2 = try readOneFrame(io, alloc, &stream, &decoder);
+    alloc.free(r2);
+
+    try testz.expectTrue(wake_count.load(.monotonic) >= 1);
+}
+
+/// The headless server (`server/main.zig`) and any repaint-every-frame
+/// front end never call `setWakeCallback`; dispatch must not depend on a
+/// hook being present.
+pub fn dispatchWorksWithNoWakeCallbackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-nowake-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveConnections, .{ &srv, alloc, @as(usize, 2) });
+    defer thread.join();
+
+    try sendMessage(io, socket_path,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"ok"}}
+    );
+
+    // A second connection's round trip both syncs against the write above
+    // and exercises the null-hook path once more.
+    const response_body = try requestMessage(io, alloc, socket_path,
+        \\{"jsonrpc":"2.0","id":1,"method":"get_property","params":{"property":"cursor"}}
+    );
+    defer alloc.free(response_body);
+
+    try testz.expectEqualStr("o", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("k", ctx.root.cell(0, 1).grapheme());
+}

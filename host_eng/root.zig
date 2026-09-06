@@ -61,6 +61,11 @@ pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
         alloc: std.mem.Allocator,
         lag: f64 = 0,
         currTime: f64 = 0,
+        /// `redrawOnDemand` only: cleared once the first frame has been
+        /// drawn. The idle wait at the top of `gameLoopCore` is skipped
+        /// until then so startup always paints one frame without waiting
+        /// on an OS event.
+        drew_once: bool = false,
 
         const UpdateStepMs = 1000.0 / engOpts.updateStepHz;
         const Self = @This();
@@ -85,10 +90,29 @@ pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
             self.alloc.destroy(self);
         }
 
+        /// Upper bound on the simulated time a single iteration will try to
+        /// catch up on, in `redrawOnDemand` mode. Without it, a loop that
+        /// blocked for seconds waiting on an event would then run hundreds
+        /// of fixed update steps in one burst.
+        const MaxCatchupMs = 100.0;
+
         pub fn gameLoopCore(self: *Self, app: *AppData) bool {
+            if (comptime engOpts.redrawOnDemand) {
+                if (self.drew_once) {
+                    // Idle until an OS event arrives, `Engine.wakeEventLoop`
+                    // is called from another thread, or the app's own
+                    // timeout elapses (a blinking caret, a pending
+                    // screenshot).
+                    self.engine.waitEvents(app.idleTimeoutMs());
+                }
+            }
+
             const new_time = @as(f64, @floatFromInt(sdl.SDL_GetTicksNS())) / 1_000_000.0;
-            const delta = new_time - self.currTime;
+            var delta = new_time - self.currTime;
             self.currTime = new_time;
+            if (comptime engOpts.redrawOnDemand) {
+                if (delta > MaxCatchupMs) delta = MaxCatchupMs;
+            }
             self.lag += delta;
 
             self.engine.pollEvents();
@@ -102,8 +126,12 @@ pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
                 if (!keep_running) return false;
             }
 
+            if (comptime engOpts.redrawOnDemand) {
+                if (self.drew_once and !app.needsRedraw(self.engine)) return true;
+            }
             app.render(self.engine);
             self.engine.window.swapBuffers();
+            self.drew_once = true;
             return true;
         }
 
@@ -252,9 +280,40 @@ pub fn EngineType(comptime engOpts: EngineOptions) type {
                     // polling self-healed, so anything held when the window
                     // loses focus would otherwise stay down forever.
                     sdl.SDL_EVENT_WINDOW_FOCUS_LOST => self.inputs.clear(),
+                    // `wakeEventLoop`'s nudge from another thread: its only
+                    // job was to break the wait above so the loop re-checks
+                    // its redraw state -- nothing to handle here.
+                    sdl.SDL_EVENT_USER => {},
                     else => self.inputs.handleEvent(event),
                 }
             }
+        }
+
+        /// Blocks until the next OS event, a `wakeEventLoop` nudge, or
+        /// `timeout_ms` elapses (null = no timeout). Used by
+        /// `gameLoopCore` only when `engOpts.redrawOnDemand` is set; the
+        /// event it unblocks on is left on the queue for `pollEvents` to
+        /// drain normally.
+        pub fn waitEvents(self: *Self, timeout_ms: ?f64) void {
+            _ = self;
+            if (timeout_ms) |ms| {
+                const clamped: i32 = @intFromFloat(@max(1.0, @min(ms, @as(f64, std.math.maxInt(i32)))));
+                _ = sdl.SDL_WaitEventTimeout(null, clamped);
+            } else {
+                _ = sdl.SDL_WaitEvent(null);
+            }
+        }
+
+        /// Pushes an empty user event so a loop parked in `waitEvents`
+        /// wakes and re-evaluates. Safe to call from any thread (SDL's
+        /// event queue is internally locked) -- the server's wake callback
+        /// (see `host/main.zig`) routes through here from a connection
+        /// thread.
+        pub fn wakeEventLoop(self: *Self) void {
+            _ = self;
+            var event: sdl.SDL_Event = std.mem.zeroes(sdl.SDL_Event);
+            event.type = sdl.SDL_EVENT_USER;
+            _ = sdl.SDL_PushEvent(&event);
         }
 
         /// Sets the window icon from an encoded image (PNG or anything

@@ -3,6 +3,7 @@ const glyphwire = @import("glyphwire");
 const host_eng = @import("host_eng");
 
 const config = @import("config.zig");
+const geometry = @import("geometry.zig");
 const caret_mod = @import("caret.zig");
 const input_mod = @import("input.zig");
 const selection_mod = @import("selection.zig");
@@ -11,8 +12,43 @@ const window_sizing_mod = @import("window_sizing.zig");
 const preedit_mod = @import("preedit.zig");
 const render_mod = @import("render.zig");
 const panes_mod = @import("panes.zig");
+const redraw_mod = @import("redraw.zig");
 
 const CursorConfig = config.CursorConfig;
+const CursorShape = config.CursorShape;
+
+/// Everything `App.needsRedraw` compares one drawn frame to the next: the
+/// pure `Context` fingerprint (`redraw.zig`) plus the host-local state
+/// that also decides what ends up on screen. A plain value type, compared
+/// with `std.meta.eql`.
+const RedrawSig = struct {
+    ctx: redraw_mod.ContextSig,
+    /// The session's visibility change-counter
+    /// (`Server.visibleContextGen`). A context switch re-points
+    /// `server.ctx`, and two contexts could in principle share a
+    /// `ContextSig`, so carry the gen explicitly.
+    visible_gen: u64,
+    /// Framebuffer pixel size -- a window resize moves every vertex.
+    fb_w: i32,
+    fb_h: i32,
+    /// Cell pixel size -- a font zoom (Ctrl +/-) moves every vertex too.
+    cell_w: i32,
+    cell_h: i32,
+    /// Caret screen cell + whether it is painted this phase + its shape.
+    /// The caret is an immediate draw on its own blink clock, so a phase
+    /// flip has to force a frame even when the grid didn't move.
+    caret_shown: bool,
+    caret_row: usize,
+    caret_col: usize,
+    caret_shape: CursorShape,
+    /// FNV hash of the IME preedit string (empty when no composition is
+    /// active) -- the overlay is drawn straight from engine keyboard
+    /// state, which never touches `render_gen`.
+    preedit_hash: u64,
+    /// While a `--screenshot` capture is still pending every frame must
+    /// draw, so the readback in `render` actually happens.
+    screenshot_pending: bool,
+};
 
 pub const EngOptions: host_eng.EngineOptions = .{
     // `maxSprites`: a full-window character grid draws far more than the
@@ -23,6 +59,12 @@ pub const EngOptions: host_eng.EngineOptions = .{
     // covers a ~240x125 cell grid of solid backgrounds; the renderer's
     // `u32` batch indices make it safe.
     .rendererOpts = .{ .textRendering = true, .maxSprites = 30_000 },
+    // A terminal is static most of the time: block in the event loop when
+    // idle and only repaint when `App.needsRedraw` says something changed
+    // (see `redraw.zig`, `App.idleTimeoutMs`, decisions.md's "Redraw on
+    // change"). The server's wake callback (registered in `main.zig`)
+    // breaks the wait when a socket client mutates the grid.
+    .redrawOnDemand = true,
 };
 pub const AppRunner = host_eng.AppRunner(App, EngOptions);
 
@@ -96,6 +138,10 @@ pub const App = struct {
     /// moment a full-screen program takes the screen and snap the
     /// scrollback view back to the live tail (see `update`).
     screen_was_owned: bool = false,
+
+    /// The last drawn frame's redraw fingerprint (see `needsRedraw`).
+    /// Null until the first frame, which always draws.
+    redraw_prev: ?RedrawSig = null,
 
     caret: caret_mod.Caret,
     keys: input_mod.KeyInput,
@@ -245,5 +291,75 @@ pub const App = struct {
 
     pub fn render(self: *App, eng: *Engine) void {
         self.renderer.render(eng);
+    }
+
+    /// Whether anything the renderer composites has moved since the last
+    /// drawn frame. `AppRunner.gameLoopCore` calls this before `render` +
+    /// `swapBuffers` when `EngOptions.redrawOnDemand` is set (it is), so a
+    /// terminal sitting idle stops repainting entirely. Cheap: one
+    /// `ctx_mutex`-held pass over the layers (`redraw.contextSig`) plus a
+    /// few host-local reads. Always true on the first frame and while a
+    /// `--screenshot` capture is still pending.
+    pub fn needsRedraw(self: *App, eng: *Engine) bool {
+        const cur = self.redrawSig(eng);
+        defer self.redraw_prev = cur;
+        if (self.redraw_prev) |prev| return !std.meta.eql(prev, cur);
+        return true;
+    }
+
+    fn redrawSig(self: *App, eng: *Engine) RedrawSig {
+        const server = self.server;
+        const fb = eng.window_state.framebuffer_size;
+
+        var ctx_sig: redraw_mod.ContextSig = .{};
+        var caret_shown = false;
+        var caret_row: usize = 0;
+        var caret_col: usize = 0;
+        {
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            ctx_sig = redraw_mod.contextSig(server.ctx);
+            const root = &server.ctx.root;
+            const view: usize = if (scroll_mod.rootOwned(root)) 0 else root.view_scroll;
+            if (self.caret.visible()) {
+                if (self.caret.screenCell(root, view)) |cell| {
+                    caret_shown = true;
+                    caret_row = cell.row;
+                    caret_col = cell.col;
+                }
+            }
+        }
+
+        return .{
+            .ctx = ctx_sig,
+            .visible_gen = server.visibleContextGen(),
+            .fb_w = fb.x,
+            .fb_h = fb.y,
+            .cell_w = geometry.cell_w,
+            .cell_h = geometry.cell_h,
+            .caret_shown = caret_shown,
+            .caret_row = caret_row,
+            .caret_col = caret_col,
+            .caret_shape = self.caret.shape,
+            .preedit_hash = std.hash.Fnv1a_64.hash(self.preedit.text(eng)),
+            .screenshot_pending = self.screenshot.path != null and !self.screenshot.done,
+        };
+    }
+
+    /// How long `AppRunner.gameLoopCore` may block in `waitEvents` before
+    /// waking to re-check state a background thread may have changed. Null
+    /// means block until an OS event or an `Engine.wakeEventLoop` call --
+    /// the server's wake callback fires that on any wire activity, so a
+    /// socket-driven grid change needs no timeout. A pending screenshot or
+    /// a configured caret blink still needs the loop back on its own
+    /// clock, so those return a bounded wait in milliseconds.
+    pub fn idleTimeoutMs(self: *App) ?f64 {
+        if (self.screenshot.path != null and !self.screenshot.done) return 16;
+        if (self.caret.blink) {
+            const period = @max(self.caret.blink_ms, 1.0);
+            const into = @mod(self.caret.blink_elapsed_ms, period);
+            return @max(4.0, period - into);
+        }
+        return null;
     }
 };
