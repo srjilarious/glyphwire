@@ -97,7 +97,7 @@ pub const HostHooks = struct {
 /// C-ABI Lua callbacks (`sh.*`, `defcmd`, the interrupt hook) can reach
 /// the engine. The shell is single-threaded and has exactly one engine,
 /// so a module-level pointer is enough -- same pattern as
-/// `config.g_active` and pixzig's `sequencer.SeqScriptingContext`.
+/// `config.g_active`.
 var g_engine: ?*ScriptEngine = null;
 
 pub const ScriptEngine = struct {

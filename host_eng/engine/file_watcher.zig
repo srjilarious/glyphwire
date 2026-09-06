@@ -1,4 +1,4 @@
-//! Vendored from pixzig, currently unreferenced: `resources.zig`'s
+//! Currently unreferenced: `resources.zig`'s
 //! hot-reload paths that used it are commented out (see that file's
 //! header). Kept in the tree so re-enabling asset hot-reload is an
 //! uncomment rather than a re-port. If glyphwire ever wants file

@@ -32,7 +32,7 @@ pub const BatchLayout = struct {
 ///
 /// This holds only the generic vertex-data plumbing: buffer setup, shader
 /// attribute/uniform locations, and the flush-on-texture-change bookkeeping
-/// shared by every quad renderer in pixzig. Renderer-specific concerns (rect
+/// shared by every quad renderer here. Renderer-specific concerns (rect
 /// rotation, GL_DEPTH_TEST toggling, line-drawn rect outlines, ...) belong in
 /// a thin wrapper type built on top of this, not here.
 pub fn QuadBatch(comptime layout: BatchLayout) type {
@@ -196,7 +196,7 @@ pub fn QuadBatch(comptime layout: BatchLayout) type {
 
         /// Enqueues a quad given its 4 vertex positions (and, depending on
         /// `layout`, texcoords/colors), in the winding order used throughout
-        /// pixzig: corner 0 is (l,b), 1 is (l,t), 2 is (r,t), 3 is (r,b).
+        /// here: corner 0 is (l,b), 1 is (l,t), 2 is (r,t), 3 is (r,b).
         /// Auto-flushes the batch first if `texture` differs from the
         /// currently queued texture, or the batch is full.
         pub fn addQuad(

@@ -36,25 +36,11 @@ jobs:
         with:
           path: glyphwire
 
-      # glyphwire's build.zig.zon points `pixzig` at `../pixzig` (a sibling
-      # checkout). CI reproduces that layout: glyphwire/ and pixzig/ side by
-      # side in the workspace root. Tracks pixzig's `main` branch.
-      - name: Check out pixzig (sibling path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: srjilarious/pixzig
-          ref: main
-          path: pixzig
+      # No system packages are needed to build the host: `host_eng` is
+      # in-tree, and the SDL3 dependency vendors its own X11 and Wayland
+      # headers and dlopens libX11 / libwayland-client at runtime.
 
-      # zglfw (pulled in transitively by the host through pixzig) links
-      # libX11 on Linux. Wayland is loaded at runtime via dlopen, so only
-      # the X11 dev package is needed to compile.
-      - name: Install X11 headers for the pixzig host
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev
-
-      # Matches build.zig.zon's minimum_zig_version and pixzig's own CI.
+      # Matches build.zig.zon's minimum_zig_version.
       - name: Install Zig 0.16.0
         uses: mlugg/setup-zig@v2
         with:
@@ -66,6 +52,13 @@ jobs:
       - name: Build (ReleaseSafe)
         working-directory: glyphwire
         run: zig build package -Doptimize=ReleaseSafe
+
+      # The test runner links `host_eng` too, so this is what catches a
+      # backend change that compiles for the host but breaks its input
+      # state machines or renames a wire-visible key.
+      - name: Test
+        working-directory: glyphwire
+        run: zig build tests
 
       # Layout mirrors a dev checkout: binaries sit next to `assets/` so the
       # host resolves its default font paths ("assets/...") relative to the

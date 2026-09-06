@@ -1,6 +1,6 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const pixzig = @import("pixzig");
+const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
@@ -21,14 +21,14 @@ const cursor_box_line_px = 2;
 /// the grid content it covers doesn't show through, and an underline
 /// marking it as uncommitted -- the convention every terminal and text
 /// field uses for preedit. See `drawPreedit`.
-const preedit_bg = pixzig.Color.from(40, 44, 60, 255);
-const preedit_fg = pixzig.Color.from(235, 235, 240, 255);
+const preedit_bg = host_eng.Color.from(40, 44, 60, 255);
+const preedit_fg = host_eng.Color.from(235, 235, 240, 255);
 const preedit_underline_px = 2;
 
 // ── Static quad batches ───────────────────────────────────────────────
 //
 // Each layer's composited output is cached as a small set of
-// `pixzig.renderer.StaticQuadBatch`es (`LayerBatches`) built once and
+// `host_eng.renderer.StaticQuadBatch`es (`LayerBatches`) built once and
 // re-drawn every frame with no per-frame vertex upload -- see
 // `syncBatches`. A batch binds exactly one texture, so the categories
 // split by texture: `color_bg` (no texture: cell colour fills, the
@@ -40,12 +40,12 @@ const preedit_underline_px = 2;
 // (see `drawRootCaret`).
 
 /// Shape batch: colour fills, no texture. `ColorShader`.
-const ShapeBatch = pixzig.renderer.StaticQuadBatch(.{ .posDim = 2, .colorDim = 4 });
+const ShapeBatch = host_eng.renderer.StaticQuadBatch(.{ .posDim = 2, .colorDim = 4 });
 /// Textured, untinted: image and icon cells. `TextureShader`.
-const SpriteBatch = pixzig.renderer.StaticQuadBatch(.{ .posDim = 2, .texDim = 2 });
+const SpriteBatch = host_eng.renderer.StaticQuadBatch(.{ .posDim = 2, .texDim = 2 });
 /// Textured + per-vertex colour: glyph quads against the font atlas.
-/// `TextColorShader`, matching pixzig's own `TextRenderer` colour batch.
-const GlyphBatch = pixzig.renderer.StaticQuadBatch(.{ .posDim = 2, .texDim = 2, .colorDim = 4 });
+/// `TextColorShader`, matching the engine's own `TextRenderer` colour batch.
+const GlyphBatch = host_eng.renderer.StaticQuadBatch(.{ .posDim = 2, .texDim = 2, .colorDim = 4 });
 
 /// One image / non-atlas-icon handle's quads, bound to that handle's
 /// texture. `key` is the `glyphwire.ImageHandle`.
@@ -82,9 +82,9 @@ pub const LayerBatches = struct {
 
     fn init(
         alloc: std.mem.Allocator,
-        shape_shader: *pixzig.ManagedShader,
-        sprite_shader: *pixzig.ManagedShader,
-        glyph_shader: *pixzig.ManagedShader,
+        shape_shader: *host_eng.ManagedShader,
+        sprite_shader: *host_eng.ManagedShader,
+        glyph_shader: *host_eng.ManagedShader,
     ) !LayerBatches {
         var color_bg = try ShapeBatch.init(alloc, shape_shader);
         errdefer color_bg.deinit();
@@ -108,27 +108,27 @@ pub const LayerBatches = struct {
     }
 };
 
-/// Positions/texcoords for one quad in pixzig's winding order (corner 0 =
+/// Positions/texcoords for one quad in the engine's winding order (corner 0 =
 /// (l,b), 1 = (l,t), 2 = (r,t), 3 = (r,b)) -- the same order `addQuad`
 /// and `TextRenderer.drawStringColored` use.
 fn quad4(l: f32, t: f32, r: f32, b: f32) [4][2]f32 {
     return .{ .{ l, b }, .{ l, t }, .{ r, t }, .{ r, b } };
 }
 
-fn colour4(c: pixzig.Color) [4][4]f32 {
+fn colour4(c: host_eng.Color) [4][4]f32 {
     const v: [4]f32 = .{ c.r, c.g, c.b, c.a };
     return .{ v, v, v, v };
 }
 
-fn addRect(b: *ShapeBatch, dest: pixzig.RectF, c: pixzig.Color) void {
+fn addRect(b: *ShapeBatch, dest: host_eng.RectF, c: host_eng.Color) void {
     b.addQuad(quad4(dest.l, dest.t, dest.r, dest.b), {}, colour4(c)) catch {};
 }
 
-fn addSprite(b: *SpriteBatch, dest: pixzig.RectF, src: pixzig.RectF) void {
+fn addSprite(b: *SpriteBatch, dest: host_eng.RectF, src: host_eng.RectF) void {
     b.addQuad(quad4(dest.l, dest.t, dest.r, dest.b), quad4(src.l, src.t, src.r, src.b), {}) catch {};
 }
 
-fn addGlyph(b: *GlyphBatch, dest: pixzig.RectF, src: pixzig.RectF, c: pixzig.Color) void {
+fn addGlyph(b: *GlyphBatch, dest: host_eng.RectF, src: host_eng.RectF, c: host_eng.Color) void {
     b.addQuad(quad4(dest.l, dest.t, dest.r, dest.b), quad4(src.l, src.t, src.r, src.b), colour4(c)) catch {};
 }
 
@@ -138,7 +138,7 @@ fn addGlyph(b: *GlyphBatch, dest: pixzig.RectF, src: pixzig.RectF, c: pixzig.Col
 /// overlay (`icon_fg`) batch, same as its in-cell counterpart.
 pub const DeferredIcon = struct {
     icon: glyphwire.IconBg,
-    pos: pixzig.Vec2I,
+    pos: host_eng.Vec2I,
     foreground: bool,
 };
 
@@ -159,7 +159,7 @@ pub const Renderer = struct {
     /// `ManagedTexture`'s heap-allocated `Handle` stays at a stable
     /// address for its full lifetime, so `&managed.get().?.val` stays
     /// valid across the frames a `StaticQuadBatch` holds it.
-    image_textures: std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture),
+    image_textures: std.AutoHashMap(glyphwire.ImageHandle, *host_eng.ManagedTexture),
     /// Every bundled icon (`Context.icons`, seeded from the `assets/icons/`
     /// scan -- see `icons.loadIconsFromDir`) decoded once at startup and
     /// packed into a single texture, so a screen full of icons draws from
@@ -167,8 +167,8 @@ pub const Renderer = struct {
     /// then falls back to a per-handle `image_textures` upload, routed to
     /// `LayerBatches.icon_fallback`). `icon_uv` maps an icon's image
     /// handle to its normalized sub-rect inside `icon_atlas`.
-    icon_atlas: ?*pixzig.ManagedTexture = null,
-    icon_uv: std.AutoHashMap(glyphwire.ImageHandle, pixzig.RectF),
+    icon_atlas: ?*host_eng.ManagedTexture = null,
+    icon_uv: std.AutoHashMap(glyphwire.ImageHandle, host_eng.RectF),
     /// Scratch for the `.natural`-icon overflow handled at the end of
     /// `rebuildLayer` -- see `DeferredIcon`. Cleared (not freed) at the
     /// start of each rebuild and reused across rebuilds/layers.
@@ -181,9 +181,9 @@ pub const Renderer = struct {
     layer_batches: std.AutoHashMapUnmanaged(glyphwire.LayerHandle, *LayerBatches) = .empty,
     /// The three `ManagedShader`s the batches bind, fetched once on the
     /// first `syncBatches` (the window / GL context is up by then).
-    shape_shader: ?*pixzig.ManagedShader = null,
-    sprite_shader: ?*pixzig.ManagedShader = null,
-    glyph_shader: ?*pixzig.ManagedShader = null,
+    shape_shader: ?*host_eng.ManagedShader = null,
+    sprite_shader: ?*host_eng.ManagedShader = null,
+    glyph_shader: ?*host_eng.ManagedShader = null,
     /// Bumped whenever a text rebuild grew the glyph atlas (every glyph's
     /// UV moved). Each `LayerBatches` records the epoch it built at; a
     /// mismatch forces a rebuild of that layer's text.
@@ -239,7 +239,7 @@ pub const Renderer = struct {
         // One decoded icon awaiting its blit into the atlas buffer.
         const Packed = struct {
             handle: glyphwire.ImageHandle,
-            image: pixzig.stbi.Image,
+            image: host_eng.stbi.Image,
             x: usize = 0,
             y: usize = 0,
         };
@@ -251,7 +251,7 @@ pub const Renderer = struct {
         }
         for (handles.items) |handle| {
             const entry = self.app.server.ctx.images.get(handle) orelse continue;
-            var image = pixzig.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
+            var image = host_eng.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
                 std.log.warn("glyphwire-host: icon handle {d} failed to decode for the atlas: {t}", .{ handle, err });
                 continue;
             };
@@ -339,10 +339,10 @@ pub const Renderer = struct {
     /// Returns a stable pointer to the uploaded texture for `handle`,
     /// decoding and uploading it first if this is the first time this App
     /// has seen it -- see `image_textures`'s doc comment.
-    fn textureForImage(self: *Renderer, eng: *Engine, handle: glyphwire.ImageHandle) ?*pixzig.Texture {
+    fn textureForImage(self: *Renderer, eng: *Engine, handle: glyphwire.ImageHandle) ?*host_eng.Texture {
         const managed = self.image_textures.get(handle) orelse blk: {
             const entry = self.app.server.ctx.images.get(handle) orelse return null;
-            var image = pixzig.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
+            var image = host_eng.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
                 std.log.err("glyphwire-host: failed to decode image handle {d}: {t}", .{ handle, err });
                 return null;
             };
@@ -369,9 +369,9 @@ pub const Renderer = struct {
 
     fn ensureShaders(self: *Renderer, eng: *Engine) bool {
         if (self.shape_shader != null) return true;
-        self.shape_shader = eng.resources.getShader(pixzig.shaders.ColorShader) catch return false;
-        self.sprite_shader = eng.resources.getShader(pixzig.shaders.TextureShader) catch return false;
-        self.glyph_shader = eng.resources.getShader(pixzig.shaders.TextColorShader) catch return false;
+        self.shape_shader = eng.resources.getShader(host_eng.shaders.ColorShader) catch return false;
+        self.sprite_shader = eng.resources.getShader(host_eng.shaders.TextureShader) catch return false;
+        self.glyph_shader = eng.resources.getShader(host_eng.shaders.TextColorShader) catch return false;
         return true;
     }
 
@@ -429,7 +429,7 @@ pub const Renderer = struct {
     fn syncOneLayer(
         self: *Renderer,
         eng: *Engine,
-        fa: ?*pixzig.renderer.FontAtlas,
+        fa: ?*host_eng.renderer.FontAtlas,
         handle: glyphwire.LayerHandle,
         layer: *const glyphwire.Layer,
         origin_x: i32,
@@ -473,7 +473,7 @@ pub const Renderer = struct {
     fn rebuildLayer(
         self: *Renderer,
         eng: *Engine,
-        fa: ?*pixzig.renderer.FontAtlas,
+        fa: ?*host_eng.renderer.FontAtlas,
         lb: *LayerBatches,
         layer: *const glyphwire.Layer,
         origin_x: i32,
@@ -490,7 +490,7 @@ pub const Renderer = struct {
 
         lb.color_bg.beginBuild({});
 
-        const atlas_tex: ?*const pixzig.Texture = if (self.icon_atlas) |a|
+        const atlas_tex: ?*const host_eng.Texture = if (self.icon_atlas) |a|
             (if (a.get()) |live| &live.val else null)
         else
             null;
@@ -500,7 +500,7 @@ pub const Renderer = struct {
             lb.icon_fg.beginBuild(t);
         }
 
-        const fa_tex: ?*const pixzig.Texture = if (fa) |f| &f.texture else null;
+        const fa_tex: ?*const host_eng.Texture = if (fa) |f| &f.texture else null;
         if (fa_tex) |t| lb.text.beginBuild(t);
 
         // Phase 1: pack every glyph this layer shows into the atlas, then
@@ -536,8 +536,8 @@ pub const Renderer = struct {
                         if (bg.r != 0 or bg.g != 0 or bg.b != 0) {
                             addRect(
                                 &lb.color_bg,
-                                pixzig.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
-                                pixzig.Color.from(bg.r, bg.g, bg.b, bg.a),
+                                host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
+                                host_eng.Color.from(bg.r, bg.g, bg.b, bg.a),
                             );
                         }
                     },
@@ -556,7 +556,7 @@ pub const Renderer = struct {
                 if (any_highlight and layer.isHighlighted(c.metadata_id)) {
                     addRect(
                         &lb.color_bg,
-                        pixzig.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
+                        host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
                         selection.selection_highlight_color,
                     );
                 }
@@ -564,7 +564,7 @@ pub const Renderer = struct {
                 if (fa) |f| {
                     const g = c.grapheme();
                     if (g.len > 0) {
-                        emitGlyphs(&lb.text, f, g, px, py, pixzig.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
+                        emitGlyphs(&lb.text, f, g, px, py, host_eng.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
                     }
                 }
             }
@@ -591,7 +591,7 @@ pub const Renderer = struct {
                 const y0 = origin_y + @as(i32, @intCast(srow)) * geometry.cell_h;
                 addRect(
                     &lb.color_bg,
-                    pixzig.RectF.fromPosSize(x0, y0, rect_w, geometry.cell_h),
+                    host_eng.RectF.fromPosSize(x0, y0, rect_w, geometry.cell_h),
                     selection.selection_highlight_color,
                 );
             }
@@ -610,7 +610,7 @@ pub const Renderer = struct {
     /// Finds (or lazily creates + `beginBuild`s) the per-handle sprite
     /// batch for `key` in `list`, bound to `tex`. Null on an allocation
     /// failure.
-    fn texBatchFor(self: *Renderer, list: *std.ArrayList(TexBatch), key: u64, tex: *const pixzig.Texture) ?*SpriteBatch {
+    fn texBatchFor(self: *Renderer, list: *std.ArrayList(TexBatch), key: u64, tex: *const host_eng.Texture) ?*SpriteBatch {
         for (list.items) |*t| {
             if (t.key == key) return &t.batch;
         }
@@ -642,7 +642,7 @@ pub const Renderer = struct {
 
         const img_w_f: f32 = @floatFromInt(entry.width);
         const img_h_f: f32 = @floatFromInt(entry.height);
-        const src = pixzig.RectF{
+        const src = host_eng.RectF{
             .l = @as(f32, @floatFromInt(img.offset_x)) / img_w_f,
             .t = @as(f32, @floatFromInt(img.offset_y)) / img_h_f,
             .r = @as(f32, @floatFromInt(img.offset_x + @as(u32, @intCast(avail_w)))) / img_w_f,
@@ -650,7 +650,7 @@ pub const Renderer = struct {
         };
 
         const batch = self.texBatchFor(&lb.images, img.handle, tex) orelse return;
-        addSprite(batch, pixzig.RectF.fromPosSize(px, py, avail_w, avail_h), src);
+        addSprite(batch, host_eng.RectF.fromPosSize(px, py, avail_w, avail_h), src);
     }
 
     /// `.natural`-scale icons can overflow into cells not yet emitted, so
@@ -672,7 +672,7 @@ pub const Renderer = struct {
         const entry = self.app.server.ctx.images.get(icon.handle) orelse return;
         if (entry.width == 0 or entry.height == 0) return;
 
-        const atlas_uv: ?pixzig.RectF = if (has_icon_atlas) self.icon_uv.get(icon.handle) else null;
+        const atlas_uv: ?host_eng.RectF = if (has_icon_atlas) self.icon_uv.get(icon.handle) else null;
 
         const cell_w_f: f32 = @floatFromInt(geometry.cell_w);
         const cell_h_f: f32 = @floatFromInt(geometry.cell_h);
@@ -705,14 +705,14 @@ pub const Renderer = struct {
             .center => (cell_h_f - dest_h) / 2,
             .end => cell_h_f - dest_h,
         };
-        const dest = pixzig.RectF{ .l = dest_x, .t = dest_y, .r = dest_x + dest_w, .b = dest_y + dest_h };
+        const dest = host_eng.RectF{ .l = dest_x, .t = dest_y, .r = dest_x + dest_w, .b = dest_y + dest_h };
 
         // `icon.src_*` is a fraction of the icon (0..1 for a plain
         // `draw_icon`, a sub-rect only for a box tile). Map it through the
         // atlas sub-rect when drawing from the atlas; use it directly on a
         // fallback per-handle texture.
         if (atlas_uv) |a| {
-            const src = pixzig.RectF{
+            const src = host_eng.RectF{
                 .l = a.l + icon.src_l * (a.r - a.l),
                 .t = a.t + icon.src_t * (a.b - a.t),
                 .r = a.l + icon.src_r * (a.r - a.l),
@@ -722,22 +722,22 @@ pub const Renderer = struct {
         } else {
             const tex = self.textureForImage(eng, icon.handle) orelse return;
             const batch = self.texBatchFor(&lb.icon_fallback, icon.handle, tex) orelse return;
-            addSprite(batch, dest, pixzig.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b });
+            addSprite(batch, dest, host_eng.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b });
         }
     }
 
     /// Emits `text`'s glyph quads starting at cell top-left `(px, py)`,
-    /// mirroring `pixzig.renderer.TextRenderer.drawStringColored`: baseline
+    /// mirroring `host_eng.renderer.TextRenderer.drawStringColored`: baseline
     /// at `py + atlas.ascent`, each glyph placed by its bearing and
     /// advanced by its `advance`, UVs straight from the atlas.
-    fn emitGlyphs(batch: *GlyphBatch, fa: *pixzig.renderer.FontAtlas, text: []const u8, px: i32, py: i32, color: pixzig.Color) void {
+    fn emitGlyphs(batch: *GlyphBatch, fa: *host_eng.renderer.FontAtlas, text: []const u8, px: i32, py: i32, color: host_eng.Color) void {
         const pos_y = py + fa.ascent;
         var curr_x = px;
         var it = (std.unicode.Utf8View.initUnchecked(text)).iterator();
         while (it.nextCodepoint()) |cp| {
             const cd = fa.getChar(@intCast(cp)) orelse continue;
             if (cd.size.x > 0 and cd.size.y > 0) {
-                const dest = pixzig.RectF.fromPosSize(curr_x + cd.bearing.x, pos_y - cd.bearing.y, cd.size.x, cd.size.y);
+                const dest = host_eng.RectF.fromPosSize(curr_x + cd.bearing.x, pos_y - cd.bearing.y, cd.size.x, cd.size.y);
                 addGlyph(batch, dest, cd.coords, color);
             }
             curr_x += cd.advance;
@@ -839,9 +839,8 @@ pub const Renderer = struct {
     /// transient overlay text, not grid content, and wrapping it would
     /// have to reflow around content it is about to replace anyway.
     ///
-    /// Compiles away entirely on the GLFW backend (`Preedit.supported`).
+
     fn drawPreedit(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize) void {
-        if (comptime !preedit_mod.Preedit.supported) return;
 
         const text = self.app.preedit.text(eng);
         if (text.len == 0) return;
@@ -859,7 +858,7 @@ pub const Renderer = struct {
         defer eng.renderer.end();
 
         eng.renderer.drawFilledRect(
-            pixzig.RectF.fromPosSize(x0, y0, span_px, geometry.cell_h),
+            host_eng.RectF.fromPosSize(x0, y0, span_px, geometry.cell_h),
             preedit_bg,
         );
 
@@ -890,7 +889,7 @@ pub const Renderer = struct {
         if (cursor_byte != null and cursor_col == null) cursor_col = col;
 
         eng.renderer.drawFilledRect(
-            pixzig.RectF.fromPosSize(x0, y0 + geometry.cell_h - preedit_underline_px, span_px, preedit_underline_px),
+            host_eng.RectF.fromPosSize(x0, y0 + geometry.cell_h - preedit_underline_px, span_px, preedit_underline_px),
             preedit_fg,
         );
 
@@ -900,7 +899,7 @@ pub const Renderer = struct {
         if (cursor_col) |cc| {
             if (cc <= root.width) {
                 eng.renderer.drawFilledRect(
-                    pixzig.RectF.fromPosSize(
+                    host_eng.RectF.fromPosSize(
                         origin_x + @as(i32, @intCast(cc)) * geometry.cell_w,
                         y0,
                         cursor_width,
@@ -918,7 +917,7 @@ pub const Renderer = struct {
     /// `line` stays a thin bar at the left edge. Assumes an open renderer
     /// pass.
     fn drawCaret(self: *const Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, crow: usize, ccol: usize, view_offset: usize) void {
-        const white = pixzig.Color.from(255, 255, 255, 255);
+        const white = host_eng.Color.from(255, 255, 255, 255);
         const cx = origin_x + @as(i32, @intCast(ccol)) * geometry.cell_w;
         const cy = origin_y + @as(i32, @intCast(crow)) * geometry.cell_h;
 
@@ -927,20 +926,20 @@ pub const Renderer = struct {
 
         switch (self.app.caret.shape) {
             .line => eng.renderer.drawFilledRect(
-                pixzig.RectF.fromPosSize(cx, cy, cursor_width, geometry.cell_h),
+                host_eng.RectF.fromPosSize(cx, cy, cursor_width, geometry.cell_h),
                 white,
             ),
             .block => eng.renderer.drawFilledRect(
-                pixzig.RectF.fromPosSize(cx, cy, cell_span, geometry.cell_h),
+                host_eng.RectF.fromPosSize(cx, cy, cell_span, geometry.cell_h),
                 white,
             ),
             .box => eng.renderer.drawRect(
-                pixzig.RectF.fromPosSize(cx, cy, cell_span, geometry.cell_h),
+                host_eng.RectF.fromPosSize(cx, cy, cell_span, geometry.cell_h),
                 white,
                 cursor_box_line_px,
             ),
             .underline => eng.renderer.drawFilledRect(
-                pixzig.RectF.fromPosSize(cx, cy + geometry.cell_h - cursor_underline_px, cell_span, cursor_underline_px),
+                host_eng.RectF.fromPosSize(cx, cy + geometry.cell_h - cursor_underline_px, cell_span, cursor_underline_px),
                 white,
             ),
         }
@@ -950,7 +949,7 @@ pub const Renderer = struct {
     /// `content_pad_px` margins and the scrollbar excluded -- from the GL
     /// framebuffer and writes it to `path` as a PNG. Best-effort.
     fn captureContentArea(self: *Renderer, eng: *Engine, path: []const u8) void {
-        const gl = pixzig.gl;
+        const gl = host_eng.gl;
         const fb = eng.window_state.framebuffer_size;
         const x0: i32 = geometry.content_pad_px;
         const w: i32 = @min(@as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w, fb.x - geometry.scrollbar_width_px - 2 * geometry.content_pad_px);
@@ -998,7 +997,7 @@ pub const Renderer = struct {
             @memcpy(pixels[bot * row_bytes ..][0..row_bytes], tmp);
         }
 
-        const img = pixzig.stbi.Image{
+        const img = host_eng.stbi.Image{
             .data = pixels,
             .width = @intCast(uw),
             .height = @intCast(uh),
@@ -1038,25 +1037,25 @@ pub const Renderer = struct {
         }
         if (owned) {
             eng.renderer.drawFilledRect(
-                pixzig.RectF.fromPosSize(fb.x - geometry.scrollbar_width_px, 0, geometry.scrollbar_width_px, fb.y),
-                pixzig.Color.from(28, 28, 32, 255),
+                host_eng.RectF.fromPosSize(fb.x - geometry.scrollbar_width_px, 0, geometry.scrollbar_width_px, fb.y),
+                host_eng.Color.from(28, 28, 32, 255),
             );
             return;
         }
         const geom = geometry.scrollbarGeom(fb.x, fb.y, history_len, height, view_scroll);
 
         eng.renderer.drawFilledRect(
-            pixzig.RectF.fromPosSize(@as(i32, @intFromFloat(geom.left)), 0, geometry.scrollbar_width_px, fb.y),
-            pixzig.Color.from(28, 28, 32, 255),
+            host_eng.RectF.fromPosSize(@as(i32, @intFromFloat(geom.left)), 0, geometry.scrollbar_width_px, fb.y),
+            host_eng.Color.from(28, 28, 32, 255),
         );
         eng.renderer.drawFilledRect(
-            pixzig.RectF{
+            host_eng.RectF{
                 .l = geom.left + 2,
                 .t = geom.thumb_top,
                 .r = geom.left + @as(f32, @floatFromInt(geometry.scrollbar_width_px)) - 2,
                 .b = geom.thumb_top + geom.thumb_h,
             },
-            pixzig.Color.from(120, 120, 130, 255),
+            host_eng.Color.from(120, 120, 130, 255),
         );
     }
 };

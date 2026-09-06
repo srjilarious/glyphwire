@@ -1,6 +1,6 @@
 const std = @import("std");
 const sdl = @import("sdl3");
-const pixzig = @import("pixzig_core.zig");
+const core = @import("core.zig");
 
 const NumKeys = @typeInfo(Key).@"enum".fields.len;
 const NumMouseButtons = @typeInfo(MouseButton).@"enum".fields.len;
@@ -49,10 +49,9 @@ fn FixedBuffer(comptime capacity: usize) type {
 /// Key identities forwarded to glyphwire by name (`@tagName`), so the
 /// field names here are wire-visible and must match what the rest of
 /// glyphwire matches on -- notably `src/key_encode.zig`'s `F1`..`F12`
-/// entries, hence the uppercase function keys. The set mirrors zglfw's
-/// `Key` enum so `glyphwire-host` (GLFW) and `glyphwire-host-sdl` put the
-/// same names on the wire; GLFW's `world_1`/`world_2` have no SDL
-/// equivalent and are dropped.
+/// entries, hence the uppercase function keys. Every name here is one SDL
+/// actually reports: there is no `F25`, and no `world_1`/`world_2`, both
+/// of which the old GLFW backend declared and no SDL keycode maps to.
 ///
 /// These come from SDL's *keycode* (`event.key.key`), which is resolved
 /// through the active OS layout, where zglfw's are physical positions. So
@@ -154,7 +153,6 @@ pub const Key = enum {
     F22,
     F23,
     F24,
-    F25,
     kp_0,
     kp_1,
     kp_2,
@@ -183,6 +181,11 @@ pub const Key = enum {
     menu,
 };
 
+/// Mouse buttons, also forwarded by name (see `Key`). `x1`/`x2` are the
+/// two side buttons; the old GLFW backend called the same physical
+/// buttons `four`/`five` and declared `six`..`eight` on top, which no
+/// platform ever reported. `host/input.zig` forwards every field of this
+/// enum, so these names are wire-visible too.
 pub const MouseButton = enum {
     left,
     right,
@@ -292,7 +295,6 @@ fn mapKey(key: sdl.SDL_Keycode) Key {
         sdl.SDLK_F22 => .F22,
         sdl.SDLK_F23 => .F23,
         sdl.SDLK_F24 => .F24,
-        sdl.SDLK_EXECUTE => .F25,
         sdl.SDLK_KP_0 => .kp_0,
         sdl.SDLK_KP_1 => .kp_1,
         sdl.SDLK_KP_2 => .kp_2,
@@ -428,13 +430,23 @@ pub const Keyboard = struct {
         return @min(i, composing.len);
     }
 
-    fn setPreedit(self: *Keyboard, composing: []const u8, cursor: i32) void {
+    /// Appends typed UTF-8 to this tick's text buffer. Driven by
+    /// `InputManager.handleEvent` on `SDL_EVENT_TEXT_INPUT`; public so a
+    /// test can drive the same path without an SDL event queue.
+    pub fn pushText(self: *Keyboard, utf8: []const u8) void {
+        self.text_buf.appendSlice(utf8);
+    }
+
+    /// Replaces the IME composition and its caret. See `pushText` for why
+    /// this is public.
+    pub fn setPreedit(self: *Keyboard, composing: []const u8, cursor: i32) void {
         self.preedit_buf.clear();
         self.preedit_buf.appendSlice(composing);
         self.preedit_cursor = cursor;
     }
 
-    fn clearPreedit(self: *Keyboard) void {
+    /// Ends any composition in flight.
+    pub fn clearPreedit(self: *Keyboard) void {
         self.preedit_buf.clear();
         self.preedit_cursor = -1;
     }
@@ -447,15 +459,27 @@ pub const Keyboard = struct {
         self.prev = self.curr;
         self.text_buf.clear();
     }
+
+    /// Drops every key, the modifier bits and any composition in flight.
+    /// Called when the window loses focus: this state is event-driven, so
+    /// a key held as focus leaves never sees its key-up and would stay
+    /// down forever. `prev` is cleared alongside `curr` so the resync
+    /// doesn't read as a `released` edge on the next tick.
+    pub fn clear(self: *Keyboard) void {
+        self.curr = std.StaticBitSet(NumKeys).initEmpty();
+        self.prev = self.curr;
+        self.mods = 0;
+        self.text_buf.clear();
+        self.clearPreedit();
+    }
 };
 
 pub const Mouse = struct {
     curr: std.StaticBitSet(NumMouseButtons) = std.StaticBitSet(NumMouseButtons).initEmpty(),
     prev: std.StaticBitSet(NumMouseButtons) = std.StaticBitSet(NumMouseButtons).initEmpty(),
-    raw_pos_value: pixzig.Vec2F = .{ .x = 0, .y = 0 },
-    fb_pos: pixzig.Vec2F = .{ .x = 0, .y = 0 },
-    logical_pos: pixzig.Vec2F = .{ .x = -1, .y = -1 },
-    scroll_delta: pixzig.Vec2F = .{ .x = 0, .y = 0 },
+    raw_pos_value: core.Vec2F = .{ .x = 0, .y = 0 },
+    logical_pos: core.Vec2F = .{ .x = -1, .y = -1 },
+    scroll_delta: core.Vec2F = .{ .x = 0, .y = 0 },
 
     pub fn set(self: *Mouse, button: MouseButton, down_value: bool) void {
         if (down_value) {
@@ -479,15 +503,15 @@ pub const Mouse = struct {
         return !self.curr.isSet(idx) and self.prev.isSet(idx);
     }
 
-    pub fn rawPos(self: *const Mouse) pixzig.Vec2F {
+    pub fn rawPos(self: *const Mouse) core.Vec2F {
         return self.raw_pos_value;
     }
 
-    pub fn pos(self: *const Mouse) pixzig.Vec2F {
+    pub fn pos(self: *const Mouse) core.Vec2F {
         return self.logical_pos;
     }
 
-    pub fn scroll(self: *const Mouse) pixzig.Vec2F {
+    pub fn scroll(self: *const Mouse) core.Vec2F {
         return self.scroll_delta;
     }
 
@@ -495,19 +519,48 @@ pub const Mouse = struct {
         self.prev = self.curr;
         self.scroll_delta = .{ .x = 0, .y = 0 };
     }
+
+    /// Drops every button and the pending scroll delta, for the same
+    /// focus-loss reason as `Keyboard.clear`. The cursor position is left
+    /// alone: it stays wherever the pointer last was, which is still true
+    /// when focus comes back.
+    pub fn clear(self: *Mouse) void {
+        self.curr = std.StaticBitSet(NumMouseButtons).initEmpty();
+        self.prev = self.curr;
+        self.scroll_delta = .{ .x = 0, .y = 0 };
+    }
 };
 
 pub const InputManager = struct {
     mouse_enabled: bool,
-    num_gamepads: u8,
     keyboard: Keyboard = .{},
     mouse: Mouse = .{},
 
-    pub fn init(opts: pixzig.InputOptions) InputManager {
-        return .{
-            .mouse_enabled = opts.mouse,
-            .num_gamepads = 0,
-        };
+    /// `opts.numGamepads` is rejected at compile time by `Engine.init`
+    /// rather than silently ignored here -- host_eng carries no gamepad
+    /// support at all.
+    pub fn init(opts: core.InputOptions) InputManager {
+        return .{ .mouse_enabled = opts.mouse };
+    }
+
+    /// Seeds the cursor position from SDL rather than leaving it at
+    /// (0, 0) until the pointer first moves. Without this a host that
+    /// reads `mouse.pos()` before any motion event -- glyphwire's does,
+    /// to decide hover -- sees the top-left cell as if the pointer were
+    /// parked there. Called once from `Engine.init`.
+    pub fn seedMousePos(self: *InputManager) void {
+        if (!self.mouse_enabled) return;
+        var x: f32 = 0;
+        var y: f32 = 0;
+        _ = sdl.SDL_GetMouseState(&x, &y);
+        self.mouse.raw_pos_value = .{ .x = x, .y = y };
+    }
+
+    /// Drops all key and button state. `Engine.pollEvents` calls this on
+    /// `SDL_EVENT_WINDOW_FOCUS_LOST`; see `Keyboard.clear`.
+    pub fn clear(self: *InputManager) void {
+        self.keyboard.clear();
+        self.mouse.clear();
     }
 
     pub fn handleEvent(self: *InputManager, event: sdl.SDL_Event) void {
@@ -518,8 +571,7 @@ pub const InputManager = struct {
                 self.keyboard.mods = event.key.mod;
             },
             sdl.SDL_EVENT_TEXT_INPUT => {
-                const text = std.mem.span(event.text.text);
-                self.keyboard.text_buf.appendSlice(text);
+                self.keyboard.pushText(std.mem.span(event.text.text));
                 // A commit ends the composition. SDL doesn't always follow
                 // it with an empty editing event, so drop the preedit here
                 // or the committed text would stay ghosted at the caret.
@@ -559,15 +611,14 @@ pub const InputManager = struct {
     pub fn update(
         self: *InputManager,
         window: *@import("platform_sdl.zig").Window,
-        scale_factor: pixzig.Vec2F,
-        viewport: *const pixzig.Viewport,
+        scale_factor: core.Vec2F,
+        viewport: *const core.Viewport,
     ) void {
         _ = window;
         if (self.mouse_enabled) {
             const raw = self.mouse.rawPos();
-            const fb = pixzig.Vec2F{ .x = raw.x * scale_factor.x, .y = raw.y * scale_factor.y };
-            self.mouse.fb_pos = fb;
-            self.mouse.logical_pos = viewport.framebufferToLogical(fb) orelse pixzig.Vec2F{ .x = -1, .y = -1 };
+            const fb = core.Vec2F{ .x = raw.x * scale_factor.x, .y = raw.y * scale_factor.y };
+            self.mouse.logical_pos = viewport.framebufferToLogical(fb) orelse core.Vec2F{ .x = -1, .y = -1 };
         }
     }
 

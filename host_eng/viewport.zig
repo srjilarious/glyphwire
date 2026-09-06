@@ -1,18 +1,18 @@
-//! Logical-resolution viewport math, vendored verbatim in behaviour
-//! from pixzig's `src/pixzig/window.zig` (its `Camera2D` and
-//! `WindowState` are not carried here -- `WindowState` lives in
-//! `window.zig` next door, rebuilt on SDL).
+//! Logical-resolution viewport math: how a fixed logical area is mapped
+//! onto a framebuffer of a different size. Independent of the windowing
+//! backend -- `WindowState`, which is not, lives in `window.zig` next
+//! door.
 
 const gl = @import("zopengl").bindings;
 const zmath = @import("zmath");
-const common = @import("pixzig_src/common.zig");
+const common = @import("engine/common.zig");
 
 const Vec2I = common.Vec2I;
 const Vec2F = common.Vec2F;
 const RectI = common.RectI;
 
 /// How the logical area is mapped onto the framebuffer when the two
-/// differ in size. Vendored from pixzig's `src/pixzig/window.zig`.
+/// differ in size.
 pub const ScalePolicy = union(enum) {
     /// Fills the framebuffer, ignoring aspect ratio.
     stretch,

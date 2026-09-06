@@ -52,7 +52,7 @@ const runs = [_]Run{
     .{ .row = 0, .col = 0, .text = "glyphwire", .fg = rgb(0, 255, 255) },
     .{ .row = 0, .col = 10, .text = "styled text demo", .fg = rgb(255, 255, 255) },
 
-    .{ .row = 2, .col = 0, .text = "colored text over pixzig", .fg = rgb(255, 255, 255), .bg = rgb(40, 40, 90) },
+    .{ .row = 2, .col = 0, .text = "colored text over glyphwire", .fg = rgb(255, 255, 255), .bg = rgb(40, 40, 90) },
 
     .{ .row = 4, .col = 0, .text = "RED", .fg = rgb(255, 85, 85) },
     .{ .row = 4, .col = 4, .text = "GREEN", .fg = rgb(80, 250, 123) },

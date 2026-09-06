@@ -1,6 +1,6 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const pixzig = @import("pixzig");
+const host_eng = @import("host_eng");
 
 const config = @import("config.zig");
 const caret_mod = @import("caret.zig");
@@ -13,50 +13,44 @@ const render_mod = @import("render.zig");
 
 const CursorConfig = config.CursorConfig;
 
-pub const EngOptions: pixzig.PixzigEngineOptions = .{
+pub const EngOptions: host_eng.EngineOptions = .{
     // `maxSprites`: a full-window character grid draws far more than the
     // 1000-quad default per category (background rects, glyphs, icons). The
     // per-category flushed passes in `render.Renderer.renderLayer` keep the
     // paint order correct regardless, but sizing every batch queue to hold
     // a whole large grid keeps each category to a single draw call. 30k
-    // covers a ~240x125 cell grid of solid backgrounds; pixzig's `u32`
-    // batch indices make it safe.
+    // covers a ~240x125 cell grid of solid backgrounds; the renderer's
+    // `u32` batch indices make it safe.
     .rendererOpts = .{ .textRendering = true, .maxSprites = 30_000 },
 };
-pub const AppRunner = pixzig.PixzigAppRunner(App, EngOptions);
+pub const AppRunner = host_eng.AppRunner(App, EngOptions);
 
-/// The pixzig engine instance type, aliased so the sub-struct modules
+/// The engine instance type, aliased so the sub-struct modules
 /// (`input.zig`, `render.zig`, ...) can name it without re-deriving the
-/// `PixzigAppRunner` instantiation.
+/// `AppRunner` instantiation.
 pub const Engine = AppRunner.Engine;
 
-/// The active engine backend's key / mouse-button enums and window handle.
-/// Both `glyphwire-host` (upstream pixzig, GLFW) and `glyphwire-host-sdl`
-/// (the vendored `host_eng`, SDL3) are built from this one `host/` tree,
-/// and they name these types in different places: the SDL3 backend groups
-/// its own enums under `pixzig.input`, while upstream pixzig re-exports
-/// zglfw's under `pixzig.glfw` (its own `pixzig.input` holds the
-/// `Keyboard`/`Mouse`/`KeyChord` machinery, not the key enums). Pick
-/// whichever the linked engine actually offers; when the GLFW host goes
-/// away, drop the `pixzig.glfw` arm and use `pixzig.input` directly.
-const backend = if (@hasDecl(pixzig.input, "Key")) pixzig.input else pixzig.glfw;
-pub const Key = backend.Key;
-pub const MouseButton = backend.MouseButton;
-pub const Window = backend.Window;
+/// The engine's key / mouse-button enums and window handle. Both enums'
+/// field names are wire-visible -- `input.zig` forwards them by
+/// `@tagName` -- so read `host_eng/input.zig`'s doc comments before
+/// renaming anything in them.
+pub const Key = host_eng.input.Key;
+pub const MouseButton = host_eng.input.MouseButton;
+pub const Window = host_eng.input.Window;
 
 /// Font file/size passed to `App.init` -- what `window_sizing`'s
 /// `applyFontSize` needs to repeat the startup `measureFontFileIndexed` at
 /// a new size.
 pub const FontRuntime = window_sizing_mod.WindowSizing.FontRuntime;
 
-/// glyphwire-host: the pixzig-windowed glyphwire renderer (Milestone 8 --
+/// glyphwire-host: the SDL3-windowed glyphwire renderer (Milestone 8 --
 /// see docs/slice_plan.md). Owns the `Context` and `Server` in-process --
 /// it's the graphical front end, not just another client of a separately
 /// spawned server -- and reads/writes the grid directly (see
 /// `render.Renderer.render`, `Server.reportKey`/`reportMouseButton`/
 /// `reportMouseMove`), with no wire round trip for its own state.
-/// glyphwire-shell is still a separate process (no pixzig dependency, so it
-/// can't own an in-process `Context` itself) and only ever sees the grid
+/// glyphwire-shell is still a separate process (no engine dependency, so
+/// it can't own an in-process `Context` itself) and only ever sees the grid
 /// through the socket, exactly like any other client would --
 /// `Server.serveForever` runs on a background thread the whole time so that
 /// connection keeps working normally.
@@ -78,7 +72,7 @@ pub const App = struct {
     /// Set by `reapChild` once glyphwire-shell's process actually exits
     /// (normally from its `exit` builtin, but this covers a crash or
     /// external kill just as well) -- the one thing that ends the host,
-    /// deliberately not `escape` the way a typical pixzig example/game
+    /// deliberately not `escape` the way a typical engine example/game
     /// would: an accidental Escape shouldn't kill an interactive shell
     /// session out from under whatever's running in it.
     shell_exited: *std.atomic.Value(bool),
@@ -146,8 +140,8 @@ pub const App = struct {
             },
             .renderer = .{
                 .app = undefined,
-                .image_textures = std.AutoHashMap(glyphwire.ImageHandle, *pixzig.ManagedTexture).init(alloc),
-                .icon_uv = std.AutoHashMap(glyphwire.ImageHandle, pixzig.RectF).init(alloc),
+                .image_textures = std.AutoHashMap(glyphwire.ImageHandle, *host_eng.ManagedTexture).init(alloc),
+                .icon_uv = std.AutoHashMap(glyphwire.ImageHandle, host_eng.RectF).init(alloc),
             },
         };
         // Back-pointers: `app` is at a stable heap address for its whole
@@ -196,7 +190,7 @@ pub const App = struct {
         self.selection.handleKeys(eng, deltaTimeMs);
         // Push the session clipboard buffer to the OS clipboard if it
         // changed (a client's `set_clipboard`, or a selection copy just
-        // above). Main-thread GLFW call.
+        // above). Main-thread SDL call.
         self.selection.syncClipboardToOs();
         const key_pressed = self.keys.reportKeyEvents(eng);
         const text_typed = self.keys.reportTextInput(eng);
@@ -229,7 +223,7 @@ pub const App = struct {
         self.caret.tickBlink(deltaTimeMs);
         // Last, so the OS text-input area follows wherever every path
         // above left the caret. Drives the IME candidate window's
-        // placement; no-op on the GLFW backend.
+        // placement.
         self.preedit.syncInputArea(eng);
 
         return true;

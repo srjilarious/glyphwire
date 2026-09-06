@@ -1,5 +1,6 @@
-//! Vendored from pixzig's `src/pixzig/resources.zig`, with two engine
-//! features glyphwire doesn't use stripped or disabled:
+//! The resource manager: ref-counted textures, shaders, atlases and
+//! fonts, keyed by name. Two engine features glyphwire doesn't use are
+//! stripped or disabled here:
 //!
 //!   * Tilemap support (`ManagedTileMap`, `loadTileMap`, `acquireTileMap`)
 //!     is removed outright. It was the only reason this file pulled in
@@ -512,7 +513,7 @@ pub const ResourceManager = struct {
     //
     // /// Poll the file watcher and reload any resources whose source files have
     // /// changed since the last call. This is a no-op in release builds.
-    // /// Called automatically by `PixzigAppRunner` each frame.
+    // /// Called automatically by `AppRunner` each frame.
     // pub fn checkHotReload(self: *Self) void {
     //     if (comptime builtin.mode != .Debug) return;
     //     const hr = if (self.hot_reload) |*h| h else return;

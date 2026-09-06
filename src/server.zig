@@ -45,7 +45,7 @@ pub const Connection = struct {
 /// `ctx_mutex` below) while still serving other, separate client processes
 /// over the socket the normal way -- glyphwire-host does exactly this: it
 /// owns the `Context` and renders it directly, but glyphwire-shell (a
-/// separate process, no pixzig dependency) still only ever sees it through
+/// separate process, no engine dependency) still only ever sees it through
 /// this wire protocol. `server/main.zig` is the headless case: a `Server`
 /// with no in-process owner at all, just serving connections.
 pub const Server = struct {

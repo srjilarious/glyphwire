@@ -26,7 +26,7 @@ fn sandboxShellConfig(env: *std.process.Environ.Map, alloc: std.mem.Allocator) !
 ///
 /// Superseded milestone-7's `shellSpawnsServerAndExecsClientTest`, which
 /// spawned `glyphwire-shell` itself and waited for it to exit. That no
-/// longer applies: glyphwire-shell is now the pixzig-windowed renderer (see
+/// longer applies: glyphwire-host is now the SDL3-windowed renderer (see
 /// slice_plan.md, Milestone 8) and stays open rendering the grid rather than
 /// exiting after launching a child, so it can't be driven headlessly from a
 /// test. The `Server`/discovery-env-var mechanism this test cares about is
@@ -92,7 +92,7 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
     try testz.expectEqual(c00.style.fg.g, 255);
     try testz.expectEqual(c00.style.fg.b, 255);
 
-    // "colored text over pixzig" at row 2, col 0 with a navy background.
+    // "colored text over glyphwire" at row 2, col 0 with a navy background.
     const c20 = ctx.root.cell(2, 0);
     try testz.expectEqualStr("c", c20.grapheme());
     switch (c20.style.bg) {

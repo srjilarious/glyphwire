@@ -96,7 +96,7 @@ pub fn Renderer(opts: RendererOptions) type {
             text: TextRenderer = undefined,
         };
 
-        const DefaultFontName = "__pixzig_default_font";
+        const DefaultFontName = "__host_eng_default_font";
 
         pub fn init(alloc: std.mem.Allocator, resMgr: *ResourceManager, initOpts: RendererInitOpts) !Self {
             var rend = try alloc.create(Impl);

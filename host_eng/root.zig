@@ -1,63 +1,61 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const sdl = @import("sdl3");
-const pixzig = @import("pixzig_core.zig");
+const core = @import("core.zig");
 
 const input_mod = @import("input.zig");
 const platform_mod = @import("platform_sdl.zig");
 const window_mod = @import("window.zig");
 
-pub const gl = pixzig.gl;
-pub const zopengl = pixzig.zopengl;
-pub const zmath = pixzig.zmath;
-pub const stbi = pixzig.stbi;
-pub const renderer = pixzig.renderer;
-pub const shaders = pixzig.shaders;
-pub const resources = pixzig.resources;
-pub const system = pixzig.system;
-pub const ziglua = pixzig.ziglua;
+pub const gl = core.gl;
+pub const zopengl = core.zopengl;
+pub const zmath = core.zmath;
+pub const stbi = core.stbi;
+pub const renderer = core.renderer;
+pub const shaders = core.shaders;
+pub const resources = core.resources;
+pub const system = core.system;
+pub const ziglua = core.ziglua;
 
-pub const Texture = pixzig.Texture;
-pub const ManagedTexture = pixzig.ManagedTexture;
-pub const ManagedShader = pixzig.ManagedShader;
-pub const Vec2I = pixzig.Vec2I;
-pub const Vec2F = pixzig.Vec2F;
-pub const RectI = pixzig.RectI;
-pub const RectF = pixzig.RectF;
-pub const Color = pixzig.Color;
-pub const Color8 = pixzig.Color8;
-pub const Viewport = pixzig.Viewport;
-pub const ScalePolicy = pixzig.ScalePolicy;
+pub const Texture = core.Texture;
+pub const ManagedTexture = core.ManagedTexture;
+pub const ManagedShader = core.ManagedShader;
+pub const Vec2I = core.Vec2I;
+pub const Vec2F = core.Vec2F;
+pub const RectI = core.RectI;
+pub const RectF = core.RectF;
+pub const Color = core.Color;
+pub const Color8 = core.Color8;
+pub const Viewport = core.Viewport;
+pub const ScalePolicy = core.ScalePolicy;
 pub const WindowState = window_mod.WindowState;
-pub const InputOptions = pixzig.InputOptions;
-pub const PixzigEngineOptions = pixzig.PixzigEngineOptions;
-pub const PixzigEngineInitOptions = pixzig.PixzigEngineInitOptions;
+pub const InputOptions = core.InputOptions;
+pub const EngineOptions = core.EngineOptions;
+pub const EngineInitOptions = core.EngineInitOptions;
 
-/// Input types and the platform window handle. Named `input` (not `glfw`)
-/// because there is no GLFW here: `Key` / `MouseButton` are this backend's
-/// own enums and `Window` wraps an `SDL_Window`. Callers name keys as
-/// `pixzig.input.Key.escape`, mouse buttons as `pixzig.input.MouseButton`.
+/// Input types and the platform window handle. `Key` / `MouseButton` are
+/// this backend's own enums and `Window` wraps an `SDL_Window`. Callers
+/// name keys as `host_eng.input.Key.escape`, mouse buttons as
+/// `host_eng.input.MouseButton`.
 pub const input = struct {
     pub const Window = platform_mod.Window;
     pub const Key = input_mod.Key;
     pub const MouseButton = input_mod.MouseButton;
+    pub const Keyboard = input_mod.Keyboard;
+    pub const Mouse = input_mod.Mouse;
+    pub const InputManager = input_mod.InputManager;
 };
 
-const ResourceManager = pixzig.resources.ResourceManager;
-
-fn sdlError(err: anyerror) anyerror {
-    std.log.err("SDL3: {s}", .{sdl.SDL_GetError()});
-    return err;
-}
+const ResourceManager = core.resources.ResourceManager;
 
 fn glProcAddress(proc_name: [*:0]const u8) callconv(.c) ?*const anyopaque {
     const ptr = sdl.SDL_GL_GetProcAddress(proc_name);
     return @ptrCast(ptr);
 }
 
-pub fn PixzigAppRunner(comptime AppData: type, comptime engOpts: PixzigEngineOptions) type {
+pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
     return struct {
-        pub const Engine = PixzigEngine(engOpts);
+        pub const Engine = EngineType(engOpts);
 
         engine: *Engine,
         alloc: std.mem.Allocator,
@@ -70,7 +68,7 @@ pub fn PixzigAppRunner(comptime AppData: type, comptime engOpts: PixzigEngineOpt
         pub fn init(
             title: [:0]const u8,
             alloc: std.mem.Allocator,
-            engInitOpts: PixzigEngineInitOptions,
+            engInitOpts: EngineInitOptions,
         ) !*Self {
             const runner = try alloc.create(Self);
             errdefer alloc.destroy(runner);
@@ -124,11 +122,13 @@ pub fn PixzigAppRunner(comptime AppData: type, comptime engOpts: PixzigEngineOpt
     };
 }
 
-pub fn PixzigEngine(comptime engOpts: PixzigEngineOptions) type {
+/// Builds the engine type for a given set of compile-time options.
+/// `AppRunner` instantiates one and re-exports it as `AppRunner.Engine`,
+/// which is how host code normally names it.
+pub fn EngineType(comptime engOpts: EngineOptions) type {
     return struct {
         window: *platform_mod.Window,
-        options: PixzigEngineInitOptions,
-        scaleFactor: f32,
+        options: EngineInitOptions,
         allocator: std.mem.Allocator,
         projMat: zmath.Mat,
         window_state: WindowState,
@@ -142,26 +142,25 @@ pub fn PixzigEngine(comptime engOpts: PixzigEngineOptions) type {
         const Self = @This();
         pub const Renderer = renderer.Renderer(engOpts.rendererOpts);
 
-        pub fn init(title: [:0]const u8, allocator: std.mem.Allocator, options: PixzigEngineInitOptions) !*Self {
-            if (comptime engOpts.audioOpts.enabled) @compileError("host_eng SDL facade does not carry pixzig audio");
-            if (comptime engOpts.manifestOpts != null) @compileError("host_eng SDL facade does not carry pixzig manifests");
+        pub fn init(title: [:0]const u8, allocator: std.mem.Allocator, options: EngineInitOptions) !*Self {
+            if (comptime engOpts.audioOpts.enabled) @compileError("host_eng does not carry an audio engine");
+            if (comptime engOpts.manifestOpts != null) @compileError("host_eng does not carry an asset manifest");
+            if (comptime engOpts.inputOpts.numGamepads > 0) @compileError("host_eng does not carry gamepad support");
 
-            if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO | sdl.SDL_INIT_EVENTS)) return sdlError(error.SdlInitFailed);
+            if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO | sdl.SDL_INIT_EVENTS)) return platform_mod.sdlError(error.SdlInitFailed);
             errdefer sdl.SDL_Quit();
 
             const gl_major: c_int = if (builtin.target.os.tag == .emscripten) 2 else 4;
             const gl_minor: c_int = if (builtin.target.os.tag == .emscripten) 0 else 5;
 
-            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_MAJOR_VERSION, gl_major)) return sdlError(error.SdlGlAttributeFailed);
-            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_MINOR_VERSION, gl_minor)) return sdlError(error.SdlGlAttributeFailed);
-            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_PROFILE_MASK, sdl.SDL_GL_CONTEXT_PROFILE_CORE)) return sdlError(error.SdlGlAttributeFailed);
-            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_FLAGS, sdl.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG)) return sdlError(error.SdlGlAttributeFailed);
-            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_DOUBLEBUFFER, 1)) return sdlError(error.SdlGlAttributeFailed);
+            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_MAJOR_VERSION, gl_major)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
+            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_MINOR_VERSION, gl_minor)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
+            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_PROFILE_MASK, sdl.SDL_GL_CONTEXT_PROFILE_CORE)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
+            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_FLAGS, sdl.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
+            if (!sdl.SDL_GL_SetAttribute(sdl.SDL_GL_DOUBLEBUFFER, 1)) return platform_mod.sdlError(error.SdlGlAttributeFailed);
 
-            const window = try platform_mod.Window.create(allocator, title, options);
+            const window = try platform_mod.Window.create(allocator, title, options, engOpts.inputOpts.textInput);
             errdefer window.destroy();
-            if (!sdl.SDL_GL_MakeCurrent(window.handle, window.gl_context)) return sdlError(error.SdlMakeCurrentFailed);
-            if (!sdl.SDL_StartTextInput(window.handle)) return sdlError(error.SdlTextInputFailed);
 
             std.log.info("Loading OpenGL profile.", .{});
             if (builtin.target.os.tag == .emscripten) {
@@ -198,7 +197,6 @@ pub fn PixzigEngine(comptime engOpts: PixzigEngineOptions) type {
             eng.* = .{
                 .window = window,
                 .options = options,
-                .scaleFactor = @max(ws.scale_factor.x, ws.scale_factor.y),
                 .allocator = allocator,
                 .projMat = proj_mat,
                 .window_state = ws,
@@ -216,6 +214,7 @@ pub fn PixzigEngine(comptime engOpts: PixzigEngineOptions) type {
             eng.renderer = try Renderer.init(allocator, &eng.resources, options.renderInitOpts);
             errdefer eng.renderer.deinit();
             eng.enableVSync(engOpts.vsyncEnabled);
+            eng.inputs.seedMousePos();
 
             return eng;
         }
@@ -239,14 +238,27 @@ pub fn PixzigEngine(comptime engOpts: PixzigEngineOptions) type {
                     sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
                     sdl.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
                     => self.window_state.resized = true,
+                    // An event-driven key bitset latches where per-frame
+                    // polling self-healed, so anything held when the window
+                    // loses focus would otherwise stay down forever.
+                    sdl.SDL_EVENT_WINDOW_FOCUS_LOST => self.inputs.clear(),
                     else => self.inputs.handleEvent(event),
                 }
             }
         }
 
+        /// Sets the window icon from an encoded image (PNG or anything
+        /// else stbi decodes). There is no default icon: host_eng ships no
+        /// assets of its own, so a host that wants one calls this with its
+        /// own image.
         pub fn setIcon(self: *Self, icon_data: *std.Io.Reader) !void {
-            _ = self;
-            _ = icon_data;
+            const encoded = try icon_data.readAlloc(self.allocator, icon_data.end);
+            defer self.allocator.free(encoded);
+
+            var image = try stbi.Image.loadFromMemory(encoded, 4);
+            defer image.deinit();
+
+            self.window.setIcon(&image);
         }
 
         pub fn enableVSync(self: *Self, enabled: bool) void {
@@ -256,6 +268,9 @@ pub fn PixzigEngine(comptime engOpts: PixzigEngineOptions) type {
             }
         }
 
+        /// Shows or hides the system cursor. Global in SDL3 rather than
+        /// per-window; nothing here depends on the difference, since the
+        /// engine only ever owns one window.
         pub fn showCursor(self: *Self, visible: bool) void {
             _ = self;
             _ = if (visible) sdl.SDL_ShowCursor() else sdl.SDL_HideCursor();
@@ -280,7 +295,6 @@ pub fn PixzigEngine(comptime engOpts: PixzigEngineOptions) type {
             self.renderer.clear(0, 0, 0, 1);
             self.viewport.apply();
 
-            self.scaleFactor = @max(self.window_state.scale_factor.x, self.window_state.scale_factor.y);
             if (self.options.logicalSize == null) {
                 const fw: f32 = @floatFromInt(self.window_state.framebuffer_size.x);
                 const fh: f32 = @floatFromInt(self.window_state.framebuffer_size.y);

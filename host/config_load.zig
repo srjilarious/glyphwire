@@ -1,6 +1,6 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const pixzig = @import("pixzig");
+const host_eng = @import("host_eng");
 
 const config = @import("config.zig");
 const geometry = @import("geometry.zig");
@@ -11,12 +11,12 @@ const HostConfig = config.HostConfig;
 /// nothing about parsing a config file belongs to the graphics engine, so
 /// it drives `ziglua` directly (`runConfigScript` below) instead of going
 /// through an engine scripting subsystem. It still reaches `ziglua`
-/// through the engine facade rather than importing the module by name:
-/// pixzig ships its own `libs/ziglua` and glyphwire ships another, and
-/// linking both Lua C libraries into one binary would collide. Whichever
-/// engine backend the host is built against supplies the one Lua that
-/// binary actually links.
-const Lua = pixzig.ziglua.Lua;
+/// through the engine facade (`host_eng.ziglua`) rather than importing the
+/// module by name: `host_eng` and `glyphwire` are each given a `ziglua`
+/// import in `build.zig`, and linking two Lua C libraries into one binary
+/// would collide. Going through the facade names the one Lua this binary
+/// actually links.
+const Lua = host_eng.ziglua.Lua;
 
 /// Owned path to glyphwire's config directory (holds `host.conf`).
 /// Shared with glyphwire-shell and glyphwire-ls -- see

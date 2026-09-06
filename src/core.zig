@@ -3090,7 +3090,7 @@ pub const CellPos = struct { row: usize = 0, col: usize = 0 };
 /// knowing anything about how input was captured.
 ///
 /// Key/button names are whatever string the reporter used (glyphwire-host
-/// uses `@tagName` of pixzig's GLFW-backed key/button enums, e.g. "a",
+/// uses `@tagName` of its engine's key/button enums, e.g. "a",
 /// "left_shift", "left") -- not a closed set enforced here.
 pub const InputState = struct {
     alloc: std.mem.Allocator,

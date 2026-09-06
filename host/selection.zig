@@ -1,6 +1,6 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const pixzig = @import("pixzig");
+const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
@@ -12,7 +12,7 @@ const KeyRepeatState = key_repeat.KeyRepeatState;
 
 /// A translucent tint drawn over the selected cells in the `color_bg`
 /// render pass, so text painted afterward stays readable on top of it.
-pub const selection_highlight_color = pixzig.Color.from(80, 130, 220, 90);
+pub const selection_highlight_color = host_eng.Color.from(80, 130, 220, 90);
 
 /// Text selection (keyboard mode + mouse drag) and the OS-clipboard
 /// bridge. Mirrors the selection's two ends here so a move can be computed
@@ -295,8 +295,8 @@ pub const Selection = struct {
         const server = self.app.server;
         const s = self.app.window.getClipboardString() orelse return;
         if (s.len == 0) return;
-        // `s` is GLFW-owned and only valid until the next clipboard call;
-        // both calls below copy it right away.
+        // `s` is engine-owned and only valid until the next clipboard
+        // call; both calls below copy it right away.
         server.setClipboard(s) catch |err| {
             std.log.err("glyphwire-host: setClipboard (paste) failed: {t}", .{err});
             return;
@@ -311,7 +311,7 @@ pub const Selection = struct {
 
     /// Pushes `ctx.clipboard` to the OS clipboard when its serial has
     /// moved since the last push -- called once per frame on the main
-    /// thread (GLFW clipboard writes are main-thread-only).
+    /// thread (SDL clipboard writes are main-thread-only).
     pub fn syncClipboardToOs(self: *Selection) void {
         const server = self.app.server;
         const serial = server.clipboardSerial();

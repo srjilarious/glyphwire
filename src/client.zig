@@ -243,9 +243,9 @@ pub const Client = struct {
     }
 
     /// `report_key(key, pressed)` -- a notification. `key` is expected to
-    /// be a stable, portable name (glyphwire-host uses `@tagName` of
-    /// pixzig's GLFW key enum, e.g. "a", "left_shift", "escape"); this
-    /// type doesn't enforce a closed set.
+    /// be a stable, portable name (glyphwire-host uses `@tagName` of its
+    /// engine's `Key` enum, e.g. "a", "left_shift", "escape"); this type
+    /// doesn't enforce a closed set.
     pub fn reportKey(self: *Client, key: []const u8, pressed: bool) !void {
         try self.notify("report_key", .{ .key = key, .pressed = pressed });
     }

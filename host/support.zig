@@ -1,6 +1,6 @@
-//! Pure, pixzig-free pieces of glyphwire-host, re-exported as one module
+//! Pure, engine-free pieces of glyphwire-host, re-exported as one module
 //! so the test runner (`tests/host_tests.zig`) can exercise them without
-//! pulling in GLFW / OpenGL. Same cross-directory-module reason as
+//! pulling in SDL / OpenGL. Same cross-directory-module reason as
 //! `shell_support` / `ls_support` -- see build.zig. Only modules that
 //! import nothing heavier than `std` and `glyphwire` belong here.
 

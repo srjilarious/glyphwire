@@ -11,8 +11,7 @@ const Engine = app_mod.Engine;
 /// The IME composition ("preedit") overlay: the text the user is part-way
 /// through composing, which the input method has not committed yet.
 ///
-/// Two halves, both of which the engine backend has to support for any of
-/// this to do anything:
+/// Two halves:
 ///
 ///   * `syncInputArea` tells the OS where the caret is, so the IME can put
 ///     its candidate window next to it instead of at the window's origin.
@@ -21,10 +20,11 @@ const Engine = app_mod.Engine;
 ///     commit lands, because uncommitted text never reaches the `text`
 ///     event stream that `input.reportTextInput` forwards.
 ///
-/// glyphwire-host (GLFW) supports neither, so both compile away to nothing
-/// there -- see `supported`. Nothing is forwarded to glyphwire-shell from
-/// here: a composition is host-local until the IME commits it, at which
-/// point it arrives as ordinary text on the existing stream.
+/// Nothing is forwarded to glyphwire-shell from here: a composition is
+/// host-local until the IME commits it, at which point it arrives as
+/// ordinary text on the existing stream. SDL3 does not surface the keys
+/// the IME consumes (Space to convert, Enter to commit) as key events
+/// either, so those never reach the shell as keystrokes.
 pub const Preedit = struct {
     app: *App,
 
@@ -34,18 +34,11 @@ pub const Preedit = struct {
 
     const Area = struct { x: i32, y: i32, w: i32, h: i32 };
 
-    /// Whether the linked engine backend can do any of this. The SDL3
-    /// backend (`host_eng`) exposes `Keyboard.preedit` and
-    /// `Window.setTextInputArea`; upstream pixzig's GLFW backend exposes
-    /// neither, and GLFW has no IME plumbing to build it on.
-    pub const supported = @hasDecl(app_mod.Window, "setTextInputArea");
-
     /// The composition in progress, or an empty slice when there is none.
     /// Borrowed from the engine's keyboard state; valid until the next
     /// event poll.
     pub fn text(self: *const Preedit, eng: *Engine) []const u8 {
         _ = self;
-        if (comptime !supported) return "";
         return eng.inputs.keyboard.preedit();
     }
 
@@ -54,7 +47,6 @@ pub const Preedit = struct {
     /// user can see where in the composition they are.
     pub fn cursorByte(self: *const Preedit, eng: *Engine) ?usize {
         _ = self;
-        if (comptime !supported) return null;
         return eng.inputs.keyboard.preeditCursorByte();
     }
 
@@ -66,7 +58,6 @@ pub const Preedit = struct {
     /// Called every frame from `App.update`; the `last_area` compare keeps
     /// it to one SDL call per actual caret move.
     pub fn syncInputArea(self: *Preedit, eng: *Engine) void {
-        if (comptime !supported) return;
         if (geometry.cell_w <= 0 or geometry.cell_h <= 0) return;
 
         const cell = blk: {
