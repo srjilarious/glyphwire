@@ -54,6 +54,11 @@ const default_cmd_var_timeout_ms: u64 = 400;
 const resize_settle_ms: i64 = 140;
 const resize_poll_ms: i64 = 50;
 
+/// Fish-style inline completion hint delay. The prompt loop already uses
+/// a 500ms idle heartbeat, so this stays aligned with that cadence.
+const autocomplete_idle_ms: i64 = 500;
+const autocomplete_hint_color = glyphwire.Color{ .r = 120, .g = 120, .b = 120 };
+
 comptime {
     // The captured-child marker detector keeps its own copy of the
     // marker string to stay dependency-free (see shell/handshake.zig);
@@ -490,6 +495,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // refresh entirely while a resize is still in flight so it
             // isn't drawn at an intermediate size.
             drainResizes(listener, &prompt);
+            if (prompt.pending_resize == null and prompt.browse_pos == null) {
+                const drew_hint = prompt.maybeShowCompletionHint() catch false;
+                if (drew_hint) continue;
+            }
             if (prompt.pending_resize == null and prompt.right_dynamic and prompt.browse_pos == null) {
                 // Refresh the powerline right chain so `{time}` keeps
                 // ticking while nothing is typed.
@@ -703,6 +712,8 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         } else if (std.mem.eql(u8, ev.key, "right")) {
             if (prompt.browse_pos != null) {
                 try prompt.browseRight(1);
+            } else if (prompt.cursor == prompt.buffer.items.len) {
+                try prompt.acceptCompletionHintOrComplete();
             } else {
                 try prompt.moveCursorTo(lineedit.nextBoundary(prompt.buffer.items, prompt.cursor));
             }
@@ -856,6 +867,14 @@ const Prompt = struct {
     /// candidate list (bash's "ring the bell once, list on the second
     /// press"). Any non-Tab key clears it (see `runPrompt`).
     completion_armed: bool = false,
+    /// Fish-style inline autocomplete hint: after the prompt has been idle
+    /// for `autocomplete_idle_ms`, the first completion candidate's suffix
+    /// is drawn in a dim colour after the caret. The real line buffer is
+    /// unchanged; every edit hides the hint and arms a new idle delay.
+    completion_hint: std.ArrayList(u8) = .empty,
+    completion_hint_visible: bool = false,
+    completion_hint_dirty: bool = true,
+    completion_hint_activity_at: ?std.Io.Clock.Timestamp = null,
     /// `null` means the line on screen is the one actually being typed
     /// (not a recalled history entry). Otherwise, an index into `history`
     /// for whichever entry `historyUp`/`historyDown` last loaded.
@@ -992,6 +1011,7 @@ const Prompt = struct {
         self.history.deinit(alloc);
         self.scratch.deinit(alloc);
         self.buffer.deinit(alloc);
+        self.completion_hint.deinit(alloc);
         self.aliases.deinit(alloc);
         for (self.marks.items) |m| freeMark(alloc, m);
         self.marks.deinit(alloc);
@@ -1054,6 +1074,21 @@ const Prompt = struct {
     fn scrollbackTypeExits(self: *Prompt) bool {
         if (self.promptCfg()) |p| if (p.scrollback_type_exits) |b| return b;
         return true;
+    }
+
+    /// Any real prompt edit or cursor move invalidates the displayed
+    /// inline completion. The next idle tick recomputes it from the new
+    /// buffer/cursor state.
+    fn armCompletionHint(self: *Prompt) void {
+        self.completion_hint_visible = false;
+        self.completion_hint_dirty = true;
+        self.completion_hint_activity_at = std.Io.Clock.Timestamp.now(self.client.io, .awake);
+    }
+
+    fn hideCompletionHint(self: *Prompt) void {
+        self.completion_hint_visible = false;
+        self.completion_hint_dirty = false;
+        self.completion_hint.clearRetainingCapacity();
     }
 
     /// Fills `host`/`host_buf` from `$HOSTNAME` or `/etc/hostname`. Best
@@ -1733,11 +1768,24 @@ const Prompt = struct {
         }
         const visible = buf[vis_start..vis_end];
 
-        var line_buf: [1024]u8 = undefined;
-        if (visible.len >= line_buf.len) return; // absurdly long; bail
-        @memcpy(line_buf[0..visible.len], visible);
-        const total = @min(visible.len + (box_w - w), line_buf.len);
-        @memset(line_buf[visible.len..total], ' ');
+        var hint_end: usize = 0;
+        var hint_w: usize = 0;
+        if (self.completion_hint_visible and vis_end == buf.len) {
+            const room = box_w -| w;
+            const hint = self.completion_hint.items;
+            while (hint_end < hint.len) {
+                const nb = lineedit.nextBoundary(hint, hint_end);
+                const cw = lineedit.cellWidth(hint[hint_end..nb]);
+                if (hint_w + cw > room) break;
+                hint_w += cw;
+                hint_end = nb;
+            }
+        }
+
+        var spaces: [1024]u8 = undefined;
+        const fill_w = box_w -| (w + hint_w);
+        const fill = @min(fill_w, spaces.len);
+        @memset(spaces[0..fill], ' ');
 
         // Box repaint + caret placement go out as one `batch` frame, so
         // the host never renders an intermediate frame with the caret
@@ -1747,7 +1795,9 @@ const Prompt = struct {
         var b = self.client.batch();
         defer b.deinit();
         try b.setCursor(row, left);
-        try b.writeText(line_buf[0..total], null, null);
+        if (visible.len > 0) try b.writeText(visible, null, null);
+        if (hint_end > 0) try b.writeText(self.completion_hint.items[0..hint_end], autocomplete_hint_color, null);
+        if (fill > 0) try b.writeText(spaces[0..fill], null, null);
         try b.setCursor(row, self.line_start_col + self.caretCol());
         var res = try b.send();
         res.deinit();
@@ -1777,6 +1827,7 @@ const Prompt = struct {
         self.line_start_col = cur.col;
         self.cursor = 0;
         self.buffer.clearRetainingCapacity();
+        self.armCompletionHint();
         try self.renderInputLine();
     }
 
@@ -1800,6 +1851,7 @@ const Prompt = struct {
         }
         self.pending_resize = null;
         self.resize_seen_at = null;
+        self.armCompletionHint();
         try self.handleResize(rev.cols, rev.rows);
     }
 
@@ -1858,6 +1910,7 @@ const Prompt = struct {
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
         self.input_scroll = 0;
+        self.armCompletionHint();
         try self.renderInputLine();
     }
 
@@ -1874,6 +1927,7 @@ const Prompt = struct {
         try self.buffer.appendSlice(self.client.alloc, text);
         self.cursor = self.buffer.items.len;
         self.input_scroll = 0;
+        self.armCompletionHint();
         try self.renderInputLine();
     }
 
@@ -1921,6 +1975,7 @@ const Prompt = struct {
         const start = lineedit.prevBoundary(self.buffer.items, self.cursor);
         try self.buffer.replaceRange(self.client.alloc, start, self.cursor - start, &.{});
         self.cursor = start;
+        self.armCompletionHint();
         try self.setCursorAt(self.cursor);
     }
 
@@ -1929,6 +1984,7 @@ const Prompt = struct {
         if (self.cursor >= self.buffer.items.len) return;
         const end = lineedit.nextBoundary(self.buffer.items, self.cursor);
         try self.buffer.replaceRange(self.client.alloc, self.cursor, end - self.cursor, &.{});
+        self.armCompletionHint();
         try self.setCursorAt(self.cursor);
     }
 
@@ -1937,6 +1993,7 @@ const Prompt = struct {
         if (self.cursor == 0) return;
         try self.buffer.replaceRange(self.client.alloc, 0, self.cursor, &.{});
         self.cursor = 0;
+        self.armCompletionHint();
         try self.setCursorAt(0);
     }
 
@@ -2367,6 +2424,11 @@ const Prompt = struct {
         // Running any command spends the multi-select: drop the marks and
         // their highlight before the command's output scrolls in.
         try self.resetMarks();
+
+        if (self.completion_hint_visible) {
+            self.hideCompletionHint();
+            try self.renderInputLine();
+        }
 
         try self.client.setCursor(self.line_start_row, self.line_start_col);
         if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
@@ -3657,6 +3719,7 @@ const Prompt = struct {
         if (text.len == 0) return;
         try self.buffer.insertSlice(self.client.alloc, self.cursor, text);
         self.cursor += text.len;
+        self.armCompletionHint();
         try self.setCursorAt(self.cursor); // -> renderInputLine repaints the box
     }
 
@@ -3679,49 +3742,19 @@ const Prompt = struct {
     /// interpreted -- see `complete.wordRange`.
     fn doComplete(self: *Prompt) !void {
         const alloc = self.client.alloc;
-        const io = self.client.io;
 
         const line = self.buffer.items;
         const wr = complete.wordRange(line, self.cursor);
         const word = line[wr.start..self.cursor];
         const dp = complete.dirPrefix(word);
 
-        const scan_dir = try self.completionDir(dp.dir);
-        defer alloc.free(scan_dir);
-
-        var dir = std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true }) catch return;
-        defer dir.close(io);
-
         var cands: std.ArrayList(CompletionCandidate) = .empty;
         defer {
             for (cands.items) |cand| alloc.free(cand.name);
             cands.deinit(alloc);
         }
-
-        const want_hidden = dp.prefix.len > 0 and dp.prefix[0] == '.';
-        var it = dir.iterate();
-        while (it.next(io) catch null) |entry| {
-            if (!std.mem.startsWith(u8, entry.name, dp.prefix)) continue;
-            if (!want_hidden and std.mem.startsWith(u8, entry.name, ".")) continue;
-            try cands.append(alloc, .{
-                .name = try alloc.dupe(u8, entry.name),
-                .is_dir = entry.kind == .directory,
-            });
-        }
-
-        // In command position (`argv[0]`, no `dir/` part) Tab also
-        // completes the names the plain directory scan can't see:
-        // aliases, the core builtins, and script builtins.
-        if (dp.dir.len == 0 and std.mem.indexOfNone(u8, line[0..wr.start], " \t") == null)
-            try self.appendCommandNameCandidates(&cands, dp.prefix);
-
+        try self.collectCompletionCandidates(&cands, line, wr, dp);
         if (cands.items.len == 0) return;
-
-        std.mem.sort(CompletionCandidate, cands.items, {}, struct {
-            fn lessThan(_: void, a: CompletionCandidate, b: CompletionCandidate) bool {
-                return std.mem.lessThan(u8, a.name, b.name);
-            }
-        }.lessThan);
 
         if (cands.items.len == 1) {
             const only = cands.items[0];
@@ -3792,6 +3825,107 @@ const Prompt = struct {
             try eng.collectCommandNames(alloc, prefix, &names);
             for (names.items) |n| try push(alloc, cands, n);
         }
+    }
+
+    /// Gathers the same sorted candidate set used by Tab completion. The
+    /// inline hint path calls this too, so a dim suggestion agrees with
+    /// what pressing Tab would consider completions for the current word.
+    fn collectCompletionCandidates(
+        self: *Prompt,
+        cands: *std.ArrayList(CompletionCandidate),
+        line: []const u8,
+        wr: complete.WordRange,
+        dp: complete.DirPrefix,
+    ) !void {
+        const alloc = self.client.alloc;
+        const io = self.client.io;
+
+        const scan_dir = try self.completionDir(dp.dir);
+        defer alloc.free(scan_dir);
+
+        if (std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true })) |*dir| {
+            defer dir.close(io);
+            const want_hidden = dp.prefix.len > 0 and dp.prefix[0] == '.';
+            var it = dir.iterate();
+            while (it.next(io) catch null) |entry| {
+                if (!std.mem.startsWith(u8, entry.name, dp.prefix)) continue;
+                if (!want_hidden and std.mem.startsWith(u8, entry.name, ".")) continue;
+                try cands.append(alloc, .{
+                    .name = try alloc.dupe(u8, entry.name),
+                    .is_dir = entry.kind == .directory,
+                });
+            }
+        } else |_| {}
+
+        // In command position (`argv[0]`, no `dir/` part) completion also
+        // offers the names the plain directory scan can't see: aliases,
+        // core builtins, and script builtins.
+        if (dp.dir.len == 0 and std.mem.indexOfNone(u8, line[0..wr.start], " \t") == null)
+            try self.appendCommandNameCandidates(cands, dp.prefix);
+
+        sortCompletionCandidates(cands.items);
+    }
+
+    fn sortCompletionCandidates(cands: []CompletionCandidate) void {
+        std.mem.sort(CompletionCandidate, cands, {}, struct {
+            fn lessThan(_: void, a: CompletionCandidate, b: CompletionCandidate) bool {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }.lessThan);
+    }
+
+    /// On an idle tick, compute and draw the first completion candidate as
+    /// dimmed text after the caret. Returns true when it repainted the
+    /// input row, letting the caller skip a redundant idle redraw.
+    fn maybeShowCompletionHint(self: *Prompt) !bool {
+        if (!self.completion_hint_dirty or self.completion_hint_visible) return false;
+        if (self.browse_pos != null or self.pending_resize != null) return false;
+        const active_at = self.completion_hint_activity_at orelse return false;
+        if (active_at.untilNow(self.client.io).raw.toMilliseconds() < autocomplete_idle_ms) return false;
+
+        const line = self.buffer.items;
+        if (self.cursor != line.len) return false;
+
+        const wr = complete.wordRange(line, self.cursor);
+        if (wr.end != self.cursor) return false;
+
+        const word = line[wr.start..self.cursor];
+        if (word.len == 0) return false;
+
+        self.completion_hint_dirty = false;
+        self.completion_hint.clearRetainingCapacity();
+
+        const dp = complete.dirPrefix(word);
+        var cands: std.ArrayList(CompletionCandidate) = .empty;
+        defer {
+            for (cands.items) |cand| self.client.alloc.free(cand.name);
+            cands.deinit(self.client.alloc);
+        }
+        try self.collectCompletionCandidates(&cands, line, wr, dp);
+        if (cands.items.len == 0) return false;
+
+        const first = cands.items[0];
+        const suffix = (try complete.candidateSuffix(self.client.alloc, dp.prefix, first.name, first.is_dir)) orelse return false;
+        defer self.client.alloc.free(suffix);
+        if (suffix.len == 0) return false;
+
+        try self.completion_hint.appendSlice(self.client.alloc, suffix);
+        self.completion_hint_visible = true;
+        try self.renderInputLine();
+        return true;
+    }
+
+    /// Right arrow at the end of the input accepts the visible inline
+    /// hint. If no hint has been drawn yet, use the same completion path
+    /// as Tab so Right-at-end is still a completion gesture.
+    fn acceptCompletionHintOrComplete(self: *Prompt) !void {
+        if (self.cursor != self.buffer.items.len or self.buffer.items.len == 0) return;
+        if (self.completion_hint_visible and self.completion_hint.items.len > 0) {
+            try self.insertText(self.completion_hint.items);
+            self.completion_armed = false;
+            return;
+        }
+        try self.doComplete();
     }
 
     /// Resolves the `dir/` portion of a completion word to a path
@@ -3959,4 +4093,3 @@ fn hookRunLine(
         },
     }
 }
-

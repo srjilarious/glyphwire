@@ -4,7 +4,6 @@ const std = @import("std");
 /// directory scan and the edits to the on-screen line live in
 /// `shell/main.zig` (`Prompt.doComplete`); everything here is testable
 /// with no filesystem or IO.
-
 /// The `[start, end)` byte range of the "word" the cursor sits in, used
 /// to decide what a Tab press should complete. A word boundary is an
 /// unescaped space or tab; a `\` immediately before a space keeps that
@@ -66,4 +65,19 @@ pub fn commonPrefixLen(names: []const []const u8) usize {
         n = i;
     }
     return n;
+}
+
+/// The text a fish-style inline hint should draw after a typed completion
+/// prefix for one candidate. Returns `null` if `name` is not actually a
+/// completion of `prefix`; otherwise the result is owned by `alloc` and
+/// includes the same terminator Tab completion would insert (`/` for a
+/// directory, a space for anything else).
+pub fn candidateSuffix(alloc: std.mem.Allocator, prefix: []const u8, name: []const u8, is_dir: bool) !?[]u8 {
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+
+    const rest = name[prefix.len..];
+    const out = try alloc.alloc(u8, rest.len + 1);
+    @memcpy(out[0..rest.len], rest);
+    out[rest.len] = if (is_dir) '/' else ' ';
+    return out;
 }

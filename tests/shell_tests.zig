@@ -321,6 +321,25 @@ pub fn commonPrefixLenTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(complete.commonPrefixLen(&.{}), 0);
 }
 
+// ─── complete.candidateSuffix ─────────────────────────────────────────
+
+pub fn candidateSuffixAddsDirectorySlashTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const got = (try complete.candidateSuffix(alloc, "sr", "src", true)).?;
+    defer alloc.free(got);
+    try testz.expectEqualStr("c/", got);
+}
+
+pub fn candidateSuffixAddsFileSpaceTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const got = (try complete.candidateSuffix(alloc, "build", "build.zig", false)).?;
+    defer alloc.free(got);
+    try testz.expectEqualStr(".zig ", got);
+}
+
+pub fn candidateSuffixRejectsNonMatchTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const got = try complete.candidateSuffix(alloc, "zo", "src", true);
+    try testz.expectEqual(got, null);
+}
+
 // ─── handshake.aware ──────────────────────────────────────────────────
 
 pub fn handshakeAwareDetectsFullMarkerTest(_: std.Io, _: std.mem.Allocator) !void {
