@@ -2101,43 +2101,53 @@ this is the implementation shape.
   plus `config.grammar_dirs`), checks its ABI against the vendored
   libtree-sitter (`min_abi_version`..`max_abi_version`), and reads the
   sibling `highlights.scm`. Extension → grammar name comes from
-  `default_langs` (the six bundled) plus `zoe.conf`. `Highlighter` owns
-  the `Parser`/`Tree`/`Query`, does a **full reparse of the whole buffer**
-  on every edit (`Buffer.edits` moved), and `lineSpans(start, end, out)`
-  runs the query over one line's byte range and returns non-overlapping
-  colour spans; a nested/shorter capture wins the bytes it covers, tie
-  goes to the later match. `Theme` maps dotted capture names
+  `default_langs` (the seven bundled) plus `zoe.conf`. `Highlighter` owns
+  the `Parser`/`Tree`/`Query`, reparses **incrementally** — `applyEdit`
+  replays `Buffer`'s edit journal onto the retained tree, then
+  `reparseIncremental` parses against it and reports the changed byte
+  ranges — with a whole-buffer `reparse` as the fallback (first parse,
+  language switch, journal overflow). `lineSpans(start, end, out)` runs
+  the query over one line's byte range and returns non-overlapping colour
+  spans; a nested/shorter capture wins the bytes it covers, tie goes to
+  the later match. `Theme` maps dotted capture names
   (`string.special.key` → `string.special` → `string`) to colours;
   `null` means "leave it the pane's default". Query predicates `#eq?` /
   `#not-eq?` / `#any-of?` / `#not-any-of?` are evaluated against the
   parsed source; a pattern with any other test predicate (`#match?`,
   `#lua-match?`) is `disablePattern`'d, so those heuristics
   (ALL_CAPS → constant, PascalCase → type) are lost rather than
-  misapplied. Only `highlights.scm` is consulted — no injections
-  (Markdown code fences stay uncoloured) and no locals.
+  misapplied. **Injections:** `injections.scm` (where the grammar ships
+  one) resolves embedded regions after the primary parse — each parsed
+  with its own grammar over its included byte ranges, `lineSpans` blends
+  the child layers over the primary — recursing to `max_injection_depth`.
+  No `locals.scm`.
 - **`zoe/langconf.zig`** — `~/.config/glyphwire/zoe.conf`, a Lua
   `config` table like `ls.conf` / `host.conf`. `config.theme` overrides
   capture colours, `config.languages` adds/remaps extensions,
-  `config.grammar_dirs` prepends search directories. Absent file = the
-  six bundled languages and the built-in dark theme. Sample at
+  `config.grammar_dirs` prepends search directories, `config.injections`
+  (default true) toggles embedded-language highlighting. Absent file =
+  the seven bundled languages and the built-in dark theme. Sample at
   `assets/zoe.conf.example`.
 - **`zoe/ui.zig`** — `Ui` owns the `Registry` + `Highlighter` +
-  `langconf.Config` (its arena backs the registry's language table).
-  `renderBuffer` reparses when the tree is stale and forces a full
-  repaint; `renderRowSpans` walks each visible line codepoint by
-  codepoint, grouping equal colours into runs and emitting one
-  `write_text` per run clipped to `[left_col, left_col+cols)`. Any
-  highlighter failure falls back to the original single plain write.
+  `langconf.Config` (its arena backs the registry's language table);
+  `configureInjections` hands the highlighter the registry to resolve
+  injected grammars through. `renderBuffer` calls `syncHighlight` to
+  bring the tree up to date; when the reparse was incremental and its
+  effect bounded, `renderChangedRows` repaints just the affected rows,
+  otherwise the pane redraws in full. `renderRowSpans` walks each visible
+  line codepoint by codepoint, grouping equal colours into runs and
+  emitting one `write_text` per run clipped to `[left_col, left_col+cols)`.
+  Any highlighter failure falls back to the original single plain write.
 - **`build.zig`** — `tree_sitter` is pinned to the exact
   `srjilarious/zig-tree-sitter` commit `testz` already uses (two pins of
   it collide on the shared `src/parser.zig`). `installGrammars` compiles
-  each of six grammar `parser.c` (+ `scanner.c` where present) to
+  each bundled grammar's `parser.c` (+ `scanner.c` where present) to
   `share/glyphwire/grammars/<name>/parser.so` and copies its
-  `highlights.scm`; the `grammar_*` deps are lazy source-only and never
+  `highlights.scm` (and `injections.scm` for zig, markdown and
+  `markdown_inline`); the `grammar_*` deps are lazy source-only and never
   linked into a Zig binary. `zig build zoe` points
   `GLYPHWIRE_ZOE_GRAMMAR_DIR` at the just-installed set.
-- **Deferred:** incremental reparse (`Tree.edit` + `Buffer` edit ranges),
-  injection queries (embedded languages), `locals.scm` scope resolution,
+- **Deferred:** `locals.scm` scope resolution, `injection.combined`,
   a WASM grammar loader, a generic editor extension/plugin API.
 
 ## Prompt prefix draws in one frame; resize wipes stale prompt rows
