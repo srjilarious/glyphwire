@@ -886,47 +886,72 @@ Follow-up in the same branch, both client-local (no wire change):
 `fromMimetype` + declared-format-mismatch + format-stored), 1 `dispatch`
 (unknown format rejected), 4 `shell` (`quoteArg` round trips); 269 pass.
 
-## Configurable prompt (template-string form)
+## Configurable prompt
 
-`shell.conf` can now define the prompt: `prompt{ left = ..., right = ...,
-exit = ..., dur = ..., dur_min_ms = N }`. All client-local (no wire
-change) — `decisions.md`'s Shell section has a new "Prompt templating"
-subsection; `api.md` is untouched.
+`shell.conf`'s `prompt{ ... }` defines the prompt, in either of two
+shapes: plain template strings (`left` / `right` / `exit` / `dur`), or
+**powerline segment lists** (`left_segments` / `right_segments` +
+`sep` / `head` / `tail` / `lines` / ...). All client-local (no wire
+change) — `decisions.md`'s Shell section has the "Prompt templating"
+subsection (incl. a "Powerline segments" part); `api.md` is untouched.
 
 - **`shell/prompt_template.zig`** (new, in `shell_support`, pure) parses a
   template into an ordered op list (`text` / `icon`). Tokens `{cwd}`
-  (`$HOME`→`~`), `{cwd_full}`, `{user}`, `{host}`, `{icon:NAME}`; `{{` /
-  `}}` literal braces; `\n` `\t` `\\` unescaped; an unknown `{token}` left
-  verbatim. `{exit}` / `{dur}` are **conditional sections**: `{exit}`
-  renders the `exit` sub-template only on a non-zero last exit status,
-  `{dur}` renders the `dur` sub-template only when the last command ran
-  `>= dur_min_ms` (default 2000). Inside those, `{exit_code}` and
-  `{duration}` (humanized: `450ms` / `1.5s` / `2m5s`) are the values; a
-  `max_depth` guard stops a self-referential section.
-- **`shell/config.zig`** gained a `prompt{ ... }` binding (one table arg,
-  keys optional, calls merge) → `config.PromptConfig`.
-- **`shell/main.zig`**: `writePromptPrefix` splits into
-  `writeDefaultPrefix` (unchanged `<cwd> > `, used when nothing is
-  configured) and `writeTemplatedPrefix`. `prompt.right` is drawn first,
-  right-aligned on the prompt row (single-line, overwritten by a long
-  input line); `prompt.left` from column 0. `emitOps` advances one cell by
-  hand after each `draw_icon` (which doesn't move the server cursor).
-- **`shell/pty.zig`**: `Pty` now decodes the `waitpid` status into
+  (`$HOME`→`~`), `{cwd_full}`, `{user}`, `{host}`, `{time}`, `{env:NAME}`,
+  `{icon:NAME}`; `{{` / `}}` literal braces; `\n` `\t` `\\` unescaped; an
+  unknown `{token}` left verbatim. `{exit}` / `{dur}` are **conditional
+  sections**: `{exit}` renders the `exit` sub-template only on a non-zero
+  last exit status, `{dur}` renders the `dur` sub-template only when the
+  last command ran `>= dur_min_ms` (default 2000). Inside those,
+  `{exit_code}` and `{duration}` (humanized: `450ms` / `1.5s` / `2m5s`)
+  are the values; a `max_depth` guard stops a self-referential section.
+  Also `parseColor` (`#rgb` / `#rrggbb`).
+- **`shell/config.zig`** — `prompt{ ... }` binding (one table arg, keys
+  optional, calls merge) → `config.PromptConfig`. The plain string keys
+  plus the powerline keys: `left_segments` / `right_segments` (arrays of
+  `{ text|[1], fg, bg, when }`), `sep` / `sep_right` / `head` / `tail` /
+  `right_head` glyphs, `lines`, `input`, `time_format`. All the prompt
+  strings/segments live in a `ShellConfig.prompt_arena` — `luaPrompt`'s
+  validation raises Lua errors (a `longjmp` past Zig `defer`), so
+  wholesale arena cleanup in `deinit` is the only leak-safe option.
+- **`shell/main.zig`**: `writePromptPrefix` picks `writeDefaultPrefix`
+  (unchanged `<cwd> > `), `writeTemplatedPrefix` (string form), or
+  `writePowerlinePrefix` (segments). `Prompt` now keeps the parsed
+  `ShellConfig` alive for the session (`prompt_config`) rather than
+  copying fields out. Powerline drawing: `renderChain` renders visible
+  segments into one arena, `drawChain` lays a bg strip + composites text
+  transparent + `draw_icon foreground`, separators coloured
+  `fg = left bg` / `bg = right bg`. `{time}` via a libc
+  `time`/`localtime_r`/`strftime` extern block.
+- **Line editor → repaint model.** Every edit mutates the local `buffer`
+  and calls the new `renderInputLine`, which repaints the whole box
+  `[line_start_col, input_max_col)` from a horizontally-scrolled
+  (`input_scroll`) window and places the cursor — replacing the
+  `insert_cells` / `delete_cells` shifting. This bounds the input against
+  a locked right prompt and scrolls a long line inside its zone.
+  `submitLine` re-echoes the full command unbounded first so scrollback
+  is complete. A single-line powerline right chain is redrawn per
+  keystroke + on the idle timeout (so `{time}` ticks); a 2-line prompt
+  puts segments on row 1 and input on the last row, untouched by typing.
+- **`shell/pty.zig`**: `Pty` decodes the `waitpid` status into
   `exit_code` (exit code, or `128 + signal`); `reaped` / `wait` take
   `*Pty`. `runCommand` records `last_status` / `last_dur_ms` /
-  `have_status` for the next prompt (only external commands; timing via
-  `std.Io.Clock` since this reduced std has no `std.time.Timer`).
-- **Icons:** `assets/icons/distro/{arch,tux,debian,fedora,ubuntu}.png`
-  (simple geometric renderings, not official artwork) added to
-  `core.default_icon_manifest` as `distro-*`.
-- **Tests:** `tests/prompt_template_tests.zig` (new group `prompt`, 26
-  cases) + 5 in `shell_config_tests.zig` for the `prompt{}` binding.
+  `have_status` for the next prompt (external commands only; timing via
+  `std.Io.Clock` — no `std.time.Timer` in this std).
+- **Assets:** `assets/icons/distro/{arch,tux,debian,fedora,ubuntu}.png`
+  (simple geometric renderings, not official artwork) → `distro-*` in
+  `core.default_icon_manifest`. `assets/PowerlineSymbols-subset.ttf` (a
+  ~20 KB `pyftsubset` of a Nerd Font to U+E0A0–E0D7), registered as an
+  extra always-on host fallback face in `host/main.zig`.
+- **Tests:** `tests/prompt_template_tests.zig` (group `prompt`, ~40
+  cases incl. `{time}` / `{env}` / `parseColor`) + `shell_config_tests`
+  for the `prompt{}` binding and the segment lists.
 - **Deferred — the Lua-function prompt.** `shell.conf` sets a callback
-  that receives all the same data items and batches its own draw commands
-  (`draw_icon` / `write_text` / ...), so a prompt can shell out to check
-  git state and such. Recorded in `docs/ideas.md`; the string form here is
-  the deliberate first slice, and the template engine's `Op` list / `Data`
-  snapshot are already the right shape to hand to a Lua callback later.
+  that receives the same data items and batches its own draw commands, so
+  a prompt can shell out for git state, k8s context, a `zig version`
+  pill, etc. Recorded in `docs/ideas.md`; the string + segment forms are
+  the first slices, and `prompt_template`'s `Op` list / `Data` snapshot
+  are already the right shape to hand to a callback.
 
 ## Further out (sequencing noted, not detailed yet)
 

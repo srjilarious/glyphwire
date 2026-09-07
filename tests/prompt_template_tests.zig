@@ -254,3 +254,67 @@ pub fn opsWidthCountsUtf8CodepointsNotBytesTest(_: std.Io, _: std.mem.Allocator)
     const ops = [_]pt.Op{.{ .text = "é!" }};
     try testz.expectEqual(pt.opsWidth(&ops), 2);
 }
+
+// ─── {time} / {env:VAR} ──────────────────────────────────────────────
+
+pub fn timeTokenInterpolatesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "[{time}]", .{ .time = "17:05" });
+    defer alloc.free(s);
+    try testz.expectEqualStr("[17:05]", s);
+}
+
+pub fn envTokenReadsTheMapTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var m = std.process.Environ.Map.init(alloc);
+    defer m.deinit();
+    try m.put("KUBE_CTX", "prod");
+
+    const s = try flatten(alloc, "ctx={env:KUBE_CTX} end", .{ .environ = &m });
+    defer alloc.free(s);
+    try testz.expectEqualStr("ctx=prod end", s);
+}
+
+pub fn envTokenMissingKeyRendersEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var m = std.process.Environ.Map.init(alloc);
+    defer m.deinit();
+
+    const s = try flatten(alloc, "[{env:NOPE}]", .{ .environ = &m });
+    defer alloc.free(s);
+    try testz.expectEqualStr("[]", s);
+}
+
+pub fn envTokenWithNoMapRendersEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "[{env:PATH}]", .{});
+    defer alloc.free(s);
+    try testz.expectEqualStr("[]", s);
+}
+
+pub fn envTokenEmptyNameIsLiteralTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "{env:}", .{});
+    defer alloc.free(s);
+    try testz.expectEqualStr("{env:}", s);
+}
+
+// ─── parseColor ──────────────────────────────────────────────────────
+
+pub fn parseColorHandlesShortAndLongHexTest(_: std.Io, _: std.mem.Allocator) !void {
+    const white = pt.parseColor("#fff").?;
+    try testz.expectEqual(white.r, 255);
+    try testz.expectEqual(white.g, 255);
+    try testz.expectEqual(white.b, 255);
+
+    const c = pt.parseColor("#1e88e5").?;
+    try testz.expectEqual(c.r, 30);
+    try testz.expectEqual(c.g, 136);
+    try testz.expectEqual(c.b, 229);
+
+    // `#` is optional.
+    const nohash = pt.parseColor("000000").?;
+    try testz.expectEqual(nohash.r, 0);
+}
+
+pub fn parseColorRejectsMalformedTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(pt.parseColor(""), null);
+    try testz.expectEqual(pt.parseColor("#12"), null);
+    try testz.expectEqual(pt.parseColor("#12345"), null);
+    try testz.expectEqual(pt.parseColor("#gggggg"), null);
+}

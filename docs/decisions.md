@@ -945,8 +945,10 @@ surface.
   **verbatim** so a typo shows rather than vanishing. Fields: `{cwd}`
   (working dir, `$HOME` collapsed to `~`), `{cwd_full}` (absolute),
   `{user}` (`$USER`), `{host}` (from `$HOSTNAME` / `/etc/hostname`,
-  resolved once per session), `{icon:NAME}` (a bundled icon by registry
-  name, one cell wide — e.g. `distro-arch`).
+  resolved once per session), `{time}` (local time via a libc `strftime`
+  in `shell/main.zig`, format from `time_format`), `{env:NAME}` (an
+  environment variable), `{icon:NAME}` (a bundled icon by registry name,
+  one cell wide — e.g. `distro-arch`).
 - **`{exit}` and `{dur}` are conditional sections, not raw values** — the
   request's "show an error code / an icon only on a non-zero exit" and
   "don't show a duration under 2–3s". `{exit}` expands to the `exit`
@@ -965,14 +967,61 @@ surface.
   about "the last program", and a builtin has no meaningful exit code
   here. The monotonic timing uses `std.Io.Clock` (`.awake`); this reduced
   std has no `std.time.Timer`.
-- **`prompt.right` is drawn first, right-aligned on the prompt's starting
-  row, then `prompt.left` from column 0.** It's single-line; a long input
-  line will overwrite it (accepted, like starship's transient right
-  prompt). Skipped entirely if its rendered width doesn't fit the grid.
+- **Plain form — `prompt.right` is drawn first, right-aligned on the
+  prompt row, then `prompt.left` from column 0.** Single-line; a long
+  input line overwrites the right side (accepted, like starship's
+  transient right prompt). Skipped if its width doesn't fit the grid.
+
+##### Powerline segments (`left_segments` / `right_segments`)
+- **A structured list beat inline `{seg:fg,bg}` tokens** — per-segment
+  attributes and `when`-conditions read badly stuffed into one string,
+  and the list form matches how starship/powerline configs actually look.
+  Each entry is `{ text (or [1]), fg = "#rgb", bg = "#rgb", when }`;
+  `text` is itself a template, so every token above works inside a
+  segment. `when` is `always` (default) / `error` (non-zero exit) /
+  `slow` (last command `>= dur_min_ms`); a segment whose text renders
+  empty is dropped, and no separator is drawn for a dropped segment.
+- **No new wire op — it's coloured cells + a Nerd Font glyph.** The
+  "lighter alternative to background tiles": `drawChain` lays each
+  segment's background as a run of spaces (`write_text` with `bg`), then
+  composites the text over it with `write_text` transparent (fg only, so
+  the strip shows through) and icons via `draw_icon foreground` (into
+  `Cell.fg_icon`). Separators are one `write_text` of `sep` with
+  `fg = left segment bg`, `bg = right segment bg` — the standard powerline
+  trick; right-side chains swap fg/bg so a left-pointing glyph reads
+  right. `head` / `tail` / `right_head` caps are drawn in the adjacent
+  segment's bg over the terminal background.
+- **The glyphs come from a bundled fallback face.** No single font has
+  both full CJK (the host primary) and the Powerline Extra range, so
+  `assets/PowerlineSymbols-subset.ttf` (a ~20 KB `pyftsubset` of a Nerd
+  Font to U+E0A0–E0D7) is registered as an *additional* host fallback
+  after the configured one — the atlas fallback chain already handles
+  "codepoint the primary lacks". Plain JetBrains Mono already covers the
+  basic arrows (U+E0A0–E0B3); the subset adds the rounded/angled caps.
+- **`lines >= 2` puts the segments on the first row and the input line
+  (prefixed with `input`, default `"> "`) on the last** — which is how a
+  right-side clock stays put: it's on a row the line editor never
+  touches. On a single-line prompt the right chain is instead redrawn
+  after every keystroke (and on the idle timeout, so `{time}` ticks),
+  and the input box's right edge (`input_max_col`) is clamped short of
+  it.
+- **The line editor moved to a repaint model.** It used to shift cells
+  with `insert_cells` / `delete_cells` (ECMA-48 ICH/DCH); now every edit
+  mutates the local `buffer` and calls `renderInputLine`, which repaints
+  the whole box `[line_start_col, input_max_col)` from a
+  horizontally-scrolled (`input_scroll`) window of the buffer and places
+  the cursor. This is what lets the editor respect a right-side prompt's
+  bounds and scroll a long line inside its zone instead of wrapping.
+  `submitLine` re-echoes the full command unbounded (past the box / right
+  prompt, wrapping) before running it, so scrollback shows all of it.
+  The `insert_cells` / `delete_cells` wire ops are now unused by the
+  shell but stay in the protocol.
 - **Deferred:** a `prompt` *function* form — `shell.conf` sets a Lua
   callback that receives the same data items and emits its own draw
   commands (so it can shell out to `git status` etc.). Recorded in
-  `docs/ideas.md`; the string form above is deliberately the first slice.
+  `docs/ideas.md` / roadmap.md; the string + segment forms here are the
+  first slices, and `prompt_template`'s `Op` list / `Data` snapshot are
+  already the right shape to hand to a callback.
 
 #### Persistent command history: `~/.config/glyphwire/history`
 - **Plain text, one command per line, oldest first** — same directory

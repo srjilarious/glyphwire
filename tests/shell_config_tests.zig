@@ -209,3 +209,72 @@ pub fn configPromptRejectsNegativeDurMinTest(_: std.Io, alloc: std.mem.Allocator
 
     try testz.expectTrue(res.err != null);
 }
+
+// ─── powerline segments ──────────────────────────────────────────────
+
+pub fn configReadsPowerlineSegmentsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt {
+        \\  left_segments = {
+        \\    { text = "{icon:distro-arch}", fg = "#000", bg = "#d0d0d0" },
+        \\    { " {cwd} ", fg = "#ffffff", bg = "#3a3a3a" },
+        \\    { " {exit_code} ", bg = "#d70000", when = "error" },
+        \\  },
+        \\  right_segments = {
+        \\    { " {time} ", fg = "#fff", bg = "#5f87af" },
+        \\  },
+        \\  head = "H", sep = "S", tail = "T",
+        \\  lines = 2, input = "> ", time_format = "%H:%M",
+        \\}
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    const p = res.config.prompt;
+
+    const left = p.left_segments.?;
+    try testz.expectEqual(left.len, 3);
+    try testz.expectEqualStr("{icon:distro-arch}", left[0].text);
+    try testz.expectEqualStr("#000", left[0].fg.?);
+    try testz.expectEqualStr("#d0d0d0", left[0].bg.?);
+    try testz.expectEqual(left[0].when, .always);
+    // positional text (`[1]`), no `fg`
+    try testz.expectEqualStr(" {cwd} ", left[1].text);
+    try testz.expectEqual(left[2].when, .err);
+    try testz.expectEqual(left[2].fg, null);
+
+    try testz.expectEqual(p.right_segments.?.len, 1);
+    try testz.expectEqualStr("H", p.head.?);
+    try testz.expectEqualStr("S", p.sep.?);
+    try testz.expectEqualStr("T", p.tail.?);
+    try testz.expectEqual(p.lines.?, 2);
+    try testz.expectEqualStr("> ", p.input.?);
+    try testz.expectEqualStr("%H:%M", p.time_format.?);
+}
+
+pub fn configPowerlineSegmentsMergeAcrossCallsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\prompt { left_segments = { { "a" }, { "b" } } }
+        \\prompt { left_segments = { { "c" } } }
+    ;
+    var res = try config.load(alloc, src);
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    // Second call replaces the list wholesale.
+    try testz.expectEqual(res.config.prompt.left_segments.?.len, 1);
+    try testz.expectEqualStr("c", res.config.prompt.left_segments.?[0].text);
+}
+
+pub fn configPowerlineRejectsBadWhenTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { left_segments = { { \"x\", when = \"sometimes\" } } }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}
+
+pub fn configPowerlineRejectsZeroLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { lines = 0 }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}

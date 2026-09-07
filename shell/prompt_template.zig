@@ -43,6 +43,11 @@ pub const Op = union(enum) {
     icon: []const u8,
 };
 
+/// An RGB colour parsed from a `#rgb` / `#rrggbb` string (see
+/// `parseColor`). Structurally the same as `glyphwire.Color`; the caller
+/// maps between them (this module stays free of the glyphwire import).
+pub const Color = struct { r: u8, g: u8, b: u8 };
+
 /// The shell state a template renders against. All string fields default to
 /// empty so a caller can fill in only what it has.
 pub const Data = struct {
@@ -50,6 +55,10 @@ pub const Data = struct {
     cwd_full: []const u8 = "",
     user: []const u8 = "",
     host: []const u8 = "",
+    /// Preformatted local time for `{time}` (the caller runs `strftime`).
+    time: []const u8 = "",
+    /// Backing map for `{env:NAME}`. `null` -> `{env:...}` renders empty.
+    environ: ?*const std.process.Environ.Map = null,
 
     /// The last external command's exit status, and whether one has run at
     /// all this session. `{exit}` stays empty until `have_status` is true.
@@ -85,21 +94,25 @@ pub const Rendered = struct {
 /// otherwise loop forever, since the data that made it fire is unchanged.
 const max_depth = 4;
 
-/// Renders `template` against `data` into an ordered op list. Only fails on
-/// allocation failure; an unrecognized token is emitted as literal text,
-/// not an error.
+/// Renders `template` against `data` into an ordered op list, with its own
+/// arena. Only fails on allocation failure; an unrecognized token is
+/// emitted as literal text, not an error.
 pub fn render(gpa: std.mem.Allocator, template: []const u8, data: Data) error{OutOfMemory}!Rendered {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
-    const a = arena.allocator();
+    const ops = try renderOps(arena.allocator(), template, data);
+    return .{ .arena = arena, .ops = ops };
+}
 
+/// Like `render`, but appends into a caller-supplied arena and returns
+/// just the op slice -- for when several templates share one arena (the
+/// powerline segment chains).
+pub fn renderOps(arena: std.mem.Allocator, template: []const u8, data: Data) error{OutOfMemory}![]const Op {
     var ops: std.ArrayList(Op) = .empty;
     var pending: std.ArrayList(u8) = .empty;
-
-    try renderInto(a, &ops, &pending, template, data, 0);
-    try flushPending(a, &ops, &pending);
-
-    return .{ .arena = arena, .ops = try ops.toOwnedSlice(a) };
+    try renderInto(arena, &ops, &pending, template, data, 0);
+    try flushPending(arena, &ops, &pending);
+    return ops.toOwnedSlice(arena);
 }
 
 /// Appends the accumulated literal text (if any) as one `text` op, then
@@ -188,6 +201,18 @@ fn expandToken(
         return;
     }
 
+    if (std.mem.startsWith(u8, token, "env:")) {
+        const name = token["env:".len..];
+        if (name.len == 0) {
+            try appendLiteralToken(a, pending, token);
+            return;
+        }
+        if (data.environ) |m| {
+            if (m.get(name)) |v| try pending.appendSlice(a, v);
+        }
+        return;
+    }
+
     if (std.mem.eql(u8, token, "cwd")) {
         try pending.appendSlice(a, data.cwd);
     } else if (std.mem.eql(u8, token, "cwd_full")) {
@@ -196,6 +221,8 @@ fn expandToken(
         try pending.appendSlice(a, data.user);
     } else if (std.mem.eql(u8, token, "host")) {
         try pending.appendSlice(a, data.host);
+    } else if (std.mem.eql(u8, token, "time")) {
+        try pending.appendSlice(a, data.time);
     } else if (std.mem.eql(u8, token, "exit_code")) {
         var buf: [8]u8 = undefined;
         try pending.appendSlice(a, std.fmt.bufPrint(&buf, "{d}", .{data.last_status}) catch "");
@@ -273,4 +300,36 @@ pub fn opsWidth(ops: []const Op) usize {
         .icon => width += 1,
     };
     return width;
+}
+
+fn hexNibble(ch: u8) ?u8 {
+    return switch (ch) {
+        '0'...'9' => ch - '0',
+        'a'...'f' => ch - 'a' + 10,
+        'A'...'F' => ch - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Parses `#rgb` / `#rrggbb` (the `#` optional). `#abc` expands each
+/// nibble (`#aabbcc`). `null` for anything else.
+pub fn parseColor(spec: []const u8) ?Color {
+    var s = spec;
+    if (s.len > 0 and s[0] == '#') s = s[1..];
+    if (s.len == 3) {
+        const r = hexNibble(s[0]) orelse return null;
+        const g = hexNibble(s[1]) orelse return null;
+        const b = hexNibble(s[2]) orelse return null;
+        return .{ .r = r * 17, .g = g * 17, .b = b * 17 };
+    }
+    if (s.len == 6) {
+        const rh = hexNibble(s[0]) orelse return null;
+        const rl = hexNibble(s[1]) orelse return null;
+        const gh = hexNibble(s[2]) orelse return null;
+        const gl = hexNibble(s[3]) orelse return null;
+        const bh = hexNibble(s[4]) orelse return null;
+        const bl = hexNibble(s[5]) orelse return null;
+        return .{ .r = rh * 16 + rl, .g = gh * 16 + gl, .b = bh * 16 + bl };
+    }
+    return null;
 }

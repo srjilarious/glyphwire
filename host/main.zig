@@ -45,6 +45,11 @@ const font_fallback_default = "assets/JetBrainsMono-Regular.ttf";
 const font_size_default: f32 = 20.0;
 const conf_lua_path = "assets/conf.lua";
 
+// Always-registered extra fallback: a tiny pyftsubset of a Nerd Font to
+// the Powerline range (U+E0A0-E0D7), for a configured powerline shell
+// prompt's separator / cap glyphs.
+const powerline_symbols_font = "assets/PowerlineSymbols-subset.ttf";
+
 // Runtime font-size (Ctrl+- / Ctrl++ / Ctrl+0) policy. The engine applies
 // whatever size it is handed; the clamp range and step are the host's.
 const min_font_size: f32 = 8.0;
@@ -1600,6 +1605,14 @@ pub fn main(init: std.process.Init) !void {
     // box. Non-fatal -- text still works from the primary alone.
     appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, font_cfg.fallback, 0) catch |err| {
         std.log.warn("could not add fallback font '{s}': {t}", .{ font_cfg.fallback, err });
+    };
+
+    // And a bundled Powerline-symbols subset (U+E0A0-E0D7) as a further
+    // fallback, so a configured powerline shell prompt's separator /
+    // rounded-cap glyphs render even though neither the CJK primary nor a
+    // plain-Latin fallback covers that Private Use range.
+    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, powerline_symbols_font, 0) catch |err| {
+        std.log.warn("could not add powerline symbols font '{s}': {t}", .{ powerline_symbols_font, err });
     };
 
     const app = try App.init(alloc, appRunner.engine, &srv, &shell_exited, screenshot_path, screenshot_delay_ms, .{

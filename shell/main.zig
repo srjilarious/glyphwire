@@ -30,6 +30,36 @@ const c = struct {
     extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 };
 
+/// libc time formatting for the prompt's `{time}` token -- this reduced
+/// std has no `strftime`/`localtime`. `Tm` is glibc's `struct tm` (the
+/// nine `int` fields, then `tm_gmtoff` / `tm_zone`).
+const timelib = struct {
+    const Tm = extern struct {
+        sec: c_int,
+        min: c_int,
+        hour: c_int,
+        mday: c_int,
+        mon: c_int,
+        year: c_int,
+        wday: c_int,
+        yday: c_int,
+        isdst: c_int,
+        gmtoff: c_long,
+        zone: ?[*:0]const u8,
+    };
+    extern "c" fn time(t: ?*c_long) c_long;
+    extern "c" fn localtime_r(timep: *const c_long, result: *Tm) ?*Tm;
+    extern "c" fn strftime(s: [*]u8, max: usize, format: [*:0]const u8, tm: *const Tm) usize;
+};
+
+/// Parses a `#rgb` / `#rrggbb` (the `#` optional) colour for a powerline
+/// segment; `null` for an unset field or a malformed value.
+fn plColor(s: ?[]const u8) ?glyphwire.Color {
+    const spec = s orelse return null;
+    const p = prompt_template.parseColor(spec) orelse return null;
+    return .{ .r = p.r, .g = p.g, .b = p.b };
+}
+
 /// glyphwire-shell: sets up discovery, then either execs into a given
 /// command (`glyphwire-shell <command> [args...]`, unchanged from
 /// milestone 5) or, given no command, runs the interactive prompt itself
@@ -296,7 +326,15 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         // Blocks until one is queued rather than polling on a fixed
         // interval; the timeout is just a fallback heartbeat, not
         // load-bearing.
-        const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
+        const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse {
+            // Idle tick: refresh the powerline right chain so `{time}`
+            // keeps ticking while nothing is typed. No-op otherwise.
+            if (prompt.right_dynamic and prompt.browse_pos == null) {
+                prompt.drawRightChain() catch {};
+                prompt.client.setCursor(prompt.line_start_row, prompt.line_start_col + prompt.caretCol()) catch {};
+            }
+            continue;
+        };
 
         // Committed text input -- the characters the user typed, already
         // resolved through their OS keyboard layout / dead keys / IME.
@@ -570,26 +608,17 @@ const Prompt = struct {
     /// then. Owned; freed in `deinit`.
     history_path: ?[]const u8 = null,
 
-    /// Prompt templates from `shell.conf`'s `prompt{ ... }` (see
-    /// `shell/prompt_template.zig` and `loadStartupConfig`). All `null`
-    /// means no prompt config -- `writePromptPrefix` then uses the
-    /// built-in `writeDefaultPrefix`. `left`/`right` are the main
-    /// templates; `exit`/`dur` are the sub-templates `{exit}` / `{dur}`
-    /// expand to. Owned dups; freed in `deinit`.
-    prompt_left: ?[]const u8 = null,
-    prompt_right: ?[]const u8 = null,
-    prompt_exit: ?[]const u8 = null,
-    prompt_dur: ?[]const u8 = null,
-    /// Minimum wall-clock run time of the last external command before
-    /// `{dur}` shows anything. `shell.conf`'s `prompt.dur_min_ms`
-    /// overrides this default.
-    dur_min_ms: u64 = 2000,
+    /// The parsed `shell.conf`, kept alive for the whole session so the
+    /// prompt can read `prompt_config.?.prompt` live on every redraw (see
+    /// `promptCfg` / `writePromptPrefix`). `null` when there was no config
+    /// file. Owns its strings/segments; freed in `deinit`.
+    prompt_config: ?config.ShellConfig = null,
 
     /// The last external command's exit status and wall-clock run time,
     /// plus whether any external command has run this session -- feeds
-    /// `{exit}` / `{exit_code}` / `{dur}` / `{duration}`. Only
-    /// `runCommand` updates these; the `cd` / `alias` / `unalias`
-    /// builtins leave them as the last real program's values.
+    /// `{exit}` / `{exit_code}` / `{dur}` / `{duration}` and a segment's
+    /// `when = "error" | "slow"`. Only `runCommand` updates these; the
+    /// `cd` / `alias` / `unalias` builtins leave them alone.
     last_status: u8 = 0,
     last_dur_ms: u64 = 0,
     have_status: bool = false,
@@ -600,6 +629,25 @@ const Prompt = struct {
     host: []const u8 = "",
     host_buf: [64]u8 = undefined,
 
+    /// Input-line box for the repaint model. `line_start_row`/`_col` (above)
+    /// are its top-left; `input_max_col` is the exclusive right edge the
+    /// typed text may not cross (so a locked right-side prompt stays put),
+    /// and `input_scroll` is the first buffer byte shown when the line is
+    /// longer than the box. `renderInputLine` repaints the whole box on
+    /// every edit rather than shifting cells with `insert_cells`/
+    /// `delete_cells`.
+    input_max_col: usize = 0,
+    input_scroll: usize = 0,
+
+    /// Powerline layout state, set by `writePowerlinePrefix`. `pl_top_row`
+    /// is the row the segment chains live on; `right_dynamic` is true when
+    /// `right_segments` are configured (they get refreshed on the idle
+    /// timeout so `{time}` ticks, and -- on a single-line prompt -- after
+    /// every keystroke so they stay pinned).
+    pl_top_row: usize = 0,
+    right_dynamic: bool = false,
+    prompt_lines: u8 = 1,
+
     fn deinit(self: *Prompt) void {
         const alloc = self.client.alloc;
         for (self.history.items) |line| alloc.free(line);
@@ -608,10 +656,19 @@ const Prompt = struct {
         self.buffer.deinit(alloc);
         self.aliases.deinit(alloc);
         if (self.history_path) |p| alloc.free(p);
-        if (self.prompt_left) |s| alloc.free(s);
-        if (self.prompt_right) |s| alloc.free(s);
-        if (self.prompt_exit) |s| alloc.free(s);
-        if (self.prompt_dur) |s| alloc.free(s);
+        if (self.prompt_config) |*pcfg| pcfg.deinit();
+    }
+
+    /// The parsed prompt config, or `null` when there's no `shell.conf`.
+    fn promptCfg(self: *Prompt) ?*const config.PromptConfig {
+        if (self.prompt_config) |*pcfg| return &pcfg.prompt;
+        return null;
+    }
+
+    /// `prompt.dur_min_ms` if set, else the built-in default.
+    fn durMinMs(self: *Prompt) u64 {
+        if (self.promptCfg()) |p| if (p.dur_min_ms) |m| return m;
+        return 2000;
     }
 
     /// Fills `host`/`host_buf` from `$HOSTNAME` or `/etc/hostname`. Best
@@ -634,19 +691,29 @@ const Prompt = struct {
     }
 
     /// Writes the prompt prefix at the cursor's current position and
-    /// returns the cursor position right after it, for the caller to
-    /// record as `line_start_row`/`_col`. Everything is read fresh each
-    /// time (cwd, exit status, ...) so a `cd` or a failed command shows
-    /// on the very next prompt.
+    /// returns where the input line begins, for the caller to record as
+    /// `line_start_row`/`_col`. Everything is read fresh each time (cwd,
+    /// exit status, time, ...) so a `cd` or a failed command shows on the
+    /// very next prompt.
     ///
-    /// With no `shell.conf` prompt config this is just `writeDefaultPrefix`
-    /// (`<cwd> > `); a configured `prompt.left` / `prompt.right` routes
-    /// through `writeTemplatedPrefix`.
+    /// Three shapes, by `shell.conf`:
+    ///   - nothing configured -> `writeDefaultPrefix` (`<cwd> > `)
+    ///   - `prompt.left` / `prompt.right` strings -> `writeTemplatedPrefix`
+    ///   - `prompt.left_segments` / `right_segments` -> `writePowerlinePrefix`
+    ///
+    /// Also (re)sets the input-box bounds: `input_max_col` (right edge the
+    /// typed text may not cross), `input_scroll`, `right_dynamic`,
+    /// `prompt_lines`.
     fn writePromptPrefix(self: *Prompt) !glyphwire.Cursor {
-        if (self.prompt_left == null and self.prompt_right == null) {
-            return self.writeDefaultPrefix();
-        }
-        return self.writeTemplatedPrefix();
+        self.input_max_col = self.grid_cols;
+        self.input_scroll = 0;
+        self.right_dynamic = false;
+        self.prompt_lines = 1;
+
+        const p = self.promptCfg() orelse return self.writeDefaultPrefix();
+        if (p.left_segments != null or p.right_segments != null) return self.writePowerlinePrefix(p);
+        if (p.left != null or p.right != null) return self.writeTemplatedPrefix(p);
+        return self.writeDefaultPrefix();
     }
 
     /// The built-in prompt: the absolute working directory followed by
@@ -662,76 +729,311 @@ const Prompt = struct {
         return try self.client.getCursor();
     }
 
-    /// Renders the configured `prompt.left` / `prompt.right` templates
-    /// (see `shell/prompt_template.zig`) against the shell's live state
-    /// and emits them. `prompt.right` is drawn first, right-aligned on
-    /// the prompt's starting row (a long input line will later overwrite
-    /// it -- accepted, like starship's transient right prompt); then
-    /// `prompt.left` is drawn from column 0. Returns the cursor position
-    /// after the left template, where input begins.
-    fn writeTemplatedPrefix(self: *Prompt) !glyphwire.Cursor {
-        const alloc = self.client.alloc;
+    /// Stack buffers backing a `prompt_template.Data` snapshot -- the
+    /// caller holds one of these for the lifetime of the `Data`.
+    const PromptDataBufs = struct {
+        cwd: [std.fs.max_path_bytes]u8 = undefined,
+        tilde: [std.fs.max_path_bytes]u8 = undefined,
+        time: [64]u8 = undefined,
+    };
 
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd_full = cwd_buf[0 .. std.process.currentPath(self.client.io, &cwd_buf) catch 0];
-
-        var tilde_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd_tilde = self.collapseHome(cwd_full, &tilde_buf);
-
-        const data = prompt_template.Data{
-            .cwd = cwd_tilde,
+    /// Fills a `prompt_template.Data` from the shell's live state, using
+    /// `b` for the strings that need somewhere to live.
+    fn buildPromptData(self: *Prompt, b: *PromptDataBufs, p: *const config.PromptConfig) prompt_template.Data {
+        const cwd_full = b.cwd[0 .. std.process.currentPath(self.client.io, &b.cwd) catch 0];
+        return .{
+            .cwd = self.collapseHome(cwd_full, &b.tilde),
             .cwd_full = cwd_full,
             .user = self.environ_map.get("USER") orelse "",
             .host = self.host,
+            .time = self.formatTime(&b.time, p.time_format orelse "%H:%M"),
+            .environ = self.environ_map,
             .last_status = self.last_status,
             .have_status = self.have_status,
             .last_dur_ms = self.last_dur_ms,
-            .dur_min_ms = self.dur_min_ms,
-            .exit_section = self.prompt_exit,
-            .dur_section = self.prompt_dur,
+            .dur_min_ms = self.durMinMs(),
+            .exit_section = p.exit,
+            .dur_section = p.dur,
         };
+    }
 
-        // The row the caller left the cursor on -- both sections anchor to it.
+    /// Local time formatted per `fmt` (a `strftime` string), into `buf`.
+    /// Uses libc directly (this reduced std has no time-formatting) and
+    /// returns "" on any failure.
+    fn formatTime(_: *Prompt, buf: []u8, fmt: []const u8) []const u8 {
+        var fmtz: [96]u8 = undefined;
+        if (fmt.len == 0 or fmt.len >= fmtz.len) return "";
+        @memcpy(fmtz[0..fmt.len], fmt);
+        fmtz[fmt.len] = 0;
+
+        const t: c_long = timelib.time(null);
+        var tm: timelib.Tm = undefined;
+        if (timelib.localtime_r(&t, &tm) == null) return "";
+        const n = timelib.strftime(buf.ptr, buf.len, @ptrCast(&fmtz), &tm);
+        return buf[0..n];
+    }
+
+    /// Renders the configured `prompt.left` / `prompt.right` template
+    /// strings (see `shell/prompt_template.zig`). `prompt.right` is drawn
+    /// right-aligned on the prompt row (a long input line overwrites it --
+    /// accepted, like starship's transient right prompt); `prompt.left`
+    /// from column 0. Returns where input begins.
+    fn writeTemplatedPrefix(self: *Prompt, p: *const config.PromptConfig) !glyphwire.Cursor {
+        const alloc = self.client.alloc;
+
+        var bufs: PromptDataBufs = .{};
+        const data = self.buildPromptData(&bufs, p);
+
         const start = try self.client.getCursor();
 
-        if (self.prompt_right) |rt| {
+        if (p.right) |rt| {
             var r = try prompt_template.render(alloc, rt, data);
             defer r.deinit();
             const w = prompt_template.opsWidth(r.ops);
             if (w > 0 and w < self.grid_cols) {
                 try self.client.setCursor(start.row, self.grid_cols - w);
-                try self.emitOps(r.ops, start.row, self.grid_cols - w);
+                try self.emitOps(r.ops, start.row, self.grid_cols - w, .{});
             }
             try self.client.setCursor(start.row, 0);
         }
 
-        var l = try prompt_template.render(alloc, self.prompt_left orelse default_prompt_left, data);
+        var l = try prompt_template.render(alloc, p.left orelse default_prompt_left, data);
         defer l.deinit();
-        try self.emitOps(l.ops, start.row, 0);
+        try self.emitOps(l.ops, start.row, 0, .{});
 
         return try self.client.getCursor();
     }
 
-    /// Walks a rendered template's ops, `write_text`ing each text run and
-    /// `draw_icon`ing each icon at the running cell. `draw_icon` doesn't
-    /// move the server cursor, so after an icon the cursor is advanced one
-    /// column by hand; text runs resync from `getCursor` (so a `\n` in a
-    /// run is handled by the server's own CR+LF).
-    fn emitOps(self: *Prompt, ops: []const prompt_template.Op, row: usize, col: usize) !void {
+    const RenderedSeg = struct {
+        ops: []const prompt_template.Op,
+        width: usize,
+        fg: ?glyphwire.Color,
+        bg: ?glyphwire.Color,
+    };
+
+    /// Renders each *visible* segment of `segs` (dropping `when`-filtered
+    /// and empty ones) into `out` (allocated in `arena`), returns the
+    /// summed on-screen width of the segments themselves (separators and
+    /// caps not included -- see `chainWidth`).
+    fn renderChain(
+        _: *Prompt,
+        arena: std.mem.Allocator,
+        segs: []const config.PromptSegment,
+        data: prompt_template.Data,
+        out: *std.ArrayList(RenderedSeg),
+    ) !usize {
+        var total: usize = 0;
+        for (segs) |seg| {
+            switch (seg.when) {
+                .always => {},
+                .err => if (!(data.have_status and data.last_status != 0)) continue,
+                .slow => if (!(data.dur_min_ms > 0 and data.last_dur_ms >= data.dur_min_ms)) continue,
+            }
+            const ops = try prompt_template.renderOps(arena, seg.text, data);
+            const w = prompt_template.opsWidth(ops);
+            if (w == 0) continue;
+            try out.append(arena, .{
+                .ops = ops,
+                .width = w,
+                .fg = plColor(seg.fg),
+                .bg = plColor(seg.bg),
+            });
+            total += w;
+        }
+        return total;
+    }
+
+    /// Total on-screen width of a rendered chain: segment widths (`seg_sum`)
+    /// plus `count - 1` separators plus the caps that are non-empty.
+    fn chainWidth(count: usize, seg_sum: usize, sep: []const u8, head: []const u8, tail: []const u8) usize {
+        if (count == 0) return 0;
+        var w = seg_sum + prompt_template.displayWidth(sep) * (count - 1);
+        if (head.len > 0) w += prompt_template.displayWidth(head);
+        if (tail.len > 0) w += prompt_template.displayWidth(tail);
+        return w;
+    }
+
+    /// Draws a rendered chain left to right starting at `(row, start_col)`:
+    /// optional `head` cap, then each segment (a background strip, then its
+    /// text/icons composited over it), with `sep` between adjacent
+    /// segments, then optional `tail` cap. A separator is drawn in the two
+    /// neighbours' backgrounds -- for `right_side` chains the fg/bg are
+    /// swapped so a left-pointing glyph reads correctly.
+    fn drawChain(
+        self: *Prompt,
+        row: usize,
+        start_col: usize,
+        segs: []const RenderedSeg,
+        sep: []const u8,
+        head: []const u8,
+        tail: []const u8,
+        right_side: bool,
+    ) !void {
+        if (segs.len == 0) return;
+        var col = start_col;
+
+        if (head.len > 0) {
+            try self.client.setCursor(row, col);
+            try self.client.writeText(head, segs[0].bg, null);
+            col += prompt_template.displayWidth(head);
+        }
+
+        for (segs, 0..) |seg, i| {
+            if (i > 0 and sep.len > 0) {
+                const prev = segs[i - 1];
+                try self.client.setCursor(row, col);
+                if (right_side) {
+                    try self.client.writeText(sep, seg.bg, prev.bg);
+                } else {
+                    try self.client.writeText(sep, prev.bg, seg.bg);
+                }
+                col += prompt_template.displayWidth(sep);
+            }
+            // Background strip, then text/icons composited over it.
+            try self.client.setCursor(row, col);
+            try self.writeSpaces(seg.width, seg.fg, seg.bg);
+            try self.emitOps(seg.ops, row, col, .{ .fg = seg.fg, .transparent = true });
+            col += seg.width;
+        }
+
+        if (tail.len > 0) {
+            try self.client.setCursor(row, col);
+            try self.client.writeText(tail, segs[segs.len - 1].bg, null);
+        }
+    }
+
+    /// Re-renders and redraws the `right_segments` chain at its pinned
+    /// position -- called on the idle timeout so `{time}` ticks, and (on a
+    /// single-line prompt) after every keystroke so it stays put while the
+    /// input line is repainted. A no-op when no right chain is configured.
+    fn drawRightChain(self: *Prompt) !void {
+        const p = self.promptCfg() orelse return;
+        const segs = p.right_segments orelse return;
+
+        var arena_state = std.heap.ArenaAllocator.init(self.client.alloc);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        var bufs: PromptDataBufs = .{};
+        const data = self.buildPromptData(&bufs, p);
+
+        var list: std.ArrayList(RenderedSeg) = .empty;
+        const seg_sum = try self.renderChain(arena, segs, data, &list);
+        if (list.items.len == 0) return;
+
+        const sep_right = p.sep_right orelse (p.sep orelse "");
+        const right_head = p.right_head orelse "";
+        const w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
+        if (w >= self.grid_cols) return;
+        try self.drawChain(self.pl_top_row, self.grid_cols - w, list.items, sep_right, right_head, "", true);
+    }
+
+    /// The powerline prompt: `left_segments` from column 0, `right_segments`
+    /// right-aligned, on `prompt_lines`-1 rows above the input line (or all
+    /// on one row when `prompt_lines == 1`). Returns where input begins.
+    fn writePowerlinePrefix(self: *Prompt, p: *const config.PromptConfig) !glyphwire.Cursor {
+        var arena_state = std.heap.ArenaAllocator.init(self.client.alloc);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        var bufs: PromptDataBufs = .{};
+        const data = self.buildPromptData(&bufs, p);
+
+        const start = try self.client.getCursor();
+        self.pl_top_row = start.row;
+        self.prompt_lines = p.lines orelse 1;
+
+        const sep = p.sep orelse "";
+        const sep_right = p.sep_right orelse sep;
+        const head = p.head orelse "";
+        const tail = p.tail orelse "";
+        const right_head = p.right_head orelse "";
+
+        var left_end: usize = 0;
+        if (p.left_segments) |segs| {
+            var list: std.ArrayList(RenderedSeg) = .empty;
+            const seg_sum = try self.renderChain(arena, segs, data, &list);
+            try self.drawChain(start.row, 0, list.items, sep, head, tail, false);
+            left_end = @min(chainWidth(list.items.len, seg_sum, sep, head, tail), self.grid_cols);
+        }
+
+        var right_w: usize = 0;
+        if (p.right_segments) |segs| {
+            var list: std.ArrayList(RenderedSeg) = .empty;
+            const seg_sum = try self.renderChain(arena, segs, data, &list);
+            right_w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
+            if (list.items.len > 0 and right_w < self.grid_cols) {
+                self.right_dynamic = true;
+                try self.drawChain(start.row, self.grid_cols - right_w, list.items, sep_right, right_head, "", true);
+            }
+        }
+
+        const input_prefix = p.input orelse "> ";
+        if (self.prompt_lines >= 2) {
+            const irow = start.row + self.prompt_lines - 1;
+            try self.client.setCursor(irow, 0);
+            if (input_prefix.len > 0) try self.client.writeText(input_prefix, null, null);
+            self.line_start_row = irow;
+            self.line_start_col = prompt_template.displayWidth(input_prefix);
+            self.input_max_col = self.grid_cols;
+        } else {
+            var col = left_end;
+            try self.client.setCursor(start.row, col);
+            if (input_prefix.len > 0) {
+                try self.client.writeText(input_prefix, null, null);
+                col += prompt_template.displayWidth(input_prefix);
+            }
+            self.line_start_row = start.row;
+            self.line_start_col = col;
+            self.input_max_col = if (self.right_dynamic and right_w + 1 < self.grid_cols)
+                self.grid_cols - right_w - 1
+            else
+                self.grid_cols;
+            if (self.input_max_col <= self.line_start_col) self.input_max_col = self.grid_cols;
+        }
+        self.input_scroll = 0;
+        return .{ .row = self.line_start_row, .col = self.line_start_col };
+    }
+
+    /// Writes `n` spaces at the cursor with the given fg/bg -- the
+    /// background strip a powerline segment's text then composites over.
+    fn writeSpaces(self: *Prompt, n: usize, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
+        var buf: [256]u8 = undefined;
+        var left = n;
+        while (left > 0) {
+            const chunk = @min(left, buf.len);
+            @memset(buf[0..chunk], ' ');
+            try self.client.writeText(buf[0..chunk], fg, bg);
+            left -= chunk;
+        }
+    }
+
+    const EmitOpts = struct { fg: ?glyphwire.Color = null, transparent: bool = false };
+
+    /// Walks a rendered template's ops. Text runs go through `write_text`
+    /// (or `write_text` transparent, keeping any background strip) with
+    /// `opts.fg`; icons through `draw_icon` at the running cell (which
+    /// `draw_icon` doesn't advance, so the column is bumped by hand).
+    /// Text runs resync the cursor from `getCursor` so an embedded `\n`
+    /// (server CR+LF) needs no local bookkeeping.
+    fn emitOps(self: *Prompt, ops: []const prompt_template.Op, row: usize, col: usize, opts: EmitOpts) !void {
         var cur_row = row;
         var cur_col = col;
         for (ops) |op| switch (op) {
             .text => |t| {
-                try self.client.writeText(t, null, null);
+                if (opts.transparent) {
+                    try self.client.writeTextTransparent(t, opts.fg);
+                } else {
+                    try self.client.writeText(t, opts.fg, null);
+                }
                 const cur = try self.client.getCursor();
                 cur_row = cur.row;
                 cur_col = cur.col;
             },
             .icon => |name| {
                 // A `draw_icon` notification for an unregistered name is
-                // logged and dropped server-side, not returned as an
-                // error, so nothing to handle here beyond the wire write.
-                try self.client.drawIconStyled(cur_row, cur_col, name, .{});
+                // logged and dropped server-side, not returned as an error.
+                try self.client.drawIconStyled(cur_row, cur_col, name, .{ .foreground = opts.transparent });
                 cur_col += 1;
                 try self.client.setCursor(cur_row, cur_col);
             },
@@ -754,23 +1056,89 @@ const Prompt = struct {
         return buf[0 .. rest.len + 1];
     }
 
-    /// A fresh prompt: writes the prefix and resets the line -- empty
-    /// buffer, cursor at 0. Used to start a brand new input line (after
-    /// `submitLine` or at startup); see `clearScreen` for the ctrl+l case,
-    /// which redraws the prefix but keeps whatever's already typed.
+    /// The caret's column offset from `line_start_col` -- the display
+    /// width of `buffer` between `input_scroll` and `cursor` (both byte
+    /// offsets on codepoint boundaries). Byte count and column count only
+    /// coincide for ASCII; a CJK char is one codepoint, two columns.
+    fn caretCol(self: *Prompt) usize {
+        const buf = self.buffer.items;
+        const from = @min(self.input_scroll, buf.len);
+        const to = @min(self.cursor, buf.len);
+        if (to <= from) return 0;
+        return lineedit.displayCol(buf[from..], to - from);
+    }
+
+    /// Repaints the whole input box -- `[line_start_col, input_max_col)` on
+    /// `line_start_row` -- from `buffer`, scrolling horizontally
+    /// (`input_scroll`, a byte offset kept on a codepoint boundary) so the
+    /// caret stays visible, then places the server cursor. Replaces the
+    /// old per-edit `insert_cells` / `delete_cells` dance: every editing
+    /// op mutates `buffer`/`cursor` locally and calls this. All width math
+    /// is in display columns (`lineedit`), so a CJK line lays out right.
+    /// On a single-line powerline prompt it also redraws the pinned right
+    /// chain so typing can't disturb it.
+    fn renderInputLine(self: *Prompt) !void {
+        const buf = self.buffer.items;
+        const left = self.line_start_col;
+        const right = if (self.input_max_col > left + 1) self.input_max_col else self.grid_cols;
+        const box_w = right - left;
+
+        // Keep the caret within the box, working in columns not bytes.
+        if (self.cursor < self.input_scroll) {
+            self.input_scroll = self.cursor;
+        } else {
+            while (self.input_scroll < self.cursor and
+                lineedit.displayCol(buf[self.input_scroll..], self.cursor - self.input_scroll) >= box_w)
+            {
+                self.input_scroll = lineedit.nextBoundary(buf, self.input_scroll);
+            }
+        }
+        if (lineedit.cellWidth(buf) <= box_w) self.input_scroll = 0;
+
+        // Visible slice: whole codepoints from `input_scroll` while they fit.
+        const vis_start = @min(self.input_scroll, buf.len);
+        var vis_end = vis_start;
+        var w: usize = 0;
+        while (vis_end < buf.len) {
+            const nb = lineedit.nextBoundary(buf, vis_end);
+            const cw = lineedit.cellWidth(buf[vis_end..nb]);
+            if (w + cw > box_w) break;
+            w += cw;
+            vis_end = nb;
+        }
+        const visible = buf[vis_start..vis_end];
+
+        var line_buf: [1024]u8 = undefined;
+        if (visible.len >= line_buf.len) return; // absurdly long; bail
+        @memcpy(line_buf[0..visible.len], visible);
+        const total = @min(visible.len + (box_w - w), line_buf.len);
+        @memset(line_buf[visible.len..total], ' ');
+
+        try self.client.setCursor(self.line_start_row, left);
+        try self.client.writeText(line_buf[0..total], null, null);
+
+        if (self.right_dynamic and self.prompt_lines == 1) self.drawRightChain() catch {};
+
+        try self.client.setCursor(self.line_start_row, left + self.caretCol());
+    }
+
+    /// A fresh prompt: writes the prefix, resets the line, repaints the
+    /// (empty) input box. Used to start a brand new input line (after
+    /// `submitLine` or at startup); see `clearScreen` for ctrl+l, which
+    /// keeps whatever's already typed.
     fn showPrompt(self: *Prompt) !void {
         const cur = try self.writePromptPrefix();
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
         self.cursor = 0;
         self.buffer.clearRetainingCapacity();
+        try self.renderInputLine();
     }
 
-    /// ctrl+l: clears the whole screen (`Client.clear`) and redraws the
-    /// current prompt line -- prefix plus whatever's already typed -- at
-    /// the top, with the cursor restored to its same offset within the
-    /// line. Unlike `showPrompt`, doesn't touch `buffer`/`cursor`: this is
-    /// a mid-edit redraw, not a fresh prompt.
+    /// ctrl+l: clears the screen, redraws the whole prompt (all segment
+    /// rows included) at the top, then repaints the input box with
+    /// whatever's already typed. Unlike `showPrompt`, doesn't touch
+    /// `buffer`/`cursor`.
     fn clearScreen(self: *Prompt) !void {
         try self.client.clear(0, 0, null, null);
         try self.client.setCursor(0, 0);
@@ -778,27 +1146,24 @@ const Prompt = struct {
         const cur = try self.writePromptPrefix();
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
-
-        if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
-        try self.setCursorAt(self.cursor);
+        self.input_scroll = 0;
+        try self.renderInputLine();
     }
 
-    /// Replaces the whole line -- on-screen and in `buffer` -- with
-    /// `text`, leaving the cursor at its end. Shared by `historyUp`/
-    /// `historyDown`: clears whatever's currently drawn via
-    /// `deleteCells` from column 0 (same `setCursorAt(0)`-then-
-    /// `deleteCells` order `killToStart` already uses) rather than
-    /// tracking a diff against the old text, since a recalled history
-    /// entry has no relation to what it's replacing.
+    /// Replaces the whole line -- `buffer` and on screen -- with `text`,
+    /// cursor at its end. Shared by `historyUp`/`historyDown`. With the
+    /// repaint model this is just a buffer swap plus `renderInputLine`.
     fn setLine(self: *Prompt, text: []const u8) !void {
-        try self.setCursorAt(0);
-        if (self.buffer.items.len > 0) try self.client.deleteCells(lineedit.cellWidth(self.buffer.items));
-
+        self.browse_pos = null;
+        if (self.view_scroll != 0) {
+            const res = try self.client.scrollView(0, null);
+            self.view_scroll = res.offset;
+        }
         self.buffer.clearRetainingCapacity();
         try self.buffer.appendSlice(self.client.alloc, text);
-        if (text.len > 0) try self.client.writeText(text, null, null);
         self.cursor = self.buffer.items.len;
-        try self.setCursorAt(self.cursor);
+        self.input_scroll = 0;
+        try self.renderInputLine();
     }
 
     /// ctrl+up: recalls the previous (older) history entry, most recent
@@ -837,48 +1202,37 @@ const Prompt = struct {
         }
     }
 
-    /// Deletes the character before the cursor (backspace) -- a whole
-    /// codepoint, and the one or two grid cells it occupied.
+    /// Deletes the codepoint before the cursor (backspace). `buffer` /
+    /// `cursor` are mutated locally; `setCursorAt` -> `renderInputLine`
+    /// repaints the box (no `delete_cells` in the repaint model).
     fn deleteBackward(self: *Prompt) !void {
         if (self.cursor == 0) return;
         const start = lineedit.prevBoundary(self.buffer.items, self.cursor);
-        const cells = lineedit.cellWidth(self.buffer.items[start..self.cursor]);
         try self.buffer.replaceRange(self.client.alloc, start, self.cursor - start, &.{});
         self.cursor = start;
         try self.setCursorAt(self.cursor);
-        try self.client.deleteCells(cells);
     }
 
-    /// Deletes the character at the cursor (forward delete) -- distinct
-    /// from `deleteBackward` now that the cursor isn't always pinned to
-    /// the end of the line. Like `deleteBackward`, acts on a whole
-    /// codepoint and its grid cell(s).
+    /// Deletes the codepoint at the cursor (forward delete).
     fn deleteForward(self: *Prompt) !void {
         if (self.cursor >= self.buffer.items.len) return;
         const end = lineedit.nextBoundary(self.buffer.items, self.cursor);
-        const cells = lineedit.cellWidth(self.buffer.items[self.cursor..end]);
         try self.buffer.replaceRange(self.client.alloc, self.cursor, end - self.cursor, &.{});
         try self.setCursorAt(self.cursor);
-        try self.client.deleteCells(cells);
     }
 
     /// ctrl+u: deletes from the start of the line through the cursor.
     fn killToStart(self: *Prompt) !void {
         if (self.cursor == 0) return;
-        // `delete_cells` counts grid cells, not bytes -- wide chars in the
-        // killed span each freed two.
-        const count = lineedit.cellWidth(self.buffer.items[0..self.cursor]);
         try self.buffer.replaceRange(self.client.alloc, 0, self.cursor, &.{});
         self.cursor = 0;
         try self.setCursorAt(0);
-        try self.client.deleteCells(count);
     }
 
     /// Moves the cursor without changing the buffer -- ctrl+a/ctrl+e,
     /// ctrl+arrow word jumps, and plain arrow movement all end here.
     fn moveCursorTo(self: *Prompt, offset: usize) !void {
-        self.cursor = std.math.clamp(offset, 0, self.buffer.items.len);
-        try self.setCursorAt(self.cursor);
+        try self.setCursorAt(offset);
     }
 
     /// Moves the host's scrollback view (see `Prompt.view_scroll` /
@@ -913,7 +1267,7 @@ const Prompt = struct {
                 (self.line_start_row - 1) -| (count - 1)
             else
                 0;
-            self.browse_pos = .{ .row = start_row, .col = self.line_start_col + lineedit.displayCol(self.buffer.items, self.cursor) };
+            self.browse_pos = .{ .row = start_row, .col = self.line_start_col + self.caretCol() };
             const absorbed = self.line_start_row -| start_row;
             const overshoot = count -| absorbed;
             if (overshoot > 0) try self.scrollWindow(@intCast(overshoot));
@@ -1074,45 +1428,48 @@ const Prompt = struct {
         return i;
     }
 
-    /// Positions the server-side cursor at buffer offset `offset` on the
-    /// current line.
+    /// Clamps `self.cursor` to `offset` (a byte offset into `buffer`),
+    /// ends any browse / scrollback view, and repaints the input line
+    /// (`renderInputLine`) so the server cursor lands at the right screen
+    /// cell -- the column is the *display width* left of the cursor, not
+    /// the byte count, so a CJK line's caret is placed right (see
+    /// `lineedit` / `caretCol`).
+    ///
     /// Every ordinary editing operation (`moveCursorTo`, `insertText`,
-    /// `deleteBackward`/`deleteForward`, `killToStart`, `setLine`,
-    /// `clearScreen`) funnels through here to place the real, buffer-offset
-    /// cursor -- so clearing `browse_pos` here, unconditionally, is the
-    /// entire "snap back to the prompt" mechanism. Nothing else needs to
-    /// know browsing was happening: the moment any of those run, the grid
-    /// cursor lands back on the live prompt as a side effect of what it was
-    /// already going to do anyway.
+    /// `deleteBackward`/`deleteForward`, `killToStart`, `setLine`) funnels
+    /// through here, so clearing `browse_pos` unconditionally is the
+    /// entire "snap back to the prompt" mechanism -- the moment any of
+    /// those run, the grid cursor lands back on the live prompt as a side
+    /// effect.
     ///
     /// If the host window was scrolled back into scrollback (via browsing
     /// past the top, or the host's own wheel/scrollbar), snap it back to
-    /// the live tail here too -- starting to type, recall history, move
-    /// the cursor, etc. all mean "I'm done looking at history", the same
-    /// as this already does for `browse_pos`.
+    /// the live tail here too -- starting to type, moving the cursor, etc.
+    /// all mean "I'm done looking at history".
     fn setCursorAt(self: *Prompt, offset: usize) !void {
         self.browse_pos = null;
         if (self.view_scroll != 0) {
             const res = try self.client.scrollView(0, null);
             self.view_scroll = res.offset;
         }
-        // `offset` is a byte offset into `buffer`; the grid column is the
-        // *display width* of everything left of it -- a wide (CJK) char is
-        // two columns but (usually) three bytes, so the two only coincide
-        // for pure-ASCII lines. See `lineedit`.
-        const col = self.line_start_col + lineedit.displayCol(self.buffer.items, offset);
-        try self.client.setCursor(self.line_start_row, col);
+        self.cursor = std.math.clamp(offset, 0, self.buffer.items.len);
+        try self.renderInputLine();
     }
 
-    /// Leaves the just-typed line where it already is (it's been live-
-    /// echoed character by character), moves to the row below it, runs
-    /// the line as a command if it names one (see `runCommand`), then
-    /// resyncs from the server before starting a fresh prompt -- the
-    /// child may have written any number of rows while it ran, so the
-    /// next prompt's position isn't knowable in advance the way it was
-    /// back when this just echoed the line to a fixed offset. `exit`
-    /// skips all of that and just sets `should_exit` for the caller.
+    /// Re-echoes the whole command line unbounded from `line_start` (the
+    /// input box normally shows only a horizontally-scrolled window of it)
+    /// so scrollback keeps the full command, then drops to the row below
+    /// the prompt line and runs it as a command if it names one (see
+    /// `runCommand`), resyncing from the server before a fresh prompt.
+    /// `exit` skips all of that and just sets `should_exit`.
+    ///
+    /// The drop is to `line_start_row + 1`, not the end of a re-echo that
+    /// wrapped -- matching the pre-repaint editor, where a long command
+    /// naturally wrapped onto the next row as it was typed and the
+    /// command's output then drew over that wrapped tail.
     fn submitLine(self: *Prompt) !void {
+        try self.client.setCursor(self.line_start_row, self.line_start_col);
+        if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
         try self.client.setCursor(self.line_start_row + 1, 0);
 
         const alloc = self.client.alloc;
@@ -1533,26 +1890,23 @@ const Prompt = struct {
         };
         defer alloc.free(source);
 
-        var result = try config.load(alloc, source);
-        defer result.deinit();
+        const result = try config.load(alloc, source);
 
         for (result.config.aliases.items) |a| {
             try self.aliases.set(alloc, a.name, a.value);
         }
 
-        // Prompt templating: copy owned dups so they outlive `result`.
-        const pc = result.config.prompt;
-        if (pc.left) |s| self.prompt_left = try alloc.dupe(u8, s);
-        if (pc.right) |s| self.prompt_right = try alloc.dupe(u8, s);
-        if (pc.exit) |s| self.prompt_exit = try alloc.dupe(u8, s);
-        if (pc.dur) |s| self.prompt_dur = try alloc.dupe(u8, s);
-        if (pc.dur_min_ms) |ms| self.dur_min_ms = ms;
-
         if (result.err) |msg| {
             var buf: [512]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "shell.conf: {s}\n", .{msg}) catch "shell.conf: error\n";
             try self.client.writeText(line, .{ .r = 255, .g = 85, .b = 85 }, null);
+            alloc.free(msg);
         }
+
+        // Keep the parsed config for the session -- `writePromptPrefix`
+        // reads `prompt_config.?.prompt` live on every redraw (so `{time}`
+        // and cwd stay current). `Prompt.deinit` frees it.
+        self.prompt_config = result.config;
     }
 
     /// Loads `~/.config/glyphwire/history` into `self.history` so ctrl+up
@@ -1749,20 +2103,16 @@ const Prompt = struct {
     }
 
     /// Inserts a run of characters at the cursor -- used both by the
-    /// prompt loop's `text`-event handler (the characters the user typed)
-    /// and by Tab completion, dropping a whole run in one `insert_cells` +
-    /// `write_text` pair instead of a round trip per character. Cursor and
-    /// grid-cell counts are byte- and display-width-correct, so a CJK or
-    /// combining run lands right.
+    /// prompt loop's `text`-event handler (the characters the user typed,
+    /// already layout/dead-key/IME resolved) and by Tab completion. The
+    /// buffer edit plus `setCursorAt` -> `renderInputLine` repaint the box;
+    /// column math in the repaint is display-width-correct so a CJK run
+    /// lands right.
     fn insertText(self: *Prompt, text: []const u8) !void {
         if (text.len == 0) return;
         try self.buffer.insertSlice(self.client.alloc, self.cursor, text);
-        try self.setCursorAt(self.cursor);
-        // `insert_cells` opens grid cells, not bytes: a CJK completion
-        // suffix needs two cells per character, not three.
-        try self.client.insertCells(lineedit.cellWidth(text));
-        try self.client.writeText(text, null, null);
         self.cursor += text.len;
+        try self.setCursorAt(self.cursor); // -> renderInputLine repaints the box
     }
 
     /// Tab: filename completion for the word under the cursor. Reads the
@@ -1877,8 +2227,8 @@ const Prompt = struct {
         const cur = try self.writePromptPrefix();
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
-        if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
-        try self.setCursorAt(self.cursor);
+        self.input_scroll = 0;
+        try self.setCursorAt(self.cursor); // -> renderInputLine redraws the typed line
     }
 };
 

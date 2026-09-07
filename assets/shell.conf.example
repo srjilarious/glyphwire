@@ -8,29 +8,64 @@
 alias("ll", "ls -l")
 alias("gs", "git status")
 
--- Prompt templating. Call prompt{ ... } with any subset of these keys;
+-- Prompt templating. Call prompt{ ... } with any subset of its keys;
 -- multiple calls merge, last write winning per key. Leave it out entirely
 -- to keep the built-in "<cwd> > " prompt.
 --
--- Tokens in a template string:
+-- Tokens (usable in every template string, including segment `text`):
 --   {cwd}        working directory, $HOME shown as ~
 --   {cwd_full}   working directory, absolute
 --   {user}       $USER
 --   {host}       hostname
+--   {time}       local time (strftime `time_format`, default %H:%M)
+--   {env:NAME}   an environment variable ("" if unset)
 --   {icon:NAME}  a bundled icon, one cell wide (e.g. distro-arch, distro-tux)
---   {exit}       expands to the `exit` sub-template below, but only when the
---                last command exited non-zero
---   {dur}        expands to the `dur` sub-template below, but only when the
---                last command ran for at least dur_min_ms
+--   {exit}       expands to the `exit` sub-template, only on a non-zero exit
+--   {dur}        expands to the `dur` sub-template, only when the last
+--                command ran for at least dur_min_ms
 --   {{ }}        literal braces;  \n \t \\  are unescaped
 --
 -- Inside the `exit` sub-template: {exit_code} is the number.
 -- Inside the `dur` sub-template:  {duration} is the humanized time.
 
+-- (A) Plain template strings:
+--
+-- prompt {
+--     left = "{icon:distro-arch} {cwd}{exit} > ",
+--     right = "{user}@{host}{dur}",
+--     exit = " [{exit_code}]",
+--     dur = "  {duration}",
+--     dur_min_ms = 2000,
+-- }
+
+-- (B) Powerline segments: left_segments / right_segments are lists of
+-- { text (or [1]), fg, bg, when }.  A segment whose text renders empty is
+-- dropped; `when` is "always" (default), "error" (non-zero exit) or
+-- "slow" (last command >= dur_min_ms).  Segments are joined with `sep`
+-- (fg = left bg, bg = right bg -- the powerline trick) and capped with
+-- head/tail/right_head.  lines >= 2 puts the segments on the first row
+-- and the input line (prefixed with `input`) on the last -- so a right
+-- side with the time never moves as you type.  The \u{E0Bx} glyphs need
+-- a Nerd Font; glyphwire-host bundles a Powerline-range fallback.
+
 prompt {
-    left = "{icon:distro-arch} {cwd}{exit} > ",
-    right = "{user}@{host}{dur}",
-    exit = " [{exit_code}]",
-    dur = "  {duration}",
+    left_segments = {
+        { "{icon:distro-arch}", fg = "#000000", bg = "#d0d0d0" },
+        { " {user} ",           fg = "#ffffff", bg = "#5f87af" },
+        { " {cwd} ",            fg = "#ffffff", bg = "#3a3a3a" },
+        { " {exit_code} ",      fg = "#ffffff", bg = "#d70000", when = "error" },
+    },
+    right_segments = {
+        { " {duration} ", fg = "#ffffff", bg = "#5f5f00", when = "slow" },
+        { " {time} ",     fg = "#ffffff", bg = "#5f87af" },
+    },
+    head       = "\u{E0B6}",  -- rounded left cap
+    sep        = "\u{E0B1}",  -- thin right-pointing separator
+    tail       = "\u{E0B4}",  -- rounded right cap
+    sep_right  = "\u{E0B3}",  -- thin left-pointing separator
+    right_head = "\u{E0B6}",
+    lines = 2,
+    input = "> ",
+    time_format = "%H:%M",
     dur_min_ms = 2000,
 }
