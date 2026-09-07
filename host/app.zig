@@ -13,6 +13,7 @@ const preedit_mod = @import("preedit.zig");
 const render_mod = @import("render.zig");
 const panes_mod = @import("panes.zig");
 const redraw_mod = @import("redraw.zig");
+const profiler_mod = @import("profiler.zig");
 
 const CursorConfig = config.CursorConfig;
 const CursorShape = config.CursorShape;
@@ -149,6 +150,11 @@ pub const App = struct {
     /// Null until the first frame, which always draws.
     redraw_prev: ?RedrawSig = null,
 
+    /// Frame-timing profiler + HUD toggle. Inert (every call an
+    /// early-return) unless `host.conf`'s `profile` is set. See
+    /// `host/profiler.zig`.
+    profiler: profiler_mod.HostProfiler,
+
     caret: caret_mod.Caret,
     keys: input_mod.KeyInput,
     preedit: preedit_mod.Preedit,
@@ -167,10 +173,12 @@ pub const App = struct {
         screenshot_delay_ms: f64,
         font: FontRuntime,
         cursor: CursorConfig,
+        profile: config.ProfileConfig,
     ) !*App {
         const app = try alloc.create(App);
         app.* = .{
             .alloc = alloc,
+            .profiler = profiler_mod.HostProfiler.init(server.io, profile.enabled, profile.hud, profile.force_redraw, profile.window_ms, profile.log_interval_ms),
             .server = server,
             .window = eng.window,
             .shell_exited = shell_exited,
@@ -229,6 +237,9 @@ pub const App = struct {
     }
 
     pub fn update(self: *App, eng: *Engine, deltaTimeMs: f64) bool {
+        const t0: ?std.Io.Timestamp = if (self.profiler.active()) self.profiler.now() else null;
+        defer if (t0) |s| self.profiler.recordSince(.update, s);
+
         if (self.shell_exited.load(.monotonic)) return false;
         // A `--screenshot` run quits the frame after `render` has taken
         // the capture, so an automated run terminates on its own.
@@ -296,7 +307,47 @@ pub const App = struct {
     }
 
     pub fn render(self: *App, eng: *Engine) void {
+        const t0: ?std.Io.Timestamp = if (self.profiler.active()) self.profiler.now() else null;
         self.renderer.render(eng);
+        if (t0) |s| {
+            self.profiler.recordSince(.draw, s);
+            self.profiler.markDrawn();
+        }
+    }
+
+    /// Whether the frame-timing profiler is collecting samples -- the
+    /// loop hooks below check this so a non-profiling run pays no timer
+    /// cost. See `host/profiler.zig`.
+    pub fn profileActive(self: *App) bool {
+        return self.profiler.active();
+    }
+
+    /// A monotonic timestamp for the loop's own `waitEvents` /
+    /// `swapBuffers` brackets.
+    pub fn profileNow(self: *App) std.Io.Timestamp {
+        return self.profiler.now();
+    }
+
+    /// Called once at the top of each `AppRunner.gameLoopCore` iteration
+    /// (guarded by `@hasDecl`). Flushes the last frame's counter / rate
+    /// windows and records the wall period since the previous call as the
+    /// `frame` span.
+    pub fn profileFrameStart(self: *App) void {
+        if (!self.profiler.active()) return;
+        const period = self.profiler.core.frameBoundary();
+        self.profiler.record(.frame, period);
+    }
+
+    /// The stretch `gameLoopCore` spent blocked in `waitEvents` this
+    /// iteration, measured from `start` (a `profileNow` timestamp).
+    pub fn profileWait(self: *App, start: std.Io.Timestamp) void {
+        self.profiler.recordSince(.wait, start);
+    }
+
+    /// The stretch `gameLoopCore` spent in `swapBuffers` this iteration
+    /// (includes any vsync block), measured from `start`.
+    pub fn profileSwap(self: *App, start: std.Io.Timestamp) void {
+        self.profiler.recordSince(.present, start);
     }
 
     /// Whether anything the renderer composites has moved since the last
@@ -307,10 +358,25 @@ pub const App = struct {
     /// few host-local reads. Always true on the first frame and while a
     /// `--screenshot` capture is still pending.
     pub fn needsRedraw(self: *App, eng: *Engine) bool {
+        const t0: ?std.Io.Timestamp = if (self.profiler.active()) self.profiler.now() else null;
+        defer if (t0) |s| self.profiler.recordSince(.redraw_check, s);
+
+        // Runs every iteration, so it is also where the profiler snapshot
+        // gets pushed onto the session (under `ctx_mutex`, inside
+        // `redrawSig`) for `get_property "profile"` to read.
         const cur = self.redrawSig(eng);
         defer self.redraw_prev = cur;
-        if (self.redraw_prev) |prev| return !std.meta.eql(prev, cur);
-        return true;
+
+        // Forced every-frame redraw (Ctrl+Shift+R) bypasses change
+        // detection entirely -- for profiling steady-state draw cost.
+        if (self.profiler.force_redraw) return true;
+        // The HUD shows live numbers, so it repaints continuously while
+        // visible -- `idleTimeoutMs` bounds that to ~10 Hz.
+        if (self.profiler.hud_visible) return true;
+
+        const need = if (self.redraw_prev) |prev| !std.meta.eql(prev, cur) else true;
+        if (!need) self.profiler.markSkipped();
+        return need;
     }
 
     fn redrawSig(self: *App, eng: *Engine) RedrawSig {
@@ -324,6 +390,10 @@ pub const App = struct {
         {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
+            // Publish the latest profiler numbers for `get_property
+            // "profile"` while we already hold the lock the wire handler
+            // reads them under. Inert when profiling is off.
+            if (self.profiler.active()) server.session.profile = self.profiler.snapshot();
             ctx_sig = redraw_mod.contextSig(server.ctx);
             const root = &server.ctx.root;
             const view: usize = if (scroll_mod.rootOwned(root)) 0 else root.view_scroll;
@@ -363,8 +433,16 @@ pub const App = struct {
     /// a configured caret blink still needs the loop back on its own
     /// clock, so those return a bounded wait in milliseconds.
     pub fn idleTimeoutMs(self: *App) ?f64 {
+        // Forced every-frame redraw: never block on the event loop, so
+        // the loop runs at the display's frame rate (vsync in
+        // `swapBuffers` is then the only throttle).
+        if (self.profiler.force_redraw) return 0;
+
         var wait: ?f64 = null;
         if (self.screenshot.path != null and !self.screenshot.done) wait = 16;
+        // The profiler HUD refreshes its numbers off the OS event stream,
+        // so wake ~10x/second to redraw it while it is shown.
+        if (self.profiler.hud_visible) wait = softMin(wait, 100);
         if (self.caret.blink) {
             const period = @max(self.caret.blink_ms, 1.0);
             const into = @mod(self.caret.blink_elapsed_ms, period);

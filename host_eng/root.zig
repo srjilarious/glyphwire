@@ -97,13 +97,31 @@ pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
         const MaxCatchupMs = 100.0;
 
         pub fn gameLoopCore(self: *Self, app: *AppData) bool {
+            // Optional frame-timing hooks: an `AppData` that declares them
+            // (glyphwire-host does -- see `host/profiler.zig`) gets the
+            // per-iteration boundary plus the `waitEvents` / `swapBuffers`
+            // durations the loop is the only place that can measure. Any
+            // other app compiles these out entirely.
+            const prof = comptime @hasDecl(AppData, "profileFrameStart");
+            if (comptime prof) app.profileFrameStart();
+
             if (comptime engOpts.redrawOnDemand) {
                 if (self.drew_once) {
                     // Idle until an OS event arrives, `Engine.wakeEventLoop`
                     // is called from another thread, or the app's own
                     // timeout elapses (a blinking caret, a pending
                     // screenshot).
-                    self.engine.waitEvents(app.idleTimeoutMs());
+                    if (comptime prof) {
+                        if (app.profileActive()) {
+                            const t0 = app.profileNow();
+                            self.engine.waitEvents(app.idleTimeoutMs());
+                            app.profileWait(t0);
+                        } else {
+                            self.engine.waitEvents(app.idleTimeoutMs());
+                        }
+                    } else {
+                        self.engine.waitEvents(app.idleTimeoutMs());
+                    }
                 }
             }
 
@@ -130,7 +148,17 @@ pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
                 if (self.drew_once and !app.needsRedraw(self.engine)) return true;
             }
             app.render(self.engine);
-            self.engine.window.swapBuffers();
+            if (comptime prof) {
+                if (app.profileActive()) {
+                    const t0 = app.profileNow();
+                    self.engine.window.swapBuffers();
+                    app.profileSwap(t0);
+                } else {
+                    self.engine.window.swapBuffers();
+                }
+            } else {
+                self.engine.window.swapBuffers();
+            }
             self.drew_once = true;
             return true;
         }

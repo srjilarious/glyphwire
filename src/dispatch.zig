@@ -1227,6 +1227,30 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
+
+        // `profile` is a host-wide diagnostic, not a per-layer property:
+        // no `layer`, and it is answered straight from the session
+        // snapshot glyphwire-host refreshes each frame under `ctx_mutex`
+        // (see src/profiler.zig, host/profiler.zig). `active` is false
+        // whenever the host isn't profiling.
+        if (std.mem.eql(u8, p.property, "profile")) {
+            const snap: core.ProfileSnapshot = if (self.session) |s| s.profile else .{};
+            const View = struct {
+                active: bool,
+                fps: f32,
+                skips_per_sec: f32,
+                phases: []const core.ProfilePhase,
+                counters: []const core.ProfileCount,
+            };
+            return try rpc.response(alloc, id, View{
+                .active = snap.active,
+                .fps = snap.fps,
+                .skips_per_sec = snap.skips_per_sec,
+                .phases = snap.phaseSlice(),
+                .counters = snap.counterSlice(),
+            });
+        }
+
         const layer = try self.resolveLayer(p.layer);
 
         if (std.mem.eql(u8, p.property, "cursor")) {

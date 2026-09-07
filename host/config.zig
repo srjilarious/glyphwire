@@ -85,11 +85,44 @@ pub const GridConfig = struct {
 
 pub const default_icon_theme = "oxygen";
 
+// Frame-timing profiler (see `host/profiler.zig`, `src/profiler.zig`).
+// Off by default -- when disabled every profiler call is a cheap
+// early-return, so the redraw-on-demand idle path pays nothing.
+pub const profile_enabled_default: bool = false;
+pub const profile_hud_default: bool = false;
+// Start with forced every-frame redraw (bypasses redraw-on-demand, for
+// measuring draw cost continuously). Ctrl+Shift+R toggles it at runtime.
+pub const profile_force_redraw_default: bool = false;
+pub const profile_log_ms_default: f64 = 0; // 0 = no periodic std.log summary
+pub const profile_log_ms_min: f64 = 250;
+pub const profile_log_ms_max: f64 = 60_000;
+// Summary window: every stat (phase avg/p95/max, counter per-frame mean,
+// fps) is accumulated over this many ms and then republished, so the
+// numbers reflect the recent past rather than the whole session -- the
+// same idea as an FPS counter's 1s bucket.
+pub const profile_window_ms_default: f64 = 1000;
+pub const profile_window_ms_min: f64 = 100;
+pub const profile_window_ms_max: f64 = 10_000;
+
+/// Resolved profiler settings. `enabled` gates the whole subsystem;
+/// `hud` is the initial visibility of the on-screen overlay (Ctrl+Shift+P
+/// toggles it at runtime while `enabled`); `window_ms` is the stat
+/// averaging window; `log_interval_ms` is the cadence of the periodic
+/// text summary to `std.log` (0 = never).
+pub const ProfileConfig = struct {
+    enabled: bool = profile_enabled_default,
+    hud: bool = profile_hud_default,
+    force_redraw: bool = profile_force_redraw_default,
+    window_ms: f64 = profile_window_ms_default,
+    log_interval_ms: f64 = profile_log_ms_default,
+};
+
 /// Everything `config_load.loadConfig` resolves from `host.conf`.
 pub const HostConfig = struct {
     font: FontConfig = .{},
     cursor: CursorConfig = .{},
     grid: GridConfig = .{},
+    profile: ProfileConfig = .{},
     /// Which bundled file-type icon set (`<asset-dir>/icons/filetype/<name>/`)
     /// backs the canonical `file/*` names glyphwire-ls draws with -- one
     /// of `oxygen` (default), `papirus`, `material`. An unknown value
@@ -117,6 +150,18 @@ pub fn clampFontSize(size: f32) f32 {
 /// `cursor_blink_ms` clamped to `[cursor_blink_ms_min, cursor_blink_ms_max]`.
 pub fn clampBlinkMs(ms: f64) f64 {
     return std.math.clamp(ms, cursor_blink_ms_min, cursor_blink_ms_max);
+}
+
+/// `profile_log_ms`: 0 (or negative) means "no periodic summary"; any
+/// other value is clamped to `[profile_log_ms_min, profile_log_ms_max]`.
+pub fn clampProfileLogMs(ms: f64) f64 {
+    if (ms <= 0) return 0;
+    return std.math.clamp(ms, profile_log_ms_min, profile_log_ms_max);
+}
+
+/// `profile_window_ms` clamped to `[profile_window_ms_min, profile_window_ms_max]`.
+pub fn clampProfileWindowMs(ms: f64) f64 {
+    return std.math.clamp(ms, profile_window_ms_min, profile_window_ms_max);
 }
 
 /// `grid_cols` clamped up to `geometry.min_grid_cols`.

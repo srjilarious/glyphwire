@@ -8,3 +8,4 @@ pub const geometry = @import("geometry.zig");
 pub const config = @import("config.zig");
 pub const key_repeat = @import("key_repeat.zig");
 pub const redraw = @import("redraw.zig");
+pub const profiler = @import("profiler.zig");

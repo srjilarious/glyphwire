@@ -2178,6 +2178,63 @@ this is the implementation shape.
   clear-then-redraw batch wipes the region, leaves neighbouring rows
   alone, and bumps the revision exactly once.
 
+## Frame-timing profiler + HUD
+
+Static batching and redraw-on-demand cut idle CPU/GPU a lot, but there
+was no way to see where a frame's time actually goes or whether a change
+made the host slower — hence a small profiler with three read surfaces.
+See decisions.md's "Profiler" section for the rationale.
+
+- **`src/profiler.zig`** — `Profiler(Span, Counter)`, generic over two
+  caller-supplied dense enums (≤ `core.profile_max_phases` /
+  `_counters`). Stats accumulate over a fixed **time window**
+  (`window_ms`, default 1s) and republish at the boundary — an
+  FPS-counter-style bucket, not a lifetime or frame-count average. Per
+  span: window avg / max + a p95 estimate over a capped sample ring
+  (`p95_cap` = 512). Per counter: mean per-frame total over the window
+  (no lifetime total). `frameBoundary()` (once per loop iteration) folds
+  the frame's counter tallies in, publishes + resets if the window
+  elapsed, fires the optional `std.log` summary, and returns the wall
+  period since its last call; `publishNow()` forces a close.
+  `window_ms <= 0` publishes every `frameBoundary` (raw per-frame; used
+  by the tests). No `std.time.Timer` in this reduced std — it reads
+  `std.Io.Clock.awake` via a stored `io`. `writeSummary(snapshot,
+  writer)` renders the text table. Seven tests, group `profiler`.
+- **`core.zig`** — `ProfilePhase` / `ProfileCount` / `ProfileSnapshot`
+  (plain data, fixed-size arrays, `name` fields point at `@tagName`
+  storage) + `Session.profile`, a read-through the host refreshes and
+  `get_property "profile"` returns. Core never interprets it.
+- **`host/profiler.zig`** — `HostProfiler` = the shared profiler for
+  `Span{ frame, wait, update, redraw_check, sync_batches, draw, present }`
+  and `Counter{ layers_rebuilt, draw_calls, quads }`, plus the
+  `hud_visible` + `force_redraw` toggles. `host.conf`: `profile`
+  (enable), `profile_hud` (HUD starts shown), `profile_force_redraw`
+  (start with every-frame redraw), `profile_window_ms` (stat averaging
+  window, default 1000), `profile_log_ms` (summary cadence, 0 = off).
+- **`host_eng/root.zig`** — `gameLoopCore` calls three `@hasDecl`-guarded
+  optional `AppData` hooks: `profileFrameStart` (top of iteration) and
+  the `waitEvents` / `swapBuffers` brackets it's the only place that can
+  time. Any non-host engine consumer compiles them out.
+- **`host/app.zig` / `host/render.zig`** — the app times `update`,
+  `redraw_check`, `draw`, `sync_batches`; counts `layers_rebuilt` (one
+  per `rebuildLayer`) and `draw_calls` / `quads` (via `drawBatch`, the
+  new funnel every static batch draw goes through — `StaticQuadBatch`
+  gained `quadCount()`). `needsRedraw` returns true while the HUD is
+  shown; `idleTimeoutMs` drops to ~100ms then. The snapshot is written
+  onto `Session.profile` in `redrawSig`'s existing `ctx_mutex` block.
+  `render.zig`'s `drawProfilerHud` paints the top-right overlay after
+  the `--screenshot` capture.
+- **`host/input.zig`** — Ctrl+Shift+P toggles the HUD, Ctrl+Shift+R
+  toggles forced every-frame redraw (`needsRedraw` always true +
+  `idleTimeoutMs` 0, i.e. the pre-redraw-on-demand loop, for measuring
+  steady-state draw cost). Both only while `profile` is on, both
+  swallowed so the shell/grid never see them.
+- **`shell/main.zig`** — `GLYPHWIRE_SHELL_PROFILE=<ms>` builds a
+  two-span profiler (`prompt_render`, `right_chain`, counter
+  `batch_sends`) whose `frameBoundary` ticks once per prompt-loop
+  iteration and which dumps a `std.log` table on that cadence. No HUD,
+  no wire — the shell is a client.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

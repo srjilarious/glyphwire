@@ -25,6 +25,12 @@ const preedit_bg = host_eng.Color.from(40, 44, 60, 255);
 const preedit_fg = host_eng.Color.from(235, 235, 240, 255);
 const preedit_underline_px = 2;
 
+// Profiler HUD overlay (Ctrl+Shift+P). A translucent plate top-right
+// with one text line per timed phase / counter -- see `drawProfilerHud`.
+const hud_bg = host_eng.Color.from(12, 14, 20, 232);
+const hud_head = host_eng.Color.from(255, 220, 120, 255);
+const hud_fg = host_eng.Color.from(210, 215, 225, 255);
+
 // ── Static quad batches ───────────────────────────────────────────────
 //
 // Each layer's composited output is cached as a small set of
@@ -504,6 +510,7 @@ pub const Renderer = struct {
             lb.built_text_epoch != self.text_epoch;
         if (!need) return;
 
+        self.app.profiler.add(.layers_rebuilt, 1);
         self.rebuildLayer(eng, fa, lb, layer, origin_x, origin_y, view_offset);
         lb.built = true;
         lb.built_gen = gen;
@@ -833,16 +840,23 @@ pub const Renderer = struct {
         const mvp = eng.projMat;
         // Back to front: colour fills + tints, image cells, icon
         // backgrounds, foreground/overlay icons, non-atlas icons, text.
-        if (!lb.color_bg.isEmpty()) lb.color_bg.draw(mvp);
-        for (lb.images.items) |*t| {
-            if (!t.batch.isEmpty()) t.batch.draw(mvp);
-        }
-        if (!lb.icon_bg.isEmpty()) lb.icon_bg.draw(mvp);
-        if (!lb.icon_fg.isEmpty()) lb.icon_fg.draw(mvp);
-        for (lb.icon_fallback.items) |*t| {
-            if (!t.batch.isEmpty()) t.batch.draw(mvp);
-        }
-        if (!lb.text.isEmpty()) lb.text.draw(mvp);
+        self.drawBatch(&lb.color_bg, mvp);
+        for (lb.images.items) |*t| self.drawBatch(&t.batch, mvp);
+        self.drawBatch(&lb.icon_bg, mvp);
+        self.drawBatch(&lb.icon_fg, mvp);
+        for (lb.icon_fallback.items) |*t| self.drawBatch(&t.batch, mvp);
+        self.drawBatch(&lb.text, mvp);
+    }
+
+    /// Draws one static batch, skipping it when empty, and -- while
+    /// profiling -- tallying it as one draw call plus its quad count.
+    /// Only the batched per-layer compositing is counted; the immediate
+    /// caret / preedit / chrome passes are not.
+    fn drawBatch(self: *Renderer, batch: anytype, mvp: anytype) void {
+        if (batch.isEmpty()) return;
+        self.app.profiler.add(.draw_calls, 1);
+        self.app.profiler.add(.quads, batch.quadCount());
+        batch.draw(mvp);
     }
 
     /// Reads every layer's cells straight out of the in-process `Context`
@@ -859,7 +873,9 @@ pub const Renderer = struct {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
 
+            const sb_t0: ?std.Io.Timestamp = if (self.app.profiler.active()) self.app.profiler.now() else null;
             self.syncBatches(eng);
+            if (sb_t0) |s| self.app.profiler.recordSince(.sync_batches, s);
 
             // Pin the root view to the live tail while a full-screen
             // program owns the screen (`rootOwned`).
@@ -891,12 +907,84 @@ pub const Renderer = struct {
         eng.renderer.end();
 
         // `--screenshot`: everything for this frame is drawn but not yet
-        // swapped, so GL_BACK holds exactly what's about to be shown.
+        // swapped, so GL_BACK holds exactly what's about to be shown. The
+        // HUD is drawn *after* the capture so it never lands in a
+        // scripted screenshot.
         if (self.app.screenshot.path) |path| {
             if (!self.app.screenshot.done and self.app.screenshot.elapsed_ms >= self.app.screenshot.delay_ms) {
                 self.captureContentArea(eng, path);
                 self.app.screenshot.done = true;
             }
+        }
+
+        self.drawProfilerHud(eng);
+    }
+
+    /// Paints the profiler overlay in the top-right corner while the HUD
+    /// is toggled on (Ctrl+Shift+P; only possible when `host.conf` set
+    /// `profile`). Immediate-mode like the caret. Lines are formatted
+    /// first so the panel can be sized to the widest one (and clamped to
+    /// the window) -- monospace, so column count is exact. All numbers
+    /// are the profiler's windowed values, not lifetime.
+    fn drawProfilerHud(self: *Renderer, eng: *Engine) void {
+        if (!self.app.profiler.hud_visible) return;
+        const snap = self.app.profiler.snapshot();
+
+        const cap = 2 + glyphwire.profile_max_phases + glyphwire.profile_max_counters;
+        var text: [cap][80]u8 = undefined;
+        var len: [cap]usize = undefined;
+        var head: [cap]bool = undefined;
+        var n: usize = 0;
+
+        const put = struct {
+            fn f(buf: []u8, comptime fmt: []const u8, args: anytype) usize {
+                const s = std.fmt.bufPrint(buf, fmt, args) catch return 0;
+                return s.len;
+            }
+        }.f;
+
+        const mode: []const u8 = if (self.app.profiler.force_redraw) "   [FORCED REDRAW]" else "";
+        len[n] = put(&text[n], "PROFILER   fps {d:.1}   skip/s {d:.0}{s}", .{ snap.fps, snap.skips_per_sec, mode });
+        head[n] = true;
+        n += 1;
+        len[n] = put(&text[n], "phase           avg     p95     max", .{});
+        head[n] = true;
+        n += 1;
+        for (snap.phaseSlice()) |ph| {
+            len[n] = put(&text[n], "  {s:<12}{d:>7.2} {d:>7.2} {d:>7.2}", .{ ph.name, ph.avg_ms, ph.p95_ms, ph.max_ms });
+            head[n] = false;
+            n += 1;
+        }
+        len[n] = put(&text[n], "counter       per frame", .{});
+        head[n] = true;
+        n += 1;
+        for (snap.counterSlice()) |c| {
+            len[n] = put(&text[n], "  {s:<14}{d:>9.1}", .{ c.name, c.per_frame });
+            head[n] = false;
+            n += 1;
+        }
+
+        var max_cols: i32 = 0;
+        for (len[0..n]) |l| max_cols = @max(max_cols, @as(i32, @intCast(l)));
+
+        const pad: i32 = 6;
+        const line_h: i32 = geometry.cell_h;
+        const char_w: i32 = geometry.cell_w;
+        const fb = eng.window_state.framebuffer_size;
+        const panel_w = @min(max_cols * char_w + pad * 2, @max(char_w, fb.x - pad * 2));
+        const panel_h = @as(i32, @intCast(n)) * line_h + pad * 2;
+        const x0: i32 = @max(pad, fb.x - panel_w - pad);
+        const y0: i32 = pad;
+
+        eng.renderer.begin(eng.projMat);
+        defer eng.renderer.end();
+        eng.renderer.drawFilledRect(host_eng.RectF.fromPosSize(x0, y0, panel_w, panel_h), hud_bg);
+        for (0..n) |i| {
+            _ = eng.renderer.drawStringColored(
+                text[i][0..len[i]],
+                .{ .x = x0 + pad, .y = y0 + pad + @as(i32, @intCast(i)) * line_h },
+                if (head[i]) hud_head else hud_fg,
+            );
         }
     }
 

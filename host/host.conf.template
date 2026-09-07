@@ -92,4 +92,40 @@
 --     -- Language / tool logos (dev/zig, distro/arch, ...) are the same in
 --     -- every theme.
 --     icon_theme = "oxygen",
+--
+--     ---- Profiler ---------------------------------------------------
+--
+--     -- Frame-timing profiler. When off (the default) every measurement
+--     -- call is a cheap early-return, so the idle redraw-on-demand path
+--     -- costs nothing. When on, per-phase timings (wait, update,
+--     -- sync_batches, draw, present, ...) and volume counters (layers
+--     -- rebuilt, draw calls, quads) are collected and reachable over the
+--     -- wire as `get_property "profile"`.
+--     profile = false,
+--
+--     -- Whether the on-screen profiler HUD starts visible. Ctrl+Shift+P
+--     -- toggles it while `profile` is true. The HUD forces a repaint
+--     -- every frame while shown (bounded to ~10 Hz), so leave it off
+--     -- until you want to watch the numbers.
+--     profile_hud = false,
+--
+--     -- Start with forced every-frame redraw: the host repaints every
+--     -- frame instead of only on a change, the way it did before the
+--     -- redraw-on-demand work. For measuring steady-state draw cost and
+--     -- A/B-ing it against the idle path. Ctrl+Shift+R toggles it while
+--     -- `profile` is true.
+--     profile_force_redraw = false,
+--
+--     -- Averaging window in milliseconds. Every profiler number (phase
+--     -- avg/p95/max, per-frame counter means, fps) is accumulated over
+--     -- this long and then republished, so it tracks the recent past
+--     -- rather than the whole session -- like an FPS counter's 1s
+--     -- bucket. Clamped to 100..10000. Set it equal to profile_log_ms
+--     -- to make each logged line an average over exactly that interval.
+--     profile_window_ms = 1000,
+--
+--     -- Cadence, in milliseconds, of a periodic profiler summary dumped
+--     -- to the log (stderr). 0 disables it; any other value is clamped
+--     -- to 250..60000.
+--     profile_log_ms = 0,
 -- }

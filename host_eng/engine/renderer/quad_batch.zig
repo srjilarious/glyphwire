@@ -571,6 +571,12 @@ pub fn StaticQuadBatch(comptime layout: BatchLayout) type {
             return self.numIndices == 0;
         }
 
+        /// How many quads the batch will draw (6 indices per quad). Used
+        /// by glyphwire-host's profiler to report per-frame quad volume.
+        pub fn quadCount(self: *const Self) usize {
+            return self.numIndices / 6;
+        }
+
         /// Draws the batch's current GPU contents with the given
         /// transform. Assumes the caller has already checked `isEmpty()`
         /// when it needs to skip renderer-specific state (e.g. depth-test
