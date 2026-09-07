@@ -715,6 +715,16 @@ pub const Client = struct {
         return parsed.value.result;
     }
 
+    /// `set_property(layer, "content_extent", {cols, rows})` -- a
+    /// notification. Declares the size of the whole content a
+    /// self-scrolling pane redraws (a TUI editor's buffer), so the host
+    /// can draw a proportional scrollbar and turn a wheel / drag over the
+    /// pane into a `scroll_offset` the client obeys. `{0, 0}` clears it.
+    /// See `core.PropertyName.content_extent`.
+    pub fn setLayerContentExtent(self: *Client, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "content_extent", .cols = cols, .rows = rows });
+    }
+
     /// `set_property(layer, "scrollbars", {vertical, horizontal})` -- a
     /// notification. Opt in per axis; the host draws the bars inside the
     /// layer's own bounds and drives `scroll_offset` from them.

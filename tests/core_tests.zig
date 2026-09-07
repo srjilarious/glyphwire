@@ -2670,6 +2670,35 @@ pub fn shrinkingContentReclampsScrollTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqual(layer.scroll_off.row, 5);
 }
 
+pub fn contentExtentDrivesAVirtualScrollbarTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // A self-scrolling pane: the real grid is only the viewport size, but
+    // it reports a much taller virtual content.
+    var layer = try glyphwire.Layer.init(alloc, 30, 20, 0);
+    defer layer.deinit();
+    try testz.expectFalse(layer.scrollsAnywhere()); // grid == viewport
+
+    layer.setProperty(.{ .content_extent = .{ .cols = 30, .rows = 1000 } });
+    try testz.expectTrue(layer.scrollsAnywhere());
+    try testz.expectEqual(layer.maxScroll().row, 980);
+
+    // The offset moves the *virtual* position, not the real grid.
+    const landed = layer.setScrollOffset(.{ .row = 5000, .col = 0 });
+    try testz.expectEqual(landed.row, 980);
+    try testz.expectEqual(layer.content_off.row, 980);
+    try testz.expectEqual(layer.scroll_off.row, 0);
+    try testz.expectEqual(layer.scrollbarState().row, 980);
+    try testz.expectEqual(layer.getProperty(.scroll_offset).scroll_offset.row, 980);
+    try testz.expectEqual(layer.getProperty(.content_extent).content_extent.rows, 1000);
+
+    // Clearing it drops back to an ordinary pane and zeroes the virtual
+    // offset.
+    layer.setProperty(.{ .content_extent = .{ .cols = 0, .rows = 0 } });
+    try testz.expectFalse(layer.scrollsAnywhere());
+    try testz.expectEqual(layer.content_off.row, 0);
+    try testz.expectEqual(layer.getProperty(.content_extent).content_extent.rows, 20);
+}
+
 pub fn scrollbarStateReportsDerivedMaximaTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 50, 200, 0);

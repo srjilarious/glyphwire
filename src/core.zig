@@ -883,6 +883,19 @@ pub const PropertyName = enum {
     /// have content wider than its pane and should still not sprout a
     /// scrollbar.
     scrollbars,
+    /// A "virtual" content size in cells (`{cols, rows}`) for a pane that
+    /// scrolls *itself*: a TUI editor's buffer, whose real cell grid is
+    /// only viewport-sized (a full grid for a large file would be
+    /// hundreds of megabytes) so it redraws on every scroll rather than
+    /// letting the host slide a viewport. Setting this tells the host how
+    /// big the whole content really is, so it can draw a proportional
+    /// scrollbar and turn a wheel / thumb drag over the pane into a
+    /// `scroll_offset` the client then obeys and redraws against —
+    /// `scroll_offset` on such a layer moves this virtual position, not
+    /// the real (unmoving) grid. `{0, 0}` clears it back to an ordinary
+    /// host-scrolled pane. Get reports the effective content size (the
+    /// virtual one if set, else the real grid).
+    content_extent,
 };
 
 pub const PropertyValue = union(PropertyName) {
@@ -896,6 +909,7 @@ pub const PropertyValue = union(PropertyName) {
     viewport: Viewport,
     scroll_offset: CellPos,
     scrollbars: ScrollbarState,
+    content_extent: Viewport,
 };
 
 pub const PropertyError = error{
@@ -1184,6 +1198,15 @@ pub const Layer = struct {
     /// the content grid. Always within `maxScroll` (every writer goes
     /// through `setScrollOffset`, and `resize` re-clamps).
     scroll_off: CellPos = .{},
+    /// See `PropertyName.content_extent`. Non-null on a pane that scrolls
+    /// itself: the size of the whole content the client redraws, which
+    /// the scrollbar/viewport maths use in place of the real grid.
+    content_extent: ?CellPos = null,
+    /// The virtual scroll position while `content_extent` is set --
+    /// `scroll_off` stays put (the real grid never moves) and this is
+    /// what `set_property(scroll_offset)`, the scrollbar and the wheel
+    /// move instead.
+    content_off: CellPos = .{},
     /// See `PropertyName.scrollbars`.
     scrollbars: Scrollbars = .{},
     /// The connections that own this layer, for lifecycle culling (see
@@ -1248,14 +1271,30 @@ pub const Layer = struct {
         return @min(self.viewport_rows, self.height);
     }
 
-    /// The largest legal `scroll_off` on each axis: how much content the
+    /// The content size the scrollbar/viewport maths run against: the
+    /// virtual `content_extent` for a self-scrolling pane, else the real
+    /// cell grid.
+    fn effectiveContent(self: *const Layer) CellPos {
+        return self.content_extent orelse .{ .row = self.height, .col = self.width };
+    }
+
+    /// The scroll offset a scrollbar reflects and `set_property` /
+    /// wheel / drag move: the virtual `content_off` for a self-scrolling
+    /// pane, else the real `scroll_off`.
+    pub fn effectiveScrollOffset(self: *const Layer) CellPos {
+        return if (self.content_extent != null) self.content_off else self.scroll_off;
+    }
+
+    /// The largest legal scroll offset on each axis: how much content the
     /// viewport can't show at once. Both zero when the viewport covers
     /// the whole content, which is what makes `scrollsAnywhere` false and
-    /// leaves the scrollbars inert.
+    /// leaves the scrollbars inert. Saturating -- a virtual
+    /// `content_extent` smaller than the viewport just yields zero.
     pub fn maxScroll(self: *const Layer) CellPos {
+        const c = self.effectiveContent();
         return .{
-            .row = self.height - self.viewportRows(),
-            .col = self.width - self.viewportCols(),
+            .row = c.row -| self.viewportRows(),
+            .col = c.col -| self.viewportCols(),
         };
     }
 
@@ -1266,14 +1305,21 @@ pub const Layer = struct {
     }
 
     /// Moves the viewport, clamped to `maxScroll`, and returns where it
-    /// landed. The single writer for `scroll_off` -- the wheel, a
+    /// landed. The single writer for the scroll offset -- the wheel, a
     /// scrollbar drag and `set_property` all come through here, so the
-    /// clamp can't be bypassed.
+    /// clamp can't be bypassed. On a self-scrolling pane
+    /// (`content_extent` set) this moves the virtual `content_off`; the
+    /// real grid never moves.
     pub fn setScrollOffset(self: *Layer, off: CellPos) CellPos {
         const max = self.maxScroll();
         const next: CellPos = .{ .row = @min(off.row, max.row), .col = @min(off.col, max.col) };
-        if (next.row != self.scroll_off.row or next.col != self.scroll_off.col) {
-            self.scroll_off = next;
+        const cur = self.effectiveScrollOffset();
+        if (next.row != cur.row or next.col != cur.col) {
+            if (self.content_extent != null) {
+                self.content_off = next;
+            } else {
+                self.scroll_off = next;
+            }
             self.touchRender();
         }
         return next;
@@ -1282,23 +1328,35 @@ pub const Layer = struct {
     /// Relative move, saturating at both ends -- what a wheel tick and an
     /// arrow key both want.
     pub fn scrollOffsetBy(self: *Layer, d_row: i64, d_col: i64) CellPos {
-        const row: i64 = @as(i64, @intCast(self.scroll_off.row)) + d_row;
-        const col: i64 = @as(i64, @intCast(self.scroll_off.col)) + d_col;
+        const cur = self.effectiveScrollOffset();
+        const row: i64 = @as(i64, @intCast(cur.row)) + d_row;
+        const col: i64 = @as(i64, @intCast(cur.col)) + d_col;
         return self.setScrollOffset(.{
             .row = @intCast(@max(row, 0)),
             .col = @intCast(@max(col, 0)),
         });
     }
 
+    /// Sets (or, with `null`, clears) the virtual content extent and
+    /// re-clamps the virtual offset into it. See
+    /// `PropertyName.content_extent`.
+    pub fn setContentExtent(self: *Layer, extent: ?CellPos) void {
+        self.content_extent = extent;
+        if (extent == null) self.content_off = .{};
+        _ = self.setScrollOffset(self.effectiveScrollOffset());
+        self.touchRender();
+    }
+
     /// Everything the host needs to draw this layer's scrollbars, and the
     /// answer to `get_property(layer, "scrollbars")`.
     pub fn scrollbarState(self: *const Layer) ScrollbarState {
         const max = self.maxScroll();
+        const off = self.effectiveScrollOffset();
         return .{
             .vertical = self.scrollbars.vertical,
             .horizontal = self.scrollbars.horizontal,
-            .row = self.scroll_off.row,
-            .col = self.scroll_off.col,
+            .row = off.row,
+            .col = off.col,
             .max_row = max.row,
             .max_col = max.col,
         };
@@ -1551,7 +1609,7 @@ pub const Layer = struct {
         if (self.stashed_cursor.col >= new_width) self.stashed_cursor.col = new_width - 1;
         // A smaller content grid can leave the viewport parked past the
         // end of it (see `maxScroll`).
-        _ = self.setScrollOffset(self.scroll_off);
+        _ = self.setScrollOffset(self.effectiveScrollOffset());
         self.touchRender();
     }
 
@@ -2555,8 +2613,12 @@ pub const Layer = struct {
             .scroll => .{ .scroll = .{ .offset = self.view_scroll, .max = self.history_len } },
             .visibility => .{ .visibility = self.visible },
             .viewport => .{ .viewport = .{ .cols = self.viewportCols(), .rows = self.viewportRows() } },
-            .scroll_offset => .{ .scroll_offset = self.scroll_off },
+            .scroll_offset => .{ .scroll_offset = self.effectiveScrollOffset() },
             .scrollbars => .{ .scrollbars = self.scrollbarState() },
+            .content_extent => .{ .content_extent = blk: {
+                const c = self.effectiveContent();
+                break :blk .{ .cols = c.col, .rows = c.row };
+            } },
         };
     }
 
@@ -2578,10 +2640,13 @@ pub const Layer = struct {
                 self.viewport_rows = v.rows;
                 // A smaller content window can strand the scroll offset
                 // past its new maximum.
-                _ = self.setScrollOffset(self.scroll_off);
+                _ = self.setScrollOffset(self.effectiveScrollOffset());
             },
             .scroll_offset => |off| _ = self.setScrollOffset(off),
             .scrollbars => |sb| self.scrollbars = .{ .vertical = sb.vertical, .horizontal = sb.horizontal },
+            .content_extent => |v| self.setContentExtent(
+                if (v.cols == 0 and v.rows == 0) null else .{ .row = v.rows, .col = v.cols },
+            ),
         }
         // `.position` moves where the layer composites; `.cursor` can scroll
         // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
@@ -3965,7 +4030,7 @@ pub const Context = struct {
                 layer.touchRender();
             },
             .revision, .scroll => return PropertyError.ReadOnlyProperty,
-            .cursor, .position, .viewport, .scroll_offset, .scrollbars => layer.setProperty(value),
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .content_extent => layer.setProperty(value),
         }
     }
 
