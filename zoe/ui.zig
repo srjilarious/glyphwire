@@ -134,6 +134,12 @@ pub const Ui = struct {
     hl_edits: u64 = 0,
     /// Reused span buffer for `renderRowSpans`.
     hl_scratch: std.ArrayList(syntax.Span) = .empty,
+    /// Buffer lines an incremental reparse says need repainting for a
+    /// highlighting reason (edited lines plus tree-sitter's changed
+    /// ranges). Filled by `syncHighlight`, consumed by `renderChangedRows`.
+    hl_dirty_lines: std.ArrayList(usize) = .empty,
+    /// Scratch for `Highlighter.reparseIncremental`'s changed-range output.
+    hl_changed: std.ArrayList(syntax.ByteRange) = .empty,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -235,6 +241,13 @@ pub const Ui = struct {
         self.hl = hl;
         self.hl_config = cfg;
 
+        // The highlighter resolves injected grammars through the same
+        // registry; `injections` is the `zoe.conf` on/off switch.
+        self.hl.?.configureInjections(&self.grammars.?, cfg.injections);
+        // From here on `Buffer` keeps the edit journal the incremental
+        // reparse replays.
+        self.ed.buf.track_edits = true;
+
         self.selectHighlightLanguage(self.ed.path);
     }
 
@@ -268,6 +281,8 @@ pub const Ui = struct {
         self.tree.deinit();
 
         self.hl_scratch.deinit(self.alloc);
+        self.hl_dirty_lines.deinit(self.alloc);
+        self.hl_changed.deinit(self.alloc);
         if (self.hl) |*h| h.deinit();
         if (self.grammars) |*g| g.deinit();
         for (self.hl_search_dirs) |d| self.alloc.free(d);
@@ -639,7 +654,9 @@ pub const Ui = struct {
     /// `move_content` and repaint only the band the scroll exposed. An
     /// edit, a horizontal scroll, a jump of a screen or more, or a
     /// bounds change (`buffer_full_redraw`) still repaints in full --
-    /// cases a row shift can't represent.
+    /// cases a row shift can't represent -- except that an edit whose
+    /// highlighting effect an incremental reparse could bound repaints
+    /// only the rows it touched (`renderChangedRows`).
     fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const b = self.buffer_bounds;
         if (b.cols == 0 or b.rows == 0) return;
@@ -647,18 +664,26 @@ pub const Ui = struct {
         try self.syncBufferScrollbar();
 
         // A fresh edit (or the first parse after choosing a language)
-        // means the tree is stale: reparse the whole buffer and repaint.
-        // Full reparse per edit is the v1 model -- see syntax.zig.
+        // means the tree is stale. `syncHighlight` reparses -- incremental
+        // when it can, whole-buffer otherwise -- and reports whether the
+        // repaint can be confined to `hl_dirty_lines`.
+        var localized = false;
         if (self.hl) |*h| {
             if (h.languageSet() and self.ed.buf.edits != self.hl_edits) {
-                h.reparse(&self.ed.buf) catch {};
+                localized = self.syncHighlight(h) catch blk: {
+                    self.buffer_full_redraw = true;
+                    break :blk false;
+                };
                 self.hl_edits = self.ed.buf.edits;
-                self.buffer_full_redraw = true;
             }
+            self.ed.buf.clearEdits();
         }
 
         const cursor = self.ed.pos();
-        switch (planBufferRender(.{
+        const scrolled = self.top_line != self.prev_top_line or self.left_col != self.prev_left_col;
+        if (localized and !self.buffer_full_redraw and !scrolled) {
+            try self.renderChangedRows(batch, cursor.line);
+        } else switch (planBufferRender(.{
             .prev_top = self.prev_top_line,
             .top = self.top_line,
             .prev_left = self.prev_left_col,
@@ -713,6 +738,102 @@ pub const Ui = struct {
         self.prev_cursor_line = cursor.line;
         self.prev_edits = self.ed.buf.edits;
         self.buffer_full_redraw = false;
+    }
+
+    /// Brings the highlighter's tree back in sync with the buffer after
+    /// an edit. Returns true when it managed an incremental reparse and
+    /// filled `hl_dirty_lines` with a bounded set of buffer lines that
+    /// -- together with the edited lines -- covers every highlighting
+    /// change, so the caller can repaint just those rows. Returns false
+    /// (and sets `buffer_full_redraw`) when the whole visible pane must
+    /// be repainted: no retained tree, the edit journal overflowed, the
+    /// line count changed, the injection layout shifted, or the change
+    /// is simply too broad to localise.
+    fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
+        const buf = &self.ed.buf;
+        self.hl_dirty_lines.clearRetainingCapacity();
+
+        if (!h.ready() or buf.edits_overflowed or buf.pending_edits.items.len == 0) {
+            try h.reparse(buf);
+            self.buffer_full_redraw = true;
+            return false;
+        }
+
+        // Replay the journal onto the retained tree. An edit that spans
+        // more than one line changes the line count, which shifts every
+        // row below it -- the partial-repaint path can't express that, so
+        // reparse incrementally (still the win) but repaint in full.
+        var line_count_stable = true;
+        for (buf.pending_edits.items) |e| {
+            h.applyEdit(e);
+            if (e.start_point.line != e.old_end_point.line or
+                e.start_point.line != e.new_end_point.line) line_count_stable = false;
+        }
+
+        self.hl_changed.clearRetainingCapacity();
+        const localized = h.reparseIncremental(buf, &self.hl_changed) catch {
+            self.buffer_full_redraw = true;
+            return false;
+        };
+        if (!localized or !line_count_stable) {
+            self.buffer_full_redraw = true;
+            return false;
+        }
+
+        // Union: every directly-edited line, plus every line overlapping
+        // a range tree-sitter flagged as structurally changed.
+        for (buf.pending_edits.items) |e| {
+            try self.addDirtyLine(e.start_point.line);
+        }
+        for (self.hl_changed.items) |cr| {
+            const lo = buf.lineAt(cr.start);
+            const hi = buf.lineAt(if (cr.end > cr.start) cr.end - 1 else cr.start);
+            if (hi -| lo > self.buffer_bounds.rows) {
+                self.buffer_full_redraw = true;
+                return false;
+            }
+            var line = lo;
+            while (line <= hi) : (line += 1) try self.addDirtyLine(line);
+            if (self.hl_dirty_lines.items.len > self.buffer_bounds.rows) {
+                self.buffer_full_redraw = true;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Adds `line` to `hl_dirty_lines` if it isn't already there. The set
+    /// stays small (bounded by the pane height), so a linear scan is fine.
+    fn addDirtyLine(self: *Ui, line: usize) !void {
+        for (self.hl_dirty_lines.items) |existing| {
+            if (existing == line) return;
+        }
+        try self.hl_dirty_lines.append(self.alloc, line);
+    }
+
+    /// Repaints only the on-screen rows an incremental reparse marked
+    /// dirty, plus the caret's old and new rows, leaving every other row
+    /// as it was. `renderBuffer`'s caret pass runs afterwards.
+    fn renderChangedRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor_line: usize) !void {
+        const b = self.buffer_bounds;
+        const top = self.top_line;
+
+        for (self.hl_dirty_lines.items) |line| {
+            if (line < top or line >= top + b.rows) continue;
+            try self.renderBufferRow(batch, line - top);
+        }
+        for ([_]usize{ self.prev_cursor_line, cursor_line }) |line| {
+            if (line < top or line >= top + b.rows) continue;
+            if (self.dirtyLineListed(line)) continue;
+            try self.renderBufferRow(batch, line - top);
+        }
+    }
+
+    fn dirtyLineListed(self: *const Ui, line: usize) bool {
+        for (self.hl_dirty_lines.items) |existing| {
+            if (existing == line) return true;
+        }
+        return false;
     }
 
     /// Repaints buffer-pane screen rows `[from, to)` from the buffer's

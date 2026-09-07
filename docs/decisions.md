@@ -2722,18 +2722,42 @@ handled by checking `ts_language_abi_version()` and refusing with a clear
 message rather than crashing. The loader is shaped so a WASM backend can
 be added later without touching callers.
 
-**Full reparse per edit for v1.** tree-sitter is built for incremental
-reparse (`ts_tree_edit` + the old tree), but that needs `Buffer` to
-report edit byte ranges, which it doesn't yet (only a monotonic `edits`
-counter). A whole-buffer `parseString` on each edit is sub-millisecond
-for the files zoe opens and is obviously correct; incremental is a
-contained follow-up behind the same `Highlighter.reparse` call.
+**Incremental reparse, edit ranges journalled on `Buffer`.** tree-sitter
+is built for incremental reparse (`ts_tree_edit` + the old tree). `Buffer`
+now keeps a small journal (`Buffer.Edit`: start/old-end/new-end as byte
+offsets *and* row/column points, `track_edits` gated so it costs nothing
+when highlighting is off) that `ui.zig` replays onto the retained tree
+before reparsing against it. A whole-buffer `parseString` remains the
+fallback: the first parse, a language switch, or a journal that overflowed
+its 512-entry cap. The repaint is narrowed to match: `getChangedRanges`
+between the old and new trees, unioned with the directly-edited lines,
+gives the set of rows to redraw — so typing inside a function no longer
+retransmits the whole visible pane. A change to the line count, or an
+injection layout that shifted, still repaints the pane in full (the parse
+stays incremental — that is the win).
+
+**Injected languages.** After the primary parse, `injections.scm` (when
+the grammar dir ships one) is run over the tree to find embedded regions:
+a fenced code block in Markdown, the `(inline)` span of every Markdown
+paragraph, an HTML block. Each region is parsed with its own grammar over
+just its byte ranges (`Parser.setIncludedRanges`), and `lineSpans` paints
+the child layers over the primary one so a deeper layer's colour wins the
+bytes it covers. `@injection.language` captures and `#set!
+injection.language "x"` directives are both honoured; a small alias table
+maps the spellings queries use (`markdown.inline`, `py`) to grammar-dir
+names. Injection recurses to `max_injection_depth` (3) so Markdown block →
+`markdown_inline` → `html` works. Child trees are rebuilt from scratch on
+each reparse rather than kept incremental — they are small. Deliberately
+skipped for now: `injection.combined` (every content region of a language
+is parsed on its own) and `locals.scm`.
 
 **Config is Lua, like the other clients.** `~/.config/glyphwire/zoe.conf`
-assigns a `config` table (`theme`, `languages`, `grammar_dirs`), matching
-`ls.conf` / `host.conf`, rather than a separate declarative manifest
-format. Absent file = six bundled grammars (zig, json, c, python, toml,
-markdown — block only) and a built-in dark theme.
+assigns a `config` table (`theme`, `languages`, `grammar_dirs`,
+`injections`), matching `ls.conf` / `host.conf`, rather than a separate
+declarative manifest format. Absent file = seven bundled grammars (zig,
+json, c, python, toml, markdown block + `markdown_inline`), a built-in
+dark theme, and injection on. `config.injections = false` is the escape
+hatch.
 
 **Predicates we can't evaluate disable their pattern.** `#eq?` /
 `#any-of?` (and negations) are evaluated; `#match?` / `#lua-match?` need a

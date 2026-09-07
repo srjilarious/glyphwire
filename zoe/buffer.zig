@@ -178,6 +178,30 @@ pub const GapBuffer = struct {
 /// buffer is one empty line, matching how every editor counts. A trailing
 /// newline therefore means a final empty line exists, which is what makes
 /// `G` land where vim puts it.
+/// One applied mutation, in the shape tree-sitter's `TSInputEdit` wants:
+/// byte offsets and row/column points for the edit's start, its old end
+/// and its new end. `syntax.zig` replays these onto the retained parse
+/// tree (`Tree.edit`) so a reparse can reuse it instead of starting from
+/// scratch.
+///
+/// It lives on `Buffer`, not on the highlighter, because only `Buffer`
+/// sees each individual mutation -- `editor.zig` routinely issues several
+/// per keystroke (an autoindented newline is a delete plus an insert).
+pub const Edit = struct {
+    start_byte: usize,
+    old_end_byte: usize,
+    new_end_byte: usize,
+    start_point: Pos,
+    old_end_point: Pos,
+    new_end_point: Pos,
+};
+
+/// Cap on `pending_edits`. Past this the log is cleared and
+/// `edits_overflowed` is set: a consumer that sees the flag must do a
+/// full reparse rather than trust a partial replay. Sized so a normal
+/// burst of typing between frames never trips it.
+const max_pending_edits: usize = 512;
+
 pub const Buffer = struct {
     alloc: std.mem.Allocator,
     gap: GapBuffer,
@@ -188,6 +212,17 @@ pub const Buffer = struct {
     /// against its last value to tell an edit (repaint everything) from a
     /// pure cursor move or scroll (shift the rows already drawn).
     edits: u64 = 0,
+
+    /// When false, `pending_edits` is not maintained -- there is no
+    /// consumer. `ui.zig` sets it once it has a live highlighter.
+    track_edits: bool = false,
+    /// Mutations applied since the last `clearEdits`, oldest first. Only
+    /// populated while `track_edits`. Never allocates otherwise.
+    pending_edits: std.ArrayList(Edit) = .empty,
+    /// `pending_edits` filled past `max_pending_edits` (or an append
+    /// failed) and was dropped; the log no longer accounts for every
+    /// change since the last drain.
+    edits_overflowed: bool = false,
 
     pub fn init(alloc: std.mem.Allocator) !Buffer {
         return initFromText(alloc, "");
@@ -203,6 +238,7 @@ pub const Buffer = struct {
     pub fn deinit(self: *Buffer) void {
         self.gap.deinit();
         self.line_starts.deinit(self.alloc);
+        self.pending_edits.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -295,17 +331,67 @@ pub const Buffer = struct {
 
     pub fn insert(self: *Buffer, offset: usize, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        try self.gap.insert(@min(offset, self.len()), bytes);
+        const at = @min(offset, self.len());
+        const start_point = if (self.track_edits) self.posOf(at) else Pos{};
+
+        try self.gap.insert(at, bytes);
         try self.reindex();
         self.dirty = true;
         self.edits += 1;
+
+        if (self.track_edits) self.recordEdit(.{
+            .start_byte = at,
+            .old_end_byte = at,
+            .new_end_byte = at + bytes.len,
+            .start_point = start_point,
+            .old_end_point = start_point,
+            .new_end_point = self.posOf(at + bytes.len),
+        });
     }
 
     pub fn delete(self: *Buffer, offset: usize, count: usize) !void {
         if (count == 0 or offset >= self.len()) return;
-        self.gap.delete(offset, count);
+        const del = @min(count, self.len() - offset);
+        const start_point = if (self.track_edits) self.posOf(offset) else Pos{};
+        const old_end_point = if (self.track_edits) self.posOf(offset + del) else Pos{};
+
+        self.gap.delete(offset, del);
         try self.reindex();
         self.dirty = true;
         self.edits += 1;
+
+        if (self.track_edits) self.recordEdit(.{
+            .start_byte = offset,
+            .old_end_byte = offset + del,
+            .new_end_byte = offset,
+            .start_point = start_point,
+            .old_end_point = old_end_point,
+            .new_end_point = start_point,
+        });
+    }
+
+    /// Append one edit to the pending log, or trip `edits_overflowed` and
+    /// drop the log if it is full (or the append fails). Never returns an
+    /// error: a lost edit degrades the highlighter to a full reparse, it
+    /// does not fail the mutation.
+    fn recordEdit(self: *Buffer, e: Edit) void {
+        if (self.edits_overflowed) return;
+        if (self.pending_edits.items.len >= max_pending_edits) {
+            self.pending_edits.clearRetainingCapacity();
+            self.edits_overflowed = true;
+            return;
+        }
+        self.pending_edits.append(self.alloc, e) catch {
+            self.pending_edits.clearRetainingCapacity();
+            self.edits_overflowed = true;
+        };
+    }
+
+    /// Drop the pending edit log and clear the overflow flag. The
+    /// consumer calls this once it has replayed (or given up on) the
+    /// edits for a frame.
+    pub fn clearEdits(self: *Buffer) void {
+        self.pending_edits.clearRetainingCapacity();
+        self.edits_overflowed = false;
     }
 };

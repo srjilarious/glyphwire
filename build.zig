@@ -425,23 +425,43 @@ const BundledGrammar = struct {
     dep: []const u8,
     subdir: []const u8 = "",
     scanner: bool = false,
+    /// The grammar dir also ships `queries/injections.scm`, to install
+    /// alongside `highlights.scm` so zoe can highlight embedded languages.
+    injections: bool = false,
 };
 
 const bundled_grammars = [_]BundledGrammar{
-    .{ .name = "zig", .dep = "grammar_zig" },
+    .{ .name = "zig", .dep = "grammar_zig", .injections = true },
     .{ .name = "json", .dep = "grammar_json" },
     .{ .name = "c", .dep = "grammar_c" },
     .{ .name = "python", .dep = "grammar_python", .scanner = true },
     .{ .name = "toml", .dep = "grammar_toml", .scanner = true },
-    // Only the block grammar -- the inline one needs an injection query
-    // zoe doesn't run yet (see zoe/syntax.zig's v1 notes).
-    .{ .name = "markdown", .dep = "grammar_markdown", .subdir = "tree-sitter-markdown/", .scanner = true },
+    // Markdown ships as two grammars: the block grammar parses the
+    // document structure and injects `markdown_inline` for every
+    // paragraph's inline span (and other languages for fenced code
+    // blocks); the inline grammar highlights emphasis, links and code
+    // spans. Both carry an `injections.scm`.
+    .{
+        .name = "markdown",
+        .dep = "grammar_markdown",
+        .subdir = "tree-sitter-markdown/",
+        .scanner = true,
+        .injections = true,
+    },
+    .{
+        .name = "markdown_inline",
+        .dep = "grammar_markdown",
+        .subdir = "tree-sitter-markdown-inline/",
+        .scanner = true,
+        .injections = true,
+    },
 };
 
 /// Compiles each bundled grammar to `<install_dir>/<name>/parser.so` and
-/// copies its `highlights.scm` alongside, wired onto the default install
-/// step. The grammar deps are lazy, so a plain `zig build` only fetches
-/// them because this runs; nothing links them into a Zig binary.
+/// copies its `highlights.scm` (and `injections.scm`, where the grammar
+/// has one) alongside, wired onto the default install step. The grammar
+/// deps are lazy, so a plain `zig build` only fetches them because this
+/// runs; nothing links them into a Zig binary.
 fn installGrammars(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -479,5 +499,14 @@ fn installGrammars(
         );
         b.getInstallStep().dependOn(&inst_lib.step);
         b.getInstallStep().dependOn(&inst_scm.step);
+
+        if (g.injections) {
+            const inst_inj = b.addInstallFileWithDir(
+                dep.path(b.fmt("{s}queries/injections.scm", .{g.subdir})),
+                dest,
+                "injections.scm",
+            );
+            b.getInstallStep().dependOn(&inst_inj.step);
+        }
     }
 }

@@ -1,9 +1,10 @@
 //! zoe's optional startup config, `~/.config/glyphwire/zoe.conf` -- a Lua
 //! script assigning a global `config` table, the same shape `host.conf`
 //! and `ls.conf` use. It carries syntax-highlighting settings only:
-//! extra languages / extension remaps, extra grammar directories, and
-//! capture-group colour overrides. With no file present zoe runs on the
-//! built-in six languages and dark theme.
+//! extra languages / extension remaps, extra grammar directories,
+//! capture-group colour overrides, and an `injections` on/off switch.
+//! With no file present zoe runs on the built-in six languages, the dark
+//! theme, and injection enabled.
 //!
 //! Split out here (rather than in `ui.zig`) so `tests/zoe_tests.zig` can
 //! exercise the parse without a Lua state wired into a running client,
@@ -30,6 +31,10 @@ pub const Config = struct {
     grammar_dirs: []const []const u8,
     /// The built-in theme with any `config.theme` overrides applied.
     theme: syntax.Theme,
+    /// `config.injections` -- whether to run `injections.scm` and
+    /// highlight embedded languages (code fences, Markdown inline).
+    /// Default true; set `false` as an escape hatch.
+    injections: bool = true,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -53,6 +58,7 @@ pub fn load(
         .langs = &syntax.default_langs,
         .grammar_dirs = &.{},
         .theme = syntax.Theme.initDefault(),
+        .injections = true,
     };
 
     const src = readConf(&cfg.arena, io, environ) orelse return cfg;
@@ -81,7 +87,18 @@ pub fn load(
     applyTheme(lua, &cfg.theme);
     cfg.grammar_dirs = readGrammarDirs(lua, a, environ);
     cfg.langs = readLangs(lua, a);
+    cfg.injections = readInjections(lua);
     return cfg;
+}
+
+/// `config.injections = false` turns embedded-language highlighting off.
+/// Anything other than an explicit `false` (absent, `nil`, `true`, a
+/// non-boolean) leaves it on.
+fn readInjections(lua: *Lua) bool {
+    const t = lua.getField(-1, "injections");
+    defer lua.pop(1);
+    if (t != .boolean) return true;
+    return lua.toBoolean(-1);
 }
 
 /// `config.theme = { keyword = "#c678dd", ... }` -> overrides on the

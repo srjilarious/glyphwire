@@ -775,3 +775,221 @@ pub fn syntaxHighlightsJsonSpansTest(io: std.Io, alloc: std.mem.Allocator) !void
     }
     try testz.expectTrue(covers_number);
 }
+
+// ─── Incremental reparse: the buffer edit journal ───────────────────────
+
+pub fn bufferJournalsEditsOnlyWhileTrackingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "abc\ndef\n");
+    defer buf.deinit();
+
+    // Off by default -- nothing is recorded.
+    try buf.insert(1, "X");
+    try testz.expectEqual(buf.pending_edits.items.len, 0);
+
+    buf.track_edits = true;
+
+    // "aXbc\ndef\n": insert "YY" just before the first newline (offset 4).
+    try buf.insert(4, "YY");
+    try testz.expectEqual(buf.pending_edits.items.len, 1);
+    {
+        const e = buf.pending_edits.items[0];
+        try testz.expectEqual(e.start_byte, 4);
+        try testz.expectEqual(e.old_end_byte, 4);
+        try testz.expectEqual(e.new_end_byte, 6);
+        try testz.expectEqual(e.start_point.line, 0);
+        try testz.expectEqual(e.start_point.col, 4);
+        try testz.expectEqual(e.new_end_point.line, 0);
+        try testz.expectEqual(e.new_end_point.col, 6);
+    }
+
+    // "aXbcYY\ndef\n": delete 3 bytes from offset 5 -- "Y\nd", straddling
+    // the newline, so the old end is on the next line.
+    try buf.delete(5, 3);
+    try testz.expectEqual(buf.pending_edits.items.len, 2);
+    {
+        const e = buf.pending_edits.items[1];
+        try testz.expectEqual(e.start_byte, 5);
+        try testz.expectEqual(e.old_end_byte, 8);
+        try testz.expectEqual(e.new_end_byte, 5);
+        try testz.expectEqual(e.start_point.line, 0);
+        try testz.expectEqual(e.old_end_point.line, 1);
+        try testz.expectEqual(e.old_end_point.col, 1);
+    }
+
+    buf.clearEdits();
+    try testz.expectEqual(buf.pending_edits.items.len, 0);
+    try testz.expectFalse(buf.edits_overflowed);
+}
+
+pub fn bufferJournalOverflowSetsFlagTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "");
+    defer buf.deinit();
+    buf.track_edits = true;
+
+    // Way past the 512 cap: the log is dropped and the flag latches.
+    var i: usize = 0;
+    while (i < 600) : (i += 1) try buf.insert(buf.len(), "x");
+    try testz.expectTrue(buf.edits_overflowed);
+    try testz.expectEqual(buf.pending_edits.items.len, 0);
+
+    buf.clearEdits();
+    try testz.expectFalse(buf.edits_overflowed);
+}
+
+// ─── Incremental reparse equivalence ───────────────────────────────────
+
+pub fn syntaxIncrementalReparseMatchesFullTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const g = reg.get("json") orelse return error.GrammarMissing;
+
+    const src = "{\n  \"a\": 1,\n  \"b\": 2\n}\n";
+    var buf = try Buffer.initFromText(alloc, src);
+    defer buf.deinit();
+    buf.track_edits = true;
+
+    var inc = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer inc.deinit();
+    try inc.setLanguage("json", g);
+    try inc.reparse(&buf);
+
+    // Widen the `1` to `123`, an edit contained in one line.
+    const at = std.mem.indexOfScalar(u8, src, '1').?;
+    try buf.delete(at, 1);
+    try buf.insert(at, "123");
+    for (buf.pending_edits.items) |e| inc.applyEdit(e);
+
+    var changed: std.ArrayList(syntax.ByteRange) = .empty;
+    defer changed.deinit(alloc);
+    _ = try inc.reparseIncremental(&buf, &changed);
+    buf.clearEdits();
+    try testz.expectTrue(changed.items.len >= 1);
+
+    // A fresh full parse of the final text must give identical spans.
+    var full = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer full.deinit();
+    try full.setLanguage("json", g);
+    try full.reparse(&buf);
+
+    var a: std.ArrayList(syntax.Span) = .empty;
+    defer a.deinit(alloc);
+    var b: std.ArrayList(syntax.Span) = .empty;
+    defer b.deinit(alloc);
+
+    var line: usize = 0;
+    while (line < buf.lineCount()) : (line += 1) {
+        const ls = buf.lineStart(line);
+        const le = buf.lineEnd(line);
+        try inc.lineSpans(ls, le, &a);
+        try full.lineSpans(ls, le, &b);
+        try testz.expectEqual(a.items.len, b.items.len);
+        for (a.items, b.items) |x, y| {
+            try testz.expectEqual(x.start, y.start);
+            try testz.expectEqual(x.end, y.end);
+            try testz.expectEqual(x.color.r, y.color.r);
+            try testz.expectEqual(x.color.g, y.color.g);
+            try testz.expectEqual(x.color.b, y.color.b);
+        }
+    }
+}
+
+// ─── Injection queries ────────────────────────────────────────────────
+
+fn markdownStackInstalled(io: std.Io) bool {
+    std.Io.Dir.cwd().access(io, grammar_test_dir ++ "/markdown/libtree-sitter-markdown.so", .{}) catch return false;
+    std.Io.Dir.cwd().access(io, grammar_test_dir ++ "/markdown/injections.scm", .{}) catch return false;
+    std.Io.Dir.cwd().access(io, grammar_test_dir ++ "/markdown_inline/libtree-sitter-markdown_inline.so", .{}) catch return false;
+    return true;
+}
+
+/// The span covering line-relative byte `off`, or null.
+fn spanAt(spans: []const syntax.Span, off: usize) ?syntax.Span {
+    for (spans) |s| {
+        if (off >= s.start and off < s.end) return s;
+    }
+    return null;
+}
+
+pub fn syntaxInjectionHighlightsFencedCodeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io) or !markdownStackInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const md = reg.get("markdown") orelse return error.GrammarMissing;
+
+    const src = "# Title\n\n```json\n{ \"x\": 42 }\n```\n";
+    var buf = try Buffer.initFromText(alloc, src);
+    defer buf.deinit();
+
+    // Line 3 (0-based) is the JSON object inside the fence; `42` sits at
+    // line-relative bytes 7..9. markdown paints the whole fenced block
+    // `@text.literal` (green); only the injected JSON grammar paints `42`
+    // with the number colour.
+    const ls = buf.lineStart(3);
+    const le = buf.lineEnd(3);
+    const number = syntax.Theme.initDefault().colorFor("number").?;
+
+    var spans: std.ArrayList(syntax.Span) = .empty;
+    defer spans.deinit(alloc);
+
+    var on = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer on.deinit();
+    on.configureInjections(&reg, true);
+    try on.setLanguage("markdown", md);
+    try on.reparse(&buf);
+    try on.lineSpans(ls, le, &spans);
+    const on_span = spanAt(spans.items, 7) orelse return error.NoSpanOverNumber;
+    try testz.expectEqual(on_span.color.r, number.r);
+    try testz.expectEqual(on_span.color.g, number.g);
+    try testz.expectEqual(on_span.color.b, number.b);
+
+    var off = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer off.deinit();
+    off.configureInjections(&reg, false);
+    try off.setLanguage("markdown", md);
+    try off.reparse(&buf);
+    try off.lineSpans(ls, le, &spans);
+    if (spanAt(spans.items, 7)) |s| {
+        try testz.expectFalse(s.color.r == number.r and s.color.g == number.g and s.color.b == number.b);
+    }
+}
+
+pub fn syntaxInjectionSurvivesIncrementalEditTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io) or !markdownStackInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const md = reg.get("markdown") orelse return error.GrammarMissing;
+
+    const src = "```json\n{ \"x\": 1 }\n```\n";
+    var buf = try Buffer.initFromText(alloc, src);
+    defer buf.deinit();
+    buf.track_edits = true;
+
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer hl.deinit();
+    hl.configureInjections(&reg, true);
+    try hl.setLanguage("markdown", md);
+    try hl.reparse(&buf);
+
+    var spans: std.ArrayList(syntax.Span) = .empty;
+    defer spans.deinit(alloc);
+    try hl.lineSpans(buf.lineStart(1), buf.lineEnd(1), &spans);
+    const before = spans.items.len;
+    try testz.expectTrue(before >= 1);
+
+    // Edit inside the fence, then reparse incrementally: the injection is
+    // rebuilt and the JSON grammar still colours the line.
+    const at = std.mem.indexOfScalar(u8, src, '1').?;
+    try buf.insert(at, "23");
+    for (buf.pending_edits.items) |e| hl.applyEdit(e);
+    var changed: std.ArrayList(syntax.ByteRange) = .empty;
+    defer changed.deinit(alloc);
+    _ = try hl.reparseIncremental(&buf, &changed);
+    buf.clearEdits();
+
+    try hl.lineSpans(buf.lineStart(1), buf.lineEnd(1), &spans);
+    try testz.expectTrue(spans.items.len >= 1);
+}

@@ -3,18 +3,24 @@
 -- Copy to ~/.config/glyphwire/zoe.conf (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
 -- startup; every key is optional -- with no config at all zoe highlights
--- the six bundled languages with its built-in dark theme.
+-- the seven bundled languages with its built-in dark theme, embedded
+-- languages included.
 
 config = {
     -- Extra languages, or extension overrides for the bundled ones. Each
     -- entry maps file extensions (with the dot) to a grammar directory
     -- name -- zoe looks for `<grammar_dir>/<name>/parser.so` +
     -- `highlights.scm` on its grammar search path. Bundled names:
-    -- zig, json, c, python, toml, markdown.
+    -- zig, json, c, python, toml, markdown, markdown_inline.
     languages = {
         { name = "c", extensions = { ".c", ".h", ".ino" } },
         -- { name = "lua", extensions = { ".lua" } },  -- once you drop a `lua` grammar in
     },
+
+    -- Highlight embedded languages via `injections.scm`: code fences in
+    -- Markdown, inline markup, HTML blocks. On by default; set false to
+    -- turn it off.
+    injections = true,
 
     -- Where to look for grammar directories, highest priority first.
     -- These are prepended to the default search path
