@@ -173,6 +173,68 @@ pub fn bufferDirtyFlagTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectFalse(buf.dirty);
 }
 
+pub fn bufferEditCounterBumpsOnRealMutationsOnlyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "abc");
+    defer buf.deinit();
+    try testz.expectEqual(buf.edits, 0);
+    try buf.insert(1, "X");
+    try buf.delete(0, 1);
+    try testz.expectEqual(buf.edits, 2);
+    // The no-op guards don't count.
+    try buf.insert(0, "");
+    try buf.delete(99, 3);
+    try testz.expectEqual(buf.edits, 2);
+}
+
+// ─── Buffer-pane render planning ────────────────────────────────────────
+
+pub fn planBufferRenderShiftsOnPureSubScreenScrollTest(_: std.Io, _: std.mem.Allocator) !void {
+    const plan = zoe.ui.planBufferRender;
+
+    // Scrolled down 3 lines on a 20-row pane: shift up 3, repaint the
+    // bottom 3.
+    switch (plan(.{ .prev_top = 10, .top = 13, .prev_left = 0, .left = 0, .prev_edits = 4, .edits = 4, .rows = 20, .force_full = false })) {
+        .full => return error.TestExpectedShift,
+        .shift => |s| {
+            try testz.expectEqual(s.count, 3);
+            try testz.expectEqual(s.dir, .up);
+            try testz.expectEqual(s.exposed_lo, 17);
+            try testz.expectEqual(s.exposed_hi, 20);
+        },
+    }
+
+    // Scrolled up 2: shift down 2, repaint the top 2.
+    switch (plan(.{ .prev_top = 10, .top = 8, .prev_left = 0, .left = 0, .prev_edits = 4, .edits = 4, .rows = 20, .force_full = false })) {
+        .full => return error.TestExpectedShift,
+        .shift => |s| {
+            try testz.expectEqual(s.dir, .down);
+            try testz.expectEqual(s.exposed_lo, 0);
+            try testz.expectEqual(s.exposed_hi, 2);
+        },
+    }
+}
+
+pub fn planBufferRenderFallsBackToFullTest(_: std.Io, _: std.mem.Allocator) !void {
+    const plan = zoe.ui.planBufferRender;
+    const S = zoe.ui.BufferRenderState;
+    const expectFull = struct {
+        fn f(s: S) !void {
+            try testz.expectTrue(plan(s) == .full);
+        }
+    }.f;
+
+    // No scroll.
+    try expectFull(.{ .prev_top = 10, .top = 10, .prev_left = 0, .left = 0, .prev_edits = 4, .edits = 4, .rows = 20, .force_full = false });
+    // An edit landed.
+    try expectFull(.{ .prev_top = 10, .top = 13, .prev_left = 0, .left = 0, .prev_edits = 4, .edits = 5, .rows = 20, .force_full = false });
+    // Horizontal scroll.
+    try expectFull(.{ .prev_top = 10, .top = 13, .prev_left = 0, .left = 4, .prev_edits = 4, .edits = 4, .rows = 20, .force_full = false });
+    // Jump of a screen or more -- nothing to keep.
+    try expectFull(.{ .prev_top = 10, .top = 40, .prev_left = 0, .left = 0, .prev_edits = 4, .edits = 4, .rows = 20, .force_full = false });
+    // Forced.
+    try expectFull(.{ .prev_top = 10, .top = 13, .prev_left = 0, .left = 0, .prev_edits = 4, .edits = 4, .rows = 20, .force_full = true });
+}
+
 // ─── Motions ────────────────────────────────────────────────────────────
 
 pub fn motionLeftRightStopAtLineEdgesTest(_: std.Io, alloc: std.mem.Allocator) !void {

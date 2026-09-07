@@ -188,14 +188,21 @@ answers:
   0: zoe owns its own scroll position (which buffer line is at the top of
   the pane) and redraws, rather than pushing rows into a ring buffer it
   would then have to fight with.
-- **Redraw granularity.** The naive version redraws the visible pane
-  every keystroke inside one `batch` (one atomic frame, per the batching
-  decision). Whether that needs to become a dirty-line diff is a question
-  for a profile, not for now.
+- **Redraw granularity.** The naive version redrew the visible pane every
+  keystroke inside one `batch` (one atomic frame, per the batching
+  decision), which is `rows` `write_text` pairs down the socket per tick
+  and felt heavy. First cut landed: `planBufferRender` shifts the rows the
+  layer already holds with one `move_content` on a pure sub-screen scroll
+  and repaints only the exposed band; an edit, a horizontal scroll or a
+  screen-plus jump still repaints in full. A true per-line diff (repaint
+  only the lines whose content changed on an edit) is the next step and
+  wants the per-line dirty tracking below.
 - **`Buffer.dirty` vs. per-line dirty.** The core tracks one modified
-  flag today because `:q` is all that consults it. A renderer that wants
-  to redraw only changed lines will want more, and that belongs in
-  `buffer.zig` rather than being reconstructed by the renderer.
+  flag plus a monotonic `Buffer.edits` counter today (the counter is what
+  `planBufferRender` diffs to tell an edit from a pure scroll). A renderer
+  that wants to redraw only the changed lines on an edit will want a
+  per-line version, and that belongs in `buffer.zig` rather than being
+  reconstructed by the renderer.
 
 ## Lua
 

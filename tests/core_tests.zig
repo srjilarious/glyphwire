@@ -1871,6 +1871,44 @@ pub fn scrollUpDownAndReverseIndexTest(io: std.Io, alloc: std.mem.Allocator) !vo
     try testz.expectEqualStr("2", layer.cell(2, 0).grapheme());
 }
 
+pub fn moveContentShiftsBandInPlaceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 5, 0);
+    defer layer.deinit();
+
+    try layer.writeText("11\n22\n33\n44\n55", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    const gen0 = layer.renderGeneration();
+
+    // Whole grid up 2: rows climb, the bottom two blank.
+    layer.moveContent(null, null, 2, .up);
+    try testz.expectEqualStr("3", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("5", layer.cell(2, 0).grapheme());
+    try testz.expectEqual(layer.cell(3, 0).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(4, 0).grapheme().len, 0);
+    try testz.expectTrue(layer.renderGeneration() != gen0);
+
+    // Back down 2: what's left slides back, the top two blank.
+    layer.moveContent(null, null, 2, .down);
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(1, 0).grapheme().len, 0);
+    try testz.expectEqualStr("3", layer.cell(2, 0).grapheme());
+
+    // A bounded band leaves the rows outside it untouched.
+    var band = try glyphwire.Layer.init(alloc, 4, 5, 0);
+    defer band.deinit();
+    try band.writeText("aa\nbb\ncc\ndd\nee", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    band.moveContent(1, 3, 1, .up);
+    try testz.expectEqualStr("a", band.cell(0, 0).grapheme()); // outside the band
+    try testz.expectEqualStr("c", band.cell(1, 0).grapheme());
+    try testz.expectEqual(band.cell(3, 0).grapheme().len, 0); // blanked at bot
+    try testz.expectEqualStr("e", band.cell(4, 0).grapheme()); // outside the band
+
+    // Out of range / zero count: no-op, no crash.
+    band.moveContent(2, 99, 1, .up);
+    band.moveContent(null, null, 0, .up);
+    try testz.expectEqualStr("a", band.cell(0, 0).grapheme());
+}
+
 pub fn insertAndDeleteLinesTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 4, 4, 0);
