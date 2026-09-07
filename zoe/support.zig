@@ -16,6 +16,8 @@ pub const editor = @import("editor.zig");
 pub const keys = @import("keys.zig");
 pub const tree = @import("tree.zig");
 pub const ui = @import("ui.zig");
+pub const syntax = @import("syntax.zig");
+pub const langconf = @import("langconf.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const GapBuffer = buffer.GapBuffer;

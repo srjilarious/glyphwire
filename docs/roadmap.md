@@ -2088,6 +2088,58 @@ terminal blocks in the event loop and does not repaint at all.
   up/down, similar in spirit to how `submitLine` already stashes the
   just-submitted line to scrollback.
 
+## zoe syntax highlighting (tree-sitter)
+
+Client-local, no wire change — zoe already writes coloured `write_text`
+runs. The rationale lives in decisions.md ("zoe syntax highlighting");
+this is the implementation shape.
+
+- **`zoe/syntax.zig`** — `Registry` and `Highlighter`. `Registry`
+  `dlopen`s a language `parser.so` on first use from a grammar search
+  path (`$GLYPHWIRE_ZOE_GRAMMAR_DIR`, `~/.config/glyphwire/zoe/grammars`,
+  `~/.local/share/glyphwire/grammars`, `<exe>/../share/glyphwire/grammars`,
+  plus `config.grammar_dirs`), checks its ABI against the vendored
+  libtree-sitter (`min_abi_version`..`max_abi_version`), and reads the
+  sibling `highlights.scm`. Extension → grammar name comes from
+  `default_langs` (the six bundled) plus `zoe.conf`. `Highlighter` owns
+  the `Parser`/`Tree`/`Query`, does a **full reparse of the whole buffer**
+  on every edit (`Buffer.edits` moved), and `lineSpans(start, end, out)`
+  runs the query over one line's byte range and returns non-overlapping
+  colour spans; a nested/shorter capture wins the bytes it covers, tie
+  goes to the later match. `Theme` maps dotted capture names
+  (`string.special.key` → `string.special` → `string`) to colours;
+  `null` means "leave it the pane's default". Query predicates `#eq?` /
+  `#not-eq?` / `#any-of?` / `#not-any-of?` are evaluated against the
+  parsed source; a pattern with any other test predicate (`#match?`,
+  `#lua-match?`) is `disablePattern`'d, so those heuristics
+  (ALL_CAPS → constant, PascalCase → type) are lost rather than
+  misapplied. Only `highlights.scm` is consulted — no injections
+  (Markdown code fences stay uncoloured) and no locals.
+- **`zoe/langconf.zig`** — `~/.config/glyphwire/zoe.conf`, a Lua
+  `config` table like `ls.conf` / `host.conf`. `config.theme` overrides
+  capture colours, `config.languages` adds/remaps extensions,
+  `config.grammar_dirs` prepends search directories. Absent file = the
+  six bundled languages and the built-in dark theme. Sample at
+  `assets/zoe.conf.example`.
+- **`zoe/ui.zig`** — `Ui` owns the `Registry` + `Highlighter` +
+  `langconf.Config` (its arena backs the registry's language table).
+  `renderBuffer` reparses when the tree is stale and forces a full
+  repaint; `renderRowSpans` walks each visible line codepoint by
+  codepoint, grouping equal colours into runs and emitting one
+  `write_text` per run clipped to `[left_col, left_col+cols)`. Any
+  highlighter failure falls back to the original single plain write.
+- **`build.zig`** — `tree_sitter` is pinned to the exact
+  `srjilarious/zig-tree-sitter` commit `testz` already uses (two pins of
+  it collide on the shared `src/parser.zig`). `installGrammars` compiles
+  each of six grammar `parser.c` (+ `scanner.c` where present) to
+  `share/glyphwire/grammars/<name>/parser.so` and copies its
+  `highlights.scm`; the `grammar_*` deps are lazy source-only and never
+  linked into a Zig binary. `zig build zoe` points
+  `GLYPHWIRE_ZOE_GRAMMAR_DIR` at the just-installed set.
+- **Deferred:** incremental reparse (`Tree.edit` + `Buffer` edit ranges),
+  injection queries (embedded languages), `locals.scm` scope resolution,
+  a WASM grammar loader, a generic editor extension/plugin API.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

@@ -125,7 +125,7 @@ fn runUi(
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
     const cwd = cwd_buf[0..cwd_len];
 
-    const ui = try zoe.Ui.init(alloc, io, &client, listener, ed, cwd);
+    const ui = try zoe.Ui.init(alloc, io, &client, listener, ed, cwd, environ);
     defer ui.deinit();
 
     try ui.run();
