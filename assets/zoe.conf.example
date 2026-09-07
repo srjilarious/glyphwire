@@ -1,0 +1,40 @@
+-- Example zoe config.
+--
+-- Copy to ~/.config/glyphwire/zoe.conf (or $GLYPHWIRE_CONFIG_DIR, or
+-- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
+-- startup; every key is optional -- with no config at all zoe highlights
+-- the six bundled languages with its built-in dark theme.
+
+config = {
+    -- Extra languages, or extension overrides for the bundled ones. Each
+    -- entry maps file extensions (with the dot) to a grammar directory
+    -- name -- zoe looks for `<grammar_dir>/<name>/parser.so` +
+    -- `highlights.scm` on its grammar search path. Bundled names:
+    -- zig, json, c, python, toml, markdown.
+    languages = {
+        { name = "c", extensions = { ".c", ".h", ".ino" } },
+        -- { name = "lua", extensions = { ".lua" } },  -- once you drop a `lua` grammar in
+    },
+
+    -- Where to look for grammar directories, highest priority first.
+    -- These are prepended to the default search path
+    -- ($GLYPHWIRE_ZOE_GRAMMAR_DIR, ~/.config/glyphwire/zoe/grammars,
+    -- ~/.local/share/glyphwire/grammars, and the installed share dir).
+    grammar_dirs = { "~/src/tree-sitter-grammars" },
+
+    -- Capture-group colors, "#rrggbb". Unset groups keep the built-in
+    -- value. Names are tree-sitter highlight captures; a dotted name
+    -- falls back to its prefix ("string.special" -> "string") when unset.
+    theme = {
+        comment  = "#6a7a86",
+        keyword  = "#c678dd",
+        ["string"] = "#98c379",
+        number   = "#d19a66",
+        type     = "#e5c07b",
+        ["function"] = "#61afef",
+        constant = "#d19a66",
+        operator = "#56b6c2",
+        property = "#e06c75",
+        variable = "#d7dae0",
+    },
+}

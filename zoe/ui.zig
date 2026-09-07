@@ -25,6 +25,8 @@ const ls_icons = @import("ls_support").icons;
 
 const editor = @import("editor.zig");
 const tree_mod = @import("tree.zig");
+const syntax = @import("syntax.zig");
+const langconf = @import("langconf.zig");
 
 const Editor = editor.Editor;
 const Tree = tree_mod.Tree;
@@ -118,6 +120,21 @@ pub const Ui = struct {
     dirty: bool = true,
     quit: bool = false,
 
+    /// tree-sitter syntax highlighting. All four are null / empty when
+    /// highlighting is off -- no grammar directory resolved, or
+    /// `Highlighter.init` failed -- and the buffer renders in plain
+    /// `fg_text`. `hl_config`'s arena backs `grammars`' language table,
+    /// so it outlives the registry. See syntax.zig.
+    hl_config: ?langconf.Config = null,
+    grammars: ?syntax.Registry = null,
+    hl: ?syntax.Highlighter = null,
+    hl_search_dirs: []const []const u8 = &.{},
+    /// The `Buffer.edits` value the current parse tree reflects; a
+    /// mismatch in `renderBuffer` triggers a reparse.
+    hl_edits: u64 = 0,
+    /// Reused span buffer for `renderRowSpans`.
+    hl_scratch: std.ArrayList(syntax.Span) = .empty,
+
     pub fn init(
         alloc: std.mem.Allocator,
         io: std.Io,
@@ -125,6 +142,7 @@ pub const Ui = struct {
         listener: *glyphwire.InputListener,
         ed: *Editor,
         root_dir: []const u8,
+        environ: *const std.process.Environ.Map,
     ) !*Ui {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
@@ -183,11 +201,58 @@ pub const Ui = struct {
         });
         try client.setRootSplit(root_split);
 
+        // Best-effort: highlighting off is a valid state, never a reason
+        // to fail bringing the editor up.
+        self.setupHighlight(environ);
+
         // The `layout` broadcast goes to *other* connections, and the
         // listener is one -- but reading the bounds back directly avoids
         // a startup frame drawn against guesses.
         try self.readBounds();
         return self;
+    }
+
+    /// Loads `zoe.conf`, resolves the grammar search path, and builds the
+    /// registry + highlighter. Any failure leaves all of it null and the
+    /// buffer renders unhighlighted.
+    fn setupHighlight(self: *Ui, environ: *const std.process.Environ.Map) void {
+        var cfg = langconf.load(self.alloc, self.io, environ);
+
+        const dirs = syntax.searchDirs(self.alloc, self.io, environ, cfg.grammar_dirs) catch {
+            cfg.deinit();
+            return;
+        };
+
+        const hl = syntax.Highlighter.init(self.alloc, cfg.theme) catch {
+            for (dirs) |d| self.alloc.free(d);
+            self.alloc.free(dirs);
+            cfg.deinit();
+            return;
+        };
+
+        self.hl_search_dirs = dirs;
+        self.grammars = syntax.Registry.init(self.alloc, self.io, dirs, cfg.langs);
+        self.hl = hl;
+        self.hl_config = cfg;
+
+        self.selectHighlightLanguage(self.ed.path);
+    }
+
+    /// Points the highlighter at the grammar for `path` (by extension),
+    /// or clears it. Cheap and idempotent -- also called from `openFile`.
+    fn selectHighlightLanguage(self: *Ui, path: ?[]const u8) void {
+        const h = if (self.hl) |*x| x else return;
+        const reg = if (self.grammars) |*x| x else return;
+
+        h.clearLanguage();
+        const p = path orelse return;
+        const name = reg.nameForPath(p) orelse return;
+        const grammar = reg.get(name) orelse return;
+        h.setLanguage(name, grammar) catch return;
+
+        // Nudge `hl_edits` off the buffer's value so the next
+        // `renderBuffer` parses.
+        self.hl_edits = self.ed.buf.edits -% 1;
     }
 
     /// Tears down what `init` built on the server, not just this
@@ -201,6 +266,14 @@ pub const Ui = struct {
     pub fn deinit(self: *Ui) void {
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
+
+        self.hl_scratch.deinit(self.alloc);
+        if (self.hl) |*h| h.deinit();
+        if (self.grammars) |*g| g.deinit();
+        for (self.hl_search_dirs) |d| self.alloc.free(d);
+        self.alloc.free(self.hl_search_dirs);
+        if (self.hl_config) |*c| c.deinit();
+
         self.alloc.destroy(self);
     }
 
@@ -491,6 +564,7 @@ pub const Ui = struct {
         defer self.alloc.free(bytes);
 
         try self.ed.loadText(bytes, path);
+        self.selectHighlightLanguage(path);
         self.top_line = 0;
         self.left_col = 0;
         // A whole new buffer -- nothing on screen carries over.
@@ -572,6 +646,17 @@ pub const Ui = struct {
         self.scrollBufferToCursor();
         try self.syncBufferScrollbar();
 
+        // A fresh edit (or the first parse after choosing a language)
+        // means the tree is stale: reparse the whole buffer and repaint.
+        // Full reparse per edit is the v1 model -- see syntax.zig.
+        if (self.hl) |*h| {
+            if (h.languageSet() and self.ed.buf.edits != self.hl_edits) {
+                h.reparse(&self.ed.buf) catch {};
+                self.hl_edits = self.ed.buf.edits;
+                self.buffer_full_redraw = true;
+            }
+        }
+
         const cursor = self.ed.pos();
         switch (planBufferRender(.{
             .prev_top = self.prev_top_line,
@@ -645,19 +730,125 @@ pub const Ui = struct {
         var pad: std.ArrayList(u8) = .empty;
         defer pad.deinit(self.alloc);
 
-        if (line < self.ed.buf.lineCount()) {
-            const text = try self.ed.buf.lineText(self.alloc, line);
-            defer self.alloc.free(text);
-            const visible = sliceCols(text, self.left_col, b.cols);
-            try pad.appendSlice(self.alloc, visible);
-            try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), b.cols);
-            try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_text, bg_buffer);
-        } else {
+        if (line >= self.ed.buf.lineCount()) {
             // vim's marker for "past the end of the buffer".
             try pad.append(self.alloc, '~');
             try padTo(self.alloc, &pad, 1, b.cols);
             try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_dim, bg_buffer);
+            return;
         }
+
+        const text = try self.ed.buf.lineText(self.alloc, line);
+        defer self.alloc.free(text);
+
+        // Highlighted rows are painted a colour run at a time; on any
+        // failure (or with no grammar) fall through to one plain write.
+        if (self.hl) |*h| {
+            if (h.ready() and self.renderRowSpans(batch, r, line, text)) return;
+        }
+
+        const visible = sliceCols(text, self.left_col, b.cols);
+        try pad.appendSlice(self.alloc, visible);
+        try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), b.cols);
+        try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_text, bg_buffer);
+    }
+
+    /// Paints buffer row `r` (buffer line `line`, whole text `text`) as
+    /// tree-sitter colour runs clipped to `[left_col, left_col+cols)`.
+    /// Returns false if the highlighter couldn't produce spans, so the
+    /// caller can fall back to a plain write.
+    fn renderRowSpans(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        r: usize,
+        line: usize,
+        text: []const u8,
+    ) bool {
+        const h = &self.hl.?;
+        const ls = self.ed.buf.lineStart(line);
+        const le = self.ed.buf.lineEnd(line);
+        h.lineSpans(ls, le, &self.hl_scratch) catch return false;
+        self.rowSpansImpl(batch, r, text, self.hl_scratch.items) catch return false;
+        return true;
+    }
+
+    fn rowSpansImpl(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        r: usize,
+        text: []const u8,
+        spans: []const syntax.Span,
+    ) !void {
+        const cols = self.buffer_bounds.cols;
+        const left = self.left_col;
+
+        const visible = sliceCols(text, left, cols);
+        if (visible.len == 0) {
+            // Line is entirely scrolled off to the left, or empty.
+            try self.writeSpaces(batch, r, 0, cols);
+            return;
+        }
+        const vis_start_bo: usize = @intFromPtr(visible.ptr) - @intFromPtr(text.ptr);
+        const vis_start_dc = displayColOfByte(text, vis_start_bo);
+
+        // A double-width char straddling the left edge is dropped by
+        // `sliceCols`; fill the gap it leaves so the row starts at col 0.
+        if (vis_start_dc > left) {
+            try self.writeSpaces(batch, r, 0, vis_start_dc - left);
+        }
+
+        var run_buf: std.ArrayList(u8) = .empty;
+        defer run_buf.deinit(self.alloc);
+        var run_dc = vis_start_dc;
+        var run_color: ?Color = null;
+        var have_run = false;
+
+        var dc = vis_start_dc;
+        var i: usize = 0;
+        while (i < visible.len) {
+            const seq = std.unicode.utf8ByteSequenceLength(visible[i]) catch 1;
+            const end = @min(i + seq, visible.len);
+            const cp = std.unicode.utf8Decode(visible[i..end]) catch 0xFFFD;
+            const w = glyphwire.codepointWidth(cp);
+
+            const color = spanColorAt(spans, vis_start_bo + i);
+            if (!have_run or !colorOptEql(color, run_color)) {
+                if (have_run) try self.flushRun(batch, r, run_dc, run_buf.items, run_color);
+                run_buf.clearRetainingCapacity();
+                run_dc = dc;
+                run_color = color;
+                have_run = true;
+            }
+            try run_buf.appendSlice(self.alloc, visible[i..end]);
+            dc += w;
+            i = end;
+        }
+        if (have_run) try self.flushRun(batch, r, run_dc, run_buf.items, run_color);
+
+        // Pad the rest of the row.
+        if (dc < left + cols) {
+            try self.writeSpaces(batch, r, dc - left, left + cols - dc);
+        }
+    }
+
+    fn flushRun(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        r: usize,
+        start_dc: usize,
+        bytes: []const u8,
+        color: ?Color,
+    ) !void {
+        if (bytes.len == 0 or start_dc < self.left_col) return;
+        try writeAt(batch, self.buffer_layer, r, start_dc - self.left_col, bytes, color orelse fg_text, bg_buffer);
+    }
+
+    fn writeSpaces(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize, col: usize, n: usize) !void {
+        if (n == 0) return;
+        var pad: std.ArrayList(u8) = .empty;
+        defer pad.deinit(self.alloc);
+        try pad.appendNTimes(self.alloc, ' ', n);
+        try writeAt(batch, self.buffer_layer, r, col, pad.items, fg_text, bg_buffer);
     }
 
     /// Keeps the caret inside the buffer pane, both axes.
@@ -902,6 +1093,39 @@ pub fn planBufferRender(s: BufferRenderState) BufferRender {
 fn padTo(alloc: std.mem.Allocator, line: *std.ArrayList(u8), width: usize, target: usize) !void {
     if (width >= target) return;
     try line.appendNTimes(alloc, ' ', target - width);
+}
+
+/// The display column at which byte `off` of `text` sits -- the summed
+/// width of every codepoint before it. Used to place the first colour
+/// run of a horizontally-scrolled row.
+fn displayColOfByte(text: []const u8, off: usize) usize {
+    var col: usize = 0;
+    var i: usize = 0;
+    while (i < off and i < text.len) {
+        const seq = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const end = @min(i + seq, text.len);
+        const cp = std.unicode.utf8Decode(text[i..end]) catch 0xFFFD;
+        col += glyphwire.codepointWidth(cp);
+        i = end;
+    }
+    return col;
+}
+
+/// The colour of the span covering line-relative byte `off`, or null for
+/// "no span here" (the default text colour). Spans are sorted and
+/// non-overlapping, so the first hit is the answer.
+fn spanColorAt(spans: []const syntax.Span, off: usize) ?Color {
+    for (spans) |s| {
+        if (off < s.start) return null;
+        if (off < s.end) return s.color;
+    }
+    return null;
+}
+
+fn colorOptEql(a: ?Color, b: ?Color) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return a.?.r == b.?.r and a.?.g == b.?.g and a.?.b == b.?.b and a.?.a == b.?.a;
 }
 
 /// The slice of `text` starting at display column `start` and at most

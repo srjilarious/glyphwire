@@ -118,6 +118,22 @@ pub fn build(b: *std.Build) void {
     // `ls_support` is no longer strictly dependency-free, but the width
     // math it also carries still pulls in nothing at its own call sites.
     ls_support_mod.addImport("ziglua", ziglua_mod);
+    // zoe/langconf.zig (zoe.conf parser) is the third ziglua consumer.
+    zoe_support_mod.addImport("ziglua", ziglua_mod);
+
+    // ── zoe syntax highlighting ──
+    //
+    // `tree_sitter` is the Zig binding *plus* the vendored libtree-sitter
+    // C runtime (its module links the static lib in), so importing it
+    // into `zoe_support` is enough to reach the `zoe` binary and the test
+    // runner. The grammars themselves are NOT linked in: `installGrammars`
+    // compiles each to a standalone `parser.so` that zoe `dlopen`s at
+    // runtime from the grammar search path (see zoe/syntax.zig).
+    const tree_sitter_dep = b.dependency("tree_sitter", .{ .target = target, .optimize = optimize });
+    zoe_support_mod.addImport("tree_sitter", tree_sitter_dep.module("tree_sitter"));
+
+    const grammars_install_dir = "share/glyphwire/grammars";
+    installGrammars(b, target, optimize, grammars_install_dir);
 
     const tests_exe = b.addExecutable(.{
         .name = "tests",
@@ -323,10 +339,22 @@ pub fn build(b: *std.Build) void {
     });
     zoe_exe.root_module.addImport("glyphwire", glyphwire_mod);
     zoe_exe.root_module.addImport("zoe_support", zoe_support_mod);
+    // zoe_support -> langconf.zig -> ziglua, and -> syntax.zig ->
+    // tree_sitter (which links the vendored libtree-sitter C runtime).
+    // Both need libc and the Lua C lib on the final binary, same as
+    // gw-shell / gw-ls do for their own configs.
+    zoe_exe.root_module.linkLibrary(lua_lib);
+    zoe_exe.root_module.link_libc = true;
     b.installArtifact(zoe_exe);
 
     const run_zoe = b.addRunArtifact(zoe_exe);
     run_zoe.step.dependOn(b.getInstallStep());
+    // Point zoe at the grammars this build just installed, the way
+    // `run_host` points the host at the installed asset dir.
+    run_zoe.setEnvironmentVariable(
+        "GLYPHWIRE_ZOE_GRAMMAR_DIR",
+        b.getInstallPath(.{ .custom = "share/glyphwire" }, "grammars"),
+    );
     if (b.args) |args| run_zoe.addArgs(args);
 
     const zoe_step = b.step("zoe", "Run the zoe editor (headless core driver for now -- see docs/investigations/zoe-editor.md)");
@@ -386,4 +414,70 @@ pub fn build(b: *std.Build) void {
         install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     install_local_step.dependOn(&installed_assets_step.step);
+}
+
+/// One bundled tree-sitter grammar: the lazy-dependency name holding its
+/// generated parser, an optional in-repo subdirectory (the Markdown repo
+/// nests two grammars), whether it ships an external `scanner.c`, and the
+/// grammar-search-path directory name zoe loads it as.
+const BundledGrammar = struct {
+    name: []const u8,
+    dep: []const u8,
+    subdir: []const u8 = "",
+    scanner: bool = false,
+};
+
+const bundled_grammars = [_]BundledGrammar{
+    .{ .name = "zig", .dep = "grammar_zig" },
+    .{ .name = "json", .dep = "grammar_json" },
+    .{ .name = "c", .dep = "grammar_c" },
+    .{ .name = "python", .dep = "grammar_python", .scanner = true },
+    .{ .name = "toml", .dep = "grammar_toml", .scanner = true },
+    // Only the block grammar -- the inline one needs an injection query
+    // zoe doesn't run yet (see zoe/syntax.zig's v1 notes).
+    .{ .name = "markdown", .dep = "grammar_markdown", .subdir = "tree-sitter-markdown/", .scanner = true },
+};
+
+/// Compiles each bundled grammar to `<install_dir>/<name>/parser.so` and
+/// copies its `highlights.scm` alongside, wired onto the default install
+/// step. The grammar deps are lazy, so a plain `zig build` only fetches
+/// them because this runs; nothing links them into a Zig binary.
+fn installGrammars(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    install_dir: []const u8,
+) void {
+    for (bundled_grammars) |g| {
+        const dep = b.lazyDependency(g.dep, .{}) orelse continue;
+
+        const lib = b.addLibrary(.{
+            .name = b.fmt("tree-sitter-{s}", .{g.name}),
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        lib.root_module.addCSourceFile(.{
+            .file = dep.path(b.fmt("{s}src/parser.c", .{g.subdir})),
+            .flags = &.{"-std=c11"},
+        });
+        if (g.scanner) lib.root_module.addCSourceFile(.{
+            .file = dep.path(b.fmt("{s}src/scanner.c", .{g.subdir})),
+            .flags = &.{"-std=c11"},
+        });
+        lib.root_module.addIncludePath(dep.path(b.fmt("{s}src", .{g.subdir})));
+
+        const dest: std.Build.InstallDir = .{ .custom = b.fmt("{s}/{s}", .{ install_dir, g.name }) };
+        const inst_lib = b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = dest } });
+        const inst_scm = b.addInstallFileWithDir(
+            dep.path(b.fmt("{s}queries/highlights.scm", .{g.subdir})),
+            dest,
+            "highlights.scm",
+        );
+        b.getInstallStep().dependOn(&inst_lib.step);
+        b.getInstallStep().dependOn(&inst_scm.step);
+    }
 }

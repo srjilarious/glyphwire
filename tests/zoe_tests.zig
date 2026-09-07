@@ -694,3 +694,84 @@ pub fn sliceColsCountsDisplayWidthTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 0, 3), "\u{65e5}");
     try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 2, 2), "\u{672c}");
 }
+
+// ─── Syntax highlighting (tree-sitter) ──────────────────────────────────
+
+const syntax = zoe.syntax;
+
+pub fn themeColorForWalksDottedPrefixesTest(_: std.Io, _: std.mem.Allocator) !void {
+    var theme = syntax.Theme.initDefault();
+    // An exact group has a colour.
+    try testz.expectTrue(theme.colorFor("keyword") != null);
+    // A dotted name with no mapping of its own falls back to the nearest
+    // prefix that has one: `keyword.function` -> `keyword`.
+    try testz.expectEqual(theme.colorFor("keyword.function.macro").?.r, theme.colorFor("keyword").?.r);
+    // The walk stops at the *first* known prefix, so a name whose prefix
+    // is itself mapped resolves to that, not further up.
+    try testz.expectEqual(theme.colorFor("string.special.key").?.r, theme.colorFor("string.special").?.r);
+    // `@none` and unknown groups get nothing.
+    try testz.expectTrue(theme.colorFor("none") == null);
+    try testz.expectTrue(theme.colorFor("nonsense.group") == null);
+    // An override by name takes effect for that group and its fallbacks.
+    try testz.expectTrue(theme.setByName("keyword", .{ .r = 1, .g = 2, .b = 3 }));
+    try testz.expectEqual(theme.colorFor("keyword.function").?.g, 2);
+}
+
+const grammar_test_dir = "zig-out/share/glyphwire/grammars";
+
+/// The grammar `.so`s only exist after `zig build` has run the install
+/// step; when they don't, the two tests below no-op rather than fail (a
+/// bare `zig test` on this file has nothing to load).
+fn grammarsInstalled(io: std.Io) bool {
+    std.Io.Dir.cwd().access(io, grammar_test_dir ++ "/json/libtree-sitter-json.so", .{}) catch return false;
+    return true;
+}
+
+pub fn syntaxRegistryLoadsBundledGrammarTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+
+    try testz.expectEqualStr(reg.nameForPath("pkg/data.json").?, "json");
+    try testz.expectTrue(reg.nameForPath("notes.txt") == null);
+
+    const g = reg.get("json") orelse return error.GrammarMissing;
+    try testz.expectTrue(g.language.abiVersion() >= syntax.min_abi_version);
+}
+
+pub fn syntaxHighlightsJsonSpansTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const g = reg.get("json") orelse return error.GrammarMissing;
+
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer hl.deinit();
+    try hl.setLanguage("json", g);
+
+    const src = "{\"a\": 12}";
+    var buf = try Buffer.initFromText(alloc, src);
+    defer buf.deinit();
+    try hl.reparse(&buf);
+    try testz.expectTrue(hl.ready());
+
+    var spans: std.ArrayList(syntax.Span) = .empty;
+    defer spans.deinit(alloc);
+    try hl.lineSpans(0, src.len, &spans);
+
+    // The string key and the number are both captured; every span must
+    // sit inside the line and be non-empty.
+    try testz.expectTrue(spans.items.len >= 2);
+    for (spans.items) |sp| {
+        try testz.expectTrue(sp.start < sp.end);
+        try testz.expectTrue(sp.end <= src.len);
+    }
+    // `12` is at bytes 6..8 -- some span must cover it.
+    var covers_number = false;
+    for (spans.items) |sp| {
+        if (sp.start <= 6 and sp.end >= 7) covers_number = true;
+    }
+    try testz.expectTrue(covers_number);
+}
