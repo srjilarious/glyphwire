@@ -268,6 +268,7 @@ pub const Ui = struct {
             if (ev.layer == self.tree_layer) self.tree_scroll = .{ .row = ev.row, .col = ev.col };
         }
         while (self.listener.pollMouseButtonEvent()) |ev| {
+            defer ev.deinit(self.alloc);
             if (ev.pressed) try self.handleClick(ev);
         }
         while (self.listener.pollInputEvent()) |ev| {

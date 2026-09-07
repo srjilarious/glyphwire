@@ -1733,6 +1733,14 @@ pub const MouseButtonEvent = struct {
     /// `Client.getMetadata`'s `view_offset` so a click made while the host
     /// is scrolled back resolves to the row actually under the pointer.
     view_offset: usize = 0,
+
+    /// Frees the owned `.button` string, like `InputEvent.deinit`. Every
+    /// drained event owns its own copy (the listener dupes it per
+    /// notification), so a consumer that pops without freeing leaks one
+    /// string per press *and* release.
+    pub fn deinit(self: MouseButtonEvent, alloc: std.mem.Allocator) void {
+        alloc.free(self.button);
+    }
 };
 /// One `mouse_move` notification: the pointer's new pixel + cell
 /// position. No owned memory -- handed back by value like `ResizeEvent`.
@@ -2010,7 +2018,8 @@ pub const InputListener = struct {
 
     /// Pops the oldest queued mouse button event, if any -- see
     /// `pollKeyEvent`, the same non-blocking-drain shape. Caller must free
-    /// `.button` with the same allocator passed to `connect`.
+    /// the event with `MouseButtonEvent.deinit` (or free `.button`
+    /// directly) using the same allocator passed to `connect`.
     pub fn pollMouseButtonEvent(self: *InputListener) ?MouseButtonEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
