@@ -22,6 +22,10 @@ config = {
     -- turn it off.
     injections = true,
 
+    -- Lines a PageDown / PageUp (or Ctrl-D / Ctrl-U) moves the cursor.
+    -- Default 10.
+    page_lines = 10,
+
     -- Where to look for grammar directories, highest priority first.
     -- These are prepended to the default search path
     -- ($GLYPHWIRE_ZOE_GRAMMAR_DIR, ~/.config/glyphwire/zoe/grammars,

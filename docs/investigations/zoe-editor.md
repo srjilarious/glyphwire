@@ -117,11 +117,11 @@ see it.
 
 | | Keys |
 |---|---|
-| Motions | `h` `j` `k` `l`, `w` `W` `b` `B` `e` `E`, `0` `^` `$`, `gg` `G`, arrows / Home / End |
+| Motions | `h` `j` `k` `l`, `w` `W` `b` `B` `e` `E`, `0` `^` `$`, `gg` `G`, arrows / Home / End, PageUp / PageDown / Ctrl-D / Ctrl-U (by `page_lines`, default 10, `zoe.conf`-settable) |
 | Counts | `3j`, `10l`, `3G`, `2gg`, and `2d3w` (the counts multiply, as in vim) |
 | Insert | `i` `a` `I` `A` `o` `O`, Escape, Backspace, Enter, Delete |
 | Edits | `x` `X` `D` `C` `s`, `dd`, `d{w,b,e,h,l,0,^,$}`, `dj` `dk` `dG` `dgg` |
-| Command line | `:w [file]`, `:q`, `:q!`, `:wq` / `:x`, `:<number>` |
+| Command line | `:w [file]`, `:q`, `:q!`, `:wq` / `:x`, `:e[!] [file]`, `:cd [dir]` / `:pwd`, `:<number>`, `:$` / `:.` / `:+N` / `:-N`, and `:{count}{motion}` (`:23k`) |
 
 Two vim behaviours worth calling out because they are the ones people
 notice when they're missing, and both are covered by tests: the sticky
@@ -191,12 +191,17 @@ answers:
 - **Redraw granularity.** The naive version redrew the visible pane every
   keystroke inside one `batch` (one atomic frame, per the batching
   decision), which is `rows` `write_text` pairs down the socket per tick
-  and felt heavy. First cut landed: `planBufferRender` shifts the rows the
-  layer already holds with one `move_content` on a pure sub-screen scroll
-  and repaints only the exposed band; an edit, a horizontal scroll or a
-  screen-plus jump still repaints in full. A true per-line diff (repaint
-  only the lines whose content changed on an edit) is the next step and
-  wants the per-line dirty tracking below.
+  and felt heavy. Landed in three passes: (1) `planBufferRender` shifts
+  the rows the layer already holds with one `move_content` on a pure
+  sub-screen scroll and repaints only the exposed band; (2) `render`
+  gates each pane on its own dirty flag (`buffer_dirty` / `tree_dirty` /
+  `status_dirty`), so a `:` line keystroke redraws just the status row --
+  no per-row syntax pass over the buffer, no `draw_icon` per tree entry
+  (the reported command-line lag); (3) a pure cursor move (bare `hjkl`, a
+  word motion, an on-screen `:23k`) with no edit and no scroll repaints
+  only the two rows the caret left and landed on (`repaintCaretRows`). A
+  true per-line diff on an *edit* is still the remaining step and wants
+  the per-line dirty tracking below.
 - **`Buffer.dirty` vs. per-line dirty.** The core tracks one modified
   flag plus a monotonic `Buffer.edits` counter today (the counter is what
   `planBufferRender` diffs to tell an edit from a pure scroll). A renderer

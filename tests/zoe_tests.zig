@@ -407,6 +407,61 @@ pub fn editorStickyColumnSurvivesAShortLineTest(_: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(ed.pos().col, 4); // and back out again
 }
 
+/// `"l0\nl1\n...\nl<n-1>"` -- a buffer tall enough to page through.
+fn numberedLines(alloc: std.mem.Allocator, n: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (i > 0) try out.append(alloc, '\n');
+        try out.print(alloc, "l{d}", .{i});
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+pub fn editorPageDownAndUpMoveByPageLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const text = try numberedLines(alloc, 40);
+    defer alloc.free(text);
+    var ed = try Editor.initFromText(alloc, text, null);
+    defer ed.deinit();
+    // Default page is 10 lines.
+    _ = try keys.feed(&ed, "<page_down>");
+    try testz.expectEqual(ed.pos().line, 10);
+    _ = try keys.feed(&ed, "<page_down>");
+    try testz.expectEqual(ed.pos().line, 20);
+    _ = try keys.feed(&ed, "<page_up>");
+    try testz.expectEqual(ed.pos().line, 10);
+    // Clamped at the ends, never wrapping.
+    _ = try keys.feed(&ed, "<page_up>");
+    _ = try keys.feed(&ed, "<page_up>");
+    try testz.expectEqual(ed.pos().line, 0);
+}
+
+pub fn editorPageLinesIsConfigurableTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const text = try numberedLines(alloc, 40);
+    defer alloc.free(text);
+    var ed = try Editor.initFromText(alloc, text, null);
+    defer ed.deinit();
+    ed.page_lines = 15; // what `zoe.conf`'s `page_lines` would set
+    _ = try keys.feed(&ed, "<page_down>");
+    try testz.expectEqual(ed.pos().line, 15);
+}
+
+pub fn editorCtrlDAndCtrlUPageInNormalModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const text = try numberedLines(alloc, 40);
+    defer alloc.free(text);
+    var ed = try Editor.initFromText(alloc, text, null);
+    defer ed.deinit();
+    // Ctrl carries no character, so these arrive as named keys.
+    _ = try ed.feedKey("d", .{ .ctrl = true });
+    try testz.expectEqual(ed.pos().line, 10);
+    _ = try ed.feedKey("u", .{ .ctrl = true });
+    try testz.expectEqual(ed.pos().line, 0);
+    // Plain `d` (via the text stream) is still the delete operator.
+    _ = try keys.feed(&ed, "d");
+    try testz.expectEqual(ed.operator.?, 'd');
+}
+
 // ─── Editor: edits ──────────────────────────────────────────────────────
 
 pub fn editorDeleteCharTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -533,6 +588,63 @@ pub fn commandLineGotoLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
     defer ed.deinit();
     _ = try keys.feed(&ed, ":3<cr>");
     try testz.expectEqual(ed.pos().line, 2);
+}
+
+pub fn commandLineDollarAndDotAddressesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree\nfour\nfive", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, ":$<cr>");
+    try testz.expectEqual(ed.pos().line, 4);
+    _ = try keys.feed(&ed, ":2<cr>");
+    _ = try keys.feed(&ed, ":.<cr>");
+    try testz.expectEqual(ed.pos().line, 1);
+}
+
+pub fn commandLineRelativeAddressesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const text = try numberedLines(alloc, 20);
+    defer alloc.free(text);
+    var ed = try Editor.initFromText(alloc, text, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, ":10<cr>"); // line 10 == index 9
+    _ = try keys.feed(&ed, ":+5<cr>");
+    try testz.expectEqual(ed.pos().line, 14);
+    _ = try keys.feed(&ed, ":-3<cr>");
+    try testz.expectEqual(ed.pos().line, 11);
+    _ = try keys.feed(&ed, ":-<cr>"); // bare `-` is one line
+    try testz.expectEqual(ed.pos().line, 10);
+}
+
+pub fn commandLineCountedMotionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const text = try numberedLines(alloc, 40);
+    defer alloc.free(text);
+    var ed = try Editor.initFromText(alloc, text, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, ":25<cr>"); // line index 24
+    _ = try keys.feed(&ed, ":23k<cr>");
+    try testz.expectEqual(ed.pos().line, 1);
+    _ = try keys.feed(&ed, ":10j<cr>");
+    try testz.expectEqual(ed.pos().line, 11);
+}
+
+pub fn commandLineChdirAndPwdReturnOutcomesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    switch (try keys.feed(&ed, ":cd /tmp<cr>")) {
+        .chdir => |dir| try testz.expectEqualStr(dir.?, "/tmp"),
+        else => try testz.fail(),
+    }
+    switch (try keys.feed(&ed, ":cd<cr>")) {
+        .chdir => |dir| try testz.expectTrue(dir == null),
+        else => try testz.fail(),
+    }
+    switch (try keys.feed(&ed, ":cd -<cr>")) {
+        .chdir => |dir| try testz.expectEqualStr(dir.?, "-"),
+        else => try testz.fail(),
+    }
+    switch (try keys.feed(&ed, ":pwd<cr>")) {
+        .pwd => {},
+        else => try testz.fail(),
+    }
 }
 
 pub fn commandLineUnknownCommandReportsE492Test(_: std.Io, alloc: std.mem.Allocator) !void {
