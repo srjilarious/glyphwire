@@ -261,6 +261,91 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqualStr("z", snapshot.cellAt(2, text_col + 2).grapheme); // "e" was backspaced away, "z" took its place
 }
 
+/// Drives the real glyphwire-shell binary with a `shell.conf` that
+/// configures a powerline `left_segments` prompt, and checks the
+/// segment's text lands *on* its coloured background strip -- the
+/// regression `emitOps` had where `writeSpaces` left the cursor at the
+/// end of the strip so the text was written one strip-width to the
+/// right, over blank default-background cells.
+pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pl-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread3.join();
+
+    // A throwaway config dir with a powerline shell.conf. One segment,
+    // literal text "AB" (no `{cwd}` etc.), a distinctive blue bg.
+    const cfg_dir = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pl-e2e-cfg-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(cfg_dir);
+    try std.Io.Dir.cwd().createDirPath(io, cfg_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, cfg_dir) catch {};
+    const conf_path = try std.fs.path.join(alloc, &.{ cfg_dir, "shell.conf" });
+    defer alloc.free(conf_path);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = conf_path,
+        .data = "prompt { left_segments = { { \"AB\", fg = \"#ffffff\", bg = \"#1e88e5\" } }, lines = 1, input = \"> \" }\n",
+    });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try shell_env.put("GLYPHWIRE_NO_HISTORY", "1");
+    try shell_env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
+
+    var shell_child = try std.process.spawn(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    // Segment strip is cols [0,2) on row 0; the input "> " follows it.
+    try waitForCell(&reporter, 0, 0, "A");
+    try waitForCell(&reporter, 0, 1, "B");
+
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+
+    // The text sits on the segment's blue background, not on blank cells.
+    const a = snapshot.cellAt(0, 0);
+    try testz.expectEqualStr("A", a.grapheme);
+    try testz.expectTrue(a.bg != null);
+    try testz.expectEqual(a.bg.?.r, 30);
+    try testz.expectEqual(a.bg.?.g, 136);
+    try testz.expectEqual(a.bg.?.b, 229);
+
+    const b = snapshot.cellAt(0, 1);
+    try testz.expectEqualStr("B", b.grapheme);
+    try testz.expectTrue(b.bg != null);
+    try testz.expectEqual(b.bg.?.b, 229);
+
+    // And the input prompt follows the segment, not buried under shifted text.
+    try testz.expectEqualStr(">", snapshot.cellAt(0, 2).grapheme);
+}
+
 /// Drives the real glyphwire-shell binary through a filename Tab
 /// completion: types `ls sr` at the prompt and presses Tab, expecting the
 /// only `sr*` entry in the shell's cwd (`src/`, this repo's source dir --
