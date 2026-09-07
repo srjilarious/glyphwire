@@ -103,10 +103,9 @@ pub const Ui = struct {
     /// pushed to the buffer layer for its host-drawn scrollbar. Re-pushed
     /// only when one of them changes -- see `syncBufferScrollbar`.
     pushed_bar: [4]usize = .{ std.math.maxInt(usize), 0, 0, 0 },
-    /// Session cell size in px, for natural-sizing tree icons to the row
-    /// height. Read once at startup; a runtime font-zoom isn't announced
-    /// to clients, so it can lag until the next launch.
-    cell_px_w: u32 = 0,
+    /// Session cell height in px, for natural-sizing tree icons to the
+    /// row height. Read once at startup; a runtime font-zoom isn't
+    /// announced to clients, so it can lag until the next launch.
     cell_px_h: u32 = 0,
     /// The tree pane's scroll offset, mirrored from `scroll_offset`
     /// notifications so a click can be resolved to the right entry.
@@ -171,7 +170,6 @@ pub const Ui = struct {
             .status_layer = status_layer,
             .pane_split = pane_split,
             .root_split = root_split,
-            .cell_px_w = metrics.w,
             .cell_px_h = metrics.h,
         };
         errdefer self.tree.deinit();
@@ -764,12 +762,14 @@ pub const Ui = struct {
 
                 // The icon composites *over* the row's background rather
                 // than replacing it, so a selected row stays highlighted
-                // underneath it. Drawn at its natural size, only shrunk to
-                // fit one cell -- `"fit"` scales a 32px source down to the
-                // ~8px a cell is wide, which is unreadable; capping a
-                // natural draw to the cell box keeps it crisp. Falls back
-                // to `"fit"` if the cell metrics somehow didn't load.
-                const natural = self.cell_px_w > 0 and self.cell_px_h > 0;
+                // underneath it. Sized exactly like `glyphwire-ls`'s
+                // small-table icons: natural, capped in *height* to one
+                // row and free to overflow its column in width (a plain
+                // `"fit"` shrinks a 32px source to the ~8px a cell is wide
+                // and is unreadable). Only `max_h` -- adding `max_w` would
+                // shrink it back to the narrow cell width. Falls back to
+                // `"fit"` if the cell metrics somehow didn't load.
+                const natural = self.cell_px_h > 0;
                 try batch.notify("draw_icon", .{
                     .layer = self.tree_layer,
                     .row = r,
@@ -778,7 +778,6 @@ pub const Ui = struct {
                     .scale = if (natural) "natural" else "fit",
                     .h_align = "start",
                     .v_align = "center",
-                    .max_w = if (natural) self.cell_px_w else null,
                     .max_h = if (natural) self.cell_px_h else null,
                     .foreground = true,
                 });
