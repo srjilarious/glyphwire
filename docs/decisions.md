@@ -2197,6 +2197,71 @@ surface.
   Pausing the blink on focus loss (hold it solid, stop waking entirely)
   is a noted future refinement, not v1.
 
+### Profiler
+- **The profiler is a first-class runtime toggle, not a build flag.**
+  `host.conf`'s `profile` enables a small frame-timing subsystem
+  (`src/profiler.zig`, generic over a caller-supplied span/counter enum;
+  `host/profiler.zig` instantiates it for the host loop). Every
+  measurement call is written as an unconditional early-return guarded by
+  a runtime bool, so a normal build carries the calls but pays nothing
+  measurable — matching the redraw-on-demand goal of a near-zero idle
+  cost. Rejected a `-Dprofile` build option: profiling a slowdown you
+  can't reproduce on demand shouldn't need a dedicated binary, and the
+  HUD wants a live in-session toggle (Ctrl+Shift+P) regardless.
+- **Every number is a windowed average, not a lifetime one.** Stats
+  accumulate over `profile_window_ms` (default 1s) and republish at the
+  boundary, then the accumulators reset — the FPS-counter pattern
+  (`host_eng`'s own `FpsCounter`), generalised to per-phase avg/p95/max
+  and per-counter per-frame means. A first cut kept a fixed-size rolling
+  sample ring instead; its time span was frame-count-based and so
+  unintuitive (very long under redraw-on-demand idle, where samples
+  arrive at ~10Hz), and a slow startup frame dragged the average for
+  minutes. Set `profile_window_ms` equal to `profile_log_ms` to make
+  each logged line an average over exactly that interval.
+- **Three surfaces, one snapshot.** The same `core.ProfileSnapshot`
+  (plain data: per-phase `avg`/`p95`/`max` ms + per-frame counter means)
+  feeds an on-screen HUD, an optional periodic `std.log` table
+  (`profile_log_ms`), and the wire — `get_property "profile"`. Dropped a
+  lifetime running total per counter: over a whole session it only ever
+  grows and told you nothing the per-frame mean doesn't.
+  The wire path is a read-through: glyphwire-host writes the snapshot
+  onto `core.Session.profile` each iteration under the `ctx_mutex` the
+  dispatch handler already reads it under, so no new server hook or
+  callback (unlike `setWakeCallback`) — the session never interprets it.
+  This keeps `glyphwire-probe` able to sample a running host with no
+  window interaction.
+- **The phases are the redraw-on-demand pipeline.** `frame` (whole
+  iteration wall period), `wait` (the `SDL_WaitEvent` block), `update`,
+  `redraw_check` (`needsRedraw`), `sync_batches` (per-layer batch
+  rebuild), `draw`, `present` (`swapBuffers`, incl. any vsync block).
+  `wait` and `present` are the only two the app can't time itself, so
+  `host_eng`'s `gameLoopCore` measures them and calls back through two
+  `@hasDecl`-guarded optional `AppData` hooks — a non-profiling engine
+  consumer compiles them out entirely, and `host_eng` gains no config
+  surface. Counters (`layers_rebuilt`, `draw_calls`, `quads`) cover just
+  the batched compositing, which is what static batching is about;
+  immediate-mode caret/preedit/chrome draws are not counted.
+- **The HUD forces continuous redraw while shown.** It displays live
+  numbers, so `needsRedraw` returns true unconditionally and
+  `idleTimeoutMs` drops to ~100ms while the HUD is visible -- a
+  deliberate ~10Hz repaint that the profiler's own frame counters then
+  report. It is off by default and drawn after any `--screenshot`
+  capture so it never lands in a scripted screenshot.
+- **A separate "forced redraw" toggle restores the pre-optimisation
+  loop.** Ctrl+Shift+R (or `host.conf`'s `profile_force_redraw`) makes
+  `needsRedraw` always true *and* `idleTimeoutMs` return 0, so the loop
+  runs at the display's frame rate the way it did before
+  redraw-on-demand -- for measuring steady-state `draw` / `present` /
+  `sync_batches` cost and A/B-ing it against the idle path. Kept
+  distinct from the HUD toggle: the HUD's ~10Hz cap is deliberate,
+  forced redraw is uncapped. `skips_per_sec` reads 0 while it is on,
+  which is the confirmation alongside the HUD's `[FORCED REDRAW]` tag.
+- **glyphwire-shell reuses the same module, env-gated.**
+  `GLYPHWIRE_SHELL_PROFILE=<ms>` turns on a two-span profiler
+  (`prompt_render`, `right_chain`) that dumps a `std.log` table on that
+  cadence — no HUD, no wire surface, since the shell is a client. Aimed
+  at the "prompt redraw feels slow" work.
+
 ### Deferred: capability caching
 - Considered: a server-side cache (never client-side — the client must
   stay unaware caching exists at all) keyed by the connecting binary's

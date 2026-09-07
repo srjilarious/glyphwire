@@ -4493,6 +4493,63 @@ pub const ContextError = error{
     RootContextImmutable,
 };
 
+// ─── Profiler snapshot ─────────────────────────────────────────────────
+//
+// A plain-data view of glyphwire-host's frame-timing profiler (see
+// `src/profiler.zig`, `host/profiler.zig`). The host refreshes
+// `Session.profile` under `ctx_mutex` when profiling is enabled; the
+// wire `get_property "profile"` handler in `dispatch.zig` reads it back.
+// Core never interprets any of it -- it is a read-through only, kept here
+// (rather than in `protocol.zig`) so `Session` can hold one by value.
+// `name` fields always point at `@tagName` storage, so a snapshot stays
+// valid for the process lifetime with nothing to free.
+
+/// One timed phase's rolling stats, in milliseconds.
+pub const ProfilePhase = struct {
+    name: []const u8 = "",
+    avg_ms: f32 = 0,
+    p95_ms: f32 = 0,
+    max_ms: f32 = 0,
+};
+
+/// One accumulating counter: the mean of its per-frame total over the
+/// summary window (e.g. quads submitted per composited frame).
+pub const ProfileCount = struct {
+    name: []const u8 = "",
+    per_frame: f32 = 0,
+};
+
+/// Upper bound on `ProfileSnapshot.phases` / `.counters` -- the profiler
+/// `@compileError`s if a consumer declares more span / counter enum
+/// members than this.
+pub const profile_max_phases = 10;
+pub const profile_max_counters = 8;
+
+/// Everything `get_property "profile"` returns. `active` is false when
+/// the host was built or configured without profiling, in which case
+/// every other field is zero.
+pub const ProfileSnapshot = struct {
+    active: bool = false,
+    /// Frames the renderer actually drew per second, averaged over the
+    /// summary window; `skips_per_sec` counts iterations where
+    /// `needsRedraw` said nothing moved and `render` was skipped.
+    fps: f32 = 0,
+    skips_per_sec: f32 = 0,
+    phase_count: u8 = 0,
+    counter_count: u8 = 0,
+    phases: [profile_max_phases]ProfilePhase = .{ProfilePhase{}} ** profile_max_phases,
+    counters: [profile_max_counters]ProfileCount = .{ProfileCount{}} ** profile_max_counters,
+
+    /// The populated phase / counter slices -- what a serializer or a
+    /// formatter should walk (the arrays are fixed-size padding).
+    pub fn phaseSlice(self: *const ProfileSnapshot) []const ProfilePhase {
+        return self.phases[0..self.phase_count];
+    }
+    pub fn counterSlice(self: *const ProfileSnapshot) []const ProfileCount {
+        return self.counters[0..self.counter_count];
+    }
+};
+
 pub const Session = struct {
     alloc: std.mem.Allocator,
     /// Every context, keyed by handle. Key 0 is the root context, whose
@@ -4517,6 +4574,13 @@ pub const Session = struct {
     /// that happens between two polls is never missed.
     visible_handle: std.atomic.Value(ContextHandle) = .init(root_context_handle),
     visible_gen: std.atomic.Value(u64) = .init(0),
+
+    /// glyphwire-host's latest frame-timing profiler snapshot, refreshed
+    /// under `ctx_mutex` each iteration while profiling is on and returned
+    /// verbatim by `get_property "profile"`. `.active == false` (the
+    /// default) whenever the host isn't profiling; the session never reads
+    /// or acts on any field. See `src/profiler.zig`.
+    profile: ProfileSnapshot = .{},
 
     /// Wraps an already-created root context. The caller keeps ownership
     /// of `root`'s memory and stays responsible for `root.deinit()`;

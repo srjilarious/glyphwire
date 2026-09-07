@@ -171,6 +171,22 @@ pub fn loadConfig(
             std.log.warn("glyphwire-host: host.conf cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
     }
 
+    if (luaBoolField(lua, "profile")) |v| cfg.profile.enabled = v;
+    if (luaBoolField(lua, "profile_hud")) |v| cfg.profile.hud = v;
+    if (luaBoolField(lua, "profile_force_redraw")) |v| cfg.profile.force_redraw = v;
+    if (luaNumField(lua, "profile_window_ms")) |v| {
+        const c = config.clampProfileWindowMs(@as(f64, v));
+        if (c != @as(f64, v))
+            std.log.warn("glyphwire-host: host.conf profile_window_ms {d} out of range; clamped to {d}", .{ v, c });
+        cfg.profile.window_ms = c;
+    }
+    if (luaNumField(lua, "profile_log_ms")) |v| {
+        const c = config.clampProfileLogMs(@as(f64, v));
+        if (c != @as(f64, v) and v > 0)
+            std.log.warn("glyphwire-host: host.conf profile_log_ms {d} out of range; clamped to {d}", .{ v, c });
+        cfg.profile.log_interval_ms = c;
+    }
+
     if (luaUintField(lua, "grid_cols")) |v| {
         const c = config.clampGridCols(v);
         if (c != v)

@@ -67,6 +67,14 @@ pub const KeyInput = struct {
         self.reportModifier(2, "left_shift", kb.shift());
         self.reportModifier(3, "left_super", kb.super());
 
+        // Ctrl+Shift+P toggles the profiler HUD and Ctrl+Shift+R toggles
+        // forced every-frame redraw, but only when `host.conf` enabled
+        // profiling at all. Handled once here (not per-key in the loop)
+        // and swallowed below so the shell / grid never see them.
+        const profile_toggle = self.app.profiler.active() and kb.ctrl() and kb.shift();
+        if (profile_toggle and kb.pressed(.p)) _ = self.app.profiler.toggleHud();
+        if (profile_toggle and kb.pressed(.r)) _ = self.app.profiler.toggleForceRedraw();
+
         var any_pressed = false;
         const ctrl_held = kb.ctrl();
         const fields = @typeInfo(app_mod.Key).@"enum".fields;
@@ -79,6 +87,8 @@ pub const KeyInput = struct {
                 // swallow them here so the shell/grid never sees the
                 // keystroke.
                 .minus, .equal, .zero, .kp_subtract, .kp_add, .kp_0 => ctrl_held,
+                // Ctrl+Shift+P / Ctrl+Shift+R are profiler toggles (see above).
+                .p, .r => profile_toggle,
                 else => false,
             };
             // Selection / clipboard shortcuts (Ctrl+Shift+C/V/Space) and,

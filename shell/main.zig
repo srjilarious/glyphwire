@@ -365,6 +365,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     defer listener.deinit();
 
     var prompt: Prompt = .{ .client = &client, .environ_map = environ_map, .listener = listener };
+    prompt.profiler = shellProfilerFromEnv(io, environ_map);
     // The live environment `sh.setenv` mutates (alongside libc, for
     // children). Seeded from the *live* libc environ, not the
     // `std.process.Init` snapshot in `environ_map`: `main` prepends
@@ -430,6 +431,11 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     }
 
     while (true) {
+        // One profiler "tick" per loop iteration (per input event or idle
+        // timeout): rolls the counter windows and fires the periodic
+        // summary. Inert unless GLYPHWIRE_SHELL_PROFILE is set.
+        _ = prompt.profiler.frameBoundary();
+
         // Drains any pending mouse click before (possibly) blocking below
         // -- non-blocking, so this never delays key handling. A left
         // click resolves the same way Enter-while-browsing does
@@ -830,12 +836,38 @@ const Mark = struct {
 /// `wordRight`) needs to inspect characters, and `submitLine` echoes the
 /// full line to scrollback, neither of which is worth a round trip to
 /// read back over the wire.
+/// Timed phases of a prompt redraw (see `renderInputLine` /
+/// `drawRightChain`). `right_chain` nests inside `prompt_render` when the
+/// redraw refreshes the powerline right side.
+const ShellSpan = enum { prompt_render, right_chain };
+/// Per-tick counters for the prompt profiler.
+const ShellCounter = enum { batch_sends };
+const ShellProfiler = glyphwire.Profiler(ShellSpan, ShellCounter);
+
+/// Builds the prompt profiler from `GLYPHWIRE_SHELL_PROFILE` (periodic
+/// summary interval in ms; unset / 0 / non-numeric = profiling off).
+/// Output is a `std.log` table on that cadence -- there is no shell HUD
+/// and no wire surface. Handy against the "prompt feels slow" work: set
+/// `GLYPHWIRE_SHELL_PROFILE=2000` and watch `prompt_render` p95 / max.
+fn shellProfilerFromEnv(io: std.Io, environ_map: *const std.process.Environ.Map) ShellProfiler {
+    const raw = environ_map.get("GLYPHWIRE_SHELL_PROFILE") orelse return ShellProfiler.init(io, false, 0, 0);
+    const ms = std.fmt.parseFloat(f64, std.mem.trim(u8, raw, " \t\r\n")) catch 0;
+    if (ms <= 0) return ShellProfiler.init(io, false, 0, 0);
+    // The averaging window and the log cadence are the same value here:
+    // each dumped table is an average over exactly the last `ms`.
+    return ShellProfiler.init(io, true, ms, ms);
+}
+
 const Prompt = struct {
     client: *glyphwire.Client,
     /// The environment as it was at startup -- a read-only snapshot from
     /// `std.process.Init`. Everything that doesn't change over a session
     /// (`$USER`, `$HOME`, `$XDG_*`, hostname) reads from here.
     environ_map: *const std.process.Environ.Map,
+    /// Prompt-redraw profiler. Disabled by default (its `io` is only ever
+    /// touched on the enabled path); `runPrompt` replaces it with a real
+    /// one built from `GLYPHWIRE_SHELL_PROFILE` (see `shellProfilerFromEnv`).
+    profiler: ShellProfiler = .{ .io = undefined, .enabled = false },
     /// The shell's *live* environment: seeded from `environ_map`, then
     /// mutated by `sh.setenv` / `sh.unsetenv` from a script (which also
     /// push the change into libc so spawned children inherit it). The
@@ -1532,6 +1564,9 @@ const Prompt = struct {
     /// frame with the caret stranded out on the right where the chain is
     /// drawn -- the "cursor blip to the right" this used to cause.
     fn drawRightChain(self: *Prompt) !void {
+        const rt0: ?std.Io.Timestamp = if (self.profiler.enabled) self.profiler.nowTs() else null;
+        defer if (rt0) |s| self.profiler.record(.right_chain, self.profiler.elapsedNs(s));
+
         const p = self.promptCfg() orelse return;
         const segs = p.right_segments orelse return;
 
@@ -1568,6 +1603,7 @@ const Prompt = struct {
         try b.setCursor(caret_row, self.line_start_col + self.caretCol());
         var res = try b.send();
         res.deinit();
+        self.profiler.add(.batch_sends, 1);
     }
 
     /// The powerline prompt: `left_segments` from column 0, `right_segments`
@@ -1779,6 +1815,9 @@ const Prompt = struct {
     /// On a single-line powerline prompt it also redraws the pinned right
     /// chain so typing can't disturb it.
     fn renderInputLine(self: *Prompt) !void {
+        const pt0: ?std.Io.Timestamp = if (self.profiler.enabled) self.profiler.nowTs() else null;
+        defer if (pt0) |s| self.profiler.record(.prompt_render, self.profiler.elapsedNs(s));
+
         // Box repaint + caret placement go out as one `batch` frame, so
         // the host never renders an intermediate frame with the caret
         // parked at the box's left edge -- the brief caret "jump" seen on
@@ -1789,6 +1828,7 @@ const Prompt = struct {
         try self.appendInputLine(&b);
         var res = try b.send();
         res.deinit();
+        self.profiler.add(.batch_sends, 1);
 
         // The dynamic right chain is its own `batch` frame (ending with
         // its own caret restore); it only redraws when configured.

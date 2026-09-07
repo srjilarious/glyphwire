@@ -289,7 +289,7 @@ pub fn main(init: std.process.Init) !void {
         .path = font_cfg.face,
         .face_index = font_face_index,
         .size = font_cfg.size,
-    }, host_cfg.cursor);
+    }, host_cfg.cursor, host_cfg.profile);
 
     // The render loop only repaints on demand (`EngOptions.redrawOnDemand`)
     // and parks in `SDL_WaitEvent` when idle; this lets the server's
