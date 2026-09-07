@@ -21,6 +21,15 @@ pub const WindowSizing = struct {
     font_size: f32,
     initial_font_size: f32,
 
+    /// A grid size the framebuffer now implies but that hasn't been
+    /// committed yet -- held until the window has stopped changing size
+    /// for `geometry.resize_settle_ms`, so a drag-resize reflows the grid
+    /// (and broadcasts one `resize`) once at the end. Null when the live
+    /// framebuffer already matches the committed grid. `pending_elapsed_ms`
+    /// counts frame delta since the size last changed.
+    pending_grid: ?geometry.GridSize = null,
+    pending_elapsed_ms: f64 = 0,
+
     /// Font file/size passed to `App.init` -- what `applyFontSize` needs to
     /// repeat the startup `measureFontFileIndexed` at a new size.
     pub const FontRuntime = struct {
@@ -46,19 +55,49 @@ pub const WindowSizing = struct {
     /// column isn't lost under the bar or the padding. The initial window
     /// (see `main`) is opened that much wider than the grid for the same
     /// reason.
-    pub fn syncWindowSize(self: *WindowSizing, eng: *Engine) void {
+    ///
+    /// The new size is debounced: while the window is actively being
+    /// dragged the grid stays put (the render clips or letterboxes the
+    /// old grid into the new framebuffer), and the `reportResize` that
+    /// reflows every client fires once, `geometry.resize_settle_ms` after
+    /// the last size change. `App.idleTimeoutMs` returns a bounded wait
+    /// while `pending_grid` is set so the loop wakes to flush it even
+    /// after the OS event stream goes quiet.
+    pub fn syncWindowSize(self: *WindowSizing, eng: *Engine, delta_ms: f64) void {
         const fb = eng.window_state.framebuffer_size;
         if (geometry.cell_w <= 0 or geometry.cell_h <= 0) return;
         const cols: usize = @intCast(@max(@divTrunc(fb.x - 2 * geometry.content_pad_px - geometry.scrollbar_width_px, geometry.cell_w), geometry.min_grid_cols));
         const rows: usize = @intCast(@max(@divTrunc(fb.y, geometry.cell_h), geometry.min_grid_rows));
-        if (cols == geometry.grid_cols and rows == geometry.grid_rows) return;
 
-        self.app.server.reportResize(self.app.alloc, cols, rows) catch |err| {
-            std.log.err("glyphwire-host: reportResize({d}x{d}) failed: {t}", .{ cols, rows, err });
-            return;
-        };
-        geometry.grid_cols = cols;
-        geometry.grid_rows = rows;
+        const target: geometry.GridSize = .{ .cols = cols, .rows = rows };
+        const committed: geometry.GridSize = .{ .cols = geometry.grid_cols, .rows = geometry.grid_rows };
+        self.pending_elapsed_ms += delta_ms;
+
+        switch (geometry.resizeSettleStep(committed, target, self.pending_grid, self.pending_elapsed_ms)) {
+            .settled => self.pending_grid = null,
+            .wait => {},
+            .restart => {
+                self.pending_grid = target;
+                self.pending_elapsed_ms = 0;
+            },
+            .commit => {
+                self.pending_grid = null;
+                self.app.server.reportResize(self.app.alloc, cols, rows) catch |err| {
+                    std.log.err("glyphwire-host: reportResize({d}x{d}) failed: {t}", .{ cols, rows, err });
+                    return;
+                };
+                geometry.grid_cols = cols;
+                geometry.grid_rows = rows;
+            },
+        }
+    }
+
+    /// A bounded wait, in ms, while a resize is still settling -- null
+    /// otherwise. `App.idleTimeoutMs` folds this in so the frame loop
+    /// wakes to commit a settled resize even with no pending OS event.
+    pub fn settleTimeoutMs(self: *const WindowSizing) ?f64 {
+        if (self.pending_grid == null) return null;
+        return @max(4.0, @as(f64, @floatFromInt(geometry.resize_settle_ms)) - self.pending_elapsed_ms);
     }
 
     /// Ctrl+- / Ctrl++ step the font size by `font_size_step` (clamped to

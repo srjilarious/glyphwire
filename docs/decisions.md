@@ -364,6 +364,31 @@ surface.
   shrink" because the ring buffer already models exactly this
   non-destructive live-tail behavior — a shrink is just the viewport
   window narrowing over content that's still there.
+  - **The grid size is debounced (`geometry.resize_settle_ms`, 120ms).**
+    `syncWindowSize` used to call `reportResize` on every intermediate
+    pixel size while the window was being dragged, so every subscribed
+    client reflowed dozens of times per drag — visibly laggy for the
+    shell's prompt and worse for a TUI whose panes and buffer all redraw
+    on each `resize` / `layout`. Now a new size has to hold steady for
+    `resize_settle_ms` before it is committed; in between, `render` draws
+    the old grid clipped or letterboxed into the new framebuffer (the
+    engine already rebuilt the projection). `App.idleTimeoutMs` folds in
+    `WindowSizing.settleTimeoutMs` so the redraw-on-change loop wakes to
+    flush the settled size after the OS event stream goes quiet. The
+    decision (`geometry.resizeSettleStep`) is a pure function, covered by
+    `tests/host_tests.zig` without a window. Font-zoom's
+    `resizeWindowForCells` is unaffected: it targets the framebuffer for
+    the current grid, so `syncWindowSize` sees no change to debounce.
+  - **A divider drag previews, and commits once on release.** `Panes`
+    used to call `moveDivider` + `reportLayout` on every mouse-move frame,
+    so both panes either side (and, in zoe, the buffer inside one) redrew
+    continuously through the drag. Now the drag only moves a ghost band
+    (`Panes.preview`, drawn by `render.zig`); the real `moveDivider` and a
+    single `reportLayout` fire on button release. The ghost does not model
+    a pane hitting its minimum — the layout walk that decides that is not
+    run until release — so a drag past a limit over-travels the ghost and
+    the divider snaps back on release, an accepted trade for not
+    reflowing mid-drag.
 - **v1 built — scrollback view + scrollbar:** the root layer carries a
   display-only `view_scroll` (rows scrolled back into the cell-grid
   history; `viewRow` applies it at read time, writes are unaffected).

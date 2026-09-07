@@ -119,6 +119,25 @@ pub fn cursorShapeFromStrTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectTrue(config.cursorShapeFromStr("diamond") == null);
 }
 
+// ─── geometry.resizeSettleStep ──────────────────────────────────────
+
+pub fn resizeSettleDebouncesADragTest(_: std.Io, _: std.mem.Allocator) !void {
+    const committed: geometry.GridSize = .{ .cols = 100, .rows = 40 };
+    const a: geometry.GridSize = .{ .cols = 110, .rows = 40 };
+    const b: geometry.GridSize = .{ .cols = 120, .rows = 40 };
+
+    // First measurement of a new size with nothing pending: start timing.
+    try testz.expectEqual(geometry.resizeSettleStep(committed, a, null, 0), .restart);
+    // Same size, still inside the settle window: keep waiting.
+    try testz.expectEqual(geometry.resizeSettleStep(committed, a, a, 50), .wait);
+    // The drag moved on to a different size: restart the timer.
+    try testz.expectEqual(geometry.resizeSettleStep(committed, b, a, 90), .restart);
+    // b held past the settle window: commit it.
+    try testz.expectEqual(geometry.resizeSettleStep(committed, b, b, 130), .commit);
+    // Snapped back to the committed size mid-drag: drop the pending.
+    try testz.expectEqual(geometry.resizeSettleStep(committed, committed, b, 200), .settled);
+}
+
 // ─── key_repeat.KeyRepeatState ───────────────────────────────────────
 
 pub fn keyRepeatStartsAtDelayTest(_: std.Io, _: std.mem.Allocator) !void {
