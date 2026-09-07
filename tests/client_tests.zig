@@ -428,6 +428,55 @@ pub fn clientBatchNotificationFormAppliesWithoutReplyTest(io: std.Io, alloc: std
     try testz.expectEqualStr("t", ctx.root.cell(2, 1).grapheme());
 }
 
+/// `Batch.clear` wipes cells mid-batch, ordered with the surrounding
+/// sub-messages: a `clear` then a `write_text` over the same row in one
+/// batch leaves only the rewritten text. This is the primitive the
+/// shell's prompt redraw leans on -- clear stale prompt rows, then
+/// redraw over them, in one frame.
+pub fn clientBatchClearThenRedrawInOneBatchTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    // Seed two rows outside the batch.
+    try client.setCursor(0, 0);
+    try client.writeText("stale-left", null, null);
+    try client.setCursor(1, 0);
+    try client.writeText("keep-me", null, null);
+
+    {
+        var b = client.batch();
+        defer b.deinit();
+        // Wipe just row 0, then redraw a shorter string over it.
+        try b.clear(0, 0, 1, null);
+        try b.setCursor(0, 0);
+        try b.writeText("new", null, null);
+        var results = try b.send();
+        results.deinit();
+    }
+
+    // A round trip forces the server to have applied the notification-form
+    // batch before the assertions read `ctx.root` directly.
+    _ = try client.getCursor();
+
+    // Row 0: cleared then partly rewritten; the old tail is gone.
+    try testz.expectEqualStr(ctx.root.cell(0, 0).grapheme(), "n");
+    try testz.expectEqualStr(ctx.root.cell(0, 4).grapheme(), "");
+    // Row 1: untouched by a single-row clear.
+    try testz.expectEqualStr(ctx.root.cell(1, 0).grapheme(), "k");
+}
+
 /// `Client`'s selection and clipboard methods round-trip over a real
 /// socket: set a selection, read its text back, then set/get the
 /// clipboard.

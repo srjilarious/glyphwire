@@ -2140,6 +2140,34 @@ this is the implementation shape.
   injection queries (embedded languages), `locals.scm` scope resolution,
   a WASM grammar loader, a generic editor extension/plugin API.
 
+## Prompt prefix draws in one frame; resize wipes stale prompt rows
+
+- **The problem.** The shell's prompt prefix was drawn with a stream of
+  bare `set_property` / `write_text` / `draw_icon` messages, each its own
+  host frame, so a powerline prompt visibly assembled segment by segment.
+  Separately, a window *grow* widened the grid without wiping the
+  now-stale right chain, which the resize redraw re-placed further right —
+  leaving the old copy stranded mid-screen.
+- **`writePromptPrefix(sink: ?*Client.Batch)`** and its three writers
+  (`writeDefaultPrefix` / `writeTemplatedPrefix` / `writePowerlinePrefix`)
+  now append every draw to a batch: their own (opened and sent before
+  returning) when `sink` is null, or a caller-supplied one otherwise. One
+  `get_cursor` up front finds where the last command's output ended;
+  `cursorAfter` then computes the post-prefix cursor locally (wrapping at
+  `grid_cols`) since a `get_cursor` reply can't see the unsent batch.
+- **`Client.Batch.clear`** added (mirrors `Client.clear`) — the one new
+  bit of client-library surface.
+- **`handleResize`** opens a single batch: `clear(top, 0, prompt_lines,
+  null)` (full width, `prompt_lines` is config-derived so it still spans
+  the pre-resize prompt), then `writePromptPrefix(&b)`, then
+  `appendInputLine(&b)` (the batch-appending half split out of
+  `renderInputLine`), sent once. Only the prompt's own rows are cleared,
+  so reflowed command output above it is left alone.
+- **Tests.** `clientBatchClearWipesCellsInOneFrameTest` in
+  `tests/client_tests.zig` covers the new batched `clear`: a
+  clear-then-redraw batch wipes the region, leaves neighbouring rows
+  alone, and bumps the revision exactly once.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).
