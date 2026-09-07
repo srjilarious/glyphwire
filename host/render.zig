@@ -147,6 +147,10 @@ pub const DeferredIcon = struct {
 /// not as chrome hanging off the edge of the window.
 const divider_color = host_eng.Color.from(58, 58, 66, 255);
 
+/// The ghost band shown while a divider is being dragged, before the
+/// drag ends and the layout actually moves (see `panes.Panes`).
+const divider_preview_color = host_eng.Color.from(120, 120, 140, 255);
+
 /// A pane scrollbar's track and thumb. The track is nearly transparent --
 /// it sits over content rather than in a reserved gutter, so it should
 /// register as a hint until the thumb is grabbed.
@@ -1114,6 +1118,14 @@ pub const Renderer = struct {
             eng.renderer.drawFilledRect(
                 host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
                 divider_color,
+            );
+        }
+        // The drag ghost, over the top: the real dividers above are still
+        // at their pre-drag positions until the drag ends.
+        if (self.app.panes.preview) |p| {
+            eng.renderer.drawFilledRect(
+                host_eng.RectF{ .l = p.x, .t = p.y, .r = p.x + p.w, .b = p.y + p.h },
+                divider_preview_color,
             );
         }
     }

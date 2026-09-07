@@ -20,6 +20,43 @@ pub var grid_rows: usize = initial_grid_rows;
 pub const min_grid_cols = 16;
 pub const min_grid_rows = 4;
 
+// How long the window size must hold still before `syncWindowSize`
+// commits a new grid size (one `reportResize` + `resize` broadcast, and
+// the client reflow that follows). During a drag-resize the old grid is
+// drawn clipped/letterboxed into the new framebuffer instead, so a
+// TUI's panes and a shell's reflow don't churn on every intermediate
+// pixel size.
+pub const resize_settle_ms: i64 = 120;
+
+pub const GridSize = struct { cols: usize, rows: usize };
+
+/// What `WindowSizing.syncWindowSize` should do with a freshly measured
+/// grid size, given the committed size and the pending-resize state.
+/// Pure, so `tests/host_tests.zig` covers the debounce with no window.
+pub const ResizeSettleStep = enum {
+    /// The measured size matches the committed one -- drop any pending.
+    settled,
+    /// The size is still moving -- (re)start the settle timer.
+    restart,
+    /// A new size, holding steady but not long enough yet -- keep waiting.
+    wait,
+    /// Held steady past `resize_settle_ms` -- commit it now.
+    commit,
+};
+
+pub fn resizeSettleStep(
+    committed: GridSize,
+    target: GridSize,
+    pending: ?GridSize,
+    elapsed_ms: f64,
+) ResizeSettleStep {
+    if (target.cols == committed.cols and target.rows == committed.rows) return .settled;
+    const p = pending orelse return .restart;
+    if (p.cols != target.cols or p.rows != target.rows) return .restart;
+    if (elapsed_ms < @as(f64, @floatFromInt(resize_settle_ms))) return .wait;
+    return .commit;
+}
+
 // Blank margin, in pixels, kept on both sides of the composited layers:
 // one strip against the window's left border, and one between the grid's
 // right edge and the always-on scrollbar. Every layer's screen origin is

@@ -60,19 +60,26 @@ pub const Panes = struct {
 
     /// The divider currently being pulled.
     ///
-    /// `applied` is how many cells have already been sent to
-    /// `moveDivider`, so each frame sends only the difference. Tracking
-    /// the total against the grab point (rather than accumulating
-    /// per-frame deltas) is what keeps the divider under the pointer when
-    /// a drag is clamped at a pane's minimum and then pulled back.
+    /// `pending` is how many cells the pointer has travelled from the
+    /// grab point along the split's axis -- not yet applied. The layout
+    /// isn't touched until the drag ends: a single `moveDivider` +
+    /// `reportLayout` then, rather than one per frame, so a TUI pane and
+    /// the buffer inside it don't redraw on every mouse-move.
     drag: ?Drag = null,
+
+    /// While `drag` is set, the previewed band position in pixels --
+    /// `render.zig` draws a ghost divider here. Null otherwise.
+    preview: ?geometry.RectPx = null,
 
     pub const Drag = struct {
         split: glyphwire.SplitHandle,
         index: usize,
         axis: glyphwire.SplitAxis,
         grab_px: f32,
-        applied: i64 = 0,
+        /// The divider's pixel rect at grab time -- the ghost is this,
+        /// shifted by `pending` cells along the axis.
+        base: geometry.RectPx,
+        pending: i64 = 0,
     };
 
     pub fn deinit(self: *Panes) void {
@@ -127,34 +134,47 @@ pub const Panes = struct {
                 .index = hit.index,
                 .axis = hit.axis,
                 .grab_px = if (hit.axis == .row) pos.x else pos.y,
+                .base = geometry.cellRectPx(hit.rect),
             };
+            self.preview = geometry.cellRectPx(hit.rect);
             return true;
         }
 
         const drag = self.drag orelse return false;
-        if (!eng.inputs.mouse.down(.left)) {
-            self.drag = null;
-            return true;
-        }
 
         // Pointer travel since the grab, in cells along the split's axis.
         const cur: f32 = if (drag.axis == .row) pos.x else pos.y;
         const cell: f32 = @floatFromInt(if (drag.axis == .row) geometry.cell_w else geometry.cell_h);
         const travelled: i64 = @intFromFloat(@round((cur - drag.grab_px) / @max(cell, 1)));
-        const delta = travelled - drag.applied;
-        if (delta == 0) return true;
 
-        {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
-            server.ctx.moveDivider(drag.split, drag.index, delta) catch {};
+        if (!eng.inputs.mouse.down(.left)) {
+            // Drag ended: apply the whole move once, then re-lay-out once.
+            self.drag = null;
+            self.preview = null;
+            if (travelled != 0) {
+                {
+                    server.ctx_mutex.lockUncancelable(server.io);
+                    defer server.ctx_mutex.unlock(server.io);
+                    server.ctx.moveDivider(drag.split, drag.index, travelled) catch {};
+                }
+                server.reportLayout(self.app.alloc) catch |err| {
+                    std.log.err("glyphwire-host: reportLayout(divider) failed: {t}", .{err});
+                };
+            }
+            return true;
         }
-        self.drag.?.applied = travelled;
 
-        // The tree moved: tell every subscriber where their panes are now.
-        server.reportLayout(self.app.alloc) catch |err| {
-            std.log.err("glyphwire-host: reportLayout(divider) failed: {t}", .{err});
-        };
+        // Still dragging: just move the ghost. The layout is untouched
+        // until release, so nothing downstream redraws mid-drag.
+        self.drag.?.pending = travelled;
+        var ghost = drag.base;
+        const shift_px = @as(f32, @floatFromInt(travelled)) * cell;
+        if (drag.axis == .row) {
+            ghost.x += shift_px;
+        } else {
+            ghost.y += shift_px;
+        }
+        self.preview = ghost;
         return true;
     }
 };

@@ -48,6 +48,12 @@ const RedrawSig = struct {
     /// While a `--screenshot` capture is still pending every frame must
     /// draw, so the readback in `render` actually happens.
     screenshot_pending: bool,
+    /// The divider drag ghost's position, so it repaints as it's dragged
+    /// (the layout it previews doesn't move until the drag ends, so
+    /// nothing else in the sig changes mid-drag). All zero when idle.
+    divider_preview_x: f32,
+    divider_preview_y: f32,
+    divider_preview_on: bool,
 };
 
 pub const EngOptions: host_eng.EngineOptions = .{
@@ -229,7 +235,7 @@ pub const App = struct {
         if (self.screenshot.done) return false;
         if (self.screenshot.path != null) self.screenshot.elapsed_ms += deltaTimeMs;
 
-        self.window_sizing.syncWindowSize(eng);
+        self.window_sizing.syncWindowSize(eng, deltaTimeMs);
         // After syncWindowSize so a font change (which alters cell_w/cell_h
         // and then resizes the window) is only reconciled against the
         // framebuffer on the *next* frame, once both have settled.
@@ -343,6 +349,9 @@ pub const App = struct {
             .caret_shape = self.caret.shape,
             .preedit_hash = std.hash.Fnv1a_64.hash(self.preedit.text(eng)),
             .screenshot_pending = self.screenshot.path != null and !self.screenshot.done,
+            .divider_preview_x = if (self.panes.preview) |p| p.x else 0,
+            .divider_preview_y = if (self.panes.preview) |p| p.y else 0,
+            .divider_preview_on = self.panes.preview != null,
         };
     }
 
@@ -354,12 +363,22 @@ pub const App = struct {
     /// a configured caret blink still needs the loop back on its own
     /// clock, so those return a bounded wait in milliseconds.
     pub fn idleTimeoutMs(self: *App) ?f64 {
-        if (self.screenshot.path != null and !self.screenshot.done) return 16;
+        var wait: ?f64 = null;
+        if (self.screenshot.path != null and !self.screenshot.done) wait = 16;
         if (self.caret.blink) {
             const period = @max(self.caret.blink_ms, 1.0);
             const into = @mod(self.caret.blink_elapsed_ms, period);
-            return @max(4.0, period - into);
+            wait = softMin(wait, @max(4.0, period - into));
         }
-        return null;
+        // A resize still settling needs the loop back on its own clock to
+        // commit it once the OS event stream goes quiet.
+        wait = softMin(wait, self.window_sizing.settleTimeoutMs());
+        return wait;
+    }
+
+    fn softMin(a: ?f64, b: ?f64) ?f64 {
+        const x = a orelse return b;
+        const y = b orelse return a;
+        return @min(x, y);
     }
 };
