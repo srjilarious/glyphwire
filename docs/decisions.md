@@ -465,6 +465,26 @@ surface.
     untouched — it is the root layer's scrollback and keeps its gutter.
     Horizontal is real, not decorative: a tree with long filenames is
     exactly the case that motivated it.
+  - **`content_extent` gives a self-scrolling pane a real scrollbar.**
+    A pane whose real cell grid is only viewport-sized — a TUI editor's
+    buffer, which redraws its visible rows on every scroll because a full
+    grid for a large file would be hundreds of megabytes — has no slack
+    for the host to draw a bar from, and a wheel over it would fall
+    through to the shell's scrollback. `content_extent` (`{cols, rows}`,
+    `{0,0}` to clear) is the client telling the host how big the whole
+    content really is. The host then draws the bar proportionally and,
+    on a wheel or thumb drag, moves a *virtual* offset and broadcasts the
+    ordinary `scroll_offset` notification; the client obeys it and
+    redraws. No new notification and no new "scroll request" verb: the
+    host already broadcasts `scroll_offset` for its own wheel/scrollbar
+    over a host-scrolled pane, and a self-scrolling pane wants exactly the
+    same event with exactly the same meaning ("the view moved, redraw").
+    The real grid's `scroll_off` never moves — `content_off` is a
+    parallel field the scrollbar/`maxScroll`/`scroll_offset` maths select
+    when `content_extent` is set. Considered and rejected: a dedicated
+    `content_offset` property and a `scroll_request` notification — both
+    duplicate `scroll_offset` for no gain, and the client already knows
+    which of its panes is self-scrolling by handle.
   - **The split tree lives server-side.** `create_split` /
     `set_split_children` / `set_root_split` / `move_divider`: a client
     describes the arrangement once and the host computes every pane's

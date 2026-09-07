@@ -99,6 +99,10 @@ pub const Ui = struct {
     /// bounds change or its content is replaced wholesale, cases a row
     /// shift can't express.
     buffer_full_redraw: bool = true,
+    /// The `(content rows, content cols, scroll row, scroll col)` last
+    /// pushed to the buffer layer for its host-drawn scrollbar. Re-pushed
+    /// only when one of them changes -- see `syncBufferScrollbar`.
+    pushed_bar: [4]usize = .{ std.math.maxInt(usize), 0, 0, 0 },
     /// Session cell size in px, for natural-sizing tree icons to the row
     /// height. Read once at startup; a runtime font-zoom isn't announced
     /// to clients, so it can lag until the next launch.
@@ -143,8 +147,13 @@ pub const Ui = struct {
         const buffer_layer = try client.createLayer(size.cols, size.rows, 0);
         const status_layer = try client.createLayer(size.cols, 1, 0);
 
-        // Only the tree is host-scrolled, so only the tree gets bars.
+        // The tree is host-scrolled (both bars). The buffer scrolls
+        // itself, but a `content_extent` (pushed each frame from the line
+        // count -- see `syncBufferScrollbar`) lets the host draw a
+        // proportional vertical bar and turn a wheel or thumb drag over
+        // the pane into a `scroll_offset` zoe then follows.
         try client.setLayerScrollbars(tree_layer, true, true);
+        try client.setLayerScrollbars(buffer_layer, true, false);
 
         const pane_split = try client.createSplit(.row);
         const root_split = try client.createSplit(.column);
@@ -292,6 +301,12 @@ pub const Ui = struct {
         }
         while (self.listener.pollScrollOffsetEvent()) |ev| {
             if (ev.layer == self.tree_layer) self.tree_scroll = .{ .row = ev.row, .col = ev.col };
+            // A wheel or thumb drag over the buffer pane: the host moved
+            // the virtual offset and told us where. Follow it, and drag
+            // the cursor along so it stays on screen (like vim's Ctrl-E /
+            // Ctrl-Y). `pushed_bar` is updated so `syncBufferScrollbar`
+            // doesn't immediately echo this straight back.
+            if (ev.layer == self.buffer_layer) self.scrollBufferTo(ev.row, ev.col);
         }
         while (self.listener.pollMouseButtonEvent()) |ev| {
             defer ev.deinit(self.alloc);
@@ -557,6 +572,7 @@ pub const Ui = struct {
         const b = self.buffer_bounds;
         if (b.cols == 0 or b.rows == 0) return;
         self.scrollBufferToCursor();
+        try self.syncBufferScrollbar();
 
         const cursor = self.ed.pos();
         switch (planBufferRender(.{
@@ -658,6 +674,45 @@ pub const Ui = struct {
         const col = self.cursorDisplayCol() catch return;
         if (col < self.left_col) self.left_col = col;
         if (col >= self.left_col + b.cols) self.left_col = col - b.cols + 1;
+    }
+
+    /// Applies a host-driven scroll of the buffer pane (wheel or thumb
+    /// drag): moves the view and drags the cursor back onto it, keeping
+    /// its column. Records the new position as already pushed so the next
+    /// `syncBufferScrollbar` doesn't bounce it back to the host.
+    fn scrollBufferTo(self: *Ui, row: usize, col: usize) void {
+        const b = self.buffer_bounds;
+        if (b.rows == 0) return;
+        self.top_line = row;
+        self.left_col = col;
+
+        const cur = self.ed.pos();
+        const last = self.ed.buf.lineCount() -| 1;
+        const clamped_line = std.math.clamp(cur.line, row, @min(row + b.rows - 1, last));
+        if (clamped_line != cur.line) {
+            self.ed.cursor = self.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
+        }
+        self.pushed_bar = .{ self.ed.buf.lineCount(), b.cols, self.top_line, self.left_col };
+        self.dirty = true;
+    }
+
+    /// Keeps the buffer layer's host-drawn scrollbar in step with zoe's
+    /// own scroll state: the content extent is the line count (the width
+    /// is just the pane's, so no horizontal bar), and the offset is
+    /// `top_line`/`left_col`. Only sent when something changed, so a
+    /// still buffer is silent. A wheel or thumb drag over the pane comes
+    /// back the other way as a `scroll_offset` notification (see
+    /// `drainEvents`).
+    fn syncBufferScrollbar(self: *Ui) !void {
+        const b = self.buffer_bounds;
+        const now: [4]usize = .{ self.ed.buf.lineCount(), b.cols, self.top_line, self.left_col };
+        if (std.mem.eql(usize, &now, &self.pushed_bar)) return;
+
+        if (now[0] != self.pushed_bar[0] or now[1] != self.pushed_bar[1]) {
+            try self.client.setLayerContentExtent(self.buffer_layer, now[1], now[0]);
+        }
+        try self.client.setLayerScrollOffset(self.buffer_layer, self.top_line, self.left_col);
+        self.pushed_bar = now;
     }
 
     /// The caret's column in *display* cells, which is not its byte

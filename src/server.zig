@@ -613,7 +613,7 @@ pub const Server = struct {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             const layer = self.ctx.layerPtr(layer_handle) orelse return;
-            const before = layer.scroll_off;
+            const before = layer.effectiveScrollOffset();
             var after = before;
             if (offset) |o| after = layer.setScrollOffset(o);
             if (delta) |d| after = layer.scrollOffsetBy(d.row, d.col);

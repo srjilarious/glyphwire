@@ -1201,6 +1201,8 @@ pub const Dispatcher = struct {
                 .max_row = 0,
                 .max_col = 0,
             } }
+        else if (std.mem.eql(u8, p.property, "content_extent"))
+            .{ .content_extent = .{ .cols = p.cols, .rows = p.rows } }
         else
             return DispatchError.UnknownProperty;
 
@@ -1272,6 +1274,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "size")) {
             const sz = layer.getProperty(.size).size;
             return try rpc.response(alloc, id, SizeResult{ .cols = sz.cols, .rows = sz.rows });
+        } else if (std.mem.eql(u8, p.property, "content_extent")) {
+            const ce = layer.getProperty(.content_extent).content_extent;
+            return try rpc.response(alloc, id, SizeResult{ .cols = ce.cols, .rows = ce.rows });
         } else if (std.mem.eql(u8, p.property, "scroll")) {
             const sc = layer.getProperty(.scroll).scroll;
             return try rpc.response(alloc, id, ScrollResult{ .offset = sc.offset, .max = sc.max });

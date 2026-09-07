@@ -69,6 +69,45 @@ pub fn moveContentNotificationShiftsGridTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectError(d.handle(alloc, bad), dispatch.DispatchError.InvalidMoveDirection);
 }
 
+pub fn contentExtentAndVirtualOffsetRoundTripOverWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // A created (non-root) layer, viewport-sized, that scrolls itself.
+    const mk = try roundTripThroughWire(alloc,
+        \\{"method":"create_layer","id":1,"params":{"width":40,"height":10}}
+    );
+    defer alloc.free(mk);
+    const mk_body = (try d.handle(alloc, mk)).response.?;
+    defer alloc.free(mk_body);
+
+    const set_extent = try roundTripThroughWire(alloc,
+        \\{"method":"set_property","params":{"layer":1,"property":"content_extent","cols":40,"rows":500}}
+    );
+    defer alloc.free(set_extent);
+    try testz.expectTrue((try d.handle(alloc, set_extent)).response == null);
+
+    const set_off = try roundTripThroughWire(alloc,
+        \\{"method":"set_property","params":{"layer":1,"property":"scroll_offset","row":9999,"col":0}}
+    );
+    defer alloc.free(set_off);
+    try testz.expectTrue((try d.handle(alloc, set_off)).response == null);
+
+    const layer = ctx.layerPtr(1).?;
+    try testz.expectEqual(layer.content_off.row, 490); // 500 - 10, clamped
+    try testz.expectEqual(layer.scroll_off.row, 0); // real grid never moved
+
+    const get = try roundTripThroughWire(alloc,
+        \\{"method":"get_property","id":2,"params":{"layer":1,"property":"content_extent"}}
+    );
+    defer alloc.free(get);
+    const get_body = (try d.handle(alloc, get)).response.?;
+    defer alloc.free(get_body);
+    try testz.expectTrue(std.mem.indexOf(u8, get_body, "\"rows\":500") != null);
+}
+
 pub fn getPropertyRequestReturnsDecodedResponseTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
