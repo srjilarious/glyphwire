@@ -511,6 +511,10 @@ pub const Ui = struct {
                 if (self.focus == .buffer) try self.applyOutcome(try self.ed.feedText(t.text));
             },
             .copy_request => {},
+            // The host closing already ends zoe's run loop when the shell
+            // that spawned it exits; nothing persistent to flush here that
+            // isn't already the user's explicit `:w`.
+            .shutdown => {},
         }
 
         // Any keystroke can change the status row -- the mode word, the

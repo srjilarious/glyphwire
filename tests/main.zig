@@ -20,6 +20,8 @@ const Tests = blk: {
         testz.Group{ .name = "Shell Parse Tests", .tag = "shell-parse", .mod = @import("./shell_parse_tests.zig") },
         testz.Group{ .name = "Shell Config Tests", .tag = "shell-config", .mod = @import("./shell_config_tests.zig") },
         testz.Group{ .name = "Shell Script Engine Tests", .tag = "shell-script", .mod = @import("./shell_script_engine_tests.zig") },
+        testz.Group{ .name = "Shell Zjump Tests", .tag = "shell-zjump", .mod = @import("./shell_zjump_tests.zig") },
+        testz.Group{ .name = "Shell Flush Gate Tests", .tag = "shell-flushgate", .mod = @import("./shell_flushgate_tests.zig") },
         testz.Group{ .name = "Prompt Template Tests", .tag = "prompt", .mod = @import("./prompt_template_tests.zig") },
         testz.Group{ .name = "Ls Tests", .tag = "ls", .mod = @import("./ls_tests.zig") },
         testz.Group{ .name = "Open Action Tests", .tag = "openaction", .mod = @import("./openaction_tests.zig") },

@@ -9,6 +9,8 @@ const hs = @import("shell_support").handshake;
 const config = @import("shell_support").config;
 const script_engine = @import("shell_support").script_engine;
 const history = @import("shell_support").history;
+const zjump = @import("shell_support").zjump;
+const flushgate = @import("shell_support").flushgate;
 const keyencode = @import("shell_support").keyencode;
 const lineedit = @import("shell_support").lineedit;
 const prompt_template = @import("shell_support").prompt_template;
@@ -358,7 +360,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     // pty foreground loop (`runCommand`) when a child turns on motion
     // reporting; the prompt loop lets `InputListener`'s own cap drop the
     // backlog.
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "clipboard", "terminal" }) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "shutdown", "clipboard", "terminal" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -410,7 +412,12 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         };
         try prompt.loadStartupConfig(config_dir);
         try prompt.loadHistory(config_dir);
+        try prompt.loadZjump(config_dir);
     } else |_| {}
+
+    // Seed the flush clock so the age-based trigger measures from now,
+    // not from the epoch.
+    prompt.persist_gate.reset(std.Io.Timestamp.now(io, .awake).toMilliseconds());
 
     try prompt.showPrompt();
 
@@ -503,6 +510,9 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // refresh entirely while a resize is still in flight so it
             // isn't drawn at an intermediate size.
             drainResizes(listener, &prompt);
+            // An idle moment is a good time to flush persistent state if
+            // the age trigger has come due.
+            prompt.maybeFlushPersistentState();
             if (prompt.pending_resize == null and prompt.browse_pos == null) {
                 const drew_hint = prompt.maybeShowCompletionHint() catch false;
                 if (drew_hint) continue;
@@ -584,6 +594,14 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
                     };
                 }
                 continue;
+            },
+            .shutdown => {
+                // The host window is closing. Flush persistent state and
+                // end the loop the same way a typed `exit` does --
+                // `defer prompt.deinit()` (which also flushes) then runs.
+                prompt.flushPersistentState(.force);
+                prompt.should_exit = true;
+                return;
             },
             .key => |kev| kev,
         };
@@ -766,7 +784,7 @@ const CompletionCandidate = struct { name: []const u8, is_dir: bool };
 /// precedence comment there). Offered by Tab completion in command
 /// position alongside aliases and script builtins. `alias` is handled a
 /// step earlier than the rest but is still a name worth completing.
-const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "unalias" };
+const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "unalias", "zj" };
 
 /// Alias store backing the prompt's `alias`/`unalias` builtins. Seeded at
 /// startup from `~/.config/glyphwire/shell.conf`'s `alias(name, value)`
@@ -965,6 +983,39 @@ const Prompt = struct {
     /// then. Owned; freed in `deinit`.
     history_path: ?[]const u8 = null,
 
+    /// Directory-jump database behind the `zj` builtin (`z` / zoxide
+    /// style) -- every `cd` records the new directory here, `zj QUERY`
+    /// picks the best-ranked match. `null` when there's no config
+    /// directory or `$GLYPHWIRE_NO_HISTORY` opted this session out; the
+    /// builtin then just reports it's unavailable. See `zjump.zig`.
+    zdb: ?zjump.Db = null,
+    /// Absolute path to `~/.config/glyphwire/z.db`; `null` alongside a
+    /// `null` `zdb` or when the db is memory-only. Owned; freed in `deinit`.
+    zdb_path: ?[]const u8 = null,
+    /// Whether `zj` records visits and answers queries at all -- turned
+    /// off by `zj{ enabled = false }` in `shell.conf`. The db is still
+    /// loaded (so flipping it back on mid-config-reload isn't lossy) but
+    /// left untouched.
+    zj_enabled: bool = true,
+    /// Directories `zj` never records or returns, from
+    /// `zj{ exclude_dirs = { ... } }`, with a leading `~` expanded. Owned
+    /// (built by `loadStartupConfig`); each string and the slice are
+    /// freed in `deinit`.
+    zj_excludes: [][]const u8 = &.{},
+
+    /// Set when `self.history` has changed since it was last written to
+    /// disk. History is now kept in memory and flushed lazily (see
+    /// `persist_gate` / `flushPersistentState`) rather than rewritten on
+    /// every submitted line.
+    history_dirty: bool = false,
+    /// Set when `self.zdb` has changed since it was last written.
+    zdb_dirty: bool = false,
+    /// Decides when the two lazily-flushed files (history, `z.db`) get
+    /// written: after enough changes, or enough elapsed time, whichever
+    /// comes first -- plus an unconditional flush on a clean exit and on
+    /// the host's `shutdown` notification. See `flushgate.zig`.
+    persist_gate: flushgate.FlushGate = .{},
+
     /// The persistent Lua interpreter -- runs `shell.conf` and every
     /// script builtin (`~/.config/glyphwire/scripts/*.lua`, `defcmd`).
     /// `null` when the shell has no config directory. Heap-allocated and
@@ -1041,6 +1092,11 @@ const Prompt = struct {
 
     fn deinit(self: *Prompt) void {
         const alloc = self.client.alloc;
+        // Last chance to persist -- covers the `exit` builtin and the
+        // socket-close (host gone) paths, which reach here without going
+        // through the explicit `shutdown` flush. `.due` rather than
+        // `.force` so an untouched session writes nothing.
+        self.flushPersistentState(.due);
         for (self.history.items) |line| alloc.free(line);
         self.history.deinit(alloc);
         self.scratch.deinit(alloc);
@@ -1050,6 +1106,12 @@ const Prompt = struct {
         for (self.marks.items) |m| freeMark(alloc, m);
         self.marks.deinit(alloc);
         if (self.history_path) |p| alloc.free(p);
+        if (self.zdb) |*db| db.deinit();
+        if (self.zdb_path) |p| alloc.free(p);
+        if (self.zj_excludes.len > 0) {
+            for (self.zj_excludes) |s| alloc.free(s);
+            alloc.free(self.zj_excludes);
+        }
         // `prompt_config` just borrows `script_engine.?.cfg`; the engine
         // frees it.
         if (self.script_engine) |eng| eng.deinit();
@@ -2569,12 +2631,14 @@ const Prompt = struct {
                 null;
             if (history.shouldRecord(prev, self.buffer.items)) {
                 try self.history.append(alloc, try alloc.dupe(u8, self.buffer.items));
-                self.persistHistory();
+                self.history_dirty = true;
+                self.persist_gate.note();
             }
         }
         self.history_index = null;
 
         try self.dispatchLine();
+        self.maybeFlushPersistentState();
         if (self.should_exit) return; // "exit" (typed or via an alias) -- see dispatchLine
 
         const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
@@ -2664,6 +2728,8 @@ const Prompt = struct {
             try self.doUnalias(argv[1..]);
         } else if (std.mem.eql(u8, argv[0], "cd")) {
             try self.doCd(argv[1..]);
+        } else if (std.mem.eql(u8, argv[0], "zj")) {
+            try self.doZj(argv[1..]);
         } else if (self.runScriptBuiltin(argv)) {
             // handled by the persistent Lua engine
         } else {
@@ -2771,7 +2837,8 @@ const Prompt = struct {
 
     fn isBuiltinName(self: *Prompt, name: []const u8) bool {
         if (std.mem.eql(u8, name, "exit") or std.mem.eql(u8, name, "unalias") or
-            std.mem.eql(u8, name, "cd") or std.mem.eql(u8, name, "alias")) return true;
+            std.mem.eql(u8, name, "cd") or std.mem.eql(u8, name, "alias") or
+            std.mem.eql(u8, name, "zj")) return true;
         if (self.script_engine) |eng| return eng.hasCommand(name);
         return false;
     }
@@ -2791,6 +2858,10 @@ const Prompt = struct {
         }
         if (std.mem.eql(u8, argv[0], "cd")) {
             try self.doCd(argv[1..]);
+            return 0;
+        }
+        if (std.mem.eql(u8, argv[0], "zj")) {
+            try self.doZj(argv[1..]);
             return 0;
         }
         if (std.mem.eql(u8, argv[0], "alias")) {
@@ -3088,6 +3159,12 @@ const Prompt = struct {
                 return false;
             },
             .copy_request => return false,
+            // Host window closing: report it as an interrupt so the
+            // caller SIGINTs the pipeline group and unwinds.
+            .shutdown => {
+                self.should_exit = true;
+                return true;
+            },
             .key => |kev| {
                 defer alloc.free(kev.key);
                 if (!kev.pressed) return false;
@@ -3133,6 +3210,10 @@ const Prompt = struct {
             .text => |tev| self.client.alloc.free(tev.text),
             .paste => |tev| self.client.alloc.free(tev.text),
             .copy_request => {},
+            .shutdown => {
+                self.should_exit = true;
+                hit = true;
+            },
         };
         return hit;
     }
@@ -3306,6 +3387,11 @@ const Prompt = struct {
                     .paste => |tev| alloc.free(tev.text),
                     .key => |kev| alloc.free(kev.key),
                     .copy_request => {},
+                    .shutdown => {
+                        self.should_exit = true;
+                        pty.signalGroup(std.posix.SIG.HUP);
+                        break;
+                    },
                 }
                 continue;
             }
@@ -3336,6 +3422,13 @@ const Prompt = struct {
                 // No shell prompt to copy while a child is foregrounded;
                 // a selection copy is handled entirely host-side.
                 .copy_request => continue,
+                // Host window closing: SIGHUP the child and break the
+                // foreground loop so the shell can flush and exit.
+                .shutdown => {
+                    self.should_exit = true;
+                    pty.signalGroup(std.posix.SIG.HUP);
+                    break;
+                },
                 .key => |kev| kev,
             };
             defer alloc.free(ev.key);
@@ -3473,25 +3566,133 @@ const Prompt = struct {
     /// missing `$HOME` is reported onto the grid the same way
     /// `runCommand` reports a spawn failure, rather than propagated.
     fn doCd(self: *Prompt, args: []const []const u8) !void {
-        const io = self.client.io;
         const alloc = self.client.alloc;
         const raw_target: []const u8 = if (args.len > 0) args[0] else "~";
 
         const target = self.expandTilde(raw_target) catch {
-            try self.client.writeText("cd: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
+            try self.client.writeText("cd: HOME not set", err_color, null);
             return;
         };
         defer if (target.ptr != raw_target.ptr) alloc.free(target);
 
-        var dir = std.Io.Dir.cwd().openDir(io, target, .{}) catch |err| {
-            try self.reportCdError(target, err);
+        self.chdir(target) catch |err| try self.reportCdError(target, err);
+    }
+
+    /// Changes the shell's working directory to `target` (already
+    /// tilde-expanded) and, on success, records the new directory as a
+    /// `zj` visit. Every directory change funnels through here -- an
+    /// interactive `cd`, a `zj` jump, a script's `sh.chdir` -- so a visit
+    /// is recorded exactly once per change and in exactly one place. The
+    /// `openDir` / `setCurrentDir` error is returned unreported: `cd` and
+    /// `zj` word their failure messages differently.
+    fn chdir(self: *Prompt, target: []const u8) !void {
+        const io = self.client.io;
+        var dir = try std.Io.Dir.cwd().openDir(io, target, .{});
+        defer dir.close(io);
+        try std.process.setCurrentDir(io, dir);
+        self.recordVisit();
+    }
+
+    /// Records the shell's current directory (post-`chdir`) in the `zj`
+    /// database. A no-op when `zj` is disabled or unavailable. `$HOME`
+    /// and `/` are skipped on purpose -- both are a single keystroke away
+    /// without any help (`zj` with no argument, `cd /`) and would only
+    /// crowd the rankings -- as is anything under a configured
+    /// `exclude_dirs` entry.
+    fn recordVisit(self: *Prompt) void {
+        if (!self.zj_enabled) return;
+        if (self.zdb == null) return;
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = std.process.currentPath(self.client.io, &buf) catch return;
+        const cwd = buf[0..n];
+
+        if (self.environ_map.get("HOME")) |home| {
+            if (std.mem.eql(u8, cwd, home)) return;
+        }
+        if (std.mem.eql(u8, cwd, "/")) return;
+        if (zjump.isExcluded(cwd, self.zj_excludes)) return;
+
+        self.zdb.?.record(cwd, self.nowSecs()) catch return;
+        self.zdb_dirty = true;
+        self.persist_gate.note();
+    }
+
+    /// `zj [QUERY...]` -- the directory-jump builtin. Bare `zj` goes to
+    /// `$HOME`; a single argument that is itself an existing directory
+    /// acts like `cd` (so `zj ../sibling` and `zj ./build` still work);
+    /// otherwise every argument is a query term matched against the `zj`
+    /// database and the best-ranked directory wins. A jump target that
+    /// has since disappeared is pruned and reported.
+    fn doZj(self: *Prompt, args: []const []const u8) !void {
+        const alloc = self.client.alloc;
+
+        if (self.zdb == null) {
+            try self.client.writeText("zj: directory database unavailable", err_color, null);
+            return;
+        }
+
+        if (args.len == 0) {
+            const home = self.environ_map.get("HOME") orelse {
+                try self.client.writeText("zj: HOME not set", err_color, null);
+                return;
+            };
+            self.chdir(home) catch |err| try self.reportZjError(home, err);
+            return;
+        }
+
+        if (args.len == 1) {
+            const expanded = self.expandTilde(args[0]) catch args[0];
+            defer if (expanded.ptr != args[0].ptr) alloc.free(expanded);
+            if (self.dirExists(expanded)) {
+                self.chdir(expanded) catch |err| try self.reportZjError(expanded, err);
+                return;
+            }
+        }
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd: ?[]const u8 = if (std.process.currentPath(self.client.io, &buf)) |n| buf[0..n] else |_| null;
+
+        const hit = self.zdb.?.bestMatch(args, self.nowSecs(), .{
+            .cwd = cwd,
+            .exclude = self.zj_excludes,
+            .exists = zjExistsProbe,
+            .exists_ctx = self,
+        }) orelse {
+            const joined = try std.mem.join(alloc, " ", args);
+            defer alloc.free(joined);
+            var msg: [320]u8 = undefined;
+            const line = std.fmt.bufPrint(&msg, "zj: no match for '{s}'", .{joined}) catch "zj: no match";
+            try self.client.writeText(line, err_color, null);
             return;
         };
-        defer dir.close(io);
 
-        std.process.setCurrentDir(io, dir) catch |err| {
-            try self.reportCdError(target, err);
+        // `bestMatch` hands back a slice borrowed from the database, and
+        // `chdir` then records into (mutates) it -- and a failure prunes
+        // the entry. Copy the path out before either can move it.
+        const target = try alloc.dupe(u8, hit);
+        defer alloc.free(target);
+
+        self.chdir(target) catch |err| {
+            self.zdb.?.remove(target);
+            self.zdb_dirty = true;
+            try self.reportZjError(target, err);
         };
+    }
+
+    fn reportZjError(self: *Prompt, target: []const u8, err: anyerror) !void {
+        var buf: [320]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "zj: {s}: {t}", .{ target, err }) catch "zj: jump failed";
+        try self.client.writeText(msg, err_color, null);
+    }
+
+    /// Whether `path` opens as a directory. Used by `zj`'s "single
+    /// existing-dir argument acts like cd" shortcut and, via
+    /// `zjExistsProbe`, to filter vanished entries out of a match.
+    fn dirExists(self: *Prompt, path: []const u8) bool {
+        var d = std.Io.Dir.cwd().openDir(self.client.io, path, .{}) catch return false;
+        d.close(self.client.io);
+        return true;
     }
 
     /// Expands a leading `~` to `$HOME` -- bare `~` or `~/rest`; `~user`
@@ -3586,6 +3787,7 @@ const Prompt = struct {
             .unsetenv = hookUnsetenv,
             .getenv = hookGetenv,
             .cwd = hookCwd,
+            .chdir = hookChdir,
             .realpath = hookRealpath,
             .write = hookWrite,
             .poll_interrupt = hookPollInterrupt,
@@ -3633,6 +3835,25 @@ const Prompt = struct {
         // `writePromptPrefix` reads `.prompt` off it live on every redraw
         // (so `{time}` and cwd stay current).
         self.prompt_config = &eng.cfg;
+
+        // `zj{}` settings. Copy the excludes into our own storage with a
+        // leading `~` expanded, so the pure matcher can compare them
+        // byte-for-byte against absolute paths.
+        self.zj_enabled = eng.cfg.zj.enabled;
+        if (eng.cfg.zj.exclude_dirs.len > 0) {
+            var owned = try alloc.alloc([]const u8, eng.cfg.zj.exclude_dirs.len);
+            var filled: usize = 0;
+            errdefer {
+                for (owned[0..filled]) |s| alloc.free(s);
+                alloc.free(owned);
+            }
+            for (eng.cfg.zj.exclude_dirs) |raw| {
+                const expanded = self.expandTilde(raw) catch raw;
+                owned[filled] = if (expanded.ptr == raw.ptr) try alloc.dupe(u8, raw) else expanded;
+                filled += 1;
+            }
+            self.zj_excludes = owned;
+        }
     }
 
     /// Loads `~/.config/glyphwire/history` into `self.history` so Up-arrow
@@ -3680,18 +3901,57 @@ const Prompt = struct {
         }
 
         self.history_path = path;
-        self.persistHistory();
+        // Rewrite once now so a file that was over the cap / had
+        // consecutive dupes is trimmed on disk even for a session that
+        // never adds a line.
+        self.writeHistoryFile();
     }
 
-    /// Rewrites the whole history file from `self.history` (trimmed to the
-    /// last `history.max_entries`). Called after every recorded line --
-    /// the file is small and interactive commands are human-slow, so a
-    /// full rewrite each time is simpler than an append + periodic
-    /// compaction, and it means the file survives this process being
-    /// killed rather than exited (the usual way an interactive session
-    /// ends here). A no-op when there's no `history_path`; an IO failure
-    /// is logged, not propagated.
-    fn persistHistory(self: *Prompt) void {
+    /// Loads `~/.config/glyphwire/z.db` for the `zj` builtin. A missing
+    /// file just yields an empty in-memory database, so `zj` still
+    /// records visits this session; the file is created on the first
+    /// flush. `$GLYPHWIRE_NO_HISTORY` opts out completely (no read, no
+    /// path stored, no write), the same lever the e2e tests use to keep
+    /// off the developer's real files. Any IO or parse failure leaves a
+    /// memory-only database with no path.
+    fn loadZjump(self: *Prompt, config_dir: []const u8) !void {
+        const alloc = self.client.alloc;
+        const io = self.client.io;
+
+        if (self.environ_map.get("GLYPHWIRE_NO_HISTORY")) |v| {
+            if (v.len > 0) {
+                self.zdb = zjump.Db.init(alloc);
+                return;
+            }
+        }
+
+        const path = try std.fs.path.join(alloc, &.{ config_dir, "z.db" });
+        errdefer alloc.free(path);
+
+        var db: zjump.Db = undefined;
+        if (std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20))) |bytes| {
+            defer alloc.free(bytes);
+            db = try zjump.Db.parse(alloc, bytes);
+        } else |err| switch (err) {
+            error.FileNotFound => db = zjump.Db.init(alloc),
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                std.log.warn("zj: could not read {s}: {t}", .{ path, err });
+                db = zjump.Db.init(alloc);
+            },
+        }
+
+        self.zdb = db;
+        self.zdb_path = path;
+    }
+
+    /// Rewrites the whole history file from `self.history` (trimmed to
+    /// the last `history.max_entries`). History is kept in memory and
+    /// this is called lazily -- see `flushPersistentState` /
+    /// `persist_gate` -- plus unconditionally on a clean exit and the
+    /// host `shutdown`. A no-op when there's no `history_path`; an IO
+    /// failure is logged, not propagated.
+    fn writeHistoryFile(self: *Prompt) void {
         const path = self.history_path orelse return;
         const alloc = self.client.alloc;
 
@@ -3701,6 +3961,60 @@ const Prompt = struct {
         std.Io.Dir.cwd().writeFile(self.client.io, .{ .sub_path = path, .data = bytes }) catch |err| {
             std.log.warn("history: could not write {s}: {t}", .{ path, err });
         };
+    }
+
+    /// Rewrites `~/.config/glyphwire/z.db` from `self.zdb`. Same lazy /
+    /// forced flush cadence as `writeHistoryFile`. A no-op without a
+    /// `zdb_path` or database; IO failures are logged.
+    fn writeZdbFile(self: *Prompt) void {
+        const path = self.zdb_path orelse return;
+        if (self.zdb == null) return;
+        const alloc = self.client.alloc;
+
+        const bytes = self.zdb.?.serialize(alloc) catch return;
+        defer alloc.free(bytes);
+
+        std.Io.Dir.cwd().writeFile(self.client.io, .{ .sub_path = path, .data = bytes }) catch |err| {
+            std.log.warn("zj: could not write {s}: {t}", .{ path, err });
+        };
+    }
+
+    const FlushMode = enum { due, force };
+
+    /// Writes history and/or `z.db`. `.force` writes both regardless of
+    /// the dirty flags (the clean-exit / `shutdown` path); `.due` writes
+    /// only what actually changed. Either way the dirty flags clear and
+    /// the gate's clock restarts. IO failures are swallowed (logged in
+    /// the write helpers), never propagated.
+    fn flushPersistentState(self: *Prompt, mode: FlushMode) void {
+        const force = mode == .force;
+        if (self.history_dirty or force) {
+            self.writeHistoryFile();
+            self.history_dirty = false;
+        }
+        if (self.zdb_dirty or force) {
+            self.writeZdbFile();
+            self.zdb_dirty = false;
+        }
+        self.persist_gate.reset(self.nowMillis());
+    }
+
+    /// Flushes only when the gate says it is due (enough un-flushed
+    /// changes, or enough elapsed time). Called at idle ticks and after
+    /// each submitted line.
+    fn maybeFlushPersistentState(self: *Prompt) void {
+        if (self.persist_gate.shouldFlush(self.nowMillis())) self.flushPersistentState(.due);
+    }
+
+    /// Wall-clock time, unix seconds -- the timestamp `zj` entries carry.
+    fn nowSecs(self: *Prompt) i64 {
+        return std.Io.Timestamp.now(self.client.io, .real).toSeconds();
+    }
+
+    /// Monotonic milliseconds -- what the flush gate measures elapsed
+    /// time with (immune to the wall clock being stepped).
+    fn nowMillis(self: *Prompt) i64 {
+        return std.Io.Timestamp.now(self.client.io, .awake).toMilliseconds();
     }
 
     /// Expands a leading alias in `words` into a fresh owned `Arg` list.
@@ -4125,6 +4439,22 @@ fn hookCwd(ctx: *anyopaque, buf: []u8) ?[]const u8 {
     return buf[0..n];
 }
 
+/// `sh.chdir` -- change the shell's working directory. Goes through the
+/// same `Prompt.chdir` an interactive `cd` uses, so a script jump is
+/// recorded in the `zj` database too. Returns false (no Lua error) if
+/// the path doesn't open.
+fn hookChdir(ctx: *anyopaque, path: [:0]const u8) bool {
+    const self: *Prompt = @ptrCast(@alignCast(ctx));
+    self.chdir(path) catch return false;
+    return true;
+}
+
+/// The `zjump.MatchOpts.exists` probe -- `ctx` is the `*Prompt`.
+fn zjExistsProbe(ctx: ?*anyopaque, path: []const u8) bool {
+    const self: *Prompt = @ptrCast(@alignCast(ctx.?));
+    return self.dirExists(path);
+}
+
 /// `sh.realpath` -- libc `realpath`, so `..`/symlinks/relative all
 /// collapse against the real filesystem. `buf` must be `PATH_MAX`.
 fn hookRealpath(ctx: *anyopaque, path: [:0]const u8, buf: []u8) ?[]const u8 {
@@ -4159,6 +4489,12 @@ fn hookPollInterrupt(ctx: *anyopaque) bool {
         // runs; a copy_request carries nothing to free.
         .paste => |tev| self.client.alloc.free(tev.text),
         .copy_request => {},
+        // Host window closing mid-script: treat it as an interrupt so the
+        // builtin unwinds; the loop in `runPrompt` then flushes and exits.
+        .shutdown => {
+            self.should_exit = true;
+            hit = true;
+        },
     };
     return hit;
 }

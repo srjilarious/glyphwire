@@ -1771,6 +1771,10 @@ pub const InputEvent = union(enum) {
     /// by calling `Client.setClipboard` with whatever it wants copied
     /// (glyphwire-shell: the current prompt line).
     copy_request,
+    /// One `shutdown` notification: the host window is closing. No owned
+    /// memory. glyphwire-shell treats it like a typed `exit` -- flush
+    /// persistent state, then return from its prompt loop.
+    shutdown: ShutdownEvent,
 
     /// Frees the owned string for whichever variant this is.
     pub fn deinit(self: InputEvent, alloc: std.mem.Allocator) void {
@@ -1779,6 +1783,7 @@ pub const InputEvent = union(enum) {
             .text => |t| alloc.free(t.text),
             .paste => |t| alloc.free(t.text),
             .copy_request => {},
+            .shutdown => {},
         }
     }
 };
@@ -1809,6 +1814,13 @@ pub const MouseMoveEvent = struct { px: PxPos, cell: CellPos };
 /// memory (unlike `KeyEvent.key`), so `pollResizeEvent` hands it back by
 /// value with nothing for the caller to free.
 pub const ResizeEvent = struct { cols: usize, rows: usize };
+
+/// One `shutdown` notification: the host window is closing. `grace_ms` is
+/// roughly how long the host waits for this process to exit before it
+/// tears down anyway. No owned memory. Delivered on the same ordered
+/// queue as key/text (`InputEvent.shutdown`) so a consumer sees it in
+/// line with the input it has already queued.
+pub const ShutdownEvent = struct { grace_ms: u32 };
 
 /// `get_property(layer, "scroll_offset")`'s result -- where the viewport
 /// sits and how far it can go on each axis.
@@ -2481,6 +2493,16 @@ pub const InputListener = struct {
             self.last_size = ev;
             try self.resize_events.append(self.alloc, ev);
             self.resize_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "shutdown")) {
+            const p = try std.json.parseFromValue(protocol.ShutdownParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.input_events.append(self.alloc, .{ .shutdown = .{ .grace_ms = p.value.grace_ms } });
+            self.input_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "context")) {
             const p = try std.json.parseFromValue(protocol.ContextParams, self.alloc, parsed.value.params, .{
                 .ignore_unknown_fields = true,

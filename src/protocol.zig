@@ -255,6 +255,15 @@ pub const TerminalReplyParams = struct { bytes: []const u8 };
 /// `resize` params: the new host window size, in cells.
 pub const ResizeParams = struct { cols: usize, rows: usize };
 
+/// `shutdown` params: the host window is closing and this connection
+/// should flush any persistent state and exit. `grace_ms` is roughly how
+/// long the host will wait for that before it exits anyway -- advisory,
+/// and a client that has nothing to flush can just ignore it. A real
+/// field (rather than an empty object) on purpose: a zero-field struct
+/// serializes as `[]`, which would fail an object parse (see
+/// decisions.md's "Zig JSON gotcha").
+pub const ShutdownParams = struct { grace_ms: u32 = 0 };
+
 /// `context` params: the now-visible context's handle and the size of
 /// its root layer (in cells). A client that manages its own context
 /// (zoe) uses the handle to tell "I'm the one on screen now" from "I've

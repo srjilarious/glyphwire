@@ -65,6 +65,10 @@ pub const HostHooks = struct {
     getenv: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
     /// Absolute working directory into `buf`; null on failure.
     cwd: *const fn (ctx: *anyopaque, buf: []u8) ?[]const u8,
+    /// Change the shell's working directory to `path`; false if it
+    /// doesn't open. Goes through the same path an interactive `cd` does,
+    /// so the jump is recorded in the `zj` database too.
+    chdir: *const fn (ctx: *anyopaque, path: [:0]const u8) bool,
     /// Canonical absolute form of `path` into `buf` (libc `realpath`);
     /// null if it doesn't resolve on disk. `buf` must be PATH_MAX.
     realpath: *const fn (ctx: *anyopaque, path: [:0]const u8, buf: []u8) ?[]const u8,
@@ -432,6 +436,8 @@ fn installShTable(lua: *Lua) void {
     lua.setField(-2, "getenv");
     lua.pushFunction(ziglua.wrap(shCwd));
     lua.setField(-2, "cwd");
+    lua.pushFunction(ziglua.wrap(shChdir));
+    lua.setField(-2, "chdir");
     lua.pushFunction(ziglua.wrap(shRealpath));
     lua.setField(-2, "realpath");
     lua.pushFunction(ziglua.wrap(shRun));
@@ -515,6 +521,16 @@ fn shRealpath(lua: *Lua) i32 {
     } else {
         lua.pushNil();
     }
+    return 1;
+}
+
+/// `sh.chdir(path)` -- change the shell's working directory. Returns
+/// true on success, false if `path` doesn't open (no Lua error, so a
+/// script can branch on it).
+fn shChdir(lua: *Lua) i32 {
+    const e = g_engine orelse return 0;
+    const path = lua.checkString(1); // already NUL-terminated
+    lua.pushBoolean(e.hooks.chdir(e.hooks.ctx, path));
     return 1;
 }
 

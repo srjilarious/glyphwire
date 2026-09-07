@@ -2282,6 +2282,46 @@ unimplemented. Full command inventory + what's still missing is in
   `page_lines`, Ctrl-D/U, `:$`/`:.`, `:+N`/`:-N`, `:{count}{motion}`,
   `:cd`/`:pwd` outcomes). 725 pass.
 
+## `zj` directory jumping + a `shutdown` notification + lazy state flush
+
+See `docs/decisions.md`'s Shell section (`#### zj directory jumping`,
+`#### Persistent state is flushed lazily`) for the *why*; this is the
+shape of the change.
+
+- **`shell/zjump.zig` (pure).** `Db` = a `<rank>\t<last>\t<path>` TSV
+  parsed into ranked entries. `record(path, now)` bumps a per-path visit
+  weight; `bestMatch(terms, now, opts)` filters by case-insensitive
+  substring (last term also matching the basename), the current dir, an
+  `exclude` list and an optional `exists` probe, then ranks by frecency
+  (`rank × recencyMultiplier(age)` — zoxide's 4/2/0.5/0.25 steps).
+  `age()` scales everything ×0.9 and drops the sub-1.0 entries once the
+  summed weight passes 10000. `serialize` sorts by path for a clean diff.
+- **`shell/flushgate.zig` (pure).** `FlushGate` — a "flush after N changes
+  or T ms, whichever first" policy; the caller passes the clock in.
+- **`Prompt`** grew `zdb` / `zdb_path` / `zj_enabled` / `zj_excludes`,
+  `history_dirty` / `zdb_dirty` / `persist_gate`. `doCd` and the new
+  `doZj` both funnel through `chdir(target)`, which does the
+  `openDir` + `setCurrentDir` and then `recordVisit` (real cwd, minus
+  `$HOME` / `/` / excludes). History no longer rewrites per line — it
+  sets `history_dirty` and the gate flushes at idle ticks / after a
+  submit / on `deinit`; `shutdown` forces both.
+- **`zj` builtin** joins `cd`/`exit`/`unalias` as a core builtin (name,
+  dispatch, `isBuiltinName`, `runBuiltin`, completion list). Bare `zj` →
+  `$HOME`; a single existing-dir arg → `cd`; otherwise a DB query.
+- **`zj{ enabled, exclude_dirs }`** in `shell.conf` (`shell/config.zig`
+  `luaZj`); `shell/main.zig` copies the excludes with `~` expanded.
+- **`sh.chdir(path)`** — new `HostHooks` entry + `sh` table binding, so a
+  Lua script can change the shell's dir (and get it recorded in `zj`).
+- **`shutdown` wire notification** (`{grace_ms}`, server→client):
+  `protocol.ShutdownParams`, `rpc.shutdownNotification`,
+  `Dispatcher.Subscriptions.shutdown`, `Server.reportShutdown`,
+  `InputListener` → `InputEvent.shutdown` on the ordered queue.
+  `host/main.zig` broadcasts it on window close and waits ≤1.5s for the
+  shell to exit. The shell treats it as a typed `exit`; `zoe` /
+  `table-demo` just end their loops.
+- **Tests:** `shell_zjump_tests.zig` (+21) and `shell_flushgate_tests.zig`
+  (+5), registered in `tests/main.zig`.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).
