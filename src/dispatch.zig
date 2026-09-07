@@ -35,6 +35,8 @@ pub const DispatchError = error{
     /// need the still-unbuilt error-response path (roadmap Milestone 0).
     LayerPermissionDenied,
     InvalidIconOption,
+    /// `move_content`'s `direction` wasn't `"up"` or `"down"`.
+    InvalidMoveDirection,
     UnknownMetadata,
     UnknownTable,
     InvalidTableOption,
@@ -97,6 +99,17 @@ const WriteTextParams = struct {
 const CellCountParams = struct {
     layer: ?core.LayerHandle = null,
     count: usize,
+};
+
+const MoveContentParams = struct {
+    layer: ?core.LayerHandle = null,
+    /// Inclusive content-grid row range, defaulting to the whole grid.
+    top: ?usize = null,
+    bot: ?usize = null,
+    /// Rows to shift, clamped to the span. Defaults to 1.
+    count: usize = 1,
+    /// `"up"` (default) or `"down"` -- the sense of CSI SU/SD.
+    direction: ?[]const u8 = null,
 };
 
 /// Params shared by `set_property`/`get_property`. Not every field is
@@ -896,6 +909,7 @@ pub const Dispatcher = struct {
         .{ "write_text", catResult(handleWriteText) },
         .{ "insert_cells", catVoid(handleInsertCells) },
         .{ "delete_cells", catVoid(handleDeleteCells) },
+        .{ "move_content", catVoid(handleMoveContent) },
         .{ "set_property", catVoid(handleSetProperty) },
         .{ "get_property", catBytesId(handleGetProperty) },
         .{ "get_cells", catBytesId(handleGetCells) },
@@ -1133,6 +1147,25 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.deleteCells(parsed.value.count);
+    }
+
+    /// `move_content`: shifts a band of a layer's content grid vertically
+    /// in place (`Layer.moveContent` -> `scrollRange`) so a client-
+    /// scrolled pane can scroll without retransmitting every visible row.
+    /// A notification -- the shift is best-effort and batchable next to
+    /// the follow-up redraw of the newly-exposed band.
+    fn handleMoveContent(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(MoveContentParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const dir: core.Layer.ScrollDir = if (p.direction) |d|
+            (std.meta.stringToEnum(core.Layer.ScrollDir, d) orelse return DispatchError.InvalidMoveDirection)
+        else
+            .up;
+        layer.moveContent(p.top, p.bot, p.count, dir);
     }
 
     fn handleSetProperty(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {

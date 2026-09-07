@@ -184,6 +184,10 @@ pub const Buffer = struct {
     line_starts: std.ArrayList(usize) = .empty,
     /// Set by every mutation, cleared by `markClean`. `:q` consults it.
     dirty: bool = false,
+    /// Bumped by every mutation and never reset. A renderer diffs it
+    /// against its last value to tell an edit (repaint everything) from a
+    /// pure cursor move or scroll (shift the rows already drawn).
+    edits: u64 = 0,
 
     pub fn init(alloc: std.mem.Allocator) !Buffer {
         return initFromText(alloc, "");
@@ -294,6 +298,7 @@ pub const Buffer = struct {
         try self.gap.insert(@min(offset, self.len()), bytes);
         try self.reindex();
         self.dirty = true;
+        self.edits += 1;
     }
 
     pub fn delete(self: *Buffer, offset: usize, count: usize) !void {
@@ -301,5 +306,6 @@ pub const Buffer = struct {
         self.gap.delete(offset, count);
         try self.reindex();
         self.dirty = true;
+        self.edits += 1;
     }
 };

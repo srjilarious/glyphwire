@@ -175,6 +175,30 @@ pub const Client = struct {
         try self.notify("delete_cells", .{ .count = count });
     }
 
+    /// `move_content(layer, count, direction)` -- a notification. Shifts
+    /// `count` rows of `layer`'s content grid (the whole grid, or the
+    /// inclusive `[top, bot]` band) vertically in place, the wire face of
+    /// CSI SU/SD: a client-scrolled pane scrolls by moving the rows it
+    /// still has and redrawing only the newly-exposed band rather than
+    /// retransmitting every visible row. Usually issued from inside a
+    /// `batch` right before that partial redraw -- see `Batch.moveContent`.
+    pub fn moveContentOn(
+        self: *Client,
+        layer: core.LayerHandle,
+        top: ?usize,
+        bot: ?usize,
+        count: usize,
+        direction: core.Layer.ScrollDir,
+    ) !void {
+        try self.notify("move_content", .{
+            .layer = layer,
+            .top = top,
+            .bot = bot,
+            .count = count,
+            .direction = @tagName(direction),
+        });
+    }
+
     /// `get_property(layer, "cursor")` -- a request.
     pub fn getCursor(self: *Client) !core.Cursor {
         var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .property = "cursor" });
@@ -1329,6 +1353,25 @@ pub const Client = struct {
         /// Batched `tag_metadata` -- see `Client.tagMetadata`.
         pub fn tagMetadata(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle) !void {
             try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id });
+        }
+
+        /// Batched `move_content` -- see `Client.moveContentOn`. `null`
+        /// `top`/`bot` means the whole content grid.
+        pub fn moveContent(
+            self: *Batch,
+            layer: ?core.LayerHandle,
+            top: ?usize,
+            bot: ?usize,
+            count: usize,
+            direction: core.Layer.ScrollDir,
+        ) !void {
+            try self.notify("move_content", .{
+                .layer = layer,
+                .top = top,
+                .bot = bot,
+                .count = count,
+                .direction = @tagName(direction),
+            });
         }
 
         /// Batched `draw_icon` with options -- see `Client.drawIconStyled`.

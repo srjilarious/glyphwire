@@ -1863,12 +1863,17 @@ pub const Layer = struct {
         self.cursor = .{ .row = self.scroll_top, .col = 0 };
     }
 
+    /// Which way `scrollRange` / `moveContent` shift a band: `.up` moves
+    /// content toward the top of the band (blank rows appear at the
+    /// bottom), `.down` the reverse -- the same sense as CSI SU / SD.
+    pub const ScrollDir = enum { up, down };
+
     /// Scrolls rows `[top, bot]` of the active screen by `n` within that
     /// band -- `.up` moves content toward `top` (blank rows appear at
     /// `bot`), `.down` the reverse. No scrollback: rows pushed past a
     /// margin are gone. Backs a line feed at the bottom margin, `SU`/`SD`,
     /// `IL`/`DL` and `RI`.
-    fn scrollRange(self: *Layer, top: usize, bot: usize, n_in: usize, dir: enum { up, down }) void {
+    fn scrollRange(self: *Layer, top: usize, bot: usize, n_in: usize, dir: ScrollDir) void {
         if (bot < top or bot >= self.height) return;
         const span = bot - top + 1;
         const n = @min(n_in, span);
@@ -1899,6 +1904,23 @@ pub const Layer = struct {
 
     fn blankRow(row: []Cell) void {
         for (row) |*c| c.* = .{};
+    }
+
+    /// Shifts a band of the content grid vertically in place -- the wire
+    /// face of `scrollRange` (which already backs CSI SU/SD and IL/DL),
+    /// exposed so a client-scrolled pane doesn't have to retransmit every
+    /// visible row on every scroll tick. A TUI editor whose buffer layer
+    /// is `scrollback_rows: 0` with the content grid exactly viewport-
+    /// sized scrolls by moving the rows it still has and redrawing only
+    /// the newly-exposed band.
+    ///
+    /// `top`/`bot` are an inclusive row range in the content grid,
+    /// defaulting to the whole grid (`0` .. `height - 1`); `count` rows
+    /// are shifted, clamped to the span. Cells carry their styling, icons
+    /// and metadata ids with them (a whole-`Cell` copy). An empty or
+    /// out-of-range range, or a zero `count`, is a silent no-op.
+    pub fn moveContent(self: *Layer, top: ?usize, bot: ?usize, count: usize, dir: ScrollDir) void {
+        self.scrollRange(top orelse 0, bot orelse (self.height -| 1), count, dir);
     }
 
     /// A line feed (`\n` / VT / FF, and index past the bottom margin).

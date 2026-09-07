@@ -40,6 +40,35 @@ pub fn writeTextNotificationUpdatesCoreStateTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectEqual(ctx.root.cursor.col, 5);
 }
 
+pub fn moveContentNotificationShiftsGridTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 8, 4, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const seed = try roundTripThroughWire(alloc,
+        \\{"method":"write_text","params":{"text":"r0\nr1\nr2\nr3"}}
+    );
+    defer alloc.free(seed);
+    try testz.expectTrue((try d.handle(alloc, seed)).response == null);
+
+    const up = try roundTripThroughWire(alloc,
+        \\{"method":"move_content","params":{"count":1,"direction":"up"}}
+    );
+    defer alloc.free(up);
+    try testz.expectTrue((try d.handle(alloc, up)).response == null);
+    try testz.expectEqualStr("r", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("1", ctx.root.cell(0, 1).grapheme());
+    try testz.expectEqual(ctx.root.cell(3, 0).grapheme().len, 0);
+
+    // A bad direction is a dispatch error, not a silent no-op.
+    const bad = try roundTripThroughWire(alloc,
+        \\{"method":"move_content","params":{"count":1,"direction":"sideways"}}
+    );
+    defer alloc.free(bad);
+    try testz.expectError(d.handle(alloc, bad), dispatch.DispatchError.InvalidMoveDirection);
+}
+
 pub fn getPropertyRequestReturnsDecodedResponseTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

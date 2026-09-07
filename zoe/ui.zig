@@ -13,9 +13,11 @@
 //! itself changes (an expand or collapse), never on a scroll tick. The
 //! buffer pane can't work that way: a 100k-line file as a cell grid is
 //! hundreds of megabytes. So its content grid is exactly pane-sized, zoe
-//! owns `top_line`/`left_col`, and it redraws the visible rows. See
-//! docs/investigations/zoe-editor.md for what that costs and what would
-//! fix it.
+//! owns `top_line`/`left_col`, and it repaints the visible rows -- but on
+//! a pure scroll of less than a screen it shifts the rows it already drew
+//! with one `move_content` and repaints only the exposed band
+//! (`planBufferRender`), rather than rewriting the whole pane every tick.
+//! See docs/investigations/zoe-editor.md for what a full diff would add.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -85,6 +87,23 @@ pub const Ui = struct {
     /// zoe's own scroll position, since that pane isn't host-scrolled.
     top_line: usize = 0,
     left_col: usize = 0,
+    /// The scroll position and edit count the buffer layer's cells
+    /// currently reflect. `renderBuffer` diffs against these to shift the
+    /// rows it already drew (`move_content`) on a pure scroll instead of
+    /// rewriting every visible row.
+    prev_top_line: usize = 0,
+    prev_left_col: usize = 0,
+    prev_cursor_line: usize = 0,
+    prev_edits: u64 = 0,
+    /// Forces a full buffer repaint next frame -- set whenever the pane's
+    /// bounds change or its content is replaced wholesale, cases a row
+    /// shift can't express.
+    buffer_full_redraw: bool = true,
+    /// Session cell size in px, for natural-sizing tree icons to the row
+    /// height. Read once at startup; a runtime font-zoom isn't announced
+    /// to clients, so it can lag until the next launch.
+    cell_px_w: u32 = 0,
+    cell_px_h: u32 = 0,
     /// The tree pane's scroll offset, mirrored from `scroll_offset`
     /// notifications so a click can be resolved to the right entry.
     tree_scroll: glyphwire.CellPos = .{},
@@ -116,6 +135,7 @@ pub const Ui = struct {
         try listener.attachContext(context);
 
         const size = try client.getSize();
+        const metrics = try client.getCellMetrics();
 
         // Content sizes are provisional: every `layout` notification
         // resizes them to match the panes they landed in.
@@ -142,6 +162,8 @@ pub const Ui = struct {
             .status_layer = status_layer,
             .pane_split = pane_split,
             .root_split = root_split,
+            .cell_px_w = metrics.w,
+            .cell_px_h = metrics.h,
         };
         errdefer self.tree.deinit();
 
@@ -262,6 +284,10 @@ pub const Ui = struct {
             if (ev.boundsFor(self.buffer_layer)) |b| self.buffer_bounds = toBounds(b);
             if (ev.boundsFor(self.status_layer)) |b| self.status_bounds = toBounds(b);
             try self.syncContentSizes();
+            // The buffer layer's grid was resized: the rows it holds no
+            // longer line up with the panes, so the next frame can't
+            // shift them -- it has to repaint.
+            self.buffer_full_redraw = true;
             self.dirty = true;
         }
         while (self.listener.pollScrollOffsetEvent()) |ev| {
@@ -335,6 +361,8 @@ pub const Ui = struct {
         self.tree_visible = !self.tree_visible;
         if (!self.tree_visible and self.focus == .tree) self.focus = .buffer;
         try self.applySplitChildren();
+        // The buffer pane is about to be re-laid-out wider or narrower.
+        self.buffer_full_redraw = true;
         self.dirty = true;
     }
 
@@ -452,6 +480,8 @@ pub const Ui = struct {
         try self.ed.loadText(bytes, path);
         self.top_line = 0;
         self.left_col = 0;
+        // A whole new buffer -- nothing on screen carries over.
+        self.buffer_full_redraw = true;
         self.ed.setStatus("\"{s}\" {d}L", .{ path, self.ed.buf.lineCount() });
         self.dirty = true;
     }
@@ -511,39 +541,57 @@ pub const Ui = struct {
         });
     }
 
+    /// Redraws the buffer pane.
+    ///
+    /// The pane is exactly viewport-sized (see the module note), so a
+    /// scroll can't be a host viewport move -- zoe owns `top_line` and
+    /// repaints. But repainting *every* visible row on every scroll tick
+    /// is `b.rows` write pairs down the socket per keystroke, which is
+    /// what made the pane feel heavy. So: on a pure vertical scroll of
+    /// less than a screen, shift the rows already on the layer with one
+    /// `move_content` and repaint only the band the scroll exposed. An
+    /// edit, a horizontal scroll, a jump of a screen or more, or a
+    /// bounds change (`buffer_full_redraw`) still repaints in full --
+    /// cases a row shift can't represent.
     fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const b = self.buffer_bounds;
         if (b.cols == 0 or b.rows == 0) return;
         self.scrollBufferToCursor();
 
         const cursor = self.ed.pos();
-        var pad: std.ArrayList(u8) = .empty;
-        defer pad.deinit(self.alloc);
+        switch (planBufferRender(.{
+            .prev_top = self.prev_top_line,
+            .top = self.top_line,
+            .prev_left = self.prev_left_col,
+            .left = self.left_col,
+            .prev_edits = self.prev_edits,
+            .edits = self.ed.buf.edits,
+            .rows = b.rows,
+            .force_full = self.buffer_full_redraw,
+        })) {
+            .full => try self.renderBufferRows(batch, 0, b.rows),
+            .shift => |s| {
+                // The scrolled-past rows are still valid where they land;
+                // only the newly-uncovered band at one edge needs drawing.
+                try batch.moveContent(self.buffer_layer, null, null, s.count, s.dir);
+                try self.renderBufferRows(batch, s.exposed_lo, s.exposed_hi);
 
-        var r: usize = 0;
-        while (r < b.rows) : (r += 1) {
-            const line = self.top_line + r;
-            pad.clearRetainingCapacity();
-
-            if (line < self.ed.buf.lineCount()) {
-                const text = try self.ed.buf.lineText(self.alloc, line);
-                defer self.alloc.free(text);
-                const visible = sliceCols(text, self.left_col, b.cols);
-                try pad.appendSlice(self.alloc, visible);
-                try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), b.cols);
-                try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_text, bg_buffer);
-            } else {
-                // vim's marker for "past the end of the buffer".
-                try pad.append(self.alloc, '~');
-                try padTo(self.alloc, &pad, 1, b.cols);
-                try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_dim, bg_buffer);
-            }
+                // The caret is drawn as an inverted cell over its row;
+                // repaint the row it left (to clear that cell) and the row
+                // it's on now, unless the exposed band already covered them.
+                for ([_]usize{ self.prev_cursor_line, cursor.line }) |line| {
+                    if (line < self.top_line or line >= self.top_line + b.rows) continue;
+                    const screen_row = line - self.top_line;
+                    if (screen_row >= s.exposed_lo and screen_row < s.exposed_hi) continue;
+                    try self.renderBufferRow(batch, screen_row);
+                }
+            },
         }
 
-        // The caret is a block drawn as one inverted cell. The host's own
-        // caret renderer only knows about the root layer, and a client
-        // that owns its pane knows better than the host where its cursor
-        // is anyway.
+        // The caret is a block drawn as one inverted cell, on top of the
+        // row just (re)painted. The host's own caret renderer only knows
+        // about the root layer, and a client that owns its pane knows
+        // better than the host where its cursor is anyway.
         if (cursor.line >= self.top_line and cursor.line < self.top_line + b.rows) {
             const display_col = try self.cursorDisplayCol();
             if (display_col >= self.left_col and display_col - self.left_col < b.cols) {
@@ -559,6 +607,42 @@ pub const Ui = struct {
                     bg_cursor,
                 );
             }
+        }
+
+        self.prev_top_line = self.top_line;
+        self.prev_left_col = self.left_col;
+        self.prev_cursor_line = cursor.line;
+        self.prev_edits = self.ed.buf.edits;
+        self.buffer_full_redraw = false;
+    }
+
+    /// Repaints buffer-pane screen rows `[from, to)` from the buffer's
+    /// current contents -- plain text, or vim's `~` past the end, without
+    /// the caret.
+    fn renderBufferRows(self: *Ui, batch: *glyphwire.client.Client.Batch, from: usize, to: usize) !void {
+        var r = from;
+        while (r < to) : (r += 1) try self.renderBufferRow(batch, r);
+    }
+
+    fn renderBufferRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize) !void {
+        const b = self.buffer_bounds;
+        const line = self.top_line + r;
+
+        var pad: std.ArrayList(u8) = .empty;
+        defer pad.deinit(self.alloc);
+
+        if (line < self.ed.buf.lineCount()) {
+            const text = try self.ed.buf.lineText(self.alloc, line);
+            defer self.alloc.free(text);
+            const visible = sliceCols(text, self.left_col, b.cols);
+            try pad.appendSlice(self.alloc, visible);
+            try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), b.cols);
+            try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_text, bg_buffer);
+        } else {
+            // vim's marker for "past the end of the buffer".
+            try pad.append(self.alloc, '~');
+            try padTo(self.alloc, &pad, 1, b.cols);
+            try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_dim, bg_buffer);
         }
     }
 
@@ -625,13 +709,22 @@ pub const Ui = struct {
 
                 // The icon composites *over* the row's background rather
                 // than replacing it, so a selected row stays highlighted
-                // underneath it.
+                // underneath it. Drawn at its natural size, only shrunk to
+                // fit one cell -- `"fit"` scales a 32px source down to the
+                // ~8px a cell is wide, which is unreadable; capping a
+                // natural draw to the cell box keeps it crisp. Falls back
+                // to `"fit"` if the cell metrics somehow didn't load.
+                const natural = self.cell_px_w > 0 and self.cell_px_h > 0;
                 try batch.notify("draw_icon", .{
                     .layer = self.tree_layer,
                     .row = r,
                     .col = e.depth * tree_mod.indent_cols,
                     .name = iconFor(e),
-                    .scale = "fit",
+                    .scale = if (natural) "natural" else "fit",
+                    .h_align = "start",
+                    .v_align = "center",
+                    .max_w = if (natural) self.cell_px_w else null,
+                    .max_h = if (natural) self.cell_px_h else null,
                     .foreground = true,
                 });
             } else {
@@ -697,6 +790,59 @@ pub const Ui = struct {
         };
     }
 };
+
+/// The scroll/edit state `planBufferRender` decides from.
+pub const BufferRenderState = struct {
+    /// The scroll position the buffer layer's cells currently reflect.
+    prev_top: usize,
+    prev_left: usize,
+    /// The scroll position this frame wants.
+    top: usize,
+    left: usize,
+    /// `Buffer.edits` last frame vs. now -- any change means an edit.
+    prev_edits: u64,
+    edits: u64,
+    /// Visible rows in the buffer pane.
+    rows: usize,
+    /// A pane bounds change or a fresh buffer forces a repaint.
+    force_full: bool,
+};
+
+/// What `renderBuffer` should do this frame. Split out as a pure
+/// decision so `tests/zoe_tests.zig` can exercise it without a live
+/// client.
+pub const BufferRender = union(enum) {
+    /// Repaint every visible row.
+    full,
+    /// Shift the rows already on the layer by `count` in `dir` with one
+    /// `move_content`, then repaint screen rows `[exposed_lo, exposed_hi)`.
+    shift: struct {
+        count: usize,
+        dir: glyphwire.Layer.ScrollDir,
+        exposed_lo: usize,
+        exposed_hi: usize,
+    },
+};
+
+/// A row shift can express a pure vertical scroll of less than a screen
+/// and nothing else. An edit (`edits` moved), a horizontal scroll, a
+/// jump of a screen or more, an empty pane, or a forced repaint are all
+/// `.full`.
+pub fn planBufferRender(s: BufferRenderState) BufferRender {
+    const d: i64 = @as(i64, @intCast(s.top)) - @as(i64, @intCast(s.prev_top));
+    const shift: usize = @abs(d);
+    if (s.force_full or s.edits != s.prev_edits or s.left != s.prev_left or
+        s.rows == 0 or shift == 0 or shift >= s.rows)
+    {
+        return .full;
+    }
+    return .{ .shift = .{
+        .count = shift,
+        .dir = if (d > 0) .up else .down,
+        .exposed_lo = if (d > 0) s.rows - shift else 0,
+        .exposed_hi = if (d > 0) s.rows else shift,
+    } };
+}
 
 /// Pads `line` with spaces from `width` display cells out to `target`.
 fn padTo(alloc: std.mem.Allocator, line: *std.ArrayList(u8), width: usize, target: usize) !void {

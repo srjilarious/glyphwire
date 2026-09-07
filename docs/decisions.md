@@ -498,6 +498,21 @@ surface.
     silent — which is what makes the layout walk safe for the host to
     re-run purely to recover divider geometry. `Context.layout_gen` is
     the cache key the host uses to avoid even that most frames.
+  - **`move_content` shifts a band of a pane's grid in place.** A pane
+    that owns its own scroll position (`scrollback_rows: 0`, content grid
+    exactly viewport-sized — a TUI editor's buffer, where a full cell
+    grid for a large file would be hundreds of megabytes) still has to
+    *repaint* to scroll, and repainting every visible row on every scroll
+    tick is `rows` `write_text` pairs down the socket per keystroke —
+    which is what made zoe's buffer pane feel heavy. `move_content` is
+    the wire face of `Layer.scrollRange`, the primitive that already
+    backs CSI SU/SD and IL/DL: the client shifts the rows it still has
+    with one message and repaints only the band the scroll exposed. It is
+    a notification (best-effort, no clamp report) and batchable, so the
+    shift and the follow-up partial redraw land in one frame. Not a
+    `scroll_offset` move: that property drives a host viewport over a
+    larger content grid, which is exactly what this kind of pane doesn't
+    have.
 - **v1 built — layer ownership & lifecycle:** every `create_layer` over a
   socket connection records that connection as the layer's first
   **owner**. `adopt_layer` adds more owners (one process handing ongoing
