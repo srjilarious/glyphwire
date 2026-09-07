@@ -1010,13 +1010,18 @@ const Prompt = struct {
 
     const EmitOpts = struct { fg: ?glyphwire.Color = null, transparent: bool = false };
 
-    /// Walks a rendered template's ops. Text runs go through `write_text`
-    /// (or `write_text` transparent, keeping any background strip) with
-    /// `opts.fg`; icons through `draw_icon` at the running cell (which
-    /// `draw_icon` doesn't advance, so the column is bumped by hand).
-    /// Text runs resync the cursor from `getCursor` so an embedded `\n`
-    /// (server CR+LF) needs no local bookkeeping.
+    /// Walks a rendered template's ops, starting at `(row, col)`. Text runs
+    /// go through `write_text` (or `write_text` transparent, keeping any
+    /// background strip) with `opts.fg`; icons through `draw_icon` at the
+    /// running cell (which `draw_icon` doesn't advance, so the column is
+    /// bumped by hand). Text runs resync the cursor from `getCursor` so an
+    /// embedded `\n` (server CR+LF) needs no local bookkeeping.
+    ///
+    /// The explicit `setCursor` up front matters: `drawChain` calls this
+    /// right after `writeSpaces` has left the cursor at the *end* of the
+    /// segment's background strip, not its start.
     fn emitOps(self: *Prompt, ops: []const prompt_template.Op, row: usize, col: usize, opts: EmitOpts) !void {
+        try self.client.setCursor(row, col);
         var cur_row = row;
         var cur_col = col;
         for (ops) |op| switch (op) {
