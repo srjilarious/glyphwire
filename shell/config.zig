@@ -142,6 +142,16 @@ pub const PromptConfig = struct {
     scrollback_type_exits: ?bool = null,
 };
 
+/// What a `zj{ ... }` call declared -- config for the `zj` directory-jump
+/// builtin (see `shell/zjump.zig`). Merges key by key across calls, last
+/// write winning. `exclude_dirs` strings are owned by the enclosing
+/// `ShellConfig` (`prompt_arena`) and are taken verbatim -- `shell/main.zig`
+/// expands a leading `~` when it copies them.
+pub const ZjConfig = struct {
+    enabled: bool = true,
+    exclude_dirs: []const []const u8 = &.{},
+};
+
 /// Everything one shell.conf run declared, parsed into Zig data. Owns its
 /// contents; call `deinit` once the caller has copied what it needs.
 pub const ShellConfig = struct {
@@ -153,6 +163,9 @@ pub const ShellConfig = struct {
     /// Prompt templating from `prompt{ ... }` calls. Multiple calls merge
     /// key by key, last write winning per key.
     prompt: PromptConfig = .{},
+    /// `zj{ ... }` settings for the directory-jump builtin. Merged key by
+    /// key across calls; `exclude_dirs` strings live in `prompt_arena`.
+    zj: ZjConfig = .{},
     /// `open_actions{ ... }` entries, in declaration order across every
     /// call (a later entry for the same key wins -- `openaction.resolve`
     /// scans last-match). Empty means "defaults only". Backed by
@@ -210,6 +223,9 @@ pub fn installBindings(lua: *Lua) void {
 
     lua.pushFunction(ziglua.wrap(luaOpenActions));
     lua.setGlobal("open_actions");
+
+    lua.pushFunction(ziglua.wrap(luaZj));
+    lua.setGlobal("zj");
 }
 
 /// Makes `cfg` the `ShellConfig` every `alias`/`prompt` call appends
@@ -332,6 +348,41 @@ fn luaPrompt(lua: *Lua) !i32 {
     if (!lua.isNoneOrNil(-1)) {
         lua.checkType(-1, .boolean);
         cfg.prompt.scrollback_type_exits = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
+/// `zj{ enabled = true, exclude_dirs = { "/tmp", "~/scratch" } }` --
+/// settings for the directory-jump builtin. A missing key leaves the
+/// current value; `exclude_dirs` replaces any previous list wholesale.
+/// Strings go in `prompt_arena`.
+fn luaZj(lua: *Lua) !i32 {
+    const cfg = g_active orelse return 0;
+    lua.checkType(1, .table);
+
+    _ = lua.getField(1, "enabled");
+    if (!lua.isNoneOrNil(-1)) {
+        lua.checkType(-1, .boolean);
+        cfg.zj.enabled = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "exclude_dirs");
+    if (!lua.isNoneOrNil(-1)) {
+        lua.checkType(-1, .table);
+        const arena = cfg.prompt_arena.allocator();
+        const tbl = lua.getTop();
+        const n = lua.rawLen(tbl);
+        const list = try arena.alloc([]const u8, n);
+        var i: usize = 1;
+        while (i <= n) : (i += 1) {
+            _ = lua.getIndex(tbl, @intCast(i));
+            defer lua.pop(1);
+            list[i - 1] = try arena.dupe(u8, lua.checkString(-1));
+        }
+        cfg.zj.exclude_dirs = list;
     }
     lua.pop(1);
 

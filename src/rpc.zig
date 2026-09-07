@@ -126,6 +126,12 @@ pub fn resizeNotification(alloc: std.mem.Allocator, cols: usize, rows: usize) ![
     return notification(alloc, "resize", protocol.ResizeParams{ .cols = cols, .rows = rows });
 }
 
+/// `shutdown` -- the host window is closing; flush and exit within
+/// roughly `grace_ms`.
+pub fn shutdownNotification(alloc: std.mem.Allocator, grace_ms: u32) ![]u8 {
+    return notification(alloc, "shutdown", protocol.ShutdownParams{ .grace_ms = grace_ms });
+}
+
 /// `context` -- the visible context changed to `context` (its handle),
 /// whose root layer is `cols` x `rows`. Sent by `create_context` /
 /// `activate_context` / `destroy_context` and by the disconnect-cull

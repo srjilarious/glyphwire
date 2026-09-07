@@ -525,6 +525,11 @@ pub const Subscriptions = struct {
     /// `resize` server->client notifications (`{cols, rows}`), sent when
     /// the host window is resized -- see `Server.reportResize`.
     resize: bool = false,
+    /// `shutdown` server->client notification (`{grace_ms}`), sent once
+    /// when the host window is closing so a client can flush persistent
+    /// state and exit cleanly -- see `Server.reportShutdown`.
+    /// glyphwire-shell subscribes and treats it like a typed `exit`.
+    shutdown: bool = false,
     /// `scroll` server->client notifications (`{offset, max}`), sent when
     /// the root layer's scrollback view offset moves -- see
     /// `Server.reportScroll` (mouse wheel / scrollbar) and
@@ -572,6 +577,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "mouse_button")) return self.mouse_button;
         if (std.mem.eql(u8, event, "mouse_move")) return self.mouse_move;
         if (std.mem.eql(u8, event, "resize")) return self.resize;
+        if (std.mem.eql(u8, event, "shutdown")) return self.shutdown;
         if (std.mem.eql(u8, event, "scroll")) return self.scroll;
         if (std.mem.eql(u8, event, "scroll_offset")) return self.scroll;
         if (std.mem.eql(u8, event, "layout")) return self.layout;
@@ -591,6 +597,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "mouse_button")) s.mouse_button = true;
             if (std.mem.eql(u8, e, "mouse_move")) s.mouse_move = true;
             if (std.mem.eql(u8, e, "resize")) s.resize = true;
+            if (std.mem.eql(u8, e, "shutdown")) s.shutdown = true;
             if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
             if (std.mem.eql(u8, e, "scroll_offset")) s.scroll = true;
             if (std.mem.eql(u8, e, "layout")) s.layout = true;

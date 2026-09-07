@@ -301,6 +301,26 @@ pub fn main(init: std.process.Init) !void {
 
     appRunner.run(app);
 
+    // If the window was closed (rather than the shell exiting on its own,
+    // which is the other way `appRunner.run` returns), the shell child is
+    // still connected and hasn't been told anything. Give it a chance to
+    // flush its persistent state (command history, the `zj` directory
+    // database) and exit cleanly: the `serveForever` thread is still up,
+    // so a `shutdown` notification still reaches it, and then wait a
+    // bounded time for its process to actually exit -- `reapChild` flips
+    // `shell_exited` when it does.
+    if (!shell_exited.load(.monotonic)) {
+        const grace_ms: u32 = 1500;
+        srv.reportShutdown(alloc, grace_ms) catch {};
+
+        const start = std.Io.Timestamp.now(io, .awake);
+        while (!shell_exited.load(.monotonic)) {
+            const elapsed = std.Io.Timestamp.now(io, .awake).toMilliseconds() - start.toMilliseconds();
+            if (elapsed >= grace_ms) break;
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(15), .awake) catch break;
+        }
+    }
+
     // `appRunner.run` only returns once the window closes, but
     // `serveForever`'s thread and any live per-connection threads (e.g.
     // the glyphwire-shell child, which is normally still connected) are

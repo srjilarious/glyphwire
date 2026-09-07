@@ -2088,6 +2088,63 @@ surface.
   grid as `name: message` and reported as exit status 1, and the state
   stays usable. A builtin's numeric `return` is its `$?` (so `{exit}`
   works); `runScriptBuiltin` reports `last_dur_ms = 0`.
+- **`sh.chdir(path)` changes the shell's directory from a script**, going
+  through the same `Prompt.chdir` an interactive `cd` uses (so the jump
+  is recorded in the `zj` database too). Returns a boolean rather than
+  raising, so a script can branch on a bad path. Added because `sh.exec`
+  can't do it — `sh.exec("cd ...")` goes straight to `runPipeline`, which
+  never consults builtin dispatch, so `cd` there would try to exec a
+  binary.
+
+#### `zj` directory jumping
+- **`zj QUERY` is a `z`/zoxide-style jump built in, not a shipped Lua
+  script.** It needs to change the shell's own cwd, which a script could
+  only do through the new `sh.chdir` hook; a core builtin is simpler and
+  keeps the ranking logic in a pure, unit-tested Zig module
+  (`shell/zjump.zig`), matching how `history.zig` / `glob.zig` are
+  structured. Named `zj` rather than `z` to stay clear of a one-letter
+  name a user is likely to have aliased.
+- **Every `cd` records the new directory; `zj` ranks by frecency.** The
+  database (`~/.config/glyphwire/z.db`, a `<rank>\t<last>\t<path>` TSV) is
+  keyed by the *real* cwd (`getcwd` after the change, so symlinks and
+  `..` are already collapsed). Ranking is zoxide's formula: a per-path
+  visit weight scaled by a stepped recency multiplier (4× within the
+  hour, 2× the day, 0.5× the week, 0.25× older), so a directory hit three
+  times this morning beats one hit forty times last month. Bounded not by
+  an entry cap but by aging: once the summed weight passes 10000 every
+  entry is scaled ×0.9 and the sub-1.0 ones are dropped.
+- **Matching is case-insensitive substring, last term also matching the
+  basename.** `zj a b` requires every term as a substring of the path and
+  the last term as a substring of the final component — so `zj dow` lands
+  in `~/Downloads` from anywhere, not in `~/downloads-archive/old`. Full
+  fuzzy/subsequence scoring was deliberately skipped as more than the
+  feature needs. The current directory is never a result; `$HOME` and `/`
+  are never *recorded* (a keystroke away without help); `exclude_dirs`
+  from `zj{}` in `shell.conf` drops a subtree from both. A single
+  argument that is itself an existing directory falls back to plain `cd`
+  (so `zj ../sibling` still works), and bare `zj` goes `$HOME`. A jump
+  target that has since vanished is pruned from the database and
+  reported. An interactive picker for ambiguous queries is deferred.
+
+#### Persistent state is flushed lazily, not on every change
+- **History and the `zj` database are kept in memory and written on a
+  gate**, replacing history's old "rewrite the file after every line".
+  That eager write existed because an interactive session was normally
+  *killed*, not exited — which no longer holds now that the host sends a
+  `shutdown` notification (see below) the shell flushes on. The gate
+  (`shell/flushgate.zig`) forces a write after 25 un-flushed changes or
+  120s, whichever first, bounding what a `SIGKILL`/crash can lose; a
+  clean exit and the `shutdown` path both force an unconditional flush.
+- **The host tells clients it's closing (`shutdown` notification) instead
+  of just dropping the socket.** On window close `host/main.zig` — after
+  the render loop has ended but while the `serveForever` thread is still
+  up — broadcasts `shutdown{grace_ms}` and then waits up to `grace_ms`
+  (1.5s) for the shell's process to exit before tearing down. The shell
+  subscribes and treats it as a typed `exit`. A wire notification rather
+  than shell-only cleanup so any client (a future editor with unsaved
+  buffers) can hook the same signal; it rides the same
+  `InputListener` ordered queue as `key`/`text` so it can't jump ahead of
+  input the user already typed.
 
 ### Batch messages
 - **`batch` wraps an ordered list of other messages in one frame**,

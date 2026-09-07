@@ -17,9 +17,9 @@
 -- loops / conditionals / `string` / `table` all work. It runs in the
 -- shell's session-long Lua state, so a `function` (or `defcmd`) it
 -- defines stays callable as a builtin afterwards. glyphwire adds:
--- `alias(name, value)`, `prompt{ ... }`, `defcmd(name, fn)`, and the `sh`
--- table (`sh.setenv` / `sh.unsetenv` / `sh.getenv` / `sh.cwd` /
--- `sh.realpath`). See the Scripts section below.
+-- `alias(name, value)`, `prompt{ ... }`, `zj{ ... }`, `defcmd(name, fn)`,
+-- and the `sh` table (`sh.setenv` / `sh.unsetenv` / `sh.getenv` /
+-- `sh.cwd` / `sh.chdir` / `sh.realpath`). See the Scripts section below.
 
 
 ---- Aliases ------------------------------------------------------------
@@ -72,6 +72,22 @@
 --   ["application/zip"] = "ark {selections}",
 --   ["text/*"]          = "code {sel}",   -- any text/* file into an editor
 --   ["file"]            = "xdg-open {sel}", -- catch-all for other files
+-- }
+
+
+---- Directory jumping (zj) -----------------------------------------
+--
+-- Every `cd` records the directory you landed in; `zj QUERY` then jumps
+-- to the best-ranked match (a `z` / zoxide clone). Matching is
+-- case-insensitive substring, with the last term also having to match the
+-- final path component -- `zj dow` goes to ~/Downloads from anywhere.
+-- Bare `zj` goes home; `zj ../sibling` (an existing path) acts like `cd`.
+-- The database is ~/.config/glyphwire/z.db, written on exit and
+-- periodically. $HOME and / are never recorded.
+--
+-- zj{
+--   enabled = true,                       -- set false to turn it off
+--   exclude_dirs = { "/tmp", "~/scratch" }, -- never record or return these (or anything under them)
 -- }
 
 

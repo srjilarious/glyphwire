@@ -111,6 +111,7 @@ fn run(init: std.process.Init) !void {
             .key => |k| if (k.pressed) return,
             .text, .paste => {},
             .copy_request => {},
+            .shutdown => return,
         }
     }
 }

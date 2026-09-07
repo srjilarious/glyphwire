@@ -570,6 +570,20 @@ pub const Server = struct {
         try self.reportLayout(alloc);
     }
 
+    /// Broadcasts a `shutdown` notification (`{grace_ms}`) to every
+    /// connection subscribed to `"shutdown"` -- the window is closing and
+    /// a client should flush any persistent state and exit. Sent once, by
+    /// glyphwire-host, after its render loop has ended; the server thread
+    /// is still up so the notification still reaches a connected client,
+    /// and the host then waits up to `grace_ms` for the client's process
+    /// to actually exit before it tears down. Touches no context state,
+    /// so it needs no lock.
+    pub fn reportShutdown(self: *Server, alloc: std.mem.Allocator, grace_ms: u32) !void {
+        const body = try rpc.shutdownNotification(alloc, grace_ms);
+        defer alloc.free(body);
+        self.broadcast(null, "shutdown", body);
+    }
+
     /// Re-lays-out the split tree against the current context size and
     /// broadcasts a `layout` notification for every pane whose bounds
     /// moved. Silent when there is no split tree, or when the layout came

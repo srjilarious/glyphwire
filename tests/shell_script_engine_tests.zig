@@ -16,6 +16,8 @@ const TestHost = struct {
     env: std.StringHashMapUnmanaged([]const u8) = .empty,
     out: std.ArrayListUnmanaged(u8) = .empty,
     interrupt: bool = false,
+    /// Last path `sh.chdir` was asked to change to.
+    chdir_to: ?[]const u8 = null,
 
     fn deinit(self: *TestHost) void {
         var it = self.env.iterator();
@@ -25,6 +27,7 @@ const TestHost = struct {
         }
         self.env.deinit(self.alloc);
         self.out.deinit(self.alloc);
+        if (self.chdir_to) |p| self.alloc.free(p);
     }
 
     fn hooks(self: *TestHost) script_engine.HostHooks {
@@ -34,6 +37,7 @@ const TestHost = struct {
             .unsetenv = tUnsetenv,
             .getenv = tGetenv,
             .cwd = tCwd,
+            .chdir = tChdir,
             .realpath = tRealpath,
             .write = tWrite,
             .poll_interrupt = tPollInterrupt,
@@ -81,6 +85,13 @@ fn tCwd(ctx: *anyopaque, buf: []u8) ?[]const u8 {
     const cwd = "/tmp";
     @memcpy(buf[0..cwd.len], cwd);
     return buf[0..cwd.len];
+}
+
+fn tChdir(ctx: *anyopaque, path: [:0]const u8) bool {
+    const self: *TestHost = @ptrCast(@alignCast(ctx));
+    if (self.chdir_to) |p| self.alloc.free(p);
+    self.chdir_to = self.alloc.dupe(u8, path) catch null;
+    return true;
 }
 
 fn tRealpath(ctx: *anyopaque, path: [:0]const u8, buf: []u8) ?[]const u8 {
