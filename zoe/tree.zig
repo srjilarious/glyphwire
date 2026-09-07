@@ -20,8 +20,12 @@ const glyphwire = @import("glyphwire");
 /// Cells of indent per nesting level.
 pub const indent_cols: usize = 2;
 
-/// Columns reserved before the name for the entry's icon plus a space.
-pub const icon_cols: usize = 2;
+/// Columns reserved before the name for the entry's icon plus a gap. The
+/// icon renders at its natural size capped to the row height (like
+/// `glyphwire-ls`'s small-table icons), which is wider than one cell, so
+/// this leaves it room without the first letter of the name tucking
+/// under it.
+pub const icon_cols: usize = 3;
 
 pub const Entry = struct {
     /// The final path component, owned.

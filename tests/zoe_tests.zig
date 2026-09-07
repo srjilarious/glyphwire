@@ -635,9 +635,11 @@ pub fn treeWidestColsIncludesIndentAndIconTest(_: std.Io, alloc: std.mem.Allocat
     var t = try fakeTree(alloc);
     defer t.deinit();
 
-    // "deep.zig" at depth 2: 2*2 indent + 2 icon + 8 name.
-    try testz.expectEqual(t.widestCols(), 14);
-    try testz.expectEqual(t.at(0).?.cols(), 5);
+    const ic = zoe.tree.icon_cols;
+    // "deep.zig" at depth 2: 2*2 indent + icon + 8 name.
+    try testz.expectEqual(t.widestCols(), 4 + ic + 8);
+    // "src" at depth 0: icon + 3 name.
+    try testz.expectEqual(t.at(0).?.cols(), ic + 3);
 }
 
 pub fn treeCollapseRemovesTheWholeSubtreeTest(io: std.Io, alloc: std.mem.Allocator) !void {
