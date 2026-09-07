@@ -77,7 +77,9 @@ pub fn main(init: std.process.Init) !void {
 
     if (script) |s| {
         switch (try zoe.keys.feed(&ed, s)) {
-            .none, .quit => {},
+            // `:cd` / `:pwd` need a live client and a real cwd to act
+            // on; the headless driver just reports what parsed.
+            .none, .quit, .chdir, .pwd => {},
             .write, .write_quit, .edit => |target| try headlessSave(io, &ed, target),
         }
     }

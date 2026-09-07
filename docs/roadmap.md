@@ -2235,6 +2235,53 @@ See decisions.md's "Profiler" section for the rationale.
   iteration and which dumps a `std.log` table on that cadence. No HUD,
   no wire — the shell is a client.
 
+## zoe: command-line navigation, paging keys, and a per-pane redraw gate
+
+Client-local work, no wire change. Driven by live use: typing on the `:`
+line felt laggy, PageUp/PageDown did nothing, and `:23k` / `:cd` were
+unimplemented. Full command inventory + what's still missing is in
+`docs/investigations/zoe-editor.md`.
+
+- **The command-line lag was a redraw-scope bug.** `Ui.render` rebuilt
+  *every* pane on every dirty frame, and every keystroke set the frame
+  dirty. So each `:` line character shipped a batch containing a full
+  syntax-highlighted buffer repaint (`h.lineSpans` per visible row) *and*
+  a full file-tree repaint (a `write_text` pair **plus a `draw_icon`**
+  per entry). Fix is a per-pane dirty split: `buffer_dirty` /
+  `tree_dirty` / `status_dirty`, each set by whatever changed that pane
+  and cleared by `render`. `handleInput` snapshots `(cursor, buf.edits)`
+  around the keystroke and only marks the buffer dirty if they moved; the
+  status row (one line) is always redrawn. A `:` line keystroke now
+  touches one row.
+- **Pure cursor moves repaint two rows, not the pane.** `renderBuffer`
+  gained a branch before `planBufferRender`: no edit, no scroll, no
+  forced-full, no localized-highlight change means only the caret moved,
+  so `repaintCaretRows` redraws the row it left and the row it landed on
+  and nothing else. `planBufferRender` still returns `.full` for a
+  non-scrolling frame; this branch just gets there first for the common
+  case (bare `hjkl`, word motions, an on-screen `:23k`).
+- **PageDown / PageUp / Ctrl-D / Ctrl-U** move by `Editor.page_lines`
+  (default 10, `zoe.conf` `page_lines`, `Ui.setupHighlight` writes it in
+  on the same config load). `feedKey` now reads its `Mods` (was
+  discarded) so the Ctrl forms — normal-mode only, leaving insert-mode
+  Ctrl-U/D free for a later vim meaning — resolve; `handleInput` passes
+  the real ctrl state instead of `.{}`. A fixed count, not a screenful:
+  the editor core has no viewport.
+- **`:` line addresses and motions.** `commandLineJump` handles `$` /
+  `.` (last / current line), `+N` / `-N` (relative, N defaults to 1),
+  and `{count}{motion}` — a leading digit routes `:23k`, `:10l`, `:5G`
+  etc. through the same motions a bare keystroke uses, while `:w` / `:q`
+  / `:e` still dispatch as commands because they have no leading digit.
+- **`:cd [dir]` / `:pwd`.** Two new `Outcome`s (`chdir: ?[]const u8`,
+  `pwd`) — the editor core still does no IO. `Ui.changeDir` resolves
+  `null` → `$HOME`, `"-"` → the remembered previous dir, `~/…` →
+  expanded, then `std.process.setCurrentPath` and re-roots the tree pane
+  (`Tree.init` at the new cwd, scroll reset). `zoe/main.zig`'s headless
+  switch ignores both.
+- **Tests:** `zoe_tests.zig` +6 (paging by default and configured
+  `page_lines`, Ctrl-D/U, `:$`/`:.`, `:+N`/`:-N`, `:{count}{motion}`,
+  `:cd`/`:pwd` outcomes). 725 pass.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

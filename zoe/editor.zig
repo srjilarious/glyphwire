@@ -62,6 +62,15 @@ pub const Outcome = union(enum) {
     /// `Editor.cmd_arg` like `write` does. A bare `:e` (reload the
     /// current file) carries null.
     edit: ?[]const u8,
+    /// `:cd [dir]` -- change the working directory. `null` means
+    /// `$HOME`, `"-"` the previous directory, anything else the target
+    /// path (borrows `Editor.cmd_arg`, valid until the next input). The
+    /// host does the `chdir` and re-roots the file tree; the editor
+    /// core has no cwd of its own.
+    chdir: ?[]const u8,
+    /// `:pwd` -- show the working directory on the status line. The
+    /// editor doesn't know it, so the host fills the message in.
+    pwd,
 };
 
 pub const Editor = struct {
@@ -85,6 +94,13 @@ pub const Editor = struct {
     operator_count: usize = 0,
     /// A pending single-character prefix -- only `g` today (`gg`).
     prefix: ?u8 = null,
+
+    /// Lines a PageDown / PageUp (or Ctrl-D / Ctrl-U) moves the cursor.
+    /// vim scrolls close to a full screen, but the editor core has no
+    /// viewport to measure, so this is a fixed count -- overridable from
+    /// `zoe.conf`'s `page_lines`, which the host writes here after
+    /// `init`.
+    page_lines: usize = 10,
 
     /// The `:` line being typed, without the leading colon.
     cmdline: std.ArrayList(u8) = .empty,
@@ -204,7 +220,6 @@ pub const Editor = struct {
     /// the keys with no character to carry them are handled here --
     /// everything printable arrives through `feedText`.
     pub fn feedKey(self: *Editor, key: []const u8, mods: Mods) !Outcome {
-        _ = mods;
         const eq = std.mem.eql;
         if (eq(u8, key, "escape")) {
             self.escape();
@@ -213,6 +228,18 @@ pub const Editor = struct {
 
         switch (self.mode) {
             .normal => {
+                // PageDown/PageUp, and vim's Ctrl-D / Ctrl-U half-page
+                // keys, all move by `page_lines`. The Ctrl forms are
+                // normal-mode only, leaving insert-mode Ctrl-U/D free
+                // for their vim meanings if zoe grows them later.
+                if (eq(u8, key, "page_down") or (mods.ctrl and eq(u8, key, "d"))) {
+                    self.pageMove(.down, false);
+                    return .none;
+                }
+                if (eq(u8, key, "page_up") or (mods.ctrl and eq(u8, key, "u"))) {
+                    self.pageMove(.up, false);
+                    return .none;
+                }
                 if (eq(u8, key, "left")) {
                     self.moveTo(motion.left(&self.buf, self.cursor, 1), true);
                 } else if (eq(u8, key, "right")) {
@@ -229,7 +256,11 @@ pub const Editor = struct {
                 return .none;
             },
             .insert => {
-                if (eq(u8, key, "enter")) {
+                if (eq(u8, key, "page_down")) {
+                    self.pageMove(.down, true);
+                } else if (eq(u8, key, "page_up")) {
+                    self.pageMove(.up, true);
+                } else if (eq(u8, key, "enter")) {
                     try self.insertText("\n");
                 } else if (eq(u8, key, "backspace")) {
                     try self.backspace();
@@ -301,6 +332,20 @@ pub const Editor = struct {
 
     fn syncSticky(self: *Editor) void {
         self.sticky_col = self.buf.posOf(self.cursor).col;
+    }
+
+    const VDir = enum { up, down };
+
+    /// PageDown / PageUp: a vertical jump of `page_lines`, keeping the
+    /// sticky column just like `j` / `k`. `allow_eol` follows the mode,
+    /// the same as the arrow keys.
+    fn pageMove(self: *Editor, dir: VDir, allow_eol: bool) void {
+        const n = self.page_lines;
+        const target = switch (dir) {
+            .down => motion.down(&self.buf, self.cursor, n, self.sticky_col, allow_eol),
+            .up => motion.up(&self.buf, self.cursor, n, self.sticky_col, allow_eol),
+        };
+        self.moveTo(target, false);
     }
 
     /// The count typed so far, defaulting to 1, consumed in the process.
@@ -587,6 +632,10 @@ pub const Editor = struct {
             return .none;
         }
 
+        // `:$`, `:.`, `:+N`, `:-N`, and `:{count}{motion}` (`:23k`) --
+        // a line address or a normal-mode motion typed on the `:` line.
+        if (self.commandLineJump(line)) return .none;
+
         const name_end = std.mem.indexOfAny(u8, line, " \t") orelse line.len;
         const name = line[0..name_end];
         const arg = std.mem.trim(u8, line[name_end..], " \t");
@@ -596,6 +645,8 @@ pub const Editor = struct {
         const arg_opt: ?[]const u8 = if (self.cmd_arg.items.len == 0) null else self.cmd_arg.items;
 
         const eq = std.mem.eql;
+        if (eq(u8, name, "cd") or eq(u8, name, "chdir")) return .{ .chdir = arg_opt };
+        if (eq(u8, name, "pwd")) return .pwd;
         if (eq(u8, name, "w") or eq(u8, name, "write")) return .{ .write = arg_opt };
         if (eq(u8, name, "e") or eq(u8, name, "edit")) {
             if (self.buf.dirty) {
@@ -618,6 +669,84 @@ pub const Editor = struct {
 
         self.setStatus("E492: Not an editor command: {s}", .{name});
         return .none;
+    }
+
+    /// The `:` forms that move the cursor rather than run a command:
+    ///
+    ///  - `$` / `.`            -- the last / current line
+    ///  - `+N` / `-N`          -- N lines down / up (N defaults to 1)
+    ///  - `{count}{motion}`    -- a normal-mode motion with a count, so
+    ///                            `:23k` moves up 23 lines and `:10l`
+    ///                            right 10 characters
+    ///
+    /// A leading digit is what distinguishes the motion form from a
+    /// command, so `:w` / `:q` / `:e` still dispatch normally. Returns
+    /// true when `line` was one of these and the cursor has been moved.
+    fn commandLineJump(self: *Editor, line: []const u8) bool {
+        if (line.len == 0) return false;
+
+        if (std.mem.eql(u8, line, "$")) {
+            self.moveTo(motion.gotoLine(&self.buf, self.buf.lineCount() - 1), true);
+            return true;
+        }
+        if (std.mem.eql(u8, line, ".")) {
+            self.moveTo(motion.gotoLine(&self.buf, self.buf.lineAt(self.cursor)), true);
+            return true;
+        }
+        if (line[0] == '+' or line[0] == '-') {
+            const digits = line[1..];
+            const n: usize = if (digits.len == 0)
+                1
+            else
+                std.fmt.parseInt(usize, digits, 10) catch return false;
+            const here = self.buf.lineAt(self.cursor);
+            const target = if (line[0] == '+') here + n else here -| n;
+            self.moveTo(motion.gotoLine(&self.buf, target), true);
+            return true;
+        }
+
+        var i: usize = 0;
+        while (i < line.len and std.ascii.isDigit(line[i])) i += 1;
+        if (i == 0 or i == line.len) return false;
+        const count = std.fmt.parseInt(usize, line[0..i], 10) catch return false;
+        return self.commandLineMotion(line[i..], count);
+    }
+
+    /// Runs motion string `m` with `count`, the same motions `command`
+    /// dispatches from a bare keystroke. Vertical motions keep the
+    /// sticky column. Returns false for an unrecognized motion, so the
+    /// caller can fall through to reporting an unknown command.
+    fn commandLineMotion(self: *Editor, m: []const u8, count: usize) bool {
+        const buf = &self.buf;
+        const c = self.cursor;
+        const sc = self.sticky_col;
+        const eq = std.mem.eql;
+        if (eq(u8, m, "j")) {
+            self.moveTo(motion.down(buf, c, count, sc, false), false);
+        } else if (eq(u8, m, "k")) {
+            self.moveTo(motion.up(buf, c, count, sc, false), false);
+        } else if (eq(u8, m, "h")) {
+            self.moveTo(motion.left(buf, c, count), true);
+        } else if (eq(u8, m, "l")) {
+            self.moveTo(motion.right(buf, c, count, false), true);
+        } else if (eq(u8, m, "w")) {
+            self.moveTo(motion.wordForward(buf, c, count, false), true);
+        } else if (eq(u8, m, "W")) {
+            self.moveTo(motion.wordForward(buf, c, count, true), true);
+        } else if (eq(u8, m, "b")) {
+            self.moveTo(motion.wordBackward(buf, c, count, false), true);
+        } else if (eq(u8, m, "B")) {
+            self.moveTo(motion.wordBackward(buf, c, count, true), true);
+        } else if (eq(u8, m, "e")) {
+            self.moveTo(motion.wordEnd(buf, c, count, false), true);
+        } else if (eq(u8, m, "E")) {
+            self.moveTo(motion.wordEnd(buf, c, count, true), true);
+        } else if (eq(u8, m, "G") or eq(u8, m, "gg")) {
+            self.moveTo(motion.gotoLine(buf, count -| 1), true);
+        } else {
+            return false;
+        }
+        return true;
     }
 };
 

@@ -35,6 +35,10 @@ pub const Config = struct {
     /// highlight embedded languages (code fences, Markdown inline).
     /// Default true; set `false` as an escape hatch.
     injections: bool = true,
+    /// `config.page_lines` -- lines a PageDown / PageUp (or Ctrl-D /
+    /// Ctrl-U) moves the cursor. Default 10; a non-positive or
+    /// non-number value is ignored.
+    page_lines: usize = 10,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -88,7 +92,19 @@ pub fn load(
     cfg.grammar_dirs = readGrammarDirs(lua, a, environ);
     cfg.langs = readLangs(lua, a);
     cfg.injections = readInjections(lua);
+    cfg.page_lines = readPageLines(lua, cfg.page_lines);
     return cfg;
+}
+
+/// `config.page_lines = 15`. A number >= 1 replaces the default;
+/// anything else (absent, zero, negative, non-number) leaves it.
+fn readPageLines(lua: *Lua, current: usize) usize {
+    const t = lua.getField(-1, "page_lines");
+    defer lua.pop(1);
+    if (t != .number) return current;
+    const n = lua.toNumber(-1) catch return current;
+    if (n < 1) return current;
+    return @intFromFloat(n);
 }
 
 /// `config.injections = false` turns embedded-language highlighting off.

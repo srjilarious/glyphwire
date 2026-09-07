@@ -62,6 +62,22 @@ const Bounds = struct {
 
 const Focus = enum { buffer, tree };
 
+/// The slice of editor state the buffer pane draws from. `handleInput`
+/// takes one before dispatching a keystroke and one after; if they match,
+/// the buffer pane is untouched and `render` can skip it -- which is what
+/// keeps a `:` line keystroke from triggering a full syntax repaint.
+const EdSnapshot = struct {
+    cursor: usize,
+    edits: u64,
+
+    fn of(ed: *const Editor) EdSnapshot {
+        return .{ .cursor = ed.cursor, .edits = ed.buf.edits };
+    }
+    fn eql(a: EdSnapshot, b: EdSnapshot) bool {
+        return a.cursor == b.cursor and a.edits == b.edits;
+    }
+};
+
 pub const Ui = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -115,10 +131,22 @@ pub const Ui = struct {
 
     focus: Focus = .buffer,
     tree_visible: bool = true,
-    /// Set by anything that changes what should be on screen; cleared by
-    /// `render`. One redraw per input burst rather than one per event.
-    dirty: bool = true,
+    /// Per-pane redraw flags, set by whatever changed that pane's
+    /// contents and cleared by `render`. Split three ways because a
+    /// keystroke on the `:` line only touches the status row -- redrawing
+    /// the buffer (a fresh syntax pass per visible row) and the whole
+    /// file tree (a `draw_icon` per entry) on every such keystroke is
+    /// what made the command line feel laggy.
+    buffer_dirty: bool = true,
+    tree_dirty: bool = true,
+    status_dirty: bool = true,
     quit: bool = false,
+
+    /// The process environment, kept for `:cd` (`$HOME`) and passed on
+    /// to the highlighter setup.
+    environ: *const std.process.Environ.Map,
+    /// The working directory before the last `:cd`, for `:cd -`. Owned.
+    prev_cwd: ?[]u8 = null,
 
     /// tree-sitter syntax highlighting. All four are null / empty when
     /// highlighting is off -- no grammar directory resolved, or
@@ -195,6 +223,7 @@ pub const Ui = struct {
             .pane_split = pane_split,
             .root_split = root_split,
             .cell_px_h = metrics.h,
+            .environ = environ,
         };
         errdefer self.tree.deinit();
 
@@ -223,6 +252,10 @@ pub const Ui = struct {
     /// buffer renders unhighlighted.
     fn setupHighlight(self: *Ui, environ: *const std.process.Environ.Map) void {
         var cfg = langconf.load(self.alloc, self.io, environ);
+
+        // `page_lines` rides in on the same config load, whether or not
+        // highlighting itself ends up enabled below.
+        self.ed.page_lines = cfg.page_lines;
 
         const dirs = syntax.searchDirs(self.alloc, self.io, environ, cfg.grammar_dirs) catch {
             cfg.deinit();
@@ -279,6 +312,7 @@ pub const Ui = struct {
     pub fn deinit(self: *Ui) void {
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
+        if (self.prev_cwd) |p| self.alloc.free(p);
 
         self.hl_scratch.deinit(self.alloc);
         self.hl_dirty_lines.deinit(self.alloc);
@@ -353,7 +387,7 @@ pub const Ui = struct {
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
             try self.drainEvents();
-            if (self.dirty) try self.render();
+            if (self.buffer_dirty or self.tree_dirty or self.status_dirty) try self.render();
             if (self.quit) break;
 
             // Block until something arrives rather than spinning; the
@@ -381,9 +415,11 @@ pub const Ui = struct {
             try self.syncContentSizes();
             // The buffer layer's grid was resized: the rows it holds no
             // longer line up with the panes, so the next frame can't
-            // shift them -- it has to repaint.
+            // shift them -- it has to repaint. Every pane moved.
             self.buffer_full_redraw = true;
-            self.dirty = true;
+            self.buffer_dirty = true;
+            self.tree_dirty = true;
+            self.status_dirty = true;
         }
         while (self.listener.pollScrollOffsetEvent()) |ev| {
             if (ev.layer == self.tree_layer) self.tree_scroll = .{ .row = ev.row, .col = ev.col };
@@ -409,6 +445,13 @@ pub const Ui = struct {
     }
 
     fn handleInput(self: *Ui, ev: glyphwire.InputEvent) !void {
+        // A keystroke on the `:` line, or a normal-mode key that turns
+        // out to do nothing, leaves the buffer pane exactly as it was.
+        // Snapshot the parts of the editor the buffer pane draws from so
+        // `render` can skip repainting it (and re-running the syntax
+        // pass) when none of them moved.
+        const before = EdSnapshot.of(self.ed);
+
         switch (ev) {
             .key => |k| {
                 // Every physical keystroke is two notifications, a press
@@ -430,10 +473,16 @@ pub const Ui = struct {
                 // taken before the editor sees them so they work in any
                 // mode. Modifiers arrive as their own key events, so the
                 // listener's down-set is what answers "was ctrl held".
-                if (self.listener.isKeyDown("left_control") or self.listener.isKeyDown("right_control")) {
+                const ctrl = self.listener.isKeyDown("left_control") or
+                    self.listener.isKeyDown("right_control");
+                if (ctrl) {
                     if (std.mem.eql(u8, k.key, "w")) {
                         self.focus = if (self.focus == .buffer) .tree else .buffer;
-                        self.dirty = true;
+                        // Only the tree's selected-row highlight depends
+                        // on focus; the buffer draws its caret the same
+                        // in either pane.
+                        self.tree_dirty = true;
+                        self.status_dirty = true;
                         return;
                     }
                     if (std.mem.eql(u8, k.key, "n")) {
@@ -441,12 +490,20 @@ pub const Ui = struct {
                         return;
                     }
                 }
-                if (self.focus == .tree) return self.treeKey(k.key);
-                try self.applyOutcome(try self.ed.feedKey(k.key, .{}));
+                if (self.focus == .tree) {
+                    try self.treeKey(k.key);
+                    self.status_dirty = true;
+                    return;
+                }
+                try self.applyOutcome(try self.ed.feedKey(k.key, .{ .ctrl = ctrl }));
             },
             .text => |t| {
                 self.ed.status.clearRetainingCapacity();
-                if (self.focus == .tree) return self.treeText(t.text);
+                if (self.focus == .tree) {
+                    try self.treeText(t.text);
+                    self.status_dirty = true;
+                    return;
+                }
                 try self.applyOutcome(try self.ed.feedText(t.text));
             },
             .paste => |t| {
@@ -455,7 +512,13 @@ pub const Ui = struct {
             },
             .copy_request => {},
         }
-        self.dirty = true;
+
+        // Any keystroke can change the status row -- the mode word, the
+        // `:` line, the cursor position, a just-cleared error -- and it
+        // is one row, so always redraw it. The buffer pane redraws only
+        // when the editor state it shows actually moved.
+        self.status_dirty = true;
+        if (!EdSnapshot.of(self.ed).eql(before)) self.buffer_dirty = true;
     }
 
     fn toggleTree(self: *Ui) !void {
@@ -464,7 +527,9 @@ pub const Ui = struct {
         try self.applySplitChildren();
         // The buffer pane is about to be re-laid-out wider or narrower.
         self.buffer_full_redraw = true;
-        self.dirty = true;
+        self.buffer_dirty = true;
+        self.tree_dirty = true;
+        self.status_dirty = true;
     }
 
     // ── Tree pane input ─────────────────────────────────────────────────
@@ -475,7 +540,7 @@ pub const Ui = struct {
         if (eq(u8, key, "up")) self.treeMove(-1);
         if (eq(u8, key, "enter")) try self.treeActivate();
         if (eq(u8, key, "escape")) self.focus = .buffer;
-        self.dirty = true;
+        self.tree_dirty = true;
     }
 
     /// Tree navigation reuses vim's own keys, so switching panes doesn't
@@ -495,7 +560,7 @@ pub const Ui = struct {
                 else => {},
             }
         }
-        self.dirty = true;
+        self.tree_dirty = true;
     }
 
     fn treeMove(self: *Ui, delta: i64) void {
@@ -547,7 +612,8 @@ pub const Ui = struct {
         self.tree.cursor = index;
         self.focus = .tree;
         try self.treeActivate();
-        self.dirty = true;
+        self.tree_dirty = true;
+        self.status_dirty = true;
     }
 
     // ── Editor outcomes ─────────────────────────────────────────────────
@@ -568,7 +634,73 @@ pub const Ui = struct {
                 };
                 try self.openFile(path);
             },
+            .chdir => |target| self.changeDir(target),
+            .pwd => {
+                var buf: [std.fs.max_path_bytes]u8 = undefined;
+                const n = std.process.currentPath(self.io, &buf) catch {
+                    self.ed.setStatus("E: cannot read working directory", .{});
+                    return;
+                };
+                self.ed.setStatus("{s}", .{buf[0..n]});
+            },
         }
+    }
+
+    /// `:cd` -- change the process working directory and re-root the
+    /// file tree there. `target` is null for `$HOME`, `"-"` for the
+    /// previous directory, `~/...` for a home-relative path, or a plain
+    /// path. The previous directory is remembered for the next `:cd -`.
+    fn changeDir(self: *Ui, target: ?[]const u8) void {
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dest: []const u8 = blk: {
+            const t = target orelse break :blk self.environ.get("HOME") orelse {
+                self.ed.setStatus("E: $HOME not set", .{});
+                return;
+            };
+            if (std.mem.eql(u8, t, "-")) break :blk self.prev_cwd orelse {
+                self.ed.setStatus("E: no previous directory", .{});
+                return;
+            };
+            if (std.mem.eql(u8, t, "~") or std.mem.startsWith(u8, t, "~/")) {
+                const h = self.environ.get("HOME") orelse break :blk t;
+                const rest = if (t.len > 1) t[2..] else "";
+                break :blk std.fmt.bufPrint(&home_buf, "{s}/{s}", .{ h, rest }) catch t;
+            }
+            break :blk t;
+        };
+
+        // Remember the current directory before leaving it.
+        var cur_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cur_n = std.process.currentPath(self.io, &cur_buf) catch 0;
+
+        std.process.setCurrentPath(self.io, dest) catch {
+            self.ed.setStatus("E344: Can't chdir to \"{s}\"", .{dest});
+            return;
+        };
+
+        if (cur_n > 0) {
+            if (self.alloc.dupe(u8, cur_buf[0..cur_n])) |owned| {
+                if (self.prev_cwd) |p| self.alloc.free(p);
+                self.prev_cwd = owned;
+            } else |_| {}
+        }
+
+        // Re-root the tree at the resolved absolute cwd.
+        var new_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const new_n = std.process.currentPath(self.io, &new_buf) catch 0;
+        const new_root = if (new_n > 0) new_buf[0..new_n] else dest;
+
+        if (Tree.init(self.alloc, self.io, new_root)) |fresh| {
+            self.tree.deinit();
+            self.tree = fresh;
+            self.tree_scroll = .{};
+            self.client.setLayerScrollOffset(self.tree_layer, 0, 0) catch {};
+            self.syncContentSizes() catch {};
+        } else |_| {}
+
+        self.tree_dirty = true;
+        self.status_dirty = true;
+        self.ed.setStatus("{s}", .{new_root});
     }
 
     fn openFile(self: *Ui, path: []const u8) !void {
@@ -585,7 +717,8 @@ pub const Ui = struct {
         // A whole new buffer -- nothing on screen carries over.
         self.buffer_full_redraw = true;
         self.ed.setStatus("\"{s}\" {d}L", .{ path, self.ed.buf.lineCount() });
-        self.dirty = true;
+        self.buffer_dirty = true;
+        self.status_dirty = true;
     }
 
     fn save(self: *Ui, target: ?[]const u8) void {
@@ -609,17 +742,23 @@ pub const Ui = struct {
 
     /// One batch for the whole frame, so the panes go from the previous
     /// state to this one in a single rendered frame rather than a band at
-    /// a time (decisions.md's Batch section).
+    /// a time (decisions.md's Batch section). Each pane is redrawn only
+    /// when its own dirty flag is set: a keystroke on the `:` line marks
+    /// just the status row, leaving the buffer's syntax pass and the
+    /// tree's per-entry icons untouched.
     fn render(self: *Ui) !void {
-        self.dirty = false;
         var batch = self.client.batch();
         defer batch.deinit();
 
-        try self.renderBuffer(&batch);
-        if (self.tree_visible) try self.renderTree(&batch);
-        try self.renderStatus(&batch);
+        if (self.buffer_dirty) try self.renderBuffer(&batch);
+        if (self.tree_visible and self.tree_dirty) try self.renderTree(&batch);
+        if (self.status_dirty) try self.renderStatus(&batch);
 
         _ = try batch.send();
+
+        self.buffer_dirty = false;
+        self.tree_dirty = false;
+        self.status_dirty = false;
     }
 
     /// Places the cursor on a layer, then writes one run there. Every
@@ -681,7 +820,15 @@ pub const Ui = struct {
 
         const cursor = self.ed.pos();
         const scrolled = self.top_line != self.prev_top_line or self.left_col != self.prev_left_col;
-        if (localized and !self.buffer_full_redraw and !scrolled) {
+        const edited = self.ed.buf.edits != self.prev_edits;
+        if (!self.buffer_full_redraw and !scrolled and !edited and !localized) {
+            // Nothing but the caret moved (a bare `h`/`j`/`k`/`l`, a
+            // word motion, an on-screen `:23k`): the pane is already
+            // right everywhere except the rows the caret left and
+            // landed on. Repaint just those -- no per-row syntax pass
+            // over the whole viewport.
+            try self.repaintCaretRows(batch, cursor.line);
+        } else if (localized and !self.buffer_full_redraw and !scrolled) {
             try self.renderChangedRows(batch, cursor.line);
         } else switch (planBufferRender(.{
             .prev_top = self.prev_top_line,
@@ -738,6 +885,29 @@ pub const Ui = struct {
         self.prev_cursor_line = cursor.line;
         self.prev_edits = self.ed.buf.edits;
         self.buffer_full_redraw = false;
+    }
+
+    /// Repaints the buffer rows the caret just left and just landed on.
+    /// Used when nothing else about the pane changed, so every other row
+    /// is already correct; `renderBuffer`'s caret pass draws the block
+    /// cursor on top afterwards.
+    fn repaintCaretRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor_line: usize) !void {
+        const b = self.buffer_bounds;
+        const top = self.top_line;
+        try self.repaintRowIfOnScreen(batch, self.prev_cursor_line, top, b.rows);
+        if (cursor_line != self.prev_cursor_line)
+            try self.repaintRowIfOnScreen(batch, cursor_line, top, b.rows);
+    }
+
+    fn repaintRowIfOnScreen(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        line: usize,
+        top: usize,
+        rows: usize,
+    ) !void {
+        if (line < top or line >= top + rows) return;
+        try self.renderBufferRow(batch, line - top);
     }
 
     /// Brings the highlighter's tree back in sync with the buffer after
@@ -1003,7 +1173,10 @@ pub const Ui = struct {
             self.ed.cursor = self.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
         }
         self.pushed_bar = .{ self.ed.buf.lineCount(), b.cols, self.top_line, self.left_col };
-        self.dirty = true;
+        // The view moved and the cursor may have been dragged with it;
+        // the status row shows both.
+        self.buffer_dirty = true;
+        self.status_dirty = true;
     }
 
     /// Keeps the buffer layer's host-drawn scrollbar in step with zoe's
