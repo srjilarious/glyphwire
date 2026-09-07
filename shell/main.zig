@@ -1143,7 +1143,13 @@ const Prompt = struct {
     /// Also (re)sets the input-box bounds: `input_max_col` (right edge the
     /// typed text may not cross), `input_scroll`, `right_dynamic`,
     /// `prompt_lines`.
-    fn writePromptPrefix(self: *Prompt) !glyphwire.Cursor {
+    /// Draws the prompt prefix as a single host frame. With `sink` null
+    /// each prefix writer opens its own `batch`, appends every draw, and
+    /// sends it once -- so the prompt appears all at once, not segment by
+    /// segment. With `sink` non-null the draws are appended to the
+    /// caller's batch instead (it does the send), letting `handleResize`
+    /// fold the prefix redraw into the same frame as its clear.
+    fn writePromptPrefix(self: *Prompt, sink: ChainSink) !glyphwire.Cursor {
         self.input_max_col = self.grid_cols;
         self.input_scroll = 0;
         self.right_dynamic = false;
@@ -1154,23 +1160,44 @@ const Prompt = struct {
         // multi-line redraw) reuses whatever they resolve to now.
         self.resetCmdVars();
 
-        const p = self.promptCfg() orelse return self.writeDefaultPrefix();
-        if (p.left_segments != null or p.right_segments != null) return self.writePowerlinePrefix(p);
-        if (p.left != null or p.right != null) return self.writeTemplatedPrefix(p);
-        return self.writeDefaultPrefix();
+        const p = self.promptCfg() orelse return self.writeDefaultPrefix(sink);
+        if (p.left_segments != null or p.right_segments != null) return self.writePowerlinePrefix(p, sink);
+        if (p.left != null or p.right != null) return self.writeTemplatedPrefix(p, sink);
+        return self.writeDefaultPrefix(sink);
+    }
+
+    /// The cursor `w` display-columns past `from`, wrapping at `grid_cols`
+    /// onto later rows. Locates where input begins after a prefix has been
+    /// appended to a batch, so no post-draw `getCursor` round trip (which
+    /// couldn't see the not-yet-sent batch anyway) is needed.
+    fn cursorAfter(self: *Prompt, from: glyphwire.Cursor, w: usize) glyphwire.Cursor {
+        if (self.grid_cols == 0) return .{ .row = from.row, .col = from.col + w };
+        const abs = from.col + w;
+        return .{ .row = from.row + abs / self.grid_cols, .col = abs % self.grid_cols };
     }
 
     /// The built-in prompt: the absolute working directory followed by
     /// `" > "`. Unchanged from before prompt templating existed.
-    fn writeDefaultPrefix(self: *Prompt) !glyphwire.Cursor {
+    fn writeDefaultPrefix(self: *Prompt, sink: ChainSink) !glyphwire.Cursor {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_len = std.process.currentPath(self.client.io, &cwd_buf) catch 0;
 
         var prefix_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
         const prefix = std.fmt.bufPrint(&prefix_buf, "{s} > ", .{cwd_buf[0..cwd_len]}) catch "> ";
 
-        try self.client.writeText(prefix, null, null);
-        return try self.client.getCursor();
+        const start = try self.client.getCursor();
+
+        var local = self.client.batch();
+        defer local.deinit();
+        const b: *glyphwire.Client.Batch = sink orelse &local;
+        try b.setCursor(start.row, start.col);
+        try b.writeText(prefix, null, null);
+        if (sink == null) {
+            var res = try local.send();
+            res.deinit();
+        }
+
+        return self.cursorAfter(start, prompt_template.displayWidth(prefix));
     }
 
     /// Stack buffers backing a `prompt_template.Data` snapshot -- the
@@ -1334,7 +1361,7 @@ const Prompt = struct {
     /// right-aligned on the prompt row (a long input line overwrites it --
     /// accepted, like starship's transient right prompt); `prompt.left`
     /// from column 0. Returns where input begins.
-    fn writeTemplatedPrefix(self: *Prompt, p: *const config.PromptConfig) !glyphwire.Cursor {
+    fn writeTemplatedPrefix(self: *Prompt, p: *const config.PromptConfig, sink: ChainSink) !glyphwire.Cursor {
         const alloc = self.client.alloc;
 
         var bufs: PromptDataBufs = .{};
@@ -1342,22 +1369,32 @@ const Prompt = struct {
 
         const start = try self.client.getCursor();
 
+        var local = self.client.batch();
+        defer local.deinit();
+        const b: *glyphwire.Client.Batch = sink orelse &local;
+
         if (p.right) |rt| {
             var r = try prompt_template.render(alloc, rt, data);
             defer r.deinit();
             const w = prompt_template.opsWidth(r.ops, self.icon_cols);
             if (w > 0 and w < self.grid_cols) {
-                try self.client.setCursor(start.row, self.grid_cols - w);
-                try self.emitOps(null, r.ops, start.row, self.grid_cols - w, .{});
+                // `emitOps` positions itself with a leading `setCursor`.
+                try self.emitOps(b, r.ops, start.row, self.grid_cols - w, .{});
             }
-            try self.client.setCursor(start.row, 0);
         }
 
         var l = try prompt_template.render(alloc, p.left orelse default_prompt_left, data);
         defer l.deinit();
-        try self.emitOps(null, l.ops, start.row, 0, .{});
+        try self.emitOps(b, l.ops, start.row, 0, .{});
 
-        return try self.client.getCursor();
+        if (sink == null) {
+            var res = try local.send();
+            res.deinit();
+        }
+
+        // Input begins just past the left template (single row -- templated
+        // prompts keep the right prompt on the same line).
+        return self.cursorAfter(.{ .row = start.row, .col = 0 }, prompt_template.opsWidth(l.ops, self.icon_cols));
     }
 
     const RenderedSeg = struct {
@@ -1536,7 +1573,7 @@ const Prompt = struct {
     /// The powerline prompt: `left_segments` from column 0, `right_segments`
     /// right-aligned, on `prompt_lines`-1 rows above the input line (or all
     /// on one row when `prompt_lines == 1`). Returns where input begins.
-    fn writePowerlinePrefix(self: *Prompt, p: *const config.PromptConfig) !glyphwire.Cursor {
+    fn writePowerlinePrefix(self: *Prompt, p: *const config.PromptConfig, sink: ChainSink) !glyphwire.Cursor {
         var arena_state = std.heap.ArenaAllocator.init(self.client.alloc);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -1545,6 +1582,12 @@ const Prompt = struct {
         const data = self.buildPromptData(&bufs, p);
 
         self.prompt_lines = p.lines orelse 1;
+
+        // Every draw below goes into one frame: the caller's batch when
+        // `sink` is set, otherwise a batch this function opens and sends.
+        var local = self.client.batch();
+        defer local.deinit();
+        const b: *glyphwire.Client.Batch = sink orelse &local;
 
         // The prompt needs `prompt_lines` consecutive rows. If the cursor
         // (left where the last command's output ended) is close enough to
@@ -1557,9 +1600,9 @@ const Prompt = struct {
         var top = start.row;
         if (self.grid_rows > 0 and top + self.prompt_lines > self.grid_rows) {
             const overshoot = top + self.prompt_lines - self.grid_rows;
-            try self.client.setCursor(self.grid_rows - 1, 0);
+            try b.setCursor(self.grid_rows - 1, 0);
             var k: usize = 0;
-            while (k < overshoot) : (k += 1) try self.client.writeText("\n", null, null);
+            while (k < overshoot) : (k += 1) try b.writeText("\n", null, null);
             top -= overshoot;
         }
         self.pl_top_row = top;
@@ -1576,7 +1619,7 @@ const Prompt = struct {
         if (p.left_segments) |segs| {
             var list: std.ArrayList(RenderedSeg) = .empty;
             const seg_sum = try self.renderChain(arena, segs, data, &list);
-            try self.drawChain(top, 0, list.items, sep, head, tail, false, null);
+            try self.drawChain(top, 0, list.items, sep, head, tail, false, b);
             left_end = @min(chainWidth(list.items.len, seg_sum, sep, head, tail), self.grid_cols);
         }
 
@@ -1587,7 +1630,7 @@ const Prompt = struct {
             right_w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
             if (list.items.len > 0 and right_w < self.grid_cols) {
                 self.right_dynamic = true;
-                try self.drawChain(top, self.grid_cols - right_w, list.items, sep_right, right_head, "", true, null);
+                try self.drawChain(top, self.grid_cols - right_w, list.items, sep_right, right_head, "", true, b);
             }
         }
 
@@ -1595,16 +1638,16 @@ const Prompt = struct {
         if (self.prompt_lines >= 2) {
             // `top + prompt_lines <= grid_rows` now, so this row is on-grid.
             const irow = top + self.prompt_lines - 1;
-            try self.client.setCursor(irow, 0);
-            if (input_prefix.len > 0) try self.client.writeText(input_prefix, null, null);
+            try b.setCursor(irow, 0);
+            if (input_prefix.len > 0) try b.writeText(input_prefix, null, null);
             self.line_start_row = irow;
             self.line_start_col = prompt_template.displayWidth(input_prefix);
             self.input_max_col = self.grid_cols;
         } else {
             var col = left_end;
-            try self.client.setCursor(top, col);
+            try b.setCursor(top, col);
             if (input_prefix.len > 0) {
-                try self.client.writeText(input_prefix, null, null);
+                try b.writeText(input_prefix, null, null);
                 col += prompt_template.displayWidth(input_prefix);
             }
             self.line_start_row = top;
@@ -1616,6 +1659,10 @@ const Prompt = struct {
             if (self.input_max_col <= self.line_start_col) self.input_max_col = self.grid_cols;
         }
         self.input_scroll = 0;
+        if (sink == null) {
+            var res = try local.send();
+            res.deinit();
+        }
         return .{ .row = self.line_start_row, .col = self.line_start_col };
     }
 
@@ -1732,6 +1779,28 @@ const Prompt = struct {
     /// On a single-line powerline prompt it also redraws the pinned right
     /// chain so typing can't disturb it.
     fn renderInputLine(self: *Prompt) !void {
+        // Box repaint + caret placement go out as one `batch` frame, so
+        // the host never renders an intermediate frame with the caret
+        // parked at the box's left edge -- the brief caret "jump" seen on
+        // a history recall or line swap otherwise. Same trick as
+        // `drawRightChain`.
+        var b = self.client.batch();
+        defer b.deinit();
+        try self.appendInputLine(&b);
+        var res = try b.send();
+        res.deinit();
+
+        // The dynamic right chain is its own `batch` frame (ending with
+        // its own caret restore); it only redraws when configured.
+        if (self.right_dynamic and self.prompt_lines == 1) self.drawRightChain() catch {};
+    }
+
+    /// Appends the input-box repaint (visible slice + completion hint +
+    /// blank fill) and the trailing caret placement to `b`, updating
+    /// `input_scroll` along the way. Split out of `renderInputLine` so
+    /// `handleResize` can fold the input box into the same frame as its
+    /// clear + prefix redraw.
+    fn appendInputLine(self: *Prompt, b: *glyphwire.Client.Batch) !void {
         const buf = self.buffer.items;
         // Clamp to the last real row: a stale `line_start_row` past the
         // grid bottom (see `writePowerlinePrefix`) would otherwise make
@@ -1741,7 +1810,7 @@ const Prompt = struct {
         const right = if (self.input_max_col > left + 1) self.input_max_col else self.grid_cols;
         const box_w = right -| left;
         if (box_w == 0) {
-            try self.client.setCursor(row, @min(left, self.grid_cols -| 1));
+            try b.setCursor(row, @min(left, self.grid_cols -| 1));
             return;
         }
 
@@ -1789,24 +1858,11 @@ const Prompt = struct {
         const fill = @min(fill_w, spaces.len);
         @memset(spaces[0..fill], ' ');
 
-        // Box repaint + caret placement go out as one `batch` frame, so
-        // the host never renders an intermediate frame with the caret
-        // parked at the box's left edge -- the brief caret "jump" seen on
-        // a history recall or line swap otherwise. Same trick as
-        // `drawRightChain`.
-        var b = self.client.batch();
-        defer b.deinit();
         try b.setCursor(row, left);
         if (visible.len > 0) try b.writeText(visible, null, null);
         if (hint_end > 0) try b.writeText(self.completion_hint.items[0..hint_end], autocomplete_hint_color, null);
         if (fill > 0) try b.writeText(spaces[0..fill], null, null);
         try b.setCursor(row, self.line_start_col + self.caretCol());
-        var res = try b.send();
-        res.deinit();
-
-        // The dynamic right chain is its own `batch` frame (ending with
-        // its own caret restore); it only redraws when configured.
-        if (self.right_dynamic and self.prompt_lines == 1) self.drawRightChain() catch {};
     }
 
     /// Puts the server cursor at the caret's screen cell -- `line_start_col`
@@ -1824,7 +1880,7 @@ const Prompt = struct {
     /// `submitLine` or at startup); see `clearScreen` for ctrl+l, which
     /// keeps whatever's already typed.
     fn showPrompt(self: *Prompt) !void {
-        const cur = try self.writePromptPrefix();
+        const cur = try self.writePromptPrefix(null);
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
         self.cursor = 0;
@@ -1867,6 +1923,13 @@ const Prompt = struct {
     /// now overflows the bottom) and repaint the input box with whatever's
     /// typed. Keeps `buffer`/`cursor`; ends any in-progress browse (the
     /// old viewport rows it referred to are gone).
+    ///
+    /// The clear + prefix redraw + input repaint go out as one `batch`
+    /// frame. The clear spans the full grid width across every row the
+    /// prompt occupies: growing the window widens the grid, which strands
+    /// the old right chain out in the middle where nothing redraws over
+    /// it, and a shrink that changes `prompt_lines`' worth of rows can
+    /// leave a stale segment row above the new input line.
     fn handleResize(self: *Prompt, cols: usize, rows: usize) !void {
         if (cols == 0 or rows == 0) return;
         if (cols == self.grid_cols and rows == self.grid_rows) return;
@@ -1893,11 +1956,25 @@ const Prompt = struct {
         const top: usize = if (shifted < 0) 0 else @min(@as(usize, @intCast(shifted)), rows -| 1);
 
         try self.client.setCursor(top, 0);
-        const start = try self.writePromptPrefix();
+
+        var b = self.client.batch();
+        defer b.deinit();
+
+        // Wipe the rows the prompt is about to be redrawn on, full width,
+        // before anything is drawn over them -- same order, same frame.
+        // `prompt_lines` is stable across a resize (it comes from config),
+        // so it still describes how many rows the pre-resize prompt used.
+        const span = @min(self.prompt_lines, rows -| top);
+        if (span > 0) try b.clear(top, 0, span, null);
+
+        const start = try self.writePromptPrefix(&b);
         self.line_start_row = start.row;
         self.line_start_col = start.col;
         self.input_scroll = 0;
-        try self.renderInputLine();
+        try self.appendInputLine(&b);
+
+        var res = try b.send();
+        res.deinit();
     }
 
     /// ctrl+l: clears the screen, redraws the whole prompt (all segment
@@ -1908,7 +1985,7 @@ const Prompt = struct {
         try self.client.clear(0, 0, null, null);
         try self.client.setCursor(0, 0);
 
-        const cur = try self.writePromptPrefix();
+        const cur = try self.writePromptPrefix(null);
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
         self.input_scroll = 0;
@@ -3956,7 +4033,7 @@ const Prompt = struct {
         }
         try self.client.writeText("\n", null, null);
 
-        const cur = try self.writePromptPrefix();
+        const cur = try self.writePromptPrefix(null);
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
         self.input_scroll = 0;

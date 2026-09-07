@@ -1829,7 +1829,34 @@ surface.
   in-between frame with the caret parked at the box's left edge — a
   visible caret "jump" on a history recall / line swap. Same trick the
   right chain (`drawRightChain`) already uses; the dynamic right chain
-  stays its own trailing batch.
+  stays its own trailing batch. The batch-appending half is split into
+  `appendInputLine(*Client.Batch)` so `handleResize` can fold it into
+  the same frame as its clear + prefix redraw.
+- **The whole prompt prefix draws as one `batch` frame.**
+  `writePromptPrefix` and its three writers (`writeDefaultPrefix`,
+  `writeTemplatedPrefix`, `writePowerlinePrefix`) used to emit each
+  `set_property` / `write_text` / `draw_icon` straight to the client, so
+  a powerline prompt visibly built up segment by segment. Now each writer
+  routes every draw through a `Client.Batch` — its own (sent before it
+  returns) when `sink` is null, or the caller's when passed one — so the
+  prompt appears all at once. One `get_cursor` up front still locates
+  where the last command's output ended; the post-draw cursor is then
+  computed locally (`cursorAfter`, wrapping at `grid_cols`) rather than
+  read back, since the not-yet-sent batch wouldn't be reflected in a
+  `get_cursor` reply. The templated/powerline right chains already
+  assumed no `\n` in segment/template text (the `emitOps` batched path),
+  and that assumption now covers the left side too.
+- **A resize clears the full width of every prompt row before redrawing,
+  in the same frame.** `handleResize` opens one `Client.Batch`, appends a
+  `clear(top, 0, prompt_lines, null)` (full width, `prompt_lines` is
+  config-derived so it still describes the pre-resize prompt), then the
+  prefix redraw and the input-box repaint, and sends once. Growing the
+  window widens the grid and moves the right chain's target column
+  rightward, leaving the previously-drawn right chain stranded in the
+  middle where nothing redraws over it; a shrink can likewise leave a
+  stale segment row above the new input line. Clearing the prompt's row
+  span — and only that span, so reflowed command output above it is
+  untouched — wipes both.
 - **glyphwire-host no longer caret-previews vertical arrows.** The host
   nudges `ctx.root.cursor` on a held arrow key to hide round-trip
   latency, but Up/Down at the prompt now mean history recall / break

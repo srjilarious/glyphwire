@@ -1343,6 +1343,12 @@ pub const Client = struct {
             try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
         }
 
+        /// Batched `clear` -- see `Client.clear`. `rows`/`cols` null means
+        /// "the rest of the layer from `row`/`col`".
+        pub fn clear(self: *Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+            try self.notify("clear", .{ .row = row, .col = col, .rows = rows, .cols = cols });
+        }
+
         /// Batched `write_text` -- see `Client.writeText`.
         pub fn writeText(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
             try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg) });
