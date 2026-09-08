@@ -703,10 +703,17 @@ can exercise them directly — same split `shell/support.zig` has.
   The human form stays the default, so plain `glyphwire-ls -l` is
   unchanged.
 
-Not done (candidate next steps): sort flags (by mtime / size / reversed —
-note `-S` is already taken for "small format", so a size sort needs a
-different letter or a `--sort=` option), `-d` (list the directory entry
-itself, not its contents), and recursive `-R`.
+The `-l` table now opens sorted by Name ascending (a `table_set_sort`
+right after `table_set_rows`), so its Name header carries a direction
+arrow and a click on any of the sortable headers (Size / User / Group /
+Time / Name) re-sorts in place — glyphwire-host drives that directly, see
+decisions.md's Table section. The fixed permission columns aren't
+`sortable`.
+
+Not done (candidate next steps): sort *flags* for the initial order (by
+mtime / size / reversed — note `-S` is already taken for "small format",
+so a size sort needs a different letter or a `--sort=` option), `-d`
+(list the directory entry itself, not its contents), and recursive `-R`.
 
 ## `batch` messages, and `glyphwire-ls`'s two-frame listing
 

@@ -8,6 +8,7 @@ const caret_mod = @import("caret.zig");
 const input_mod = @import("input.zig");
 const selection_mod = @import("selection.zig");
 const scroll_mod = @import("scroll.zig");
+const table_sort_mod = @import("table_sort.zig");
 const window_sizing_mod = @import("window_sizing.zig");
 const preedit_mod = @import("preedit.zig");
 const render_mod = @import("render.zig");
@@ -160,6 +161,7 @@ pub const App = struct {
     preedit: preedit_mod.Preedit,
     selection: selection_mod.Selection,
     scroll: scroll_mod.Scroll,
+    table_sort: table_sort_mod.TableSort,
     panes: panes_mod.Panes,
     window_sizing: window_sizing_mod.WindowSizing,
     renderer: render_mod.Renderer,
@@ -193,6 +195,7 @@ pub const App = struct {
             .preedit = .{ .app = undefined },
             .selection = .{ .app = undefined },
             .scroll = .{ .app = undefined },
+            .table_sort = .{ .app = undefined },
             .panes = .{ .app = undefined },
             .window_sizing = .{
                 .app = undefined,
@@ -215,6 +218,7 @@ pub const App = struct {
         app.preedit.app = app;
         app.selection.app = app;
         app.scroll.app = app;
+        app.table_sort.app = app;
         app.panes.app = app;
         app.window_sizing.app = app;
         app.renderer.app = app;
@@ -275,7 +279,12 @@ pub const App = struct {
         const pane_bar_took_left = !divider_took_left and self.scroll.handlePaneScrollbar(eng);
         const chrome_took_left = divider_took_left or pane_bar_took_left;
         const scrollbar_took_left = !chrome_took_left and self.scroll.handleScrollbar(eng);
-        const took_left = chrome_took_left or scrollbar_took_left;
+        const chrome_or_bar_took_left = chrome_took_left or scrollbar_took_left;
+        // A click on a sortable table header cycles that column's sort and
+        // repaints the table in place; it's consumed so it isn't also
+        // delivered to glyphwire-shell as a grid click.
+        const table_took_left = !chrome_or_bar_took_left and self.table_sort.handleHeaderClick(eng);
+        const took_left = chrome_or_bar_took_left or table_took_left;
         const select_took_left = self.selection.handleMouseSelection(eng, took_left);
         self.keys.reportMouseEvents(eng, took_left or select_took_left);
         self.keys.handleRepeatKeys(eng, deltaTimeMs);
