@@ -1408,7 +1408,7 @@ surface.
   column jumps straight to it ascending. "Unsorted" stays reachable so a
   table with no default sort can be returned to its natural order. The
   active sort column's header draws its name plus a filled-triangle
-  arrow (`"Name ▲"` / `"▼"`), and `Table.headerColWidth` widens that one
+  arrow (`"Name ▴"` / `"▾"`), and `Table.headerColWidth` widens that one
   column by `sort_arrow_cells` (2) so the arrow never eats into the name;
   body cells under it get the same extra width (trailing padding, or for
   an `.end`-aligned column the value stays flush under the arrow). A

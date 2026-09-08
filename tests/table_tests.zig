@@ -891,8 +891,8 @@ pub fn tableCycleSortOnColumnStepsThroughThreeStatesTest(_: std.Io, alloc: std.m
     try testz.expectEqual(t.sort_dir, .ascending);
 }
 
-/// A sorted column's header draws its name plus a direction arrow (▲
-/// ascending, ▼ descending), and the column widens so the arrow never
+/// A sorted column's header draws its name plus a direction arrow (▴
+/// ascending, ▾ descending), and the column widens so the arrow never
 /// clips the name. Clearing the sort removes the arrow and the extra
 /// width. Rendered end to end so the `headerColWidth` layout that the
 /// header, body and hit-test all share is exercised through `getCells`.
@@ -942,7 +942,7 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
         try testz.expectEqualStr("N", snap.cellAt(0, 0).grapheme);
         try testz.expectEqualStr("e", snap.cellAt(0, 3).grapheme);
         try testz.expectEqualStr(" ", snap.cellAt(0, 4).grapheme);
-        try testz.expectEqualStr("\u{25B2}", snap.cellAt(0, 5).grapheme); // ▲
+        try testz.expectEqualStr("\u{25B4}", snap.cellAt(0, 5).grapheme); // ▴
         // Name column widened 4 -> 6, so the "X" header shifted to col 7.
         try testz.expectEqualStr("X", snap.cellAt(0, 7).grapheme);
         try testz.expectEqualStr("a", snap.cellAt(1, 0).grapheme); // now sorted
@@ -952,7 +952,7 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
     {
         var snap = try client.getCells();
         defer snap.deinit();
-        try testz.expectEqualStr("\u{25BC}", snap.cellAt(0, 5).grapheme); // ▼
+        try testz.expectEqualStr("\u{25BE}", snap.cellAt(0, 5).grapheme); // ▾
         try testz.expectEqualStr("b", snap.cellAt(1, 0).grapheme);
     }
 
@@ -962,7 +962,7 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
         defer snap.deinit();
         // Arrow gone, column back to its nominal width: "X" at col 5.
         try testz.expectEqualStr("X", snap.cellAt(0, 5).grapheme);
-        try testz.expectNotEqualStr("\u{25B2}", snap.cellAt(0, 5).grapheme);
+        try testz.expectNotEqualStr("\u{25B4}", snap.cellAt(0, 5).grapheme);
     }
 }
 
@@ -1028,6 +1028,65 @@ pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Alloc
         var hist = try client.getCellsView(3);
         defer hist.deinit();
         try testz.expectEqualStr("N", hist.cellAt(0, 0).grapheme);
-        try testz.expectNotEqualStr("\u{25B2}", hist.cellAt(0, 7).grapheme);
+        try testz.expectNotEqualStr("\u{25B4}", hist.cellAt(0, 7).grapheme);
+    }
+}
+
+/// A window resize rebuilds the ring bottom-anchored, moving every
+/// retained row (a table's included) by the height delta. `Layer.resize`
+/// shifts each table's pinned `top_live` to match, so a re-sort still
+/// lands the table where it now sits -- the client that drew it
+/// (`glyphwire-ls -l`) is long gone and won't re-render it.
+pub fn tableTopLiveFollowsResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 8, 20);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    // Header at row 0, body "c"/"a"/"b" at rows 1-3.
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 6, .sortable = true },
+    }, .{ .borders = false, .header_separator = false });
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "c" }},
+        &.{.{ .display = "a" }},
+        &.{.{ .display = "b" }},
+    });
+    // `table_set_rows` is a notification; force the server to process it
+    // (and its `render`) before the resize by issuing a request.
+    {
+        var s = try client.getCells();
+        s.deinit();
+    }
+
+    // Grow the layer 8 -> 12 rows, through the same in-process path
+    // glyphwire-host uses. Bottom-anchored, so every row moves down four:
+    // the header is now at row 4, body at rows 5-7.
+    try srv.reportResize(alloc, 20, 12);
+
+    // A re-sort must repaint at the shifted position, not the original.
+    try client.tableSetSort(null, table, 0, .ascending);
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        try testz.expectEqualStr("N", snap.cellAt(4, 0).grapheme);
+        // "Name" (4) + " ▴" (2) == the column's width 6, so no widening:
+        // arrow lands at col 5.
+        try testz.expectEqualStr("\u{25B4}", snap.cellAt(4, 5).grapheme);
+        try testz.expectEqualStr("a", snap.cellAt(5, 0).grapheme); // sorted
+        try testz.expectEqualStr("c", snap.cellAt(7, 0).grapheme);
+        // Nothing left painted at the pre-resize rows.
+        try testz.expectEqualStr("", snap.cellAt(0, 0).grapheme);
     }
 }
