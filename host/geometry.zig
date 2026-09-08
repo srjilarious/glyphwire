@@ -79,6 +79,16 @@ pub var cell_h: i32 = undefined;
 pub const scrollbar_width_px: i32 = 12;
 pub const scrollbar_min_thumb_px: f32 = 24;
 
+/// Pixels reserved on the window's right edge for the always-on
+/// scrollbar's gutter. Zero when the visible context has opted the bar
+/// out (`core.Context.window_scrollbar`), so the grid reflows wider to
+/// fill the space the bar would have taken. `syncWindowSize` (px -> cell
+/// count) and `resizeWindowForCells` (cell count -> px) both read this,
+/// so the reserved width and the reclaimed width always agree.
+pub fn rightGutterPx(has_scrollbar: bool) i32 {
+    return if (has_scrollbar) scrollbar_width_px else 0;
+}
+
 /// How many grid rows one full wheel "tick" (`scroll().y` of magnitude
 /// 1) scrolls the view by -- picked to feel like a normal terminal
 /// scrollback, not tied to any particular OS's wheel step size.
@@ -201,19 +211,20 @@ fn thumbSpan(track_len: f32, visible: usize, total: usize, offset: usize, max: u
 
 /// Where a pane's scrollbars sit inside `rect`.
 ///
-/// `state` carries the opt-in flags and the offsets; `view_*` is the
-/// viewport in cells and `content_*` the content grid behind it. A bar is
-/// omitted when it wasn't opted into, or when the axis has nothing to
-/// scroll -- a pane wider than its content shouldn't grow a bar that
-/// can't move. When both are shown, each track stops short of the other
-/// so they don't overlap in the corner.
+/// `state` carries the opt-in flags, the offsets, and the reach on each
+/// axis (`max_row`/`max_col`), which already account for a self-scrolling
+/// pane's virtual `content_extent`; `view_*` is the viewport in cells.
+/// The total content on an axis is `view + max` -- what fits plus what
+/// can't be reached at once -- so the thumb is that visible fraction of
+/// the track. A bar is omitted when it wasn't opted into, or when the
+/// axis has nothing to scroll -- a pane wider than its content shouldn't
+/// grow a bar that can't move. When both are shown, each track stops
+/// short of the other so they don't overlap in the corner.
 pub fn paneScrollbars(
     rect: RectPx,
     state: glyphwire.ScrollbarState,
     view_cols: usize,
     view_rows: usize,
-    content_cols: usize,
-    content_rows: usize,
 ) PaneScrollbars {
     const want_v = state.vertical and state.max_row > 0;
     const want_h = state.horizontal and state.max_col > 0;
@@ -230,7 +241,7 @@ pub fn paneScrollbars(
             .w = pane_scrollbar_px,
             .h = @max(rect.h - v_inset, 0),
         };
-        const span = thumbSpan(track.h, view_rows, content_rows, state.row, state.max_row);
+        const span = thumbSpan(track.h, view_rows, view_rows + state.max_row, state.row, state.max_row);
         out.vertical = .{
             .track = track,
             .thumb = .{ .x = track.x, .y = track.y + span.start, .w = track.w, .h = span.len },
@@ -243,7 +254,7 @@ pub fn paneScrollbars(
             .w = @max(rect.w - h_inset, 0),
             .h = pane_scrollbar_px,
         };
-        const span = thumbSpan(track.w, view_cols, content_cols, state.col, state.max_col);
+        const span = thumbSpan(track.w, view_cols, view_cols + state.max_col, state.col, state.max_col);
         out.horizontal = .{
             .track = track,
             .thumb = .{ .x = track.x + span.start, .y = track.y, .w = span.len, .h = track.h },

@@ -2322,6 +2322,47 @@ shape of the change.
 - **Tests:** `shell_zjump_tests.zig` (+21) and `shell_flushgate_tests.zig`
   (+5), registered in `tests/main.zig`.
 
+## zoe scrollbar + command-line split fixes
+
+Three fixes from live use of zoe; see `docs/decisions.md`'s Panes
+section for the *why*.
+
+- **Pane scrollbar thumb honours `content_extent`.** `geometry.paneScrollbars`
+  dropped its `content_cols`/`content_rows` params and now sizes the
+  thumb from `viewport + state.max_row` (or `_col`) — the reach the
+  `ScrollbarState` already carries, which folds in a self-scrolling
+  pane's virtual extent. Was passing `layer.width`/`layer.height`, so
+  zoe's buffer pane (real grid == viewport) always drew a full thumb.
+  Call sites in `host/render.zig` + `host/scroll.zig` updated;
+  `tests/host_tests.zig` bar tests adjusted + one added
+  (`paneThumbFractionFollowsTheVirtualExtentTest`).
+- **`Context.window_scrollbar`** (default true) — whether glyphwire-host
+  paints its always-on right-edge bar for a context. `create_context`
+  gains a `window_scrollbar` field, plus a runtime `set_window_scrollbar`
+  notification (`{visible}`, `dispatch.handleSetWindowScrollbar`, acts on
+  the connection's active context). `host/render.zig`'s `renderScrollbar`
+  early-returns when off; `host/scroll.zig`'s `handleScrollbar` ignores
+  the gutter; `host/redraw.zig`'s `contextSig` folds the flag in (bit 62
+  of `root_view`) so a runtime toggle repaints. The gutter is reclaimed:
+  `geometry.rightGutterPx(has_bar)` (0 when off) is read by
+  `syncWindowSize` and `resizeWindowForCells`, so the grid reflows wider
+  for a bar-less visible context (one debounced `reportResize` on the
+  switch). `client.createContext` gains the param; `client.setWindowScrollbar`
+  added. zoe passes `false`.
+- **`Split.resizable`** (default true) — `create_split` gains a
+  `resizable` field. A non-resizable split reserves no `divider_cells`
+  gap (`core.zig` `layoutSplit`/`childExtents` take a per-split `gap`),
+  emits no `DividerRect`, and `moveDivider` no-ops on it. Set on the
+  created split in `dispatch.handleCreateSplit` (keeps `Context.createSplit`'s
+  many call sites untouched). `client.createSplit` gains the param; zoe's
+  outer column split (editor area over the one-row command line) passes
+  `false`, the inner tree|buffer split stays `true`.
+- **Tests:** `tests/host_tests.zig` (+2: virtual-extent thumb fraction,
+  `contextSig` toggles with the flag), `tests/core_tests.zig` (+2:
+  non-resizable split gap/divider, `moveDivider` no-op),
+  `tests/dispatch_tests.zig` (+2: `create_split` resizable flag,
+  `create_context` + `set_window_scrollbar`).
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

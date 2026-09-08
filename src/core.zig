@@ -3618,6 +3618,15 @@ pub const SplitChild = struct {
 pub const Split = struct {
     axis: SplitAxis,
     children: std.ArrayList(SplitChild) = .empty,
+    /// Whether the user may drag the bands between this split's children.
+    /// When false the split reserves no `divider_cells` gap between its
+    /// children (the row/column returns to content), emits no
+    /// `DividerRect` for glyphwire-host to draw or hit-test, and
+    /// `moveDivider` is a no-op. What a TUI wants for a structural split
+    /// like an editor's buffer-area-over-command-line: the command line
+    /// is a fixed one-row child and a resize handle there is just a
+    /// wasted row.
+    resizable: bool = true,
     /// The cell rect this split occupied at the last `layoutSplits`.
     /// `moveDivider` needs it to turn a drag in cells back into sizes,
     /// and there is nowhere else to get it: a split has no size of its
@@ -3688,6 +3697,14 @@ pub const Context = struct {
     /// grabs to resize them. One cell is wide enough to hit and cheap to
     /// draw.
     divider_cells: usize = 1,
+    /// Whether glyphwire-host draws its always-on right-edge scrollbar
+    /// (the root layer's scrollback view) for this context. On for the
+    /// shell and every terminal-style client; a pure-TUI context like
+    /// zoe -- whose root has no scrollback and whose panes carry their
+    /// own `scrollbars` -- turns it off (`create_context`'s
+    /// `window_scrollbar`, or the `set_window_scrollbar` notification) so
+    /// the window doesn't show a permanently full, inert bar.
+    window_scrollbar: bool = true,
     /// Bumped whenever the split tree or the context size changes, i.e.
     /// whenever a previously computed layout (and its divider rects) went
     /// stale. glyphwire-host caches the divider geometry it hit-tests
@@ -4180,6 +4197,10 @@ pub const Context = struct {
         defer self.alloc.free(extents);
         self.childExtents(split, rect, extents);
 
+        // A non-resizable split leaves no gap between its children and
+        // draws no grab band -- see `Split.resizable`.
+        const gap: usize = if (split.resizable) self.divider_cells else 0;
+
         var pos: usize = if (split.axis == .row) rect.col else rect.row;
         for (split.children.items, 0..) |child, i| {
             const extent = extents[i];
@@ -4194,12 +4215,12 @@ pub const Context = struct {
             }
 
             pos += extent;
-            if (i + 1 < n) {
+            if (i + 1 < n and gap > 0) {
                 if (dividers) |out| {
                     const band: CellRect = if (split.axis == .row)
-                        .{ .row = rect.row, .col = pos, .cols = self.divider_cells, .rows = rect.rows }
+                        .{ .row = rect.row, .col = pos, .cols = gap, .rows = rect.rows }
                     else
-                        .{ .row = pos, .col = rect.col, .cols = rect.cols, .rows = self.divider_cells };
+                        .{ .row = pos, .col = rect.col, .cols = rect.cols, .rows = gap };
                     try out.append(self.alloc, .{
                         .split = handle,
                         .index = i,
@@ -4207,7 +4228,7 @@ pub const Context = struct {
                         .rect = band,
                     });
                 }
-                pos += self.divider_cells;
+                pos += gap;
             }
         }
     }
@@ -4222,7 +4243,8 @@ pub const Context = struct {
     fn childExtents(self: *const Context, split: *const Split, rect: CellRect, out: []usize) void {
         const n = split.children.items.len;
         const axis_total: usize = if (split.axis == .row) rect.cols else rect.rows;
-        var remaining = axis_total -| (n - 1) * self.divider_cells;
+        const gap: usize = if (split.resizable) self.divider_cells else 0;
+        var remaining = axis_total -| (n - 1) * gap;
 
         var fixed_total: usize = 0;
         var weight_total: f32 = 0;
@@ -4304,6 +4326,9 @@ pub const Context = struct {
     pub fn moveDivider(self: *Context, handle: SplitHandle, index: usize, delta: i64) SplitError!void {
         const split = self.splits.getPtr(handle) orelse return SplitError.UnknownSplit;
         if (!split.laid_out) return;
+        // A non-resizable split has no draggable bands -- a client asking
+        // to move one is asking for nothing (see `Split.resizable`).
+        if (!split.resizable) return;
         const n = split.children.items.len;
         if (index + 1 >= n) return;
         if (delta == 0) return;

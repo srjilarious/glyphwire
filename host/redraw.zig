@@ -37,6 +37,9 @@ pub const ContextSig = struct {
     /// Root scrollback view offset (`view_scroll`) in the low bits and,
     /// in bit 63, whether a full-screen program currently owns the screen
     /// (which pins the view to the live tail regardless of `view_scroll`).
+    /// Bit 62 is the context's `window_scrollbar` flag -- a
+    /// `set_window_scrollbar` toggle changes nothing else the renderer
+    /// hashes, so it needs its own bit here to force the repaint.
     /// A wheel / scrollbar scroll moves `view_scroll` through
     /// `Layer.scrollView`, which does bump `render_gen` -- this is belt
     /// and braces, and makes the scroll state explicit in the fingerprint.
@@ -70,6 +73,7 @@ pub fn contextSig(ctx: *const glyphwire.Context) ContextSig {
 
     sig.root_view = ctx.root.view_scroll;
     if (rootScreenOwned(&ctx.root)) sig.root_view |= @as(u64, 1) << 63;
+    if (ctx.window_scrollbar) sig.root_view |= @as(u64, 1) << 62;
 
     return sig;
 }

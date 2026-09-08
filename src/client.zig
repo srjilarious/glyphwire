@@ -568,14 +568,33 @@ pub const Client = struct {
     /// owns it, so it's torn down (with everything in it) if the
     /// connection closes without `destroyContext`. Returns its handle,
     /// for `activateContext`.
-    pub fn createContext(self: *Client, width: ?usize, height: ?usize, scrollback_rows: usize) !core.ContextHandle {
+    ///
+    /// `window_scrollbar` false suppresses glyphwire-host's always-on
+    /// right-edge scrollbar for this context -- what a pure-TUI client
+    /// (zoe) wants, since its root has no scrollback and its panes carry
+    /// their own bars. `setWindowScrollbar` toggles it later.
+    pub fn createContext(
+        self: *Client,
+        width: ?usize,
+        height: ?usize,
+        scrollback_rows: usize,
+        window_scrollbar: bool,
+    ) !core.ContextHandle {
         var parsed = try self.request(struct { context: core.ContextHandle }, "create_context", .{
             .width = width,
             .height = height,
             .scrollback_rows = scrollback_rows,
+            .window_scrollbar = window_scrollbar,
         });
         defer parsed.deinit();
         return parsed.value.result.context;
+    }
+
+    /// `set_window_scrollbar(visible)` -- a notification. Toggles the
+    /// always-on window scrollbar for this connection's active context
+    /// after the fact (see `createContext`'s `window_scrollbar`).
+    pub fn setWindowScrollbar(self: *Client, visible: bool) !void {
+        try self.notify("set_window_scrollbar", .{ .visible = visible });
     }
 
     /// `destroy_context(context)` -- a notification. Frees a context
@@ -745,11 +764,17 @@ pub const Client = struct {
         return parsed.value.result;
     }
 
-    /// `create_split(axis)` -- a request. An empty pane container; give
-    /// it children with `setSplitChildren` and make it the layout with
-    /// `setRootSplit`.
-    pub fn createSplit(self: *Client, axis: core.SplitAxis) !core.SplitHandle {
-        var parsed = try self.request(struct { handle: core.SplitHandle }, "create_split", .{ .axis = @tagName(axis) });
+    /// `create_split(axis, resizable)` -- a request. An empty pane
+    /// container; give it children with `setSplitChildren` and make it
+    /// the layout with `setRootSplit`. `resizable` false (see
+    /// `core.Split.resizable`) leaves no gap between the children, draws
+    /// no grab band, and ignores `moveDivider` -- for a structural split
+    /// like buffer-area-over-command-line.
+    pub fn createSplit(self: *Client, axis: core.SplitAxis, resizable: bool) !core.SplitHandle {
+        var parsed = try self.request(struct { handle: core.SplitHandle }, "create_split", .{
+            .axis = @tagName(axis),
+            .resizable = resizable,
+        });
         defer parsed.deinit();
         return parsed.value.result.handle;
     }
