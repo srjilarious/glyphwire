@@ -96,6 +96,9 @@ pub const TableColumn = struct {
     /// "text" (default) or "number" -- see `core.ColumnKind`.
     kind: ?[]const u8 = null,
     sortable: bool = false,
+    /// Fold ASCII case when sorting a `.text` column -- see
+    /// `core.TableColumn.case_insensitive`.
+    case_insensitive: bool = false,
     width: usize,
     min_width: usize = 1,
     /// "start" (default), "center", or "end".
@@ -142,6 +145,7 @@ pub const ColumnState = struct {
     name: []const u8,
     kind: []const u8,
     sortable: bool,
+    case_insensitive: bool,
     width: usize,
     min_width: usize,
     h_align: []const u8,

@@ -278,9 +278,21 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
     return entries.toOwnedSlice(alloc);
 }
 
+/// Case-insensitive by name (ASCII fold), with a raw-byte tie-break so
+/// `"Foo"`/`"foo"` keep a fixed order -- matches the `case_insensitive`
+/// Name column in the `-l` table, so the plain listing and a Name-header
+/// click show the same order.
 fn sortEntries(entries: []FileEntry) void {
     std.mem.sort(FileEntry, entries, {}, struct {
         fn lessThan(_: void, a: FileEntry, b: FileEntry) bool {
+            const n = @min(a.name.len, b.name.len);
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const la = std.ascii.toLower(a.name[i]);
+                const lb = std.ascii.toLower(b.name[i]);
+                if (la != lb) return la < lb;
+            }
+            if (a.name.len != b.name.len) return a.name.len < b.name.len;
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);
@@ -1202,7 +1214,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         .{ .name = "User", .width = user_width, .sortable = true },
         .{ .name = "Group", .width = group_width, .sortable = true },
         .{ .name = "Time", .width = time_width, .kind = .number, .sortable = true },
-        .{ .name = "Name", .width = name_width, .sortable = true },
+        .{ .name = "Name", .width = name_width, .sortable = true, .case_insensitive = true },
     }, .{
         .borders = false,
         .alt_row_bg = rgb(30, 30, 30),
