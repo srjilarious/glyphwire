@@ -813,19 +813,19 @@ pub fn tableHeaderColumnAtResolvesColumnAndSeparatorTest(_: std.Io, alloc: std.m
 
     // Borderless, anchored at (0,0): header is row 0, columns laid out
     // A = cols 0..2, sep = 3, BB = cols 4..5, sep = 6, C = cols 7..10.
-    try testz.expectEqual(t.headerColumnAt(0, 0).?, 0);
-    try testz.expectEqual(t.headerColumnAt(0, 2).?, 0);
-    try testz.expectTrue(t.headerColumnAt(0, 3) == null); // separator
-    try testz.expectEqual(t.headerColumnAt(0, 4).?, 1);
-    try testz.expectEqual(t.headerColumnAt(0, 7).?, 2);
-    try testz.expectTrue(t.headerColumnAt(1, 0) == null); // not the header row
+    try testz.expectEqual(t.headerColumnAt(0, 0, 0).?, 0);
+    try testz.expectEqual(t.headerColumnAt(0, 2, 0).?, 0);
+    try testz.expectTrue(t.headerColumnAt(0, 3, 0) == null); // separator
+    try testz.expectEqual(t.headerColumnAt(0, 4, 0).?, 1);
+    try testz.expectEqual(t.headerColumnAt(0, 7, 0).?, 2);
+    try testz.expectTrue(t.headerColumnAt(1, 0, 0) == null); // not the header row
 
     // Sort BB ascending: its width grows from 2 to stringWidth("BB") + 2
     // = 4, so BB now spans cols 4..7, its separator moves to 8, C to 9.
     t.setSort(1, .ascending);
-    try testz.expectEqual(t.headerColumnAt(0, 7).?, 1);
-    try testz.expectTrue(t.headerColumnAt(0, 8) == null); // separator, shifted right
-    try testz.expectEqual(t.headerColumnAt(0, 9).?, 2);
+    try testz.expectEqual(t.headerColumnAt(0, 7, 0).?, 1);
+    try testz.expectTrue(t.headerColumnAt(0, 8, 0) == null); // separator, shifted right
+    try testz.expectEqual(t.headerColumnAt(0, 9, 0).?, 2);
 }
 
 /// A bordered table's header sits one row below its anchor (the top
@@ -839,12 +839,12 @@ pub fn tableHeaderColumnAtAccountsForBordersTest(_: std.Io, alloc: std.mem.Alloc
 
     // Borders: top border is row 0, header is row 1, content starts at
     // col 1. A = cols 1..3, separator = 4, B = cols 5..7.
-    try testz.expectTrue(t.headerColumnAt(0, 1) == null); // row 0 is the top border
-    try testz.expectEqual(t.headerColumnAt(1, 1).?, 0);
-    try testz.expectEqual(t.headerColumnAt(1, 3).?, 0);
-    try testz.expectTrue(t.headerColumnAt(1, 4) == null); // separator
-    try testz.expectEqual(t.headerColumnAt(1, 5).?, 1);
-    try testz.expectEqual(t.headerColumnAt(1, 7).?, 1);
+    try testz.expectTrue(t.headerColumnAt(0, 1, 0) == null); // row 0 is the top border
+    try testz.expectEqual(t.headerColumnAt(1, 1, 0).?, 0);
+    try testz.expectEqual(t.headerColumnAt(1, 3, 0).?, 0);
+    try testz.expectTrue(t.headerColumnAt(1, 4, 0) == null); // separator
+    try testz.expectEqual(t.headerColumnAt(1, 5, 0).?, 1);
+    try testz.expectEqual(t.headerColumnAt(1, 7, 0).?, 1);
 }
 
 /// `Table.cycleSortOnColumn` is the 3-state header-click cycle: a fresh
@@ -963,5 +963,71 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
         // Arrow gone, column back to its nominal width: "X" at col 5.
         try testz.expectEqualStr("X", snap.cellAt(0, 5).grapheme);
         try testz.expectNotEqualStr("\u{25B2}", snap.cellAt(0, 5).grapheme);
+    }
+}
+
+/// After fresh output has scrolled a table up, a re-sort (`table_set_sort`,
+/// which now goes through `Table.repaint`) redraws it *in place* at its
+/// current position instead of running `render`'s terminal-scroll a
+/// second time. `scrollOne` pins each table's `top_live` to its content
+/// so `repaint` knows where the table now sits. Regression test for a
+/// tall/scrolled table that re-`render` left showing only its last rows.
+pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 8, 20);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    // Header at row 0, body rows "c" / "a" / "b" at rows 1-3.
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 6, .sortable = true },
+    }, .{ .borders = false, .header_separator = false });
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "c" }},
+        &.{.{ .display = "a" }},
+        &.{.{ .display = "b" }},
+    });
+
+    // Push three line feeds from the bottom row: the whole table moves up
+    // three rows, its header into scrollback. Body "c"/"a"/"b" (rows 1-3)
+    // are now at live rows -2/-1/0, so live row 0 shows "b".
+    try client.setCursor(7, 0);
+    try client.writeText("\n\n\n", null, null);
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        try testz.expectEqualStr("b", snap.cellAt(0, 0).grapheme);
+    }
+
+    // Sort ascending -> rows become a/b/c; repaint places them from the
+    // table's pinned position, so live row 0 now shows "c" (the third
+    // sorted row) and the table did NOT scroll further.
+    try client.tableSetSort(null, table, 0, .ascending);
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        try testz.expectEqualStr("c", snap.cellAt(0, 0).grapheme);
+    }
+
+    // Documented limitation: rows already in scrollback (here the header,
+    // three rows up) aren't rewritten -- the ring's history isn't
+    // rewritable -- so the arrow only appears once the table is fully on
+    // screen again. The header still reads its original text.
+    {
+        var hist = try client.getCellsView(3);
+        defer hist.deinit();
+        try testz.expectEqualStr("N", hist.cellAt(0, 0).grapheme);
+        try testz.expectNotEqualStr("\u{25B2}", hist.cellAt(0, 7).grapheme);
     }
 }
