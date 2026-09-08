@@ -1477,6 +1477,16 @@ pub const Layer = struct {
         // the renderer matches them against live cell data, so they follow
         // their content automatically and an id with no matching cells left
         // just draws nothing.
+        // Tables, unlike highlights, are placed by row: pin each one's
+        // `top_live` to its content so a later `repaint` / header
+        // hit-test (`Table.headerColumnAt`) still finds it after output
+        // has pushed it up. (Region scrolls and `resize` don't adjust
+        // this -- a full-screen program owns the screen then, and a
+        // resize rebuilds the ring and the client re-renders anyway.)
+        if (self.tables.count() > 0) {
+            var it = self.tables.valueIterator();
+            while (it.next()) |t| t.top_live -= 1;
+        }
         // If the view is currently scrolled back, follow the incoming row
         // so the content the user is looking at stays at the same screen
         // position while new output piles up below it -- terminal-style.
@@ -2983,6 +2993,19 @@ pub const Table = struct {
     sort_dir: SortDirection = .none,
     revision: u64 = 0,
     painted: TablePaintedExtent = .{},
+    /// Where the table's logical row 0 currently sits in **live-viewport**
+    /// coordinates (row 0 == the live viewport's top). `render` sets it
+    /// (`anchor_row - scrolled`, so it goes negative for a table that
+    /// scrolled its header up into scrollback), and `Layer.scrollOne`
+    /// decrements it for every table on the layer as fresh output pushes
+    /// the table up -- the same content-pinning `scrollOne` already does
+    /// for `Layer.selection`. This is what lets a header click (which
+    /// arrives as a *screen* row) be mapped back to the table however far
+    /// output or the scrollback view has moved it since it was drawn --
+    /// see `headerColumnAt` / `repaint`. `render`/`repaint`/`headerColumnAt`
+    /// are the only readers; nothing persists it across a `resize` (the
+    /// ring is rebuilt and the owning client re-renders).
+    top_live: i64 = 0,
 
     /// Takes ownership of `columns` and `style` outright (the caller,
     /// `handleCreateTable`, built them specifically to hand off) -- same
@@ -3050,28 +3073,34 @@ pub const Table = struct {
         }
     }
 
-    /// The index of the column whose header cell covers viewport cell
-    /// `(row, col)`, or `null` when that cell isn't on this table's
-    /// header row or falls on an inter-column separator. Coordinates are
-    /// live-viewport cells (`0` = the top row on screen); callers must
-    /// only use this while the table sits at the live tail, since
-    /// `self.row`/`painted` model the on-screen footprint and a
-    /// scrolled-back view shifts the header off that row. Lays columns
-    /// out through `headerColWidth`, exactly as `render`/`writeHeaderRow`
-    /// do, so a click resolves to the column actually drawn under it --
-    /// including the extra width the active sort column takes for its
-    /// arrow. Pairs with `cycleSortOnColumn`.
-    pub fn headerColumnAt(self: *const Table, row: usize, col: usize) ?usize {
+    /// The index of the column whose header cell covers **screen** cell
+    /// `(screen_row, screen_col)` given the layer is scrolled back by
+    /// `view_scroll` rows, or `null` when that cell isn't on this table's
+    /// header row or lands on an inter-column separator.
+    ///
+    /// The header's live-viewport row is `top_live + border_pad` (see
+    /// `top_live` -- kept accurate as output scrolls the table), and the
+    /// content at live row `L` is shown at screen row `L + view_scroll`,
+    /// so the header is on screen row `top_live + border_pad +
+    /// view_scroll`. That means a header click resolves correctly however
+    /// far the table has scrolled and whether or not the user has
+    /// scrolled the view back to reach it -- the only requirement is that
+    /// the header is actually on screen. Columns are laid out through
+    /// `headerColWidth`, exactly as `render`/`writeHeaderRow` do, so the
+    /// click lands on the column drawn under it, arrow width included.
+    /// Pairs with `cycleSortOnColumn`.
+    pub fn headerColumnAt(self: *const Table, screen_row: usize, screen_col: usize, view_scroll: usize) ?usize {
         const border_pad: usize = if (self.style.borders) 1 else 0;
-        if (row != self.row + border_pad) return null;
+        const header_screen = self.top_live + @as(i64, @intCast(border_pad)) + @as(i64, @intCast(view_scroll));
+        if (header_screen < 0 or @as(i64, @intCast(screen_row)) != header_screen) return null;
         var c = self.col + border_pad;
         for (self.columns, 0..) |_, i| {
             if (i > 0) {
-                if (col == c) return null; // inter-column separator
+                if (screen_col == c) return null; // inter-column separator
                 c += 1;
             }
             const w = self.headerColWidth(i);
-            if (col >= c and col < c + w) return i;
+            if (screen_col >= c and screen_col < c + w) return i;
             c += w;
         }
         return null;
@@ -3085,9 +3114,10 @@ pub const Table = struct {
     /// the sort feature's clarifying questions). Every other column, and
     /// all columns while the table is unsorted, get only their nominal
     /// width, so an inactive sortable header is laid out identically to a
-    /// fixed one. `render`, `writeHeaderRow`, `writeBodyRow` and
-    /// `headerColumnAt` all place columns through this so the header and
-    /// body stay aligned and a header hit-test lands on the right column.
+    /// fixed one. `render`, `paintAt`, `writeHeaderRow`, `writeBodyRow`
+    /// and `headerColumnAt` all place columns through this so the header
+    /// and body stay aligned and a header hit-test lands on the right
+    /// column.
     fn headerColWidth(self: *const Table, i: usize) usize {
         const base = @max(self.columns[i].width, self.columns[i].min_width);
         if (self.sort_dir == .none or self.sort_column != i) return base;
@@ -3242,6 +3272,10 @@ pub const Table = struct {
         const painted_top = anchor_row -| scrolled;
         const painted_bottom = @min(cur_row, layer.height);
         self.row = painted_top;
+        // Unclamped: goes negative when the header scrolled up into
+        // history. `scrollOne` decrements it as more output arrives, so
+        // `headerColumnAt`/`repaint` can always find the table again.
+        self.top_live = @as(i64, @intCast(anchor_row)) - @as(i64, @intCast(scrolled));
         self.painted = .{
             .row = painted_top,
             .col = self.col,
@@ -3249,6 +3283,111 @@ pub const Table = struct {
             .cols = content_width + 2 * border_pad,
         };
         self.revision += 1;
+    }
+
+    /// Repaint the table's current cells in place -- what a re-sort
+    /// (`table_set_sort`, or a glyphwire-host header click) and a re-style
+    /// need, as opposed to `render`'s "draw fresh at the cursor, scrolling
+    /// the layer terminal-style" (right only when the table is first put
+    /// on screen). The row *set* is unchanged, so this never scrolls the
+    /// layer: it redraws the same footprint at the table's current
+    /// position (`top_live`, kept accurate by `scrollOne` as output moved
+    /// the table since `render`), clipping to the viewport instead. A
+    /// table taller than the viewport therefore re-sorts the portion
+    /// that's actually on screen; rows already in scrollback keep their
+    /// old order (the ring's history isn't rewritable). Falls back to
+    /// `render` only if the table was never rendered (`revision == 0`) --
+    /// a table scrolled entirely off screen has `painted.rows == 0` but
+    /// must still `repaint` (silently, painting nothing) rather than
+    /// re-`render` and re-scroll.
+    pub fn repaint(self: *Table, layer: *Layer, ctx: *const Context) !void {
+        if (self.revision == 0) return self.render(layer, ctx);
+        clearExtent(layer, self.painted);
+        self.painted = try self.paintAt(layer, ctx, self.top_live);
+        self.revision += 1;
+    }
+
+    /// Draws every piece of the table -- top border, header, separator,
+    /// body rows, bottom border -- top-down starting at live-viewport row
+    /// `top` (which may be negative: the table's header is up in
+    /// scrollback), **clipping** any piece that falls outside `0
+    /// ..layer.height` rather than scrolling to make room. Returns the
+    /// on-screen footprint actually covered, for `repaint` to stash as
+    /// `painted`. Shares the column layout (`headerColWidth`) and the
+    /// per-piece writers with `render`; only the vertical placement rule
+    /// differs (clip here, scroll there).
+    fn paintAt(self: *Table, layer: *Layer, ctx: *const Context, top: i64) !TablePaintedExtent {
+        var content_width: usize = 0;
+        for (self.columns, 0..) |_, i| {
+            if (i > 0) content_width += 1;
+            content_width += self.headerColWidth(i);
+        }
+        const border_pad: usize = if (self.style.borders) 1 else 0;
+        const row_height = @max(self.style.row_height, 1);
+        const content_start_col = self.col + border_pad;
+        const height_i: i64 = @intCast(layer.height);
+
+        // True when a single-line piece at row `r` is on screen.
+        const onScreen = struct {
+            fn f(r: i64, h: i64) bool {
+                return r >= 0 and r < h;
+            }
+        }.f;
+
+        var cur: i64 = top;
+
+        if (self.style.borders) {
+            if (onScreen(cur, height_i)) self.drawBorderEdge(layer, ctx, @intCast(cur), content_width, .top);
+            cur += 1;
+        }
+
+        if (onScreen(cur, height_i)) {
+            self.writeHeaderRow(layer, @intCast(cur), content_start_col);
+            if (self.style.borders) self.drawSideBorders(layer, ctx, @intCast(cur), content_width);
+        }
+        cur += 1;
+
+        if (self.style.header_separator) {
+            if (onScreen(cur, height_i)) self.drawSeparatorRow(layer, ctx, @intCast(cur), content_start_col, content_width);
+            cur += 1;
+        }
+
+        const indices = try self.sortedIndices(self.alloc);
+        defer self.alloc.free(indices);
+
+        for (indices, 0..) |row_idx, display_i| {
+            // A body block is placed only when its top line is on screen;
+            // its lower lines then clip per-cell against `layer.height`.
+            // A block whose top is above row 0 (the scroll boundary) is
+            // skipped whole -- one row not repainted there is the price of
+            // never rewriting history.
+            if (cur >= 0 and cur < height_i) {
+                const r: usize = @intCast(cur);
+                const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
+                if (row_bg) |bg| fillRowBg(layer, r, content_start_col, content_width, row_height, bg);
+                if (self.style.borders) {
+                    var line: usize = 0;
+                    while (line < row_height and r + line < layer.height) : (line += 1)
+                        self.drawSideBorders(layer, ctx, r + line, content_width);
+                }
+                self.writeBodyRow(layer, ctx, self.rows[row_idx], r, content_start_col, row_height, row_bg);
+            }
+            cur += @intCast(row_height);
+        }
+
+        if (self.style.borders) {
+            if (onScreen(cur, height_i)) self.drawBorderEdge(layer, ctx, @intCast(cur), content_width, .bottom);
+            cur += 1;
+        }
+
+        const vis_top = std.math.clamp(top, 0, height_i);
+        const vis_bot = std.math.clamp(cur, 0, height_i);
+        return .{
+            .row = @intCast(vis_top),
+            .col = self.col,
+            .rows = @intCast(vis_bot - vis_top),
+            .cols = content_width + 2 * border_pad,
+        };
     }
 
     fn writeHeaderRow(self: *const Table, layer: *Layer, row: usize, content_start_col: usize) void {

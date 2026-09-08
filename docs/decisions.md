@@ -1366,17 +1366,42 @@ surface.
   `host/table_sort.zig` hit-tests the click against each table's header
   row (`Table.headerColumnAt`, which lays columns out through the same
   `headerColWidth` the renderer uses), and on a `sortable` column runs
-  `Table.cycleSortOnColumn` + `Table.render` under `ctx_mutex`. The click
+  `Table.cycleSortOnColumn` + `Table.repaint` under `ctx_mutex`. The click
   is consumed so glyphwire-shell doesn't also get it as a grid click.
   This is a deliberate departure from "the server never hit-tests" — the
   server core still doesn't; the host does, and the host is in-process
   with the server anyway (it already reads `core` state directly every
   frame to render). Scope of the first cut (asked): tables on the
-  visible context's **root layer**, and only at the live tail
-  (`Table.row`/`painted` model the on-screen footprint, so a
-  scrolled-back view would resolve the wrong row). A checkbox-style
-  toggle for `alt_row_bg` etc. is still just a `table_set_style` a future
-  client would call.
+  visible context's **root layer**. A checkbox-style toggle for
+  `alt_row_bg` etc. is still just a `table_set_style` a future client
+  would call.
+- **The hit-test survives scrolling: `Table.top_live` is content-pinned,
+  like a selection.** The header click arrives as a *screen* row, but the
+  table was drawn wherever the shell's cursor happened to be and output
+  has scrolled it since. `Table.top_live` (logical row 0's position in
+  live-viewport coordinates, negative once the header is in scrollback)
+  is set by `render` and then decremented by `Layer.scrollOne` for every
+  table on the layer — exactly the content-pinning `scrollOne` already
+  does for `Layer.selection`. `headerColumnAt` adds the layer's
+  `view_scroll` back in, so a click resolves whether output pushed the
+  table up or the user scrolled the view back to reach the header. The
+  earlier cut keyed off a stale `Table.row` and both mis-fired (a body
+  row of a scrolled table read as the header) and, via a re-`render`,
+  scrolled the layer a second time until only the table's last rows were
+  left — the bug that motivated all of this.
+- **A re-sort `repaint`s in place; it does not re-`render`.** `render`
+  draws the table fresh at the cursor and scrolls the layer
+  terminal-style as it overflows — correct exactly once, when the table
+  is first emitted as command output. A re-sort keeps the same rows and
+  the same footprint, so `Table.repaint` redraws that footprint at the
+  table's current `top_live`, clipping to the viewport instead of
+  scrolling. Consequence for a table taller than the viewport: the
+  on-screen part re-sorts, rows already in scrollback keep their prior
+  order (the ring's history isn't rewritable) — including a header
+  scrolled off, so its arrow only shows once the table is fully back on
+  screen. Acceptable: the common case (a listing that fits) is exact,
+  and the alternative (rewriting history rows) is a much bigger change to
+  the ring's API for a corner case.
 - **The 3-state click cycle, and the arrow expands the column rather than
   clipping the name (asked).** A click steps ascending → descending →
   unsorted (back to insertion order); clicking a different sortable
@@ -1389,6 +1414,15 @@ surface.
   an `.end`-aligned column the value stays flush under the arrow). A
   column that is merely `sortable` but not the current sort shows nothing
   extra — no persistent "click me" affordance (asked).
+- **`glyphwire-ls -l` sets no default sort (asked, revised).** An earlier
+  round of this feature had `-l` open sorted by Name ascending (so the
+  Name header carried its arrow from the start). The user revised that:
+  the listing opens in `sortEntries` order (which is by name anyway) with
+  **no** arrow on any header until the user clicks one. So `-l` emits no
+  `table_set_sort` — it just marks Size / User / Group / Time / Name
+  `sortable` and gives the Name cells a `sort_key` of the bare filename
+  (not the `"name -> target"` display text) so a click-sort on Name
+  matches `sortEntries` exactly. The permission columns aren't sortable.
 - **`table_get_state` reports structure, not rendered cells.** Row count,
   sort state, style, and revision — not the cells themselves, which are
   already readable through the owning layer's ordinary `get_cells` (a

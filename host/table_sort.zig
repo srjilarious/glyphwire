@@ -19,10 +19,11 @@ const Engine = app_mod.Engine;
 /// it isn't also forwarded to glyphwire-shell as a grid click.
 ///
 /// Scope of this first cut: tables on the **visible context's root
-/// layer** only (where `glyphwire-ls -l` puts them), and only while the
-/// view is at the live tail -- `Table.headerColumnAt` maps a screen cell
-/// against `Table.row`/`painted`, which model the on-screen footprint,
-/// so a scrolled-back view would resolve the wrong row.
+/// layer** (where `glyphwire-ls -l` puts them). Works wherever the header
+/// is actually on screen -- `Table.headerColumnAt` maps the screen cell
+/// back through the table's pinned `top_live` and the layer's scrollback
+/// offset, so output scrolling the table up, or the user scrolling the
+/// view back to reach the header, are both fine.
 pub const TableSort = struct {
     app: *App,
 
@@ -56,10 +57,9 @@ pub const TableSort = struct {
         defer server.ctx_mutex.unlock(server.io);
 
         const layer = &server.ctx.root;
-        // A scrolled-back view or a full-screen program owning the screen
-        // both make the header's screen row unknowable here -- leave the
-        // click for selection / mouse reporting.
-        if (layer.view_scroll != 0 or scroll_mod.rootOwned(layer)) return false;
+        // While a full-screen program owns the screen its own content is
+        // on the grid, not a table -- leave the click for mouse reporting.
+        if (scroll_mod.rootOwned(layer)) return false;
 
         // Paint order (`table_order`) = last drawn wins where two tables
         // overlap, matching how the renderer composites them.
@@ -67,7 +67,7 @@ pub const TableSort = struct {
         var hit_col: usize = 0;
         for (layer.table_order.items) |handle| {
             const table = layer.tables.getPtr(handle) orelse continue;
-            const col = table.headerColumnAt(cell.row, cell.col) orelse continue;
+            const col = table.headerColumnAt(cell.row, cell.col, layer.view_scroll) orelse continue;
             if (!table.columns[col].sortable) continue;
             hit_table = table;
             hit_col = col;
@@ -75,7 +75,7 @@ pub const TableSort = struct {
         const table = hit_table orelse return false;
 
         table.cycleSortOnColumn(hit_col);
-        table.render(layer, server.ctx) catch |err| {
+        table.repaint(layer, server.ctx) catch |err| {
             std.log.err("table header sort repaint failed: {t}", .{err});
         };
         self.swallow_release = true;

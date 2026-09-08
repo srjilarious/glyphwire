@@ -1302,15 +1302,13 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
 
     try client.tableSetRows(null, table, rows);
 
-    // Default the listing to Name ascending (column 8, the last in the
-    // `createTable` list) so `-l` opens sorted the way a plain `ls` prints
-    // and the Name header shows its direction arrow. A header click in
-    // glyphwire-host re-sorts from here (asc -> desc -> back to this
-    // filesystem order); the fixed permission columns aren't `sortable`
-    // and stay plain. `sortEntries` above still pre-orders the rows, so
-    // this is a no-op reorder that just arms the sort state + arrow.
-    const name_column = 8;
-    try client.tableSetSort(null, table, name_column, .ascending);
+    // No default sort: the listing opens in `sortEntries` (name) order
+    // and no header shows an arrow until the user clicks one. A header
+    // click in glyphwire-host then cycles that column asc -> desc -> back
+    // to this order. The Name column carries a `sort_key` of the bare
+    // filename (set on the row cells above) so a click-sort on it matches
+    // `sortEntries` exactly; the fixed permission columns aren't
+    // `sortable`.
 
     const state = try client.tableGetState(null, table);
     // `painted.row + painted.rows` is the row just past the table's whole

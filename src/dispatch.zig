@@ -2259,7 +2259,13 @@ pub const Dispatcher = struct {
 
         const dir = try parseTableOption(core.SortDirection, p.direction, .none);
         table.setSort(p.column, dir);
-        try table.render(layer, self.ctx);
+        // `repaint`, not `render`: a re-sort keeps the same rows and
+        // footprint, so it redraws in place at the table's current
+        // position instead of scrolling the layer terminal-style a
+        // second time (which, for a table already scrolled once on its
+        // first `render`, drops all but its last rows). See
+        // `core.Table.repaint`.
+        try table.repaint(layer, self.ctx);
     }
 
     /// `table_set_style`: replaces the table's whole style (e.g. toggling
