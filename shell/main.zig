@@ -23,6 +23,15 @@ const default_prompt_left = "{cwd_full} > ";
 /// `prompt{ scrolloff = N }` isn't set. See `Prompt.scrolloffRows`.
 const default_scrolloff: usize = 8;
 
+/// Resize debounce (see the resize handling in `runPrompt`). A resize
+/// drag emits an event per frame; redrawing the prompt on each one looks
+/// messy, so the redraw waits until the size has been quiet for
+/// `resize_settle_ms`. `resize_poll_ms` is the short `waitInputEvent`
+/// timeout used while a resize is pending -- resize notifications don't
+/// wake that wait, so the loop has to check back on its own.
+const resize_settle_ms: i64 = 140;
+const resize_poll_ms: i64 = 50;
+
 comptime {
     // The captured-child marker detector keeps its own copy of the
     // marker string to stay dependency-free (see shell/handshake.zig);
@@ -227,13 +236,15 @@ fn configDirPath(alloc: std.mem.Allocator, environ_map: *const std.process.Envir
     return std.fs.path.join(alloc, &.{ home, ".config", "glyphwire" });
 }
 
-/// Drains every queued `resize` notification and re-lays-out the prompt
-/// once for the most recent size (a resize drag fires one per frame).
-/// A no-op when nothing is queued or the size didn't actually change.
+/// Drains every queued `resize` notification into `prompt.pending_resize`
+/// (see `Prompt.noteResize`) and then applies it if the size has settled
+/// (`applyPendingResize`). The prompt is *not* redrawn while a resize is
+/// still in flight.
 fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
     var last: ?glyphwire.ResizeEvent = null;
     while (listener.pollResizeEvent()) |rev| last = rev;
-    if (last) |rev| prompt.handleResize(rev.cols, rev.rows) catch {};
+    if (last) |rev| prompt.noteResize(rev.cols, rev.rows);
+    prompt.applyPendingResize(false) catch {};
 }
 
 /// Prints the current directory followed by `> `, echoes typed characters
@@ -341,27 +352,34 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
 
         // A window resize rebuilt the grid (bottom-anchored) and changed
         // its dimensions, so the recorded prompt rows, the right chain's
-        // column and every grid-size clamp are stale. Coalesce a burst of
-        // resize events (a drag fires one per frame) and re-lay-out once.
+        // column and every grid-size clamp are stale. The re-layout is
+        // debounced (`Prompt.noteResize` / `applyPendingResize`): drain
+        // the burst here, redraw only once the size has settled.
         drainResizes(listener, &prompt);
 
         // One ordered stream of key + text events (see `InputEvent`).
         // Blocks until one is queued rather than polling on a fixed
-        // interval; the timeout is just a fallback heartbeat, not
-        // load-bearing.
-        const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse {
-            // Idle tick. Handle any resize that landed during the wait
-            // before the right-chain refresh, so it redraws at the new
-            // size rather than the stale one.
+        // interval; the timeout is just a fallback heartbeat -- but while a
+        // resize is settling it polls fast (`resize_poll_ms`), since resize
+        // notifications don't wake this wait.
+        const wait_ms: i64 = if (prompt.pending_resize != null) resize_poll_ms else 500;
+        const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(wait_ms), .clock = .awake } })) orelse {
+            // Idle tick. Drain/apply any resize first; skip the right-chain
+            // refresh entirely while a resize is still in flight so it
+            // isn't drawn at an intermediate size.
             drainResizes(listener, &prompt);
-            // Refresh the powerline right chain so `{time}` keeps ticking
-            // while nothing is typed. No-op otherwise.
-            if (prompt.right_dynamic and prompt.browse_pos == null) {
+            if (prompt.pending_resize == null and prompt.right_dynamic and prompt.browse_pos == null) {
+                // Refresh the powerline right chain so `{time}` keeps
+                // ticking while nothing is typed.
                 prompt.drawRightChain() catch {};
                 prompt.placeInputCursor() catch {};
             }
             continue;
         };
+        // A real keystroke means the drag (if any) is over -- apply a
+        // still-settling resize now so the keystroke lands on a correct
+        // layout.
+        prompt.applyPendingResize(true) catch {};
 
         // Committed text input -- the characters the user typed, already
         // resolved through their OS keyboard layout / dead keys / IME.
@@ -616,6 +634,12 @@ const Prompt = struct {
     /// a command's output scrolled the layer.
     grid_cols: usize = 0,
     grid_rows: usize = 0,
+    /// A window resize that hasn't been applied yet -- the prompt redraw
+    /// is held off until the size settles (see `resize_settle_ms` and the
+    /// resize handling in `runPrompt`). Only the latest size in a burst is
+    /// kept; `resize_seen_at` is when it arrived.
+    pending_resize: ?glyphwire.ResizeEvent = null,
+    resize_seen_at: ?std.Io.Clock.Timestamp = null,
     /// Non-null while the cursor is browsing the grid instead of sitting on
     /// the live prompt (`browseUp`/`browseDown`/`browseLeft`/`browseRight`,
     /// entered by plain Up with nothing being typed) -- see those methods'
@@ -1319,8 +1343,31 @@ const Prompt = struct {
         try self.renderInputLine();
     }
 
-    /// Re-lays-out the prompt after a window resize (see the `resize`
-    /// drain in `runPrompt`). The grid was rebuilt bottom-anchored, so the
+    /// Records a resize event without redrawing -- the re-layout waits for
+    /// the size to settle (`resize_settle_ms`), since a resize drag emits
+    /// one event per frame and redrawing on each looks messy. Coalesces a
+    /// burst: keeps only the latest size, each event pushes the deadline.
+    fn noteResize(self: *Prompt, cols: usize, rows: usize) void {
+        self.pending_resize = .{ .cols = cols, .rows = rows };
+        self.resize_seen_at = std.Io.Clock.Timestamp.now(self.client.io, .awake);
+    }
+
+    /// Applies a pending resize once it's been quiet for `resize_settle_ms`
+    /// -- or immediately when `force` (the user pressed a key, so the drag
+    /// is over and the keystroke should land on a correct layout).
+    fn applyPendingResize(self: *Prompt, force: bool) !void {
+        const rev = self.pending_resize orelse return;
+        if (!force) {
+            const quiet = self.resize_seen_at.?.untilNow(self.client.io).raw.toMilliseconds();
+            if (quiet < resize_settle_ms) return;
+        }
+        self.pending_resize = null;
+        self.resize_seen_at = null;
+        try self.handleResize(rev.cols, rev.rows);
+    }
+
+    /// Re-lays-out the prompt after a window resize (see `noteResize` /
+    /// `applyPendingResize`). The grid was rebuilt bottom-anchored, so the
     /// previously-drawn prompt cells moved by the height change, and
     /// `grid_cols`/`grid_rows` -- hence the right chain's column, the
     /// input-box bounds and every row clamp -- are stale. Shift the

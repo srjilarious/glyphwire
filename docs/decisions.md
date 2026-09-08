@@ -1078,17 +1078,23 @@ surface.
   `grid_rows - 1` as a backstop, and `renderInputLine` guards a
   zero/underflowed box width.
 - **The shell re-lays-out the prompt on a window resize.** It now
-  subscribes to `"resize"` and, on a (coalesced) resize event,
-  `Prompt.handleResize` updates `grid_cols` / `grid_rows` and redraws:
-  without this the right chain stayed at the old column (`grid_cols - w`
-  with a stale `grid_cols`) and, worse, the `grid_rows - 1` clamps above
-  used a stale `grid_rows`, so after a shrink the prompt rows were past
-  the real bottom and the idle refresh `set_property`'d off-grid every
-  500 ms — the same creep. Since `Layer.resize` is bottom-anchored, the
+  subscribes to `"resize"`. Without this the right chain stayed at the
+  old column (`grid_cols - w` with a stale `grid_cols`) and, worse, the
+  `grid_rows - 1` clamps above used a stale `grid_rows`, so after a
+  shrink the prompt rows were past the real bottom and the idle refresh
+  `set_property`'d off-grid every 500 ms — the same creep. The redraw is
+  **debounced**: `Prompt.noteResize` records the latest size and a
+  timestamp; `applyPendingResize` re-lays-out only once the size has been
+  quiet for `resize_settle_ms` (~140 ms), or immediately on the next
+  keystroke. A resize *drag* emits an event per frame and redrawing on
+  each looked messy; resize notifications also don't wake
+  `waitInputEvent`, so while one is pending the loop polls on a short
+  `resize_poll_ms` timeout and suppresses the idle right-chain refresh.
+  `handleResize` itself: `Layer.resize` is bottom-anchored, so the
   recorded prompt top is shifted by the height delta and the prefix
   redrawn from there (`writePowerlinePrefix`'s scroll-up-front handles an
-  overflow); the drain runs both at the top of the key loop and before
-  the idle-tick right-chain refresh.
+  overflow). Mid-drag reflow can still look briefly odd — a real reflow
+  model is a later item (`docs/ideas.md`).
 - **Deferred:** a `prompt` *function* form — `shell.conf` sets a Lua
   callback that receives the same data items and emits its own draw
   commands (so it can shell out to `git status` etc.). Recorded in
