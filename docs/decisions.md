@@ -486,10 +486,33 @@ surface.
     wider than its pane and should not sprout a bar; and a bar is skipped
     anyway on an axis with no slack, so a wheel over a pane with nothing
     to scroll falls through to the shell's scrollback underneath instead
-    of being silently swallowed. The window's own right-edge bar is
-    untouched — it is the root layer's scrollback and keeps its gutter.
-    Horizontal is real, not decorative: a tree with long filenames is
-    exactly the case that motivated it.
+    of being silently swallowed. Horizontal is real, not decorative: a
+    tree with long filenames is exactly the case that motivated it.
+    - **The thumb is sized from the effective content, not the real
+      grid.** `paneScrollbars` builds the thumb length from
+      `viewport + max_row` (or `_col`) — the reach the `ScrollbarState`
+      already reports, which folds in a self-scrolling pane's virtual
+      `content_extent`. An earlier cut passed the layer's raw cell grid
+      as the content size, so a `content_extent` pane (real grid ==
+      viewport) always drew a full-height thumb that looked like there
+      was nothing to scroll.
+  - **The window's right-edge bar is opt-out per context.**
+    `Context.window_scrollbar` (default on; `create_context`'s
+    `window_scrollbar` field, or the `set_window_scrollbar` notification
+    at runtime) is whether glyphwire-host paints its always-on
+    scrollback bar. The shell and every terminal-style client keep it; a
+    pure-TUI context like zoe — whose root has no scrollback and whose
+    panes carry their own `scrollbars` — turns it off, since the bar
+    would otherwise sit there permanently full and inert. **The gutter is
+    reclaimed when the bar is hidden:** `syncWindowSize` (px → cells) and
+    `resizeWindowForCells` (cells → px) read `geometry.rightGutterPx`,
+    which is zero for a bar-less visible context, so the grid reflows
+    wider to fill the ~12px the bar would have taken instead of leaving a
+    dead strip. Grid sizing stays session-global, so a context switch
+    between a bar and a bar-less context does trigger one `reportResize`
+    — but it rides the existing debounce (`resize_settle_ms`), the same
+    path a window drag takes, and a full-screen program appearing or
+    leaving already reflows the surface.
   - **`content_extent` gives a self-scrolling pane a real scrollbar.**
     A pane whose real cell grid is only viewport-sized — a TUI editor's
     buffer, which redraws its visible rows on every scroll because a full
@@ -532,6 +555,15 @@ surface.
     neighbour declared — a fixed pane gets a new cell count, a weighted
     pair keeps its *combined* weight and re-splits it — so resizing two
     panes never disturbs the rest of the tree.
+  - **A split can opt out of resize entirely.** `create_split`'s
+    `resizable` (default true) — false means the split reserves **no**
+    `divider_cells` gap between its children, emits no `DividerRect` for
+    the host to draw or hit-test, and `move_divider` on it is a no-op.
+    The motivating case is an editor's outer column split: the buffer
+    area over a one-row command line, where the command line is `fixed: 1`
+    anyway and a full-width drag handle above it is a wasted row that
+    also *looks* draggable when it isn't. zoe's inner tree|buffer split
+    stays resizable; only the outer one opts out.
   - **The root layer is never a split child.** It's a context's own
     scrollback, drawn at a fixed origin; a split tree's panes cover it.
     Within one context this gives an in-place alt-screen (a full-screen

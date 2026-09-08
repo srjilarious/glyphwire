@@ -83,8 +83,6 @@ pub const Scroll = struct {
                 state,
                 layer.viewportCols(),
                 layer.viewportRows(),
-                layer.width,
-                layer.height,
             );
             if (bars.vertical) |v| {
                 if (v.track.contains(px, py)) return .{ .layer = handle, .state = state, .bars = bars };
@@ -116,8 +114,6 @@ pub const Scroll = struct {
                 state,
                 layer.viewportCols(),
                 layer.viewportRows(),
-                layer.width,
-                layer.height,
             ),
         };
     }
@@ -324,12 +320,20 @@ pub const Scroll = struct {
         var history_len: usize = undefined;
         var height: usize = undefined;
         var view_scroll: usize = undefined;
+        var enabled: bool = undefined;
         {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
             history_len = server.ctx.root.history_len;
             height = server.ctx.root.height;
             view_scroll = server.ctx.root.view_scroll;
+            enabled = server.ctx.window_scrollbar;
+        }
+        // The bar isn't drawn for this context (`core.Context.window_scrollbar`),
+        // so a click in its gutter falls through to selection / the grid.
+        if (!enabled) {
+            self.scrollbar_drag = false;
+            return false;
         }
         const geom = geometry.scrollbarGeom(fb.x, fb.y, history_len, height, view_scroll);
         const on_bar = pos.x >= geom.left;

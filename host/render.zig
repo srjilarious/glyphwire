@@ -1128,15 +1128,17 @@ pub const Renderer = struct {
         const gl = host_eng.gl;
         const fb = eng.window_state.framebuffer_size;
         const x0: i32 = geometry.content_pad_px;
-        const w: i32 = @min(@as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w, fb.x - geometry.scrollbar_width_px - 2 * geometry.content_pad_px);
 
         var used_rows: usize = geometry.min_grid_rows;
+        var gutter: i32 = geometry.scrollbar_width_px;
         {
             const server = self.app.server;
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
             used_rows = @max(geometry.min_grid_rows, server.ctx.root.cursor.row + 2);
+            gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
         }
+        const w: i32 = @min(@as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w, fb.x - gutter - 2 * geometry.content_pad_px);
         used_rows = @min(used_rows, geometry.grid_rows);
         const h: i32 = @min(@as(i32, @intCast(used_rows)) * geometry.cell_h, fb.y);
         if (w <= 0 or h <= 0) {
@@ -1241,8 +1243,6 @@ pub const Renderer = struct {
                 state,
                 layer.viewportCols(),
                 layer.viewportRows(),
-                layer.width,
-                layer.height,
             );
             if (bars.vertical) |v| drawBar(eng, v);
             if (bars.horizontal) |h| drawBar(eng, h);
@@ -1282,6 +1282,7 @@ pub const Renderer = struct {
         var height: usize = undefined;
         var view_scroll: usize = undefined;
         var owned: bool = undefined;
+        var enabled: bool = undefined;
         {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
@@ -1289,7 +1290,13 @@ pub const Renderer = struct {
             height = server.ctx.root.height;
             view_scroll = server.ctx.root.view_scroll;
             owned = scroll.rootOwned(&server.ctx.root);
+            enabled = server.ctx.window_scrollbar;
         }
+        // A pure-TUI context opts the bar out entirely -- see
+        // `core.Context.window_scrollbar`. The reserved gutter stays
+        // (grid sizing is session-global, the flag is per-context), it
+        // just isn't painted.
+        if (!enabled) return;
         if (owned) {
             eng.renderer.drawFilledRect(
                 host_eng.RectF.fromPosSize(fb.x - geometry.scrollbar_width_px, 0, geometry.scrollbar_width_px, fb.y),

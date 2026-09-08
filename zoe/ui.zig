@@ -184,8 +184,11 @@ pub const Ui = struct {
         // A dedicated context for the editor, shown immediately. From
         // here on every layer/split call on `client` targets it, not the
         // shell's context. The paired listener joins it too so its input
-        // subscriptions follow this context's visibility.
-        const context = try client.createContext(null, null, 0);
+        // subscriptions follow this context's visibility. No window
+        // scrollbar: zoe's root has no scrollback, and each pane draws
+        // its own bar -- the always-on right-edge one would just sit
+        // there permanently full.
+        const context = try client.createContext(null, null, 0, false);
         errdefer client.destroyContext(context) catch {};
         try listener.attachContext(context);
 
@@ -206,8 +209,12 @@ pub const Ui = struct {
         try client.setLayerScrollbars(tree_layer, true, true);
         try client.setLayerScrollbars(buffer_layer, true, false);
 
-        const pane_split = try client.createSplit(.row);
-        const root_split = try client.createSplit(.column);
+        // The tree|buffer split stays user-resizable. The outer
+        // column split (editor area over the one-row command line) is
+        // not: a drag handle there is a wasted row and the command line
+        // is a fixed height anyway.
+        const pane_split = try client.createSplit(.row, true);
+        const root_split = try client.createSplit(.column, false);
 
         self.* = .{
             .alloc = alloc,

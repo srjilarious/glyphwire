@@ -2051,6 +2051,35 @@ pub fn createSplitReturnsAHandleTest(io: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectEqual(ctx.splits.getPtr(1).?.axis, .row);
 }
 
+pub fn createSplitCarriesTheResizableFlagTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // Default (omitted) is resizable.
+    {
+        const decoded = try roundTripThroughWire(alloc,
+            \\{"jsonrpc":"2.0","id":1,"method":"create_split","params":{"axis":"row"}}
+        );
+        defer alloc.free(decoded);
+        const body = (try d.handle(alloc, decoded)).response.?;
+        defer alloc.free(body);
+    }
+    try testz.expectTrue(ctx.splits.getPtr(1).?.resizable);
+
+    // Explicit false lands on the split.
+    {
+        const decoded = try roundTripThroughWire(alloc,
+            \\{"jsonrpc":"2.0","id":2,"method":"create_split","params":{"axis":"column","resizable":false}}
+        );
+        defer alloc.free(decoded);
+        const body = (try d.handle(alloc, decoded)).response.?;
+        defer alloc.free(body);
+    }
+    try testz.expectTrue(!ctx.splits.getPtr(2).?.resizable);
+}
+
 pub fn createSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
@@ -2484,6 +2513,31 @@ pub fn createContextRetargetsTheConnectionAndBroadcastsTest(io: std.Io, alloc: s
     try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, 1));
     try testz.expectEqual(session.visibleStackTop(), @as(glyphwire.ContextHandle, 1));
     try testz.expectEqual(session.contextPtr(1).?, d.ctx);
+}
+
+pub fn createContextAndSetWindowScrollbarToggleTheFlagTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7);
+
+    // A pure-TUI client creates its context with the window bar off.
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0,"window_scrollbar":false}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+    try testz.expectTrue(!session.contextPtr(1).?.window_scrollbar);
+    // The root context keeps its default.
+    try testz.expectTrue(root.window_scrollbar);
+
+    // And it can turn it back on at runtime.
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_window_scrollbar","params":{"visible":true}}
+    );
+    try testz.expectTrue(session.contextPtr(1).?.window_scrollbar);
 }
 
 pub fn writeTextAfterCreateContextLandsOnTheNewContextNotRootTest(io: std.Io, alloc: std.mem.Allocator) !void {

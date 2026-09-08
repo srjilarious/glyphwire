@@ -2976,6 +2976,56 @@ pub fn splitCycleStopsAtTheDepthCapTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectTrue(ctx.splits.getPtr(split).?.laid_out);
 }
 
+pub fn nonResizableSplitReservesNoGapAndEmitsNoDividerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    const body = try ctx.createLayer(100, 40, 0);
+    const status = try ctx.createLayer(100, 1, 0);
+
+    const split = try ctx.createSplit(.column);
+    ctx.splits.getPtr(split).?.resizable = false;
+    try ctx.setSplitChildren(split, &.{
+        .{ .target = .{ .layer = body }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .layer = status }, .size = .{ .fixed = 1 } },
+    });
+    try ctx.setRootSplit(split);
+
+    var dividers: std.ArrayList(glyphwire.DividerRect) = .empty;
+    defer dividers.deinit(alloc);
+    try ctx.layoutSplits(null, &dividers);
+
+    // No `divider_cells` gap: the body takes all 40 rows bar the fixed
+    // one-row status line, where a resizable split would have left it 38.
+    try testz.expectEqual(ctx.layerPtr(body).?.viewportRows(), 39);
+    try testz.expectEqual(ctx.layerPtr(status).?.viewportRows(), 1);
+    // And nothing draggable was produced.
+    try testz.expectEqual(dividers.items.len, 0);
+}
+
+pub fn moveDividerNoOpsOnNonResizableSplitTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    const body = try ctx.createLayer(100, 40, 0);
+    const status = try ctx.createLayer(100, 1, 0);
+
+    const split = try ctx.createSplit(.column);
+    ctx.splits.getPtr(split).?.resizable = false;
+    try ctx.setSplitChildren(split, &.{
+        .{ .target = .{ .layer = body }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .layer = status }, .size = .{ .fixed = 1 } },
+    });
+    try ctx.setRootSplit(split);
+    try ctx.layoutSplits(null, null);
+
+    // The drag is silently ignored -- the split has no bands to move.
+    try ctx.moveDivider(split, 0, -10);
+    try ctx.layoutSplits(null, null);
+    try testz.expectEqual(ctx.layerPtr(body).?.viewportRows(), 39);
+    try testz.expectEqual(ctx.layerPtr(status).?.viewportRows(), 1);
+}
+
 // ── Layer ownership & lifecycle culling (see `core.ConnId`) ──────────────
 
 pub fn addLayerOwnerThenHasOwnerTest(io: std.Io, alloc: std.mem.Allocator) !void {

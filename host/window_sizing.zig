@@ -49,12 +49,15 @@ pub const WindowSizing = struct {
     /// this) has already rebuilt the viewport/projection for the new
     /// framebuffer, so `render` just draws the larger or smaller grid.
     ///
-    /// The always-on scrollbar (`scrollbar_width_px`) plus a
+    /// The always-on scrollbar's gutter (`geometry.rightGutterPx`) plus a
     /// `content_pad_px` margin on each side of the grid are subtracted
     /// from the usable width before dividing into cells, so the last
     /// column isn't lost under the bar or the padding. The initial window
     /// (see `main`) is opened that much wider than the grid for the same
-    /// reason.
+    /// reason. When the visible context has opted the bar out, that
+    /// gutter is zero and the grid reflows wider to fill it -- a
+    /// debounced `reportResize` on the context switch, same path as a
+    /// window drag.
     ///
     /// The new size is debounced: while the window is actively being
     /// dragged the grid stays put (the render clips or letterboxes the
@@ -66,7 +69,13 @@ pub const WindowSizing = struct {
     pub fn syncWindowSize(self: *WindowSizing, eng: *Engine, delta_ms: f64) void {
         const fb = eng.window_state.framebuffer_size;
         if (geometry.cell_w <= 0 or geometry.cell_h <= 0) return;
-        const cols: usize = @intCast(@max(@divTrunc(fb.x - 2 * geometry.content_pad_px - geometry.scrollbar_width_px, geometry.cell_w), geometry.min_grid_cols));
+
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        const gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
+        server.ctx_mutex.unlock(server.io);
+
+        const cols: usize = @intCast(@max(@divTrunc(fb.x - 2 * geometry.content_pad_px - gutter, geometry.cell_w), geometry.min_grid_cols));
         const rows: usize = @intCast(@max(@divTrunc(fb.y, geometry.cell_h), geometry.min_grid_rows));
 
         const target: geometry.GridSize = .{ .cols = cols, .rows = rows };
@@ -178,12 +187,16 @@ pub const WindowSizing = struct {
     /// tiling WM that ignores the request just leaves `syncWindowSize` to
     /// reflow the grid to whatever size it forces instead.
     pub fn resizeWindowForCells(self: *WindowSizing, eng: *Engine) void {
-        _ = self;
         const ws = &eng.window_state;
         const fb = ws.framebuffer_size;
         if (fb.x <= 0 or fb.y <= 0 or ws.window_size.x <= 0 or ws.window_size.y <= 0) return;
 
-        const target_fb_w = @as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w + 2 * geometry.content_pad_px + geometry.scrollbar_width_px;
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        const gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
+        server.ctx_mutex.unlock(server.io);
+
+        const target_fb_w = @as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w + 2 * geometry.content_pad_px + gutter;
         const target_fb_h = @as(i32, @intCast(geometry.grid_rows)) * geometry.cell_h;
 
         const win_w = std.math.divCeil(i32, target_fb_w * ws.window_size.x, fb.x) catch return;

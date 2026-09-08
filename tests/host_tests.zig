@@ -182,7 +182,7 @@ fn barState(vertical: bool, horizontal: bool, row: usize, col: usize, max_row: u
 }
 
 pub fn paneScrollbarsOmittedWhenNotOptedInTest(_: std.Io, _: std.mem.Allocator) !void {
-    const bars = geometry.paneScrollbars(pane_rect, barState(false, false, 0, 0, 100, 100), 30, 20, 130, 120);
+    const bars = geometry.paneScrollbars(pane_rect, barState(false, false, 0, 0, 100, 100), 30, 20);
     try testz.expectTrue(bars.vertical == null);
     try testz.expectTrue(bars.horizontal == null);
 }
@@ -190,37 +190,37 @@ pub fn paneScrollbarsOmittedWhenNotOptedInTest(_: std.Io, _: std.mem.Allocator) 
 pub fn paneScrollbarsOmittedWhenNothingToScrollTest(_: std.Io, _: std.mem.Allocator) !void {
     // Opted in, but the viewport covers the content -- a bar that can't
     // move shouldn't be drawn.
-    const bars = geometry.paneScrollbars(pane_rect, barState(true, true, 0, 0, 0, 0), 30, 20, 30, 20);
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, true, 0, 0, 0, 0), 30, 20);
     try testz.expectTrue(bars.vertical == null);
     try testz.expectTrue(bars.horizontal == null);
 }
 
 pub fn paneVerticalBarSitsOnTheRightEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
-    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 0, 0, 80, 0), 30, 20, 30, 100);
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 0, 0, 80, 0), 30, 20);
     const v = bars.vertical.?;
     try testz.expectEqual(v.track.x, 400.0 - geometry.pane_scrollbar_px);
     try testz.expectEqual(v.track.y, 50.0);
     // No horizontal bar to make room for, so the track is the full height.
     try testz.expectEqual(v.track.h, 200.0);
-    // Viewport is 20 of 100 rows, so the thumb is a fifth of the track,
-    // flush at the top for offset 0.
+    // Total content is view + reach = 20 + 80 = 100 rows, so the thumb is
+    // a fifth of the track, flush at the top for offset 0.
     try testz.expectEqual(v.thumb.h, 40.0);
     try testz.expectEqual(v.thumb.y, 50.0);
 }
 
 pub fn paneVerticalThumbTravelsWithTheOffsetTest(_: std.Io, _: std.mem.Allocator) !void {
     // Fully scrolled: the thumb is flush at the bottom of its travel.
-    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 80, 0, 80, 0), 30, 20, 30, 100);
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 80, 0, 80, 0), 30, 20);
     const v = bars.vertical.?;
     try testz.expectEqual(v.thumb.y, 50.0 + 200.0 - 40.0);
 
     // Halfway along.
-    const mid = geometry.paneScrollbars(pane_rect, barState(true, false, 40, 0, 80, 0), 30, 20, 30, 100);
+    const mid = geometry.paneScrollbars(pane_rect, barState(true, false, 40, 0, 80, 0), 30, 20);
     try testz.expectEqual(mid.vertical.?.thumb.y, 50.0 + 80.0);
 }
 
 pub fn paneBarsMakeRoomForEachOtherTest(_: std.Io, _: std.mem.Allocator) !void {
-    const bars = geometry.paneScrollbars(pane_rect, barState(true, true, 0, 0, 80, 70), 30, 20, 100, 100);
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, true, 0, 0, 80, 70), 30, 20);
     const v = bars.vertical.?;
     const h = bars.horizontal.?;
     // Each track stops short of the other so they don't overlap in the
@@ -233,8 +233,30 @@ pub fn paneBarsMakeRoomForEachOtherTest(_: std.Io, _: std.mem.Allocator) !void {
 pub fn paneThumbNeverShrinksBelowTheMinimumTest(_: std.Io, _: std.mem.Allocator) !void {
     // 20 rows visible out of 100_000: the honest fraction would be a
     // fraction of a pixel, so the thumb is floored at something grabbable.
-    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 0, 0, 99_980, 0), 30, 20, 30, 100_000);
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 0, 0, 99_980, 0), 30, 20);
     try testz.expectEqual(bars.vertical.?.thumb.h, geometry.scrollbar_min_thumb_px);
+}
+
+pub fn paneThumbFractionFollowsTheVirtualExtentTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A self-scrolling pane (zoe's buffer): the real cell grid is exactly
+    // the viewport, so the only thing that says "there is more content"
+    // is `state.max_row`, derived from the layer's `content_extent`.
+    // Viewport 20, reach 60 -> total 80 -> the thumb is a quarter of the
+    // 200px track, not the whole track (the pre-fix bug, where the
+    // geometry took the viewport-sized real grid as the content and drew
+    // a full-height thumb).
+    const bars = geometry.paneScrollbars(pane_rect, barState(true, false, 0, 0, 60, 0), 30, 20);
+    const v = bars.vertical.?;
+    try testz.expectEqual(v.thumb.h, 50.0);
+    try testz.expectTrue(v.thumb.h < v.track.h);
+}
+
+pub fn rightGutterIsZeroWithoutAScrollbarTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A bar-less visible context reclaims the gutter, so px<->cell math
+    // on both sides (`syncWindowSize`, `resizeWindowForCells`) reserves
+    // nothing and the grid reflows wider.
+    try testz.expectEqual(geometry.rightGutterPx(true), geometry.scrollbar_width_px);
+    try testz.expectEqual(geometry.rightGutterPx(false), 0);
 }
 
 // ─── geometry.layerRect / cellRectPx ──────────────────────────────────
@@ -344,4 +366,17 @@ pub fn contextSigMovesWhenAFullScreenProgramTakesTheScreenTest(_: std.Io, alloc:
     try ctx.root.writeText("\x1b[?1049h", glyphwire.default_style.fg, glyphwire.default_style.bg);
     const owned = redraw.contextSig(&ctx);
     try testz.expectFalse(std.meta.eql(before, owned));
+}
+
+pub fn contextSigMovesWhenTheWindowScrollbarIsToggledTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    const on = redraw.contextSig(&ctx);
+    // `set_window_scrollbar` changes nothing else the renderer hashes, so
+    // the flag needs its own bit in the fingerprint or the repaint is
+    // missed.
+    ctx.window_scrollbar = false;
+    const off = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(on, off));
 }

@@ -184,6 +184,10 @@ const CreateContextParams = struct {
     width: ?usize = null,
     height: ?usize = null,
     scrollback_rows: usize = 0,
+    /// Whether glyphwire-host draws its always-on right-edge scrollbar
+    /// for this context (see `core.Context.window_scrollbar`). Default
+    /// on -- a pure-TUI client passes false.
+    window_scrollbar: bool = true,
 };
 
 const CreateContextResult = struct { context: core.ContextHandle };
@@ -191,6 +195,11 @@ const CreateContextResult = struct { context: core.ContextHandle };
 /// `destroy_context` / `activate_context` / `adopt_context` -- all just
 /// name one context handle.
 const ContextHandleParams = struct { context: core.ContextHandle };
+
+/// `set_window_scrollbar`: toggles the always-on window scrollbar on the
+/// issuing connection's active context after the fact -- the runtime
+/// counterpart of `create_context`'s `window_scrollbar`.
+const SetWindowScrollbarParams = struct { visible: bool };
 
 const DestroyLayerParams = struct {
     layer: core.LayerHandle,
@@ -214,6 +223,11 @@ const LowerLayerParams = struct {
 const CreateSplitParams = struct {
     /// `"row"` (children left to right) or `"column"` (top to bottom).
     axis: []const u8,
+    /// Whether the user may drag this split's dividers (see
+    /// `core.Split.resizable`). Default true; a structural split like an
+    /// editor's buffer-area-over-command-line passes false so the fixed
+    /// child gets no grab band and no wasted row.
+    resizable: bool = true,
 };
 
 const CreateSplitResult = struct { handle: core.SplitHandle };
@@ -929,6 +943,7 @@ pub const Dispatcher = struct {
         .{ "activate_context", catResult(handleActivateContext) },
         .{ "attach_context", catVoid(handleAttachContext) },
         .{ "adopt_context", catVoid(handleAdoptContext) },
+        .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "create_split", catBytesId(handleCreateSplit) },
         .{ "destroy_split", catResult(handleDestroySplit) },
         .{ "set_split_children", catResult(handleSetSplitChildren) },
@@ -1410,6 +1425,7 @@ pub const Dispatcher = struct {
         if (self.conn_id) |cid| session.addContextOwner(new_handle, cid) catch {};
         self.active_ctx = new_handle;
         self.ctx = session.contextPtr(new_handle).?;
+        self.ctx.window_scrollbar = p.window_scrollbar;
 
         var result = try self.contextBroadcast(alloc);
         result.response = try rpc.response(alloc, id, CreateContextResult{ .context = new_handle });
@@ -1503,6 +1519,21 @@ pub const Dispatcher = struct {
         }
     }
 
+    /// `set_window_scrollbar`: toggles glyphwire-host's always-on
+    /// right-edge scrollbar for this connection's active context (see
+    /// `core.Context.window_scrollbar`). The runtime counterpart of the
+    /// `window_scrollbar` field on `create_context`. Changes nothing
+    /// else, so the host picks it up on its next repaint
+    /// (`host/redraw.zig` folds the flag into the change-detection
+    /// fingerprint).
+    fn handleSetWindowScrollbar(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetWindowScrollbarParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.window_scrollbar = parsed.value.visible;
+    }
+
     /// Re-lays-out the split tree and, if any pane's bounds moved, builds
     /// the `layout` broadcast for it. Every split mutation ends here, so
     /// a client never has to ask what the change did to its panes.
@@ -1532,6 +1563,10 @@ pub const Dispatcher = struct {
         const axis = std.meta.stringToEnum(core.SplitAxis, parsed.value.axis) orelse
             return DispatchError.InvalidSplitAxis;
         const split_handle = try self.ctx.createSplit(axis);
+        // `createSplit` has no resizable param (keeps its many in-process
+        // and test call sites untouched) -- set it here, before the split
+        // has children or a layout.
+        if (self.ctx.splits.getPtr(split_handle)) |s| s.resizable = parsed.value.resizable;
         return try rpc.response(alloc, id, CreateSplitResult{ .handle = split_handle });
     }
 
