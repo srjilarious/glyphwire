@@ -1027,6 +1027,20 @@ surface.
   prompt, wrapping) before running it, so scrollback shows all of it.
   The `insert_cells` / `delete_cells` wire ops are now unused by the
   shell but stay in the protocol.
+- **A multi-line prompt near the bottom scrolls up-front, once.** After a
+  command's output has scrolled the layer the cursor can be within
+  `prompt_lines` of the last row. `writePowerlinePrefix` used to just
+  `set_property(cursor, {row: start + lines - 1})` — which the server
+  turns into that many scrolls mid-draw — and then recorded that
+  pre-scroll target as `line_start_row`, leaving it one past the last
+  valid row so every later `renderInputLine` / idle right-chain refresh
+  `set_property`'d off the bottom and scrolled again (the prompt "crept
+  down" ~1 row every 500 ms). Now it computes the overshoot, writes that
+  many newlines at the bottom row to scroll deliberately, and draws
+  everything relative to the resulting on-grid top row. `renderInputLine`
+  / `placeInputCursor` / `drawRightChain` also clamp their row to
+  `grid_rows - 1` as a backstop, and `renderInputLine` guards a
+  zero/underflowed box width.
 - **Deferred:** a `prompt` *function* form — `shell.conf` sets a Lua
   callback that receives the same data items and emits its own draw
   commands (so it can shell out to `git status` etc.). Recorded in

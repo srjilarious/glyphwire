@@ -250,6 +250,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         var snapshot = try client.getCells();
         defer snapshot.deinit();
         prompt.grid_cols = snapshot.cols();
+        prompt.grid_rows = snapshot.rows();
     }
 
     // For `{host}` in a configured prompt template -- resolved once, it
@@ -332,7 +333,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // keeps ticking while nothing is typed. No-op otherwise.
             if (prompt.right_dynamic and prompt.browse_pos == null) {
                 prompt.drawRightChain() catch {};
-                prompt.client.setCursor(prompt.line_start_row, prompt.line_start_col + prompt.caretCol()) catch {};
+                prompt.placeInputCursor() catch {};
             }
             continue;
         };
@@ -584,11 +585,12 @@ const Prompt = struct {
     /// mirroring a real shell's "go back to what I was typing" behavior.
     /// Only meaningful while `history_index != null`.
     scratch: std.ArrayList(u8) = .empty,
-    /// The root layer's column count -- fetched once at startup (`runPrompt`)
-    /// to clamp browse-mode horizontal movement (`browseLeft`/`browseRight`);
-    /// there's no lighter-weight "get grid size" property yet (`size` is
-    /// still 🔶 in decisions.md), and it doesn't change over a session.
+    /// The root layer's size -- fetched once at startup (`runPrompt`) to
+    /// clamp browse-mode horizontal movement (`browseLeft`/`browseRight`)
+    /// and to keep the prompt from `setCursor`ing off the bottom row after
+    /// a command's output scrolled the layer.
     grid_cols: usize = 0,
+    grid_rows: usize = 0,
     /// Non-null while the cursor is browsing the grid instead of sitting on
     /// the live prompt (`browseUp`/`browseDown`/`browseLeft`/`browseRight`,
     /// entered by plain Up with nothing being typed) -- see those methods'
@@ -952,7 +954,8 @@ const Prompt = struct {
         const right_head = p.right_head orelse "";
         const w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
         if (w >= self.grid_cols) return;
-        try self.drawChain(self.pl_top_row, self.grid_cols - w, list.items, sep_right, right_head, "", true);
+        const row = if (self.grid_rows > 0) @min(self.pl_top_row, self.grid_rows - 1) else self.pl_top_row;
+        try self.drawChain(row, self.grid_cols - w, list.items, sep_right, right_head, "", true);
     }
 
     /// The powerline prompt: `left_segments` from column 0, `right_segments`
@@ -966,9 +969,25 @@ const Prompt = struct {
         var bufs: PromptDataBufs = .{};
         const data = self.buildPromptData(&bufs, p);
 
-        const start = try self.client.getCursor();
-        self.pl_top_row = start.row;
         self.prompt_lines = p.lines orelse 1;
+
+        // The prompt needs `prompt_lines` consecutive rows. If the cursor
+        // (left where the last command's output ended) is close enough to
+        // the bottom that they wouldn't fit, scroll the layer up-front by
+        // writing that many newlines at the bottom row -- so every draw
+        // below works with an on-grid `top` and the recorded
+        // `line_start_row` can't end up one past the last row (which made
+        // every later `renderInputLine` / idle refresh scroll again).
+        const start = try self.client.getCursor();
+        var top = start.row;
+        if (self.grid_rows > 0 and top + self.prompt_lines > self.grid_rows) {
+            const overshoot = top + self.prompt_lines - self.grid_rows;
+            try self.client.setCursor(self.grid_rows - 1, 0);
+            var k: usize = 0;
+            while (k < overshoot) : (k += 1) try self.client.writeText("\n", null, null);
+            top -= overshoot;
+        }
+        self.pl_top_row = top;
 
         const sep = p.sep orelse "";
         const sep_right = p.sep_right orelse sep;
@@ -980,7 +999,7 @@ const Prompt = struct {
         if (p.left_segments) |segs| {
             var list: std.ArrayList(RenderedSeg) = .empty;
             const seg_sum = try self.renderChain(arena, segs, data, &list);
-            try self.drawChain(start.row, 0, list.items, sep, head, tail, false);
+            try self.drawChain(top, 0, list.items, sep, head, tail, false);
             left_end = @min(chainWidth(list.items.len, seg_sum, sep, head, tail), self.grid_cols);
         }
 
@@ -991,13 +1010,14 @@ const Prompt = struct {
             right_w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
             if (list.items.len > 0 and right_w < self.grid_cols) {
                 self.right_dynamic = true;
-                try self.drawChain(start.row, self.grid_cols - right_w, list.items, sep_right, right_head, "", true);
+                try self.drawChain(top, self.grid_cols - right_w, list.items, sep_right, right_head, "", true);
             }
         }
 
         const input_prefix = p.input orelse "> ";
         if (self.prompt_lines >= 2) {
-            const irow = start.row + self.prompt_lines - 1;
+            // `top + prompt_lines <= grid_rows` now, so this row is on-grid.
+            const irow = top + self.prompt_lines - 1;
             try self.client.setCursor(irow, 0);
             if (input_prefix.len > 0) try self.client.writeText(input_prefix, null, null);
             self.line_start_row = irow;
@@ -1005,12 +1025,12 @@ const Prompt = struct {
             self.input_max_col = self.grid_cols;
         } else {
             var col = left_end;
-            try self.client.setCursor(start.row, col);
+            try self.client.setCursor(top, col);
             if (input_prefix.len > 0) {
                 try self.client.writeText(input_prefix, null, null);
                 col += prompt_template.displayWidth(input_prefix);
             }
-            self.line_start_row = start.row;
+            self.line_start_row = top;
             self.line_start_col = col;
             self.input_max_col = if (self.right_dynamic and right_w + 1 < self.grid_cols)
                 self.grid_cols - right_w - 1
@@ -1126,9 +1146,17 @@ const Prompt = struct {
     /// chain so typing can't disturb it.
     fn renderInputLine(self: *Prompt) !void {
         const buf = self.buffer.items;
+        // Clamp to the last real row: a stale `line_start_row` past the
+        // grid bottom (see `writePowerlinePrefix`) would otherwise make
+        // every `setCursor` below scroll the layer.
+        const row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
         const left = self.line_start_col;
         const right = if (self.input_max_col > left + 1) self.input_max_col else self.grid_cols;
-        const box_w = right - left;
+        const box_w = right -| left;
+        if (box_w == 0) {
+            try self.client.setCursor(row, @min(left, self.grid_cols -| 1));
+            return;
+        }
 
         // Keep the caret within the box, working in columns not bytes.
         if (self.cursor < self.input_scroll) {
@@ -1161,12 +1189,22 @@ const Prompt = struct {
         const total = @min(visible.len + (box_w - w), line_buf.len);
         @memset(line_buf[visible.len..total], ' ');
 
-        try self.client.setCursor(self.line_start_row, left);
+        try self.client.setCursor(row, left);
         try self.client.writeText(line_buf[0..total], null, null);
 
         if (self.right_dynamic and self.prompt_lines == 1) self.drawRightChain() catch {};
 
-        try self.client.setCursor(self.line_start_row, left + self.caretCol());
+        try self.placeInputCursor();
+    }
+
+    /// Puts the server cursor at the caret's screen cell -- `line_start_col`
+    /// plus `caretCol()` (the display-width offset of `cursor` from
+    /// `input_scroll`), on the input row clamped to the grid. Used by
+    /// `renderInputLine` and the idle right-chain refresh (which moves the
+    /// cursor while redrawing).
+    fn placeInputCursor(self: *Prompt) !void {
+        const row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
+        try self.client.setCursor(row, self.line_start_col + self.caretCol());
     }
 
     /// A fresh prompt: writes the prefix, resets the line, repaints the

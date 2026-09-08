@@ -602,6 +602,133 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     try waitForCell(&reporter, 3, arrow_col, ">");
 }
 
+/// After a command whose output scrolls the layer, the next powerline
+/// prompt must settle on a real grid row and stay there -- not keep
+/// creeping down one row per idle tick. `writePowerlinePrefix` used to
+/// record its pre-scroll target row (`start.row + prompt_lines - 1`) as
+/// `line_start_row`; when the input row landed past the bottom the layer
+/// scrolled but `line_start_row` stayed one past the last valid row, so
+/// every `renderInputLine` / idle `drawRightChain` re-`setCursor`'d off
+/// the bottom and scrolled again.
+pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-plscroll-e2e-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+    const thread3 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread3.join();
+
+    // Config: a 2-line powerline prompt with a right chain (so the idle
+    // refresh path is active), plus a 40-line file to `cat`.
+    const cfg_dir = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-plscroll-cfg-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(cfg_dir);
+    try std.Io.Dir.cwd().createDirPath(io, cfg_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, cfg_dir) catch {};
+    const conf_path = try std.fs.path.join(alloc, &.{ cfg_dir, "shell.conf" });
+    defer alloc.free(conf_path);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = conf_path,
+        .data =
+        \\prompt {
+        \\  left_segments = { { " L ", fg = "#fff", bg = "#3a3a3a" } },
+        \\  right_segments = { { " R ", fg = "#fff", bg = "#5f87af" } },
+        \\  lines = 2, input = "> ",
+        \\}
+        ,
+    });
+    var lines40: [400]u8 = undefined;
+    var w: usize = 0;
+    var n: usize = 0;
+    while (n < 40) : (n += 1) {
+        lines40[w] = 'x';
+        lines40[w + 1] = '\n';
+        w += 2;
+    }
+    const file_path = try std.fs.path.join(alloc, &.{ cfg_dir, "big.txt" });
+    defer alloc.free(file_path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file_path, .data = lines40[0..w] });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/glyphwire-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try shell_env.put("GLYPHWIRE_NO_HISTORY", "1");
+    try shell_env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try std.process.spawn(io, .{ .argv = &.{shell_path}, .environ_map = &shell_env });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    // First prompt: the "> " input row of the 2-line prompt is row 1.
+    try waitForCell(&reporter, 1, 0, ">");
+
+    var cmd_buf: [256]u8 = undefined;
+    try typeText(&reporter, try std.fmt.bufPrint(&cmd_buf, "cat {s}", .{file_path}));
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // Give `cat` time to run and the next prompt to be drawn. 40 lines of
+    // output through a 24-row grid pushes the new prompt to the bottom.
+    std.Io.sleep(io, .fromMilliseconds(700), .awake) catch {};
+
+    // The new prompt's input row: a ">" at col 0 that the cursor sits just
+    // after (col 2). The old prompt (row 1) has long since scrolled off.
+    // Require the same row twice, ~120ms apart, so a mid-scroll snapshot
+    // doesn't get mistaken for "settled".
+    var settled_row: usize = 0;
+    var attempts: usize = 0;
+    while (attempts < 200) : (attempts += 1) {
+        const r1 = promptInputRow(&reporter) catch null;
+        std.Io.sleep(reporter.io, .fromMilliseconds(120), .awake) catch {};
+        const r2 = promptInputRow(&reporter) catch null;
+        if (r1 != null and r2 != null and r1.? == r2.?) {
+            settled_row = r1.?;
+            break;
+        }
+    }
+    try testz.expectTrue(settled_row > 1 and settled_row < 24);
+
+    // Hold still across several idle ticks (500ms each). A stuck prompt
+    // creeps down one row per tick; a fixed one doesn't move.
+    std.Io.sleep(io, .fromMilliseconds(1700), .awake) catch {};
+    const after = try promptInputRow(&reporter);
+    try testz.expectEqual(after, settled_row);
+}
+
+/// The row of the 2-line powerline prompt's input line, or an error if
+/// the cursor isn't currently on a ">"-at-col-0 input row (mid-redraw).
+fn promptInputRow(reporter: *glyphwire.Client) !usize {
+    const cur = try reporter.getCursor();
+    if (cur.col != 2 or cur.row >= 24) return error.NotOnInputRow;
+    var snap = try reporter.getCells();
+    defer snap.deinit();
+    if (!std.mem.eql(u8, snap.cellAt(cur.row, 0).grapheme, ">")) return error.NotOnInputRow;
+    return cur.row;
+}
+
 /// Proves `Prompt.runCommand` actually expands a leading `~/` in a
 /// command's arguments before spawning, the same way `doCd` already did
 /// for `cd`'s target -- see shell/main.zig. Types `ls ~/<marker dir>` at
