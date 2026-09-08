@@ -771,3 +771,197 @@ pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
     defer hist7.deinit();
     try testz.expectEqualStr("S", hist7.cellAt(0, 0).grapheme);
 }
+
+/// Builds a bare `core.Table` value (no owning layer) for the pure
+/// `headerColumnAt` / `cycleSortOnColumn` unit tests below -- both only
+/// read `columns`/`row`/`col`/`style.borders`/`sort_*`, never a cell
+/// grid. `Table.deinit` frees the column names + `box_style` this
+/// allocates.
+fn buildBareTable(
+    alloc: std.mem.Allocator,
+    cols: []const struct { name: []const u8, width: usize, sortable: bool = false },
+    borders: bool,
+) !glyphwire.Table {
+    const columns = try alloc.alloc(glyphwire.TableColumn, cols.len);
+    for (cols, 0..) |c, i| {
+        columns[i] = .{
+            .name = try alloc.dupe(u8, c.name),
+            .width = c.width,
+            .sortable = c.sortable,
+        };
+    }
+    const style = glyphwire.TableStyle{
+        .box_style = try alloc.dupe(u8, "box"),
+        .borders = borders,
+    };
+    return glyphwire.Table.init(alloc, 0, 0, columns, style);
+}
+
+/// `Table.headerColumnAt` maps a viewport cell to the column whose header
+/// covers it: inside a column's span -> its index, on the one-cell
+/// inter-column separator or off the header row entirely -> null. The
+/// active sort column's span includes the extra width its arrow takes
+/// (`headerColWidth`), so a click near the arrow still resolves to that
+/// column.
+pub fn tableHeaderColumnAtResolvesColumnAndSeparatorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var t = try buildBareTable(alloc, &.{
+        .{ .name = "A", .width = 3, .sortable = true },
+        .{ .name = "BB", .width = 2, .sortable = true },
+        .{ .name = "C", .width = 4 },
+    }, false);
+    defer t.deinit();
+
+    // Borderless, anchored at (0,0): header is row 0, columns laid out
+    // A = cols 0..2, sep = 3, BB = cols 4..5, sep = 6, C = cols 7..10.
+    try testz.expectEqual(t.headerColumnAt(0, 0).?, 0);
+    try testz.expectEqual(t.headerColumnAt(0, 2).?, 0);
+    try testz.expectTrue(t.headerColumnAt(0, 3) == null); // separator
+    try testz.expectEqual(t.headerColumnAt(0, 4).?, 1);
+    try testz.expectEqual(t.headerColumnAt(0, 7).?, 2);
+    try testz.expectTrue(t.headerColumnAt(1, 0) == null); // not the header row
+
+    // Sort BB ascending: its width grows from 2 to stringWidth("BB") + 2
+    // = 4, so BB now spans cols 4..7, its separator moves to 8, C to 9.
+    t.setSort(1, .ascending);
+    try testz.expectEqual(t.headerColumnAt(0, 7).?, 1);
+    try testz.expectTrue(t.headerColumnAt(0, 8) == null); // separator, shifted right
+    try testz.expectEqual(t.headerColumnAt(0, 9).?, 2);
+}
+
+/// A bordered table's header sits one row below its anchor (the top
+/// border is row `self.row`), and content starts one column in.
+pub fn tableHeaderColumnAtAccountsForBordersTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var t = try buildBareTable(alloc, &.{
+        .{ .name = "A", .width = 3, .sortable = true },
+        .{ .name = "B", .width = 3 },
+    }, true);
+    defer t.deinit();
+
+    // Borders: top border is row 0, header is row 1, content starts at
+    // col 1. A = cols 1..3, separator = 4, B = cols 5..7.
+    try testz.expectTrue(t.headerColumnAt(0, 1) == null); // row 0 is the top border
+    try testz.expectEqual(t.headerColumnAt(1, 1).?, 0);
+    try testz.expectEqual(t.headerColumnAt(1, 3).?, 0);
+    try testz.expectTrue(t.headerColumnAt(1, 4) == null); // separator
+    try testz.expectEqual(t.headerColumnAt(1, 5).?, 1);
+    try testz.expectEqual(t.headerColumnAt(1, 7).?, 1);
+}
+
+/// `Table.cycleSortOnColumn` is the 3-state header-click cycle: a fresh
+/// column sorts ascending, ascending -> descending, descending -> back to
+/// insertion order. A non-`sortable` or out-of-range column is a no-op.
+pub fn tableCycleSortOnColumnStepsThroughThreeStatesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var t = try buildBareTable(alloc, &.{
+        .{ .name = "Fixed", .width = 5, .sortable = false },
+        .{ .name = "One", .width = 5, .sortable = true },
+        .{ .name = "Two", .width = 5, .sortable = true },
+    }, false);
+    defer t.deinit();
+
+    // A non-sortable column never arms a sort.
+    t.cycleSortOnColumn(0);
+    try testz.expectTrue(t.sort_column == null);
+    try testz.expectEqual(t.sort_dir, .none);
+
+    // Out of range: no-op.
+    t.cycleSortOnColumn(99);
+    try testz.expectTrue(t.sort_column == null);
+
+    // First click on a sortable column: ascending.
+    t.cycleSortOnColumn(1);
+    try testz.expectEqual(t.sort_column.?, 1);
+    try testz.expectEqual(t.sort_dir, .ascending);
+
+    // Second: descending.
+    t.cycleSortOnColumn(1);
+    try testz.expectEqual(t.sort_dir, .descending);
+
+    // Third: back to insertion order (column cleared).
+    t.cycleSortOnColumn(1);
+    try testz.expectTrue(t.sort_column == null);
+    try testz.expectEqual(t.sort_dir, .none);
+
+    // Fourth: ascending again.
+    t.cycleSortOnColumn(1);
+    try testz.expectEqual(t.sort_dir, .ascending);
+
+    // Clicking a different sortable column jumps straight to it ascending.
+    t.cycleSortOnColumn(2);
+    try testz.expectEqual(t.sort_column.?, 2);
+    try testz.expectEqual(t.sort_dir, .ascending);
+}
+
+/// A sorted column's header draws its name plus a direction arrow (▲
+/// ascending, ▼ descending), and the column widens so the arrow never
+/// clips the name. Clearing the sort removes the arrow and the extra
+/// width. Rendered end to end so the `headerColWidth` layout that the
+/// header, body and hit-test all share is exercised through `getCells`.
+pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    // "Name" is 4 cells and its column is 4 wide -- exactly no room for
+    // the arrow, so a sort must widen it by `sort_arrow_cells` (2). The
+    // trailing "X" column then shifts right by that much.
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 4, .sortable = true },
+        .{ .name = "X", .width = 3 },
+    }, .{ .borders = false, .header_separator = false });
+
+    try client.tableSetRows(null, table, &.{
+        &.{ .{ .display = "b" }, .{ .display = "1" } },
+        &.{ .{ .display = "a" }, .{ .display = "2" } },
+    });
+
+    {
+        // Unsorted: plain "Name", "X" header starts at the nominal col 5.
+        var snap = try client.getCells();
+        defer snap.deinit();
+        try testz.expectEqualStr("N", snap.cellAt(0, 0).grapheme);
+        try testz.expectEqualStr("X", snap.cellAt(0, 5).grapheme);
+        try testz.expectEqualStr("b", snap.cellAt(1, 0).grapheme); // insertion order
+    }
+
+    try client.tableSetSort(null, table, 0, .ascending);
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        try testz.expectEqualStr("N", snap.cellAt(0, 0).grapheme);
+        try testz.expectEqualStr("e", snap.cellAt(0, 3).grapheme);
+        try testz.expectEqualStr(" ", snap.cellAt(0, 4).grapheme);
+        try testz.expectEqualStr("\u{25B2}", snap.cellAt(0, 5).grapheme); // ▲
+        // Name column widened 4 -> 6, so the "X" header shifted to col 7.
+        try testz.expectEqualStr("X", snap.cellAt(0, 7).grapheme);
+        try testz.expectEqualStr("a", snap.cellAt(1, 0).grapheme); // now sorted
+    }
+
+    try client.tableSetSort(null, table, 0, .descending);
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        try testz.expectEqualStr("\u{25BC}", snap.cellAt(0, 5).grapheme); // ▼
+        try testz.expectEqualStr("b", snap.cellAt(1, 0).grapheme);
+    }
+
+    try client.tableSetSort(null, table, null, .none);
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        // Arrow gone, column back to its nominal width: "X" at col 5.
+        try testz.expectEqualStr("X", snap.cellAt(0, 5).grapheme);
+        try testz.expectNotEqualStr("\u{25B2}", snap.cellAt(0, 5).grapheme);
+    }
+}

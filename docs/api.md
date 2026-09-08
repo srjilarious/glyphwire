@@ -210,15 +210,29 @@ other draw call.
 | `create_table` | request | `layer?, row?, col?, columns: [{name, kind?, sortable?, width, min_width?, h_align?}], style?` | table handle | ✅ `row`/`col` default to the layer's cursor, same convention `draw_box`/`draw_icon` use. `columns[].kind` is `"text"` (default) or `"number"` (which `SortKey` variant that column's cells are expected to sort on); `h_align` is `"start"` (default)/`"center"`/`"end"`. `style` is the same shape `table_set_style` takes (`max_icon_px` included). No rows yet — nothing is painted until `table_set_rows` |
 | `destroy_table` | notification | `layer?, table` | — | ✅ blanks whatever the table last painted, then frees it and drops it from its layer's `table_order` |
 | `table_set_rows` | notification | `layer?, table, rows: [[{display, sort_key?, icon?, fg?, metadata_id?}]]` | — | ✅ replaces every row wholesale, re-sorts per the table's current sort state, and repaints. `sort_key` is a bare JSON number or string (see decisions.md), defaulting to a copy of `display` when omitted. `icon` is an icon-registry name, resolved the same way `draw_icon`'s `name` is (errors `UnknownIcon` immediately on an unrecognized one) — drawn alongside that cell's `display` text, not in a separate column, and composited *over* the row's background (it lands in the cell's `fg_icon`, so an `alt_row_bg` stripe stays unbroken behind it and a `row_height > 1` `.natural`-scaled icon's overflow paints over the neighboring rows' backgrounds). The icon is drawn `draw_icon`'s `scale: "natural"` capped to `row_height` cell-heights (and further to `style.max_icon_px` if that's set and smaller), so even a default `row_height` of 1 fills the row's line rather than shrinking to `"fit"` one cell; it falls back to a one-cell `"fit"` only when the session's cell pixel metrics are unavailable. A row's cell count must match the table's column count, or this errors `TableRowShapeMismatch` |
-| `table_set_sort` | notification | `layer?, table, column?, direction?` | — | ✅ `column: null` or `direction: "none"` (the default) both mean "back to insertion order"; otherwise `"ascending"`/`"descending"` on that column's `SortKey`. Repaints immediately — the message a future header-click handler would call |
+| `table_set_sort` | notification | `layer?, table, column?, direction?` | — | ✅ `column: null` or `direction: "none"` (the default) both mean "back to insertion order"; otherwise `"ascending"`/`"descending"` on that column's `SortKey`. Repaints immediately. The active sort column's header draws a direction arrow after its name (`"Name ▲"` / `"Name ▼"`) and widens by two cells so the arrow never clips the name; a merely `sortable` column that isn't the current sort shows nothing extra. This is also the message glyphwire-host runs itself on a header click (see Table interactivity below) |
 | `table_set_style` | notification | `layer?, table, style` | — | ✅ replaces the table's whole style (`borders`, `header_separator`, `box_style`, `alt_row_bg`, `header_fg`, `header_bg`, `row_height`, `max_icon_px`) and repaints — e.g. the message a future "checkbox for alternating row colors" UI would call. `max_icon_px` (optional) is an upper bound in pixels on a body icon's rendered height: a body icon is normally capped to `row_height` cell-heights, and this caps it further, so a tall `-l -L` row still renders a modest icon regardless of the source art's resolution |
 | `table_get_state` | request | `layer?, table` | `{columns, row_count, sort_column, sort_direction, style, painted: {row, col, rows, cols}, revision}` | ✅ structured config, not rendered cells — those are already readable through the owning layer's `get_cells` (a table paints into ordinary cells). For a future client that needs to know e.g. which columns are sortable before deciding what a header click should do. `painted` is the table's actual on-screen footprint (`core.Table.painted`) — `painted.row + painted.rows` is the first row below the whole table, border included if bordered, for a caller that wants to place its own next content there instead of overwriting the table (e.g. `glyphwire-ls -l`'s next shell prompt). A table taller than the viewport renders top-down and scrolls the layer as it goes (terminal-style), so its footprint fills the visible area (`painted.row` 0, `painted.row + painted.rows` == layer height) with the header + earliest rows now in scrollback — a caller placing follow-on content should see there's no on-screen row past the table and make room itself (e.g. `glyphwire-ls -l` emits a newline for the gap before the next prompt) rather than pass an absolute row past the bottom |
 
-Interactivity (a header click toggling sort, a checkbox toggling
-`alt_row_bg`) isn't wired up yet — the mutation messages above exist for
-a future client (almost certainly `glyphwire-shell`, following the same
-`get_metadata`-driven click-resolution pattern `activateSelectionAt`
-already uses) to call once that lands. See decisions.md's Table section.
+### Table interactivity
+
+**Header-click sorting is live, driven by glyphwire-host directly.** A
+left click on a `sortable` column's header cell cycles that column's sort
+through the same three states `table_set_sort` exposes — ascending →
+descending → back to insertion order — and repaints the table in place;
+the host consumes the click so it isn't also delivered to glyphwire-shell
+as a grid click. No wire message is involved: a table is real
+server-side state (`core.Table`), so `Table.cycleSortOnColumn` +
+`Table.render` is all it takes, and (unlike the `get_metadata`-driven
+click resolution `glyphwire-shell`'s `activateSelectionAt` uses) it works
+with no client running — which is what `glyphwire-ls -l` needs, since it
+exits the moment the table is drawn. Scope of the first cut: tables on
+the **visible context's root layer** (where `glyphwire-ls -l` puts them),
+and only while the view is at the live tail. See decisions.md's Table
+section.
+
+Other table interactivity (a checkbox toggling `alt_row_bg`, say) still
+isn't wired — `table_set_style` exists for a future client to call.
 
 ## Selection & Clipboard
 

@@ -1293,11 +1293,24 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         row[5] = .{ .display = user_texts[i], .fg = owner_color, .metadata_id = metadata_id };
         row[6] = .{ .display = group_texts[i], .fg = group_color, .metadata_id = metadata_id };
         row[7] = .{ .display = time_text, .sort_key = .{ .number = @floatFromInt(entry.mtime_sec) }, .fg = time_color, .metadata_id = metadata_id };
-        row[8] = .{ .display = name_text, .icon = iconForEntry(entry), .fg = name_fg, .metadata_id = metadata_id };
+        // Sort on the bare name, not `name_text` (which for a symlink is
+        // `"name -> target"`), so the table's Name sort matches
+        // `sortEntries` and a plain `ls` exactly.
+        row[8] = .{ .display = name_text, .sort_key = .{ .text = entry.name }, .icon = iconForEntry(entry), .fg = name_fg, .metadata_id = metadata_id };
         rows[i] = row;
     }
 
     try client.tableSetRows(null, table, rows);
+
+    // Default the listing to Name ascending (column 8, the last in the
+    // `createTable` list) so `-l` opens sorted the way a plain `ls` prints
+    // and the Name header shows its direction arrow. A header click in
+    // glyphwire-host re-sorts from here (asc -> desc -> back to this
+    // filesystem order); the fixed permission columns aren't `sortable`
+    // and stay plain. `sortEntries` above still pre-orders the rows, so
+    // this is a no-op reorder that just arms the sort state + arrow.
+    const name_column = 8;
+    try client.tableSetSort(null, table, name_column, .ascending);
 
     const state = try client.tableGetState(null, table);
     // `painted.row + painted.rows` is the row just past the table's whole

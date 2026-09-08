@@ -2838,6 +2838,26 @@ pub const ColumnKind = enum { text, number };
 
 pub const SortDirection = enum { none, ascending, descending };
 
+/// The glyph drawn after the active sort column's header name -- a filled
+/// triangle pointing the way its rows are ordered. `.none` yields an
+/// empty string: an unsorted table, and a column that is merely
+/// `sortable` but not the current sort, show nothing extra (decided in
+/// the sort feature's clarifying questions -- no persistent "click me"
+/// affordance). One display cell wide; `Table.headerColWidth` reserves it
+/// plus one leading space (`sort_arrow_cells`).
+pub fn sortArrowGlyph(dir: SortDirection) []const u8 {
+    return switch (dir) {
+        .none => "",
+        .ascending => "\u{25B2}", // ▲
+        .descending => "\u{25BC}", // ▼
+    };
+}
+
+/// Display cells the sort arrow plus its separating space occupy in a
+/// header cell -- what `Table.headerColWidth` adds on top of the column
+/// name's own width for the active sort column.
+const sort_arrow_cells: usize = 2;
+
 /// One column's shape -- display name (the header cell's text),
 /// sortability, and sizing. `width` is the column's content width in
 /// cells; `min_width` is a floor, same as the client-composited table
@@ -3013,6 +3033,67 @@ pub const Table = struct {
         self.sort_dir = dir;
     }
 
+    /// The 3-state cycle a header click steps `col` through, the mutation
+    /// glyphwire-host's header hit-test runs (`headerColumnAt` resolves
+    /// the column, this advances its sort): a fresh column -- or a return
+    /// from `.none` -- sorts ascending, ascending goes to descending, and
+    /// descending clears back to insertion order (`column: null`). A
+    /// no-op on an out-of-range or non-`sortable` column. Like `setSort`
+    /// it doesn't repaint; the caller calls `render` after.
+    pub fn cycleSortOnColumn(self: *Table, col: usize) void {
+        if (col >= self.columns.len or !self.columns[col].sortable) return;
+        if (self.sort_column != col or self.sort_dir == .none) {
+            self.setSort(col, .ascending);
+        } else switch (self.sort_dir) {
+            .ascending => self.setSort(col, .descending),
+            .descending, .none => self.setSort(null, .none),
+        }
+    }
+
+    /// The index of the column whose header cell covers viewport cell
+    /// `(row, col)`, or `null` when that cell isn't on this table's
+    /// header row or falls on an inter-column separator. Coordinates are
+    /// live-viewport cells (`0` = the top row on screen); callers must
+    /// only use this while the table sits at the live tail, since
+    /// `self.row`/`painted` model the on-screen footprint and a
+    /// scrolled-back view shifts the header off that row. Lays columns
+    /// out through `headerColWidth`, exactly as `render`/`writeHeaderRow`
+    /// do, so a click resolves to the column actually drawn under it --
+    /// including the extra width the active sort column takes for its
+    /// arrow. Pairs with `cycleSortOnColumn`.
+    pub fn headerColumnAt(self: *const Table, row: usize, col: usize) ?usize {
+        const border_pad: usize = if (self.style.borders) 1 else 0;
+        if (row != self.row + border_pad) return null;
+        var c = self.col + border_pad;
+        for (self.columns, 0..) |_, i| {
+            if (i > 0) {
+                if (col == c) return null; // inter-column separator
+                c += 1;
+            }
+            const w = self.headerColWidth(i);
+            if (col >= c and col < c + w) return i;
+            c += w;
+        }
+        return null;
+    }
+
+    /// A column's header/layout width in cells: its nominal
+    /// `max(width, min_width)`, widened only on the *active* sort column
+    /// so its name plus the direction arrow (`" ▲"`, `sort_arrow_cells`
+    /// wide) fit without truncating the name -- the column expands to fit
+    /// the arrow rather than the arrow eating into the name (decided in
+    /// the sort feature's clarifying questions). Every other column, and
+    /// all columns while the table is unsorted, get only their nominal
+    /// width, so an inactive sortable header is laid out identically to a
+    /// fixed one. `render`, `writeHeaderRow`, `writeBodyRow` and
+    /// `headerColumnAt` all place columns through this so the header and
+    /// body stay aligned and a header hit-test lands on the right column.
+    fn headerColWidth(self: *const Table, i: usize) usize {
+        const base = @max(self.columns[i].width, self.columns[i].min_width);
+        if (self.sort_dir == .none or self.sort_column != i) return base;
+        return @max(base, stringWidth(self.columns[i].name) + sort_arrow_cells);
+    }
+
     /// `table_set_style`: takes ownership of `new_style` the same way
     /// `init` takes its `style` param, freeing the previous one first.
     pub fn setStyle(self: *Table, new_style: TableStyle) void {
@@ -3103,9 +3184,9 @@ pub const Table = struct {
         clearExtent(layer, self.painted);
 
         var content_width: usize = 0;
-        for (self.columns, 0..) |column, i| {
+        for (self.columns, 0..) |_, i| {
             if (i > 0) content_width += 1;
-            content_width += @max(column.width, column.min_width);
+            content_width += self.headerColWidth(i);
         }
         const border_pad: usize = if (self.style.borders) 1 else 0;
         const row_height = @max(self.style.row_height, 1);
@@ -3171,14 +3252,30 @@ pub const Table = struct {
     }
 
     fn writeHeaderRow(self: *const Table, layer: *Layer, row: usize, content_start_col: usize) void {
+        const fg = self.style.header_fg orelse default_style.fg;
         var col = content_start_col;
         for (self.columns, 0..) |column, i| {
             if (i > 0) {
-                writeCellRun(layer, row, col, "", 1, .start, self.style.header_fg orelse default_style.fg, self.style.header_bg, null);
+                writeCellRun(layer, row, col, "", 1, .start, fg, self.style.header_bg, null);
                 col += 1;
             }
-            const width = @max(column.width, column.min_width);
-            writeCellRun(layer, row, col, column.name, width, column.h_align, self.style.header_fg orelse default_style.fg, self.style.header_bg, null);
+            const width = self.headerColWidth(i);
+            if (self.sort_dir != .none and self.sort_column == i) {
+                // The active sort column draws its name plus a direction
+                // arrow ("Name ▲"); `headerColWidth` already widened this
+                // column so the arrow fits without clipping the name. A
+                // pathologically long name (>~250 bytes) that overflows
+                // the format buffer just drops the arrow.
+                var buf: [256]u8 = undefined;
+                const label = std.fmt.bufPrint(
+                    &buf,
+                    "{s} {s}",
+                    .{ column.name, sortArrowGlyph(self.sort_dir) },
+                ) catch column.name;
+                writeCellRun(layer, row, col, label, width, column.h_align, fg, self.style.header_bg, null);
+            } else {
+                writeCellRun(layer, row, col, column.name, width, column.h_align, fg, self.style.header_bg, null);
+            }
             col += width;
         }
     }
@@ -3209,7 +3306,12 @@ pub const Table = struct {
         const mid_row = top_row + row_height / 2;
         var col = content_start_col;
         for (self.columns, 0..) |column, i| {
-            const width = @max(column.width, column.min_width);
+            // `headerColWidth`, not the nominal width, so body cells stay
+            // under their header: the active sort column is wider by the
+            // arrow's `sort_arrow_cells`, which becomes trailing padding
+            // here (or, for an `.end`-aligned column, keeps the value
+            // flush under the arrow).
+            const width = self.headerColWidth(i);
             const cell = row.cells[i];
             var icon_reserve: usize = 0;
 

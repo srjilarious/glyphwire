@@ -1355,20 +1355,40 @@ surface.
   (`-S`) grid listing and the shell prompt's `{icon:...}` already use.
   The old one-cell `.fit` stays only as the fallback when the session's
   cell pixel metrics are unavailable (`Context.cell_px_w`/`_h` zeroed).
-- **Interactivity (sort-on-click, a style toggle) is deliberately
-  server-data-only for now, not server-autonomous.** The server doesn't
-  hit-test mouse clicks against a table's header itself — that stays
-  consistent with how every other click-driven behavior in this codebase
-  already works (`glyphwire-shell`'s `activateSelectionAt`: a client
-  subscribes to `mouse_button`, resolves the clicked cell via
-  `get_metadata`, and decides what to do). What's built now is the
-  *mutation* API a click handler would eventually call
-  (`table_set_sort`/`table_set_style`) and the data model it acts on;
-  wiring an actual header-click-to-sort/checkbox-toggle handler into
-  `glyphwire-shell` (almost certainly via a `metadata_id` on header cells
-  identifying them as sort/style triggers, mirroring how
-  `glyphwire-ls`'s own cells already carry click-actionable metadata) is
-  deliberately left as a follow-up.
+- **Header-click sorting: glyphwire-host drives it directly, no wire
+  round trip, no running client.** The original plan here was to leave
+  sort-on-click to a client subscribing to `mouse_button` and resolving
+  the cell via `get_metadata`, the way `glyphwire-shell`'s
+  `activateSelectionAt` works. That doesn't fit the actual use: the table
+  the user wants to sort was drawn by `glyphwire-ls -l`, which has
+  already exited — there is no client. A table is real server-side state
+  (`core.Table`), so the host does the whole thing itself:
+  `host/table_sort.zig` hit-tests the click against each table's header
+  row (`Table.headerColumnAt`, which lays columns out through the same
+  `headerColWidth` the renderer uses), and on a `sortable` column runs
+  `Table.cycleSortOnColumn` + `Table.render` under `ctx_mutex`. The click
+  is consumed so glyphwire-shell doesn't also get it as a grid click.
+  This is a deliberate departure from "the server never hit-tests" — the
+  server core still doesn't; the host does, and the host is in-process
+  with the server anyway (it already reads `core` state directly every
+  frame to render). Scope of the first cut (asked): tables on the
+  visible context's **root layer**, and only at the live tail
+  (`Table.row`/`painted` model the on-screen footprint, so a
+  scrolled-back view would resolve the wrong row). A checkbox-style
+  toggle for `alt_row_bg` etc. is still just a `table_set_style` a future
+  client would call.
+- **The 3-state click cycle, and the arrow expands the column rather than
+  clipping the name (asked).** A click steps ascending → descending →
+  unsorted (back to insertion order); clicking a different sortable
+  column jumps straight to it ascending. "Unsorted" stays reachable so a
+  table with no default sort can be returned to its natural order. The
+  active sort column's header draws its name plus a filled-triangle
+  arrow (`"Name ▲"` / `"▼"`), and `Table.headerColWidth` widens that one
+  column by `sort_arrow_cells` (2) so the arrow never eats into the name;
+  body cells under it get the same extra width (trailing padding, or for
+  an `.end`-aligned column the value stays flush under the arrow). A
+  column that is merely `sortable` but not the current sort shows nothing
+  extra — no persistent "click me" affordance (asked).
 - **`table_get_state` reports structure, not rendered cells.** Row count,
   sort state, style, and revision — not the cells themselves, which are
   already readable through the owning layer's ordinary `get_cells` (a
