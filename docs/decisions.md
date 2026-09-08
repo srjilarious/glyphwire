@@ -307,14 +307,35 @@ surface.
   the instant the user does anything and only blinks once things settle
   (`App.tickBlink`). block/box/underline span both cells when the caret
   sits on a `wide_lead`.
-- **Fixed — caret drawn while scrolled back:** the caret used to be
-  suppressed whenever `view_scroll != 0`, which hid it during
-  glyphwire-shell's keyboard browse (Up-arrow past the top of the window)
-  and made a scrolled-back `ls` listing un-navigable by keyboard. It is
-  now drawn at its grid cell regardless of the scroll offset — browse
-  moves that same grid cursor onto the visible scrolled-back row, so the
-  caret follows; a pure wheel/scrollbar scroll just leaves it at the live
-  prompt's cell.
+- **Fixed — caret drawn while scrolled back, then pinned on mouse scroll
+  (host-local):** the caret used to be suppressed whenever
+  `view_scroll != 0`, which hid it during glyphwire-shell's keyboard
+  browse (Up-arrow past the top of the window) and made a scrolled-back
+  `ls` listing un-navigable by keyboard. It is now drawn at its grid cell
+  regardless of the scroll offset — keyboard browse moves that same grid
+  cursor onto the visible scrolled-back row, so the caret follows. A
+  *mouse* scroll (wheel or scrollbar) is different: it doesn't move the
+  grid cursor, so instead of leaving the caret glued to the live prompt's
+  screen cell, the host now **pins** it (`App.caret_pin`) to the buffer
+  cell it was on when the scroll began. It rides the content up/down as
+  the view scrolls and clips off-screen once that cell leaves the
+  viewport — "the caret stays where it is in the layer". The pin is
+  captured in `handleScroll`/`handleScrollbar` (client `scroll_view`
+  scrolls — i.e. shell keyboard browse — never set it), and released
+  either by any forwarded key/text event (which also snaps the view back
+  to the live tail, so a keypress brings the cursor back into view) or by
+  the client itself moving the cursor / scrolling back to the pin point
+  (`reconcileCaretPin`, no view change — the client is driving).
+- **Typematic key repeat extended (host-local):** pixzig's `Keyboard`
+  only edge-detects, so `glyphwire-host` already synthesized held-key
+  repeat for the four arrows (`App.key_repeat`, `Server.reportKeyRepeat`
+  → another `key_down`). That set now also covers **Backspace**,
+  **Delete** and **Ctrl+U** — the editing keys glyphwire-shell's line
+  editor acts on that ride the key stream rather than the `text` stream
+  (where character-key repeats already arrive via GLFW's char callback).
+  Ctrl+left/right word motion already repeated through the arrow path;
+  Enter and Tab stay single-shot. No wire change — a repeat is just an
+  extra `key_down`, same as before.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline
@@ -1001,7 +1022,11 @@ surface.
   `fg = left segment bg`, `bg = right segment bg` — the standard powerline
   trick; right-side chains swap fg/bg so a left-pointing glyph reads
   right. `head` / `tail` / `right_head` caps are drawn in the adjacent
-  segment's bg over the terminal background.
+  segment's bg over the terminal background — for the right chain that's
+  the *first visible* segment's bg, so the cap picks up an `error`
+  segment's colour when one is showing and the time's colour otherwise.
+  **`right_head` falls back to `head` when unset**, mirroring
+  `sep_right` → `sep`, so one `head = "\u{E0B6}"` caps both chains.
 - **The glyphs come from a bundled fallback face.** No single font has
   both full CJK (the host primary) and the Powerline Extra range, so
   `assets/PowerlineSymbols-subset.ttf` (a ~20 KB `pyftsubset` of a Nerd
@@ -1016,6 +1041,17 @@ surface.
   after every keystroke (and on the idle timeout, so `{time}` ticks),
   and the input box's right edge (`input_max_col`) is clamped short of
   it.
+- **The right-chain redraw goes out as one `batch` frame** (`drawRightChain`
+  → `drawChain` with a `ChainSink` pointing at a `Client.Batch`, plus a
+  trailing `set_property(cursor)` back to the input caret). Previously
+  each `set_property`/`write_text` was its own frame, so the host could
+  render a frame with the caret parked out on the right where the chain
+  draws before it was moved back — a visible "cursor blip to the right"
+  every idle tick on a 2-line prompt. Batching makes the whole redraw
+  plus caret restore land in a single render. The batched path in
+  `emitOps` advances the column by `displayWidth` instead of a
+  `get_cursor` round trip (segment text has no `\n`), consistent with the
+  `opsWidth` layout math.
 - **The line editor moved to a repaint model.** It used to shift cells
   with `insert_cells` / `delete_cells` (ECMA-48 ICH/DCH); now every edit
   mutates the local `buffer` and calls `renderInputLine`, which repaints
@@ -1071,6 +1107,28 @@ surface.
   entirely: nothing is read or written, though in-session recall still
   works. The e2e tests set it so driving the real `glyphwire-shell`
   binary doesn't append test commands to the developer's history.
+
+#### Scrollback browsing (Up/Down) and `scrolloff`
+- Up/Down with no line to edit walk a browse cursor (`browse_pos`) up
+  into the scrollback above the prompt and back down; Enter/click on a
+  row acts on whatever `glyphwire-ls` tagged there, Escape / any edit
+  key snaps back to the live prompt.
+- **`browseUp`/`browseDown` keep a vim-style scrolloff margin.** Instead
+  of only scrolling the host window once the browse cursor is jammed
+  against row 0 (going up) or the prompt row (going down), they start
+  scrolling the window (`scroll_view` "scroll the window along") once the
+  cursor is within `scrolloff` rows of that edge, holding the cursor at
+  the margin — until the scrollback is exhausted, when the cursor is let
+  the rest of the way to the edge. Down still can't move onto or past the
+  prompt row (it ends browsing there).
+- **`scrolloff` is a `shell.conf` `prompt{}` key**, default `8`. It lives
+  in `prompt{}` because that's the one table binding the shell config
+  has; it's clamped at use to half the rows between the top and the
+  prompt so there's always room for the cursor to travel.
+- The host side of "a keypress brings the cursor back into view" is the
+  caret-pin release in `glyphwire-host` (see Layers → the caret bullet):
+  a mouse scroll pins the caret to its buffer cell, and the next
+  key/text snaps the view back to the live tail.
 
 ### Batch messages
 - **`batch` wraps an ordered list of other messages in one frame**,

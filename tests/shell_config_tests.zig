@@ -278,3 +278,23 @@ pub fn configPowerlineRejectsZeroLinesTest(_: std.Io, alloc: std.mem.Allocator) 
     defer res.deinit();
     try testz.expectTrue(res.err != null);
 }
+
+pub fn configReadsScrolloffTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { scrolloff = 12 }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.prompt.scrolloff.?, @as(u32, 12));
+}
+
+pub fn configScrolloffDefaultsNullWhenUnsetTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { lines = 2 }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.prompt.scrolloff, null);
+}
+
+pub fn configPromptRejectsNegativeScrolloffTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { scrolloff = -1 }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}

@@ -43,7 +43,8 @@ alias("gs", "git status")
 -- dropped; `when` is "always" (default), "error" (non-zero exit) or
 -- "slow" (last command >= dur_min_ms).  Segments are joined with `sep`
 -- (fg = left bg, bg = right bg -- the powerline trick) and capped with
--- head/tail/right_head.  lines >= 2 puts the segments on the first row
+-- head/tail/right_head (right_head defaults to head).  lines >= 2 puts
+-- the segments on the first row
 -- and the input line (prefixed with `input`) on the last -- so a right
 -- side with the time never moves as you type.  The \u{E0Bx} glyphs need
 -- a Nerd Font; glyphwire-host bundles a Powerline-range fallback.
@@ -63,7 +64,7 @@ prompt {
     sep        = "\u{E0B1}",  -- thin right-pointing separator
     tail       = "\u{E0B4}",  -- rounded right cap
     sep_right  = "\u{E0B3}",  -- thin left-pointing separator
-    right_head = "\u{E0B6}",
+    -- right_head defaults to head; set it here only to differ.
     lines = 2,
     input = "> ",
     time_format = "%H:%M",

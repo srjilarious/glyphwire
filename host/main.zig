@@ -116,11 +116,13 @@ const content_pad_px: i32 = 2;
 var cell_w: i32 = undefined;
 var cell_h: i32 = undefined;
 
-// Typematic repeat timing for arrow keys -- how long a key must be held
-// before it starts repeating, and how often it repeats after that. Typical
-// OS keyboard-repeat values; tune here if they feel off.
-const arrow_repeat_delay_ms: f64 = 500;
-const arrow_repeat_interval_ms: f64 = 40;
+// Typematic repeat timing for the keys glyphwire-host synthesizes repeats
+// for (arrows, plus Backspace/Delete and Ctrl+U -- see `handleRepeatKeys`)
+// -- how long a key must be held before it starts repeating, and how often
+// it repeats after that. Typical OS keyboard-repeat values; tune here if
+// they feel off.
+const key_repeat_delay_ms: f64 = 500;
+const key_repeat_interval_ms: f64 = 40;
 
 const EngOptions: pixzig.PixzigEngineOptions = .{
     // `maxSprites`: a full-window character grid draws far more than the
@@ -134,27 +136,27 @@ const EngOptions: pixzig.PixzigEngineOptions = .{
 };
 const AppRunner = pixzig.PixzigAppRunner(App, EngOptions);
 
-/// Tracks how long one arrow key has been continuously held, to drive its
+/// Tracks how long one key has been continuously held, to drive its
 /// typematic repeat -- pixzig's `Keyboard` only edge-detects `pressed`/
 /// `released`, no built-in hold-duration, so `App` has to track this
 /// itself.
-const ArrowRepeatState = struct {
+const KeyRepeatState = struct {
     held_ms: f64 = 0,
-    next_repeat_ms: f64 = arrow_repeat_delay_ms,
+    next_repeat_ms: f64 = key_repeat_delay_ms,
 
-    fn reset(self: *ArrowRepeatState) void {
+    fn reset(self: *KeyRepeatState) void {
         self.held_ms = 0;
-        self.next_repeat_ms = arrow_repeat_delay_ms;
+        self.next_repeat_ms = key_repeat_delay_ms;
     }
 
     /// Call once per tick while the key is physically down (not on the
-    /// initial press -- that edge already moves the cursor once, handled
-    /// separately). Returns true once held_ms crosses the next scheduled
-    /// repeat threshold.
-    fn tick(self: *ArrowRepeatState, delta_ms: f64) bool {
+    /// initial press -- that edge already fires once, handled separately).
+    /// Returns true once held_ms crosses the next scheduled repeat
+    /// threshold.
+    fn tick(self: *KeyRepeatState, delta_ms: f64) bool {
         self.held_ms += delta_ms;
         if (self.held_ms < self.next_repeat_ms) return false;
-        self.next_repeat_ms += arrow_repeat_interval_ms;
+        self.next_repeat_ms += key_repeat_interval_ms;
         return true;
     }
 };
@@ -198,11 +200,19 @@ pub const App = struct {
     /// time, so the thumb tracks the pointer without jumping.
     scrollbar_drag: bool = false,
     scrollbar_grab_dy: f32 = 0,
-    arrow_repeat: struct {
-        up: ArrowRepeatState = .{},
-        down: ArrowRepeatState = .{},
-        left: ArrowRepeatState = .{},
-        right: ArrowRepeatState = .{},
+    /// Per-key hold timers for the keys glyphwire-host synthesizes
+    /// typematic repeats for -- the four arrows (which also move the root
+    /// cursor), plus Backspace, Delete and Ctrl+U, whose repeats are just
+    /// re-broadcast for glyphwire-shell's line editor to act on. See
+    /// `handleRepeatKeys`.
+    key_repeat: struct {
+        up: KeyRepeatState = .{},
+        down: KeyRepeatState = .{},
+        left: KeyRepeatState = .{},
+        right: KeyRepeatState = .{},
+        backspace: KeyRepeatState = .{},
+        delete: KeyRepeatState = .{},
+        ctrl_u: KeyRepeatState = .{},
     } = .{},
     /// Last-forwarded down/up state of each modifier, indexed
     /// `[ctrl, alt, shift, super]` -- see `reportModifier`. glyphwire-host
@@ -246,6 +256,20 @@ pub const App = struct {
     /// The `(row, col, view_scroll)` the blink phase was last reset for --
     /// compared each `update` to detect caret movement / scrolling.
     blink_ref: struct { row: usize = 0, col: usize = 0, scroll: usize = 0 } = .{},
+
+    /// Set the moment a host-driven scroll (mouse wheel or scrollbar, not
+    /// a client `scroll_view` -- so not glyphwire-shell's keyboard browse)
+    /// moves the root view off a resting spot. While set, the caret is
+    /// drawn pinned to the buffer cell it pointed at then: it rides the
+    /// content up/down as the view scrolls and clips off-screen once that
+    /// cell leaves the viewport, instead of staying glued to the live
+    /// prompt's grid cell. `row`/`col` are that cell's viewport position
+    /// and `base_scroll` the `view_scroll` in effect when it was captured,
+    /// so its current screen row is `row + view_scroll - base_scroll`.
+    /// Cleared by `clearCaretPinForKey` (any forwarded key/text, which
+    /// also snaps the view back to the live tail) or, when the client
+    /// itself moves the cursor, by `render`'s own check.
+    caret_pin: ?struct { row: usize, col: usize, base_scroll: usize } = null,
 
     /// Font file/size passed to `App.init` -- what `applyFontSize` needs to
     /// repeat the startup `measureFontFileIndexed` at a new size.
@@ -458,15 +482,20 @@ pub const App = struct {
         // and then resizes the window) is only reconciled against the
         // framebuffer on the *next* frame, once both have settled.
         self.handleFontZoom(eng);
-        self.reportKeyEvents(eng);
-        self.reportTextInput(eng);
+        const key_pressed = self.reportKeyEvents(eng);
+        const text_typed = self.reportTextInput(eng);
         // The scrollbar gets first refusal on the left button: a press or
         // drag that belongs to it is consumed here so `reportMouseEvents`
         // doesn't also forward it to the grid as a click.
         const scrollbar_took_left = self.handleScrollbar(eng);
         self.reportMouseEvents(eng, scrollbar_took_left);
-        self.handleArrowKeys(eng, deltaTimeMs);
+        self.handleRepeatKeys(eng, deltaTimeMs);
         self.handleScroll(eng);
+        // After both the key/text forwarding and the scroll handlers: a
+        // key used this frame releases a mouse-scroll caret pin and snaps
+        // the view back to the live tail (see `clearCaretPinForKey`).
+        self.clearCaretPinForKey(key_pressed or text_typed);
+        self.reconcileCaretPin();
 
         self.tickBlink(deltaTimeMs);
 
@@ -502,6 +531,52 @@ pub const App = struct {
         return @mod(self.blink_elapsed_ms, period) < self.cursor_blink_ms;
     }
 
+    /// Captures `caret_pin` from the root layer's current cursor + view
+    /// offset, unless one is already pinned. Called by the host's own
+    /// scroll paths (`handleScroll`, `handleScrollbar`) just before they
+    /// move the view, so the caret freezes at the buffer cell it was on
+    /// when a mouse scroll began -- see `caret_pin`.
+    fn pinCaretIfUnpinned(self: *App) void {
+        if (self.caret_pin != null) return;
+        self.server.ctx_mutex.lockUncancelable(self.server.io);
+        defer self.server.ctx_mutex.unlock(self.server.io);
+        const root = &self.server.ctx.root;
+        self.caret_pin = .{
+            .row = root.cursor.row,
+            .col = root.cursor.col,
+            .base_scroll = root.view_scroll,
+        };
+    }
+
+    /// Clears a caret pin because the keyboard was used, and snaps the
+    /// root view back to the live tail so the just-pressed key's effect is
+    /// on screen ("a key press scrolls the cursor back into view"). A
+    /// no-op when nothing is pinned or no key/text arrived this frame.
+    fn clearCaretPinForKey(self: *App, any_key_or_text: bool) void {
+        if (!any_key_or_text or self.caret_pin == null) return;
+        self.caret_pin = null;
+        self.server.reportScroll(self.alloc, 0, null) catch |err| {
+            std.log.err("glyphwire-host: reportScroll(caret snap-back) failed: {t}", .{err});
+        };
+    }
+
+    /// Drops a caret pin the client itself invalidated: if a connected
+    /// client (glyphwire-shell's keyboard browse, or its type-to-snap-back)
+    /// has moved the grid cursor away from where it was pinned, or the
+    /// view is back at/above where the pin was captured, the caret should
+    /// go back to tracking `layer.cursor` normally. Unlike
+    /// `clearCaretPinForKey` this does *not* touch the view -- the client
+    /// is managing it.
+    fn reconcileCaretPin(self: *App) void {
+        const pin = self.caret_pin orelse return;
+        self.server.ctx_mutex.lockUncancelable(self.server.io);
+        defer self.server.ctx_mutex.unlock(self.server.io);
+        const root = &self.server.ctx.root;
+        if (root.cursor.row != pin.row or root.cursor.col != pin.col or root.view_scroll <= pin.base_scroll) {
+            self.caret_pin = null;
+        }
+    }
+
     /// How many grid rows one full wheel "tick" (`scroll().y` of magnitude
     /// 1) scrolls the view by -- picked to feel like a normal terminal
     /// scrollback, not tied to any particular OS's wheel step size.
@@ -524,6 +599,9 @@ pub const App = struct {
         if (dy == 0) return;
 
         const delta: i64 = @intFromFloat(@round(dy * scroll_rows_per_tick));
+        // Freeze the caret at its current buffer cell for the duration of
+        // this mouse-driven scroll (see `caret_pin`).
+        self.pinCaretIfUnpinned();
         self.server.reportScroll(self.alloc, null, delta) catch |err| {
             std.log.err("glyphwire-host: reportScroll(wheel) failed: {t}", .{err});
         };
@@ -612,6 +690,7 @@ pub const App = struct {
                 // One screenful per track click, toward the pointer.
                 const page: i64 = @intCast(@max(height, 2) - 1);
                 const delta: i64 = if (pos.y < geom.thumb_top) page else -page;
+                self.pinCaretIfUnpinned();
                 self.server.reportScroll(self.alloc, null, delta) catch {};
             }
             return true;
@@ -629,6 +708,7 @@ pub const App = struct {
                     0,
                     @as(i64, @intCast(history_len)),
                 );
+                self.pinCaretIfUnpinned();
                 self.server.reportScroll(self.alloc, @intCast(target), null) catch {};
                 return true;
             }
@@ -758,28 +838,37 @@ pub const App = struct {
         eng.window.setSize(win_w, win_h);
     }
 
-    /// Moves the grid cursor for each arrow key, clamped to the grid --
-    /// generic terminal-style cursor addressing, independent of
-    /// glyphwire-shell's line editor (which repositions the cursor itself
-    /// on every character it writes, so it isn't thrown off by wherever an
-    /// arrow key last left the cursor). The initial press already reached
-    /// `ctx.input`'s down-set and got broadcast via `reportKeyEvents`
-    /// above; held-down repeats move the cursor again here and separately
-    /// re-broadcast via `reportKeyRepeat`, since `reportKey`/`setKey`
-    /// would see no state change on a key that's already down and drop it.
-    fn handleArrowKeys(self: *App, eng: *AppRunner.Engine, delta_ms: f64) void {
-        self.handleArrowKey(eng, .up, "up", &self.arrow_repeat.up, 0, -1, delta_ms);
-        self.handleArrowKey(eng, .down, "down", &self.arrow_repeat.down, 0, 1, delta_ms);
-        self.handleArrowKey(eng, .left, "left", &self.arrow_repeat.left, -1, 0, delta_ms);
-        self.handleArrowKey(eng, .right, "right", &self.arrow_repeat.right, 1, 0, delta_ms);
+    /// Drives typematic repeat for the keys the OS repeat doesn't reach us
+    /// as fresh events: the four arrows (which also move the root grid
+    /// cursor -- generic terminal-style cursor addressing, independent of
+    /// glyphwire-shell's line editor), plus Backspace, Delete and Ctrl+U.
+    /// The initial press already reached `ctx.input`'s down-set and got
+    /// broadcast via `reportKeyEvents`; held-down repeats are re-broadcast
+    /// here via `reportKeyRepeat`, since `reportKey`/`setKey` would see no
+    /// state change on a key that's already down and drop it. (Character
+    /// keys repeat fine already -- their repeats come in on the `text`
+    /// stream via GLFW's char callback.)
+    fn handleRepeatKeys(self: *App, eng: *AppRunner.Engine, delta_ms: f64) void {
+        self.handleArrowRepeat(eng, .up, "up", &self.key_repeat.up, 0, -1, delta_ms);
+        self.handleArrowRepeat(eng, .down, "down", &self.key_repeat.down, 0, 1, delta_ms);
+        self.handleArrowRepeat(eng, .left, "left", &self.key_repeat.left, -1, 0, delta_ms);
+        self.handleArrowRepeat(eng, .right, "right", &self.key_repeat.right, 1, 0, delta_ms);
+
+        // Editing keys glyphwire-shell's line editor acts on directly.
+        // No root-cursor move -- just the re-broadcast the held key needs
+        // to keep deleting. Ctrl+U is gated on Ctrl actually being held
+        // (a bare held `u` types through the `text` stream instead).
+        self.handleEditRepeat(eng, .backspace, "backspace", &self.key_repeat.backspace, false, delta_ms);
+        self.handleEditRepeat(eng, .delete, "delete", &self.key_repeat.delete, false, delta_ms);
+        self.handleEditRepeat(eng, .u, "u", &self.key_repeat.ctrl_u, true, delta_ms);
     }
 
-    fn handleArrowKey(
+    fn handleArrowRepeat(
         self: *App,
         eng: *AppRunner.Engine,
         key: pixzig.glfw.Key,
         name: []const u8,
-        state: *ArrowRepeatState,
+        state: *KeyRepeatState,
         dcol: i32,
         drow: i32,
         delta_ms: f64,
@@ -790,6 +879,33 @@ pub const App = struct {
         } else if (eng.inputs.keyboard.down(key)) {
             if (state.tick(delta_ms)) {
                 self.moveCursor(dcol, drow);
+                self.server.reportKeyRepeat(self.alloc, name) catch |err| {
+                    std.log.err("reportKeyRepeat({s}) failed: {t}", .{ name, err });
+                };
+            }
+        } else {
+            state.reset();
+        }
+    }
+
+    /// Like `handleArrowRepeat` but for an editing key with no root-cursor
+    /// side effect: only the held repeat is synthesized (the press edge
+    /// already went out via `reportKeyEvents`). `require_ctrl` limits the
+    /// repeat to when Ctrl is also held.
+    fn handleEditRepeat(
+        self: *App,
+        eng: *AppRunner.Engine,
+        key: pixzig.glfw.Key,
+        name: []const u8,
+        state: *KeyRepeatState,
+        require_ctrl: bool,
+        delta_ms: f64,
+    ) void {
+        const kb = &eng.inputs.keyboard;
+        if (kb.pressed(key)) {
+            state.reset();
+        } else if (kb.down(key) and (!require_ctrl or kb.ctrl())) {
+            if (state.tick(delta_ms)) {
                 self.server.reportKeyRepeat(self.alloc, name) catch |err| {
                     std.log.err("reportKeyRepeat({s}) failed: {t}", .{ name, err });
                 };
@@ -830,7 +946,9 @@ pub const App = struct {
     /// arrive as a physical modifier-key press. Consequence: a held right
     /// modifier shows up in `get_input_state` as `left_control` etc., not
     /// `right_control`; nothing in glyphwire distinguishes the two.
-    fn reportKeyEvents(self: *App, eng: *AppRunner.Engine) void {
+    /// Returns whether a (non-skipped) key was pressed this frame -- the
+    /// caller uses it to release a mouse-scroll caret pin.
+    fn reportKeyEvents(self: *App, eng: *AppRunner.Engine) bool {
         const kb = &eng.inputs.keyboard;
 
         self.reportModifier(0, "left_control", kb.ctrl());
@@ -838,6 +956,7 @@ pub const App = struct {
         self.reportModifier(2, "left_shift", kb.shift());
         self.reportModifier(3, "left_super", kb.super());
 
+        var any_pressed = false;
         const ctrl_held = kb.ctrl();
         const fields = @typeInfo(pixzig.glfw.Key).@"enum".fields;
         inline for (fields) |field| {
@@ -853,6 +972,7 @@ pub const App = struct {
             if (skip) {
                 // Consumed elsewhere; don't forward it.
             } else if (kb.pressed(key)) {
+                any_pressed = true;
                 self.server.reportKey(self.alloc, field.name, true) catch |err| {
                     std.log.err("reportKey({s}, true) failed: {t}", .{ field.name, err });
                 };
@@ -862,6 +982,7 @@ pub const App = struct {
                 };
             }
         }
+        return any_pressed;
     }
 
     /// Forwards one modifier's down/up state under `name`, edge-detected
@@ -889,13 +1010,14 @@ pub const App = struct {
     ///
     /// The 256-byte buffer bounds one frame's worth of committed text;
     /// pixzig caps its own per-frame codepoint buffer well below that.
-    fn reportTextInput(self: *App, eng: *AppRunner.Engine) void {
+    fn reportTextInput(self: *App, eng: *AppRunner.Engine) bool {
         var buf: [256]u8 = undefined;
         const n = eng.inputs.keyboard.text(&buf);
-        if (n == 0) return;
+        if (n == 0) return false;
         self.server.reportText(self.alloc, buf[0..n]) catch |err| {
             std.log.err("reportText failed: {t}", .{err});
         };
+        return true;
     }
 
     /// `skip_left` drops the left button for this frame -- set when
@@ -1186,29 +1308,50 @@ pub const App = struct {
         // Cursor caret, in its own flushed pass so it sits on top of the
         // text just drawn (a filled rect in the text pass would be
         // submitted before the text batch and hidden by it). Shape and
-        // blink come from `assets/conf.lua` (see `CursorConfig`). Drawn
-        // whatever the scrollback offset -- glyphwire-shell's keyboard
-        // browse moves this same grid cursor onto a visible scrolled-back
-        // row, and the caret has to follow it there (a pure wheel scroll
-        // just leaves the caret at the live prompt's grid cell).
-        if (draw_cursor and self.caretVisible() and layer.cursor.row < layer.height and layer.cursor.col < layer.width) {
-            eng.renderer.begin(eng.projMat);
-            self.drawCaret(eng, layer, origin_x, origin_y, view_offset);
-            eng.renderer.end();
+        // blink come from `assets/conf.lua` (see `CursorConfig`).
+        //
+        // Normally the caret sits at the layer's live grid cursor -- which
+        // glyphwire-shell's keyboard browse deliberately walks onto a
+        // scrolled-back row, so the caret follows it there. But a
+        // *mouse*-driven scroll pins the caret (`caret_pin`) to the buffer
+        // cell it was on when the scroll began: it rides the content as
+        // the view moves and clips off-screen once that cell leaves the
+        // viewport, rather than staying glued to the live prompt's cell.
+        if (draw_cursor and self.caretVisible()) {
+            var crow: usize = layer.cursor.row;
+            var ccol: usize = layer.cursor.col;
+            var on_grid = true;
+            if (self.caret_pin) |pin| {
+                const sr = @as(isize, @intCast(pin.row)) +
+                    @as(isize, @intCast(view_offset)) -
+                    @as(isize, @intCast(pin.base_scroll));
+                if (sr < 0 or sr >= @as(isize, @intCast(layer.height))) {
+                    on_grid = false;
+                } else {
+                    crow = @intCast(sr);
+                    ccol = pin.col;
+                }
+            }
+            if (on_grid and crow < layer.height and ccol < layer.width) {
+                eng.renderer.begin(eng.projMat);
+                self.drawCaret(eng, layer, origin_x, origin_y, crow, ccol, view_offset);
+                eng.renderer.end();
+            }
         }
     }
 
-    /// Paints the caret for `layer` at its current grid cursor. `block`,
-    /// `box`, and `underline` cover the whole cell -- two cells when the
-    /// cursor sits on the lead of a wide (CJK) character -- while `line`
-    /// stays a thin bar at the cell's left edge regardless. Assumes an
-    /// open renderer pass (see the caller).
-    fn drawCaret(self: *const App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize) void {
+    /// Paints the caret for `layer` at grid cell `(crow, ccol)` (already
+    /// resolved by the caller -- the live cursor, or a `caret_pin`ned
+    /// cell). `block`, `box`, and `underline` cover the whole cell -- two
+    /// cells when it sits on the lead of a wide (CJK) character -- while
+    /// `line` stays a thin bar at the cell's left edge regardless. Assumes
+    /// an open renderer pass (see the caller).
+    fn drawCaret(self: *const App, eng: *AppRunner.Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, crow: usize, ccol: usize, view_offset: usize) void {
         const white = pixzig.Color.from(255, 255, 255, 255);
-        const cx = origin_x + @as(i32, @intCast(layer.cursor.col)) * cell_w;
-        const cy = origin_y + @as(i32, @intCast(layer.cursor.row)) * cell_h;
+        const cx = origin_x + @as(i32, @intCast(ccol)) * cell_w;
+        const cy = origin_y + @as(i32, @intCast(crow)) * cell_h;
 
-        const on_wide_lead = layer.viewRow(view_offset, layer.cursor.row)[layer.cursor.col].wide == .wide_lead;
+        const on_wide_lead = layer.viewRow(view_offset, crow)[ccol].wide == .wide_lead;
         const cell_span: i32 = if (on_wide_lead) cell_w * 2 else cell_w;
 
         switch (self.cursor_shape) {

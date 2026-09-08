@@ -9,6 +9,7 @@ const history = @import("shell_support").history;
 const keyencode = @import("shell_support").keyencode;
 const lineedit = @import("shell_support").lineedit;
 const prompt_template = @import("shell_support").prompt_template;
+const browsescroll = @import("shell_support").browsescroll;
 const Pty = @import("pty.zig").Pty;
 
 /// The left prompt template used when `shell.conf` configured a prompt
@@ -16,6 +17,11 @@ const Pty = @import("pty.zig").Pty;
 /// for byte the same as the unconfigured default `writeDefaultPrefix`
 /// produces -- an absolute cwd, then `" > "`.
 const default_prompt_left = "{cwd_full} > ";
+
+/// Rows of context kept between the browse cursor and the top/bottom of
+/// the window while walking scrollback with Up/Down, when `shell.conf`'s
+/// `prompt{ scrolloff = N }` isn't set. See `Prompt.scrolloffRows`.
+const default_scrolloff: usize = 8;
 
 comptime {
     // The captured-child marker detector keeps its own copy of the
@@ -604,6 +610,13 @@ const Prompt = struct {
     /// wheel/scrollbar moves it, and reset to 0 by `setCursorAt` so
     /// starting to type snaps back to the live prompt.
     view_scroll: usize = 0,
+    /// Last-known maximum scrollback offset (`{offset, max}.max` from
+    /// `scroll_view` -- how many retained history rows are above the live
+    /// viewport). Refreshed on entering browse and on every `scrollWindow`
+    /// so `browsescroll.up` knows when the scrollback is exhausted. Grows
+    /// over a session; a slightly stale value just means a browse step
+    /// scrolls one iteration less far before the next call corrects it.
+    view_max: usize = 0,
     /// Absolute path to `~/.config/glyphwire/history`, set by
     /// `loadHistory` once it knows the config directory exists. `null`
     /// when there's no `$HOME`/`$XDG_CONFIG_HOME` to derive it from, or
@@ -681,6 +694,18 @@ const Prompt = struct {
     fn durMinMs(self: *Prompt) u64 {
         if (self.promptCfg()) |p| if (p.dur_min_ms) |m| return m;
         return 2000;
+    }
+
+    /// Scrolloff for scrollback browsing (see `default_scrolloff`):
+    /// `prompt.scrolloff` if set, else the default, clamped by
+    /// `browsescroll.clampScrolloff` so the cursor still has room to move
+    /// between the prompt row and the top margin.
+    fn scrolloffRows(self: *Prompt) usize {
+        const want: usize = if (self.promptCfg()) |p|
+            (if (p.scrolloff) |s| @as(usize, s) else default_scrolloff)
+        else
+            default_scrolloff;
+        return browsescroll.clampScrolloff(want, self.line_start_row);
     }
 
     /// Fills `host`/`host_buf` from `$HOSTNAME` or `/etc/hostname`. Best
@@ -821,14 +846,14 @@ const Prompt = struct {
             const w = prompt_template.opsWidth(r.ops, self.icon_cols);
             if (w > 0 and w < self.grid_cols) {
                 try self.client.setCursor(start.row, self.grid_cols - w);
-                try self.emitOps(r.ops, start.row, self.grid_cols - w, .{});
+                try self.emitOps(null, r.ops, start.row, self.grid_cols - w, .{});
             }
             try self.client.setCursor(start.row, 0);
         }
 
         var l = try prompt_template.render(alloc, p.left orelse default_prompt_left, data);
         defer l.deinit();
-        try self.emitOps(l.ops, start.row, 0, .{});
+        try self.emitOps(null, l.ops, start.row, 0, .{});
 
         return try self.client.getCursor();
     }
@@ -882,12 +907,33 @@ const Prompt = struct {
         return w;
     }
 
+    /// Draw target for the powerline chain helpers: either straight to the
+    /// client (`null`) or accumulated into one `batch` frame. `drawRightChain`
+    /// batches so the periodic redraw of the right chain plus the trailing
+    /// caret restore land in a single render -- no visible caret blip out
+    /// to the right side and back.
+    const ChainSink = ?*glyphwire.Client.Batch;
+
+    fn sinkSetCursor(self: *Prompt, sink: ChainSink, row: usize, col: usize) !void {
+        if (sink) |b| try b.setCursor(row, col) else try self.client.setCursor(row, col);
+    }
+    fn sinkWriteText(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
+        if (sink) |b| try b.writeText(text, fg, bg) else try self.client.writeText(text, fg, bg);
+    }
+    fn sinkWriteTextTransparent(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color) !void {
+        if (sink) |b| try b.writeTextTransparent(text, fg) else try self.client.writeTextTransparent(text, fg);
+    }
+    fn sinkDrawIconStyled(self: *Prompt, sink: ChainSink, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
+        if (sink) |b| try b.drawIconStyled(row, col, name, opts) else try self.client.drawIconStyled(row, col, name, opts);
+    }
+
     /// Draws a rendered chain left to right starting at `(row, start_col)`:
     /// optional `head` cap, then each segment (a background strip, then its
     /// text/icons composited over it), with `sep` between adjacent
     /// segments, then optional `tail` cap. A separator is drawn in the two
     /// neighbours' backgrounds -- for `right_side` chains the fg/bg are
-    /// swapped so a left-pointing glyph reads correctly.
+    /// swapped so a left-pointing glyph reads correctly. `sink` routes
+    /// every draw either straight to the client or into a `batch`.
     fn drawChain(
         self: *Prompt,
         row: usize,
@@ -897,37 +943,38 @@ const Prompt = struct {
         head: []const u8,
         tail: []const u8,
         right_side: bool,
+        sink: ChainSink,
     ) !void {
         if (segs.len == 0) return;
         var col = start_col;
 
         if (head.len > 0) {
-            try self.client.setCursor(row, col);
-            try self.client.writeText(head, segs[0].bg, null);
+            try self.sinkSetCursor(sink, row, col);
+            try self.sinkWriteText(sink, head, segs[0].bg, null);
             col += prompt_template.displayWidth(head);
         }
 
         for (segs, 0..) |seg, i| {
             if (i > 0 and sep.len > 0) {
                 const prev = segs[i - 1];
-                try self.client.setCursor(row, col);
+                try self.sinkSetCursor(sink, row, col);
                 if (right_side) {
-                    try self.client.writeText(sep, seg.bg, prev.bg);
+                    try self.sinkWriteText(sink, sep, seg.bg, prev.bg);
                 } else {
-                    try self.client.writeText(sep, prev.bg, seg.bg);
+                    try self.sinkWriteText(sink, sep, prev.bg, seg.bg);
                 }
                 col += prompt_template.displayWidth(sep);
             }
             // Background strip, then text/icons composited over it.
-            try self.client.setCursor(row, col);
-            try self.writeSpaces(seg.width, seg.fg, seg.bg);
-            try self.emitOps(seg.ops, row, col, .{ .fg = seg.fg, .transparent = true });
+            try self.sinkSetCursor(sink, row, col);
+            try self.writeSpaces(sink, seg.width, seg.fg, seg.bg);
+            try self.emitOps(sink, seg.ops, row, col, .{ .fg = seg.fg, .transparent = true });
             col += seg.width;
         }
 
         if (tail.len > 0) {
-            try self.client.setCursor(row, col);
-            try self.client.writeText(tail, segs[segs.len - 1].bg, null);
+            try self.sinkSetCursor(sink, row, col);
+            try self.sinkWriteText(sink, tail, segs[segs.len - 1].bg, null);
         }
     }
 
@@ -935,6 +982,11 @@ const Prompt = struct {
     /// position -- called on the idle timeout so `{time}` ticks, and (on a
     /// single-line prompt) after every keystroke so it stays put while the
     /// input line is repainted. A no-op when no right chain is configured.
+    ///
+    /// The whole redraw plus a trailing "put the caret back on the input
+    /// line" go out as one `batch` frame, so the host never renders a
+    /// frame with the caret stranded out on the right where the chain is
+    /// drawn -- the "cursor blip to the right" this used to cause.
     fn drawRightChain(self: *Prompt) !void {
         const p = self.promptCfg() orelse return;
         const segs = p.right_segments orelse return;
@@ -951,11 +1003,27 @@ const Prompt = struct {
         if (list.items.len == 0) return;
 
         const sep_right = p.sep_right orelse (p.sep orelse "");
-        const right_head = p.right_head orelse "";
+        // `right_head` caps the left edge of the right-aligned chain (the
+        // side facing the input). Unset, it falls back to `head` -- the
+        // same left-cap glyph the left chain uses -- mirroring how
+        // `sep_right` falls back to `sep`. `drawChain` draws it in the
+        // first visible segment's bg (red on an error segment, the time's
+        // bg otherwise).
+        const right_head = p.right_head orelse (p.head orelse "");
         const w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
         if (w >= self.grid_cols) return;
         const row = if (self.grid_rows > 0) @min(self.pl_top_row, self.grid_rows - 1) else self.pl_top_row;
-        try self.drawChain(row, self.grid_cols - w, list.items, sep_right, right_head, "", true);
+
+        var b = self.client.batch();
+        defer b.deinit();
+        try self.drawChain(row, self.grid_cols - w, list.items, sep_right, right_head, "", true, &b);
+        // Caret restore, same frame -- mirrors `placeInputCursor`. Always
+        // the input line: the idle-tick caller gates on `browse_pos == null`
+        // and `renderInputLine` only runs for the live line.
+        const caret_row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
+        try b.setCursor(caret_row, self.line_start_col + self.caretCol());
+        var res = try b.send();
+        res.deinit();
     }
 
     /// The powerline prompt: `left_segments` from column 0, `right_segments`
@@ -993,13 +1061,15 @@ const Prompt = struct {
         const sep_right = p.sep_right orelse sep;
         const head = p.head orelse "";
         const tail = p.tail orelse "";
-        const right_head = p.right_head orelse "";
+        // See `drawRightChain`: unset, the right chain's left cap reuses
+        // `head`, the same fallback shape as `sep_right` -> `sep`.
+        const right_head = p.right_head orelse head;
 
         var left_end: usize = 0;
         if (p.left_segments) |segs| {
             var list: std.ArrayList(RenderedSeg) = .empty;
             const seg_sum = try self.renderChain(arena, segs, data, &list);
-            try self.drawChain(top, 0, list.items, sep, head, tail, false);
+            try self.drawChain(top, 0, list.items, sep, head, tail, false, null);
             left_end = @min(chainWidth(list.items.len, seg_sum, sep, head, tail), self.grid_cols);
         }
 
@@ -1010,7 +1080,7 @@ const Prompt = struct {
             right_w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
             if (list.items.len > 0 and right_w < self.grid_cols) {
                 self.right_dynamic = true;
-                try self.drawChain(top, self.grid_cols - right_w, list.items, sep_right, right_head, "", true);
+                try self.drawChain(top, self.grid_cols - right_w, list.items, sep_right, right_head, "", true, null);
             }
         }
 
@@ -1044,13 +1114,13 @@ const Prompt = struct {
 
     /// Writes `n` spaces at the cursor with the given fg/bg -- the
     /// background strip a powerline segment's text then composites over.
-    fn writeSpaces(self: *Prompt, n: usize, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
+    fn writeSpaces(self: *Prompt, sink: ChainSink, n: usize, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
         var buf: [256]u8 = undefined;
         var left = n;
         while (left > 0) {
             const chunk = @min(left, buf.len);
             @memset(buf[0..chunk], ' ');
-            try self.client.writeText(buf[0..chunk], fg, bg);
+            try self.sinkWriteText(sink, buf[0..chunk], fg, bg);
             left -= chunk;
         }
     }
@@ -1061,26 +1131,36 @@ const Prompt = struct {
     /// go through `write_text` (or `write_text` transparent, keeping any
     /// background strip) with `opts.fg`; icons through `draw_icon` at the
     /// running cell (which `draw_icon` doesn't advance, so the column is
-    /// bumped by hand). Text runs resync the cursor from `getCursor` so an
-    /// embedded `\n` (server CR+LF) needs no local bookkeeping.
+    /// bumped by hand).
+    ///
+    /// Straight-to-client (`sink == null`), text runs resync the cursor
+    /// from `getCursor` so an embedded `\n` (server CR+LF) needs no local
+    /// bookkeeping. Batched (`sink != null`), there's no round trip:
+    /// segment text has no `\n`, so the column is advanced by its display
+    /// width instead.
     ///
     /// The explicit `setCursor` up front matters: `drawChain` calls this
     /// right after `writeSpaces` has left the cursor at the *end* of the
     /// segment's background strip, not its start.
-    fn emitOps(self: *Prompt, ops: []const prompt_template.Op, row: usize, col: usize, opts: EmitOpts) !void {
-        try self.client.setCursor(row, col);
+    fn emitOps(self: *Prompt, sink: ChainSink, ops: []const prompt_template.Op, row: usize, col: usize, opts: EmitOpts) !void {
+        try self.sinkSetCursor(sink, row, col);
         var cur_row = row;
         var cur_col = col;
         for (ops) |op| switch (op) {
             .text => |t| {
                 if (opts.transparent) {
-                    try self.client.writeTextTransparent(t, opts.fg);
+                    try self.sinkWriteTextTransparent(sink, t, opts.fg);
                 } else {
-                    try self.client.writeText(t, opts.fg, null);
+                    try self.sinkWriteText(sink, t, opts.fg, null);
                 }
-                const cur = try self.client.getCursor();
-                cur_row = cur.row;
-                cur_col = cur.col;
+                if (sink == null) {
+                    const cur = try self.client.getCursor();
+                    cur_row = cur.row;
+                    cur_col = cur.col;
+                } else {
+                    cur_col += prompt_template.displayWidth(t);
+                    try self.sinkSetCursor(sink, cur_row, cur_col);
+                }
             },
             .icon => |name| {
                 // A `draw_icon` notification for an unregistered name is
@@ -1090,7 +1170,7 @@ const Prompt = struct {
                 // step past the `icon_cols` cells it covers. Without them:
                 // the old aspect-fit-in-one-cell behavior.
                 if (self.icon_max_h > 0) {
-                    try self.client.drawIconStyled(cur_row, cur_col, name, .{
+                    try self.sinkDrawIconStyled(sink, cur_row, cur_col, name, .{
                         .scale = .natural,
                         .h_align = .start,
                         .v_align = .center,
@@ -1099,10 +1179,10 @@ const Prompt = struct {
                     });
                     cur_col += self.icon_cols;
                 } else {
-                    try self.client.drawIconStyled(cur_row, cur_col, name, .{ .foreground = opts.transparent });
+                    try self.sinkDrawIconStyled(sink, cur_row, cur_col, name, .{ .foreground = opts.transparent });
                     cur_col += 1;
                 }
-                try self.client.setCursor(cur_row, cur_col);
+                try self.sinkSetCursor(sink, cur_row, cur_col);
             },
         };
     }
@@ -1321,14 +1401,24 @@ const Prompt = struct {
     }
 
     /// Moves the host's scrollback view (see `Prompt.view_scroll` /
-    /// `Client.scrollView`) by `delta` rows -- positive scrolls back into
-    /// history, negative toward the live tail -- and records the clamped
-    /// result the server hands back. This is the "scroll the window along"
-    /// half of browsing: `browseUp`/`browseDown` call it once the browse
-    /// cursor hits the top of the visible area.
-    fn scrollWindow(self: *Prompt, delta: i64) !void {
-        const res = try self.client.scrollView(null, delta);
+    /// `Client.scrollView`) to absolute offset `offset` and records the
+    /// clamped result (offset + max) the server hands back. This is the
+    /// "scroll the window along" half of browsing: `browseUp`/`browseDown`
+    /// compute the target with `browsescroll` and apply it here.
+    fn scrollWindow(self: *Prompt, offset: usize) !void {
+        const res = try self.client.scrollView(offset, null);
         self.view_scroll = res.offset;
+        self.view_max = res.max;
+    }
+
+    /// Refreshes `view_scroll` / `view_max` from the host without moving
+    /// the view -- a get-only `get_property("scroll")` query (no `scroll`
+    /// broadcast). Called when entering browse so `browsescroll.up` starts
+    /// from a current scrollback size.
+    fn syncScrollState(self: *Prompt) !void {
+        const res = try self.client.getScroll();
+        self.view_scroll = res.offset;
+        self.view_max = res.max;
     }
 
     /// Plain Up (`count == 1`) moves the cursor up into the scrollback
@@ -1339,71 +1429,63 @@ const Prompt = struct {
     /// Ctrl+Up (`count == 5`, only while already browsing -- see the key
     /// loop) is a bigger step for scanning a long listing faster.
     ///
-    /// Once the browse cursor reaches the top visible row, any further
-    /// upward movement scrolls the host window back into scrollback
-    /// (`scrollWindow`) instead of clamping -- so a listing longer than
-    /// the window can be walked all the way up. Entering browse at the
-    /// very first prompt (`line_start_row == 0`) is allowed now too, as
-    /// long as there's history to scroll to (an empty `scroll_view`
-    /// clamps to a no-op otherwise).
+    /// The browse cursor keeps `scrolloffRows()` rows of context between
+    /// itself and the top of the window: once it's that close to the top,
+    /// further upward movement scrolls the host window back into
+    /// scrollback (`scrollWindow`) instead, keeping the cursor at the
+    /// margin -- until the scrollback is exhausted, when the cursor is
+    /// allowed to climb the rest of the way to row 0. Entering browse at
+    /// the very first prompt (`line_start_row == 0`) is fine -- an empty
+    /// `scroll_view` clamps to a no-op.
     fn browseUp(self: *Prompt, count: usize) !void {
-        if (self.browse_pos == null) {
-            const start_row = if (self.line_start_row > 0)
-                (self.line_start_row - 1) -| (count - 1)
-            else
-                0;
-            self.browse_pos = .{ .row = start_row, .col = self.line_start_col + self.caretCol() };
-            const absorbed = self.line_start_row -| start_row;
-            const overshoot = count -| absorbed;
-            if (overshoot > 0) try self.scrollWindow(@intCast(overshoot));
-            try self.client.setCursor(start_row, self.browse_pos.?.col);
-            return;
-        }
+        const entering = self.browse_pos == null;
+        if (entering) try self.syncScrollState();
 
-        var bp = self.browse_pos.?;
-        if (bp.row >= count) {
-            bp.row -= count;
-        } else {
-            const overshoot = count - bp.row;
-            bp.row = 0;
-            try self.scrollWindow(@intCast(overshoot));
-        }
+        var bp = self.browse_pos orelse glyphwire.Cursor{
+            .row = self.line_start_row -| 1,
+            .col = self.line_start_col + self.caretCol(),
+        };
+
+        const plan = browsescroll.up(
+            .{ .bp_row = bp.row, .view_scroll = self.view_scroll },
+            count,
+            self.scrolloffRows(),
+            self.view_max,
+            entering,
+        );
+        bp.row = plan.bp_row;
+        if (plan.view_scroll != self.view_scroll) try self.scrollWindow(plan.view_scroll);
         self.browse_pos = bp;
         try self.client.setCursor(bp.row, bp.col);
     }
 
     /// Plain Down (`count == 1`) while browsing moves the browse cursor
-    /// down a row, or -- when already at the bottom of the browsable
-    /// range (one row above the prompt) -- ends browsing and lands back
-    /// on the real prompt cursor instead (rather than "browsing" a row
-    /// that's actually the live line). Ctrl+Down (`count == 5`, only
-    /// while already browsing) is a bigger step, but clamps at that same
-    /// bottom row rather than overshooting into a snap-back.
-    ///
-    /// When the host window is scrolled back (`view_scroll > 0`), Down
-    /// first scrolls it toward the live tail (`scrollWindow`), the mirror
-    /// of `browseUp`'s scroll-past-the-top; only once the view is back at
-    /// the tail does Down resume moving the browse cursor down toward the
-    /// prompt. A no-op when not currently browsing.
+    /// down a row; Ctrl+Down (`count == 5`) is a bigger step. Symmetric
+    /// with `browseUp`: the cursor keeps `scrolloffRows()` rows of context
+    /// below itself by scrolling the window toward the live tail once it
+    /// gets that close to the bottom, and only once the view is back at
+    /// the tail does it move down onto the last browsable row (the one
+    /// just above the prompt). Reaching the prompt row ends browsing and
+    /// lands back on the real prompt cursor -- it can't be scrolled past.
+    /// A no-op when not currently browsing.
     fn browseDown(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
+        const bottom = self.line_start_row -| 1; // last browsable row
 
-        var remaining = count;
-        if (self.view_scroll > 0) {
-            const consume = @min(remaining, self.view_scroll);
-            try self.scrollWindow(-@as(i64, @intCast(consume)));
-            remaining -= consume;
-            if (remaining == 0) {
-                try self.client.setCursor(bp.row, bp.col);
-                return;
-            }
-        }
-
-        if (bp.row + 1 >= self.line_start_row) {
+        const plan = browsescroll.down(
+            .{ .bp_row = bp.row, .view_scroll = self.view_scroll },
+            count,
+            self.scrolloffRows(),
+            bottom,
+        );
+        if (plan.ended) {
+            // Ran into the prompt row -- land back on the real cursor
+            // (`setCursorAt` also snaps the view back to the live tail).
             try self.setCursorAt(self.cursor);
             return;
         }
-        bp.row = @min(bp.row + remaining, self.line_start_row - 1);
+        if (plan.view_scroll != self.view_scroll) try self.scrollWindow(plan.view_scroll);
+        bp.row = plan.bp_row;
         self.browse_pos = bp;
         try self.client.setCursor(bp.row, bp.col);
     }

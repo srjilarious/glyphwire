@@ -18,3 +18,4 @@ pub const lineedit = @import("lineedit.zig");
 pub const config = @import("config.zig");
 pub const keyencode = @import("keyencode.zig");
 pub const prompt_template = @import("prompt_template.zig");
+pub const browsescroll = @import("browsescroll.zig");

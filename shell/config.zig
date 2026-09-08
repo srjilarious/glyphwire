@@ -72,6 +72,8 @@ pub const PromptConfig = struct {
     /// segment's bg over the terminal background.
     head: ?[]const u8 = null,
     tail: ?[]const u8 = null,
+    /// Left cap of the right-aligned chain (the edge facing the input).
+    /// Unset, it falls back to `head`, mirroring `sep_right` -> `sep`.
     right_head: ?[]const u8 = null,
     /// Total prompt rows. `null`/1 -> single line. `>= 2` -> segments on
     /// the first row, the input line on the last row.
@@ -80,6 +82,11 @@ pub const PromptConfig = struct {
     input: ?[]const u8 = null,
     /// `strftime` format for `{time}` (default `"%H:%M"`).
     time_format: ?[]const u8 = null,
+    /// Rows of context to keep between the browse cursor and the edge of
+    /// the window while scrolling through scrollback with Up/Down (a
+    /// vim-style "scrolloff"). `null` -> the built-in default (8). Clamped
+    /// at use to leave room for the cursor itself.
+    scrolloff: ?u32 = null,
 };
 
 /// Everything one shell.conf run declared, parsed into Zig data. Owns its
@@ -219,6 +226,14 @@ fn luaPrompt(lua: *Lua) !i32 {
         const n = lua.checkNumber(-1);
         if (n < 1) lua.raiseErrorStr("prompt: lines must be >= 1", .{});
         cfg.prompt.lines = @as(u8, @intFromFloat(@min(n, 255)));
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "scrolloff");
+    if (!lua.isNoneOrNil(-1)) {
+        const n = lua.checkNumber(-1);
+        if (n < 0) lua.raiseErrorStr("prompt: scrolloff must be >= 0", .{});
+        cfg.prompt.scrolloff = @as(u32, @intFromFloat(@min(n, 1_000_000)));
     }
     lua.pop(1);
 

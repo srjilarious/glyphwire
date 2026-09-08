@@ -953,6 +953,43 @@ subsection (incl. a "Powerline segments" part); `api.md` is untouched.
   the first slices, and `prompt_template`'s `Op` list / `Data` snapshot
   are already the right shape to hand to a callback.
 
+## Caret / scroll fixes: pin on mouse scroll, `scrolloff`, backspace repeat, right cap
+
+Four reported rough edges, all client-local (no wire change — `api.md`
+untouched; `decisions.md` Layers + Shell sections updated):
+
+- **Caret pinned on a mouse scroll (`glyphwire-host`).** A wheel /
+  scrollbar scroll used to leave the caret glued to the live prompt's
+  screen cell while the content scrolled under it. It's now pinned
+  (`App.caret_pin`) to the buffer cell it was on when the scroll began,
+  rides the content, and clips off-screen once that cell leaves the
+  viewport. Any key/text releases the pin and snaps the view back to the
+  live tail (`clearCaretPinForKey`); a client moving the cursor releases
+  it without a view change (`reconcileCaretPin`). Keyboard browse in the
+  shell never pins (it scrolls via `scroll_view`, not the host's own
+  wheel path), so its caret keeps following the browse cursor as before.
+- **`scrolloff` for shell scrollback browsing.** `browseUp` / `browseDown`
+  keep a configurable margin (`shell.conf` `prompt{ scrolloff = N }`,
+  default 8) between the browse cursor and the top / bottom of the
+  window, scrolling the window at the margin instead of only when the
+  cursor is jammed against the edge. Down still can't move past the
+  prompt row.
+- **Typematic repeat for Backspace / Delete / Ctrl+U (`glyphwire-host`).**
+  `App.key_repeat` (was `arrow_repeat`) now also drives these editing
+  keys — held Backspace in the shell repeats. Arrows' Ctrl+left/right
+  word motion already repeated; character keys repeat via the `text`
+  stream. Enter/Tab stay single-shot.
+- **Right powerline chain gets a left cap.** `right_head` falls back to
+  `head` when unset (mirrors `sep_right` → `sep`), drawn in the first
+  *visible* right segment's bg (an `error` segment's colour, or the
+  time's). The right-chain redraw also moved to a single `batch` frame
+  (chain + trailing caret restore) so the idle-tick redraw no longer
+  blips the caret out to the right and back on a 2-line prompt.
+- **Tests:** `tests/shell_tests.zig` `browseUp`/`browseDown` scrolloff
+  math; `tests/host_tests.zig` (new group `host`) for the caret-pin
+  screen-row / clip logic; `tests/shell_config_tests.zig` for the
+  `scrolloff` key.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

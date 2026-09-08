@@ -962,6 +962,12 @@ pub const Client = struct {
             try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg), .metadata_id = metadata_id });
         }
 
+        /// Batched `write_text(text, fg?, transparent_bg: true)` -- see
+        /// `Client.writeTextTransparent`.
+        pub fn writeTextTransparent(self: *Batch, text: []const u8, fg: ?core.Color) !void {
+            try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .transparent_bg = true });
+        }
+
         /// Batched `tag_metadata` -- see `Client.tagMetadata`.
         pub fn tagMetadata(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle) !void {
             try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id });

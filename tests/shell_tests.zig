@@ -11,6 +11,7 @@ const handshake = @import("shell_support").handshake;
 const history = @import("shell_support").history;
 const keyencode = @import("shell_support").keyencode;
 const lineedit = @import("shell_support").lineedit;
+const browsescroll = @import("shell_support").browsescroll;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -470,4 +471,94 @@ pub fn lineeditCellWidthCountsGridCellsNotBytesTest(_: std.Io, _: std.mem.Alloca
     try testz.expectEqual(lineedit.cellWidth("ab"), @as(usize, 2));
     try testz.expectEqual(lineedit.cellWidth("日本語"), @as(usize, 6));
     try testz.expectEqual(lineedit.cellWidth(""), @as(usize, 0));
+}
+
+// ─── browsescroll: scrollback browsing scrolloff math ──────────────────
+
+pub fn browseScrolloffClampLeavesRoomForCursorTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Prompt low on the grid: full margin fits.
+    try testz.expectEqual(browsescroll.clampScrolloff(8, 24), @as(usize, 8));
+    // Prompt high up: clamped to half the rows above it.
+    try testz.expectEqual(browsescroll.clampScrolloff(8, 4), @as(usize, 2));
+    try testz.expectEqual(browsescroll.clampScrolloff(8, 1), @as(usize, 0));
+    try testz.expectEqual(browsescroll.clampScrolloff(0, 24), @as(usize, 0));
+}
+
+pub fn browseUpEnteringConsumesTheFirstRowTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Entering browse: the caller has already put the cursor one row
+    // above the prompt, so a plain Up (count 1) does nothing more.
+    const r = browsescroll.up(.{ .bp_row = 19, .view_scroll = 0 }, 1, 8, 100, true);
+    try testz.expectEqual(r.bp_row, @as(usize, 19));
+    try testz.expectEqual(r.view_scroll, @as(usize, 0));
+}
+
+pub fn browseUpEnteringOnRow0ScrollsImmediatelyTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Prompt on row 0: there's no row above it for the enter-browse move
+    // to land on, so a first Up spends its whole count scrolling.
+    const r = browsescroll.up(.{ .bp_row = 0, .view_scroll = 0 }, 1, 0, 5, true);
+    try testz.expectEqual(r.bp_row, @as(usize, 0));
+    try testz.expectEqual(r.view_scroll, @as(usize, 1));
+}
+
+pub fn browseUpMovesCursorUntilMarginThenScrollsTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Cursor well below the margin: a 5-row step just moves the cursor.
+    var r = browsescroll.up(.{ .bp_row = 19, .view_scroll = 0 }, 5, 8, 100, false);
+    try testz.expectEqual(r.bp_row, @as(usize, 14));
+    try testz.expectEqual(r.view_scroll, @as(usize, 0));
+    // From the margin, another step scrolls the window and holds the row.
+    r = browsescroll.up(.{ .bp_row = 8, .view_scroll = 0 }, 5, 8, 100, false);
+    try testz.expectEqual(r.bp_row, @as(usize, 8));
+    try testz.expectEqual(r.view_scroll, @as(usize, 5));
+}
+
+pub fn browseUpStraddlesMarginInOneStepTest(_: std.Io, _: std.mem.Allocator) !void {
+    // 5 rows from bp_row 10, margin 8: 2 rows of cursor travel to the
+    // margin, then 3 rows of window scroll.
+    const r = browsescroll.up(.{ .bp_row = 10, .view_scroll = 0 }, 5, 8, 100, false);
+    try testz.expectEqual(r.bp_row, @as(usize, 8));
+    try testz.expectEqual(r.view_scroll, @as(usize, 3));
+}
+
+pub fn browseUpLetsCursorClimbPastMarginWhenScrollbackExhaustedTest(_: std.Io, _: std.mem.Allocator) !void {
+    // view_max 0: nothing to scroll into, so the cursor is allowed all
+    // the way to row 0 despite the margin.
+    const r = browsescroll.up(.{ .bp_row = 2, .view_scroll = 0 }, 5, 8, 0, false);
+    try testz.expectEqual(r.bp_row, @as(usize, 0));
+    try testz.expectEqual(r.view_scroll, @as(usize, 0));
+}
+
+pub fn browseUpClampsScrollToViewMaxTest(_: std.Io, _: std.mem.Allocator) !void {
+    // At the margin with only 2 rows of history left: scroll 2, then the
+    // cursor climbs the remaining 1.
+    const r = browsescroll.up(.{ .bp_row = 1, .view_scroll = 0 }, 3, 8, 2, false);
+    try testz.expectEqual(r.view_scroll, @as(usize, 2));
+    try testz.expectEqual(r.bp_row, @as(usize, 0));
+}
+
+pub fn browseDownStepsCursorUntilNearBottomThenUnscrollsTest(_: std.Io, _: std.mem.Allocator) !void {
+    // bottom 19, margin 8 -> hold_row 11. Cursor at 8 with the view
+    // scrolled 5 back: 3 rows of cursor travel to hold_row, then 3 rows
+    // of un-scroll (5 -> 2), cursor held at 11.
+    const r = browsescroll.down(.{ .bp_row = 8, .view_scroll = 5 }, 6, 8, 19);
+    try testz.expectEqual(r.bp_row, @as(usize, 11));
+    try testz.expectEqual(r.view_scroll, @as(usize, 2));
+    try testz.expectFalse(r.ended);
+}
+
+pub fn browseDownAtTailMovesCursorToBottomTest(_: std.Io, _: std.mem.Allocator) !void {
+    // View already at the tail: past hold_row the cursor just keeps
+    // moving down to the last browsable row (exactly reached here).
+    const r = browsescroll.down(.{ .bp_row = 15, .view_scroll = 0 }, 4, 8, 19);
+    try testz.expectEqual(r.bp_row, @as(usize, 19));
+    try testz.expectFalse(r.ended);
+    // One more Down from the last row ends browsing.
+    const r2 = browsescroll.down(.{ .bp_row = 19, .view_scroll = 0 }, 1, 8, 19);
+    try testz.expectTrue(r2.ended);
+}
+
+pub fn browseDownEndsAtThePromptRowTest(_: std.Io, _: std.mem.Allocator) !void {
+    // At the last browsable row with the view already at the tail: the
+    // next Down ends browsing.
+    const r = browsescroll.down(.{ .bp_row = 19, .view_scroll = 0 }, 1, 8, 19);
+    try testz.expectTrue(r.ended);
 }
