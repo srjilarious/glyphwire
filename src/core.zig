@@ -1593,11 +1593,25 @@ pub const Layer = struct {
 
         self.alloc.free(self.buf);
         self.buf = new_buf;
+        const old_height = self.height;
         self.width = new_width;
         self.height = new_height;
         self.viewport_start = self.scrollback_rows;
         self.history_len = if (keep > new_height) keep - new_height else 0;
         if (self.view_scroll > self.history_len) self.view_scroll = self.history_len;
+
+        // The rebuild is bottom-anchored: the newest meaningful row stays
+        // on the last viewport row, so every retained row's distance from
+        // the bottom is unchanged and a table's pinned `top_live` (see
+        // `scrollOne`) shifts by exactly the height delta. Keeps a header
+        // click resolving after a window resize, when the client that
+        // drew the table (`glyphwire-ls -l`) has long since exited and
+        // nothing re-renders it.
+        if (self.tables.count() > 0) {
+            const dh = @as(i64, @intCast(new_height)) - @as(i64, @intCast(old_height));
+            var it = self.tables.valueIterator();
+            while (it.next()) |t| t.top_live += dh;
+        }
 
         if (self.cursor.row >= new_height) self.cursor.row = new_height - 1;
         if (self.cursor.col >= new_width) self.cursor.col = new_width - 1;
@@ -2848,9 +2862,11 @@ pub const ColumnKind = enum { text, number };
 
 pub const SortDirection = enum { none, ascending, descending };
 
-/// The glyph drawn after the active sort column's header name -- a filled
-/// triangle pointing the way its rows are ordered. `.none` yields an
-/// empty string: an unsorted table, and a column that is merely
+/// The glyph drawn after the active sort column's header name -- a small
+/// filled triangle pointing the way its rows are ordered. The "small
+/// triangle" codepoints (U+25B4 / U+25BE), deliberately not the full-size
+/// U+25B2 / U+25BC, which render oversized next to text. `.none` yields
+/// an empty string: an unsorted table, and a column that is merely
 /// `sortable` but not the current sort, show nothing extra (decided in
 /// the sort feature's clarifying questions -- no persistent "click me"
 /// affordance). One display cell wide; `Table.headerColWidth` reserves it
@@ -2858,8 +2874,8 @@ pub const SortDirection = enum { none, ascending, descending };
 pub fn sortArrowGlyph(dir: SortDirection) []const u8 {
     return switch (dir) {
         .none => "",
-        .ascending => "\u{25B2}", // ▲
-        .descending => "\u{25BC}", // ▼
+        .ascending => "\u{25B4}", // ▴
+        .descending => "\u{25BE}", // ▾
     };
 }
 
@@ -3108,7 +3124,7 @@ pub const Table = struct {
 
     /// A column's header/layout width in cells: its nominal
     /// `max(width, min_width)`, widened only on the *active* sort column
-    /// so its name plus the direction arrow (`" ▲"`, `sort_arrow_cells`
+    /// so its name plus the direction arrow (`" ▴"`, `sort_arrow_cells`
     /// wide) fit without truncating the name -- the column expands to fit
     /// the arrow rather than the arrow eating into the name (decided in
     /// the sort feature's clarifying questions). Every other column, and
@@ -3401,7 +3417,7 @@ pub const Table = struct {
             const width = self.headerColWidth(i);
             if (self.sort_dir != .none and self.sort_column == i) {
                 // The active sort column draws its name plus a direction
-                // arrow ("Name ▲"); `headerColWidth` already widened this
+                // arrow ("Name ▴"); `headerColWidth` already widened this
                 // column so the arrow fits without clipping the name. A
                 // pathologically long name (>~250 bytes) that overflows
                 // the format buffer just drops the arrow.
