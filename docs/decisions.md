@@ -1389,19 +1389,28 @@ surface.
   row of a scrolled table read as the header) and, via a re-`render`,
   scrolled the layer a second time until only the table's last rows were
   left — the bug that motivated all of this.
-- **A re-sort `repaint`s in place; it does not re-`render`.** `render`
-  draws the table fresh at the cursor and scrolls the layer
+- **A re-sort `repaint`s in place; it does not re-`render`. And it
+  operates in the layer's coordinate space, not just the viewport.**
+  `render` draws the table fresh at the cursor and scrolls the layer
   terminal-style as it overflows — correct exactly once, when the table
   is first emitted as command output. A re-sort keeps the same rows and
   the same footprint, so `Table.repaint` redraws that footprint at the
-  table's current `top_live`, clipping to the viewport instead of
-  scrolling. Consequence for a table taller than the viewport: the
-  on-screen part re-sorts, rows already in scrollback keep their prior
-  order (the ring's history isn't rewritable) — including a header
-  scrolled off, so its arrow only shows once the table is fully back on
-  screen. Acceptable: the common case (a listing that fits) is exact,
-  and the alternative (rewriting history rows) is a much bigger change to
-  the ring's API for a corner case.
+  table's current `top_live` without scrolling. A first cut clipped the
+  redraw to `[0, height)` and left any rows already in scrollback showing
+  the pre-sort order — a header scrolled a few rows up kept no arrow,
+  scrolling back up showed a half-sorted table. Fixed by giving `Layer` a
+  **signed-row write path** (`cellSigned` / `rowAtSigned`: row `< 0`
+  reaches `-row` rows up into retained history) and routing every table
+  cell writer (`writeCellRun`, `setCell*`, `drawBorderTile`, `fillRowBg`,
+  and the `Table` sub-drawers) through it. `paintAt` now walks a signed
+  `i64` cursor from `top_live` and writes each row wherever it lives —
+  viewport, scrollback, or straddling — blanking it first across the
+  wider of the old/new column span so a narrower re-sort leaves no stale
+  trailing cells. Only rows older than `history_len` (genuinely evicted
+  from the ring) are lost. `render` still uses the `usize`/scrolling walk
+  for the first draw; its writes are always in-viewport so they pass a
+  plain `@intCast`. The signed writers don't bump `Layer.render_gen`, so
+  `render`/`repaint` call `layer.touchRender()` explicitly at the end.
 - **The 3-state click cycle, and the arrow expands the column rather than
   clipping the name (asked).** A click steps ascending → descending →
   unsorted (back to insertion order); clicking a different sortable
