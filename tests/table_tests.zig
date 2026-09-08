@@ -1109,3 +1109,48 @@ pub fn tableTopLiveFollowsResizeTest(io: std.Io, alloc: std.mem.Allocator) !void
         try testz.expectEqualStr("", snap.cellAt(0, 0).grapheme);
     }
 }
+
+/// A `case_insensitive` text column folds ASCII case when sorted, so
+/// mixed-case values interleave the natural way instead of every capital
+/// clumping ahead of every lowercase. Case-folded ties (`"Bat"` vs
+/// `"bat"`) fall back to raw bytes, so the order is deterministic.
+pub fn tableCaseInsensitiveColumnFoldsWhenSortedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 12, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 8, .sortable = true, .case_insensitive = true },
+    }, .{ .borders = false, .header_separator = false });
+    // Case-sensitive asc would be "Bat","Zebra","apple","bat"; folded asc
+    // is "apple","Bat"/"bat","Zebra" with "Bat" before "bat" (raw-byte
+    // tie-break: 'B' < 'b').
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .display = "bat" }},
+        &.{.{ .display = "Zebra" }},
+        &.{.{ .display = "apple" }},
+        &.{.{ .display = "Bat" }},
+    });
+
+    try client.tableSetSort(null, table, 0, .ascending);
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        try testz.expectEqualStr("a", snap.cellAt(1, 0).grapheme); // apple
+        try testz.expectEqualStr("B", snap.cellAt(2, 0).grapheme); // Bat
+        try testz.expectEqualStr("b", snap.cellAt(3, 0).grapheme); // bat
+        try testz.expectEqualStr("Z", snap.cellAt(4, 0).grapheme); // Zebra
+    }
+}

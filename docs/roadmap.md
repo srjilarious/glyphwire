@@ -708,7 +708,10 @@ The `-l` table opens in name order with no sort arrow on any header
 User / Group / Time / Name) then sorts it in place, cycling asc → desc →
 back to that order, with a direction arrow on the active column —
 glyphwire-host drives this directly, see decisions.md's Table section.
-The fixed permission columns aren't `sortable`.
+The fixed permission columns aren't `sortable`. Name sorts
+case-insensitively (`case_insensitive` column flag), and `sortEntries` —
+the plain listing / unsorted order — folds case the same way so the two
+match.
 
 Not done (candidate next steps): sort *flags* for the initial order (by
 mtime / size / reversed — note `-S` is already taken for "small format",

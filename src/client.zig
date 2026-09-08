@@ -895,6 +895,9 @@ pub const Client = struct {
         name: []const u8,
         kind: core.ColumnKind = .text,
         sortable: bool = false,
+        /// Fold ASCII case when sorting a `.text` column -- see
+        /// `core.TableColumn.case_insensitive`.
+        case_insensitive: bool = false,
         width: usize,
         min_width: usize = 1,
         h_align: core.HAlign = .start,
@@ -955,6 +958,7 @@ pub const Client = struct {
                 .name = c.name,
                 .kind = @tagName(c.kind),
                 .sortable = c.sortable,
+                .case_insensitive = c.case_insensitive,
                 .width = c.width,
                 .min_width = c.min_width,
                 .h_align = @tagName(c.h_align),

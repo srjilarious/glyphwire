@@ -2920,6 +2920,24 @@ pub fn sortArrowGlyph(dir: SortDirection) []const u8 {
 /// name's own width for the active sort column.
 const sort_arrow_cells: usize = 2;
 
+/// Orders two byte strings ignoring ASCII case (`'A'`..`'Z'` compare
+/// equal to `'a'`..`'z'`), falling back to a raw-byte comparison when the
+/// case-folded forms are equal so the result is a total, deterministic
+/// order -- `std.mem.sort` isn't stable, so `"Foo"` and `"foo"` need a
+/// fixed relative order rather than whatever the sort happens to leave.
+/// Used by `Table.sortedIndices` for a `case_insensitive` text column.
+fn asciiFoldOrder(a: []const u8, b: []const u8) std.math.Order {
+    const n = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const la = std.ascii.toLower(a[i]);
+        const lb = std.ascii.toLower(b[i]);
+        if (la != lb) return std.math.order(la, lb);
+    }
+    if (a.len != b.len) return std.math.order(a.len, b.len);
+    return std.mem.order(u8, a, b);
+}
+
 /// One column's shape -- display name (the header cell's text),
 /// sortability, and sizing. `width` is the column's content width in
 /// cells; `min_width` is a floor, same as the client-composited table
@@ -2929,6 +2947,13 @@ pub const TableColumn = struct {
     name: []u8,
     kind: ColumnKind = .text,
     sortable: bool = false,
+    /// For a `.text` column: fold ASCII case when sorting, so `"apple"`
+    /// and `"Banana"` order the natural way instead of every capitalised
+    /// name clumping ahead of every lowercase one. Case-folded-equal keys
+    /// (`"Foo"` vs `"foo"`) then tie-break on the raw bytes so the order
+    /// stays deterministic. Ignored for `.number` columns. `glyphwire-ls`
+    /// sets it on its Name column.
+    case_insensitive: bool = false,
     width: usize,
     min_width: usize = 1,
     h_align: HAlign = .start,
@@ -3185,11 +3210,13 @@ pub const Table = struct {
 
     /// Row indices in current display order: identity order (`0, 1, 2,
     /// ...`) when unsorted or `sort_column` is out of range, otherwise
-    /// sorted on that column's `SortKey` (`.text` lexically, `.number`
-    /// numerically -- comparing a `.text` key against a `.number` one,
-    /// which shouldn't happen since a column's cells are all built the
-    /// same way by whatever sent `table_set_rows`, treats them as equal
-    /// rather than erroring). Caller-owned, freed by the caller.
+    /// sorted on that column's `SortKey` -- `.number` numerically,
+    /// `.text` byte-lexically or (when the column is `case_insensitive`)
+    /// ASCII-case-folded with a raw-byte tie-break. Comparing a `.text`
+    /// key against a `.number` one, which shouldn't happen since a
+    /// column's cells are all built the same way by whatever sent
+    /// `table_set_rows`, treats them as equal rather than erroring.
+    /// Caller-owned, freed by the caller.
     pub fn sortedIndices(self: *const Table, alloc: std.mem.Allocator) ![]usize {
         const indices = try alloc.alloc(usize, self.rows.len);
         for (indices, 0..) |*idx, i| idx.* = i;
@@ -3201,13 +3228,14 @@ pub const Table = struct {
             rows: []const TableRow,
             col: usize,
             ascending: bool,
+            fold: bool,
 
             fn order(ctx: @This(), a: usize, b: usize) std.math.Order {
                 const ka = ctx.rows[a].cells[ctx.col].sort_key;
                 const kb = ctx.rows[b].cells[ctx.col].sort_key;
                 return switch (ka) {
                     .text => |ta| switch (kb) {
-                        .text => |tb| std.mem.order(u8, ta, tb),
+                        .text => |tb| if (ctx.fold) asciiFoldOrder(ta, tb) else std.mem.order(u8, ta, tb),
                         .number => .eq,
                     },
                     .number => |na| switch (kb) {
@@ -3226,6 +3254,7 @@ pub const Table = struct {
             .rows = self.rows,
             .col = col,
             .ascending = self.sort_dir == .ascending,
+            .fold = self.columns[col].kind == .text and self.columns[col].case_insensitive,
         }, SortCtx.lessThan);
         return indices;
     }

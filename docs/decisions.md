@@ -1432,6 +1432,19 @@ surface.
   `sortable` and gives the Name cells a `sort_key` of the bare filename
   (not the `"name -> target"` display text) so a click-sort on Name
   matches `sortEntries` exactly. The permission columns aren't sortable.
+- **Case-insensitive text sort is a per-column flag; `glyphwire-ls`
+  turns it on for Name, and folds its whole listing to match (asked).**
+  `core.TableColumn.case_insensitive` (wire `case_insensitive`, `.text`
+  columns only): `Table.sortedIndices` compares that column's keys with
+  `asciiFoldOrder` — ASCII case folded, then a raw-byte tie-break so a
+  `"Foo"`/`"foo"` pair keeps a fixed order (`std.mem.sort` isn't
+  stable). Per-column rather than a table-wide style so a table can mix a
+  case-sensitive id column with a folded name column. `glyphwire-ls`
+  sets it on Name **and** makes `sortEntries` (which orders the plain
+  grid listing and the `-l` table's unsorted rows) case-insensitive the
+  same way, so the natural listing already reads case-folded and a
+  Name-header click doesn't visibly reshuffle it. Only Name folds —
+  User/Group are effectively always lowercase.
 - **`table_get_state` reports structure, not rendered cells.** Row count,
   sort state, style, and revision — not the cells themselves, which are
   already readable through the owning layer's ordinary `get_cells` (a
