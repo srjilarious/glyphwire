@@ -227,6 +227,15 @@ fn configDirPath(alloc: std.mem.Allocator, environ_map: *const std.process.Envir
     return std.fs.path.join(alloc, &.{ home, ".config", "glyphwire" });
 }
 
+/// Drains every queued `resize` notification and re-lays-out the prompt
+/// once for the most recent size (a resize drag fires one per frame).
+/// A no-op when nothing is queued or the size didn't actually change.
+fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
+    var last: ?glyphwire.ResizeEvent = null;
+    while (listener.pollResizeEvent()) |rev| last = rev;
+    if (last) |rev| prompt.handleResize(rev.cols, rev.rows) catch {};
+}
+
 /// Prints the current directory followed by `> `, echoes typed characters
 /// live, Enter commits the line and starts a new prompt row below it. See
 /// `Prompt` for the rest of the line editing (cursor movement, interior
@@ -240,7 +249,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     };
     defer client.deinit();
 
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "scroll" }) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "scroll", "resize" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -330,13 +339,23 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         // same as the mouse queue above.
         while (listener.pollScrollEvent()) |sev| prompt.view_scroll = sev.offset;
 
+        // A window resize rebuilt the grid (bottom-anchored) and changed
+        // its dimensions, so the recorded prompt rows, the right chain's
+        // column and every grid-size clamp are stale. Coalesce a burst of
+        // resize events (a drag fires one per frame) and re-lay-out once.
+        drainResizes(listener, &prompt);
+
         // One ordered stream of key + text events (see `InputEvent`).
         // Blocks until one is queued rather than polling on a fixed
         // interval; the timeout is just a fallback heartbeat, not
         // load-bearing.
         const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse {
-            // Idle tick: refresh the powerline right chain so `{time}`
-            // keeps ticking while nothing is typed. No-op otherwise.
+            // Idle tick. Handle any resize that landed during the wait
+            // before the right-chain refresh, so it redraws at the new
+            // size rather than the stale one.
+            drainResizes(listener, &prompt);
+            // Refresh the powerline right chain so `{time}` keeps ticking
+            // while nothing is typed. No-op otherwise.
             if (prompt.right_dynamic and prompt.browse_pos == null) {
                 prompt.drawRightChain() catch {};
                 prompt.placeInputCursor() catch {};
@@ -1297,6 +1316,45 @@ const Prompt = struct {
         self.line_start_col = cur.col;
         self.cursor = 0;
         self.buffer.clearRetainingCapacity();
+        try self.renderInputLine();
+    }
+
+    /// Re-lays-out the prompt after a window resize (see the `resize`
+    /// drain in `runPrompt`). The grid was rebuilt bottom-anchored, so the
+    /// previously-drawn prompt cells moved by the height change, and
+    /// `grid_cols`/`grid_rows` -- hence the right chain's column, the
+    /// input-box bounds and every row clamp -- are stale. Shift the
+    /// recorded prompt top by the same height delta, then redraw the
+    /// prefix from there (`writePowerlinePrefix` scrolls up-front if it
+    /// now overflows the bottom) and repaint the input box with whatever's
+    /// typed. Keeps `buffer`/`cursor`; ends any in-progress browse (the
+    /// old viewport rows it referred to are gone).
+    fn handleResize(self: *Prompt, cols: usize, rows: usize) !void {
+        if (cols == 0 or rows == 0) return;
+        if (cols == self.grid_cols and rows == self.grid_rows) return;
+
+        const old_rows = self.grid_rows;
+        self.grid_cols = cols;
+        self.grid_rows = rows;
+
+        self.browse_pos = null;
+        if (self.view_scroll != 0) {
+            const res = try self.client.scrollView(0, null);
+            self.view_scroll = res.offset;
+        }
+
+        // The prompt's current top row: input row minus the segment rows
+        // above it (0 for a single-line prompt).
+        const cur_top = self.line_start_row -| (self.prompt_lines -| 1);
+        const delta: isize = @as(isize, @intCast(rows)) - @as(isize, @intCast(old_rows));
+        const shifted: isize = @as(isize, @intCast(cur_top)) + delta;
+        const top: usize = if (shifted < 0) 0 else @min(@as(usize, @intCast(shifted)), rows -| 1);
+
+        try self.client.setCursor(top, 0);
+        const start = try self.writePromptPrefix();
+        self.line_start_row = start.row;
+        self.line_start_col = start.col;
+        self.input_scroll = 0;
         try self.renderInputLine();
     }
 

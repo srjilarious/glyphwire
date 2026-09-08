@@ -985,6 +985,14 @@ untouched; `decisions.md` Layers + Shell sections updated):
   time's). The right-chain redraw also moved to a single `batch` frame
   (chain + trailing caret restore) so the idle-tick redraw no longer
   blips the caret out to the right and back on a 2-line prompt.
+- **The shell handles window resize.** It subscribes to `"resize"` and
+  `Prompt.handleResize` re-lays-out the prompt: updates `grid_cols` /
+  `grid_rows`, shifts the prompt top by the (bottom-anchored) height
+  delta, redraws the prefix + input box. Fixes the right chain sticking
+  to the old column and the off-grid `set_property` creep after a shrink.
+- **Blink is host-only, confirmed.** `cursor_blink` lives entirely in
+  `host/main.zig` (`tickBlink` / `caretVisible` toggle one render pass);
+  no wire message, no grid-model mutation, nothing in `src/` or `shell/`.
 - **Tests:** `tests/shell_tests.zig` `browseUp`/`browseDown` scrolloff
   math; `tests/host_tests.zig` (new group `host`) for the caret-pin
   screen-row / clip logic; `tests/shell_config_tests.zig` for the
