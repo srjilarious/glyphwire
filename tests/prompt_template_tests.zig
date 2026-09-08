@@ -240,19 +240,21 @@ pub fn formatDurationCoversEachRangeTest(_: std.Io, _: std.mem.Allocator) !void 
 pub fn opsWidthCountsTextAndIconsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var r = try pt.render(alloc, "ab{icon:x}cd", .{});
     defer r.deinit();
-    try testz.expectEqual(pt.opsWidth(r.ops), 5);
+    try testz.expectEqual(pt.opsWidth(r.ops, 1), 5);
+    // A wider (natural-sized) icon reserves more columns.
+    try testz.expectEqual(pt.opsWidth(r.ops, 3), 7);
 }
 
 pub fn opsWidthCountsOnlyTheFinalLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var r = try pt.render(alloc, "abc\\ncd{icon:x}", .{});
     defer r.deinit();
-    try testz.expectEqual(pt.opsWidth(r.ops), 3);
+    try testz.expectEqual(pt.opsWidth(r.ops, 1), 3);
 }
 
 pub fn opsWidthCountsUtf8CodepointsNotBytesTest(_: std.Io, _: std.mem.Allocator) !void {
     // "é" is two UTF-8 bytes, one column here.
     const ops = [_]pt.Op{.{ .text = "é!" }};
-    try testz.expectEqual(pt.opsWidth(&ops), 2);
+    try testz.expectEqual(pt.opsWidth(&ops, 1), 2);
 }
 
 // ─── {time} / {env:VAR} ──────────────────────────────────────────────

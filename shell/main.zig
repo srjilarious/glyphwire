@@ -255,6 +255,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     // For `{host}` in a configured prompt template -- resolved once, it
     // doesn't change over a session.
     prompt.resolveHostname();
+    prompt.resolveIconMetrics();
 
     // Startup config + persistent history, both under
     // `$XDG_CONFIG_HOME/glyphwire` (or `$HOME/.config/glyphwire`). A
@@ -648,6 +649,15 @@ const Prompt = struct {
     right_dynamic: bool = false,
     prompt_lines: u8 = 1,
 
+    /// How a `{icon:...}` in a prompt template is drawn, from the session's
+    /// cell pixel metrics (`resolveIconMetrics`). `icon_max_h == 0` means
+    /// metrics were unavailable -> fall back to the old aspect-fit-in-one-
+    /// cell behavior. Otherwise the icon is `.natural`-scaled and capped to
+    /// one cell-height (so it fills the row without vertical overflow) and
+    /// occupies `icon_cols` columns (~2 for a square icon in a ~1:2 cell).
+    icon_cols: usize = 1,
+    icon_max_h: u32 = 0,
+
     fn deinit(self: *Prompt) void {
         const alloc = self.client.alloc;
         for (self.history.items) |line| alloc.free(line);
@@ -688,6 +698,23 @@ const Prompt = struct {
         if (trimmed.len == 0 or trimmed.len > self.host_buf.len) return;
         @memcpy(self.host_buf[0..trimmed.len], trimmed);
         self.host = self.host_buf[0..trimmed.len];
+    }
+
+    /// The bundled prompt icons (`assets/icons/...`) are 32x32.
+    const icon_native_px: u32 = 32;
+
+    /// Works out how a `{icon:...}` should be drawn from the session's cell
+    /// pixel size (`get_cell_metrics`): natural-scaled, capped to one
+    /// cell-height so it fills the row without spilling onto the row above
+    /// or below, and how many columns that makes it (`ceil(h / w)`, ~2 for
+    /// a square icon in a roughly 1:2 cell). Leaves the fit-in-one-cell
+    /// default if the metrics request fails.
+    fn resolveIconMetrics(self: *Prompt) void {
+        const m = self.client.getCellMetrics() catch return;
+        if (m.w == 0 or m.h == 0) return;
+        self.icon_max_h = m.h;
+        const render_px = @min(icon_native_px, m.h);
+        self.icon_cols = @max(1, (render_px + m.w - 1) / m.w);
     }
 
     /// Writes the prompt prefix at the cursor's current position and
@@ -789,7 +816,7 @@ const Prompt = struct {
         if (p.right) |rt| {
             var r = try prompt_template.render(alloc, rt, data);
             defer r.deinit();
-            const w = prompt_template.opsWidth(r.ops);
+            const w = prompt_template.opsWidth(r.ops, self.icon_cols);
             if (w > 0 and w < self.grid_cols) {
                 try self.client.setCursor(start.row, self.grid_cols - w);
                 try self.emitOps(r.ops, start.row, self.grid_cols - w, .{});
@@ -816,7 +843,7 @@ const Prompt = struct {
     /// summed on-screen width of the segments themselves (separators and
     /// caps not included -- see `chainWidth`).
     fn renderChain(
-        _: *Prompt,
+        self: *Prompt,
         arena: std.mem.Allocator,
         segs: []const config.PromptSegment,
         data: prompt_template.Data,
@@ -830,7 +857,7 @@ const Prompt = struct {
                 .slow => if (!(data.dur_min_ms > 0 and data.last_dur_ms >= data.dur_min_ms)) continue,
             }
             const ops = try prompt_template.renderOps(arena, seg.text, data);
-            const w = prompt_template.opsWidth(ops);
+            const w = prompt_template.opsWidth(ops, self.icon_cols);
             if (w == 0) continue;
             try out.append(arena, .{
                 .ops = ops,
@@ -1038,8 +1065,23 @@ const Prompt = struct {
             .icon => |name| {
                 // A `draw_icon` notification for an unregistered name is
                 // logged and dropped server-side, not returned as an error.
-                try self.client.drawIconStyled(cur_row, cur_col, name, .{ .foreground = opts.transparent });
-                cur_col += 1;
+                // With cell metrics: draw it at its natural size, capped to
+                // one cell-height (fills the row, no vertical spill), and
+                // step past the `icon_cols` cells it covers. Without them:
+                // the old aspect-fit-in-one-cell behavior.
+                if (self.icon_max_h > 0) {
+                    try self.client.drawIconStyled(cur_row, cur_col, name, .{
+                        .scale = .natural,
+                        .h_align = .start,
+                        .v_align = .center,
+                        .max_h = self.icon_max_h,
+                        .foreground = opts.transparent,
+                    });
+                    cur_col += self.icon_cols;
+                } else {
+                    try self.client.drawIconStyled(cur_row, cur_col, name, .{ .foreground = opts.transparent });
+                    cur_col += 1;
+                }
                 try self.client.setCursor(cur_row, cur_col);
             },
         };

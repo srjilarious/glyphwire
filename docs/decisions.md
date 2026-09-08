@@ -947,8 +947,19 @@ surface.
   `{user}` (`$USER`), `{host}` (from `$HOSTNAME` / `/etc/hostname`,
   resolved once per session), `{time}` (local time via a libc `strftime`
   in `shell/main.zig`, format from `time_format`), `{env:NAME}` (an
-  environment variable), `{icon:NAME}` (a bundled icon by registry name,
-  one cell wide — e.g. `distro-arch`).
+  environment variable), `{icon:NAME}` (a bundled icon by registry name —
+  e.g. `distro-arch`).
+- **A prompt `{icon:...}` is drawn at natural size, not fit-in-one-cell.**
+  `Prompt.resolveIconMetrics` reads `get_cell_metrics` once and draws the
+  icon `scale: natural`, `v_align: center`, capped to **one cell-height**
+  (`max_h`) so it fills the prompt row without spilling onto the row above
+  or below, and reserves `ceil(cell_h / cell_w)` columns for it (~2 for a
+  square icon in a roughly 1:2 cell). `fit` — the default `draw_icon`
+  behavior — letterboxes a square icon into a tall-narrow cell with
+  visible vertical padding, which read as wrong in a prompt. If
+  `get_cell_metrics` is unavailable the old one-cell `fit` is kept.
+  `prompt_template.opsWidth` takes the column count as a parameter so the
+  layout math (segment widths, right-alignment) matches what's drawn.
 - **`{exit}` and `{dur}` are conditional sections, not raw values** — the
   request's "show an error code / an icon only on a non-zero exit" and
   "don't show a duration under 2–3s". `{exit}` expands to the `exit`

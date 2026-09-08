@@ -286,8 +286,11 @@ pub fn displayWidth(text: []const u8) usize {
 
 /// Total column width an op list occupies on its final line -- text widths
 /// (via `displayWidth`, so a `\n` in any run resets the running count) plus
-/// one column per icon. Used to right-align `prompt.right`.
-pub fn opsWidth(ops: []const Op) usize {
+/// `icon_cols` columns per icon (the caller derives that from the cell
+/// metrics: a natural-scaled square icon capped to one cell-height is
+/// `ceil(cell_h / cell_w)` cells wide, ~2). Used for segment widths and to
+/// right-align the right chain.
+pub fn opsWidth(ops: []const Op, icon_cols: usize) usize {
     var width: usize = 0;
     for (ops) |op| switch (op) {
         .text => |t| {
@@ -297,7 +300,7 @@ pub fn opsWidth(ops: []const Op) usize {
                 width += displayWidth(t);
             }
         },
-        .icon => width += 1,
+        .icon => width += icon_cols,
     };
     return width;
 }
