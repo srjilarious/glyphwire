@@ -970,8 +970,10 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
 /// which now goes through `Table.repaint`) redraws it *in place* at its
 /// current position instead of running `render`'s terminal-scroll a
 /// second time. `scrollOne` pins each table's `top_live` to its content
-/// so `repaint` knows where the table now sits. Regression test for a
-/// tall/scrolled table that re-`render` left showing only its last rows.
+/// so `repaint` knows where the table now sits, and `paintAt` writes each
+/// row through `Layer.cellSigned` -- so the rows that have scrolled into
+/// retained history get the re-sorted content and the header arrow too,
+/// and scrolling back up shows a consistently sorted table.
 pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 20, 8, 20);
     defer ctx.deinit();
@@ -1010,9 +1012,17 @@ pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Alloc
         try testz.expectEqualStr("b", snap.cellAt(0, 0).grapheme);
     }
 
-    // Sort ascending -> rows become a/b/c; repaint places them from the
-    // table's pinned position, so live row 0 now shows "c" (the third
-    // sorted row) and the table did NOT scroll further.
+    // Before sorting: no arrow on the (scrolled-back) header yet.
+    {
+        var hist = try client.getCellsView(3);
+        defer hist.deinit();
+        try testz.expectEqualStr("N", hist.cellAt(0, 0).grapheme);
+        try testz.expectNotEqualStr("\u{25B4}", hist.cellAt(0, 5).grapheme);
+    }
+
+    // Sort ascending -> rows become a/b/c. `repaint` places them from the
+    // table's pinned position without scrolling further, so live row 0
+    // now shows "c" (the third sorted row).
     try client.tableSetSort(null, table, 0, .ascending);
     {
         var snap = try client.getCells();
@@ -1020,15 +1030,24 @@ pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Alloc
         try testz.expectEqualStr("c", snap.cellAt(0, 0).grapheme);
     }
 
-    // Documented limitation: rows already in scrollback (here the header,
-    // three rows up) aren't rewritten -- the ring's history isn't
-    // rewritable -- so the arrow only appears once the table is fully on
-    // screen again. The header still reads its original text.
+    // And the rows that scrolled into history are rewritten too: scrolling
+    // back up shows the header with its arrow and the body in sorted order
+    // (a / b above the live "c").
     {
-        var hist = try client.getCellsView(3);
-        defer hist.deinit();
-        try testz.expectEqualStr("N", hist.cellAt(0, 0).grapheme);
-        try testz.expectNotEqualStr("\u{25B4}", hist.cellAt(0, 7).grapheme);
+        var h1 = try client.getCellsView(1);
+        defer h1.deinit();
+        try testz.expectEqualStr("b", h1.cellAt(0, 0).grapheme);
+    }
+    {
+        var h2 = try client.getCellsView(2);
+        defer h2.deinit();
+        try testz.expectEqualStr("a", h2.cellAt(0, 0).grapheme);
+    }
+    {
+        var h3 = try client.getCellsView(3);
+        defer h3.deinit();
+        try testz.expectEqualStr("N", h3.cellAt(0, 0).grapheme);
+        try testz.expectEqualStr("\u{25B4}", h3.cellAt(0, 5).grapheme);
     }
 }
 

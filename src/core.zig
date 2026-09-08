@@ -1408,6 +1408,42 @@ pub const Layer = struct {
         return &self.liveRow(row)[col];
     }
 
+    /// Mutable cells of the row at **signed** live-viewport coordinate
+    /// `row`: `0` is the live viewport's top (same as `cell`), a negative
+    /// value reaches `-row` rows up into retained scrollback. Returns null
+    /// when the row isn't in the retained buffer -- `>= height` (below the
+    /// viewport, doesn't exist yet) or more than `history_len` rows above
+    /// it (scrolled out of history). Unlike `viewRow` this is a *write*
+    /// path: `Table.paintAt` uses it to re-lay a re-sorted table across
+    /// whatever mix of viewport and scrollback rows it currently occupies,
+    /// so a table stays consistently sorted after it scrolls back into
+    /// view. The alt screen has no scrollback, so a negative `row` there
+    /// is always null.
+    fn rowAtSigned(self: *const Layer, row: i64) ?[]Cell {
+        const height_i: i64 = @intCast(self.height);
+        if (row >= height_i) return null;
+        if (self.on_alt) {
+            if (row < 0) return null;
+            const start: usize = @as(usize, @intCast(row)) * self.width;
+            return self.alt_cells.?[start .. start + self.width];
+        }
+        if (row >= 0) return self.rowSlice(self.physicalRow(@intCast(row)));
+        const above: usize = @intCast(-row);
+        if (above > self.history_len) return null;
+        // `above == 1` is the row immediately above the viewport top.
+        const cap = self.capacity();
+        return self.rowSlice((self.viewport_start + cap - above) % cap);
+    }
+
+    /// The single mutable cell at signed live-viewport row `row` (see
+    /// `rowAtSigned`) and column `col`, or null if the row isn't retained
+    /// or `col` is out of range.
+    fn cellSigned(self: *const Layer, row: i64, col: usize) ?*Cell {
+        if (col >= self.width) return null;
+        const cells = self.rowAtSigned(row) orelse return null;
+        return &cells[col];
+    }
+
     /// Returns the row `rows_above_viewport` above the current viewport
     /// (0 = the row immediately above viewport row 0), or null if that
     /// much history hasn't been retained (either scrolled past
@@ -3242,20 +3278,22 @@ pub const Table = struct {
         var cur_row = self.row;
         var scrolled: usize = 0;
 
+        // Every write below is inside the viewport (`tableMakeRoom` scrolls
+        // to keep it so), so the signed-row helpers take a plain `@intCast`.
         if (self.style.borders) {
             tableMakeRoom(layer, &cur_row, &scrolled, 1);
-            self.drawBorderEdge(layer, ctx, cur_row, content_width, .top);
+            self.drawBorderEdge(layer, ctx, @intCast(cur_row), content_width, .top);
             cur_row += 1;
         }
 
         tableMakeRoom(layer, &cur_row, &scrolled, 1);
-        self.writeHeaderRow(layer, cur_row, content_start_col);
-        if (self.style.borders) self.drawSideBorders(layer, ctx, cur_row, content_width);
+        self.writeHeaderRow(layer, @intCast(cur_row), content_start_col);
+        if (self.style.borders) self.drawSideBorders(layer, ctx, @intCast(cur_row), content_width);
         cur_row += 1;
 
         if (self.style.header_separator) {
             tableMakeRoom(layer, &cur_row, &scrolled, 1);
-            self.drawSeparatorRow(layer, ctx, cur_row, content_start_col, content_width);
+            self.drawSeparatorRow(layer, ctx, @intCast(cur_row), content_start_col, content_width);
             cur_row += 1;
         }
 
@@ -3265,18 +3303,18 @@ pub const Table = struct {
         for (indices, 0..) |row_idx, display_i| {
             tableMakeRoom(layer, &cur_row, &scrolled, row_height);
             const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
-            if (row_bg) |bg| fillRowBg(layer, cur_row, content_start_col, content_width, row_height, bg);
+            if (row_bg) |bg| fillRowBg(layer, @intCast(cur_row), content_start_col, content_width, row_height, bg);
             if (self.style.borders) {
                 var line: usize = 0;
-                while (line < row_height) : (line += 1) self.drawSideBorders(layer, ctx, cur_row + line, content_width);
+                while (line < row_height) : (line += 1) self.drawSideBorders(layer, ctx, @intCast(cur_row + line), content_width);
             }
-            self.writeBodyRow(layer, ctx, self.rows[row_idx], cur_row, content_start_col, row_height, row_bg);
+            self.writeBodyRow(layer, ctx, self.rows[row_idx], @intCast(cur_row), content_start_col, row_height, row_bg);
             cur_row += row_height;
         }
 
         if (self.style.borders) {
             tableMakeRoom(layer, &cur_row, &scrolled, 1);
-            self.drawBorderEdge(layer, ctx, cur_row, content_width, .bottom);
+            self.drawBorderEdge(layer, ctx, @intCast(cur_row), content_width, .bottom);
             cur_row += 1;
         }
 
@@ -3299,6 +3337,10 @@ pub const Table = struct {
             .cols = content_width + 2 * border_pad,
         };
         self.revision += 1;
+        // The per-cell writers don't bump the layer's render generation;
+        // do it here so glyphwire-host repaints even when the table fit
+        // without a `clearExtent`/`scrollOne` (which do bump it).
+        layer.touchRender();
     }
 
     /// Repaint the table's current cells in place -- what a re-sort
@@ -3306,32 +3348,42 @@ pub const Table = struct {
     /// need, as opposed to `render`'s "draw fresh at the cursor, scrolling
     /// the layer terminal-style" (right only when the table is first put
     /// on screen). The row *set* is unchanged, so this never scrolls the
-    /// layer: it redraws the same footprint at the table's current
-    /// position (`top_live`, kept accurate by `scrollOne` as output moved
-    /// the table since `render`), clipping to the viewport instead. A
-    /// table taller than the viewport therefore re-sorts the portion
-    /// that's actually on screen; rows already in scrollback keep their
-    /// old order (the ring's history isn't rewritable). Falls back to
-    /// `render` only if the table was never rendered (`revision == 0`) --
-    /// a table scrolled entirely off screen has `painted.rows == 0` but
-    /// must still `repaint` (silently, painting nothing) rather than
-    /// re-`render` and re-scroll.
+    /// layer: it redraws the table at its current position (`top_live`,
+    /// kept accurate by `scrollOne`/`resize` as output and window changes
+    /// move the table since `render`), writing every row **wherever it now
+    /// lives** -- live viewport, retained scrollback, or straddling the
+    /// two (`Layer.cellSigned`). So a re-sorted table stays consistently
+    /// sorted when it scrolls back into view, and the header's arrow is
+    /// visible whether the header is on screen or a few rows up in
+    /// history. Only rows older than retained history are lost. Falls back
+    /// to `render` if the table was never rendered (`revision == 0`).
     pub fn repaint(self: *Table, layer: *Layer, ctx: *const Context) !void {
         if (self.revision == 0) return self.render(layer, ctx);
-        clearExtent(layer, self.painted);
         self.painted = try self.paintAt(layer, ctx, self.top_live);
         self.revision += 1;
+        // The signed-cell writes in `paintAt` don't bump the layer's
+        // render generation the way `Layer.clear`/`writeText` do, so mark
+        // it stale here -- otherwise a header-click re-sort of an
+        // on-screen table wouldn't trigger a repaint until the next
+        // unrelated frame.
+        layer.touchRender();
     }
 
     /// Draws every piece of the table -- top border, header, separator,
-    /// body rows, bottom border -- top-down starting at live-viewport row
-    /// `top` (which may be negative: the table's header is up in
-    /// scrollback), **clipping** any piece that falls outside `0
-    /// ..layer.height` rather than scrolling to make room. Returns the
-    /// on-screen footprint actually covered, for `repaint` to stash as
-    /// `painted`. Shares the column layout (`headerColWidth`) and the
-    /// per-piece writers with `render`; only the vertical placement rule
-    /// differs (clip here, scroll there).
+    /// body rows, bottom border -- top-down starting at signed
+    /// live-viewport row `top` (negative once the table's top has
+    /// scrolled up into history). Each row is first blanked across the
+    /// wider of the table's old (`painted.cols`) and new column span so a
+    /// narrower re-sort leaves no stale trailing cells, then drawn.
+    /// Placement is via `Layer.cellSigned`, so a row lands in the
+    /// viewport or in scrollback transparently; a row older than retained
+    /// history is silently skipped (its cells are gone). Returns the
+    /// table's *on-screen* footprint (clamped to the viewport) for
+    /// `repaint` to stash as `painted` -- what `table_get_state` and
+    /// `destroy_table` need. Shares the column layout (`headerColWidth`)
+    /// and the per-piece writers with `render`; only the vertical
+    /// placement rule differs (clip-and-reach-into-history here, scroll
+    /// there).
     fn paintAt(self: *Table, layer: *Layer, ctx: *const Context, top: i64) !TablePaintedExtent {
         var content_width: usize = 0;
         for (self.columns, 0..) |_, i| {
@@ -3342,57 +3394,59 @@ pub const Table = struct {
         const row_height = @max(self.style.row_height, 1);
         const content_start_col = self.col + border_pad;
         const height_i: i64 = @intCast(layer.height);
+        const total_cols = content_width + 2 * border_pad;
 
-        // True when a single-line piece at row `r` is on screen.
-        const onScreen = struct {
-            fn f(r: i64, h: i64) bool {
-                return r >= 0 and r < h;
+        // Blank one signed row across the table's full column span (old or
+        // new, whichever is wider) before it's redrawn.
+        const clear_cols = @max(self.painted.cols, total_cols);
+        const blankRow = struct {
+            fn f(l: *Layer, r: i64, start: usize, cols: usize) void {
+                const cells = l.rowAtSigned(r) orelse return;
+                const end = @min(start + cols, cells.len);
+                var c = start;
+                while (c < end) : (c += 1) cells[c] = .{};
             }
         }.f;
 
         var cur: i64 = top;
 
         if (self.style.borders) {
-            if (onScreen(cur, height_i)) self.drawBorderEdge(layer, ctx, @intCast(cur), content_width, .top);
+            blankRow(layer, cur, self.col, clear_cols);
+            self.drawBorderEdge(layer, ctx, cur, content_width, .top);
             cur += 1;
         }
 
-        if (onScreen(cur, height_i)) {
-            self.writeHeaderRow(layer, @intCast(cur), content_start_col);
-            if (self.style.borders) self.drawSideBorders(layer, ctx, @intCast(cur), content_width);
-        }
+        blankRow(layer, cur, self.col, clear_cols);
+        self.writeHeaderRow(layer, cur, content_start_col);
+        if (self.style.borders) self.drawSideBorders(layer, ctx, cur, content_width);
         cur += 1;
 
         if (self.style.header_separator) {
-            if (onScreen(cur, height_i)) self.drawSeparatorRow(layer, ctx, @intCast(cur), content_start_col, content_width);
+            blankRow(layer, cur, self.col, clear_cols);
+            self.drawSeparatorRow(layer, ctx, cur, content_start_col, content_width);
             cur += 1;
         }
 
         const indices = try self.sortedIndices(self.alloc);
         defer self.alloc.free(indices);
 
+        const rh_i: i64 = @intCast(row_height);
         for (indices, 0..) |row_idx, display_i| {
-            // A body block is placed only when its top line is on screen;
-            // its lower lines then clip per-cell against `layer.height`.
-            // A block whose top is above row 0 (the scroll boundary) is
-            // skipped whole -- one row not repainted there is the price of
-            // never rewriting history.
-            if (cur >= 0 and cur < height_i) {
-                const r: usize = @intCast(cur);
-                const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
-                if (row_bg) |bg| fillRowBg(layer, r, content_start_col, content_width, row_height, bg);
-                if (self.style.borders) {
-                    var line: usize = 0;
-                    while (line < row_height and r + line < layer.height) : (line += 1)
-                        self.drawSideBorders(layer, ctx, r + line, content_width);
-                }
-                self.writeBodyRow(layer, ctx, self.rows[row_idx], r, content_start_col, row_height, row_bg);
+            var line: i64 = 0;
+            while (line < rh_i) : (line += 1) blankRow(layer, cur + line, self.col, clear_cols);
+            const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
+            if (row_bg) |bg| fillRowBg(layer, cur, content_start_col, content_width, row_height, bg);
+            if (self.style.borders) {
+                line = 0;
+                while (line < rh_i) : (line += 1) self.drawSideBorders(layer, ctx, cur + line, content_width);
             }
-            cur += @intCast(row_height);
+            self.writeBodyRow(layer, ctx, self.rows[row_idx], cur, content_start_col, row_height, row_bg);
+            cur += rh_i;
         }
 
         if (self.style.borders) {
-            if (onScreen(cur, height_i)) self.drawBorderEdge(layer, ctx, @intCast(cur), content_width, .bottom);
+            blankRow(layer, cur, self.col, clear_cols);
+            self.drawBorderEdge(layer, ctx, cur, content_width, .bottom);
             cur += 1;
         }
 
@@ -3402,11 +3456,11 @@ pub const Table = struct {
             .row = @intCast(vis_top),
             .col = self.col,
             .rows = @intCast(vis_bot - vis_top),
-            .cols = content_width + 2 * border_pad,
+            .cols = total_cols,
         };
     }
 
-    fn writeHeaderRow(self: *const Table, layer: *Layer, row: usize, content_start_col: usize) void {
+    fn writeHeaderRow(self: *const Table, layer: *Layer, row: i64, content_start_col: usize) void {
         const fg = self.style.header_fg orelse default_style.fg;
         var col = content_start_col;
         for (self.columns, 0..) |column, i| {
@@ -3457,8 +3511,8 @@ pub const Table = struct {
     /// icon cell and a `.natural`-scaled icon that overflows into
     /// neighboring rows/columns paints over their backgrounds too. See
     /// `setCellIconOver`'s doc comment.
-    fn writeBodyRow(self: *const Table, layer: *Layer, ctx: *const Context, row: TableRow, top_row: usize, content_start_col: usize, row_height: usize, row_bg: ?Color) void {
-        const mid_row = top_row + row_height / 2;
+    fn writeBodyRow(self: *const Table, layer: *Layer, ctx: *const Context, row: TableRow, top_row: i64, content_start_col: usize, row_height: usize, row_bg: ?Color) void {
+        const mid_row = top_row + @as(i64, @intCast(row_height / 2));
         var col = content_start_col;
         for (self.columns, 0..) |column, i| {
             // `headerColWidth`, not the nominal width, so body cells stay
@@ -3498,7 +3552,7 @@ pub const Table = struct {
         }
     }
 
-    fn drawBorderEdge(self: *const Table, layer: *Layer, ctx: *const Context, row: usize, content_width: usize, edge: enum { top, bottom }) void {
+    fn drawBorderEdge(self: *const Table, layer: *Layer, ctx: *const Context, row: i64, content_width: usize, edge: enum { top, bottom }) void {
         const corner_l = if (edge == .top) "tl" else "bl";
         const mid = if (edge == .top) "t" else "b";
         const corner_r = if (edge == .top) "tr" else "br";
@@ -3510,12 +3564,12 @@ pub const Table = struct {
         drawBorderTile(layer, ctx, row, self.col + total_width - 1, self.style.box_style, corner_r);
     }
 
-    fn drawSideBorders(self: *const Table, layer: *Layer, ctx: *const Context, row: usize, content_width: usize) void {
+    fn drawSideBorders(self: *const Table, layer: *Layer, ctx: *const Context, row: i64, content_width: usize) void {
         drawBorderTile(layer, ctx, row, self.col, self.style.box_style, "l");
         drawBorderTile(layer, ctx, row, self.col + content_width + 1, self.style.box_style, "r");
     }
 
-    fn drawSeparatorRow(self: *const Table, layer: *Layer, ctx: *const Context, row: usize, content_start_col: usize, content_width: usize) void {
+    fn drawSeparatorRow(self: *const Table, layer: *Layer, ctx: *const Context, row: i64, content_start_col: usize, content_width: usize) void {
         if (self.style.borders) drawBorderTile(layer, ctx, row, self.col, self.style.box_style, "l");
         var c = content_start_col;
         while (c < content_start_col + content_width) : (c += 1) drawBorderTile(layer, ctx, row, c, self.style.box_style, "t");
@@ -3549,9 +3603,8 @@ fn tableMakeRoom(layer: *Layer, cur_row: *usize, scrolled: *usize, piece_h: usiz
     cur_row.* -|= n;
 }
 
-fn setCellText(layer: *Layer, row: usize, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
-    if (row >= layer.height or col >= layer.width) return;
-    const c = layer.cell(row, col);
+fn setCellText(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+    const c = layer.cellSigned(row, col) orelse return;
     c.setGrapheme(grapheme);
     c.style.fg = fg;
     c.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
@@ -3563,21 +3616,20 @@ fn setCellText(layer: *Layer, row: usize, col: usize, grapheme: []const u8, fg: 
 /// `(row, col + 1)` becomes a blank spacer carrying the lead's resolved
 /// style + `metadata_id`. Caller guarantees `col + 1` is in range. Used
 /// by `writeCellRun` so table cells advance the same way `writeText` does.
-fn setCellWide(layer: *Layer, row: usize, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
-    if (row >= layer.height or col + 1 >= layer.width) return;
-    const lead = layer.cell(row, col);
+fn setCellWide(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+    if (col + 1 >= layer.width) return;
+    const cells = layer.rowAtSigned(row) orelse return;
+    const lead = &cells[col];
     lead.setGrapheme(grapheme);
     lead.style.fg = fg;
     lead.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
     lead.metadata_id = metadata_id;
     lead.wide = .wide_lead;
-    const sp = layer.cell(row, col + 1);
-    sp.* = .{ .style = lead.style, .metadata_id = metadata_id, .wide = .wide_spacer };
+    cells[col + 1] = .{ .style = lead.style, .metadata_id = metadata_id, .wide = .wide_spacer };
 }
 
-fn setCellIcon(layer: *Layer, row: usize, col: usize, handle: ImageHandle, scale: IconScale, h_align: HAlign, v_align: VAlign, max_h: ?u32, metadata_id: ?MetadataHandle) void {
-    if (row >= layer.height or col >= layer.width) return;
-    const c = layer.cell(row, col);
+fn setCellIcon(layer: *Layer, row: i64, col: usize, handle: ImageHandle, scale: IconScale, h_align: HAlign, v_align: VAlign, max_h: ?u32, metadata_id: ?MetadataHandle) void {
+    const c = layer.cellSigned(row, col) orelse return;
     c.style.bg = .{ .icon = .{ .handle = handle, .scale = scale, .h_align = h_align, .v_align = v_align, .max_h = max_h } };
     c.metadata_id = metadata_id;
 }
@@ -3592,18 +3644,16 @@ fn setCellIcon(layer: *Layer, row: usize, col: usize, handle: ImageHandle, scale
 /// over the neighboring rows'/columns' backgrounds too -- the host defers
 /// `.natural` `fg_icon`s past the whole grid for exactly that, the same
 /// way it already does for `style.bg`'s `.icon` overflow.
-fn setCellIconOver(layer: *Layer, row: usize, col: usize, handle: ImageHandle, scale: IconScale, h_align: HAlign, v_align: VAlign, max_h: ?u32, metadata_id: ?MetadataHandle) void {
-    if (row >= layer.height or col >= layer.width) return;
-    const c = layer.cell(row, col);
+fn setCellIconOver(layer: *Layer, row: i64, col: usize, handle: ImageHandle, scale: IconScale, h_align: HAlign, v_align: VAlign, max_h: ?u32, metadata_id: ?MetadataHandle) void {
+    const c = layer.cellSigned(row, col) orelse return;
     c.fg_icon = .{ .handle = handle, .scale = scale, .h_align = h_align, .v_align = v_align, .max_h = max_h };
     c.metadata_id = metadata_id;
 }
 
-fn fillRowBg(layer: *Layer, top_row: usize, content_start_col: usize, content_width: usize, row_height: usize, bg: Color) void {
+fn fillRowBg(layer: *Layer, top_row: i64, content_start_col: usize, content_width: usize, row_height: usize, bg: Color) void {
     var line: usize = 0;
     while (line < row_height) : (line += 1) {
-        const r = top_row + line;
-        if (r >= layer.height) break;
+        const r = top_row + @as(i64, @intCast(line));
         var c = content_start_col;
         const end = @min(content_start_col + content_width, layer.width);
         while (c < end) : (c += 1) setCellText(layer, r, c, "", default_style.fg, bg, null);
@@ -3620,7 +3670,7 @@ fn borderTileHandle(ctx: *const Context, box_style: []const u8, piece: []const u
     return ctx.iconHandle(name);
 }
 
-fn drawBorderTile(layer: *Layer, ctx: *const Context, row: usize, col: usize, box_style: []const u8, piece: []const u8) void {
+fn drawBorderTile(layer: *Layer, ctx: *const Context, row: i64, col: usize, box_style: []const u8, piece: []const u8) void {
     var buf: [64]u8 = undefined;
     const handle = borderTileHandle(ctx, box_style, piece, &buf) orelse return;
     setCellIcon(layer, row, col, handle, .stretch, .center, .center, null, null);
@@ -3637,8 +3687,9 @@ fn drawBorderTile(layer: *Layer, ctx: *const Context, row: usize, col: usize, bo
 /// layer's bounds and to `width` cells -- a column running off the right
 /// edge loses its tail, matching `Table.render`'s "clip, don't scroll".
 /// A no-op if `width` is 0.
-fn writeCellRun(layer: *Layer, row: usize, col: usize, text: []const u8, width: usize, h_align: HAlign, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
-    if (row >= layer.height or width == 0 or col >= layer.width) return;
+fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: usize, h_align: HAlign, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+    if (width == 0 or col >= layer.width) return;
+    if (layer.rowAtSigned(row) == null) return; // row not in the retained buffer
     const end_col = @min(col + width, layer.width);
 
     const text_width = stringWidth(text);
