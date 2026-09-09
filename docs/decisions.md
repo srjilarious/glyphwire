@@ -307,6 +307,19 @@ surface.
   the instant the user does anything and only blinks once things settle
   (`App.tickBlink`). block/box/underline span both cells when the caret
   sits on a `wide_lead`.
+- **v1 built — initial grid size + scrollback config (host-local):**
+  `assets/conf.lua`'s `config` table also carries `grid_cols` (default
+  120), `grid_rows` (default 50) and `scrollback_rows` (default 1000, the
+  root layer's history-ring depth passed to `Context.init`). `grid_cols` /
+  `grid_rows` are clamped up to `min_grid_*` (16 / 4); `scrollback_rows` is
+  clamped down to 100000. Host-local for the same reason as the font and
+  caret: the window's opening size and how much scrollback the host keeps
+  are properties of the rendering front end, and the shell already reports
+  its own view of the grid over the wire (`get_property("size")`, the
+  `resize` notification) once it changes. The existing `--grid-cols` /
+  `--grid-rows` flags still win over the file — `loadConfig` runs before
+  the arg loop and seeds the same `grid_cols` / `grid_rows` the flags then
+  overwrite. `scrollback_rows` has no flag.
 - **Fixed — caret drawn while scrolled back, then pinned on mouse scroll
   (host-local):** the caret used to be suppressed whenever
   `view_scroll != 0`, which hid it during glyphwire-shell's keyboard

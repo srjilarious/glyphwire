@@ -34,4 +34,16 @@ config = {
     -- Blink half-period in milliseconds: the caret is shown for this long,
     -- then hidden for this long. Clamped to 100..5000.
     cursor_blink_ms = 530.0,
+
+    -- Initial grid size in cells. The window opens this many cells wide/tall
+    -- (times the measured cell pixel size); after that it's user-resizable
+    -- and the grid tracks the window. Clamped up to 16 cols / 4 rows. A
+    -- `--grid-cols` / `--grid-rows` command-line flag overrides these.
+    -- grid_cols = 120,
+    -- grid_rows = 50,
+
+    -- Root layer scrollback depth, in rows: how many scrolled-off rows the
+    -- history ring keeps for the mouse wheel / scrollbar to reach. Clamped
+    -- to 0..100000.
+    -- scrollback_rows = 1000,
 }

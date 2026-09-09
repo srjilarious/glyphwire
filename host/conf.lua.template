@@ -1,0 +1,68 @@
+-- glyphwire-host configuration template.
+--
+-- This is the full reference for `assets/conf.lua`, the file glyphwire-host
+-- reads once at startup (see host/main.zig `loadConfig`). Every option is
+-- listed below at its built-in default, with every line commented out --
+-- so copying this file verbatim to `assets/conf.lua` changes nothing.
+-- Uncomment and edit only the keys you want to override; a missing file,
+-- or a `config` table missing a key, keeps that key's default.
+--
+-- Syntax: it's a plain Lua script. Assign a single global table named
+-- `config`. Values are Lua literals -- strings in quotes, numbers bare,
+-- booleans `true` / `false`. `--` starts a comment. Unknown keys are
+-- ignored. A key set to the wrong type logs a warning and the default
+-- stands.
+
+-- config = {
+--
+--     ---- Fonts --------------------------------------------------------
+--
+--     -- Primary font file, relative to the repo root. A TTF/OTF, or a
+--     -- TTC collection (then set `font_face_name` to pick a face).
+--     font_face = "assets/NotoSansCJK-Regular.ttc",
+--
+--     -- For a TTC: a substring of the desired face's name
+--     -- (case-sensitive). Ignored for a plain TTF/OTF. Falls back to
+--     -- face 0 if no name matches.
+--     font_face_name = "Mono CJK JP",
+--
+--     -- Face tried for any codepoint the primary font lacks, before the
+--     -- atlas falls back to its .notdef (tofu) box.
+--     font_fallback = "assets/JetBrainsMono-Regular.ttf",
+--
+--     -- Starting cell size in pixels. Clamped to 8..72. At runtime,
+--     -- Ctrl+- / Ctrl++ step it by 2 and Ctrl+0 returns to this value.
+--     font_size = 20.0,
+--
+--     ---- Caret --------------------------------------------------------
+--
+--     -- Caret shape: "line" (a vertical bar at the cell's left edge, the
+--     -- default), "block" (fills the cell), "box" (a hollow outline), or
+--     -- "underline" (a bar along the cell's bottom). block/box/underline
+--     -- cover both cells of a wide (CJK) character.
+--     cursor_shape = "line",
+--
+--     -- Whether the caret blinks. It always shows solid the moment the
+--     -- caret moves or the window scrolls, and resumes blinking once
+--     -- things settle.
+--     cursor_blink = true,
+--
+--     -- Blink half-period in milliseconds: the caret is shown for this
+--     -- long, then hidden for this long. Clamped to 100..5000.
+--     cursor_blink_ms = 530.0,
+--
+--     ---- Grid --------------------------------------------------------
+--
+--     -- Initial grid size in cells. The window opens this many cells
+--     -- wide/tall (times the measured cell pixel size); after that it's
+--     -- user-resizable and the grid tracks the window's live size.
+--     -- Clamped up to 16 cols / 4 rows. A `--grid-cols` / `--grid-rows`
+--     -- command-line flag overrides these.
+--     grid_cols = 120,
+--     grid_rows = 50,
+--
+--     -- Root layer scrollback depth, in rows: how many scrolled-off rows
+--     -- the history ring keeps for the mouse wheel / scrollbar to reach.
+--     -- Clamped to 0..100000.
+--     scrollback_rows = 1000,
+-- }

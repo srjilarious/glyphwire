@@ -19,16 +19,25 @@ pub const std_options = pixzig.system.std_options;
 // times the measured cell pixel size. After that the window is
 // user-resizable and `grid_cols`/`grid_rows` track its live size (see
 // `App.syncWindowSize`) -- `var`, not `const`, for that reason.
+// `assets/conf.lua`'s `grid_cols` / `grid_rows` (and `--grid-cols` /
+// `--grid-rows`, which win over the file) override the initial size at
+// startup; see `loadConfig` and `main`.
 const initial_grid_cols = 120;
 const initial_grid_rows = 50;
 var grid_cols: usize = initial_grid_cols;
 var grid_rows: usize = initial_grid_rows;
 // Floor the live grid size at something a shell prompt stays usable in,
 // so dragging the window very small clips the render rather than
-// collapsing the root layer to a degenerate size.
+// collapsing the root layer to a degenerate size. A configured
+// `grid_cols` / `grid_rows` is clamped up to these too.
 const min_grid_cols = 16;
 const min_grid_rows = 4;
-const scrollback_rows = 1000;
+// Root layer scrollback depth in rows, passed to `Context.init`.
+// `assets/conf.lua`'s `scrollback_rows` overrides this at startup,
+// clamped to `[0, scrollback_rows_max]`. `var`, not `const`, for that.
+const scrollback_rows_default = 1000;
+const scrollback_rows_max = 100_000;
+var scrollback_rows: usize = scrollback_rows_default;
 
 // Font defaults. `assets/conf.lua` (a global `config` table with
 // `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
@@ -95,10 +104,22 @@ const CursorConfig = struct {
     blink_ms: f64 = cursor_blink_ms_default,
 };
 
+/// Initial grid size and scrollback depth, resolved at startup from
+/// `conf_lua_path`. A `null` field was not set by `assets/conf.lua`, so
+/// the module-level default (or a `--grid-cols` / `--grid-rows` flag)
+/// stands. `cols` / `rows` are already clamped up to `min_grid_*` and
+/// `scrollback` down to `scrollback_rows_max` by `loadConfig`.
+const GridConfig = struct {
+    cols: ?usize = null,
+    rows: ?usize = null,
+    scrollback: ?usize = null,
+};
+
 /// Everything `loadConfig` resolves from `assets/conf.lua`.
 const HostConfig = struct {
     font: FontConfig = .{},
     cursor: CursorConfig = .{},
+    grid: GridConfig = .{},
 };
 
 // Blank margin, in pixels, kept on both sides of the composited layers:
@@ -1521,6 +1542,18 @@ fn luaBoolField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?bool {
     return lua.toBoolean(-1);
 }
 
+/// Like `luaNumField`, for a non-negative whole-number field (`grid_cols`,
+/// `grid_rows`, `scrollback_rows`). Absent, non-number, negative, or
+/// non-integral -> null (the caller keeps the default).
+fn luaUintField(lua: *pixzig.ziglua.Lua, key: [:0]const u8) ?usize {
+    _ = lua.getField(-1, key);
+    defer lua.pop(1);
+    if (!lua.isNumber(-1)) return null;
+    const n = lua.toNumber(-1) catch return null;
+    if (n < 0 or n != @floor(n)) return null;
+    return @intFromFloat(n);
+}
+
 /// Maps `config.cursor_shape`'s string to a `CursorShape`, or null for an
 /// unrecognized value (the caller warns and keeps the default).
 fn cursorShapeFromStr(s: []const u8) ?CursorShape {
@@ -1530,12 +1563,16 @@ fn cursorShapeFromStr(s: []const u8) ?CursorShape {
 /// Resolves everything `assets/conf.lua` controls for this run: starts
 /// from the `*_default` constants and overlays whatever the global
 /// `config` table sets -- font fields (`font_face`, `font_face_name`,
-/// `font_fallback`, `font_size`) and caret fields (`cursor_shape`,
-/// `cursor_blink`, `cursor_blink_ms`), any subset. A missing file is the
+/// `font_fallback`, `font_size`), caret fields (`cursor_shape`,
+/// `cursor_blink`, `cursor_blink_ms`), and grid fields (`grid_cols`,
+/// `grid_rows`, `scrollback_rows`), any subset. A missing file is the
 /// normal case and is silent; a file that fails to read/parse, or a
 /// `config` that isn't a table, logs a warning and the defaults stand.
-/// `font_size` is clamped to `[min_font_size, max_font_size]` and
-/// `cursor_blink_ms` to `[cursor_blink_ms_min, cursor_blink_ms_max]`.
+/// `font_size` is clamped to `[min_font_size, max_font_size]`,
+/// `cursor_blink_ms` to `[cursor_blink_ms_min, cursor_blink_ms_max]`,
+/// `grid_cols` / `grid_rows` up to `min_grid_*`, and `scrollback_rows`
+/// down to `scrollback_rows_max`. A `--grid-cols` / `--grid-rows` flag
+/// still wins over `grid_cols` / `grid_rows` (applied later, in `main`).
 /// `gpa` is used only for transient work (the source buffer, the Lua
 /// state); returned strings are `arena`-allocated so they outlive this call.
 fn loadConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) HostConfig {
@@ -1594,6 +1631,25 @@ fn loadConfig(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) Host
             std.log.warn("glyphwire-host: conf.lua cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
     }
 
+    if (luaUintField(lua, "grid_cols")) |v| {
+        const c = @max(v, @as(usize, min_grid_cols));
+        if (c != v)
+            std.log.warn("glyphwire-host: conf.lua grid_cols {d} below minimum {d}; clamped", .{ v, min_grid_cols });
+        cfg.grid.cols = c;
+    }
+    if (luaUintField(lua, "grid_rows")) |v| {
+        const r = @max(v, @as(usize, min_grid_rows));
+        if (r != v)
+            std.log.warn("glyphwire-host: conf.lua grid_rows {d} below minimum {d}; clamped", .{ v, min_grid_rows });
+        cfg.grid.rows = r;
+    }
+    if (luaUintField(lua, "scrollback_rows")) |v| {
+        const s = @min(v, @as(usize, scrollback_rows_max));
+        if (s != v)
+            std.log.warn("glyphwire-host: conf.lua scrollback_rows {d} above maximum {d}; clamped", .{ v, scrollback_rows_max });
+        cfg.grid.scrollback = s;
+    }
+
     return cfg;
 }
 
@@ -1626,12 +1682,24 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
 
+    // Font face/size/fallback, caret shape/blink, and initial grid size /
+    // scrollback: `assets/conf.lua` if present, else the `*_default`
+    // constants at the top of this file. Loaded before the arg loop so a
+    // `--grid-cols` / `--grid-rows` flag can still override `conf.lua`'s
+    // `grid_cols` / `grid_rows`.
+    const host_cfg = loadConfig(arena, alloc, io);
+    const font_cfg = host_cfg.font;
+    if (host_cfg.grid.cols) |v| grid_cols = v;
+    if (host_cfg.grid.rows) |v| grid_rows = v;
+    if (host_cfg.grid.scrollback) |v| scrollback_rows = v;
+
     // Host-only options are pulled out here; everything else is forwarded
     // to glyphwire-shell (an empty forward list = the shell's own
     // interactive prompt, its no-args mode, rather than exec'ing a child).
     //   --screenshot <path>          write the grid region to <path> (PNG) then quit
     //   --screenshot-delay-ms <n>    wait n ms before capturing (default 2500)
-    //   --grid-cols <n> / --grid-rows <n>   open at a non-default grid size
+    //   --grid-cols <n> / --grid-rows <n>   open at a non-default grid size,
+    //                                overriding conf.lua's grid_cols / grid_rows
     //                                (handy for a screenshot whose output is
     //                                taller/wider than the default 120x50)
     var screenshot_path: ?[]const u8 = null;
@@ -1661,11 +1729,6 @@ pub fn main(init: std.process.Init) !void {
     const shell_child_argv: []const []const u8 = forwarded.items;
 
     const socket_path = try socketPath(arena, init.environ_map);
-
-    // Font face/size/fallback and caret shape/blink: `assets/conf.lua` if
-    // present, else the `*_default` constants at the top of this file.
-    const host_cfg = loadConfig(arena, alloc, io);
-    const font_cfg = host_cfg.font;
 
     // The primary font may be a `.ttc` collection; find the index of the
     // named face inside it so both the metrics measured here and the atlas

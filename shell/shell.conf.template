@@ -1,0 +1,128 @@
+-- glyphwire-shell configuration template.
+--
+-- This is the full reference for `shell.conf`, the file glyphwire-shell
+-- runs once at startup (see shell/config.zig `load`). Copy it to one of:
+--
+--   $GLYPHWIRE_CONFIG_DIR/shell.conf
+--   $XDG_CONFIG_HOME/glyphwire/shell.conf
+--   ~/.config/glyphwire/shell.conf                 (the usual location)
+--
+-- Every binding below is listed at its built-in default with every line
+-- commented out, so copying this file verbatim changes nothing. Uncomment
+-- and edit only what you want. Every binding is optional; a Lua syntax or
+-- runtime error is shown on the grid and startup continues with whatever
+-- ran before the error.
+--
+-- Syntax: it's a plain Lua script with the standard libraries open, so
+-- loops / conditionals / `string` / `table` all work. glyphwire adds two
+-- globals: `alias(name, value)` and `prompt{ ... }`.
+
+
+---- Aliases ------------------------------------------------------------
+--
+-- alias(name, value) -- expands `name` when it's the first word of a
+-- command line. Chains are followed once, and a name never expands to
+-- itself, so `alias("ls", "ls --color")` is safe. Later calls win.
+--
+-- alias("ll", "ls -l")
+-- alias("la", "ls -a")
+-- alias("gs", "git status")
+
+
+---- Prompt -----------------------------------------------------------
+--
+-- prompt{ ... } -- one table argument, every key optional. Multiple
+-- prompt{} calls merge, last write winning per key. Leave it out entirely
+-- to keep the built-in "<cwd> > " prompt.
+--
+-- Tokens (usable in every template string, including a segment's `text`):
+--   {cwd}        working directory, $HOME shown as ~
+--   {cwd_full}   working directory, absolute
+--   {user}       $USER
+--   {host}       hostname
+--   {time}       local time (strftime `time_format`, default %H:%M)
+--   {env:NAME}   an environment variable ("" if unset)
+--   {icon:NAME}  a bundled icon, one cell wide (e.g. distro-arch, distro-tux)
+--   {exit}       expands to the `exit` sub-template, only on a non-zero exit
+--   {dur}        expands to the `dur` sub-template, only when the last
+--                command ran for at least `dur_min_ms`
+--   {{  }}       literal braces;  \n \t \\  are unescaped
+--
+-- Inside the `exit` sub-template: {exit_code} is the number.
+-- Inside the `dur` sub-template:  {duration} is the humanized time
+--                                 (e.g. 450ms, 1.5s, 2m5s).
+
+
+-- (A) Plain template strings.
+--
+-- prompt {
+--     -- Left side, drawn before the input.
+--     left = "{cwd}{exit} > ",
+--     -- Right side, right-aligned on the prompt row. "" = none.
+--     right = "",
+--     -- What {exit} expands to after a non-zero exit.
+--     exit = " [{exit_code}]",
+--     -- What {dur} expands to when the last command was slow.
+--     dur = "  {duration}",
+--     -- Minimum last-command run time, in ms, before {dur} (and a
+--     -- when = "slow" segment) renders anything.
+--     dur_min_ms = 2000,
+-- }
+
+
+-- (B) Powerline segments. left_segments / right_segments are lists of
+-- { text (or positional [1]), fg, bg, when }.  A segment whose text
+-- renders empty is dropped.  `when` is "always" (default), "error" (shown
+-- only after a non-zero exit) or "slow" (only when the last command took
+-- >= dur_min_ms).  Segments are joined with `sep` (fg = the left
+-- segment's bg, bg = the right segment's bg -- the powerline trick) and
+-- capped with head / tail / right_head.  The \u{E0Bx} glyphs need a Nerd
+-- Font; glyphwire-host bundles a Powerline-range fallback face.
+--
+-- prompt {
+--     left_segments = {
+--         { "{icon:distro-arch}", fg = "#000000", bg = "#d0d0d0" },
+--         { " {user} ",           fg = "#ffffff", bg = "#5f87af" },
+--         { " {cwd} ",            fg = "#ffffff", bg = "#3a3a3a" },
+--         { " {exit_code} ",      fg = "#ffffff", bg = "#d70000", when = "error" },
+--     },
+--     right_segments = {
+--         { " {duration} ", fg = "#ffffff", bg = "#5f5f00", when = "slow" },
+--         { " {time} ",     fg = "#ffffff", bg = "#5f87af" },
+--     },
+--
+--     -- Separator drawn between adjacent segments.
+--     sep = "\u{E0B1}",
+--     -- Separator between right-side segments; falls back to `sep`.
+--     sep_right = "\u{E0B3}",
+--     -- Cap before the first left segment / after the last left segment /
+--     -- before the first right segment.
+--     head = "\u{E0B6}",
+--     tail = "\u{E0B4}",
+--     -- Left cap of the right-aligned chain (the edge facing the input).
+--     -- Falls back to `head`.
+--     right_head = "\u{E0B6}",
+--
+--     -- Total prompt rows. 1 = single line. >= 2 puts the segments on the
+--     -- first row and the input line on the last, so a right side with
+--     -- the time never moves as you type.
+--     lines = 1,
+--     -- Prefix drawn on the input row.
+--     input = "> ",
+--     -- strftime format for {time}.
+--     time_format = "%H:%M",
+--     -- Same dur_min_ms as the plain form: threshold for {dur} / "slow".
+--     dur_min_ms = 2000,
+-- }
+
+
+---- Scrollback browsing ---------------------------------------------
+--
+-- Rows of context kept between the browse cursor and the edge of the
+-- window while scrolling through scrollback with Up / Down (a vim-style
+-- "scrolloff"). Lives under prompt{} because that's the shell's one
+-- table binding. Clamped at use to leave room for the cursor itself.
+--
+-- prompt {
+--     scrolloff = 8,
+-- }

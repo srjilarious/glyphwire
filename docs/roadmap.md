@@ -998,6 +998,34 @@ untouched; `decisions.md` Layers + Shell sections updated):
   screen-row / clip logic; `tests/shell_config_tests.zig` for the
   `scrolloff` key.
 
+## `conf.lua` gains initial grid size + scrollback, plus template configs
+
+Host-local, no wire change (`api.md` untouched; `decisions.md` "Font config"
+section got a grid/scrollback bullet).
+
+- **`assets/conf.lua` keys.** `config.grid_cols` (120), `config.grid_rows`
+  (50) and `config.scrollback_rows` (1000) join the existing font / caret
+  keys. `loadConfig` reads them with a new `luaUintField` helper
+  (non-negative, integral), clamps `grid_*` up to `min_grid_*` and
+  `scrollback_rows` down to `scrollback_rows_max` (100000), each with a
+  warning if it clamped. `HostConfig` gained a `grid: GridConfig` with
+  `?usize` fields — null means "conf.lua didn't set it".
+- **CLI still wins.** `loadConfig` moved above the arg loop in `main` and
+  seeds `grid_cols` / `grid_rows` from the file; the existing `--grid-cols`
+  / `--grid-rows` flags then overwrite. `scrollback_rows` is now a
+  module-level `var` (was `const`) so config can change it before
+  `Context.init`.
+- **Template configs.** `host/conf.lua.template` and
+  `shell/shell.conf.template` — every option at its default, every line
+  commented out, with the syntax rules and token reference inline. They're
+  the copy-and-uncomment reference; `assets/shell.conf.example` stays as
+  the shorter worked example. `assets/conf.lua` also gained the three new
+  keys, commented out.
+- **No tests.** `loadConfig` links pixzig (for `ScriptEngine`) and isn't
+  reachable from `tests_exe`; there's still no `host` test group. Verified
+  by `zig build` + the full suite; the actual window-open size needs a
+  `zig build host` eyeball.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and
