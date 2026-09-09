@@ -122,7 +122,8 @@
 --   print("hi " .. (who or "there"))
 -- end)
 --
--- See shell/scripts/examples/ for venv_activate / venv_deactivate.
+-- See assets/scripts/ for up / venv_activate / venv_deactivate /
+-- drop / yoink, ready to copy into ~/.config/glyphwire/scripts/.
 
 
 ---- Prompt -----------------------------------------------------------

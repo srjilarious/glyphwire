@@ -1,5 +1,20 @@
 # glyphwire-shell script builtins
 
+The `.lua` files here are example *script builtins* -- drop the ones you
+want into `~/.config/glyphwire/scripts/` and they become commands:
+
+```
+cp *.lua ~/.config/glyphwire/scripts/
+```
+
+| script | what it does |
+|---|---|
+| `up.lua` | `up [N]` -- `cd` this shell N directories toward the root (default 1). |
+| `venv_activate.lua` / `venv_deactivate.lua` | activate / deactivate a Python virtualenv for the session (see below). |
+| `drop.lua` / `yoink.lua` | `rsync` files to / from a "dropbox" directory on a remote host. Set the target with `sh.setenv("GW_DROPBOX", "myhost:dropbox/")` in `shell.conf`. |
+
+## How script builtins work
+
 glyphwire-shell keeps one Lua state for the whole session. `shell.conf`
 runs in it, and so does every *script builtin*. A builtin is:
 

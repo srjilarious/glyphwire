@@ -152,11 +152,12 @@ Wayland at runtime, so no system dev packages are needed to compile.
 zig build                 # build every executable into zig-out/bin/
 zig build tests           # run the unit + e2e test suite
 zig build glyphwire       # build + run glyphwire (spawns gw-shell)
-zig build package         # build just the shipped programs and assets
-                          #   into zig-out/bin + zig-out/share/glyphwire/
+zig build package         # build just the shipped programs, zoe's
+                          #   grammars, and assets into zig-out/bin +
+                          #   zig-out/share/glyphwire/
 zig build install-local --prefix /usr/local
                           # install glyphwire, gw-shell, gw-view, gw-ls,
-                          #   and assets under the selected prefix
+                          #   zoe, the grammars, and assets under the prefix
 ```
 
 Individual run steps: `zig build gw-shell`, `zig build gw-ls`, `zig build demo`,
@@ -165,9 +166,11 @@ Individual run steps: `zig build gw-shell`, `zig build gw-ls`, `zig build demo`,
 
 The `.github/workflows/linux-package.yml` workflow runs `zig build package`
 in ReleaseSafe on every push and pull request, uploading a
-`glyphwire-linux-x86_64.tar.gz` (the six binaries plus `assets/`) as a run
-artifact; on a `vX.Y.Z` tag push it also attaches that tarball to the
-GitHub Release. Windows packaging is not wired up yet.
+`glyphwire-linux-x86_64.tar.gz` (the seven binaries — `glyphwire`,
+`gw-shell`, `gw-ls`, `gw-view`, `glyphwire-demo`, `glyphwire-notify`,
+`zoe` — plus `assets/` and zoe's `grammars/`) as a run artifact; on a
+`vX.Y.Z` tag push it also attaches that tarball to the GitHub Release.
+Windows packaging is not wired up yet.
 
 Once `glyphwire` is running, its shell prompt launches the client
 programs (`gw-ls`, `glyphwire-demo`, `gw-view <img.png>`,
@@ -213,10 +216,28 @@ behind the `file/*` file-type icons; see the template.) Every field is
 optional and any omitted one keeps its default; a missing file (or no
 config directory at all) uses all defaults. `gw-ls` has its own
 optional `~/.config/glyphwire/ls.conf` (`large_icon_px` / `small_icon_px`;
-see `ls/ls.conf.template`). At runtime **`Ctrl+-`** / **`Ctrl++`** step the
+see `ls/ls.conf.template`), and `zoe` reads an optional
+`~/.config/glyphwire/zoe.conf` (syntax-highlight languages, grammar
+search path, capture-group colours, `page_lines`, `line_numbers`; see
+`zoe/zoe.conf.template`). At runtime **`Ctrl+-`** / **`Ctrl++`** step the
 font size by 2px and **`Ctrl+0`** restores the configured size — the
 window resizes to keep the same column/row count (best effort; a tiling
 WM that pins the window reflows the grid instead).
+
+Each config has two files in the repo: a `*.conf.template` next to its
+source with every option listed at its default and commented out (the
+full reference), and a shorter `assets/*.conf.example` — the maintainer's
+own working setup, cleaned for sharing. The examples ship in the package
+under `share/glyphwire/assets/`, alongside `assets/scripts/` (`up`,
+`venv_activate` / `venv_deactivate`, `drop` / `yoink`). To adopt the
+setup wholesale:
+
+```sh
+mkdir -p ~/.config/glyphwire/scripts
+cd .../share/glyphwire/assets           # or the repo's assets/
+for f in host shell ls zoe; do cp $f.conf.example ~/.config/glyphwire/$f.conf; done
+cp scripts/*.lua ~/.config/glyphwire/scripts/
+```
 
 ## Regenerating the screenshots
 
@@ -248,7 +269,7 @@ name and its shell command there to capture a new one.
 | `host_eng/` | The SDL3 + OpenGL engine backend the host is built on. |
 | `shell/` | `gw-shell` — line editor, command launcher, PTY, Lua startup config, history. |
 | `ls/`, `view/`, `notify/`, `demo/`, `table-demo/`, `client/` | Client programs. |
-| `zoe/` | `zoe` — a vim-like modal editor, glyphwire's first multi-layer TUI. Phase 1 (the editor core) is built; the UI is not wired up yet. See `docs/investigations/zoe-editor.md`. |
+| `zoe/` | `zoe` — a vim-like modal editor, glyphwire's first multi-layer TUI: split panes, a file tree, tree-sitter syntax highlighting, its own context. See `docs/investigations/zoe-editor.md`. |
 | `server/` | Standalone socket server (host embeds its own; this is for testing). |
 | `tests/` | testz suite — `core`, `wire`, `dispatch`, `table`, `server`, `client`, `shell`, `ls`, `zoe`, `e2e`, ... |
 | `docs/` | `decisions.md`, `api.md`, `roadmap.md`, `investigations/`. |

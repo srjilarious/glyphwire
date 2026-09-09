@@ -2406,6 +2406,38 @@ shape.
   rejects, `gutterWidthFor` power-of-ten steps, `gutterCellText`
   absolute right-align + past-end blank + relative hybrid). 768 pass.
 
+## zoe shipped in the package; config examples as a drop-in bundle
+
+Packaging + config plumbing only, no wire or source change.
+
+- **`zig build package` / `install-local` now build and install `zoe`
+  and its tree-sitter grammars.** `installGrammars` returns a named
+  `grammars` step (still also wired onto the default install step) that
+  `package_step` and `install_local_step` depend on, since neither pulls
+  in the default install step but a packaged `zoe` `dlopen`s its grammars
+  from `share/glyphwire/grammars/` at runtime. `zoe_exe` added to both
+  step lists. `build.zig.zon` `.paths` gained `zoe` (and the previously
+  missing `debug` / `notify` / `table-demo`).
+- **CI (`linux-package.yml`).** The stage-package step copies
+  `zig-out/bin/zoe` and `zig-out/share/glyphwire/grammars/` into the
+  tarball alongside the existing six binaries and `assets/`.
+- **Config examples = the maintainer's real setup, cleaned for sharing.**
+  The `*.conf.template` files stay the full commented reference; the
+  `assets/*.conf.example` files are now a working set anyone can copy
+  wholesale into `~/.config/glyphwire/`: `host.conf.example` (new),
+  `shell.conf.example` (powerline + git segments), `ls.conf.example`,
+  `zoe.conf.example`. Machine-specific bits removed (`profile = true`; the
+  `drop`/`yoink` scripts take a `GW_DROPBOX` remote instead of a
+  hard-coded host).
+- **`assets/scripts/`** (moved from `shell/scripts/examples/`, which is
+  gone): `up.lua`, `venv_activate.lua` / `venv_deactivate.lua`,
+  `drop.lua` / `yoink.lua`, plus the README. Under `assets/` it ships in
+  the package. `shell/shell.conf.template` and the README point here.
+- **New `zoe/zoe.conf.template`** — the full all-commented reference for
+  `zoe.conf` (languages, `grammar_dirs`, `injections`, `page_lines`,
+  `line_numbers`, the capture-group `theme` at its built-in colours),
+  matching `host` / `ls` / `shell`. 768 tests still pass.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

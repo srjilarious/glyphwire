@@ -1,0 +1,121 @@
+-- zoe configuration template.
+--
+-- This is the full reference for `zoe.conf`, the file zoe runs once at
+-- startup (see zoe/langconf.zig `load`). Copy it to one of:
+--
+--   $GLYPHWIRE_CONFIG_DIR/zoe.conf
+--   $XDG_CONFIG_HOME/glyphwire/zoe.conf
+--   ~/.config/glyphwire/zoe.conf                   (the usual location)
+--
+-- Every key is listed below at its built-in default, with every line
+-- commented out -- so copying this file verbatim changes nothing.
+-- Uncomment and edit only the keys you want to override. With no file at
+-- all zoe highlights the bundled languages with its built-in dark theme,
+-- embedded languages included.
+--
+-- Syntax: a plain Lua script (standard libraries open). Assign a single
+-- global table named `config`. Unknown keys are ignored; a key of the
+-- wrong type is logged and the default stands. Any parse error is logged
+-- and whatever parsed before it is kept.
+--
+-- zoe.conf carries syntax-highlighting and a couple of editor settings
+-- only. Buffer colours beyond the capture-group theme, keybindings, and
+-- the pane layout are not configurable yet.
+
+-- config = {
+--
+--     ---- Languages -------------------------------------------------
+--
+--     -- Extra languages, or extension overrides for the bundled ones.
+--     -- Each entry maps a set of file extensions (leading dot included)
+--     -- to a grammar directory name; zoe looks for
+--     -- `<grammar_dir>/<name>/parser.so` plus `highlights.scm` on the
+--     -- grammar search path (below). Config entries are matched before
+--     -- the built-ins, so an entry may re-claim an extension a bundled
+--     -- language already owns.
+--     --
+--     -- Bundled grammar names and their default extensions:
+--     --   zig               .zig .zon
+--     --   json              .json .jsonc
+--     --   c                 .c .h
+--     --   python            .py .pyi
+--     --   toml              .toml
+--     --   markdown          .md .markdown
+--     --   markdown_inline   (used via injections, no extensions)
+--     languages = {
+--         -- { name = "c",   extensions = { ".c", ".h", ".ino" } },
+--         -- { name = "lua", extensions = { ".lua" } },  -- needs a `lua` grammar dir
+--     },
+--
+--     ---- Grammar search path -------------------------------------
+--
+--     -- Extra directories to look in for grammar dirs, highest priority
+--     -- first. `~` is expanded. These are prepended to zoe's built-in
+--     -- search order:
+--     --   1. config.grammar_dirs (this key)
+--     --   2. $GLYPHWIRE_ZOE_GRAMMAR_DIR   (":"-separated; `zig build`
+--     --      points this at the just-installed grammars)
+--     --   3. $XDG_CONFIG_HOME/glyphwire/zoe/grammars
+--     --        (or ~/.config/glyphwire/zoe/grammars)
+--     --   4. $XDG_DATA_HOME/glyphwire/grammars
+--     --        (or ~/.local/share/glyphwire/grammars)
+--     --   5. <exe dir>/../share/glyphwire/grammars   (an installed tree)
+--     -- A grammar dir is `<dir>/<name>/` holding `parser.so` (exporting
+--     -- `tree_sitter_<name>`) and `highlights.scm`; adding a language
+--     -- needs no rebuild.
+--     grammar_dirs = {
+--         -- "~/src/tree-sitter-grammars",
+--     },
+--
+--     ---- Embedded languages -------------------------------------
+--
+--     -- Run `injections.scm` so embedded languages are highlighted too:
+--     -- fenced code blocks in Markdown, Markdown inline markup, HTML
+--     -- blocks. On by default; set false to turn it off.
+--     injections = true,
+--
+--     ---- Editor ---------------------------------------------------
+--
+--     -- Lines a PageDown / PageUp (or Ctrl-D / Ctrl-U in normal mode)
+--     -- moves the cursor. A number >= 1 replaces the default; anything
+--     -- else is ignored.
+--     page_lines = 10,
+--
+--     -- The buffer-pane line-number gutter:
+--     --   false        -- no gutter
+--     --   true         -- same as "absolute"
+--     --   "absolute"   -- every line numbered from 1
+--     --   "relative"   -- distance from the cursor, cursor line still absolute
+--     -- `:set lineno=off|absolute|relative` changes it live.
+--     line_numbers = "absolute",
+--
+--     ---- Theme --------------------------------------------------------
+--
+--     -- Capture-group colours, "#rrggbb". Unset groups keep zoe's
+--     -- built-in value; `variable` and `punctuation` are intentionally
+--     -- left uncoloured (colouring every identifier and bracket is
+--     -- noise). Names are tree-sitter highlight captures; a dotted name
+--     -- falls back to its prefix when unset ("string.special.key" ->
+--     -- "string.special" -> "string").
+--     --
+--     -- The keys below are shown at their built-in defaults:
+--     theme = {
+--         comment      = "#5c6370",
+--         keyword      = "#c678dd",
+--         ["string"]   = "#98c379",
+--         number       = "#d19a66",
+--         boolean      = "#d19a66",
+--         constant     = "#d19a66",
+--         ["function"] = "#61afef",
+--         type         = "#e5c07b",
+--         constructor  = "#e5c07b",
+--         operator     = "#56b6c2",
+--         property     = "#e06c75",
+--         module       = "#e5c07b",
+--         label        = "#61afef",
+--         attribute    = "#d19a66",
+--         tag          = "#e06c75",
+--         -- string.escape / string.special / escape:
+--         ["string.escape"] = "#56b6c2",
+--     },
+-- }
