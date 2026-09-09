@@ -2254,6 +2254,39 @@ surface.
   `InputListener` ordered queue as `key`/`text` so it can't jump ahead of
   input the user already typed.
 
+#### `on{ chdir }`: auto-list after a directory change
+- **A declarative config table, not a Lua callback.** `on{ chdir = {
+  list = "off" | "always" | "metadata", command = "gw-ls -lS" } }` runs
+  `command` after the shell's cwd changes. The obvious more-general shape
+  is `on.chdir` as a Lua *function* passed `(path, method)`, and that may
+  still come, but nothing calls *into* user Lua from the dispatch loop
+  today (`open_actions` and the `sh` table both go the other way), so a
+  callback would need a new bridge and a return contract for what it's
+  allowed to do. The three fixed behaviours the feature is actually for —
+  never list, always list, list only after picking a directory in gw-ls
+  output — are an enum plus a command string. The `on{}` name is kept
+  broad on purpose so a later event (or a function form of `chdir`) slots
+  in beside it.
+- **`metadata` vs `command` is the only distinction drawn.** A `zj` jump
+  and a script's `sh.chdir` both count as `command`; only activating a
+  directory in gw-ls output (a click, or Enter/Space while browsing) is
+  `metadata`. Keyboard and mouse activation are the same thing here —
+  both already funnel through `activateSelectionAt` / `runMarkedAction`,
+  which submit a synthetic `cd`. `Prompt.chdir_method` is set there right
+  before the submit and reset by `submitLine` on the way out, so a typed
+  `cd` is always seen as `.command`.
+- **The listing runs as its own line, after the triggering command.**
+  `Prompt.chdir` (the single funnel every change already went through)
+  sets `chdir_pending_list`; `submitLine` runs it via `dispatchLineText`
+  once the `cd` — real or synthetic — has finished, so gw-ls still does
+  its aware handshake and the exit status / `{dur}` the prompt shows is
+  the same one a bare `cd` leaves (neither writes `have_status`).
+- **Default is `metadata`.** Out of the box, picking a directory in a
+  gw-ls listing re-lists the new directory; a typed `cd` stays silent.
+  This does change behaviour for a config that never mentions `on{}`, but
+  it's the case the feature exists to serve and the typed-`cd` path — the
+  one a user would notice getting noisier — is untouched.
+
 ### Batch messages
 - **`batch` wraps an ordered list of other messages in one frame**,
   applied server-side in a single pass under the one `ctx_mutex` hold the

@@ -17,7 +17,8 @@
 -- loops / conditionals / `string` / `table` all work. It runs in the
 -- shell's session-long Lua state, so a `function` (or `defcmd`) it
 -- defines stays callable as a builtin afterwards. glyphwire adds:
--- `alias(name, value)`, `prompt{ ... }`, `zj{ ... }`, `defcmd(name, fn)`,
+-- `alias(name, value)`, `prompt{ ... }`, `zj{ ... }`, `on{ ... }`,
+-- `defcmd(name, fn)`,
 -- and the `sh` table (`sh.setenv` / `sh.unsetenv` / `sh.getenv` /
 -- `sh.cwd` / `sh.chdir` / `sh.realpath`). See the Scripts section below.
 
@@ -88,6 +89,29 @@
 -- zj{
 --   enabled = true,                       -- set false to turn it off
 --   exclude_dirs = { "/tmp", "~/scratch" }, -- never record or return these (or anything under them)
+-- }
+
+
+---- Directory-change hook (on) -------------------------------------
+--
+-- on{ chdir = { ... } } -- run a command after the shell's working
+-- directory changes. `list` picks when:
+--
+--   "off"      -- never
+--   "always"   -- after every change (`cd`, `zj`, `sh.chdir`, or
+--                 picking a directory in a gw-ls listing)
+--   "metadata" -- only after picking a directory in a gw-ls listing
+--                 (a click, or Enter/Space while browsing), not a
+--                 typed `cd` / `zj`
+--
+-- `command` is a full command line, run as its own line right after the
+-- change (so a glyphwire-aware lister still handshakes). The defaults:
+--
+-- on{
+--   chdir = {
+--     list = "metadata",
+--     command = "gw-ls -lS",
+--   },
 -- }
 
 

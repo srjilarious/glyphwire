@@ -2438,6 +2438,39 @@ Packaging + config plumbing only, no wire or source change.
   `line_numbers`, the capture-group `theme` at its built-in colours),
   matching `host` / `ls` / `shell`. 768 tests still pass.
 
+## `on{ chdir }` — auto-list after a directory change
+
+Shell-local; no wire or protocol change. See `docs/decisions.md`'s Shell
+section (`#### on{ chdir }: auto-list after a directory change`) for the
+*why*.
+
+- **`shell/config.zig`.** New `ChdirListMode` enum (`off` / `always` /
+  `metadata`), `OnChdirConfig { list = .metadata, command = "gw-ls -lS" }`,
+  `OnConfig { chdir }`, and `ShellConfig.on`. `luaOn` binds `on{ chdir =
+  { list, command } }` — a missing key keeps the current value, an
+  unknown `list` string raises, `command` goes in `prompt_arena`.
+  Registered in `installBindings` alongside `alias` / `prompt` /
+  `open_actions` / `zj`.
+- **`shell/main.zig`.** `ChdirMethod { command, metadata }` and two new
+  `Prompt` fields: `chdir_method` (set to `.metadata` by
+  `activateSelectionAt` / `runMarkedAction` right before they submit,
+  reset to `.command` by a `defer` in `submitLine`) and
+  `chdir_pending_list` (the command to run, or null). `Prompt.chdir` —
+  already the single funnel for `cd` / `zj` / `sh.chdir` / a gw-ls
+  activation's synthetic `cd` — calls `queueChdirListing`, which consults
+  `on.chdir.list` against `chdir_method` and stashes `on.chdir.command`
+  in `chdir_pending_list`. `submitLine` clears the field before dispatch
+  (so a startup `sh.chdir` can't leak a listing) and, after the
+  triggering line finishes, runs any queued command via the new
+  `dispatchLineText` (the body of `dispatchLine`, split out to take a
+  line that isn't in `self.buffer`).
+- **Default `metadata`:** with no `on{}` in `shell.conf`, activating a
+  directory in a gw-ls listing re-lists it with `gw-ls -lS`; a typed
+  `cd` / `zj` stays silent.
+- **Tests:** `shell_config_tests.zig` +6 (defaults, table read, `list`
+  only keeps the default command, merge across calls, unknown `list`
+  rejected, empty `on{}` harmless). 774 pass.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).
