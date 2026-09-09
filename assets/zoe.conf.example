@@ -2,55 +2,35 @@
 --
 -- Copy to ~/.config/glyphwire/zoe.conf (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
--- startup; every key is optional -- with no config at all zoe highlights
--- the seven bundled languages with its built-in dark theme, embedded
--- languages included.
+-- startup; assign a single global table named `config` and every key is
+-- optional -- with no config at all zoe highlights the seven bundled
+-- languages (zig, json, c, python, toml, markdown, markdown_inline) with
+-- its built-in dark theme, embedded languages included. See
+-- zoe/zoe.conf.template for the full annotated reference.
 
 config = {
-    -- Extra languages, or extension overrides for the bundled ones. Each
-    -- entry maps file extensions (with the dot) to a grammar directory
-    -- name -- zoe looks for `<grammar_dir>/<name>/parser.so` +
-    -- `highlights.scm` on its grammar search path. Bundled names:
-    -- zig, json, c, python, toml, markdown, markdown_inline.
+    -- Extra extension -> grammar mappings, merged ahead of the built-ins.
+    -- Add `.ino` to the C grammar; uncomment the second line once you
+    -- drop a `lua` grammar dir on the search path.
     languages = {
         { name = "c", extensions = { ".c", ".h", ".ino" } },
-        -- { name = "lua", extensions = { ".lua" } },  -- once you drop a `lua` grammar in
+        -- { name = "lua", extensions = { ".lua" } },
     },
 
-    -- Highlight embedded languages via `injections.scm`: code fences in
-    -- Markdown, inline markup, HTML blocks. On by default; set false to
-    -- turn it off.
-    injections = true,
-
-    -- Lines a PageDown / PageUp (or Ctrl-D / Ctrl-U) moves the cursor.
-    -- Default 10.
+    -- Lines a PageDown / PageUp (or Ctrl-D / Ctrl-U) moves. Default 10.
     page_lines = 10,
 
-    -- The buffer-pane line-number gutter. On by default; `false` hides
-    -- it, "absolute" numbers every line from 1, "relative" shows each
-    -- line's distance from the cursor with the cursor's own line still
-    -- absolute. `:set lineno=off|absolute|relative` changes it live.
+    -- Line-number gutter: false / "absolute" / "relative".
+    -- `:set lineno=off|absolute|relative` changes it live.
     line_numbers = "absolute",
 
-    -- Where to look for grammar directories, highest priority first.
-    -- These are prepended to the default search path
-    -- ($GLYPHWIRE_ZOE_GRAMMAR_DIR, ~/.config/glyphwire/zoe/grammars,
-    -- ~/.local/share/glyphwire/grammars, and the installed share dir).
-    grammar_dirs = { "~/src/tree-sitter-grammars" },
-
-    -- Capture-group colors, "#rrggbb". Unset groups keep the built-in
-    -- value. Names are tree-sitter highlight captures; a dotted name
-    -- falls back to its prefix ("string.special" -> "string") when unset.
+    -- A few capture-group colors; unset groups keep the built-in value.
     theme = {
-        comment  = "#6a7a86",
-        keyword  = "#c678dd",
+        comment = "#6a7a86",
+        keyword = "#c678dd",
         ["string"] = "#98c379",
-        number   = "#d19a66",
-        type     = "#e5c07b",
+        number = "#d19a66",
+        type = "#e5c07b",
         ["function"] = "#61afef",
-        constant = "#d19a66",
-        operator = "#56b6c2",
-        property = "#e06c75",
-        variable = "#d7dae0",
     },
 }

@@ -2,86 +2,58 @@
 --
 -- Copy to ~/.config/glyphwire/shell.conf (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
--- shell startup; every binding below is optional.
-
--- Command aliases (first word only, chains followed once).
-alias("ll", "ls -l")
-alias("gs", "git status")
-
--- What activating a gw-ls entry runs. Key is an exact mimetype,
--- a "group/*", or a kind keyword ("directory"/"file"/"symlink"/"other"),
--- matched most-specific first; merged over the built-in defaults (cd into
--- a directory, gw-view an image). {sel} = one shell-quoted path,
--- {selections} = one or more. Ctrl+click marks several to open at once.
-open_actions{
-    ["text/*"] = "code {sel}",
-    ["application/zip"] = "ark {selections}",
-}
-
--- Prompt templating. Call prompt{ ... } with any subset of its keys;
--- multiple calls merge, last write winning per key. Leave it out entirely
--- to keep the built-in "<cwd> > " prompt.
+-- shell startup; every binding below is optional. See
+-- shell/shell.conf.template for the full annotated reference of prompt
+-- tokens, powerline segment keys, open_actions, zj and scripts.
 --
--- Tokens (usable in every template string, including segment `text`):
---   {cwd}        working directory, $HOME shown as ~
---   {cwd_full}   working directory, absolute
---   {user}       $USER
---   {host}       hostname
---   {time}       local time (strftime `time_format`, default %H:%M)
---   {env:NAME}   an environment variable ("" if unset)
---   {icon:NAME}  a bundled icon, one cell wide.  NAME is the icon file's
---                path under assets/icons/ without the .png (e.g.
---                distro/arch; file-type icons file/pdf / file/code /
---                …; the prompt status glyphs status/error, status/slow)
---   {exit}       expands to the `exit` sub-template, only on a non-zero exit
---   {dur}        expands to the `dur` sub-template, only when the last
---                command ran for at least dur_min_ms
---   {{ }}        literal braces;  \n \t \\  are unescaped
---
--- Inside the `exit` sub-template: {exit_code} is the number.
--- Inside the `dur` sub-template:  {duration} is the humanized time.
-
--- (A) Plain template strings:
---
--- prompt {
---     left = "{icon:distro/arch} {cwd}{exit} > ",
---     right = "{user}@{host}{dur}",
---     exit = " [{exit_code}]",
---     dur = "  {duration}",
---     dur_min_ms = 2000,
--- }
-
--- (B) Powerline segments: left_segments / right_segments are lists of
--- { text (or [1]), fg, bg, when }.  A segment whose text renders empty is
--- dropped; `when` is "always" (default), "error" (non-zero exit) or
--- "slow" (last command >= dur_min_ms).  Segments are joined with `sep`
--- (fg = left bg, bg = right bg -- the powerline trick) and capped with
--- head/tail/right_head (right_head defaults to head).  lines >= 2 puts
--- the segments on the first row
--- and the input line (prefixed with `input`) on the last -- so a right
--- side with the time never moves as you type.  The \u{E0Bx} glyphs need
--- a Nerd Font; glyphwire bundles a Powerline-range fallback.
+-- This is the maintainer's own working shell.conf, cleaned for sharing: a
+-- two-line powerline prompt with an Arch badge, user, cwd, and a git
+-- segment that only appears inside a work tree, plus a right side that
+-- surfaces a non-zero exit code, a slow-command timer, and the clock.
+-- The \u{E0Bx} caps/separators need a Nerd Font; glyphwire bundles a
+-- Powerline-range fallback face.
 
 prompt {
-    left_segments = {
-        { "{icon:distro/arch}", fg = "#000", bg = "#3a3a3a" },
-        { " {user} ",           fg = "#fff", bg = "#3a3a3a" },
-        { " {cwd} ",            fg = "#fff", bg = "#3a6ea5" },
+  commands = {
+    -- Cheap gate: prints "true" inside a work tree, nothing outside.
+    -- Every other git command hangs its `when` on this, so git never
+    -- runs when you're not in a repo.
+    git_repo = "git rev-parse --is-inside-work-tree 2>/dev/null",
+
+    -- Branch name, or the short SHA on a detached HEAD.
+    git_branch = {
+      "git symbolic-ref --short -q HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null",
+      when = "{git_repo}",
     },
-    right_segments = {
-        -- Only shown after a failing / slow command; each leads with its
-        -- status icon.
-        { "{icon:status/error} {exit_code} ", fg = "#fff", bg = "#870000", when = "error" },
-        { "{icon:status/slow} {duration} ",   fg = "#fff", bg = "#5f5f00", when = "slow" },
-        { " {time} ",                          fg = "#fff", bg = "#7c6ba8" },
+
+    -- A dot when the work tree has any staged/unstaged/untracked change.
+    git_dirty = {
+      "git status --porcelain 2>/dev/null | grep -q . && echo ' ●'",
+      when = "{git_repo}",
     },
-    head       = "\u{E0B6}",  -- rounded left cap
-    sep        = "\u{E0B0}",  -- solid right-pointing separator
-    tail       = "\u{E0B4}",  -- rounded right cap
-    sep_right  = "\u{E0B2}",  -- solid left-pointing separator
-    -- right_head defaults to head; set it here only to differ.
-    lines = 2,
-    input = "\u{E0B1} ",
-    time_format = "%H:%M",
-    dur_min_ms = 2000,
+  },
+  left_segments = {
+    { "{icon:distro/arch}", fg = "#000", bg = "#2a2a2a" },
+    { " {user} ", fg = "#fff", bg = "#3a3a3a" },
+    { " {icon:oxygen/folder-open} {cwd} ", fg = "#fff", bg = "#0c272f" },
+    { " {icon:dev/git} {git_branch} {git_dirty} ",
+      fg = "#fff", bg = "#1e6a06", when = "{git_repo}" },
+  },
+  right_segments = {
+    { "{icon:status/error} {exit_code} ", fg = "#fff", bg = "#870000", when = "error" },
+    { "{icon:status/slow} {duration} ", fg = "#fff", bg = "#5f5f00", when = "slow" },
+    { " {time} ", fg = "#fff", bg = "#7C6BA8" },
+  },
+  head = "\u{E0B6}",       -- rounded left cap
+  sep = "\u{E0B0}",        -- solid right-pointing separator
+  tail = "\u{E0B4}",       -- rounded right cap
+  sep_right = "\u{E0B2}",  -- solid left-pointing separator
+  lines = 2,
+  input = "❯ ",
+  time_format = "%H:%M",
 }
+
+-- Route `ls` through the glyphwire-ls client so listings draw with icons
+-- and clickable entries; `ll` is a long, size-sorted listing.
+alias("ls", "gw-ls")
+alias("ll", "gw-ls -lS")

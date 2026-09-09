@@ -2,7 +2,8 @@ name: Linux Package
 
 # Builds and packages the user-facing glyphwire programs for Linux
 # x86_64: glyphwire, gw-shell, glyphwire-notify, glyphwire-demo,
-# gw-view and gw-ls (via the `zig build package` step). The
+# gw-view, gw-ls and zoe (via the `zig build package` step), plus zoe's
+# bundled tree-sitter grammars under share/glyphwire/grammars. The
 # server/client/table-demo tools and the test runner are deliberately left
 # out.
 #
@@ -51,8 +52,8 @@ jobs:
           version: 0.17.0-dev.1857+3c46da14d
 
       # `zig build package` (defined in build.zig) installs only the shipped
-      # programs, skipping the test runner and the internal
-      # server/client/table-demo tools.
+      # programs and zoe's tree-sitter grammars, skipping the test runner
+      # and the internal server/client/table-demo tools.
       - name: Build (ReleaseSafe)
         working-directory: glyphwire
         run: zig build package -Doptimize=ReleaseSafe
@@ -65,8 +66,9 @@ jobs:
         run: zig build tests
 
       # Layout mirrors an install prefix: bin/ for commands, and
-      # share/glyphwire/assets/ for runtime assets. The host resolves this
-      # through ../share/glyphwire/assets relative to its executable.
+      # share/glyphwire/{assets,grammars}/ for runtime data. The host
+      # resolves assets through ../share/glyphwire/assets relative to its
+      # executable; zoe resolves grammars through the sibling grammars/ dir.
       - name: Stage package
         working-directory: glyphwire
         run: |
@@ -78,7 +80,9 @@ jobs:
           cp zig-out/bin/glyphwire-demo   "$pkg/bin/"
           cp zig-out/bin/gw-view          "$pkg/bin/"
           cp zig-out/bin/gw-ls            "$pkg/bin/"
-          cp -r zig-out/share/glyphwire/assets "$pkg/share/glyphwire/assets"
+          cp zig-out/bin/zoe              "$pkg/bin/"
+          cp -r zig-out/share/glyphwire/assets   "$pkg/share/glyphwire/assets"
+          cp -r zig-out/share/glyphwire/grammars "$pkg/share/glyphwire/grammars"
           cp README.md                    "$pkg/"
           tar czf "$pkg.tar.gz" "$pkg"
           tar tzf "$pkg.tar.gz"

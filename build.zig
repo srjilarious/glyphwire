@@ -133,7 +133,7 @@ pub fn build(b: *std.Build) void {
     zoe_support_mod.addImport("tree_sitter", tree_sitter_dep.module("tree_sitter"));
 
     const grammars_install_dir = "share/glyphwire/grammars";
-    installGrammars(b, target, optimize, grammars_install_dir);
+    const grammars_step = installGrammars(b, target, optimize, grammars_install_dir);
 
     const tests_exe = b.addExecutable(.{
         .name = "tests",
@@ -401,21 +401,26 @@ pub fn build(b: *std.Build) void {
 
     // `zig build package` installs just the user-facing programs and
     // bundled assets that ship in the Linux release tarball -- glyphwire,
-    // gw-shell, notify, demo, gw-view, gw-ls, and assets -- without also
-    // building the test runner or the internal server/client tools that
-    // plain `zig build` pulls in. The CI packaging job
+    // gw-shell, notify, demo, gw-view, gw-ls, zoe, the bundled
+    // tree-sitter grammars, and assets -- without also building the test
+    // runner or the internal server/client tools that plain `zig build`
+    // pulls in. The CI packaging job
     // (.github/workflows/linux-package.yml) drives this step.
     const package_step = b.step("package", "Install the shipped programs and assets into zig-out");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, ls_exe }) |exe| {
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, ls_exe, zoe_exe }) |exe| {
         package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     package_step.dependOn(&installed_assets_step.step);
+    // zoe dlopens its syntax grammars from share/glyphwire/grammars at
+    // runtime, so the packaged tree has to carry them alongside the binary.
+    package_step.dependOn(grammars_step);
 
-    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-view, gw-ls, and assets under the selected prefix");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, view_exe, ls_exe }) |exe| {
+    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-view, gw-ls, zoe, grammars, and assets under the selected prefix");
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, view_exe, ls_exe, zoe_exe }) |exe| {
         install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     install_local_step.dependOn(&installed_assets_step.step);
+    install_local_step.dependOn(grammars_step);
 }
 
 /// One bundled tree-sitter grammar: the lazy-dependency name holding its
@@ -467,15 +472,19 @@ const bundled_grammars = [_]BundledGrammar{
 
 /// Compiles each bundled grammar to `<install_dir>/<name>/parser.so` and
 /// copies its `highlights.scm` (and `injections.scm`, where the grammar
-/// has one) alongside, wired onto the default install step. The grammar
-/// deps are lazy, so a plain `zig build` only fetches them because this
-/// runs; nothing links them into a Zig binary.
+/// has one) alongside, wired onto the default install step. Returns a
+/// `grammars` step the `package` / `install-local` steps also depend on,
+/// since those don't pull in the default install step but a packaged zoe
+/// still needs its grammars. The grammar deps are lazy, so a plain
+/// `zig build` only fetches them because this runs; nothing links them
+/// into a Zig binary.
 fn installGrammars(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     install_dir: []const u8,
-) void {
+) *std.Build.Step {
+    const grammars_step = b.step("grammars", "Compile and install the bundled tree-sitter grammars");
     for (bundled_grammars) |g| {
         // `srcPath` yields a LazyPath to a file inside the grammar, from
         // either the vendored in-tree copy or the fetched dependency.
@@ -520,6 +529,8 @@ fn installGrammars(
         );
         b.getInstallStep().dependOn(&inst_lib.step);
         b.getInstallStep().dependOn(&inst_scm.step);
+        grammars_step.dependOn(&inst_lib.step);
+        grammars_step.dependOn(&inst_scm.step);
 
         if (g.injections) {
             const inst_inj = b.addInstallFileWithDir(
@@ -528,6 +539,8 @@ fn installGrammars(
                 "injections.scm",
             );
             b.getInstallStep().dependOn(&inst_inj.step);
+            grammars_step.dependOn(&inst_inj.step);
         }
     }
+    return grammars_step;
 }
