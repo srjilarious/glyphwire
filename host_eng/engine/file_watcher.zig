@@ -68,7 +68,7 @@ pub const FileWatcher = struct {
 
         const wd: i32 = if (self.dir_to_wd.get(dir)) |w| w else blk: {
             const new_wd: i32 = if (comptime builtin.os.tag == .linux) blk2: {
-                const dir_z = try self.alloc.dupeZ(u8, dir);
+                const dir_z = try std.mem.concatWithSentinel(self.alloc, u8, &.{dir}, 0);
                 defer self.alloc.free(dir_z);
                 const rc = linux.inotify_add_watch(
                     self.fd,

@@ -1184,7 +1184,7 @@ pub const Renderer = struct {
             .bytes_per_row = @intCast(row_bytes),
             .is_hdr = false,
         };
-        const path_z = self.app.alloc.dupeZ(u8, path) catch return;
+        const path_z = std.mem.concatWithSentinel(self.app.alloc, u8, &.{path}, 0) catch return;
         defer self.app.alloc.free(path_z);
         img.writeToFile(path_z, .png) catch |err| {
             std.log.err("glyphwire-host: screenshot write to '{s}' failed: {t}", .{ path, err });

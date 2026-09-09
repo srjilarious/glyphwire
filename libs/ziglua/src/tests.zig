@@ -534,17 +534,17 @@ test "string buffers" {
 
     // TODO: maybe implement this for all langs?
     b = buffer.initSize(lua, 20);
-    @memcpy(b[0..20], "a" ** 20);
+    @memcpy(b[0..20], "aaaaaaaaaaaaaaaaaaaa");
     buffer.pushResultSize(20);
 
     if (zlua.lang != .lua54) return;
     try expectEqual(20, buffer.len());
     buffer.sub(10);
     try expectEqual(10, buffer.len());
-    try expectEqualStrings("a" ** 10, buffer.addr());
+    try expectEqualStrings("aaaaaaaaaa", buffer.addr());
 
     buffer.addGSub(" append", "append", "appended");
-    try expectEqualStrings("a" ** 10 ++ " appended", buffer.addr());
+    try expectEqualStrings("aaaaaaaaaa appended", buffer.addr());
 }
 
 test "global table" {
@@ -2987,7 +2987,7 @@ test "define" {
         _ = try zlua.def.addClass(&state, a, my_type);
     }
 
-    var buffer: [10000]u8 = .{0} ** 10000;
+    var buffer: [10000]u8 = std.mem.zeroes([10000]u8);
     var buffer_stream = std.io.fixedBufferStream(&buffer);
     var writer = buffer_stream.writer();
 

@@ -715,7 +715,7 @@ pub fn jpegDimensionsRejectsNonJpegTest(io: std.Io, alloc: std.mem.Allocator) !v
 /// sizes we don't read), then the DIB header size, then little-endian i32
 /// width and height.
 fn fakeBmpBytes(width: i32, height: i32) [26]u8 {
-    var bytes = [_]u8{0} ** 26;
+    var bytes = std.mem.zeroes([26]u8);
     bytes[0] = 'B';
     bytes[1] = 'M';
     std.mem.writeInt(u32, bytes[14..18], 40, .little);
@@ -745,7 +745,7 @@ pub fn bmpDimensionsTopDownHeightIsAbsoluteTest(io: std.Io, alloc: std.mem.Alloc
 pub fn gifDimensionsParsesScreenDescriptorTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     _ = alloc;
-    var bytes = [_]u8{0} ** 10;
+    var bytes = std.mem.zeroes([10]u8);
     @memcpy(bytes[0..6], "GIF89a");
     std.mem.writeInt(u16, bytes[6..8], 320, .little);
     std.mem.writeInt(u16, bytes[8..10], 240, .little);
@@ -760,7 +760,7 @@ pub fn detectImageFormatSniffsMagicBytesTest(io: std.Io, alloc: std.mem.Allocato
     const png = fakePngBytes(8, 8);
     const jpeg = fakeJpegBytes(8, 8);
     const bmp = fakeBmpBytes(8, 8);
-    var gif = [_]u8{0} ** 10;
+    var gif = std.mem.zeroes([10]u8);
     @memcpy(gif[0..6], "GIF87a");
 
     try testz.expectEqual(glyphwire.detectImageFormat(&png).?, .png);
@@ -800,7 +800,7 @@ pub fn contextLoadImageStoresDeclaredFormatTest(io: std.Io, alloc: std.mem.Alloc
     defer ctx.deinit();
 
     const gif = blk: {
-        var bytes = [_]u8{0} ** 10;
+        var bytes = std.mem.zeroes([10]u8);
         @memcpy(bytes[0..6], "GIF89a");
         std.mem.writeInt(u16, bytes[6..8], 12, .little);
         std.mem.writeInt(u16, bytes[8..10], 34, .little);

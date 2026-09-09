@@ -350,7 +350,7 @@ pub const ScriptEngine = struct {
         if (self.scripts_dir.len == 0) return false;
 
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const full = std.fmt.bufPrintZ(&path_buf, "{s}/{s}{s}", .{ self.scripts_dir, name, script_ext }) catch return false;
+        const full = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}{s}", .{ self.scripts_dir, name, script_ext }, 0) catch return false;
 
         const src = std.Io.Dir.cwd().readFileAllocOptions(
             self.io,
@@ -413,9 +413,9 @@ fn setupPackagePath(lua: *Lua, scripts_dir: []const u8) void {
     const old = lua.toString(-1) catch "";
 
     var buf: [std.fs.max_path_bytes * 2 + 64]u8 = undefined;
-    const combined = std.fmt.bufPrintZ(&buf, "{s}/lib/?.lua;{s}/lib/?/init.lua;{s}", .{
+    const combined = std.fmt.bufPrintSentinel(&buf, "{s}/lib/?.lua;{s}/lib/?/init.lua;{s}", .{
         scripts_dir, scripts_dir, old,
-    }) catch {
+    }, 0) catch {
         lua.pop(2);
         return;
     };

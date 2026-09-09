@@ -30,10 +30,10 @@ pub fn keyEnumHasNoPhantomKeysTest(_: std.Io, _: std.mem.Allocator) !void {
     // F25 and world_1/world_2 came from the old GLFW backend's enum; no
     // SDL keycode maps to any of them, so declaring them only invites an
     // invented mapping like the `SDLK_EXECUTE => .F25` this replaced.
-    inline for (@typeInfo(Key).@"enum".fields) |field| {
-        try testz.expectNotEqualStr(field.name, "F25");
-        try testz.expectNotEqualStr(field.name, "world_1");
-        try testz.expectNotEqualStr(field.name, "world_2");
+    inline for (@typeInfo(Key).@"enum".field_names) |field_name| {
+        try testz.expectNotEqualStr(field_name, "F25");
+        try testz.expectNotEqualStr(field_name, "world_1");
+        try testz.expectNotEqualStr(field_name, "world_2");
     }
     // F24 is the last real one, and `unknown` must stay index 0 so the
     // bitsets can be indexed by `@intFromEnum` directly.
@@ -42,7 +42,7 @@ pub fn keyEnumHasNoPhantomKeysTest(_: std.Io, _: std.mem.Allocator) !void {
 
 pub fn mouseButtonNamesAreWireStableTest(_: std.Io, _: std.mem.Allocator) !void {
     // `host/input.zig` forwards every field of this enum by name too.
-    const fields = @typeInfo(MouseButton).@"enum".fields;
+    const fields = @typeInfo(MouseButton).@"enum".field_names;
     try testz.expectEqual(fields.len, 5);
     try testz.expectEqualStr(@tagName(MouseButton.left), "left");
     try testz.expectEqualStr(@tagName(MouseButton.right), "right");

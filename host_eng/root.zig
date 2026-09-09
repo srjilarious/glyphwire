@@ -256,7 +256,7 @@ pub fn EngineType(comptime engOpts: EngineOptions) type {
             else
                 vp.projection();
 
-            stbi.init(allocator);
+            stbi.init(std.Io.Threaded.global_single_threaded.io(), allocator);
             errdefer stbi.deinit();
 
             const eng = try allocator.create(Self);

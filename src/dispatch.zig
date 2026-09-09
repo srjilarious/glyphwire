@@ -746,7 +746,7 @@ pub const Dispatcher = struct {
     /// otherwise vanishes -- no response, no severed connection -- so this
     /// is how a client that opted in can find out after the fact. Drained
     /// by `get_errors`. `error` isn't a legal field name, hence the `_ev`.
-    error_ring: [error_ring_capacity]ErrorEntry = [_]ErrorEntry{.{}} ** error_ring_capacity,
+    error_ring: [error_ring_capacity]ErrorEntry = @splat(.{}),
     error_ring_start: usize = 0,
     error_ring_len: usize = 0,
     /// Monotonic per-connection error counter (last value assigned to an
