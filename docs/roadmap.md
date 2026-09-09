@@ -2373,6 +2373,39 @@ section for the *why*.
   `tests/dispatch_tests.zig` (+2: `create_split` resizable flag,
   `create_context` + `set_window_scrollbar`).
 
+## zoe line-number gutter
+
+A left gutter of line numbers in the buffer pane, on by default. See
+`docs/decisions.md`'s "zoe line-number gutter" for the *why*; this is the
+shape.
+
+- **`editor.LineNumbers` (`off` / `absolute` / `relative`) on `Editor`.**
+  A plain setting, like `page_lines`: the pure state machine owns it, so
+  `:set` needs no `Outcome`. `runCommand` gains `set` →
+  `Editor.applySet`, which parses `lineno=off|absolute|relative` (spaces
+  around the `=` tolerated) and reports `E518` (unknown option) / `E474`
+  (bad value) otherwise. Default `.absolute`.
+- **`zoe.conf` `config.line_numbers`.** `langconf.readLineNumbers`: `false`
+  → off, `true` → absolute, `"off"` / `"absolute"` / `"relative"` → that
+  style, anything else → the default. `Ui.setupHighlight` writes it onto
+  `Editor` after `init`, on the same config load as `page_lines`.
+  Documented in `assets/zoe.conf.example`.
+- **`zoe/ui.zig` rendering.** `gutterWidthFor(mode, line_count)` =
+  `max(3, digits) + 1` cells (0 when off); `gutterCellText` formats one
+  right-aligned cell (allocation-free, into a caller buffer), keeping the
+  caret line absolute in `.relative` mode. `Ui.gutterWidth()` /
+  `textCols()` wrap the pane maths; every buffer write shifted right by
+  the gutter, every width clamp cut to `textCols()`. `renderBufferRow`
+  paints the gutter cell then the text; `renderBuffer` adds one
+  `renderGutterCell`-per-row pass when `scrolled or (relative and the
+  caret line moved)`, the only cases the text paths leave stale numbers
+  (a `move_content` scroll slides them; relative distances all shift).
+  A `:set` that changes the mode forces `buffer_full_redraw` (the text
+  origin moved).
+- **Tests:** `zoe_tests.zig` +5 (`:set lineno` mode changes + `E518`/`E474`
+  rejects, `gutterWidthFor` power-of-ten steps, `gutterCellText`
+  absolute right-align + past-end blank + relative hybrid). 768 pass.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

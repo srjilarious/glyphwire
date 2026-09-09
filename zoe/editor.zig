@@ -35,6 +35,14 @@ const Pos = buffer.Pos;
 /// because nothing outside the state machine needs to see it.
 pub const Mode = enum { normal, insert, command };
 
+/// The buffer-pane line-number gutter. `zoe/ui.zig` draws it; the core
+/// only carries the setting so `:set lineno=…` can change it at runtime.
+/// `off` hides the gutter, `absolute` numbers every line from 1,
+/// `relative` shows each line's distance from the caret with the caret's
+/// own line still absolute. Defaults to `absolute`; `zoe.conf`'s
+/// `line_numbers` overrides it after `init`, the way `page_lines` does.
+pub const LineNumbers = enum { off, absolute, relative };
+
 /// Modifier state accompanying a `feedKey` call, matching what
 /// glyphwire's `InputListener` reports.
 pub const Mods = struct {
@@ -101,6 +109,11 @@ pub const Editor = struct {
     /// `zoe.conf`'s `page_lines`, which the host writes here after
     /// `init`.
     page_lines: usize = 10,
+
+    /// The buffer-pane line-number gutter -- see `LineNumbers`. Set from
+    /// `zoe.conf`'s `line_numbers` after `init`, changed live by
+    /// `:set lineno=…`.
+    line_numbers: LineNumbers = .absolute,
 
     /// The `:` line being typed, without the leading colon.
     cmdline: std.ArrayList(u8) = .empty,
@@ -647,6 +660,10 @@ pub const Editor = struct {
         const eq = std.mem.eql;
         if (eq(u8, name, "cd") or eq(u8, name, "chdir")) return .{ .chdir = arg_opt };
         if (eq(u8, name, "pwd")) return .pwd;
+        if (eq(u8, name, "set")) {
+            self.applySet(arg_opt);
+            return .none;
+        }
         if (eq(u8, name, "w") or eq(u8, name, "write")) return .{ .write = arg_opt };
         if (eq(u8, name, "e") or eq(u8, name, "edit")) {
             if (self.buf.dirty) {
@@ -669,6 +686,38 @@ pub const Editor = struct {
 
         self.setStatus("E492: Not an editor command: {s}", .{name});
         return .none;
+    }
+
+    /// `:set lineno=off|absolute|relative` -- the one option `:set`
+    /// understands, driving the buffer-pane line-number gutter. Spaces
+    /// around the `=` are tolerated (`:set lineno = relative`). An unknown
+    /// option name or value leaves the setting as it was and reports the
+    /// matching vim error.
+    fn applySet(self: *Editor, arg: ?[]const u8) void {
+        const a = arg orelse {
+            self.setStatus("E518: Unknown option: {s}", .{""});
+            return;
+        };
+        const eq_at = std.mem.indexOfScalar(u8, a, '=') orelse {
+            self.setStatus("E518: Unknown option: {s}", .{a});
+            return;
+        };
+        const opt = std.mem.trim(u8, a[0..eq_at], " \t");
+        const val = std.mem.trim(u8, a[eq_at + 1 ..], " \t");
+        if (!std.mem.eql(u8, opt, "lineno")) {
+            self.setStatus("E518: Unknown option: {s}", .{opt});
+            return;
+        }
+        self.line_numbers = if (std.mem.eql(u8, val, "off"))
+            .off
+        else if (std.mem.eql(u8, val, "absolute"))
+            .absolute
+        else if (std.mem.eql(u8, val, "relative"))
+            .relative
+        else {
+            self.setStatus("E474: Invalid argument: lineno={s}", .{val});
+            return;
+        };
     }
 
     /// The `:` forms that move the cursor rather than run a command:

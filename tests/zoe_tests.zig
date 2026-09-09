@@ -655,6 +655,36 @@ pub fn commandLineUnknownCommandReportsE492Test(_: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(ed.mode, .normal);
 }
 
+pub fn commandLineSetLinenoChangesTheGutterModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    try testz.expectEqual(ed.line_numbers, .absolute); // the default
+
+    _ = try keys.feed(&ed, ":set lineno=relative<cr>");
+    try testz.expectEqual(ed.line_numbers, .relative);
+    try testz.expectEqual(ed.mode, .normal);
+
+    _ = try keys.feed(&ed, ":set lineno=off<cr>");
+    try testz.expectEqual(ed.line_numbers, .off);
+
+    // Spaces around the `=` are tolerated.
+    _ = try keys.feed(&ed, ":set lineno = absolute<cr>");
+    try testz.expectEqual(ed.line_numbers, .absolute);
+}
+
+pub fn commandLineSetRejectsUnknownOptionAndValueTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+
+    _ = try keys.feed(&ed, ":set wrap=on<cr>");
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E518:"));
+
+    _ = try keys.feed(&ed, ":set lineno=sideways<cr>");
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E474:"));
+    // A bad value leaves the setting as it was.
+    try testz.expectEqual(ed.line_numbers, .absolute);
+}
+
 pub fn commandLineEscapeAbandonsTheLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
@@ -805,6 +835,38 @@ pub fn sliceColsCountsDisplayWidthTest(_: std.Io, _: std.mem.Allocator) !void {
     // rather than half-drawn.
     try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 0, 3), "\u{65e5}");
     try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 2, 2), "\u{672c}");
+}
+
+// ─── Line-number gutter ────────────────────────────────────────────────
+
+pub fn gutterWidthFloorsAtThreeDigitsTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Off means no gutter at all.
+    try testz.expectEqual(zoe.ui.gutterWidthFor(.off, 9999), 0);
+    // 1..999 lines: three digit cells plus a separator space.
+    try testz.expectEqual(zoe.ui.gutterWidthFor(.absolute, 1), 4);
+    try testz.expectEqual(zoe.ui.gutterWidthFor(.absolute, 999), 4);
+    // A fourth (then fifth) digit widens it a column at a time.
+    try testz.expectEqual(zoe.ui.gutterWidthFor(.absolute, 1000), 5);
+    try testz.expectEqual(zoe.ui.gutterWidthFor(.relative, 12345), 6);
+}
+
+pub fn gutterCellTextRightAlignsAbsoluteNumbersTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [32]u8 = undefined;
+    // Width 4 = three digit cells + one separator. Line 0 shows "1".
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .absolute, 4, 0, 0, false), "  1 ");
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .absolute, 4, 41, 0, false), " 42 ");
+    // Past the last buffer line: a blank cell, like the space beside vim's `~`.
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .absolute, 4, 100, 0, true), "    ");
+}
+
+pub fn gutterCellTextRelativeKeepsTheCaretLineAbsoluteTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [32]u8 = undefined;
+    const cursor_line: usize = 10;
+    // The caret's own row shows its absolute number...
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 10, cursor_line, false), " 11 ");
+    // ...every other row shows its distance from the caret.
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 7, cursor_line, false), "  3 ");
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 13, cursor_line, false), "  3 ");
 }
 
 // ─── Syntax highlighting (tree-sitter) ──────────────────────────────────

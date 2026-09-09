@@ -14,6 +14,7 @@ const std = @import("std");
 const ziglua = @import("ziglua");
 const glyphwire = @import("glyphwire");
 const syntax = @import("syntax.zig");
+const editor = @import("editor.zig");
 
 const Lua = ziglua.Lua;
 const Color = glyphwire.Color;
@@ -39,6 +40,12 @@ pub const Config = struct {
     /// Ctrl-U) moves the cursor. Default 10; a non-positive or
     /// non-number value is ignored.
     page_lines: usize = 10,
+    /// `config.line_numbers` -- the buffer-pane line-number gutter.
+    /// Absent or `true` means `.absolute` (the gutter is on); `false`
+    /// turns it off; `"absolute"` / `"relative"` pick the style, where
+    /// `"relative"` keeps the caret's own line absolute. `:set lineno=…`
+    /// overrides it at runtime.
+    line_numbers: editor.LineNumbers = .absolute,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -63,6 +70,7 @@ pub fn load(
         .grammar_dirs = &.{},
         .theme = syntax.Theme.initDefault(),
         .injections = true,
+        .line_numbers = .absolute,
     };
 
     const src = readConf(&cfg.arena, io, environ) orelse return cfg;
@@ -93,6 +101,7 @@ pub fn load(
     cfg.langs = readLangs(lua, a);
     cfg.injections = readInjections(lua);
     cfg.page_lines = readPageLines(lua, cfg.page_lines);
+    cfg.line_numbers = readLineNumbers(lua, cfg.line_numbers);
     return cfg;
 }
 
@@ -105,6 +114,26 @@ fn readPageLines(lua: *Lua, current: usize) usize {
     const n = lua.toNumber(-1) catch return current;
     if (n < 1) return current;
     return @intFromFloat(n);
+}
+
+/// `config.line_numbers`: `false` -> off, `true` -> absolute,
+/// `"off"` / `"absolute"` / `"relative"` -> that style. Absent, or a
+/// value that is neither a boolean nor one of those strings, leaves
+/// `current` (the default, `.absolute`).
+fn readLineNumbers(lua: *Lua, current: editor.LineNumbers) editor.LineNumbers {
+    const t = lua.getField(-1, "line_numbers");
+    defer lua.pop(1);
+    switch (t) {
+        .boolean => return if (lua.toBoolean(-1)) .absolute else .off,
+        .string => {
+            const s = lua.toString(-1) catch return current;
+            if (std.mem.eql(u8, s, "off")) return .off;
+            if (std.mem.eql(u8, s, "absolute")) return .absolute;
+            if (std.mem.eql(u8, s, "relative")) return .relative;
+            return current;
+        },
+        else => return current,
+    }
 }
 
 /// `config.injections = false` turns embedded-language highlighting off.
