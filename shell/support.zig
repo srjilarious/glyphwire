@@ -3,15 +3,17 @@
 //! can import them -- a Zig module can't reach across directories with a
 //! relative `@import`.
 //!
-//! `wordsplit` / `complete` / `glob` / `handshake` / `history` /
-//! `lineedit` / `prompt_template` are pure (no libc, no IO). `config` and
-//! `script_engine` are the exceptions: they embed a Lua state (via
+//! `wordsplit` / `envassign` / `complete` / `glob` / `handshake` /
+//! `history` / `lineedit` / `prompt_template` are pure (no libc, no IO).
+//! `config` and `script_engine` are the exceptions: they embed a Lua
+//! state (via
 //! ziglua) -- `config` for a one-shot `shell.conf` parse, `script_engine`
 //! for the shell's session-long interpreter -- so this module pulls in
 //! ziglua and the test runner links the Lua C library.
 
 pub const wordsplit = @import("wordsplit.zig");
 pub const parse = @import("parse.zig");
+pub const envassign = @import("envassign.zig");
 pub const complete = @import("complete.zig");
 pub const glob = @import("glob.zig");
 pub const handshake = @import("handshake.zig");

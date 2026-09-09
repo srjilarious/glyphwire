@@ -2,6 +2,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const wordsplit = @import("shell_support").wordsplit;
 const parse = @import("shell_support").parse;
+const envassign = @import("shell_support").envassign;
 const pipeexec = @import("shell_support").pipeexec;
 const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
@@ -784,7 +785,7 @@ const CompletionCandidate = struct { name: []const u8, is_dir: bool };
 /// precedence comment there). Offered by Tab completion in command
 /// position alongside aliases and script builtins. `alias` is handled a
 /// step earlier than the rest but is still a name worth completing.
-const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "unalias", "zj" };
+const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "unalias", "unset", "zj" };
 
 /// Alias store backing the prompt's `alias`/`unalias` builtins. Seeded at
 /// startup from `~/.config/glyphwire/shell.conf`'s `alias(name, value)`
@@ -2704,6 +2705,11 @@ const Prompt = struct {
     /// line ahead of the parser -- its value has rest-of-line semantics
     /// (`wordsplit.parseAliasDef`) the tokenizer would destroy.
     ///
+    /// A leading `NAME=VALUE` run is also peeled off ahead of the parser
+    /// (`envassign.scanLeading` -> `dispatchWithAssignments`): a bare run
+    /// sets the session environment, a run before a command sets those
+    /// names just for that line and restores them after.
+    ///
     /// Within each command: quote-aware splitting, then alias expansion
     /// (`expandAliases`), then `*` globs (`expandGlobs`), then
     /// builtin / `$PATH` dispatch -- bash order. A core or script builtin
@@ -2725,6 +2731,17 @@ const Prompt = struct {
             (trimmed.len == "alias".len or trimmed["alias".len] == ' ' or trimmed["alias".len] == '\t'))
         {
             return self.doAlias(text);
+        }
+
+        // Leading `NAME=VALUE` words: a bare run sets the session
+        // environment (`FOO=bar`), a run followed by a command sets those
+        // names just for that line (`FOO=bar cmd args`), then restores.
+        {
+            const leading = try envassign.scanLeading(alloc, trimmed, &self.env);
+            defer envassign.freeLeading(alloc, leading);
+            if (leading.assignments.len > 0) {
+                return self.dispatchWithAssignments(leading.assignments, leading.rest);
+            }
         }
 
         switch (try parse.parse(alloc, text)) {
@@ -2781,6 +2798,10 @@ const Prompt = struct {
             try self.doUnalias(argv[1..]);
         } else if (std.mem.eql(u8, argv[0], "cd")) {
             try self.doCd(argv[1..]);
+        } else if (std.mem.eql(u8, argv[0], "export")) {
+            _ = try self.doExport(argv[1..]);
+        } else if (std.mem.eql(u8, argv[0], "unset")) {
+            _ = try self.doUnset(argv[1..]);
         } else if (std.mem.eql(u8, argv[0], "zj")) {
             try self.doZj(argv[1..]);
         } else if (self.runScriptBuiltin(argv)) {
@@ -2891,6 +2912,7 @@ const Prompt = struct {
     fn isBuiltinName(self: *Prompt, name: []const u8) bool {
         if (std.mem.eql(u8, name, "exit") or std.mem.eql(u8, name, "unalias") or
             std.mem.eql(u8, name, "cd") or std.mem.eql(u8, name, "alias") or
+            std.mem.eql(u8, name, "export") or std.mem.eql(u8, name, "unset") or
             std.mem.eql(u8, name, "zj")) return true;
         if (self.script_engine) |eng| return eng.hasCommand(name);
         return false;
@@ -2912,6 +2934,12 @@ const Prompt = struct {
         if (std.mem.eql(u8, argv[0], "cd")) {
             try self.doCd(argv[1..]);
             return 0;
+        }
+        if (std.mem.eql(u8, argv[0], "export")) {
+            return self.doExport(argv[1..]);
+        }
+        if (std.mem.eql(u8, argv[0], "unset")) {
+            return self.doUnset(argv[1..]);
         }
         if (std.mem.eql(u8, argv[0], "zj")) {
             try self.doZj(argv[1..]);
@@ -3837,6 +3865,188 @@ const Prompt = struct {
         }
     }
 
+    /// Sets `name` to `value` in this process's libc environment (so
+    /// children spawned afterwards inherit it -- `pty.zig` / `pipeexec`
+    /// both `execvp` against the live environ) and in `Prompt.env`, the
+    /// overlay `{env:NAME}` renders from. The mirror of `sh.setenv`;
+    /// `name` must already be a valid identifier (`envassign.validName`).
+    fn setEnvVar(self: *Prompt, name: []const u8, value: []const u8) void {
+        const alloc = self.client.alloc;
+        const name_z = std.mem.concatWithSentinel(alloc, u8, &.{name}, 0) catch return;
+        defer alloc.free(name_z);
+        const value_z = std.mem.concatWithSentinel(alloc, u8, &.{value}, 0) catch return;
+        defer alloc.free(value_z);
+        _ = c.setenv(name_z, value_z, 1);
+        self.env.put(name, value) catch {};
+    }
+
+    /// Removes `name` from the libc environment and `Prompt.env`. The
+    /// mirror of `sh.unsetenv`.
+    fn unsetEnvVar(self: *Prompt, name: []const u8) void {
+        const alloc = self.client.alloc;
+        const name_z = std.mem.concatWithSentinel(alloc, u8, &.{name}, 0) catch return;
+        defer alloc.free(name_z);
+        _ = c.unsetenv(name_z);
+        _ = self.env.swapRemove(name);
+    }
+
+    /// `export` builtin. No args -> print every variable as `NAME=VALUE`,
+    /// sorted. `export NAME=VALUE` -> set it (`$NAME` / `${NAME}` and a
+    /// leading `~` in VALUE are expanded against the current environment;
+    /// see `envassign`). `export NAME` with no `=` -> ensure NAME exists
+    /// (created empty if unset), since this shell keeps a single
+    /// environment and has no separate "not yet exported" state. An
+    /// invalid name is reported and makes the builtin's status 1.
+    fn doExport(self: *Prompt, args: []const []const u8) !u8 {
+        const alloc = self.client.alloc;
+
+        if (args.len == 0) {
+            try self.printEnv();
+            return 0;
+        }
+
+        var status: u8 = 0;
+        for (args) |arg| {
+            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+                const name = arg[0..eq];
+                if (!envassign.validName(name)) {
+                    try self.reportBadEnvName("export", arg);
+                    status = 1;
+                    continue;
+                }
+                const value = envassign.expandValue(alloc, arg[eq + 1 ..], &self.env) catch {
+                    status = 1;
+                    continue;
+                };
+                defer alloc.free(value);
+                self.setEnvVar(name, value);
+            } else {
+                if (!envassign.validName(arg)) {
+                    try self.reportBadEnvName("export", arg);
+                    status = 1;
+                    continue;
+                }
+                if (self.env.get(arg) == null) self.setEnvVar(arg, "");
+            }
+        }
+        return status;
+    }
+
+    /// `unset NAME...` builtin. Removes each name; an unset name is not an
+    /// error (bash). An invalid name is reported and makes the status 1.
+    fn doUnset(self: *Prompt, names: []const []const u8) !u8 {
+        var status: u8 = 0;
+        for (names) |name| {
+            if (!envassign.validName(name)) {
+                try self.reportBadEnvName("unset", name);
+                status = 1;
+                continue;
+            }
+            self.unsetEnvVar(name);
+        }
+        return status;
+    }
+
+    fn reportBadEnvName(self: *Prompt, comptime builtin: []const u8, name: []const u8) !void {
+        var buf: [200]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, builtin ++ ": `{s}`: not a valid variable name", .{name}) catch
+            builtin ++ ": not a valid variable name";
+        try self.client.writeText(msg, err_color, null);
+    }
+
+    /// Writes the whole environment to the grid, one `NAME=VALUE` per
+    /// line, name-sorted -- `export` with no arguments.
+    fn printEnv(self: *Prompt) !void {
+        const alloc = self.client.alloc;
+
+        var lines: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (lines.items) |l| alloc.free(l);
+            lines.deinit(alloc);
+        }
+
+        var it = self.env.iterator();
+        while (it.next()) |entry| {
+            try lines.append(alloc, try std.fmt.allocPrint(alloc, "{s}={s}\n", .{
+                entry.key_ptr.*,
+                entry.value_ptr.*,
+            }));
+        }
+
+        std.mem.sort([]const u8, lines.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+
+        for (lines.items) |l| try self.client.writeText(l, null, null);
+    }
+
+    /// The `NAME=VALUE cmd ...` / bare `NAME=VALUE` path. `assignments`
+    /// were already peeled and `expandValue`'d by `envassign.scanLeading`;
+    /// `rest` is the remaining command text (empty for a bare run).
+    ///
+    /// Bare run: apply every assignment to the session environment.
+    /// Otherwise: snapshot each name's current value, apply the
+    /// assignments, dispatch `rest` as its own line, then restore every
+    /// name (set back or unset). Restoring in a `defer` covers a `rest`
+    /// that errors. The whole line -- pipeline / `&&` chain included --
+    /// runs with the assignments in effect (bash scopes them per pipeline
+    /// stage; that corner isn't worth the plumbing here -- see
+    /// docs/decisions.md).
+    ///
+    /// Explicit `anyerror` rather than an inferred set: this and
+    /// `dispatchLineText` call each other, and two inferred error sets in
+    /// a cycle don't resolve.
+    fn dispatchWithAssignments(
+        self: *Prompt,
+        assignments: []const envassign.Assignment,
+        rest: []const u8,
+    ) anyerror!void {
+        const alloc = self.client.alloc;
+
+        if (rest.len == 0) {
+            for (assignments) |a| self.setEnvVar(a.name, a.value);
+            self.last_status = 0;
+            self.last_dur_ms = 0;
+            self.have_status = true;
+            return;
+        }
+
+        const Saved = struct { name: []const u8, old: ?[]const u8 };
+        var saved: std.ArrayList(Saved) = .empty;
+        defer {
+            // LIFO restore is fine: `saved` holds one entry per distinct
+            // name (first occurrence wins), so order doesn't matter.
+            for (saved.items) |s| {
+                if (s.old) |o| {
+                    self.setEnvVar(s.name, o);
+                    alloc.free(o);
+                } else {
+                    self.unsetEnvVar(s.name);
+                }
+            }
+            saved.deinit(alloc);
+        }
+
+        for (assignments) |a| {
+            var seen = false;
+            for (saved.items) |s| {
+                if (std.mem.eql(u8, s.name, a.name)) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                const old: ?[]const u8 = if (self.env.get(a.name)) |v| try alloc.dupe(u8, v) else null;
+                try saved.append(alloc, .{ .name = a.name, .old = old });
+            }
+            self.setEnvVar(a.name, a.value);
+        }
+
+        try self.dispatchLineText(rest);
+    }
+
     /// Stands up the persistent Lua interpreter (`script_engine`), wired
     /// to this prompt's environment overlay, cwd and grid. Safe to skip:
     /// on failure `script_engine` stays null and script builtins are just
@@ -4474,28 +4684,17 @@ const Prompt = struct {
 // Kept as free functions, not `Prompt` methods, because that's the shape
 // a `*const fn (ctx: *anyopaque, ...)` pointer needs.
 
-/// `sh.setenv` -- update libc (so children spawned afterwards inherit it;
-/// pty.zig's `execvp` reads the live environ) and the prompt's own live
-/// view that `{env:NAME}` renders from.
+/// `sh.setenv` -- same effect as the `export` builtin (`Prompt.setEnvVar`
+/// updates libc so children inherit it, plus the `{env:NAME}` overlay).
 fn hookSetenv(ctx: *anyopaque, name: []const u8, value: []const u8) void {
     const self: *Prompt = @ptrCast(@alignCast(ctx));
-    const alloc = self.client.alloc;
-    const name_z = std.mem.concatWithSentinel(alloc, u8, &.{name}, 0) catch return;
-    defer alloc.free(name_z);
-    const value_z = std.mem.concatWithSentinel(alloc, u8, &.{value}, 0) catch return;
-    defer alloc.free(value_z);
-    _ = c.setenv(name_z, value_z, 1);
-    self.env.put(name, value) catch {};
+    self.setEnvVar(name, value);
 }
 
-/// `sh.unsetenv` -- the mirror of `hookSetenv`.
+/// `sh.unsetenv` -- same effect as the `unset` builtin.
 fn hookUnsetenv(ctx: *anyopaque, name: []const u8) void {
     const self: *Prompt = @ptrCast(@alignCast(ctx));
-    const alloc = self.client.alloc;
-    const name_z = std.mem.concatWithSentinel(alloc, u8, &.{name}, 0) catch return;
-    defer alloc.free(name_z);
-    _ = c.unsetenv(name_z);
-    _ = self.env.swapRemove(name);
+    self.unsetEnvVar(name);
 }
 
 /// `sh.getenv` -- the shell's live value (script-set values included).

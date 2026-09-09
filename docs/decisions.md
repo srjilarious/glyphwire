@@ -1775,6 +1775,63 @@ surface.
   `shell/glob.zig` is otherwise plain `*`/`?`/`[...]` string matching
   with `!`/`^` negation and `a-z` ranges).
 
+#### Environment variables: `export` / `unset` / `NAME=VALUE` prefixes
+- **`export NAME=VALUE` sets, `unset NAME` clears, both as core
+  builtins** (`shell/main.zig` `doExport` / `doUnset`, in
+  `core_builtin_names` so Tab completes them and they work as a whole
+  `&&` / `||` / `;` link but not a `|` stage, same rule as the other
+  builtins). `export` with no arguments prints the whole environment as
+  name-sorted `NAME=VALUE` lines. A bare `export NAME` (no `=`) just
+  ensures the name exists — created empty if unset — since this shell
+  keeps a single flat environment and has no "declared but not yet
+  exported" state to toggle. `export` was chosen over fish's
+  `set NAME VALUE` so the builtin and the prefix form share one `=`
+  syntax; `unset` is POSIX either way.
+- **A leading `NAME=VALUE` run on any line is peeled off ahead of the
+  parser** (`shell/envassign.zig` `scanLeading` →
+  `Prompt.dispatchWithAssignments`), the same pre-parse slot
+  `alias NAME=VALUE` already uses. A **bare** run (`FOO=bar`, `A=1 B=2`) sets the session
+  environment — bash/fish behaviour, and it makes the prefix form a
+  scoped special case of one syntax rather than a second thing to learn.
+  A run **followed by a command** (`DEBUG=1 make -j`) snapshots each
+  name, applies the assignments, runs the rest of the line, then restores
+  every name (set back or `unset`) in a `defer` so a failing command
+  still cleans up.
+- **Scope is the whole line, not the bash per-pipeline-stage rule.**
+  `A=1 foo | bar` runs *both* stages with `A=1` in effect; bash scopes it
+  to `foo` alone. Reproducing that means threading a per-stage env
+  through `pipeexec`, which isn't worth it for how rarely the difference
+  matters. An operator *inside* the assignment run (`A=1 | cat`,
+  `A=1; ls`) makes `scanLeading` abandon assignment handling for the
+  whole line — it goes to the parser untouched, so `A=1` becomes an
+  ordinary not-found command, exactly as in a shell with no assignment
+  support.
+- **The environment is mutated in place** (`Prompt.setEnvVar` /
+  `unsetEnvVar`): libc `setenv` / `unsetenv` so `pty.zig` and `pipeexec`
+  — both of which `execvp` against the live `environ` — hand it to
+  children, plus the `Prompt.env` overlay `{env:NAME}` renders from.
+  `sh.setenv` / `sh.unsetenv` from a Lua script now just call these, so
+  the script surface and the builtins can't drift.
+- **Values expand `$NAME`, `${NAME}` and a leading `~`** (both in an
+  `export` value and a prefix value — `envassign.expandValue`), so
+  `PATH=$PATH:/opt/bin foo` and `export EDITOR=~/bin/e` work. This is the
+  shell's *only* `$`-expansion, deliberately confined to assignment
+  values. It is **not quote-context aware** — the word splitter has
+  already collapsed `'...'` / `"..."` / `\` before the value is seen, so
+  a `$NAME` that was written single-quoted still expands and there is no
+  way to pass a literal `$`. An unset name expands to empty (bash); a
+  prefix run's values are all expanded against the environment as it was
+  *before* the line, so `A=1 B=$A cmd` does not see `A`. Accepted corners
+  for v1.
+- **A builtin's exit status doesn't reach `{exit}` / `{dur}`**, matching
+  `cd` / `alias` — those tokens are about "the last real program". A bad
+  name in `export` / `unset` is reported in red and makes the builtin
+  return status 1 for an `&&` chain, but a bare `FOO=bar` line always
+  reports status 0.
+- Pure parsing/expansion lives in `shell/envassign.zig` (no libc, no IO),
+  unit-tested in `tests/shell_envassign_tests.zig`; only the in-place
+  `setenv` and the grid writes stay in `shell/main.zig`.
+
 #### Startup config: `~/.config/glyphwire/shell.conf`
 - **The config is a Lua script**, run once at prompt startup. The Lua
   library is vendored in-tree (`libs/ziglua`, Lua 5.3) so
