@@ -120,9 +120,15 @@
 -- A builtin is either a `defcmd(name, fn)` registration here, or a file
 -- `<config_dir>/scripts/<name>.lua` (looked up by basename, re-read on
 -- every call so editing it takes effect immediately). Dispatch
--- precedence: core builtins (cd / exit / alias / unalias) > aliases >
--- script builtins > $PATH -- so a `cd.lua` can't shadow the real `cd`,
--- but a `ls.lua` does shadow `/usr/bin/ls`.
+-- precedence: core builtins (cd / exit / alias / unalias / export /
+-- unset / zj) > aliases > script builtins > $PATH -- so a `cd.lua` can't
+-- shadow the real `cd`, but a `ls.lua` does shadow `/usr/bin/ls`.
+--
+-- Environment variables: `export NAME=VALUE` sets one, `unset NAME`
+-- clears it, `export` with no arguments lists them. A leading
+-- `NAME=VALUE` on a line sets it for the session (`FOO=bar`) or, before
+-- a command, just for that command (`DEBUG=1 make -j`). `$NAME` /
+-- `${NAME}` / a leading `~` expand inside the value.
 --
 -- A builtin receives its arguments as `...` and as the `arg` table
 -- (`arg[0]` is the command name); a numeric `return` is its exit status.
