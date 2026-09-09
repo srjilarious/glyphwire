@@ -6,6 +6,10 @@ alias b := build
 # docs :
 # 	zig build docs
 
+# Repeatable Linux build: verify the pinned Zig, prime the cache, then `zig build {{ARGS}}`
+bootstrap *ARGS:
+	./scripts/bootstrap-linux.sh {{ARGS}}
+
 test *OPTS:
 	zig build tests -- {{OPTS}}
 
