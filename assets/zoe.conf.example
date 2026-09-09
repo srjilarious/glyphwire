@@ -26,6 +26,12 @@ config = {
     -- Default 10.
     page_lines = 10,
 
+    -- The buffer-pane line-number gutter. On by default; `false` hides
+    -- it, "absolute" numbers every line from 1, "relative" shows each
+    -- line's distance from the cursor with the cursor's own line still
+    -- absolute. `:set lineno=off|absolute|relative` changes it live.
+    line_numbers = "absolute",
+
     -- Where to look for grammar directories, highest priority first.
     -- These are prepended to the default search path
     -- ($GLYPHWIRE_ZOE_GRAMMAR_DIR, ~/.config/glyphwire/zoe/grammars,

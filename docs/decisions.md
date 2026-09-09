@@ -2994,3 +2994,33 @@ hatch.
 regex engine zoe doesn't have, so a pattern carrying one is dropped
 entirely — under-highlighting (a name that isn't specially coloured)
 rather than mis-highlighting (every identifier painted as a constant).
+
+### zoe line-number gutter
+
+**On by default, but a setting rather than a hardcode.** The buffer pane
+now reserves a left gutter for line numbers. It is on out of the box (the
+common expectation for an editor) but `zoe.conf`'s `config.line_numbers`
+turns it off (`false`) or picks the style (`"absolute"` / `"relative"`),
+and `:set lineno=off|absolute|relative` flips it live. `"relative"` is
+vim's hybrid: the caret's own line shows its absolute number, every other
+line its distance from the caret. The setting lives on `Editor`
+(`line_numbers: LineNumbers`, like `page_lines`) so the pure state
+machine owns it and `:set` needs no `Outcome`; `Ui.setupHighlight` writes
+the config value in after `init`.
+
+**Width is derived, not fixed.** The gutter is `max(3, digits(lineCount))
++ 1` cells — three digits minimum, a trailing separator space, widening a
+column at a time as the file grows past a power of ten. A width change
+shifts the text origin, which a row shift can't express, so it only
+happens on frames that already repaint the whole pane (an edit that
+changes the line count, a `:set`).
+
+**Relative mode repaints the whole gutter on a caret move; nothing else
+does.** Every buffer-text path already repaints the gutter for the rows
+it draws. Two cases leave stale numbers those paths don't touch: a
+sub-screen scroll slides the old numbers along with the text under
+`move_content`, and in `.relative` mode moving the caret changes every
+row's distance. `renderBuffer` handles both with one pass of
+`renderGutterCell` per visible row — a short unstyled write each, no
+syntax pass — gated on `scrolled or (relative and caret line moved)`. In
+`.absolute` mode a bare caret move still touches only two rows.

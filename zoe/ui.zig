@@ -69,12 +69,13 @@ const Focus = enum { buffer, tree };
 const EdSnapshot = struct {
     cursor: usize,
     edits: u64,
+    line_numbers: editor.LineNumbers,
 
     fn of(ed: *const Editor) EdSnapshot {
-        return .{ .cursor = ed.cursor, .edits = ed.buf.edits };
+        return .{ .cursor = ed.cursor, .edits = ed.buf.edits, .line_numbers = ed.line_numbers };
     }
     fn eql(a: EdSnapshot, b: EdSnapshot) bool {
-        return a.cursor == b.cursor and a.edits == b.edits;
+        return a.cursor == b.cursor and a.edits == b.edits and a.line_numbers == b.line_numbers;
     }
 };
 
@@ -260,9 +261,11 @@ pub const Ui = struct {
     fn setupHighlight(self: *Ui, environ: *const std.process.Environ.Map) void {
         var cfg = langconf.load(self.alloc, self.io, environ);
 
-        // `page_lines` rides in on the same config load, whether or not
-        // highlighting itself ends up enabled below.
+        // `page_lines` and the line-number gutter ride in on the same
+        // config load, whether or not highlighting itself ends up enabled
+        // below.
         self.ed.page_lines = cfg.page_lines;
+        self.ed.line_numbers = cfg.line_numbers;
 
         const dirs = syntax.searchDirs(self.alloc, self.io, environ, cfg.grammar_dirs) catch {
             cfg.deinit();
@@ -529,7 +532,11 @@ pub const Ui = struct {
         // is one row, so always redraw it. The buffer pane redraws only
         // when the editor state it shows actually moved.
         self.status_dirty = true;
-        if (!EdSnapshot.of(self.ed).eql(before)) self.buffer_dirty = true;
+        const after = EdSnapshot.of(self.ed);
+        if (!after.eql(before)) self.buffer_dirty = true;
+        // `:set lineno=…` moves the text origin, which a row shift can't
+        // express -- the whole pane has to be re-laid-out.
+        if (after.line_numbers != before.line_numbers) self.buffer_full_redraw = true;
     }
 
     fn toggleTree(self: *Ui) !void {
@@ -870,20 +877,33 @@ pub const Ui = struct {
             },
         }
 
+        // The line-number gutter. Every text path above repainted it for
+        // the rows it drew; two cases leave stale numbers it did not
+        // touch: a `move_content` scroll slides the old numbers along with
+        // the text, and in `.relative` mode moving the caret changes every
+        // row's distance. Repaint the whole gutter then -- it is one short
+        // write per row, no syntax pass.
+        if (self.gutterWidth() > 0 and (scrolled or
+            (self.ed.line_numbers == .relative and cursor.line != self.prev_cursor_line)))
+        {
+            var r: usize = 0;
+            while (r < b.rows) : (r += 1) try self.renderGutterCell(batch, r);
+        }
+
         // The caret is a block drawn as one inverted cell, on top of the
         // row just (re)painted. The host's own caret renderer only knows
         // about the root layer, and a client that owns its pane knows
         // better than the host where its cursor is anyway.
         if (cursor.line >= self.top_line and cursor.line < self.top_line + b.rows) {
             const display_col = try self.cursorDisplayCol();
-            if (display_col >= self.left_col and display_col - self.left_col < b.cols) {
+            if (display_col >= self.left_col and display_col - self.left_col < self.textCols()) {
                 const under = try self.cursorGrapheme();
                 defer self.alloc.free(under);
                 try writeAt(
                     batch,
                     self.buffer_layer,
                     cursor.line - self.top_line,
-                    display_col - self.left_col,
+                    self.gutterWidth() + display_col - self.left_col,
                     under,
                     fg_cursor,
                     bg_cursor,
@@ -1025,9 +1045,45 @@ pub const Ui = struct {
         while (r < to) : (r += 1) try self.renderBufferRow(batch, r);
     }
 
-    fn renderBufferRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize) !void {
-        const b = self.buffer_bounds;
+    /// Cells the line-number gutter takes in the buffer pane right now --
+    /// zero unless `:set`/`zoe.conf` turned it on. Widens by a column each
+    /// time the line count crosses a power of ten; an edit that changes
+    /// the count already forces a full pane repaint, so it is always safe
+    /// to read fresh.
+    fn gutterWidth(self: *const Ui) usize {
+        return gutterWidthFor(self.ed.line_numbers, self.ed.buf.lineCount());
+    }
+
+    /// Buffer-text width: the pane less the gutter. Saturates to zero if
+    /// the pane is narrower than the gutter (a degenerate split).
+    fn textCols(self: *const Ui) usize {
+        return self.buffer_bounds.cols -| self.gutterWidth();
+    }
+
+    /// Paints just the line-number cell for buffer screen row `r`, in
+    /// `fg_text` on the caret's line and `fg_dim` elsewhere. A no-op when
+    /// the gutter is off. Every buffer-text path calls this for the rows
+    /// it repaints; `renderBuffer` calls it for the rest when a scroll or
+    /// a `.relative` caret move changed numbers it did not otherwise touch.
+    fn renderGutterCell(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize) !void {
+        const width = self.gutterWidth();
+        if (width == 0) return;
         const line = self.top_line + r;
+        const cursor_line = self.ed.pos().line;
+        const past_end = line >= self.ed.buf.lineCount();
+
+        var buf: [32]u8 = undefined;
+        const cell = gutterCellText(&buf, self.ed.line_numbers, width, line, cursor_line, past_end);
+        const fg = if (!past_end and line == cursor_line) fg_text else fg_dim;
+        try writeAt(batch, self.buffer_layer, r, 0, cell, fg, bg_buffer);
+    }
+
+    fn renderBufferRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize) !void {
+        const line = self.top_line + r;
+        const gutter = self.gutterWidth();
+        const cols = self.textCols();
+
+        try self.renderGutterCell(batch, r);
 
         var pad: std.ArrayList(u8) = .empty;
         defer pad.deinit(self.alloc);
@@ -1035,8 +1091,8 @@ pub const Ui = struct {
         if (line >= self.ed.buf.lineCount()) {
             // vim's marker for "past the end of the buffer".
             try pad.append(self.alloc, '~');
-            try padTo(self.alloc, &pad, 1, b.cols);
-            try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_dim, bg_buffer);
+            try padTo(self.alloc, &pad, 1, cols);
+            try writeAt(batch, self.buffer_layer, r, gutter, pad.items, fg_dim, bg_buffer);
             return;
         }
 
@@ -1049,10 +1105,10 @@ pub const Ui = struct {
             if (h.ready() and self.renderRowSpans(batch, r, line, text)) return;
         }
 
-        const visible = sliceCols(text, self.left_col, b.cols);
+        const visible = sliceCols(text, self.left_col, cols);
         try pad.appendSlice(self.alloc, visible);
-        try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), b.cols);
-        try writeAt(batch, self.buffer_layer, r, 0, pad.items, fg_text, bg_buffer);
+        try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), cols);
+        try writeAt(batch, self.buffer_layer, r, gutter, pad.items, fg_text, bg_buffer);
     }
 
     /// Paints buffer row `r` (buffer line `line`, whole text `text`) as
@@ -1081,22 +1137,25 @@ pub const Ui = struct {
         text: []const u8,
         spans: []const syntax.Span,
     ) !void {
-        const cols = self.buffer_bounds.cols;
+        const cols = self.textCols();
         const left = self.left_col;
+        // Text starts after the line-number gutter (zero when it is off).
+        const gutter = self.gutterWidth();
 
         const visible = sliceCols(text, left, cols);
         if (visible.len == 0) {
             // Line is entirely scrolled off to the left, or empty.
-            try self.writeSpaces(batch, r, 0, cols);
+            try self.writeSpaces(batch, r, gutter, cols);
             return;
         }
         const vis_start_bo: usize = @intFromPtr(visible.ptr) - @intFromPtr(text.ptr);
         const vis_start_dc = displayColOfByte(text, vis_start_bo);
 
         // A double-width char straddling the left edge is dropped by
-        // `sliceCols`; fill the gap it leaves so the row starts at col 0.
+        // `sliceCols`; fill the gap it leaves so the text starts flush
+        // against the gutter.
         if (vis_start_dc > left) {
-            try self.writeSpaces(batch, r, 0, vis_start_dc - left);
+            try self.writeSpaces(batch, r, gutter, vis_start_dc - left);
         }
 
         var run_buf: std.ArrayList(u8) = .empty;
@@ -1129,7 +1188,7 @@ pub const Ui = struct {
 
         // Pad the rest of the row.
         if (dc < left + cols) {
-            try self.writeSpaces(batch, r, dc - left, left + cols - dc);
+            try self.writeSpaces(batch, r, gutter + dc - left, left + cols - dc);
         }
     }
 
@@ -1142,7 +1201,8 @@ pub const Ui = struct {
         color: ?Color,
     ) !void {
         if (bytes.len == 0 or start_dc < self.left_col) return;
-        try writeAt(batch, self.buffer_layer, r, start_dc - self.left_col, bytes, color orelse fg_text, bg_buffer);
+        const col = self.gutterWidth() + start_dc - self.left_col;
+        try writeAt(batch, self.buffer_layer, r, col, bytes, color orelse fg_text, bg_buffer);
     }
 
     fn writeSpaces(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize, col: usize, n: usize) !void {
@@ -1163,8 +1223,9 @@ pub const Ui = struct {
         if (pos.line >= self.top_line + b.rows) self.top_line = pos.line - b.rows + 1;
 
         const col = self.cursorDisplayCol() catch return;
+        const cols = self.textCols();
         if (col < self.left_col) self.left_col = col;
-        if (col >= self.left_col + b.cols) self.left_col = col - b.cols + 1;
+        if (cols > 0 and col >= self.left_col + cols) self.left_col = col - cols + 1;
     }
 
     /// Applies a host-driven scroll of the buffer pane (wheel or thumb
@@ -1392,6 +1453,61 @@ pub fn planBufferRender(s: BufferRenderState) BufferRender {
         .exposed_lo = if (d > 0) s.rows - shift else 0,
         .exposed_hi = if (d > 0) s.rows else shift,
     } };
+}
+
+/// Cells the buffer-pane line-number gutter occupies for a file of
+/// `line_count` lines shown in `mode`: the widest number's digit count,
+/// floored at 3, plus one separator space. Zero when the gutter is off.
+pub fn gutterWidthFor(mode: editor.LineNumbers, line_count: usize) usize {
+    if (mode == .off) return 0;
+    var n = line_count;
+    var digits: usize = 1;
+    while (n >= 10) : (n /= 10) digits += 1;
+    return @max(3, digits) + 1;
+}
+
+/// The text of one gutter cell, `width` display cells wide (a
+/// `gutterWidthFor` result), for buffer line `line` (0-based) with the
+/// caret on `cursor_line`. `past_end` -- the screen row is below the last
+/// buffer line -- gives an all-blank cell, like vim leaves beside its
+/// `~` markers. The number is right-aligned in the leading `width - 1`
+/// cells with the last cell a blank separator; in `.relative` mode the
+/// caret's own line still shows its absolute number. Written into `buf`
+/// (which must be at least `width` bytes) and returned as a slice, so
+/// this needs no allocator.
+pub fn gutterCellText(
+    buf: []u8,
+    mode: editor.LineNumbers,
+    width: usize,
+    line: usize,
+    cursor_line: usize,
+    past_end: bool,
+) []const u8 {
+    if (mode == .off or width == 0) return buf[0..0];
+    @memset(buf[0..width], ' ');
+    if (past_end) return buf[0..width];
+
+    const value: usize = switch (mode) {
+        .off => unreachable,
+        .absolute => line + 1,
+        .relative => if (line == cursor_line)
+            line + 1
+        else if (line > cursor_line)
+            line - cursor_line
+        else
+            cursor_line - line,
+    };
+
+    var num: [24]u8 = undefined;
+    const shown = std.fmt.bufPrint(&num, "{d}", .{value}) catch return buf[0..width];
+
+    // Right-align in the digit field (`width - 1`); the trailing cell
+    // stays the blank the memset left. A number wider than the field
+    // (a min-width gutter over a huge file) is clamped to what fits.
+    const digits = width - 1;
+    const n = @min(shown.len, digits);
+    @memcpy(buf[digits - n ..][0..n], shown[shown.len - n ..]);
+    return buf[0..width];
 }
 
 /// Pads `line` with spaces from `width` display cells out to `target`.
