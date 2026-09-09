@@ -748,7 +748,7 @@ pub const ResourceManager = struct {
         file_path: []const u8,
     ) !*ManagedTexture {
         std.log.info("Loading image '{s}' from '{s}'\n", .{ name, file_path });
-        const nt_file_path = try self.alloc.dupeZ(u8, file_path);
+        const nt_file_path = try std.mem.concatWithSentinel(self.alloc, u8, &.{file_path}, 0);
         defer self.alloc.free(nt_file_path);
 
         var image = try stbi.Image.loadFromFile(nt_file_path, 4);

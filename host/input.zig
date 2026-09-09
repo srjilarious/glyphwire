@@ -77,9 +77,9 @@ pub const KeyInput = struct {
 
         var any_pressed = false;
         const ctrl_held = kb.ctrl();
-        const fields = @typeInfo(app_mod.Key).@"enum".fields;
-        inline for (fields) |field| {
-            const key = @field(app_mod.Key, field.name);
+        const field_names = @typeInfo(app_mod.Key).@"enum".field_names;
+        inline for (field_names) |field_name| {
+            const key = @field(app_mod.Key, field_name);
             const skip_static = switch (key) {
                 // Forwarded by reportModifier above, not per physical key.
                 .left_control, .right_control, .left_alt, .right_alt, .left_shift, .right_shift, .left_super, .right_super => true,
@@ -100,12 +100,12 @@ pub const KeyInput = struct {
                 // Consumed elsewhere; don't forward it.
             } else if (kb.pressed(key)) {
                 any_pressed = true;
-                self.app.server.reportKey(self.app.alloc, field.name, true) catch |err| {
-                    std.log.err("reportKey({s}, true) failed: {t}", .{ field.name, err });
+                self.app.server.reportKey(self.app.alloc, field_name, true) catch |err| {
+                    std.log.err("reportKey({s}, true) failed: {t}", .{ field_name, err });
                 };
             } else if (kb.released(key)) {
-                self.app.server.reportKey(self.app.alloc, field.name, false) catch |err| {
-                    std.log.err("reportKey({s}, false) failed: {t}", .{ field.name, err });
+                self.app.server.reportKey(self.app.alloc, field_name, false) catch |err| {
+                    std.log.err("reportKey({s}, false) failed: {t}", .{ field_name, err });
                 };
             }
         }
@@ -178,18 +178,18 @@ pub const KeyInput = struct {
             break :blk server.ctx.root.view_scroll;
         };
 
-        const fields = @typeInfo(app_mod.MouseButton).@"enum".fields;
-        inline for (fields) |field| {
-            const btn = @field(app_mod.MouseButton, field.name);
+        const field_names = @typeInfo(app_mod.MouseButton).@"enum".field_names;
+        inline for (field_names) |field_name| {
+            const btn = @field(app_mod.MouseButton, field_name);
             const is_left = btn == .left;
             if (!(skip_left and is_left)) {
                 if (eng.inputs.mouse.pressed(btn)) {
-                    server.reportMouseButton(self.app.alloc, field.name, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
-                        std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field.name, err });
+                    server.reportMouseButton(self.app.alloc, field_name, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
+                        std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field_name, err });
                     };
                 } else if (eng.inputs.mouse.released(btn)) {
-                    server.reportMouseButton(self.app.alloc, field.name, false, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
-                        std.log.err("reportMouseButton({s}, false) failed: {t}", .{ field.name, err });
+                    server.reportMouseButton(self.app.alloc, field_name, false, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
+                        std.log.err("reportMouseButton({s}, false) failed: {t}", .{ field_name, err });
                     };
                 }
             }

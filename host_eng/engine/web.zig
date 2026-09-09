@@ -18,7 +18,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     _ = ret_addr;
 
     var buf: [1024]u8 = undefined;
-    const error_msg: [:0]u8 = std.fmt.bufPrintZ(&buf, "PANIC! {s}", .{msg}) catch unreachable;
+    const error_msg: [:0]u8 = std.fmt.bufPrintSentinel(&buf, "PANIC! {s}", .{msg}, 0) catch unreachable;
     emscripten_err(error_msg.ptr);
 
     while (true) {
@@ -38,7 +38,7 @@ pub fn log(
     const prefix = level_txt ++ prefix2;
 
     var buf: [1024]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(buf[0 .. buf.len - 1], prefix ++ format, args) catch |err| {
+    const msg = std.fmt.bufPrintSentinel(buf[0 .. buf.len - 1], prefix ++ format, args, 0) catch |err| {
         switch (err) {
             error.NoSpaceLeft => {
                 emscripten_console_error("log message too long, skipped.");

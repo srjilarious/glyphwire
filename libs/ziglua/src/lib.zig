@@ -128,12 +128,12 @@ pub const DebugInfo51 = struct {
         L: bool = false,
 
         fn toString(options: Options) [10:0]u8 {
-            var str = [_:0]u8{0} ** 10;
+            var str = std.mem.zeroes([10:0]u8);
             var index: u8 = 0;
 
-            inline for (std.meta.fields(Options)) |field| {
-                if (@field(options, field.name)) {
-                    str[index] = field.name[0];
+            inline for (@typeInfo(Options).@"struct".field_names) |field_name| {
+                if (@field(options, field_name)) {
+                    str[index] = field_name[0];
                     index += 1;
                 }
             }
@@ -180,12 +180,12 @@ const DebugInfo52 = struct {
         L: bool = false,
 
         fn toString(options: Options) [10:0]u8 {
-            var str = [_:0]u8{0} ** 10;
+            var str = std.mem.zeroes([10:0]u8);
             var index: u8 = 0;
 
-            inline for (std.meta.fields(Options)) |field| {
-                if (@field(options, field.name)) {
-                    str[index] = field.name[0];
+            inline for (@typeInfo(Options).@"struct".field_names) |field_name| {
+                if (@field(options, field_name)) {
+                    str[index] = field_name[0];
                     index += 1;
                 }
             }
@@ -237,12 +237,12 @@ const DebugInfo54 = struct {
         L: bool = false,
 
         fn toString(options: Options) [10:0]u8 {
-            var str = [_:0]u8{0} ** 10;
+            var str = std.mem.zeroes([10:0]u8);
             var index: u8 = 0;
 
-            inline for (std.meta.fields(Options)) |field| {
-                if (@field(options, field.name)) {
-                    str[index] = field.name[0];
+            inline for (@typeInfo(Options).@"struct".field_names) |field_name| {
+                if (@field(options, field_name)) {
+                    str[index] = field_name[0];
                     index += 1;
                 }
             }
@@ -279,12 +279,12 @@ pub const DebugInfoLuau = struct {
         L: bool = false,
 
         fn toString(options: Options) [10:0]u8 {
-            var str = [_:0]u8{0} ** 10;
+            var str = std.mem.zeroes([10:0]u8);
             var index: u8 = 0;
 
-            inline for (std.meta.fields(Options)) |field| {
-                if (@field(options, field.name)) {
-                    str[index] = field.name[0];
+            inline for (@typeInfo(Options).@"struct".field_names) |field_name| {
+                if (@field(options, field_name)) {
+                    str[index] = field_name[0];
                     index += 1;
                 }
             }
@@ -3372,9 +3372,9 @@ pub const Lua = opaque {
                     .unsigned => "u",
                     .signed => "i",
                 };
-                const output = std.fmt.bufPrintZ(&buf, "integer argument doesn't fit inside {s}{d} range [{d}, {d}]", .{
+                const output = std.fmt.bufPrintSentinel(&buf, "integer argument doesn't fit inside {s}{d} range [{d}, {d}]", .{
                     signedness, info.bits, std.math.minInt(T), std.math.maxInt(T),
-                }) catch unreachable;
+                }, 0) catch unreachable;
                 break :msg output[0..output.len :0].*;
             };
             lua.argError(arg, &error_msg);
@@ -3435,9 +3435,10 @@ pub const Lua = opaque {
             }
         };
 
-        inline for (std.meta.fields(T)) |field| {
-            if (std.mem.eql(u8, field.name, name)) {
-                return @enumFromInt(field.value);
+        const enum_info = @typeInfo(T).@"enum";
+        inline for (enum_info.field_names, enum_info.field_values) |field_name, field_value| {
+            if (std.mem.eql(u8, field_name, name)) {
+                return @enumFromInt(field_value);
             }
         }
 
@@ -5157,7 +5158,9 @@ pub const Buffer = struct {
 
 // Helper functions to make the zlua API easier to use
 
-const Tuple = std.meta.Tuple;
+fn Tuple(comptime types: []const type) type {
+    return @Tuple(types);
+}
 
 fn TypeOfWrap(comptime function: anytype) type {
     const Args = std.meta.ArgsTuple(@TypeOf(function));

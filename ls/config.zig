@@ -103,7 +103,7 @@ pub fn loadFromDir(
         return .{};
     };
     defer alloc.free(src);
-    const src_z = alloc.dupeZ(u8, src) catch return .{};
+    const src_z = std.mem.concatWithSentinel(alloc, u8, &.{src}, 0) catch return .{};
     defer alloc.free(src_z);
 
     var result = load(alloc, src_z);

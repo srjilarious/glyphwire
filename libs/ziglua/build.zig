@@ -89,11 +89,12 @@ pub fn build(b: *Build) void {
         // Need to figure out how to access TranslateC step from top-level build.zig.
         switch (target.result.os.tag) {
             .emscripten => {
-                if (b.sysroot == null) {
-                    @panic("Pass '--sysroot \"~/.cache/emscripten/sysroot\"'");
-                }
+                // Zig 0.17 dropped --sysroot access from build.zig; take the
+                // emscripten sysroot from the EMSCRIPTEN_SYSROOT env var.
+                const sysroot = b.graph.environ_map.get("EMSCRIPTEN_SYSROOT") orelse
+                    @panic("Set EMSCRIPTEN_SYSROOT, e.g. ~/.cache/emscripten/sysroot");
 
-                const cache_include = std.fs.path.join(b.allocator, &.{ b.sysroot.?, "include" }) catch @panic("Out of memory");
+                const cache_include = std.fs.path.join(b.allocator, &.{ sysroot, "include" }) catch @panic("Out of memory");
                 defer b.allocator.free(cache_include);
 
                 // TODO: Add this check back in.
@@ -161,7 +162,7 @@ pub fn build(b: *Build) void {
 
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| run_cmd.addArgs(args);
+        run_cmd.addPassthruArgs();
 
         const run_step = b.step(b.fmt("run-example-{s}", .{example[0]}), b.fmt("Run {s} example", .{example[0]}));
         run_step.dependOn(&run_cmd.step);

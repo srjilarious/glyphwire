@@ -26,6 +26,20 @@
 const std = @import("std");
 const core = @import("core.zig");
 
+/// Zig 0.17's `@typeInfo(E).@"enum"` exposes members as parallel
+/// `field_names` / `field_values` arrays rather than a slice of structs.
+/// This rebuilds the old `{ name, value }` view the code below relies on.
+const EnumFieldInfo = struct { name: [:0]const u8, value: comptime_int };
+fn enumFields(comptime E: type) []const EnumFieldInfo {
+    const info = @typeInfo(E).@"enum";
+    comptime var out: [info.field_names.len]EnumFieldInfo = undefined;
+    inline for (info.field_names, info.field_values, 0..) |n, v, i| {
+        out[i] = .{ .name = n, .value = v };
+    }
+    const frozen = out;
+    return &frozen;
+}
+
 /// Cap on the per-span sample ring kept for the p95 estimate within one
 /// window. A window longer than this many frames gets p95 over its most
 /// recent `p95_cap` samples.
@@ -47,8 +61,8 @@ fn durNs(d: std.Io.Duration) u64 {
 /// carries no special meaning here -- `frameBoundary` returns the wall
 /// period since its previous call and the caller records it.
 pub fn Profiler(comptime Span: type, comptime Counter: type) type {
-    const span_fields = @typeInfo(Span).@"enum".fields;
-    const counter_fields = @typeInfo(Counter).@"enum".fields;
+    const span_fields = enumFields(Span);
+    const counter_fields = enumFields(Counter);
 
     if (span_fields.len > core.profile_max_phases)
         @compileError("profiler Span has more members than core.ProfileSnapshot.phases holds");

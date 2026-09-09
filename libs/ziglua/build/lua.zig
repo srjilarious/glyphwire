@@ -69,7 +69,7 @@ pub fn configure(
         },
 
         // Enable api check
-        if (optimize == .Debug) "-DLUA_USE_APICHECK" else "",
+        if (optimize == .debug) "-DLUA_USE_APICHECK" else "",
 
         // Build as DLL for windows if shared
         if (target.result.os.tag == .windows and shared) "-DLUA_BUILD_AS_DLL" else "",
@@ -139,9 +139,9 @@ pub fn emCompileStep(b: *Build, filename: Build.LazyPath, optimize: std.builtin.
     const emcc = b.addSystemCommand(&[_][]const u8{emcc_exe_path});
     emcc.setName("emcc"); // hide emcc path
     emcc.addArg("-c");
-    if (optimize == .ReleaseSmall) {
+    if (optimize == .small) {
         emcc.addArg("-Oz");
-    } else if (optimize == .ReleaseFast or optimize == .ReleaseSafe) {
+    } else if (optimize == .fast or optimize == .safe) {
         emcc.addArg("-O3");
     }
     emcc.addFileArg(filename);
@@ -154,6 +154,7 @@ pub fn emCompileStep(b: *Build, filename: Build.LazyPath, optimize: std.builtin.
         .dependency => filename.dependency.sub_path,
         .src_path => filename.src_path.sub_path,
         .cwd_relative => filename.cwd_relative,
+        .relative => filename.relative.sub_path,
         .generated => filename.generated.sub_path,
     };
 

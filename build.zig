@@ -166,7 +166,7 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(tests_exe);
     run_tests.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_tests.addArgs(args);
+    run_tests.addPassthruArgs();
 
     const test_step = b.step("tests", "Run unit tests");
     test_step.dependOn(&run_tests.step);
@@ -184,7 +184,7 @@ pub fn build(b: *std.Build) void {
 
     const run_server = b.addRunArtifact(server_exe);
     run_server.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_server.addArgs(args);
+    run_server.addPassthruArgs();
 
     const server_step = b.step("server", "Run the glyphwire server");
     server_step.dependOn(&run_server.step);
@@ -206,8 +206,10 @@ pub fn build(b: *std.Build) void {
 
     const run_shell = b.addRunArtifact(shell_exe);
     run_shell.step.dependOn(b.getInstallStep());
-    run_shell.setEnvironmentVariable("GLYPHWIRE_BIN_DIR", b.getInstallPath(.bin, ""));
-    if (b.args) |args| run_shell.addArgs(args);
+    // Zig 0.17 removed b.getInstallPath; the run step's cwd is the build root
+    // and it depends on the install step, so the default prefix's bin dir works.
+    run_shell.setEnvironmentVariable("GLYPHWIRE_BIN_DIR", b.pathJoin(&.{ "zig-out", "bin" }));
+    run_shell.addPassthruArgs();
 
     const shell_step = b.step("gw-shell", "Run the glyphwire shell launcher");
     shell_step.dependOn(&run_shell.step);
@@ -225,7 +227,7 @@ pub fn build(b: *std.Build) void {
 
     const run_client = b.addRunArtifact(client_exe);
     run_client.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_client.addArgs(args);
+    run_client.addPassthruArgs();
 
     const client_step = b.step("client", "Run the glyphwire test client");
     client_step.dependOn(&run_client.step);
@@ -243,7 +245,7 @@ pub fn build(b: *std.Build) void {
 
     const run_probe = b.addRunArtifact(probe_exe);
     run_probe.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_probe.addArgs(args);
+    run_probe.addPassthruArgs();
 
     const probe_step = b.step("probe", "Run glyphwire-probe against GLYPHWIRE_SOCK");
     probe_step.dependOn(&run_probe.step);
@@ -261,7 +263,7 @@ pub fn build(b: *std.Build) void {
 
     const run_demo = b.addRunArtifact(demo_exe);
     run_demo.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_demo.addArgs(args);
+    run_demo.addPassthruArgs();
 
     const demo_step = b.step("demo", "Run the glyphwire styled-text demo client");
     demo_step.dependOn(&run_demo.step);
@@ -279,7 +281,7 @@ pub fn build(b: *std.Build) void {
 
     const run_table_demo = b.addRunArtifact(table_demo_exe);
     run_table_demo.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_table_demo.addArgs(args);
+    run_table_demo.addPassthruArgs();
 
     const table_demo_step = b.step("table_demo", "Run the glyphwire table widget demo client");
     table_demo_step.dependOn(&run_table_demo.step);
@@ -298,9 +300,9 @@ pub fn build(b: *std.Build) void {
 
     const run_host = b.addRunArtifact(host_exe);
     run_host.step.dependOn(b.getInstallStep());
-    run_host.setEnvironmentVariable("GLYPHWIRE_ASSET_DIR", b.getInstallPath(.{ .custom = "share/glyphwire" }, "assets"));
-    run_host.setEnvironmentVariable("GLYPHWIRE_BIN_DIR", b.getInstallPath(.bin, ""));
-    if (b.args) |args| run_host.addArgs(args);
+    run_host.setEnvironmentVariable("GLYPHWIRE_ASSET_DIR", b.pathJoin(&.{ "zig-out", "share", "glyphwire", "assets" }));
+    run_host.setEnvironmentVariable("GLYPHWIRE_BIN_DIR", b.pathJoin(&.{ "zig-out", "bin" }));
+    run_host.addPassthruArgs();
 
     const host_step = b.step("glyphwire", "Run the SDL3-windowed glyphwire host (spawns gw-shell)");
     host_step.dependOn(&run_host.step);
@@ -324,7 +326,7 @@ pub fn build(b: *std.Build) void {
 
     const run_ls = b.addRunArtifact(ls_exe);
     run_ls.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_ls.addArgs(args);
+    run_ls.addPassthruArgs();
 
     const ls_step = b.step("gw-ls", "Run the glyphwire ls client (directory listing over the wire)");
     ls_step.dependOn(&run_ls.step);
@@ -353,9 +355,9 @@ pub fn build(b: *std.Build) void {
     // `run_host` points the host at the installed asset dir.
     run_zoe.setEnvironmentVariable(
         "GLYPHWIRE_ZOE_GRAMMAR_DIR",
-        b.getInstallPath(.{ .custom = "share/glyphwire" }, "grammars"),
+        b.pathJoin(&.{ "zig-out", "share", "glyphwire", "grammars" }),
     );
-    if (b.args) |args| run_zoe.addArgs(args);
+    run_zoe.addPassthruArgs();
 
     const zoe_step = b.step("zoe", "Run the zoe editor (headless core driver for now -- see docs/investigations/zoe-editor.md)");
     zoe_step.dependOn(&run_zoe.step);
@@ -374,7 +376,7 @@ pub fn build(b: *std.Build) void {
 
     const run_view = b.addRunArtifact(view_exe);
     run_view.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_view.addArgs(args);
+    run_view.addPassthruArgs();
 
     const view_step = b.step("gw-view", "Run the glyphwire image-viewer client (gw-view <image.png>)");
     view_step.dependOn(&run_view.step);
@@ -392,7 +394,7 @@ pub fn build(b: *std.Build) void {
 
     const run_notify = b.addRunArtifact(notify_exe);
     run_notify.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_notify.addArgs(args);
+    run_notify.addPassthruArgs();
 
     const notify_step = b.step("notify", "Run the glyphwire notification client (glyphwire-notify <message>)");
     notify_step.dependOn(&run_notify.step);
@@ -423,6 +425,12 @@ pub fn build(b: *std.Build) void {
 const BundledGrammar = struct {
     name: []const u8,
     dep: []const u8,
+    /// When set, the grammar sources are vendored in-tree at this path
+    /// (relative to the build root) instead of fetched as `dep`. Used for
+    /// grammars whose upstream ships a `build.zig` that does not build on
+    /// current Zig (tree-sitter-c), so listing it as a package dependency
+    /// would fail at configure time even though we only read its sources.
+    vendored: ?[]const u8 = null,
     subdir: []const u8 = "",
     scanner: bool = false,
     /// The grammar dir also ships `queries/injections.scm`, to install
@@ -433,7 +441,7 @@ const BundledGrammar = struct {
 const bundled_grammars = [_]BundledGrammar{
     .{ .name = "zig", .dep = "grammar_zig", .injections = true },
     .{ .name = "json", .dep = "grammar_json" },
-    .{ .name = "c", .dep = "grammar_c" },
+    .{ .name = "c", .dep = "grammar_c", .vendored = "vendor/grammars/c" },
     .{ .name = "python", .dep = "grammar_python", .scanner = true },
     .{ .name = "toml", .dep = "grammar_toml", .scanner = true },
     // Markdown ships as two grammars: the block grammar parses the
@@ -469,7 +477,20 @@ fn installGrammars(
     install_dir: []const u8,
 ) void {
     for (bundled_grammars) |g| {
-        const dep = b.lazyDependency(g.dep, .{}) orelse continue;
+        // `srcPath` yields a LazyPath to a file inside the grammar, from
+        // either the vendored in-tree copy or the fetched dependency.
+        const Ctx = struct {
+            b: *std.Build,
+            dep: ?*std.Build.Dependency,
+            g: BundledGrammar,
+            fn srcPath(ctx: @This(), rel: []const u8) std.Build.LazyPath {
+                const sub = ctx.b.fmt("{s}{s}", .{ ctx.g.subdir, rel });
+                if (ctx.g.vendored) |base| return ctx.b.path(ctx.b.fmt("{s}/{s}", .{ base, sub }));
+                return ctx.dep.?.path(sub);
+            }
+        };
+        const dep: ?*std.Build.Dependency = if (g.vendored != null) null else (b.lazyDependency(g.dep, .{}) orelse continue);
+        const ctx = Ctx{ .b = b, .dep = dep, .g = g };
 
         const lib = b.addLibrary(.{
             .name = b.fmt("tree-sitter-{s}", .{g.name}),
@@ -481,19 +502,19 @@ fn installGrammars(
             }),
         });
         lib.root_module.addCSourceFile(.{
-            .file = dep.path(b.fmt("{s}src/parser.c", .{g.subdir})),
+            .file = ctx.srcPath("src/parser.c"),
             .flags = &.{"-std=c11"},
         });
         if (g.scanner) lib.root_module.addCSourceFile(.{
-            .file = dep.path(b.fmt("{s}src/scanner.c", .{g.subdir})),
+            .file = ctx.srcPath("src/scanner.c"),
             .flags = &.{"-std=c11"},
         });
-        lib.root_module.addIncludePath(dep.path(b.fmt("{s}src", .{g.subdir})));
+        lib.root_module.addIncludePath(ctx.srcPath("src"));
 
         const dest: std.Build.InstallDir = .{ .custom = b.fmt("{s}/{s}", .{ install_dir, g.name }) };
         const inst_lib = b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = dest } });
         const inst_scm = b.addInstallFileWithDir(
-            dep.path(b.fmt("{s}queries/highlights.scm", .{g.subdir})),
+            ctx.srcPath("queries/highlights.scm"),
             dest,
             "highlights.scm",
         );
@@ -502,7 +523,7 @@ fn installGrammars(
 
         if (g.injections) {
             const inst_inj = b.addInstallFileWithDir(
-                dep.path(b.fmt("{s}queries/injections.scm", .{g.subdir})),
+                ctx.srcPath("queries/injections.scm"),
                 dest,
                 "injections.scm",
             );

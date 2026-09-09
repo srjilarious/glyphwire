@@ -726,7 +726,7 @@ pub const FontAtlas = struct {
         chars: []const u8,
         alloc: std.mem.Allocator,
     ) !FontAtlas {
-        const fipz = try alloc.dupeZ(u8, fontImagePath);
+        const fipz = try std.mem.concatWithSentinel(alloc, u8, &.{fontImagePath}, 0);
         defer alloc.free(fipz);
 
         var image = try stbi.Image.loadFromFile(fipz, 0);

@@ -681,7 +681,7 @@ pub fn stringWidth(text: []const u8) usize {
 pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 
 pub const Cell = struct {
-    grapheme_bytes: [grapheme_inline_len]u8 = [_]u8{0} ** grapheme_inline_len,
+    grapheme_bytes: [grapheme_inline_len]u8 = @splat(0),
     grapheme_len: u8 = 0,
     wide: CellWidth = .narrow,
     style: Style = default_style,
@@ -4899,8 +4899,8 @@ pub const ProfileSnapshot = struct {
     skips_per_sec: f32 = 0,
     phase_count: u8 = 0,
     counter_count: u8 = 0,
-    phases: [profile_max_phases]ProfilePhase = .{ProfilePhase{}} ** profile_max_phases,
-    counters: [profile_max_counters]ProfileCount = .{ProfileCount{}} ** profile_max_counters,
+    phases: [profile_max_phases]ProfilePhase = @splat(.{}),
+    counters: [profile_max_counters]ProfileCount = @splat(.{}),
 
     /// The populated phase / counter slices -- what a serializer or a
     /// formatter should walk (the arrays are fixed-size padding).

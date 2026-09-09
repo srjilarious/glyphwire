@@ -2,8 +2,8 @@ const std = @import("std");
 const sdl = @import("sdl3");
 const core = @import("core.zig");
 
-const NumKeys = @typeInfo(Key).@"enum".fields.len;
-const NumMouseButtons = @typeInfo(MouseButton).@"enum".fields.len;
+const NumKeys = @typeInfo(Key).@"enum".field_names.len;
+const NumMouseButtons = @typeInfo(MouseButton).@"enum".field_names.len;
 
 /// Number of bytes of `bytes[0..n]` that end on a UTF-8 sequence
 /// boundary: `n` itself unless it lands mid-sequence, in which case the
@@ -337,8 +337,8 @@ fn mapMouseButton(button: u8) ?MouseButton {
 }
 
 pub const Keyboard = struct {
-    curr: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).initEmpty(),
-    prev: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).initEmpty(),
+    curr: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
+    prev: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
     mods: sdl.SDL_Keymod = 0,
     text_buf: FixedBuffer(1024) = .{},
 
@@ -466,7 +466,7 @@ pub const Keyboard = struct {
     /// down forever. `prev` is cleared alongside `curr` so the resync
     /// doesn't read as a `released` edge on the next tick.
     pub fn clear(self: *Keyboard) void {
-        self.curr = std.StaticBitSet(NumKeys).initEmpty();
+        self.curr = std.StaticBitSet(NumKeys).empty;
         self.prev = self.curr;
         self.mods = 0;
         self.text_buf.clear();
@@ -475,8 +475,8 @@ pub const Keyboard = struct {
 };
 
 pub const Mouse = struct {
-    curr: std.StaticBitSet(NumMouseButtons) = std.StaticBitSet(NumMouseButtons).initEmpty(),
-    prev: std.StaticBitSet(NumMouseButtons) = std.StaticBitSet(NumMouseButtons).initEmpty(),
+    curr: std.StaticBitSet(NumMouseButtons) = std.StaticBitSet(NumMouseButtons).empty,
+    prev: std.StaticBitSet(NumMouseButtons) = std.StaticBitSet(NumMouseButtons).empty,
     raw_pos_value: core.Vec2F = .{ .x = 0, .y = 0 },
     logical_pos: core.Vec2F = .{ .x = -1, .y = -1 },
     scroll_delta: core.Vec2F = .{ .x = 0, .y = 0 },
@@ -525,7 +525,7 @@ pub const Mouse = struct {
     /// alone: it stays wherever the pointer last was, which is still true
     /// when focus comes back.
     pub fn clear(self: *Mouse) void {
-        self.curr = std.StaticBitSet(NumMouseButtons).initEmpty();
+        self.curr = std.StaticBitSet(NumMouseButtons).empty;
         self.prev = self.curr;
         self.scroll_delta = .{ .x = 0, .y = 0 };
     }

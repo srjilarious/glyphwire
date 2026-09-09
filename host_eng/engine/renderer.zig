@@ -161,7 +161,7 @@ pub fn Renderer(opts: RendererOptions) type {
                         },
                     }
                 } else {
-                    if (builtin.mode == .Debug) {
+                    if (builtin.mode == .debug) {
                         std.log.warn("No default font provided. Text rendering will not work until a FontAtlas is set.", .{});
                     }
                 }

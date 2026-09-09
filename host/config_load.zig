@@ -32,7 +32,7 @@ fn luaStrField(lua: *Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[:0]cons
     defer lua.pop(1);
     if (!lua.isString(-1)) return null;
     const s = lua.toString(-1) catch return null;
-    return arena.dupeZ(u8, s) catch null;
+    return std.mem.concatWithSentinel(arena, u8, &.{s}, 0) catch null;
 }
 
 /// Like `luaStrField`, for a numeric field.
@@ -122,7 +122,7 @@ pub fn loadConfig(
         return cfg;
     };
     defer gpa.free(src);
-    const src_z = gpa.dupeZ(u8, src) catch return cfg;
+    const src_z = std.mem.concatWithSentinel(gpa, u8, &.{src}, 0) catch return cfg;
     defer gpa.free(src_z);
 
     const lua = Lua.init(gpa) catch |err| {

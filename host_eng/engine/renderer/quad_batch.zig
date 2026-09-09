@@ -74,7 +74,7 @@ pub fn QuadBatch(comptime layout: BatchLayout) type {
         currIdx: usize = 0,
         currNumQuads: usize = 0,
 
-        mvpArr: [16]f32 = .{0} ** 16,
+        mvpArr: [16]f32 = @splat(0),
         texture: if (hasTex) ?*const Texture else void = if (hasTex) null else {},
         begun: bool = false,
 

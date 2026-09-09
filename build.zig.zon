@@ -1,16 +1,16 @@
 .{
     .name = .glyphwire,
-    .version = "0.1.0",
+    .version = "0.5.0",
     .fingerprint = 0x13e00fabb58419a6,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.1857+3c46da14d",
     .dependencies = .{
         .testz = .{
-            .url = "https://github.com/srjilarious/testz/archive/refs/tags/v1.4.0.tar.gz",
-            .hash = "testz-1.4.0-abaPydnMAQAJayUfCw4dw1MdiaiOS_A_iJGm1qES0bQo",
+            .url = "https://github.com/srjilarious/testz/archive/refs/tags/v1.5.0.tar.gz",
+            .hash = "testz-1.5.0-abaPyQ7NAQBYXILEqHI3PWLZTK0MNb6yXp0foUmJAdT9",
         },
         .zargunaught = .{
-            .url = "https://github.com/srjilarious/zargunaught/archive/refs/tags/v1.2.1.tar.gz",
-            .hash = "zargunaught-1.2.1-aoeNIzTpAAArdAo7Hjp1FfdI6BYKPlZMRL2YRP6kc2UN",
+            .url = "https://github.com/srjilarious/zargunaught/archive/refs/tags/v1.3.0.tar.gz",
+            .hash = "zargunaught-1.3.0-aoeNI6LpAABBxLqvvp6G4e9Mx-xDG3QfJ9aJ4WEkA54g",
         },
         // Vendored Lua 5.3 so glyphwire-shell can embed a Lua state for
         // ~/.config/glyphwire/shell.conf without pulling in the whole
@@ -29,16 +29,16 @@
             .hash = "sdl-1.0.2+3.4.14-i4QD0SawqQBSVdA6eHm0lX16h_Jwf1vQXxI_lO0-09sY",
         },
         .zopengl = .{
-            .url = "git+https://github.com/srjilarious/zopengl.git#7744dae29da953544841cfc370b88fa6ab95a1bc",
-            .hash = "zopengl-0.6.0-dev-5-tnz3-mDgC4jOSi7_5NAxYWY99_SRa5do55-5ivD097",
+            .url = "git+https://github.com/srjilarious/zopengl.git#cdb08b0060f6c199acc9f2e533a9545f4878d2c9",
+            .hash = "zopengl-0.6.0-dev-5-tnz9ynDgBHZidal8DWXWLsr8ESvSbzdmHrUuEABDwI",
         },
         .zmath = .{
-            .url = "git+https://github.com/zig-gamedev/zmath.git#3a5955b2b72cd081563fbb084eff05bffd1e3fbb",
-            .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
+            .url = "git+https://github.com/srjilarious/zmath.git#bab79674ed9b15014c319f29aa37996f878f6db2",
+            .hash = "zmath-0.11.0-dev-wjwivSQuAwDgT9ShRl3HsHon9VccYgojbk7lz0qsYPUs",
         },
         .zstbi = .{
-            .url = "git+https://github.com/srjilarious/zstbi.git#89d30d105bdecd0494324ee9e6197963a9fd769b",
-            .hash = "zstbi-0.11.0-dev-L0Ea_9-XBwDgdQ5UuN7doMZiUzR4fwyzqFAxdmPjXeTF",
+            .url = "git+https://github.com/srjilarious/zstbi.git#820a20adb1a07c3d050d2fc52b5dedb90b3bf2e8",
+            .hash = "zstbi-0.11.0-dev-L0Ea_1iYBwBAN5Adaw13bU1LwWhTEMcmX9q9cbWzwydF",
         },
         // zoe's syntax highlighting. `tree_sitter` is the Zig binding plus
         // the vendored libtree-sitter C runtime; it's linked into `zoe`
@@ -53,8 +53,8 @@
         // runs. Adding a language later is a grammar dir on disk, not a
         // dependency here.
         .tree_sitter = .{
-            .url = "git+https://github.com/srjilarious/zig-tree-sitter#755b72d810586ffaac9a24b4efdd9773afd5d2ef",
-            .hash = "tree_sitter-0.25.0-8heIfwOaAQDsD5fXhxKpYX8hRmvnWNRQOH8uXjc46vGz",
+            .url = "git+https://github.com/srjilarious/zig-tree-sitter#94292e3fb9817b5a023d4dd99c13ed66139031a4",
+            .hash = "tree_sitter-0.26.0-8heIf1jzDACYun1SYfDfljvDEqUHpselif-ozckvjarH",
         },
         .grammar_json = .{
             .url = "git+https://github.com/tree-sitter/tree-sitter-json.git#254c42a6476413b776221e03982ac8ae159eeb72",
@@ -62,13 +62,8 @@
             .lazy = true,
         },
         .grammar_zig = .{
-            .url = "git+https://github.com/srjilarious/tree-sitter-zig.git#a92bb1fc6b6648fc0dfd38aecfe23ed4ae016e6a",
-            .hash = "tree_sitter_zig-1.1.3-C0B1jKN8XABxM57P1YKyaMTUYE9chnuq23jBzBQR0OI7",
-            .lazy = true,
-        },
-        .grammar_c = .{
-            .url = "git+https://github.com/tree-sitter/tree-sitter-c.git#b780e47fc780ddc8da13afa35a3f4ed5c157823d",
-            .hash = "tree_sitter_c-0.24.2-y5boS-ptQADHoCoVfjGT_nFtFQ5LbomIkW0fxG3_cmdB",
+            .url = "git+https://github.com/srjilarious/tree-sitter-zig.git#66e374d518616f18ee9e0ea71b0ec3d120c16e61",
+            .hash = "tree_sitter_zig-1.1.3-C0B1jLd2XACced7oUU76wpfA6DMrYHISwhEJp-7edP2O",
             .lazy = true,
         },
         .grammar_python = .{
@@ -91,6 +86,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor",
         "tests",
         "shell",
         "server",

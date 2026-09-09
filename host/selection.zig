@@ -318,7 +318,7 @@ pub const Selection = struct {
         if (serial == self.clipboard_serial_pushed) return;
         const text = server.clipboardText(self.app.alloc) catch return;
         defer self.app.alloc.free(text);
-        const z = self.app.alloc.dupeZ(u8, text) catch return;
+        const z = std.mem.concatWithSentinel(self.app.alloc, u8, &.{text}, 0) catch return;
         defer self.app.alloc.free(z);
         self.app.window.setClipboardString(z);
         self.clipboard_serial_pushed = serial;

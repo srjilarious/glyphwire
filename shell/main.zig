@@ -243,7 +243,7 @@ fn spawnOwnServer(io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.
 
     try waitForSocketReady(io, socket_path);
 
-    const socket_path_z = try alloc.dupeZ(u8, socket_path);
+    const socket_path_z = try std.mem.concatWithSentinel(alloc, u8, &.{socket_path}, 0);
     if (c.setenv("GLYPHWIRE_SOCK", socket_path_z, 1) != 0) return error.SetEnvFailed;
     if (c.setenv("GLYPHWIRE_CTX", glyphwire.default_context_id, 1) != 0) return error.SetEnvFailed;
     return socket_path;
@@ -2913,7 +2913,7 @@ const Prompt = struct {
             try argv_arrays.append(alloc, arr);
             for (argv, 0..) |a, k| {
                 const exp = self.expandTilde(a) catch a;
-                const z = try alloc.dupeZ(u8, exp);
+                const z = try std.mem.concatWithSentinel(alloc, u8, &.{exp}, 0);
                 if (exp.ptr != a.ptr) alloc.free(exp);
                 try zbufs.append(alloc, z);
                 arr[k] = z.ptr;
@@ -2998,7 +2998,7 @@ const Prompt = struct {
             if (m.len == 1) chosen = m[0];
         }
 
-        const z = try alloc.dupeZ(u8, chosen);
+        const z = try std.mem.concatWithSentinel(alloc, u8, &.{chosen}, 0);
         try zbufs.append(alloc, z);
         return .{
             .fd = r.fd,
@@ -3283,7 +3283,7 @@ const Prompt = struct {
             for (argv_bufs.items) |b| alloc.free(b);
             argv_bufs.deinit(alloc);
         }
-        for (expanded.items) |a| try argv_bufs.append(alloc, try alloc.dupeZ(u8, a));
+        for (expanded.items) |a| try argv_bufs.append(alloc, try std.mem.concatWithSentinel(alloc, u8, &.{a}, 0));
         const argv_z = try alloc.allocSentinel(?[*:0]const u8, argv_bufs.items.len, null);
         defer alloc.free(argv_z);
         for (argv_bufs.items, 0..) |b, i| argv_z[i] = b.ptr;
@@ -4408,9 +4408,9 @@ const Prompt = struct {
 fn hookSetenv(ctx: *anyopaque, name: []const u8, value: []const u8) void {
     const self: *Prompt = @ptrCast(@alignCast(ctx));
     const alloc = self.client.alloc;
-    const name_z = alloc.dupeZ(u8, name) catch return;
+    const name_z = std.mem.concatWithSentinel(alloc, u8, &.{name}, 0) catch return;
     defer alloc.free(name_z);
-    const value_z = alloc.dupeZ(u8, value) catch return;
+    const value_z = std.mem.concatWithSentinel(alloc, u8, &.{value}, 0) catch return;
     defer alloc.free(value_z);
     _ = c.setenv(name_z, value_z, 1);
     self.env.put(name, value) catch {};
@@ -4420,7 +4420,7 @@ fn hookSetenv(ctx: *anyopaque, name: []const u8, value: []const u8) void {
 fn hookUnsetenv(ctx: *anyopaque, name: []const u8) void {
     const self: *Prompt = @ptrCast(@alignCast(ctx));
     const alloc = self.client.alloc;
-    const name_z = alloc.dupeZ(u8, name) catch return;
+    const name_z = std.mem.concatWithSentinel(alloc, u8, &.{name}, 0) catch return;
     defer alloc.free(name_z);
     _ = c.unsetenv(name_z);
     _ = self.env.swapRemove(name);
