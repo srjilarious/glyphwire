@@ -538,3 +538,60 @@ pub fn configOpenActionsRejectsEmptyListTest(_: std.Io, alloc: std.mem.Allocator
     defer res.deinit();
     try testz.expectTrue(res.err != null);
 }
+
+// ─── on{ chdir = { ... } } binding ────────────────────────────────────
+
+pub fn configOnChdirDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "alias('a', 'b')");
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.on.chdir.list, .metadata);
+    try testz.expectEqualStr("gw-ls -lS", res.config.on.chdir.command);
+}
+
+pub fn configReadsOnChdirTableTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc,
+        \\on { chdir = { list = "always", command = "ls -la" } }
+    );
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.on.chdir.list, .always);
+    try testz.expectEqualStr("ls -la", res.config.on.chdir.command);
+}
+
+pub fn configOnChdirListOnlyKeepsDefaultCommandTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "on { chdir = { list = \"off\" } }");
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.on.chdir.list, .off);
+    try testz.expectEqualStr("gw-ls -lS", res.config.on.chdir.command);
+}
+
+pub fn configOnChdirMergesAcrossCallsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc,
+        \\on { chdir = { list = "always" } }
+        \\on { chdir = { command = "eza -l" } }
+    );
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.on.chdir.list, .always);
+    try testz.expectEqualStr("eza -l", res.config.on.chdir.command);
+}
+
+pub fn configOnChdirRejectsUnknownListTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "on { chdir = { list = \"sometimes\" } }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
+}
+
+pub fn configOnEmptyTableIsHarmlessTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "on {}");
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.on.chdir.list, .metadata);
+}

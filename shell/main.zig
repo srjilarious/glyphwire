@@ -846,6 +846,13 @@ const Mark = struct {
     mimetype: ?[]const u8,
 };
 
+/// Where the in-flight directory change came from -- read by
+/// `Prompt.queueChdirListing` to honour `on{ chdir = { list = "metadata" } }`.
+/// `.metadata` is a directory activated in gw-ls output (a click, or
+/// Enter/Space while browsing); `.command` is a typed `cd`, a `zj` jump,
+/// or a script's `sh.chdir`. See `Prompt.chdir_method`.
+const ChdirMethod = enum { command, metadata };
+
 /// The prompt's line-editing state. Tracks where the current line started
 /// and a cursor *offset* into the line -- needed the moment editing can
 /// happen anywhere but the end (ctrl+a/e/u, ctrl+arrow word jumps, plain
@@ -1028,6 +1035,19 @@ const Prompt = struct {
     /// config directory. Borrowed from `script_engine.?.cfg` -- the
     /// engine owns the storage, not this pointer.
     prompt_config: ?*const config.ShellConfig = null,
+
+    /// How the directory change currently being dispatched was
+    /// initiated. `activateSelectionAt` / `runMarkedAction` set it to
+    /// `.metadata` before they submit; `submitLine` resets it to
+    /// `.command` on the way out, so a typed `cd` / `zj` / `sh.chdir`
+    /// always sees `.command`. Read by `queueChdirListing`.
+    chdir_method: ChdirMethod = .command,
+    /// The `on{ chdir }` listing command to run once the line that
+    /// triggered a directory change finishes dispatching, or null. Set by
+    /// `queueChdirListing` after a qualifying change, consumed (and
+    /// cleared) by `submitLine`. Borrows `prompt_config`'s arena-owned
+    /// string -- not freed here.
+    chdir_pending_list: ?[]const u8 = null,
 
     /// Memoised output of the `prompt{ commands = { ... } }` vars for the
     /// current prompt. `writePromptPrefix` clears it (`resetCmdVars`) so
@@ -2410,6 +2430,11 @@ const Prompt = struct {
         defer alloc.free(line);
 
         try self.setLine(line);
+        // Tell `queueChdirListing` this submit came from a gw-ls
+        // activation, so `on{ chdir = { list = "metadata" } }` fires if
+        // the action turns out to be a directory `cd`. `submitLine`
+        // resets it regardless of what the line actually does.
+        self.chdir_method = .metadata;
         try self.submitLine();
     }
 
@@ -2539,6 +2564,8 @@ const Prompt = struct {
         defer alloc.free(line);
 
         try self.setLine(line);
+        // See `activateSelectionAt` -- same gw-ls-activation marker.
+        self.chdir_method = .metadata;
         try self.submitLine();
     }
 
@@ -2602,6 +2629,11 @@ const Prompt = struct {
     /// naturally wrapped onto the next row as it was typed and the
     /// command's output then drew over that wrapped tail.
     fn submitLine(self: *Prompt) !void {
+        // A metadata activation (`activateSelectionAt` / `runMarkedAction`)
+        // set `chdir_method` just before calling us; make sure it's back
+        // to `.command` for the next line whichever way we return.
+        defer self.chdir_method = .command;
+
         // Running any command spends the multi-select: drop the marks and
         // their highlight before the command's output scrolls in.
         try self.resetMarks();
@@ -2637,9 +2669,23 @@ const Prompt = struct {
         }
         self.history_index = null;
 
+        // Cleared here (not just after) so a `sh.chdir` run from
+        // `shell.conf` at startup can't leave a stale listing queued for
+        // the first real prompt.
+        self.chdir_pending_list = null;
+
         try self.dispatchLine();
         self.maybeFlushPersistentState();
         if (self.should_exit) return; // "exit" (typed or via an alias) -- see dispatchLine
+
+        // A directory change during dispatch may have queued an
+        // `on{ chdir }` listing -- run it now, as its own line, after the
+        // command that triggered the change (a `cd`, or the synthetic
+        // `cd` a gw-ls activation submits) has completed.
+        if (self.chdir_pending_list) |listing| {
+            self.chdir_pending_list = null;
+            try self.dispatchLineText(listing);
+        }
 
         const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
         try self.client.setCursor(cur.row + 1, 0);
@@ -2665,16 +2711,23 @@ const Prompt = struct {
     /// `&&` / `||` / `;` chain, but not as one stage of a `|` pipeline
     /// (see `runPipeline`).
     fn dispatchLine(self: *Prompt) !void {
+        return self.dispatchLineText(self.buffer.items);
+    }
+
+    /// The body of `dispatchLine`, split out so the `on{ chdir }`
+    /// auto-listing can dispatch a command line that isn't sitting in
+    /// `self.buffer`. See `dispatchLine`'s doc comment for the rules.
+    fn dispatchLineText(self: *Prompt, text: []const u8) !void {
         const alloc = self.client.alloc;
-        const trimmed = std.mem.trimStart(u8, self.buffer.items, " \t");
+        const trimmed = std.mem.trimStart(u8, text, " \t");
 
         if (std.mem.startsWith(u8, trimmed, "alias") and
             (trimmed.len == "alias".len or trimmed["alias".len] == ' ' or trimmed["alias".len] == '\t'))
         {
-            return self.doAlias(self.buffer.items);
+            return self.doAlias(text);
         }
 
-        switch (try parse.parse(alloc, self.buffer.items)) {
+        switch (try parse.parse(alloc, text)) {
             .err => |msg| {
                 defer alloc.free(msg);
                 try self.client.writeText(msg, err_color, null);
@@ -3591,6 +3644,25 @@ const Prompt = struct {
         defer dir.close(io);
         try std.process.setCurrentDir(io, dir);
         self.recordVisit();
+        self.queueChdirListing();
+    }
+
+    /// After a successful directory change, decides whether the
+    /// `on{ chdir = { command = ... } }` listing should run once the
+    /// current line finishes dispatching, per the configured `list` mode:
+    /// `off` never, `always` for any change, `metadata` only when
+    /// `chdir_method == .metadata` (a directory activated in gw-ls
+    /// output). `submitLine` picks `chdir_pending_list` up and runs it.
+    fn queueChdirListing(self: *Prompt) void {
+        const cfg = self.prompt_config orelse return;
+        const oc = cfg.on.chdir;
+        const fire = switch (oc.list) {
+            .off => false,
+            .always => true,
+            .metadata => self.chdir_method == .metadata,
+        };
+        if (!fire or oc.command.len == 0) return;
+        self.chdir_pending_list = oc.command;
     }
 
     /// Records the shell's current directory (post-`chdir`) in the `zj`

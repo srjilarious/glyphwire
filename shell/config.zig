@@ -152,6 +152,33 @@ pub const ZjConfig = struct {
     exclude_dirs: []const []const u8 = &.{},
 };
 
+/// How a directory change should auto-run a listing command, from
+/// `on{ chdir = { list = ... } }`:
+///
+///  - `off`      -- never list.
+///  - `always`   -- list after every change (`cd`, `zj`, `sh.chdir`,
+///                  activating a directory in gw-ls output).
+///  - `metadata` -- list only when the change came from activating a
+///                  directory in gw-ls output (a click, or Enter/Space
+///                  while browsing), not a typed `cd` / `zj` / `sh.chdir`.
+pub const ChdirListMode = enum { off, always, metadata };
+
+/// `on{ chdir = { list, command } }` -- what runs after the shell's
+/// working directory changes. `command` is a full command line, run
+/// through the normal dispatch path (so a glyphwire-aware lister still
+/// handshakes) once the line that triggered the change finishes. Owned
+/// by the enclosing `ShellConfig` (`prompt_arena`).
+pub const OnChdirConfig = struct {
+    list: ChdirListMode = .metadata,
+    command: []const u8 = "gw-ls -lS",
+};
+
+/// The `on{ ... }` event-hook table. Only `chdir` today; its own struct
+/// so a later event is a single added field, matching `prompt` / `zj`.
+pub const OnConfig = struct {
+    chdir: OnChdirConfig = .{},
+};
+
 /// Everything one shell.conf run declared, parsed into Zig data. Owns its
 /// contents; call `deinit` once the caller has copied what it needs.
 pub const ShellConfig = struct {
@@ -166,6 +193,9 @@ pub const ShellConfig = struct {
     /// `zj{ ... }` settings for the directory-jump builtin. Merged key by
     /// key across calls; `exclude_dirs` strings live in `prompt_arena`.
     zj: ZjConfig = .{},
+    /// `on{ ... }` event hooks. Merged key by key across calls;
+    /// `chdir.command` lives in `prompt_arena`.
+    on: OnConfig = .{},
     /// `open_actions{ ... }` entries, in declaration order across every
     /// call (a later entry for the same key wins -- `openaction.resolve`
     /// scans last-match). Empty means "defaults only". Backed by
@@ -226,6 +256,9 @@ pub fn installBindings(lua: *Lua) void {
 
     lua.pushFunction(ziglua.wrap(luaZj));
     lua.setGlobal("zj");
+
+    lua.pushFunction(ziglua.wrap(luaOn));
+    lua.setGlobal("on");
 }
 
 /// Makes `cfg` the `ShellConfig` every `alias`/`prompt` call appends
@@ -383,6 +416,40 @@ fn luaZj(lua: *Lua) !i32 {
             list[i - 1] = try arena.dupe(u8, lua.checkString(-1));
         }
         cfg.zj.exclude_dirs = list;
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
+/// `on{ chdir = { list = "off"|"always"|"metadata", command = "..." } }`
+/// -- event hooks. Today only `chdir`: run `command` after the shell's
+/// working directory changes, gated by `list` (see `ChdirListMode`). A
+/// missing key leaves the current value; an unknown `list` string raises.
+/// `command` goes in `prompt_arena`.
+fn luaOn(lua: *Lua) !i32 {
+    const cfg = g_active orelse return 0;
+    lua.checkType(1, .table);
+
+    _ = lua.getField(1, "chdir");
+    if (!lua.isNoneOrNil(-1)) {
+        lua.checkType(-1, .table);
+        const tbl = lua.getTop();
+
+        _ = lua.getField(tbl, "list");
+        if (!lua.isNoneOrNil(-1)) {
+            const s = lua.checkString(-1);
+            cfg.on.chdir.list = std.meta.stringToEnum(ChdirListMode, s) orelse
+                lua.raiseErrorStr("on: chdir.list must be \"off\", \"always\", or \"metadata\"", .{});
+        }
+        lua.pop(1);
+
+        _ = lua.getField(tbl, "command");
+        if (!lua.isNoneOrNil(-1)) {
+            const s = lua.checkString(-1);
+            cfg.on.chdir.command = try cfg.prompt_arena.allocator().dupe(u8, s);
+        }
+        lua.pop(1);
     }
     lua.pop(1);
 
