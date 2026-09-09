@@ -40,11 +40,15 @@ jobs:
       # in-tree, and the SDL3 dependency vendors its own X11 and Wayland
       # headers and dlopens libX11 / libwayland-client at runtime.
 
-      # Matches build.zig.zon's minimum_zig_version.
-      - name: Install Zig 0.16.0
+      # Matches build.zig.zon's minimum_zig_version. This exact dev build
+      # is pruned from ziglang.org; setup-zig resolves it through the
+      # community mirrors (the mach project keeps it, nomination
+      # 2026.7.30-mach). If that ever fails, download it directly from
+      # https://pkg.hexops.org/zig/ instead.
+      - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0-dev.1857+3c46da14d
 
       # `zig build package` (defined in build.zig) installs only the shipped
       # programs, skipping the test runner and the internal
