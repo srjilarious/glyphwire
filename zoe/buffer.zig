@@ -329,6 +329,12 @@ pub const Buffer = struct {
         return self.gap.read(alloc, 0, self.len());
     }
 
+    /// The byte range `[start, end)` as a fresh allocation the caller
+    /// owns -- what a yank / cut hands the clipboard.
+    pub fn read(self: *const Buffer, alloc: std.mem.Allocator, start: usize, end: usize) ![]u8 {
+        return self.gap.read(alloc, start, end);
+    }
+
     pub fn insert(self: *Buffer, offset: usize, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         const at = @min(offset, self.len());

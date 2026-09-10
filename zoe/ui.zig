@@ -70,12 +70,24 @@ const EdSnapshot = struct {
     cursor: usize,
     edits: u64,
     line_numbers: editor.LineNumbers,
+    /// The mode and selection anchor so a bare `v` / `V` / `<esc>` / `o`
+    /// -- which can change the highlighted range without moving the
+    /// cursor -- still repaints the buffer pane.
+    mode: editor.Mode,
+    anchor: ?usize,
 
     fn of(ed: *const Editor) EdSnapshot {
-        return .{ .cursor = ed.cursor, .edits = ed.buf.edits, .line_numbers = ed.line_numbers };
+        return .{
+            .cursor = ed.cursor,
+            .edits = ed.buf.edits,
+            .line_numbers = ed.line_numbers,
+            .mode = ed.mode,
+            .anchor = ed.select_anchor,
+        };
     }
     fn eql(a: EdSnapshot, b: EdSnapshot) bool {
-        return a.cursor == b.cursor and a.edits == b.edits and a.line_numbers == b.line_numbers;
+        return a.cursor == b.cursor and a.edits == b.edits and
+            a.line_numbers == b.line_numbers and a.mode == b.mode and a.anchor == b.anchor;
     }
 };
 
@@ -129,6 +141,17 @@ pub const Ui = struct {
     /// The tree pane's scroll offset, mirrored from `scroll_offset`
     /// notifications so a click can be resolved to the right entry.
     tree_scroll: glyphwire.CellPos = .{},
+
+    /// An in-progress left-button drag in the buffer pane. `anchor` is
+    /// the buffer byte offset the press landed on; `moved` flips true the
+    /// first time the pointer changes cell, which is when the drag turns
+    /// into a visual selection (a press+release with no move is a plain
+    /// click). Null when no button is down over the pane.
+    drag: ?struct { anchor: usize, moved: bool } = null,
+    /// Whether the buffer pane's cells currently carry a selection
+    /// highlight, so `renderBuffer` repaints once more to clear it when
+    /// the selection goes away.
+    prev_sel_active: bool = false,
 
     focus: Focus = .buffer,
     tree_visible: bool = true,
@@ -440,9 +463,14 @@ pub const Ui = struct {
             // doesn't immediately echo this straight back.
             if (ev.layer == self.buffer_layer) self.scrollBufferTo(ev.row, ev.col);
         }
+        // Mouse moves before buttons: a drag's pending moves should
+        // update the selection before its release closes it out.
+        while (self.listener.pollMouseMoveEvent()) |ev| {
+            try self.handleMouseDrag(ev);
+        }
         while (self.listener.pollMouseButtonEvent()) |ev| {
             defer ev.deinit(self.alloc);
-            if (ev.pressed) try self.handleClick(ev);
+            try self.handleMouseButton(ev);
         }
         while (self.listener.pollInputEvent()) |ev| {
             defer ev.deinit(self.alloc);
@@ -499,6 +527,26 @@ pub const Ui = struct {
                         try self.toggleTree();
                         return;
                     }
+                    // Ctrl+Shift+X cut and Ctrl+Shift+P paste, both
+                    // through the system clipboard. (Ctrl+Shift+C is
+                    // swallowed by glyphwire-host, which broadcasts a
+                    // `copy_request` instead -- see the `.copy_request`
+                    // arm.)
+                    const shift = self.listener.isKeyDown("left_shift") or
+                        self.listener.isKeyDown("right_shift");
+                    if (shift and self.focus == .buffer) {
+                        if (std.mem.eql(u8, k.key, "x")) {
+                            try self.applyOutcome(try self.ed.clipboardCut());
+                            self.buffer_full_redraw = true;
+                            self.buffer_dirty = true;
+                            self.status_dirty = true;
+                            return;
+                        }
+                        if (std.mem.eql(u8, k.key, "p")) {
+                            try self.pasteFromClipboard(true);
+                            return;
+                        }
+                    }
                 }
                 if (self.focus == .tree) {
                     try self.treeKey(k.key);
@@ -518,9 +566,30 @@ pub const Ui = struct {
             },
             .paste => |t| {
                 self.ed.status.clearRetainingCapacity();
-                if (self.focus == .buffer) try self.applyOutcome(try self.ed.feedText(t.text));
+                if (self.focus == .buffer) {
+                    if (self.ed.mode == .insert) {
+                        try self.applyOutcome(try self.ed.feedText(t.text));
+                    } else {
+                        // Normal / visual mode: splice the pasted text in
+                        // like `p`, replacing any selection first, rather
+                        // than obeying each character as a command.
+                        try self.ed.dropSelection();
+                        try self.ed.putText(t.text, true);
+                        self.buffer_full_redraw = true;
+                        self.buffer_dirty = true;
+                    }
+                }
             },
-            .copy_request => {},
+            // Ctrl+Shift+C with no host selection: glyphwire-host asks its
+            // `"clipboard"` subscribers to supply the copy. Only answer
+            // when zoe's context is the visible one -- the request is a
+            // broadcast, and a backgrounded zoe would otherwise race the
+            // shell's own answer.
+            .copy_request => if (self.isVisible()) {
+                try self.applyOutcome(try self.ed.clipboardCopy());
+                self.buffer_dirty = true;
+                self.status_dirty = true;
+            },
             // The host closing already ends zoe's run loop when the shell
             // that spawned it exits; nothing persistent to flush here that
             // isn't already the user's explicit `:w`.
@@ -537,6 +606,15 @@ pub const Ui = struct {
         // `:set lineno=…` moves the text origin, which a row shift can't
         // express -- the whole pane has to be re-laid-out.
         if (after.line_numbers != before.line_numbers) self.buffer_full_redraw = true;
+        // A visual selection touches whole rows, not just the caret's:
+        // any change to the anchor or the mode (entering/leaving visual,
+        // or a motion that grew the selection over rows the caret didn't
+        // land on) needs the pane repainted so the highlight follows.
+        if (after.mode != before.mode or after.anchor != before.anchor or
+            (after.mode == .visual or after.mode == .visual_line))
+        {
+            self.buffer_full_redraw = true;
+        }
     }
 
     fn toggleTree(self: *Ui) !void {
@@ -616,8 +694,100 @@ pub const Ui = struct {
         self.focus = .buffer;
     }
 
-    fn handleClick(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
+    /// A left-button press or release. In the buffer pane a press moves
+    /// the caret and arms a drag (which turns into a visual selection the
+    /// moment the pointer moves); a release with no move is a plain click
+    /// that clears any selection. Elsewhere it falls through to the tree.
+    /// glyphwire-host forwards these raw now that zoe owns its context --
+    /// it only keeps drags that land on its own chrome (dividers,
+    /// scrollbars).
+    fn handleMouseButton(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
         if (!std.mem.eql(u8, ev.button, "left")) return;
+
+        if (ev.pressed) {
+            if (self.cellInBuffer(ev.cell)) |byte| {
+                self.drag = .{ .anchor = byte, .moved = false };
+                if (self.ed.mode == .visual or self.ed.mode == .visual_line) self.ed.exitVisual();
+                self.ed.moveCursorTo(byte);
+                self.focus = .buffer;
+                self.buffer_full_redraw = true;
+                self.buffer_dirty = true;
+                self.status_dirty = true;
+            } else {
+                try self.handleTreeClick(ev);
+            }
+            return;
+        }
+
+        // Released.
+        if (self.drag) |d| {
+            self.drag = null;
+            // A plain click (no drag): make sure no selection lingers.
+            if (!d.moved and (self.ed.mode == .visual or self.ed.mode == .visual_line)) {
+                self.ed.exitVisual();
+            }
+            self.buffer_full_redraw = true;
+            self.buffer_dirty = true;
+            self.status_dirty = true;
+        }
+    }
+
+    /// A pointer move with the left button down: extend the buffer-pane
+    /// selection to the cell under the pointer, entering visual mode on
+    /// the first real move.
+    fn handleMouseDrag(self: *Ui, ev: glyphwire.MouseMoveEvent) !void {
+        if (self.drag) |*d| {
+            const byte = self.cellToBufferByte(ev.cell);
+            if (!d.moved) {
+                if (byte == d.anchor) return;
+                d.moved = true;
+            }
+            self.ed.setVisualSelection(d.anchor, byte);
+            self.buffer_full_redraw = true;
+            self.buffer_dirty = true;
+            self.status_dirty = true;
+        }
+    }
+
+    /// The buffer byte offset under grid cell `cell`, or null if the
+    /// cell isn't inside the buffer pane -- the test a press uses to
+    /// decide between a buffer drag and a tree click.
+    fn cellInBuffer(self: *Ui, cell: glyphwire.CellPos) ?usize {
+        const b = self.buffer_bounds;
+        if (b.cols == 0 or b.rows == 0) return null;
+        if (cell.row < b.row or cell.row >= b.row + b.rows) return null;
+        if (cell.col < b.col or cell.col >= b.col + b.cols) return null;
+        return self.cellToBufferByte(cell);
+    }
+
+    /// The buffer byte offset under grid cell `cell`, clamping the cell
+    /// into the buffer pane first so a drag that wanders out of the pane
+    /// still tracks its nearest edge.
+    fn cellToBufferByte(self: *Ui, cell: glyphwire.CellPos) usize {
+        const b = self.buffer_bounds;
+        const rows = @max(b.rows, 1);
+        const screen_row = std.math.clamp(cell.row, b.row, b.row + rows - 1) - b.row;
+        const line = @min(self.top_line + screen_row, self.ed.buf.lineCount() - 1);
+
+        const text_left = b.col + self.gutterWidth();
+        const rel_col = if (cell.col > text_left) cell.col - text_left else 0;
+        const dcol = self.left_col + rel_col;
+
+        const line_text = self.ed.buf.lineText(self.alloc, line) catch
+            return self.ed.buf.lineStart(line);
+        defer self.alloc.free(line_text);
+        return self.ed.buf.lineStart(line) + byteAtDisplayCol(line_text, dcol);
+    }
+
+    /// Whether zoe's context is the one currently on screen. Used to
+    /// ignore broadcasts (`copy_request`) meant for whoever is visible.
+    /// Assumes visible until the first `context` notification arrives.
+    fn isVisible(self: *Ui) bool {
+        const vc = self.listener.visibleContext() orelse return true;
+        return vc.context == self.context;
+    }
+
+    fn handleTreeClick(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
         if (!self.tree_visible) return;
         // The click reports a root-grid cell; the panes are laid out on
         // that same grid, so a hit test is just the pane's bounds.
@@ -661,7 +831,28 @@ pub const Ui = struct {
                 };
                 self.ed.setStatus("{s}", .{buf[0..n]});
             },
+            // The editor filled `ed.yank`; mirror it to the system
+            // clipboard (glyphwire-host pushes it on to the OS).
+            .set_clipboard => |text| self.client.setClipboard(text) catch {},
+            // `p` / `P`: the editor can't read the clipboard, so pull it
+            // here and hand the text back.
+            .paste => |p| try self.pasteFromClipboard(p.after),
         }
+    }
+
+    /// Fetches the system clipboard and splices it into the buffer at the
+    /// cursor (`p` / `P`, and the Ctrl+Shift+P chord). A visual-mode `p`
+    /// has already dropped the selection, so this is always a plain
+    /// insert.
+    fn pasteFromClipboard(self: *Ui, after: bool) !void {
+        const text = self.client.getClipboard() catch return;
+        defer self.alloc.free(text);
+        if (text.len == 0) return;
+        try self.ed.putText(text, after);
+        // A paste can add lines and move the text origin; repaint the pane.
+        self.buffer_full_redraw = true;
+        self.buffer_dirty = true;
+        self.status_dirty = true;
     }
 
     /// `:cd` -- change the process working directory and re-root the
@@ -836,6 +1027,14 @@ pub const Ui = struct {
             self.ed.buf.clearEdits();
         }
 
+        // A visual selection spans whole rows the incremental paths don't
+        // know to touch. While one is active -- and once more the frame it
+        // clears -- repaint the whole pane so the highlight is always
+        // current. `handleInput` already forces this for a keyboard
+        // selection; this covers the mouse-drag and paste paths too.
+        const sel_active = self.ed.selectionSpan() != null;
+        if (sel_active or self.prev_sel_active) self.buffer_full_redraw = true;
+
         const cursor = self.ed.pos();
         const scrolled = self.top_line != self.prev_top_line or self.left_col != self.prev_left_col;
         const edited = self.ed.buf.edits != self.prev_edits;
@@ -915,6 +1114,7 @@ pub const Ui = struct {
         self.prev_left_col = self.left_col;
         self.prev_cursor_line = cursor.line;
         self.prev_edits = self.ed.buf.edits;
+        self.prev_sel_active = sel_active;
         self.buffer_full_redraw = false;
     }
 
@@ -1101,14 +1301,75 @@ pub const Ui = struct {
 
         // Highlighted rows are painted a colour run at a time; on any
         // failure (or with no grammar) fall through to one plain write.
+        var painted = false;
         if (self.hl) |*h| {
-            if (h.ready() and self.renderRowSpans(batch, r, line, text)) return;
+            if (h.ready() and self.renderRowSpans(batch, r, line, text)) painted = true;
+        }
+        if (!painted) {
+            const visible = sliceCols(text, self.left_col, cols);
+            try pad.appendSlice(self.alloc, visible);
+            try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), cols);
+            try writeAt(batch, self.buffer_layer, r, gutter, pad.items, fg_text, bg_buffer);
         }
 
-        const visible = sliceCols(text, self.left_col, cols);
-        try pad.appendSlice(self.alloc, visible);
-        try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), cols);
-        try writeAt(batch, self.buffer_layer, r, gutter, pad.items, fg_text, bg_buffer);
+        // Overpaint the selected span of this row, if any, with the
+        // selection background. Done as a second write over the text just
+        // laid down rather than threaded through every colour run.
+        try self.paintSelectionRow(batch, r, line, text);
+    }
+
+    /// If buffer `line` overlaps the visual selection, repaints its
+    /// selected columns with `bg_selected` (keeping the default text
+    /// colour). A charwise selection highlights the covered characters; a
+    /// linewise one runs to the pane's right edge, like vim. A no-op when
+    /// nothing is selected or the selected part is scrolled out of view.
+    fn paintSelectionRow(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        r: usize,
+        line: usize,
+        text: []const u8,
+    ) !void {
+        const span = self.ed.selectionSpan() orelse return;
+        const ls = self.ed.buf.lineStart(line);
+        // One past the line's last byte, including its newline if it has
+        // one -- the range a linewise / cross-line selection can cover.
+        const line_hi = if (line + 1 < self.ed.buf.lineCount())
+            self.ed.buf.lineStart(line + 1)
+        else
+            self.ed.buf.len();
+        if (span.hi <= ls or span.lo > line_hi) return;
+
+        const gutter = self.gutterWidth();
+        const cols = self.textCols();
+        if (cols == 0) return;
+
+        // Selected byte range within this line's text.
+        const sel_lo_b = span.lo -| ls;
+        const sel_hi_b = span.hi - ls; // may exceed text.len (newline / EOL)
+        const to_eol = span.linewise or sel_hi_b > text.len;
+
+        const start_dc = displayColOfByte(text, @min(sel_lo_b, text.len));
+        const end_dc = if (to_eol)
+            self.left_col + cols
+        else
+            displayColOfByte(text, @min(sel_hi_b, text.len));
+        if (end_dc <= self.left_col or start_dc >= self.left_col + cols) return;
+
+        const vis_lo = @max(start_dc, self.left_col);
+        const vis_hi = @min(end_dc, self.left_col + cols);
+        if (vis_hi <= vis_lo) return;
+
+        // The characters under the highlight, then spaces out to the
+        // selection's end (a linewise selection past the text, or the
+        // newline slot of a charwise one).
+        var overlay: std.ArrayList(u8) = .empty;
+        defer overlay.deinit(self.alloc);
+        const chars = sliceCols(text, vis_lo, vis_hi - vis_lo);
+        try overlay.appendSlice(self.alloc, chars);
+        try padTo(self.alloc, &overlay, glyphwire.stringWidth(chars), vis_hi - vis_lo);
+
+        try writeAt(batch, self.buffer_layer, r, gutter + vis_lo - self.left_col, overlay.items, fg_text, bg_selected);
     }
 
     /// Paints buffer row `r` (buffer line `line`, whole text `text`) as
@@ -1398,6 +1659,8 @@ pub const Ui = struct {
             .normal => "NORMAL",
             .insert => "INSERT",
             .command => "COMMAND",
+            .visual => "VISUAL",
+            .visual_line => "V-LINE",
         };
     }
 };
@@ -1514,6 +1777,25 @@ pub fn gutterCellText(
 fn padTo(alloc: std.mem.Allocator, line: *std.ArrayList(u8), width: usize, target: usize) !void {
     if (width >= target) return;
     try line.appendNTimes(alloc, ' ', target - width);
+}
+
+/// The byte offset in `text` at display column `col` -- the inverse of
+/// `displayColOfByte`, clamped to the end of the text. A column that
+/// falls on the trailing half of a wide character resolves to that
+/// character's start. Used to turn a mouse cell into a buffer position.
+fn byteAtDisplayCol(text: []const u8, col: usize) usize {
+    var c: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const seq = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const end = @min(i + seq, text.len);
+        const cp = std.unicode.utf8Decode(text[i..end]) catch 0xFFFD;
+        const w = glyphwire.codepointWidth(cp);
+        if (c + w > col) return i;
+        c += w;
+        i = end;
+    }
+    return text.len;
 }
 
 /// The display column at which byte `off` of `text` sits -- the summed

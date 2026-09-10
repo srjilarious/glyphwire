@@ -332,6 +332,14 @@ pub const Selection = struct {
     pub fn handleMouseSelection(self: *Selection, eng: *Engine, skip_left: bool) bool {
         if (!eng.inputs.mouse_enabled) return false;
         const server = self.app.server;
+        // A client that owns the visible context (zoe) draws its own panes
+        // and runs its own selection. Chrome -- dividers, scrollbars --
+        // already got first refusal via `skip_left`, so anything left is a
+        // press into the client's content: let it through to the wire
+        // rather than starting a host grid selection that would fight it.
+        // An in-flight drag still finishes (the visible context can't
+        // change mid-drag without the button coming up first).
+        if (!self.mouse_selecting and server.visibleContextClientOwned()) return false;
         const m = &eng.inputs.mouse;
         const pos = m.pos();
         const fb = eng.window_state.framebuffer_size;

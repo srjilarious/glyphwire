@@ -28,6 +28,7 @@ pub const ShutdownEvent = client.ShutdownEvent;
 pub const ScrollEvent = client.ScrollEvent;
 pub const ContextEvent = client.ContextEvent;
 pub const MouseButtonEvent = client.MouseButtonEvent;
+pub const MouseMoveEvent = client.MouseMoveEvent;
 pub const TextEvent = client.TextEvent;
 pub const KeyEvent = client.KeyEvent;
 pub const InputEvent = client.InputEvent;

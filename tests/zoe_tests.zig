@@ -528,6 +528,225 @@ pub fn editorEscapeCancelsAPendingOperatorTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectEqual(ed.cursor, 4);
 }
 
+// ─── Editor: visual mode & clipboard ────────────────────────────────────
+
+/// Runs `script` and asserts the resulting outcome is a `set_clipboard`
+/// carrying `expected`.
+fn expectClipboard(alloc: std.mem.Allocator, text: []const u8, script: []const u8, expected: []const u8) !void {
+    var ed = try Editor.initFromText(alloc, text, null);
+    defer ed.deinit();
+    switch (try keys.feed(&ed, script)) {
+        .set_clipboard => |got| try testz.expectEqualStr(got, expected),
+        else => try testz.fail(),
+    }
+}
+
+pub fn visualCharwiseYankReportsSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `v` from the start, `e` to the end of "foo", `y` yanks it inclusive.
+    try expectClipboard(alloc, "foo bar", "vey", "foo");
+}
+
+pub fn visualCharwiseYankLeavesNormalModeAtSelectionStartTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "foo bar", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "llvey");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectTrue(ed.select_anchor == null);
+    try testz.expectEqual(ed.cursor, 2);
+}
+
+pub fn visualLinewiseYankTakesWholeLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectClipboard(alloc, "one\ntwo\nthree", "Vjy", "one\ntwo\n");
+}
+
+pub fn visualDeleteRemovesSelectionAndYanksTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello world", null);
+    defer ed.deinit();
+    switch (try keys.feed(&ed, "vlld")) {
+        .set_clipboard => |got| try testz.expectEqualStr(got, "hel"),
+        else => try testz.fail(),
+    }
+    try expectText(alloc, &ed.buf, "lo world");
+    try testz.expectEqual(ed.mode, .normal);
+}
+
+pub fn visualChangeEntersInsertModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "vlc");
+    try testz.expectEqual(ed.mode, .insert);
+    try expectText(alloc, &ed.buf, "llo");
+}
+
+pub fn visualModeSwitchesCharwiseToLinewiseTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "vV");
+    try testz.expectEqual(ed.mode, .visual_line);
+    // A second `v`/`V` on the matching submode leaves visual mode.
+    _ = try keys.feed(&ed, "V");
+    try testz.expectEqual(ed.mode, .normal);
+}
+
+pub fn visualCountedGotoLineExtendsSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `3gg` while visual keeps the count for the `gg` and grows the
+    // selection to line 3.
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree\nfour", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "v3gg");
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 0);
+    try testz.expectEqual(ed.buf.lineAt(span.hi -| 1), 2); // through line 3
+}
+
+pub fn visualEscapeReturnsToNormalTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "vl<esc>");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectTrue(ed.select_anchor == null);
+}
+
+pub fn visualPasteReturnsAPasteOutcomeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello", null);
+    defer ed.deinit();
+    // `vll` selects "hel"; `p` drops it and asks the host to splice the
+    // clipboard in.
+    switch (try keys.feed(&ed, "vllp")) {
+        .paste => |p| try testz.expectTrue(!p.after),
+        else => try testz.fail(),
+    }
+    try expectText(alloc, &ed.buf, "lo");
+    try testz.expectEqual(ed.mode, .normal);
+}
+
+pub fn normalDeleteFeedsTheClipboardTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // vim's unnamed register: `x`, `dd`, `dw` all land on the clipboard.
+    try expectClipboard(alloc, "abc", "x", "a");
+    try expectClipboard(alloc, "one\ntwo", "dd", "one\n");
+    try expectClipboard(alloc, "foo bar", "dw", "foo ");
+}
+
+pub fn normalYankOperatorReportsClipboardTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectClipboard(alloc, "one\ntwo\nthree", "yy", "one\n");
+    try expectClipboard(alloc, "foo bar baz", "yw", "foo ");
+    try expectClipboard(alloc, "one\ntwo\nthree", "yj", "one\ntwo\n");
+}
+
+pub fn normalYankLeavesBufferUnchangedTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jyy");
+    try expectText(alloc, &ed.buf, "one\ntwo");
+}
+
+pub fn normalPasteAndPutTextCharwiseTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    switch (try keys.feed(&ed, "p")) {
+        .paste => |p| try testz.expectTrue(p.after),
+        else => try testz.fail(),
+    }
+    // The host would call `putText` with whatever the clipboard held.
+    try ed.putText("XY", true);
+    try expectText(alloc, &ed.buf, "aXYbc");
+    try testz.expectEqual(ed.cursor, 2);
+}
+
+pub fn putTextLinewisePastesWholeLinesBelowTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    try ed.putText("new\n", true); // `p` on line 1
+    try expectText(alloc, &ed.buf, "one\nnew\ntwo");
+}
+
+pub fn putTextLinewiseAboveTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    try ed.putText("new\n", false); // `P` on line 1
+    try expectText(alloc, &ed.buf, "new\none\ntwo");
+}
+
+pub fn putTextLinewiseOnLastLineAddsTheSeparatorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "j"); // on "two", the last line, no trailing \n
+    try ed.putText("new\n", true);
+    try expectText(alloc, &ed.buf, "one\ntwo\nnew\n");
+}
+
+pub fn selectionSpanCharwiseIsInclusiveTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "vll"); // anchor 0, cursor 2
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 0);
+    try testz.expectEqual(span.hi, 3); // includes the cursor cell
+    try testz.expectTrue(!span.linewise);
+}
+
+pub fn selectionSpanLinewiseCoversWholeLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jVj"); // lines 1..2
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 4);
+    try testz.expectEqual(span.hi, 13); // "two\nthree" through the end of the buffer
+    try testz.expectTrue(span.linewise);
+}
+
+pub fn clipboardCopyWithNoSelectionTakesTheLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "j");
+    switch (try ed.clipboardCopy()) {
+        .set_clipboard => |got| try testz.expectEqualStr(got, "two\n"),
+        else => try testz.fail(),
+    }
+    try expectText(alloc, &ed.buf, "one\ntwo"); // copy never mutates
+}
+
+pub fn clipboardCutWithNoSelectionRemovesTheLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "j");
+    switch (try ed.clipboardCut()) {
+        .set_clipboard => |got| try testz.expectEqualStr(got, "two\n"),
+        else => try testz.fail(),
+    }
+    try expectText(alloc, &ed.buf, "one\nthree");
+}
+
+pub fn clipboardCopyUsesTheVisualSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello world", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "vee"); // "hello world" -> through "world"
+    switch (try ed.clipboardCopy()) {
+        .set_clipboard => |got| try testz.expectEqualStr(got, "hello world"),
+        else => try testz.fail(),
+    }
+    try testz.expectEqual(ed.mode, .normal);
+}
+
+pub fn mouseDragBuildsACharwiseSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello world", null);
+    defer ed.deinit();
+    ed.setVisualSelection(2, 7);
+    try testz.expectEqual(ed.mode, .visual);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 2);
+    try testz.expectEqual(span.hi, 8);
+}
+
+pub fn dropSelectionRemovesSelectedTextWithoutClipboardTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "vll");
+    try ed.dropSelection();
+    try expectText(alloc, &ed.buf, "lo");
+    try testz.expectEqual(ed.mode, .normal);
+}
+
 // ─── Editor: command line ───────────────────────────────────────────────
 
 pub fn commandLineWriteReturnsAnOutcomeTest(_: std.Io, alloc: std.mem.Allocator) !void {
