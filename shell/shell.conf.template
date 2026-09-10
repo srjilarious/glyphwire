@@ -14,8 +14,12 @@
 -- ran before the error.
 --
 -- Syntax: it's a plain Lua script with the standard libraries open, so
--- loops / conditionals / `string` / `table` all work. glyphwire adds two
--- globals: `alias(name, value)` and `prompt{ ... }`.
+-- loops / conditionals / `string` / `table` all work. It runs in the
+-- shell's session-long Lua state, so a `function` (or `defcmd`) it
+-- defines stays callable as a builtin afterwards. glyphwire adds:
+-- `alias(name, value)`, `prompt{ ... }`, `defcmd(name, fn)`, and the `sh`
+-- table (`sh.setenv` / `sh.unsetenv` / `sh.getenv` / `sh.cwd` /
+-- `sh.realpath`). See the Scripts section below.
 
 
 ---- Aliases ------------------------------------------------------------
@@ -27,6 +31,40 @@
 -- alias("ll", "ls -l")
 -- alias("la", "ls -a")
 -- alias("gs", "git status")
+
+
+---- Scripts ----------------------------------------------------------
+--
+-- A builtin is either a `defcmd(name, fn)` registration here, or a file
+-- `<config_dir>/scripts/<name>.lua` (looked up by basename, re-read on
+-- every call so editing it takes effect immediately). Dispatch
+-- precedence: core builtins (cd / exit / alias / unalias) > aliases >
+-- script builtins > $PATH -- so a `cd.lua` can't shadow the real `cd`,
+-- but a `ls.lua` does shadow `/usr/bin/ls`.
+--
+-- A builtin receives its arguments as `...` and as the `arg` table
+-- (`arg[0]` is the command name); a numeric `return` is its exit status.
+-- `print` and `io.write` go to the terminal. `os.exit` is disabled (it
+-- would kill the shell). `require` finds shared helpers under
+-- `<config_dir>/scripts/lib/`. `os.execute` / `io.popen` work but run a
+-- real subprocess outside the grid.
+--
+-- The `sh` table:
+--   sh.setenv(name, value)   set a variable for this shell and every
+--                            command it launches afterwards
+--   sh.unsetenv(name)        remove one
+--   sh.getenv(name)          the shell's live value, or nil
+--   sh.cwd()                 absolute working directory
+--   sh.realpath(path)        canonical absolute path, or nil if it
+--                            doesn't resolve on disk
+--
+-- A runaway script is stopped by Ctrl-C, or a 30s wall-clock ceiling.
+--
+-- defcmd("hello", function(who)
+--   print("hi " .. (who or "there"))
+-- end)
+--
+-- See shell/scripts/examples/ for venv_activate / venv_deactivate.
 
 
 ---- Prompt -----------------------------------------------------------

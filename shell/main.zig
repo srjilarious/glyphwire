@@ -5,6 +5,7 @@ const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
 const hs = @import("shell_support").handshake;
 const config = @import("shell_support").config;
+const script_engine = @import("shell_support").script_engine;
 const history = @import("shell_support").history;
 const keyencode = @import("shell_support").keyencode;
 const lineedit = @import("shell_support").lineedit;
@@ -49,7 +50,11 @@ comptime {
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
     extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+    /// Resolves `path` against the filesystem into `resolved` (must be at
+    /// least `PATH_MAX`); returns `resolved` on success, null otherwise.
+    extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
 };
 
 /// libc time formatting for the prompt's `{time}` token -- this reduced
@@ -259,6 +264,15 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     defer listener.deinit();
 
     var prompt: Prompt = .{ .client = &client, .environ_map = environ_map, .listener = listener };
+    // The live environment starts as a working copy of the startup
+    // snapshot; `sh.setenv` from a script mutates this copy (and libc, for
+    // children). Seeded before `defer prompt.deinit()` so the deinit is
+    // always safe.
+    prompt.env = std.process.Environ.Map.init(alloc);
+    {
+        var it = environ_map.iterator();
+        while (it.next()) |e| try prompt.env.put(e.key_ptr.*, e.value_ptr.*);
+    }
     // Unreachable before `exit` gave this loop a clean return path --
     // every previous exit was a hard kill, so this never ran and the leak
     // never surfaced.
@@ -282,6 +296,9 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     // starts with no configured aliases and an empty history.
     if (configDirPath(alloc, environ_map)) |config_dir| {
         defer alloc.free(config_dir);
+        prompt.initScriptEngine(config_dir) catch |err| {
+            std.log.warn("prompt: couldn't start the script engine: {t}", .{err});
+        };
         try prompt.loadStartupConfig(config_dir);
         try prompt.loadHistory(config_dir);
     } else |_| {}
@@ -588,7 +605,16 @@ const AliasTable = struct {
 /// read back over the wire.
 const Prompt = struct {
     client: *glyphwire.Client,
+    /// The environment as it was at startup -- a read-only snapshot from
+    /// `std.process.Init`. Everything that doesn't change over a session
+    /// (`$USER`, `$HOME`, `$XDG_*`, hostname) reads from here.
     environ_map: *const std.process.Environ.Map,
+    /// The shell's *live* environment: seeded from `environ_map`, then
+    /// mutated by `sh.setenv` / `sh.unsetenv` from a script (which also
+    /// push the change into libc so spawned children inherit it). The
+    /// prompt's `{env:NAME}` token reads this, so e.g. a venv-activate
+    /// script's `$VIRTUAL_ENV` shows up immediately. Set in `runPrompt`.
+    env: std.process.Environ.Map = undefined,
     /// The prompt's key/mouse/scroll feed. Set by `runPrompt` after
     /// connecting; `runCommand`'s pty input loop reads keystrokes from it
     /// while a command holds the foreground.
@@ -664,11 +690,18 @@ const Prompt = struct {
     /// then. Owned; freed in `deinit`.
     history_path: ?[]const u8 = null,
 
+    /// The persistent Lua interpreter -- runs `shell.conf` and every
+    /// script builtin (`~/.config/glyphwire/scripts/*.lua`, `defcmd`).
+    /// `null` when the shell has no config directory. Heap-allocated and
+    /// owned; `deinit` tears it down.
+    script_engine: ?*script_engine.ScriptEngine = null,
+
     /// The parsed `shell.conf`, kept alive for the whole session so the
-    /// prompt can read `prompt_config.?.prompt` live on every redraw (see
-    /// `promptCfg` / `writePromptPrefix`). `null` when there was no config
-    /// file. Owns its strings/segments; freed in `deinit`.
-    prompt_config: ?config.ShellConfig = null,
+    /// prompt can read `.prompt` live on every redraw (see `promptCfg` /
+    /// `writePromptPrefix`). `null` when there was no config file or no
+    /// config directory. Borrowed from `script_engine.?.cfg` -- the
+    /// engine owns the storage, not this pointer.
+    prompt_config: ?*const config.ShellConfig = null,
 
     /// Memoised output of the `prompt{ commands = { ... } }` vars for the
     /// current prompt. `writePromptPrefix` clears it (`resetCmdVars`) so
@@ -686,11 +719,13 @@ const Prompt = struct {
     cmd_var_stack: [16][]const u8 = undefined,
     cmd_var_depth: usize = 0,
 
-    /// The last external command's exit status and wall-clock run time,
-    /// plus whether any external command has run this session -- feeds
-    /// `{exit}` / `{exit_code}` / `{dur}` / `{duration}` and a segment's
-    /// `when = "error" | "slow"`. Only `runCommand` updates these; the
-    /// `cd` / `alias` / `unalias` builtins leave them alone.
+    /// The last command's exit status and wall-clock run time, plus
+    /// whether any command has run this session -- feeds `{exit}` /
+    /// `{exit_code}` / `{dur}` / `{duration}` and a segment's `when =
+    /// "error" | "slow"`. `runCommand` (external) and `runScriptBuiltin`
+    /// (a Lua builtin's numeric return) update these; the script builtin
+    /// always reports `last_dur_ms = 0`. The `cd` / `alias` / `unalias`
+    /// builtins leave them alone.
     last_status: u8 = 0,
     last_dur_ms: u64 = 0,
     have_status: bool = false,
@@ -737,7 +772,10 @@ const Prompt = struct {
         self.buffer.deinit(alloc);
         self.aliases.deinit(alloc);
         if (self.history_path) |p| alloc.free(p);
-        if (self.prompt_config) |*pcfg| pcfg.deinit();
+        // `prompt_config` just borrows `script_engine.?.cfg`; the engine
+        // frees it.
+        if (self.script_engine) |eng| eng.deinit();
+        self.env.deinit();
         self.resetCmdVars();
         self.cmd_var_cache.deinit(alloc);
     }
@@ -755,7 +793,7 @@ const Prompt = struct {
 
     /// The parsed prompt config, or `null` when there's no `shell.conf`.
     fn promptCfg(self: *Prompt) ?*const config.PromptConfig {
-        if (self.prompt_config) |*pcfg| return &pcfg.prompt;
+        if (self.prompt_config) |pcfg| return &pcfg.prompt;
         return null;
     }
 
@@ -875,7 +913,7 @@ const Prompt = struct {
             .user = self.environ_map.get("USER") orelse "",
             .host = self.host,
             .time = self.formatTime(&b.time, p.time_format orelse "%H:%M"),
-            .environ = self.environ_map,
+            .environ = &self.env,
             .last_status = self.last_status,
             .have_status = self.have_status,
             .last_dur_ms = self.last_dur_ms,
@@ -984,7 +1022,7 @@ const Prompt = struct {
         const a = arena_state.allocator();
 
         const data = prompt_template.Data{
-            .environ = self.environ_map,
+            .environ = &self.env,
             .vars = self.cmdVarResolver(),
         };
         const ops = prompt_template.renderOps(a, expr, data) catch return negate;
@@ -1958,15 +1996,34 @@ const Prompt = struct {
         defer wordsplit.freeTokens(alloc, argv);
         if (argv.len == 0) return;
 
+        // Precedence: core builtins > aliases (already expanded above) >
+        // script builtins > $PATH. A `cd.lua` can't shadow the real `cd`.
         if (std.mem.eql(u8, argv[0], "exit")) {
             self.should_exit = true;
         } else if (std.mem.eql(u8, argv[0], "unalias")) {
             try self.doUnalias(argv[1..]);
         } else if (std.mem.eql(u8, argv[0], "cd")) {
             try self.doCd(argv[1..]);
+        } else if (self.runScriptBuiltin(argv)) {
+            // handled by the persistent Lua engine
         } else {
             try self.runCommand(argv);
         }
+    }
+
+    /// If `argv[0]` names a script builtin (a `defcmd` registration or a
+    /// `~/.config/glyphwire/scripts/<name>.lua`), runs it in-process and
+    /// returns true, recording its exit status the same way an external
+    /// command's is. Returns false -- untouched -- when there's no engine
+    /// or no such builtin, so dispatch falls through to `$PATH`.
+    fn runScriptBuiltin(self: *Prompt, argv: []const []const u8) bool {
+        const eng = self.script_engine orelse return false;
+        if (!eng.hasCommand(argv[0])) return false;
+        const code = eng.runCommand(argv[0], argv[1..]);
+        self.last_status = code;
+        self.last_dur_ms = 0;
+        self.have_status = true;
+        return true;
     }
 
     /// Runs `argv` under a B0 "dumb PTY" (`shell/pty.zig`): the child's
@@ -2284,18 +2341,44 @@ const Prompt = struct {
         }
     }
 
-    /// Runs `~/.config/glyphwire/shell.conf` (if it exists) through the
-    /// Lua config loader and folds what it declares into the live prompt.
-    /// Right now that's the `alias(name, value)` bindings, applied into
-    /// the same `AliasTable` the `alias` builtin writes to -- later
-    /// bindings for the same name win, matching a shell rc file read
-    /// top-to-bottom. A missing file is silently fine; a Lua syntax or
-    /// runtime error in the file is reported onto the grid and whatever
-    /// parsed before the error is still applied. Only a real allocation
-    /// failure propagates.
+    /// Stands up the persistent Lua interpreter (`script_engine`), wired
+    /// to this prompt's environment overlay, cwd and grid. Safe to skip:
+    /// on failure `script_engine` stays null and script builtins are just
+    /// unavailable.
+    fn initScriptEngine(self: *Prompt, config_dir: []const u8) !void {
+        self.script_engine = try script_engine.ScriptEngine.init(
+            self.client.alloc,
+            self.client.io,
+            self.scriptHooks(),
+            config_dir,
+        );
+    }
+
+    /// The `script_engine.HostHooks` for this prompt -- how a running
+    /// script reaches the live shell (env, cwd, grid, Ctrl-C).
+    fn scriptHooks(self: *Prompt) script_engine.HostHooks {
+        return .{
+            .ctx = self,
+            .setenv = hookSetenv,
+            .unsetenv = hookUnsetenv,
+            .getenv = hookGetenv,
+            .cwd = hookCwd,
+            .realpath = hookRealpath,
+            .write = hookWrite,
+            .poll_interrupt = hookPollInterrupt,
+        };
+    }
+
+    /// Reads `shell.conf` and runs it through the persistent
+    /// `script_engine` (so a `function` it defines survives as a
+    /// builtin). Its `alias` declarations are replayed into the live
+    /// alias table; a syntax/runtime error is shown in red with whatever
+    /// ran first still in effect. A missing file or no engine is fine.
     fn loadStartupConfig(self: *Prompt, config_dir: []const u8) !void {
         const alloc = self.client.alloc;
         const io = self.client.io;
+
+        const eng = self.script_engine orelse return;
 
         const path = try std.fs.path.join(alloc, &.{ config_dir, "shell.conf" });
         defer alloc.free(path);
@@ -2310,23 +2393,22 @@ const Prompt = struct {
         };
         defer alloc.free(source);
 
-        const result = try config.load(alloc, source);
+        try eng.runConf(source);
 
-        for (result.config.aliases.items) |a| {
+        for (eng.cfg.aliases.items) |a| {
             try self.aliases.set(alloc, a.name, a.value);
         }
 
-        if (result.err) |msg| {
+        if (eng.conf_err) |msg| {
             var buf: [512]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "shell.conf: {s}\n", .{msg}) catch "shell.conf: error\n";
             try self.client.writeText(line, .{ .r = 255, .g = 85, .b = 85 }, null);
-            alloc.free(msg);
         }
 
-        // Keep the parsed config for the session -- `writePromptPrefix`
-        // reads `prompt_config.?.prompt` live on every redraw (so `{time}`
-        // and cwd stay current). `Prompt.deinit` frees it.
-        self.prompt_config = result.config;
+        // The engine owns the parsed config for the session --
+        // `writePromptPrefix` reads `.prompt` off it live on every redraw
+        // (so `{time}` and cwd stay current).
+        self.prompt_config = &eng.cfg;
     }
 
     /// Loads `~/.config/glyphwire/history` into `self.history` so ctrl+up
@@ -2651,4 +2733,82 @@ const Prompt = struct {
         try self.setCursorAt(self.cursor); // -> renderInputLine redraws the typed line
     }
 };
+
+// ─── script engine host hooks ────────────────────────────────────────
+//
+// `shell/script_engine.zig` reaches the live shell only through these
+// function pointers (its `HostHooks`); `ctx` is always the `*Prompt`.
+// Kept as free functions, not `Prompt` methods, because that's the shape
+// a `*const fn (ctx: *anyopaque, ...)` pointer needs.
+
+/// `sh.setenv` -- update libc (so children spawned afterwards inherit it;
+/// pty.zig's `execvp` reads the live environ) and the prompt's own live
+/// view that `{env:NAME}` renders from.
+fn hookSetenv(ctx: *anyopaque, name: []const u8, value: []const u8) void {
+    const self: *Prompt = @ptrCast(@alignCast(ctx));
+    const alloc = self.client.alloc;
+    const name_z = alloc.dupeZ(u8, name) catch return;
+    defer alloc.free(name_z);
+    const value_z = alloc.dupeZ(u8, value) catch return;
+    defer alloc.free(value_z);
+    _ = c.setenv(name_z, value_z, 1);
+    self.env.put(name, value) catch {};
+}
+
+/// `sh.unsetenv` -- the mirror of `hookSetenv`.
+fn hookUnsetenv(ctx: *anyopaque, name: []const u8) void {
+    const self: *Prompt = @ptrCast(@alignCast(ctx));
+    const alloc = self.client.alloc;
+    const name_z = alloc.dupeZ(u8, name) catch return;
+    defer alloc.free(name_z);
+    _ = c.unsetenv(name_z);
+    _ = self.env.swapRemove(name);
+}
+
+/// `sh.getenv` -- the shell's live value (script-set values included).
+fn hookGetenv(ctx: *anyopaque, name: []const u8) ?[]const u8 {
+    const self: *Prompt = @ptrCast(@alignCast(ctx));
+    return self.env.get(name);
+}
+
+/// `sh.cwd` -- absolute working directory into `buf`.
+fn hookCwd(ctx: *anyopaque, buf: []u8) ?[]const u8 {
+    const self: *Prompt = @ptrCast(@alignCast(ctx));
+    const n = std.process.currentPath(self.client.io, buf) catch return null;
+    return buf[0..n];
+}
+
+/// `sh.realpath` -- libc `realpath`, so `..`/symlinks/relative all
+/// collapse against the real filesystem. `buf` must be `PATH_MAX`.
+fn hookRealpath(ctx: *anyopaque, path: [:0]const u8, buf: []u8) ?[]const u8 {
+    _ = ctx;
+    if (buf.len < std.fs.max_path_bytes) return null;
+    const resolved = c.realpath(path, buf.ptr) orelse return null;
+    return std.mem.span(resolved);
+}
+
+/// Grid sink for a script's `print` / `io.write`.
+fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
+    const self: *Prompt = @ptrCast(@alignCast(ctx));
+    self.client.writeText(bytes, null, null) catch {};
+}
+
+/// Polled from the interrupt hook while a script runs: drains pending
+/// input (type-ahead is dropped for the duration of the builtin) and
+/// returns true the moment it sees Ctrl-C.
+fn hookPollInterrupt(ctx: *anyopaque) bool {
+    const self: *Prompt = @ptrCast(@alignCast(ctx));
+    const listener = self.listener orelse return false;
+    var hit = false;
+    while (listener.pollInputEvent()) |iev| switch (iev) {
+        .key => |kev| {
+            defer self.client.alloc.free(kev.key);
+            if (kev.pressed and std.mem.eql(u8, kev.key, "c") and
+                (listener.isKeyDown("left_control") or listener.isKeyDown("right_control")))
+                hit = true;
+        },
+        .text => |tev| self.client.alloc.free(tev.text),
+    };
+    return hit;
+}
 

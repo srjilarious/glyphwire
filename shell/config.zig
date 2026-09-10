@@ -5,6 +5,13 @@
 //! parsed result in one place and the parsing itself is unit-testable
 //! without a running shell. Mirrors how pixzig parses a Lua config into a
 //! Zig structure; new bindings add a field here and a collector in `load`.
+//!
+//! `load` spins up a throwaway Lua state for a one-shot parse (this is
+//! what the unit tests drive). The live shell instead keeps one Lua state
+//! for the whole session -- see `shell/script_engine.zig` -- and reuses
+//! the `alias`/`prompt` collectors here through `installBindings` +
+//! `beginCollecting`/`endCollecting`, so a `function` defined in
+//! `shell.conf` stays callable as a builtin afterwards.
 
 const std = @import("std");
 const ziglua = @import("ziglua");
@@ -159,11 +166,36 @@ pub const LoadResult = struct {
 };
 
 /// The config currently being populated, reachable from the C-ABI Lua
-/// callbacks. Set only for the duration of a `load` call -- the shell
-/// runs its startup config once, single-threaded, so a module-level
-/// pointer is enough (same pattern as pixzig's
-/// `sequencer.SeqScriptingContext`).
+/// callbacks. Set only while a config run is in flight (`load` here, or a
+/// `shell.conf` run inside `script_engine`) -- the shell runs
+/// single-threaded, so a module-level pointer is enough (same pattern as
+/// pixzig's `sequencer.SeqScriptingContext`).
 var g_active: ?*ShellConfig = null;
+
+/// Pushes the `alias` and `prompt` bindings as globals on `lua`. Split
+/// out from `load` so the persistent `ScriptEngine` can install the same
+/// collectors on its session-long state. Pair a run with
+/// `beginCollecting`/`endCollecting`.
+pub fn installBindings(lua: *Lua) void {
+    lua.pushFunction(ziglua.wrap(luaAlias));
+    lua.setGlobal("alias");
+
+    lua.pushFunction(ziglua.wrap(luaPrompt));
+    lua.setGlobal("prompt");
+}
+
+/// Makes `cfg` the `ShellConfig` every `alias`/`prompt` call appends
+/// into, returning the previous target for `endCollecting` to restore.
+pub fn beginCollecting(cfg: *ShellConfig) ?*ShellConfig {
+    const prev = g_active;
+    g_active = cfg;
+    return prev;
+}
+
+/// Restores whatever `beginCollecting` displaced. Always pair the two.
+pub fn endCollecting(prev: ?*ShellConfig) void {
+    g_active = prev;
+}
 
 /// Runs `source` (the contents of shell.conf, null-terminated) as Lua
 /// with glyphwire's config bindings installed, collecting what it
@@ -181,15 +213,10 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) error{OutOfMemory}!L
     defer lua.deinit();
     lua.openLibs();
 
-    lua.pushFunction(ziglua.wrap(luaAlias));
-    lua.setGlobal("alias");
+    installBindings(lua);
 
-    lua.pushFunction(ziglua.wrap(luaPrompt));
-    lua.setGlobal("prompt");
-
-    const prev = g_active;
-    g_active = &cfg;
-    defer g_active = prev;
+    const prev = beginCollecting(&cfg);
+    defer endCollecting(prev);
 
     lua.doString(source) catch {
         const msg = lua.toString(-1) catch "shell.conf: unknown Lua error";

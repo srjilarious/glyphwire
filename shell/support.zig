@@ -4,10 +4,11 @@
 //! relative `@import`.
 //!
 //! `wordsplit` / `complete` / `glob` / `handshake` / `history` /
-//! `lineedit` / `prompt_template` are pure (no libc, no IO). `config` is
-//! the exception: it embeds a Lua state (via ziglua) to run
-//! `~/.config/glyphwire/shell.conf`, so this module pulls in ziglua and
-//! the test runner links the Lua C library.
+//! `lineedit` / `prompt_template` are pure (no libc, no IO). `config` and
+//! `script_engine` are the exceptions: they embed a Lua state (via
+//! ziglua) -- `config` for a one-shot `shell.conf` parse, `script_engine`
+//! for the shell's session-long interpreter -- so this module pulls in
+//! ziglua and the test runner links the Lua C library.
 
 pub const wordsplit = @import("wordsplit.zig");
 pub const complete = @import("complete.zig");
@@ -16,6 +17,7 @@ pub const handshake = @import("handshake.zig");
 pub const history = @import("history.zig");
 pub const lineedit = @import("lineedit.zig");
 pub const config = @import("config.zig");
+pub const script_engine = @import("script_engine.zig");
 pub const keyencode = @import("keyencode.zig");
 pub const prompt_template = @import("prompt_template.zig");
 pub const browsescroll = @import("browsescroll.zig");

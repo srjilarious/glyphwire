@@ -1353,6 +1353,61 @@ surface.
   a mouse scroll pins the caret to its buffer cell, and the next
   key/text snaps the view back to the live tail.
 
+#### Persistent Lua scripting: script builtins & the `sh` table
+- **One Lua state for the whole session.** `shell/config.zig`'s `load`
+  still spins up a throwaway interpreter for a one-shot `shell.conf`
+  parse (that's what the unit tests drive), but the live shell keeps a
+  session-long state in `shell/script_engine.zig` and runs `shell.conf`
+  through *that*. So a `function` the conf defines, or a `defcmd(name,
+  fn)` it calls, stays callable as a builtin for the rest of the session.
+  This was chosen over adding a second config surface or a bespoke
+  per-command mechanism because other language runtimes are meant to hang
+  off the same extension point later, and the Lua surface can stay as
+  small as we want it.
+- **A builtin is a `defcmd` registration or a file
+  `<config_dir>/scripts/<name>.lua`.** The file is looked up by basename
+  and recompiled on every call, so editing it takes effect with no
+  restart — worth more than the microseconds in a config directory.
+- **Script names are a dispatch-layer lookup, never Lua globals.**
+  `defcmd` stores the function in a table kept only in the Lua registry;
+  a file is `loadString`d on demand. Nothing a script does to `_G` can
+  shadow or leak it, and a builtin named `string` or `os` is harmless.
+- **Precedence: core builtins (`cd`/`exit`/`alias`/`unalias`) > aliases >
+  script builtins > `$PATH`.** Aliases are already expanded by the time
+  dispatch reaches the builtin check, so the order there is just: core,
+  then `runScriptBuiltin`, then `runCommand`. A `cd.lua` can't break the
+  shell; a `ls.lua` deliberately does shadow `/usr/bin/ls`, matching
+  bash's function-over-command rule.
+- **The `sh` table is the only new host surface.** `sh.setenv` /
+  `sh.unsetenv` change this process's libc environment (so children
+  spawned afterwards inherit it — `pty.zig`'s `execvp` reads the live
+  environ, same reason `prependZigOutBinToPath` uses `setenv`) *and* a
+  `std.process.Environ.Map` the prompt owns (`Prompt.env`, seeded from
+  the startup snapshot), which is what `{env:NAME}` renders from — so a
+  venv-activate script's `$VIRTUAL_ENV` shows up on the next prompt draw
+  with no prompt cooperation. `sh.getenv` reads that live map;
+  `sh.cwd` / `sh.realpath` are the two path helpers Lua's stdlib lacks.
+  Everything else (path joining, file reads) is left to stock Lua.
+- **The stdlib is open, with three edits.** `print` and `io.write` are
+  re-pointed at the grid; `os.exit` is replaced with a function that
+  raises a catchable error (a script must not be able to kill the
+  shell). `os.execute` / `io.popen` are left working — they run a real
+  subprocess outside the grid mirroring, an accepted limitation.
+  `require` gets `<config_dir>/scripts/lib/` prepended to `package.path`.
+- **A runaway script is bounded.** `runCommand` installs an
+  instruction-count hook (`lua_sethook`) for the duration of the call;
+  the hook polls `HostHooks.poll_interrupt` (which drains the input feed
+  looking for Ctrl-C) and enforces a 30s wall-clock ceiling, raising a
+  Lua error either way — exactly how Lua's own CLI handles SIGINT. A
+  script blocked in a C call (a slow `io.popen`) isn't executing
+  bytecode, so the hook can't fire; that case is left as a known
+  limitation, same as bash.
+- **Errors never escape.** Every call into the persistent state goes
+  through `protectedCall` / `doString`; a script error is written to the
+  grid as `name: message` and reported as exit status 1, and the state
+  stays usable. A builtin's numeric `return` is its `$?` (so `{exit}`
+  works); `runScriptBuiltin` reports `last_dur_ms = 0`.
+
 ### Batch messages
 - **`batch` wraps an ordered list of other messages in one frame**,
   applied server-side in a single pass under the one `ctx_mutex` hold the
