@@ -264,14 +264,21 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     defer listener.deinit();
 
     var prompt: Prompt = .{ .client = &client, .environ_map = environ_map, .listener = listener };
-    // The live environment starts as a working copy of the startup
-    // snapshot; `sh.setenv` from a script mutates this copy (and libc, for
-    // children). Seeded before `defer prompt.deinit()` so the deinit is
-    // always safe.
+    // The live environment `sh.setenv` mutates (alongside libc, for
+    // children). Seeded from the *live* libc environ, not the
+    // `std.process.Init` snapshot in `environ_map`: `main` prepends
+    // `<cwd>/zig-out/bin` to PATH and sets the GLYPHWIRE_* discovery vars
+    // with libc `setenv` *after* that snapshot is taken (see
+    // `prependZigOutBinToPath`), so seeding from the snapshot would give a
+    // stale PATH -- and then a script that rewrites PATH (venv_activate
+    // prepending its bin/) would write the stale value back through
+    // `c.setenv` and drop `zig-out/bin`, so `ls` would stop resolving to
+    // the bundled `glyphwire-ls`. Seeded before `defer prompt.deinit()`
+    // so the deinit is always safe.
     prompt.env = std.process.Environ.Map.init(alloc);
     {
-        var it = environ_map.iterator();
-        while (it.next()) |e| try prompt.env.put(e.key_ptr.*, e.value_ptr.*);
+        const live: std.process.Environ.PosixBlock.View = .{ .slice = @ptrCast(std.mem.span(std.c.environ)) };
+        try prompt.env.putPosixBlock(live);
     }
     // Unreachable before `exit` gave this loop a clean return path --
     // every previous exit was a hard kill, so this never ran and the leak
