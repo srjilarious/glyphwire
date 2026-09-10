@@ -37,6 +37,8 @@ pub const DispatchError = error{
     InvalidIconOption,
     /// `move_content`'s `direction` wasn't `"up"` or `"down"`.
     InvalidMoveDirection,
+    /// `find_metadata`'s `direction` wasn't `"next"` or `"prev"`.
+    InvalidMetadataDirection,
     UnknownMetadata,
     UnknownTable,
     InvalidTableOption,
@@ -297,6 +299,27 @@ const GetMetadataParams = struct {
 const GetMetadataResult = struct {
     id: ?core.MetadataHandle,
     json: ?[]const u8,
+};
+
+/// `find_metadata` params: the content cell to start from (`above` in
+/// `core.SelectionPoint`'s scroll-stable coordinate -- positive counts up
+/// into scrollback) and which way to look. `"next"` walks forward in
+/// reading order, `"prev"` backward; anything else -> InvalidMetadataDirection.
+const FindMetadataParams = struct {
+    layer: ?core.LayerHandle = null,
+    above: i64 = 0,
+    col: usize = 0,
+    direction: ?[]const u8 = null,
+};
+
+/// `find_metadata` result: `found` false means there's no further span in
+/// that direction (the other fields are then unset). `above`/`col` are the
+/// first visible character of the neighbouring span, `id` its metadata id.
+const FindMetadataResult = struct {
+    found: bool,
+    above: i64 = 0,
+    col: usize = 0,
+    id: ?core.MetadataHandle = null,
 };
 
 const CellMetricsResult = struct { cell_px_w: u32, cell_px_h: u32 };
@@ -967,6 +990,7 @@ pub const Dispatcher = struct {
         .{ "create_metadata", catBytesId(handleCreateMetadata) },
         .{ "destroy_metadata", catVoid(handleDestroyMetadata) },
         .{ "get_metadata", catBytesId(handleGetMetadata) },
+        .{ "find_metadata", catBytesId(handleFindMetadata) },
         .{ "create_table", catBytesId(handleCreateTable) },
         .{ "destroy_table", catVoid(handleDestroyTable) },
         .{ "table_set_rows", catVoid(handleTableSetRows) },
@@ -1711,6 +1735,32 @@ pub const Dispatcher = struct {
         const json = if (metadata_id) |m| self.ctx.metadataJson(m) else null;
 
         return try rpc.response(alloc, id, GetMetadataResult{ .id = metadata_id, .json = json });
+    }
+
+    /// `find_metadata`: from the content cell `(above, col)`, reports the
+    /// first visible character of the metadata-id span adjacent in
+    /// `direction` -- see `core.Layer.adjacentMetadataSpan`. The shell's
+    /// Ctrl+PgUp / Ctrl+PgDn scrollback-span navigation is the caller; the
+    /// walk runs server-side so it never has to `get_cells` the grid to
+    /// find spans itself (decisions.md, Metadata).
+    fn handleFindMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(FindMetadataParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+
+        const dir: core.MetadataSpanDir = if (p.direction) |d|
+            (std.meta.stringToEnum(core.MetadataSpanDir, d) orelse return DispatchError.InvalidMetadataDirection)
+        else
+            .next;
+
+        const result: FindMetadataResult = if (layer.adjacentMetadataSpan(p.above, p.col, dir)) |hit|
+            .{ .found = true, .above = hit.above, .col = hit.col, .id = hit.id }
+        else
+            .{ .found = false };
+        return try rpc.response(alloc, id, result);
     }
 
     /// Returns a full row-major snapshot of the given layer's (default:

@@ -2539,6 +2539,46 @@ paste and `set_clipboard` / `get_clipboard` already exist). See
   linewise / last-line, `selectionSpan`, `clipboardCopy` / `clipboardCut`
   / `dropSelection`, mouse-drag selection). 815 pass.
 
+## Shell: Ctrl+PgUp/PgDn navigation between metadata-id spans
+
+One new wire request plus shell key handling; the walk itself is
+server-side. See `docs/api.md`'s `find_metadata` row and
+`docs/decisions.md`'s Metadata section for the *why*.
+
+- **`find_metadata` (`src/dispatch.zig`, `src/protocol` shapes local to
+  dispatch, `src/client.zig` `findMetadata`).** `{layer?, above, col,
+  direction}` -> `{found, above?, col?, id?}`. Walks retained content from
+  `(above, col)` (the scroll-stable `SelectionPoint.above` coordinate) to
+  the first visible character of the metadata-id span adjacent in
+  `direction` (`"next"` / `"prev"`; else `InvalidMetadataDirection`).
+- **`core.Layer.adjacentMetadataSpan(above, col, dir)`** does the walk:
+  phase 1 leaves the current span (skipping its id *and* untagged cells,
+  so a gapped `gw-ls -l` row counts as one span), phase 2 rewinds a
+  `.prev` hit to the span's first cell, phase 3 finds that span's first
+  cell with a non-blank grapheme (skips a leading icon / padding cell).
+  `null` at the ends — no wrap. New public `core.MetadataSpanDir` /
+  `MetadataSpanHit`.
+- **Shell (`shell/main.zig` `Prompt.metadataJump`, `shell/browsescroll.zig`
+  `locate`).** Ctrl+PgUp = `.prev` (enters scrollback browse from the live
+  prompt, like Ctrl+Up); Ctrl+PgDn = `.next` (a no-op at the prompt —
+  nothing tagged below the input line). `metadataJump` resyncs the scroll
+  state, turns the browse cursor / prompt caret into an `above`, calls
+  `find_metadata`, then `browsescroll.locate` converts the returned
+  `above` back into a `{view_scroll, browse row}` pair — scrolling the
+  host window if the span sits outside it, keeping the usual scrolloff
+  margin above it when the scrollback allows. A miss leaves the cursor
+  put.
+- **Decisions (asked):** Ctrl+PgUp enters browse from the prompt;
+  the walk scans all retained scrollback (scrolls off-screen spans into
+  view); land on the first *actual character* (skip leading icon/padding);
+  an in-span cursor jumps straight to the strictly-adjacent span (no
+  "go to current span start first").
+- **Tests:** `core_tests.zig` +6 (`adjacentMetadataSpan`: next/prev, skip
+  leading blank cells, gapped same-id run as one span, walking into
+  retained scrollback, nothing-tagged -> null), `shell_tests.zig` +3
+  (`browsescroll.locate` placement math), `dispatch_tests.zig` +1
+  (`find_metadata` round trip + bad direction). 826 pass.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

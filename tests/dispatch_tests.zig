@@ -1726,6 +1726,64 @@ pub fn toggleHighlightFlipsIdAndReturnsStateTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectTrue(std.mem.indexOf(u8, off.response.?, "\"entries\":[]") != null);
 }
 
+/// `find_metadata` walks from `(above, col)` to the first visible
+/// character of the adjacent metadata-id span, skipping the current span
+/// and any leading blank/icon cells of the next one; `found:false` when
+/// there's nothing further that way, and a bad `direction` is rejected.
+pub fn findMetadataWalksToNextSpanFirstCharacterTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 3, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const m1 = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_metadata","params":{"json":"{\"n\":1}"}}
+    );
+    defer if (m1.response) |r| alloc.free(r);
+    const m2 = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"create_metadata","params":{"json":"{\"n\":2}"}}
+    );
+    defer if (m2.response) |r| alloc.free(r);
+
+    // Row 0: cols 0-2 = "aa " tagged 1; cols 3-6 = "  bb" tagged 2 (two
+    // leading blank cells before the first real character at col 5).
+    try testz.expectTrue((try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"aa ","metadata_id":1}}
+    )).response == null);
+    try testz.expectTrue((try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"  bb","metadata_id":2}}
+    )).response == null);
+
+    const Response = struct {
+        result: struct { found: bool, above: i64 = 0, col: usize = 0, id: ?u32 = null },
+    };
+
+    const fwd = (try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":3,"method":"find_metadata","params":{"above":0,"col":0,"direction":"next"}}
+    )).response.?;
+    defer alloc.free(fwd);
+    const fwd_p = try std.json.parseFromSlice(Response, alloc, fwd, .{ .ignore_unknown_fields = true });
+    defer fwd_p.deinit();
+    try testz.expectTrue(fwd_p.value.result.found);
+    try testz.expectEqual(fwd_p.value.result.above, @as(i64, 0));
+    try testz.expectEqual(fwd_p.value.result.col, @as(usize, 5));
+    try testz.expectEqual(fwd_p.value.result.id.?, @as(u32, 2));
+
+    // Past the last span: nothing further.
+    const none = (try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":4,"method":"find_metadata","params":{"above":0,"col":6,"direction":"next"}}
+    )).response.?;
+    defer alloc.free(none);
+    const none_p = try std.json.parseFromSlice(Response, alloc, none, .{ .ignore_unknown_fields = true });
+    defer none_p.deinit();
+    try testz.expectFalse(none_p.value.result.found);
+
+    // An unrecognised direction is rejected.
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":5,"method":"find_metadata","params":{"above":0,"col":0,"direction":"sideways"}}
+    ), dispatch.DispatchError.InvalidMetadataDirection);
+}
+
 /// `set_highlight` replaces the id set wholesale; `clear_highlight` empties
 /// it. Both answer with the resulting `HighlightState`.
 pub fn setAndClearHighlightReplaceTheIdSetTest(io: std.Io, alloc: std.mem.Allocator) !void {

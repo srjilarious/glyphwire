@@ -63,6 +63,33 @@ pub fn up(s: State, count: usize, margin: usize, view_max: usize, entering: bool
     return .{ .bp_row = bp, .view_scroll = vs };
 }
 
+/// Pick a `{view_scroll, bp_row}` that puts content row `above` (in the
+/// scroll-stable coordinate `core.SelectionPoint.above` documents:
+/// positive counts up into retained scrollback, zero or negative is a
+/// live-viewport row) on screen, keeping `margin` rows of context above
+/// it when the scrollback allows. `view_max` is how far back the view can
+/// scroll (`history_len`); `bottom_row` is the last browsable screen row
+/// (the one just above the prompt). Used by the shell's Ctrl+PgUp/PgDn
+/// metadata-span jump, which lands on an arbitrary row rather than
+/// stepping one at a time like `up`/`down` do.
+pub fn locate(above: i64, margin: usize, view_max: usize, bottom_row: usize) Result {
+    // Feasible view offsets: `bp_row = view_scroll - above` must stay in
+    // `[0, bottom_row]`, and `view_scroll` in `[0, view_max]`.
+    const lo = @max(@as(i64, 0), above);
+    const hi = @min(@as(i64, @intCast(view_max)), above + @as(i64, @intCast(bottom_row)));
+
+    var vs: i64 = above + @as(i64, @intCast(margin));
+    if (vs < lo) vs = lo;
+    if (vs > hi) vs = hi;
+    if (vs < 0) vs = 0; // `hi < lo` only if `above` isn't actually retained.
+
+    const r = vs - above;
+    return .{
+        .bp_row = @intCast(if (r < 0) 0 else r),
+        .view_scroll = @intCast(vs),
+    };
+}
+
 /// Walk the browse cursor `count` rows down toward the prompt. `bottom` is
 /// the last browsable row (the one just above the prompt line). Symmetric
 /// with `up`: the cursor moves down freely until it's `margin` rows from

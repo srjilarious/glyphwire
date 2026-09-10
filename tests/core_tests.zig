@@ -3280,3 +3280,136 @@ pub fn sessionResizeAllCatchesUpEveryContextTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectEqual(session.contextPtr(bg).?.root.width, @as(usize, 30));
     try testz.expectEqual(session.contextPtr(bg).?.root.height, @as(usize, 8));
 }
+
+// ─── adjacentMetadataSpan: Ctrl+PgUp/PgDn scrollback-span navigation ────
+
+pub fn adjacentMetadataSpanNextSkipsCurrentSpanToNextIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    // Row 0: cols 0-3 tagged 1 ("aaa " -- trailing space still id 1), cols
+    // 4-6 tagged 2 ("bbb").
+    try layer.writeTextTagged("aaa ", fg, null, 1);
+    try layer.writeTextTagged("bbb", fg, null, 2);
+
+    const hit = layer.adjacentMetadataSpan(0, 0, .next).?;
+    try testz.expectEqual(hit.above, @as(i64, 0));
+    try testz.expectEqual(hit.col, @as(usize, 4));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 2));
+
+    // Nothing tagged past span 2.
+    try testz.expectTrue(layer.adjacentMetadataSpan(0, 5, .next) == null);
+}
+
+pub fn adjacentMetadataSpanPrevLandsOnSpanFirstCharacterTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    try layer.writeTextTagged("aaa ", fg, null, 1);
+    try layer.writeTextTagged("bbb", fg, null, 2);
+
+    // From the middle of span 2, `.prev` walks back over span 2 to the
+    // first cell of span 1.
+    const hit = layer.adjacentMetadataSpan(0, 6, .prev).?;
+    try testz.expectEqual(hit.above, @as(i64, 0));
+    try testz.expectEqual(hit.col, @as(usize, 0));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 1));
+
+    try testz.expectTrue(layer.adjacentMetadataSpan(0, 0, .prev) == null);
+}
+
+pub fn adjacentMetadataSpanSkipsLeadingIconAndPaddingCellsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    // Span 1 is a single "x"; span 2 leads with two blank cells (an icon /
+    // padding stand-in) before its first real character at col 3.
+    try layer.writeTextTagged("x", fg, null, 1);
+    try layer.writeTextTagged("  y", fg, null, 2);
+
+    const hit = layer.adjacentMetadataSpan(0, 0, .next).?;
+    try testz.expectEqual(hit.col, @as(usize, 3));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 2));
+}
+
+pub fn adjacentMetadataSpanTreatsGappedSameIdRunAsOneSpanTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    // A `gw-ls -l` style row: one id spread across two runs ("drwx" then
+    // "file") with an untagged separator cell between, then a second entry.
+    try layer.writeTextTagged("drwx", fg, null, 1);
+    try layer.writeTextTagged(" ", fg, null, null); // col 4, untagged gap
+    try layer.writeTextTagged("file", fg, null, 1); // cols 5-8, still id 1
+    try layer.writeTextTagged(" ", fg, null, null); // col 9, untagged gap
+    try layer.writeTextTagged("next", fg, null, 2); // cols 10-13
+
+    // From inside the "file" run, `.next` steps over the whole id-1 group
+    // (gap included) to id 2.
+    const fwd = layer.adjacentMetadataSpan(0, 6, .next).?;
+    try testz.expectEqual(fwd.col, @as(usize, 10));
+    try testz.expectEqual(fwd.id, @as(glyphwire.MetadataHandle, 2));
+
+    // From span 2, `.prev` walks back across the gap to the very first
+    // cell of the id-1 group.
+    const back = layer.adjacentMetadataSpan(0, 12, .prev).?;
+    try testz.expectEqual(back.col, @as(usize, 0));
+    try testz.expectEqual(back.id, @as(glyphwire.MetadataHandle, 1));
+}
+
+pub fn adjacentMetadataSpanWalksIntoRetainedScrollbackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 3, 2, 4);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    // Each 3-char write fills a row and wraps; the wrap past the bottom
+    // scrolls the oldest row into history. End state: viewport row 0 =
+    // "ccc" (id 3), row 1 = "ddd" (id 4); history "bbb" (id 2) one row
+    // above the viewport, "aaa" (id 1) two rows above.
+    try layer.writeTextTagged("aaa", fg, null, 1);
+    try layer.writeTextTagged("bbb", fg, null, 2);
+    try layer.writeTextTagged("ccc", fg, null, 3);
+    try layer.writeTextTagged("ddd", fg, null, 4);
+
+    // `.prev` from the bottom viewport row steps up one span at a time,
+    // crossing from the viewport into retained scrollback. `above` is the
+    // scroll-stable coordinate: 0 in the viewport, positive into history.
+    const s3 = layer.adjacentMetadataSpan(-1, 0, .prev).?;
+    try testz.expectEqual(s3.above, @as(i64, 0));
+    try testz.expectEqual(s3.id, @as(glyphwire.MetadataHandle, 3));
+
+    const s2 = layer.adjacentMetadataSpan(0, 0, .prev).?;
+    try testz.expectEqual(s2.above, @as(i64, 1));
+    try testz.expectEqual(s2.id, @as(glyphwire.MetadataHandle, 2));
+
+    const s1 = layer.adjacentMetadataSpan(1, 0, .prev).?;
+    try testz.expectEqual(s1.above, @as(i64, 2));
+    try testz.expectEqual(s1.id, @as(glyphwire.MetadataHandle, 1));
+
+    // Oldest retained span -- nothing further back.
+    try testz.expectTrue(layer.adjacentMetadataSpan(2, 0, .prev) == null);
+
+    // And `.next` climbs back down out of history.
+    const down = layer.adjacentMetadataSpan(2, 0, .next).?;
+    try testz.expectEqual(down.above, @as(i64, 1));
+    try testz.expectEqual(down.id, @as(glyphwire.MetadataHandle, 2));
+}
+
+pub fn adjacentMetadataSpanReturnsNullWhenNothingTaggedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    try layer.writeText("plain untagged text", glyphwire.default_style.fg, null);
+
+    try testz.expectTrue(layer.adjacentMetadataSpan(0, 0, .next) == null);
+    try testz.expectTrue(layer.adjacentMetadataSpan(0, 5, .prev) == null);
+}

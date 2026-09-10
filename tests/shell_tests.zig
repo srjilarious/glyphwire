@@ -751,3 +751,29 @@ pub fn browseDownEndsAtThePromptRowTest(_: std.Io, _: std.mem.Allocator) !void {
     const r = browsescroll.down(.{ .bp_row = 19, .view_scroll = 0 }, 1, 8, 19);
     try testz.expectTrue(r.ended);
 }
+
+// ─── browsescroll.locate: Ctrl+PgUp/PgDn metadata-span jump placement ───
+
+pub fn locateKeepsScrolloffContextAboveTheTargetTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Target 50 rows into scrollback, margin 8, plenty of history: land it
+    // at screen row 8 with the view scrolled so 8 rows sit above it.
+    const r = browsescroll.locate(50, 8, 200, 19);
+    try testz.expectEqual(r.bp_row, @as(usize, 8));
+    try testz.expectEqual(r.view_scroll, @as(usize, 58));
+}
+
+pub fn locateClampsScrollToAvailableHistoryTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Only 52 rows of history retained: the view can't scroll the full
+    // margin's worth, so the target ends up nearer the top.
+    const r = browsescroll.locate(50, 8, 52, 19);
+    try testz.expectEqual(r.view_scroll, @as(usize, 52));
+    try testz.expectEqual(r.bp_row, @as(usize, 2));
+}
+
+pub fn locateForTargetInLiveViewportStillLeavesMarginTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Target 3 rows below the viewport top (above -3): scroll back 5 so it
+    // shows at screen row 8 (= margin) rather than up against the top.
+    const r = browsescroll.locate(-3, 8, 200, 19);
+    try testz.expectEqual(r.bp_row, @as(usize, 8));
+    try testz.expectEqual(r.view_scroll, @as(usize, 5));
+}

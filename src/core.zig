@@ -769,6 +769,17 @@ pub const LayerSize = struct { cols: usize, rows: usize };
 /// retained in total. `offset == 0` is the live tail.
 pub const LayerScroll = struct { offset: usize, max: usize };
 
+/// Which way `Layer.adjacentMetadataSpan` walks: `.next` forward in
+/// reading order (down / toward the live tail), `.prev` backward (up
+/// into scrollback).
+pub const MetadataSpanDir = enum { next, prev };
+
+/// Where `Layer.adjacentMetadataSpan` landed: the first visible character
+/// of the neighbouring metadata-id span. `above` is in the scroll-stable
+/// coordinate `SelectionPoint.above` documents (positive counts up into
+/// retained scrollback, zero or negative is inside the live viewport).
+pub const MetadataSpanHit = struct { above: i64, col: usize, id: MetadataHandle };
+
 /// How much of a layer's content grid the host actually draws -- see
 /// `PropertyName.viewport`. Zero on an axis means "all of it", which is
 /// every layer that existed before viewports did.
@@ -1442,6 +1453,106 @@ pub const Layer = struct {
         if (col >= self.width) return null;
         const cells = self.rowAtSigned(row) orelse return null;
         return &cells[col];
+    }
+
+    /// One cell position while walking retained content: `row` is the
+    /// signed live-viewport coordinate `rowAtSigned` takes (0 = viewport
+    /// top, negative reaches into scrollback).
+    const WalkPos = struct { row: i64, col: usize };
+
+    /// The next content cell after `p` in reading order (left to right,
+    /// then down a row), or null past the bottom of the live viewport.
+    fn walkNext(self: *const Layer, p: WalkPos) ?WalkPos {
+        if (p.col + 1 < self.width) return .{ .row = p.row, .col = p.col + 1 };
+        const nr = p.row + 1;
+        if (nr >= @as(i64, @intCast(self.height))) return null;
+        return .{ .row = nr, .col = 0 };
+    }
+
+    /// The previous content cell before `p` in reading order, or null past
+    /// the oldest retained scrollback row.
+    fn walkPrev(self: *const Layer, p: WalkPos) ?WalkPos {
+        if (p.col > 0) return .{ .row = p.row, .col = p.col - 1 };
+        const pr = p.row - 1;
+        if (pr < -@as(i64, @intCast(self.history_len))) return null;
+        return .{ .row = pr, .col = self.width -| 1 };
+    }
+
+    fn walkStep(self: *const Layer, p: WalkPos, dir: MetadataSpanDir) ?WalkPos {
+        return switch (dir) {
+            .next => self.walkNext(p),
+            .prev => self.walkPrev(p),
+        };
+    }
+
+    /// A cell counts as holding a visible character (vs. an icon-only or
+    /// padding cell) when its grapheme is more than whitespace -- what
+    /// `adjacentMetadataSpan` skips leading cells for.
+    fn cellHasText(c: *const Cell) bool {
+        return std.mem.trim(u8, c.grapheme(), " ").len != 0;
+    }
+
+    /// From content cell `(above, col)` -- `above` in `SelectionPoint`'s
+    /// scroll-stable coordinate -- find the first visible character of the
+    /// metadata-id span adjacent in `dir`. The span the start cell already
+    /// belongs to is stepped over (its metadata id, including any untagged
+    /// cells embedded in that id's run, e.g. the inter-column gaps of a
+    /// `glyphwire-ls -l` row), as are untagged cells between spans. The
+    /// result is that span's first cell carrying a non-blank grapheme, so
+    /// a leading icon or padding cell tagged with the span's id is skipped;
+    /// a span with no visible text at all falls back to its first cell.
+    /// null when there's no further span in that direction within retained
+    /// content.
+    ///
+    /// Server-side on purpose: a client never has to round-trip the grid
+    /// with `get_cells` to scan for spans (see decisions.md, Metadata).
+    pub fn adjacentMetadataSpan(self: *const Layer, above: i64, col: usize, dir: MetadataSpanDir) ?MetadataSpanHit {
+        if (self.width == 0) return null;
+
+        const start_row: i64 = -above;
+        const start_id: ?MetadataHandle =
+            if (self.cellSigned(start_row, col)) |c| c.metadata_id else null;
+
+        // Phase 1: leave the current span. Skip cells tagged `start_id`
+        // (or untagged -- that also carries us across the gaps inside a
+        // gapped same-id run) until the first cell tagged with a different
+        // id; that id names the neighbouring span.
+        var pos = WalkPos{ .row = start_row, .col = col };
+        const target_id: MetadataHandle = while (self.walkStep(pos, dir)) |next| {
+            pos = next;
+            const c = self.cellSigned(pos.row, pos.col) orelse return null;
+            const mid = c.metadata_id orelse continue;
+            if (start_id == null or mid != start_id.?) break mid;
+        } else return null;
+
+        // Phase 2: find the span's first cell in reading order. Walking
+        // `.next` already stopped on it; walking `.prev` stopped on the
+        // span's last cell, so step back over its `target_id` cells
+        // (crossing untagged gaps) to the earliest one.
+        var span_start = pos;
+        if (dir == .prev) {
+            var scan = pos;
+            while (self.walkPrev(scan)) |p| : (scan = p) {
+                const c = self.cellSigned(p.row, p.col) orelse break;
+                if (c.metadata_id) |mid| {
+                    if (mid != target_id) break;
+                    span_start = p;
+                }
+            }
+        }
+
+        // Phase 3: the span's first cell that holds a visible character.
+        var scan = span_start;
+        while (self.cellSigned(scan.row, scan.col)) |c| {
+            if (c.metadata_id) |mid| {
+                if (mid != target_id) break;
+                if (cellHasText(c)) return .{ .above = -scan.row, .col = scan.col, .id = target_id };
+            }
+            scan = self.walkNext(scan) orelse break;
+        }
+
+        // All-icon / all-blank span: land on its first cell.
+        return .{ .above = -span_start.row, .col = span_start.col, .id = target_id };
     }
 
     /// Returns the row `rows_above_viewport` above the current viewport
