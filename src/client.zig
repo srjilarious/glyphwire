@@ -1119,6 +1119,30 @@ pub const Client = struct {
         return .{ .id = parsed.value.result.id, .json = json };
     }
 
+    /// `find_metadata(layer?, above, col, direction)` -- a request. Walks
+    /// retained content from the cell `(above, col)` (in `core.SelectionPoint`'s
+    /// scroll-stable coordinate) to the first visible character of the
+    /// metadata-id span adjacent in `dir`, skipping the span the start
+    /// cell is in and any untagged cells. Returns null when there's no
+    /// further span that way. See `core.Layer.adjacentMetadataSpan`.
+    pub fn findMetadata(
+        self: *Client,
+        layer: ?core.LayerHandle,
+        above: i64,
+        col: usize,
+        dir: core.MetadataSpanDir,
+    ) !?core.MetadataSpanHit {
+        var parsed = try self.request(
+            struct { found: bool, above: i64 = 0, col: usize = 0, id: ?core.MetadataHandle = null },
+            "find_metadata",
+            .{ .layer = layer, .above = above, .col = col, .direction = @tagName(dir) },
+        );
+        defer parsed.deinit();
+        const r = parsed.value.result;
+        if (!r.found) return null;
+        return .{ .above = r.above, .col = r.col, .id = r.id orelse 0 };
+    }
+
     /// `get_input_state` -- a request returning which keys/mouse buttons
     /// are currently down and the last known cursor position. A one-time
     /// bootstrap query; `InputListener` is the live-updating counterpart.

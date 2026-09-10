@@ -1200,6 +1200,38 @@ surface.
   optional) `metadata_id` — there'd be no point calling it to tag with
   nothing.
 
+- **`find_metadata(layer?, above, col, direction)` — span-to-span
+  navigation computed server-side.** `glyphwire-shell` wanted Ctrl+PgUp /
+  Ctrl+PgDn to jump the scrollback browse cursor between metadata-id spans
+  (a `gw-ls` entry, typically), landing on each span's first real
+  character. The shell could have pulled the grid back with `get_cells`
+  and scanned for the runs itself, but that's exactly the client-side grid
+  scan the highlight feature was restructured to avoid (see the Selection
+  & clipboard section, and `feedback` memory): `get_cells` is slow enough
+  to notice in the shell, and the server already holds every cell. So the
+  walk is a request the server answers with a single small result. Design
+  points:
+  - **Coordinates are `{above, col}`**, the same scroll-stable pair
+    `set_selection`'s points use (positive `above` counts up into retained
+    scrollback, zero or negative is a live-viewport row), not a
+    `(view_offset, screen_row)` pair — the shell converts to and from its
+    own browse state and never has to keep the server's `view_offset` in
+    sync for the query.
+  - **A span is identified by its metadata id, not by contiguity.** The
+    walk steps over the whole run of the start cell's id — *including*
+    untagged cells embedded in it, which is how a `gw-ls -l` row (one id
+    across several columns with untagged separator cells between) counts as
+    one span rather than several. Untagged cells *between* different ids
+    are skipped too.
+  - **"First text character" skips leading non-text cells.** The landing
+    cell is the target span's first cell whose grapheme is more than
+    whitespace, so a leading icon or padding cell tagged with the span's
+    id is stepped past (matching the user's ask). A span with no visible
+    text at all falls back to its first cell.
+  - **No wrap-around.** `found: false` when there's no further span that
+    direction within retained content; the shell then leaves the cursor
+    where it is.
+
 ### Table
 - **Superseded: real server-side state, not client-composited cells.** A
   first prototype (`src/table.zig`, `Client.startTable`) built a table

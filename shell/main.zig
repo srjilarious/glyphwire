@@ -705,6 +705,15 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // The mirror jump while browsing. At the live prompt there's
             // nothing below the input line, so Ctrl+Down does nothing.
             if (prompt.browse_pos != null) try prompt.browseDown(prompt.scrollbackJumpRows());
+        } else if (ctrl and std.mem.eql(u8, ev.key, "page_up")) {
+            // Ctrl+PgUp jumps the cursor to the first character of the
+            // previous metadata-id span (a gw-ls entry, say), entering
+            // scrollback browse mode from the live prompt if needed.
+            try prompt.metadataJump(.prev);
+        } else if (ctrl and std.mem.eql(u8, ev.key, "page_down")) {
+            // The mirror toward the live tail. A no-op at the live prompt
+            // (nothing tagged below the input line).
+            try prompt.metadataJump(.next);
         } else if (std.mem.eql(u8, ev.key, "up")) {
             // Plain Up: readline-style history recall at the prompt, a
             // one-row browse step while already in scrollback mode.
@@ -2358,6 +2367,53 @@ const Prompt = struct {
         }
         const end = if (last_content) |lc| lc + 1 else 0;
         return @min(end, self.grid_cols -| 1);
+    }
+
+    /// Ctrl+PgUp (`dir == .prev`) / Ctrl+PgDn (`dir == .next`): move the
+    /// cursor to the first character of the metadata-id span before / after
+    /// the one it's currently on -- a gw-ls entry, typically. From the live
+    /// prompt, `.prev` breaks into scrollback browse mode (like Ctrl+Up);
+    /// `.next` there is a no-op, since nothing tagged sits below the input
+    /// line.
+    ///
+    /// The span walk itself runs server-side (`find_metadata` ->
+    /// `core.Layer.adjacentMetadataSpan`) so the shell never scans the grid
+    /// for spans; this just turns the returned scroll-stable `above` back
+    /// into a `{view_scroll, browse row}` pair, scrolling the host window
+    /// if the target sits outside it (`browsescroll.locate` keeps the
+    /// normal scrolloff margin above it when the scrollback allows).
+    fn metadataJump(self: *Prompt, dir: glyphwire.MetadataSpanDir) !void {
+        const entering = self.browse_pos == null;
+        if (entering and dir == .next) return;
+
+        // A rare keypress -- resync the authoritative scroll state so the
+        // `locate` math below works from a current `view_max`.
+        try self.syncScrollState();
+
+        const from_row: usize, const from_col: usize = if (self.browse_pos) |bp|
+            .{ bp.row, bp.col }
+        else
+            .{ self.line_start_row, self.line_start_col + self.caretCol() };
+        // above = view_scroll - screen_row (see core.SelectionPoint).
+        const from_above: i64 =
+            @as(i64, @intCast(self.view_scroll)) - @as(i64, @intCast(from_row));
+
+        const hit = (try self.client.findMetadata(null, from_above, from_col, dir)) orelse return;
+
+        const plan = browsescroll.locate(
+            hit.above,
+            self.scrolloffRows(),
+            self.view_max,
+            self.line_start_row -| 1,
+        );
+        if (plan.view_scroll != self.view_scroll) try self.scrollWindow(plan.view_scroll);
+
+        const bp = glyphwire.Cursor{
+            .row = plan.bp_row,
+            .col = @min(hit.col, self.grid_cols -| 1),
+        };
+        self.browse_pos = bp;
+        try self.client.setCursor(bp.row, bp.col);
     }
 
     /// Enter while browsing: looks up whatever cell the browse cursor is
