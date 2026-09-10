@@ -97,6 +97,14 @@ pub const Outcome = union(enum) {
     /// `:pwd` -- show the working directory on the status line. The
     /// editor doesn't know it, so the host fills the message in.
     pwd,
+    /// `:bn` / `:bp` -- move to the next / previous open buffer. An
+    /// `Editor` *is* one buffer and knows nothing about the others, so
+    /// the list lives in `zoe/ui.zig` and these just name the direction.
+    buffer_step: struct { forward: bool },
+    /// `:bd` / `:bd!` -- close this buffer. `force` is the `!` form; a
+    /// plain `:bd` on a modified buffer never gets this far (E37, the
+    /// same guard `:q` uses).
+    buffer_close: struct { force: bool },
 };
 
 pub const Editor = struct {
@@ -1073,13 +1081,29 @@ pub const Editor = struct {
         }
         if (eq(u8, name, "w") or eq(u8, name, "write")) return .{ .write = arg_opt };
         if (eq(u8, name, "e") or eq(u8, name, "edit")) {
-            if (self.buf.dirty) {
+            // A *bare* `:e` re-reads this buffer from disk and throws
+            // away unsaved changes, so it needs the same guard `:q` has.
+            // `:e <path>` opens another buffer in another tab and
+            // abandons nothing -- see decisions.md's "zoe multiple
+            // buffers".
+            if (arg_opt == null and self.buf.dirty) {
                 self.setStatus("E37: No write since last change (add ! to override)", .{});
                 return .none;
             }
             return .{ .edit = arg_opt };
         }
         if (eq(u8, name, "e!") or eq(u8, name, "edit!")) return .{ .edit = arg_opt };
+        if (eq(u8, name, "bn") or eq(u8, name, "bnext")) return .{ .buffer_step = .{ .forward = true } };
+        if (eq(u8, name, "bp") or eq(u8, name, "bprev") or eq(u8, name, "bprevious"))
+            return .{ .buffer_step = .{ .forward = false } };
+        if (eq(u8, name, "bd!") or eq(u8, name, "bdelete!")) return .{ .buffer_close = .{ .force = true } };
+        if (eq(u8, name, "bd") or eq(u8, name, "bdelete")) {
+            if (self.buf.dirty) {
+                self.setStatus("E37: No write since last change (add ! to override)", .{});
+                return .none;
+            }
+            return .{ .buffer_close = .{ .force = false } };
+        }
         if (eq(u8, name, "wq") or eq(u8, name, "x")) return .{ .write_quit = arg_opt };
         if (eq(u8, name, "q!") or eq(u8, name, "quit!")) return .{ .quit = .{ .force = true } };
         if (eq(u8, name, "wq!") or eq(u8, name, "x!")) return .{ .write_quit = arg_opt };

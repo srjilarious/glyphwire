@@ -3192,8 +3192,8 @@ and `:set lineno=off|absolute|relative` flips it live. `"relative"` is
 vim's hybrid: the caret's own line shows its absolute number, every other
 line its distance from the caret. The setting lives on `Editor`
 (`line_numbers: LineNumbers`, like `page_lines`) so the pure state
-machine owns it and `:set` needs no `Outcome`; `Ui.setupHighlight` writes
-the config value in after `init`.
+machine owns it and `:set` needs no `Outcome`; `Ui.newSlot` writes
+the config value onto each buffer as it is opened.
 
 **Width is derived, not fixed.** The gutter is `max(3, digits(lineCount))
 + 1` cells — three digits minimum, a trailing separator space, widening a
@@ -3211,3 +3211,68 @@ row's distance. `renderBuffer` handles both with one pass of
 `renderGutterCell` per visible row — a short unstyled write each, no
 syntax pass — gated on `scrolled or (relative and caret line moved)`. In
 `.absolute` mode a bare caret move still touches only two rows.
+
+### zoe multiple buffers
+
+**Every open buffer keeps everything, deliberately.** A buffer is a
+`Slot` in `zoe/ui.zig`: its own `Editor` (text, cursor, mode, path,
+registers), its own scroll position and between-frame redraw bookkeeping,
+and its own tree-sitter `Highlighter`. Nothing is shared and nothing is
+dropped when a buffer goes to the background, so switching tabs is a
+pointer swap and one repaint — never a re-read from disk and never a
+reparse, which is what a shared highlighter would have cost on every
+switch of a large file. The price is memory: `n` open buffers hold `n`
+texts and `n` parse trees for as long as they are open. That is the
+trade this feature was asked for, and if it ever needs revisiting the
+lever is evicting a background buffer's *tree* (cheap to rebuild) long
+before its *text* (which may be modified).
+
+**One `Editor` per buffer, rather than one editor over many buffers.**
+vim's model puts mode, the `:` line and the registers above the buffer
+list; zoe's `Editor` is a single pure state machine that already owns all
+of it. Splitting it into per-buffer and global halves would have touched
+every one of its commands for no behaviour the editor lacks: the unnamed
+register is the *system* clipboard here (`Outcome.set_clipboard` /
+`Outcome.paste`), so `dd` in one tab and `p` in another already works
+across the split. The editor core therefore stays unaware that other
+buffers exist — `:bn` / `:bp` / `:bd` return `Outcome.buffer_step` /
+`Outcome.buffer_close` naming only a direction, and `zoe/ui.zig` owns the
+list.
+
+**`:e <path>` and the file tree both open-or-focus a tab.** Opening a
+file that is already open switches to its tab rather than loading a
+second copy of it, and the buffer being left keeps its cursor and scroll
+exactly where they were. The new tab lands *next to* the current one, not
+at the far end, so `:bp` goes back where you came from. Two consequences
+of no longer replacing the current buffer: `:e <path>` dropped its E37
+dirty guard (it abandons nothing now), and a *bare* `:e` — which really
+does re-read over the top of unsaved changes — keeps it. Paths are
+compared as they were given: `:e ./x.zig` and `:e x.zig` are two tabs,
+since resolving them would mean touching the filesystem for what is a
+convenience.
+
+**`:q` still quits zoe; `:bd` and the tab's `×` close one buffer.**
+Keeping `:q` as "quit the editor" rather than vim's "close this window,
+exit on the last one" means muscle memory doesn't change with the number
+of tabs open. It does mean `:q` can now take unsaved work down with it
+that the current buffer knows nothing about, so `Ui` checks *every*
+buffer and reports vim's `E162` naming the first modified one;
+`:q!` skips the check, as `!` always does. Closing a modified buffer
+refuses with `E37` unless forced (`:bd!`), and the tab's `×` reports the
+same thing rather than silently doing nothing. Closing the last buffer
+leaves an empty scratch one, so the active-buffer pointer is always
+valid and the strip always has a tab to draw.
+
+**The tab strip is a pane, not chrome.** It is a one-row layer in a
+column split of its own above the buffer pane (`buffer_col_split`), so it
+starts where the buffer starts: the file tree keeps its full height, and
+hiding the tree (Ctrl+N) widens the strip along with the pane it belongs
+to. It scrolls sideways rather than shrinking its tabs — a strip wider
+than the pane reports its real width as a `content_extent` and zoe scrolls
+it to keep the active tab fully visible, so a label never degrades into
+an ellipsis. It draws no scrollbar of its own: a horizontal bar under a
+one-row strip would double its height for something nothing needs to
+look at, and the extent alone is enough for the host to route a
+shift+wheel or a drag over it back as a `scroll_offset`. No wire change
+was needed for any of this — the strip is layers, splits, `content_extent`
+and `write_text`, all of which already existed.

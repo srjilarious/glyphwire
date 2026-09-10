@@ -1,10 +1,17 @@
-//! zoe's glyphwire client: three panes in a split tree, the render pass
+//! zoe's glyphwire client: four panes in a split tree, the render pass
 //! that fills them, and the input loop that drives the editor.
 //!
-//! The layout is a `column` split holding a `row` split (tree beside
-//! buffer) above a one-row statusline. The host owns it: zoe describes it
-//! once at startup, and after that a window resize or a divider drag
-//! arrives as a `layout` notification saying where each pane ended up.
+//! The layout is a `column` split holding a `row` split (the tree beside
+//! a column of tab strip over buffer) above a one-row statusline. The
+//! host owns it: zoe describes it once at startup, and after that a
+//! window resize or a divider drag arrives as a `layout` notification
+//! saying where each pane ended up.
+//!
+//! **Every open buffer is a `Slot`**, and the tab strip lists them. A
+//! slot holds its own editor, scroll position, redraw bookkeeping and
+//! parse tree, so switching tabs is a pointer swap (`setActive`) and one
+//! repaint -- nothing is re-read or re-parsed. See decisions.md's "zoe
+//! multiple buffers"; the strip's own geometry is `zoe/tabs.zig`.
 //!
 //! **The two panes scroll differently, on purpose.** The tree is a layer
 //! whose *content* is the whole listing -- every entry, at its full width
@@ -27,6 +34,7 @@ const editor = @import("editor.zig");
 const tree_mod = @import("tree.zig");
 const syntax = @import("syntax.zig");
 const langconf = @import("langconf.zig");
+const tabs = @import("tabs.zig");
 
 const Editor = editor.Editor;
 const Tree = tree_mod.Tree;
@@ -34,6 +42,10 @@ const Color = glyphwire.Color;
 
 /// Cells the tree pane occupies until a divider drag says otherwise.
 const default_tree_cols: usize = 28;
+
+/// The most zoe will read into a buffer. Every open buffer holds its
+/// text for as long as it is open, so this is also the per-tab ceiling.
+const max_file_bytes: usize = 64 * 1024 * 1024;
 
 // The palette. Flat and dark; the panes have to paint their own
 // background because a cell whose background is pure black draws nothing
@@ -51,6 +63,11 @@ const fg_status = Color{ .r = 226, .g = 226, .b = 236, .a = 255 };
 const fg_mode = Color{ .r = 150, .g = 220, .b = 160, .a = 255 };
 const fg_error = Color{ .r = 240, .g = 140, .b = 140, .a = 255 };
 const fg_cursor = Color{ .r = 24, .g = 24, .b = 29, .a = 255 };
+// The tab strip. The active tab takes the buffer's own background so it
+// reads as the front of the pane below it, the way a tabbed window does;
+// the rest sit on a bar darker than either.
+const bg_tab_bar = Color{ .r = 16, .g = 16, .b = 20, .a = 255 };
+const bg_tab = Color{ .r = 34, .g = 34, .b = 41, .a = 255 };
 
 /// A pane's bounds, mirrored from the last `layout` notification.
 const Bounds = struct {
@@ -75,6 +92,11 @@ const EdSnapshot = struct {
     /// cursor -- still repaints the buffer pane.
     mode: editor.Mode,
     anchor: ?usize,
+    /// The modified flag, which the tab strip shows as a `+`. Left out of
+    /// `eql` -- it only ever moves together with `edits`, and it is
+    /// compared on its own so a keystroke that dirties the buffer
+    /// redraws the strip.
+    dirty: bool,
 
     fn of(ed: *const Editor) EdSnapshot {
         return .{
@@ -83,6 +105,7 @@ const EdSnapshot = struct {
             .line_numbers = ed.line_numbers,
             .mode = ed.mode,
             .anchor = ed.select_anchor,
+            .dirty = ed.buf.dirty,
         };
     }
     fn eql(a: EdSnapshot, b: EdSnapshot) bool {
@@ -91,28 +114,17 @@ const EdSnapshot = struct {
     }
 };
 
-pub const Ui = struct {
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    client: *glyphwire.Client,
-    listener: *glyphwire.InputListener,
-    ed: *Editor,
-    tree: Tree,
-
-    /// zoe's own context -- an alt-screen-style full-window surface, not
-    /// a set of layers stacked over the shell's scrollback. Everything
-    /// below (layers, splits) lives in it, and `destroyContext` on exit
-    /// tears the whole thing down and drops visibility back to the shell.
-    context: glyphwire.ContextHandle,
-    tree_layer: glyphwire.LayerHandle,
-    buffer_layer: glyphwire.LayerHandle,
-    status_layer: glyphwire.LayerHandle,
-    pane_split: glyphwire.SplitHandle,
-    root_split: glyphwire.SplitHandle,
-
-    tree_bounds: Bounds = .{},
-    buffer_bounds: Bounds = .{},
-    status_bounds: Bounds = .{},
+/// One open buffer: its editor, plus everything about *how it is being
+/// looked at* -- the scroll position, the between-frame bookkeeping the
+/// buffer pane's incremental redraw keeps, and its own syntax tree.
+///
+/// All of it is per buffer, deliberately: switching tabs is then a
+/// pointer swap and a repaint, never a re-read or a reparse, which is
+/// what makes it feel instant on a big file. The cost is that every open
+/// buffer holds its text and its tree-sitter tree for as long as it is
+/// open -- see decisions.md's "zoe multiple buffers".
+const Slot = struct {
+    ed: Editor,
 
     /// First buffer line and display column shown in the buffer pane --
     /// zoe's own scroll position, since that pane isn't host-scrolled.
@@ -126,14 +138,92 @@ pub const Ui = struct {
     prev_left_col: usize = 0,
     prev_cursor_line: usize = 0,
     prev_edits: u64 = 0,
+    /// Whether the buffer pane's cells currently carry a selection
+    /// highlight, so `renderBuffer` repaints once more to clear it when
+    /// the selection goes away.
+    prev_sel_active: bool = false,
     /// Forces a full buffer repaint next frame -- set whenever the pane's
     /// bounds change or its content is replaced wholesale, cases a row
-    /// shift can't express.
-    buffer_full_redraw: bool = true,
+    /// shift can't express. True on a fresh slot, and on every switch
+    /// *to* a slot: the layer's cells belong to whichever buffer drew
+    /// last.
+    full_redraw: bool = true,
     /// The `(content rows, content cols, scroll row, scroll col)` last
     /// pushed to the buffer layer for its host-drawn scrollbar. Re-pushed
     /// only when one of them changes -- see `syncBufferScrollbar`.
     pushed_bar: [4]usize = .{ std.math.maxInt(usize), 0, 0, 0 },
+
+    /// This buffer's own tree-sitter state -- null when highlighting is
+    /// off entirely, or when no grammar matched its extension. Per slot
+    /// so a tab switch doesn't throw a parse tree away.
+    hl: ?syntax.Highlighter = null,
+    /// The `Buffer.edits` value `hl`'s tree reflects; a mismatch in
+    /// `renderBuffer` triggers a reparse.
+    hl_edits: u64 = 0,
+
+    fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
+        if (self.hl) |*h| h.deinit();
+        self.ed.deinit();
+        alloc.destroy(self);
+    }
+};
+
+pub const Ui = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    client: *glyphwire.Client,
+    listener: *glyphwire.InputListener,
+    tree: Tree,
+
+    /// Every open buffer, in tab order, and the one being edited. Heap
+    /// slots rather than values in the list: `buf` points into it, and a
+    /// list resize would move values out from under that pointer.
+    ///
+    /// Never empty -- closing the last buffer leaves a fresh scratch one
+    /// (`closeBuffer`), so `buf` is always valid and the strip always has
+    /// something to draw.
+    buffers: std.ArrayList(*Slot) = .empty,
+    /// The active buffer, always `buffers.items[active]`. Kept as a
+    /// pointer because nearly every line of the render and dispatch paths
+    /// reaches through it; `setActive` is the only writer of the pair.
+    buf: *Slot,
+    active: usize = 0,
+
+    /// zoe's own context -- an alt-screen-style full-window surface, not
+    /// a set of layers stacked over the shell's scrollback. Everything
+    /// below (layers, splits) lives in it, and `destroyContext` on exit
+    /// tears the whole thing down and drops visibility back to the shell.
+    context: glyphwire.ContextHandle,
+    tree_layer: glyphwire.LayerHandle,
+    tabs_layer: glyphwire.LayerHandle,
+    buffer_layer: glyphwire.LayerHandle,
+    status_layer: glyphwire.LayerHandle,
+    pane_split: glyphwire.SplitHandle,
+    /// The tab strip stacked over the buffer pane. A column split of its
+    /// own so the strip starts where the buffer does -- the file tree
+    /// keeps its full height, and hiding the tree widens the strip with
+    /// the pane it belongs to.
+    buffer_col_split: glyphwire.SplitHandle,
+    root_split: glyphwire.SplitHandle,
+
+    tree_bounds: Bounds = .{},
+    tabs_bounds: Bounds = .{},
+    buffer_bounds: Bounds = .{},
+    status_bounds: Bounds = .{},
+
+    /// The tab strip's horizontal scroll, in strip columns, and the tab
+    /// spans the last layout produced (also strip coordinates -- subtract
+    /// `tab_scroll` for screen columns). `renderTabs` refills the spans;
+    /// a click reads them back through `tabs.hit`.
+    tab_scroll: usize = 0,
+    tab_spans: std.ArrayList(tabs.Span) = .empty,
+    /// The strip's total width, so a scroll can be clamped without
+    /// re-running the layout.
+    tab_total: usize = 0,
+    /// The `(width, scroll)` last pushed to the tabs layer as its content
+    /// extent and offset, so a still strip is silent on the wire.
+    pushed_tab_bar: [2]usize = .{ std.math.maxInt(usize), 0 },
+
     /// Session cell height in px, for natural-sizing tree icons to the
     /// row height. Read once at startup; a runtime font-zoom isn't
     /// announced to clients, so it can lag until the next launch.
@@ -148,10 +238,6 @@ pub const Ui = struct {
     /// into a visual selection (a press+release with no move is a plain
     /// click). Null when no button is down over the pane.
     drag: ?struct { anchor: usize, moved: bool } = null,
-    /// Whether the buffer pane's cells currently carry a selection
-    /// highlight, so `renderBuffer` repaints once more to clear it when
-    /// the selection goes away.
-    prev_sel_active: bool = false,
 
     focus: Focus = .buffer,
     tree_visible: bool = true,
@@ -163,6 +249,7 @@ pub const Ui = struct {
     /// what made the command line feel laggy.
     buffer_dirty: bool = true,
     tree_dirty: bool = true,
+    tabs_dirty: bool = true,
     status_dirty: bool = true,
     quit: bool = false,
 
@@ -172,18 +259,16 @@ pub const Ui = struct {
     /// The working directory before the last `:cd`, for `:cd -`. Owned.
     prev_cwd: ?[]u8 = null,
 
-    /// tree-sitter syntax highlighting. All four are null / empty when
-    /// highlighting is off -- no grammar directory resolved, or
-    /// `Highlighter.init` failed -- and the buffer renders in plain
-    /// `fg_text`. `hl_config`'s arena backs `grammars`' language table,
-    /// so it outlives the registry. See syntax.zig.
+    /// tree-sitter syntax highlighting: the config, the grammar registry
+    /// every buffer's highlighter resolves through, and the search path
+    /// it was built from. All null / empty when highlighting is off -- no
+    /// grammar directory resolved, or the config failed to load -- and
+    /// every buffer then renders in plain `fg_text`. `hl_config`'s arena
+    /// backs `grammars`' language table, so it outlives the registry.
+    /// Each buffer's own parse tree lives in its `Slot`. See syntax.zig.
     hl_config: ?langconf.Config = null,
     grammars: ?syntax.Registry = null,
-    hl: ?syntax.Highlighter = null,
     hl_search_dirs: []const []const u8 = &.{},
-    /// The `Buffer.edits` value the current parse tree reflects; a
-    /// mismatch in `renderBuffer` triggers a reparse.
-    hl_edits: u64 = 0,
     /// Reused span buffer for `renderRowSpans`.
     hl_scratch: std.ArrayList(syntax.Span) = .empty,
     /// Buffer lines an incremental reparse says need repainting for a
@@ -198,7 +283,7 @@ pub const Ui = struct {
         io: std.Io,
         client: *glyphwire.Client,
         listener: *glyphwire.InputListener,
-        ed: *Editor,
+        initial_path: ?[]const u8,
         root_dir: []const u8,
         environ: *const std.process.Environ.Map,
     ) !*Ui {
@@ -222,6 +307,7 @@ pub const Ui = struct {
         // Content sizes are provisional: every `layout` notification
         // resizes them to match the panes they landed in.
         const tree_layer = try client.createLayer(default_tree_cols, size.rows, 0);
+        const tabs_layer = try client.createLayer(size.cols, 1, 0);
         const buffer_layer = try client.createLayer(size.cols, size.rows, 0);
         const status_layer = try client.createLayer(size.cols, 1, 0);
 
@@ -232,12 +318,20 @@ pub const Ui = struct {
         // the pane into a `scroll_offset` zoe then follows.
         try client.setLayerScrollbars(tree_layer, true, true);
         try client.setLayerScrollbars(buffer_layer, true, false);
+        // The tab strip scrolls sideways but draws no bar of its own: it
+        // is one row tall, and a horizontal bar under it would double its
+        // height for a scrollbar nothing needs to see. It still reports a
+        // `content_extent` (`syncTabScrollbar`), which is what makes the
+        // host treat it as scrollable and route a shift+wheel over it
+        // back as a `scroll_offset`.
+        try client.setLayerScrollbars(tabs_layer, false, false);
 
-        // The tree|buffer split stays user-resizable. The outer
-        // column split (editor area over the one-row command line) is
-        // not: a drag handle there is a wasted row and the command line
-        // is a fixed height anyway.
+        // The tree|buffer split stays user-resizable. The two column
+        // splits are not: what they stack above and below is a single
+        // fixed row each -- the tab strip and the command line -- so a
+        // drag handle on either is a wasted row.
         const pane_split = try client.createSplit(.row, true);
+        const buffer_col_split = try client.createSplit(.column, false);
         const root_split = try client.createSplit(.column, false);
 
         self.* = .{
@@ -245,19 +339,42 @@ pub const Ui = struct {
             .io = io,
             .client = client,
             .listener = listener,
-            .ed = ed,
             .tree = try Tree.init(alloc, io, root_dir),
+            // Set a few lines below, before anything can read it: the
+            // first buffer builds its highlighter against the grammar
+            // registry, which has to be at its final address in `self`
+            // first (a `Highlighter` holds a pointer to it).
+            .buf = undefined,
             .context = context,
             .tree_layer = tree_layer,
+            .tabs_layer = tabs_layer,
             .buffer_layer = buffer_layer,
             .status_layer = status_layer,
             .pane_split = pane_split,
+            .buffer_col_split = buffer_col_split,
             .root_split = root_split,
             .cell_px_h = metrics.h,
             .environ = environ,
         };
         errdefer self.tree.deinit();
 
+        // Best-effort: highlighting off is a valid state, never a reason
+        // to fail bringing the editor up. Done before the first buffer,
+        // which builds its own highlighter against what this leaves.
+        self.loadConfig(environ);
+
+        const first = try self.newSlot(initial_path);
+        errdefer first.deinit(alloc);
+        try self.buffers.append(alloc, first);
+        self.buf = first;
+        self.active = 0;
+
+        try client.setSplitChildren(buffer_col_split, &.{
+            // One row, whatever the window does -- same reasoning as the
+            // statusline below.
+            glyphwire.SplitChildInput.layerFixed(tabs_layer, 1),
+            glyphwire.SplitChildInput.layerWeighted(buffer_layer, 1),
+        });
         try self.applySplitChildren();
         try client.setSplitChildren(root_split, &.{
             glyphwire.SplitChildInput.splitWeighted(pane_split, 1),
@@ -267,10 +384,6 @@ pub const Ui = struct {
         });
         try client.setRootSplit(root_split);
 
-        // Best-effort: highlighting off is a valid state, never a reason
-        // to fail bringing the editor up.
-        self.setupHighlight(environ);
-
         // The `layout` broadcast goes to *other* connections, and the
         // listener is one -- but reading the bounds back directly avoids
         // a startup frame drawn against guesses.
@@ -278,49 +391,83 @@ pub const Ui = struct {
         return self;
     }
 
-    /// Loads `zoe.conf`, resolves the grammar search path, and builds the
-    /// registry + highlighter. Any failure leaves all of it null and the
-    /// buffer renders unhighlighted.
-    fn setupHighlight(self: *Ui, environ: *const std.process.Environ.Map) void {
+    /// Loads `zoe.conf` and resolves the grammar search path into a
+    /// registry. Any failure leaves all of it null, and every buffer then
+    /// renders unhighlighted -- each buffer's own `Highlighter` is built
+    /// against this in `newSlot`.
+    fn loadConfig(self: *Ui, environ: *const std.process.Environ.Map) void {
         var cfg = langconf.load(self.alloc, self.io, environ);
-
-        // `page_lines` and the line-number gutter ride in on the same
-        // config load, whether or not highlighting itself ends up enabled
-        // below.
-        self.ed.page_lines = cfg.page_lines;
-        self.ed.line_numbers = cfg.line_numbers;
 
         const dirs = syntax.searchDirs(self.alloc, self.io, environ, cfg.grammar_dirs) catch {
             cfg.deinit();
             return;
         };
 
-        const hl = syntax.Highlighter.init(self.alloc, cfg.theme) catch {
-            for (dirs) |d| self.alloc.free(d);
-            self.alloc.free(dirs);
-            cfg.deinit();
-            return;
-        };
-
         self.hl_search_dirs = dirs;
         self.grammars = syntax.Registry.init(self.alloc, self.io, dirs, cfg.langs);
-        self.hl = hl;
         self.hl_config = cfg;
-
-        // The highlighter resolves injected grammars through the same
-        // registry; `injections` is the `zoe.conf` on/off switch.
-        self.hl.?.configureInjections(&self.grammars.?, cfg.injections);
-        // From here on `Buffer` keeps the edit journal the incremental
-        // reparse replays.
-        self.ed.buf.track_edits = true;
-
-        self.selectHighlightLanguage(self.ed.path);
     }
 
-    /// Points the highlighter at the grammar for `path` (by extension),
-    /// or clears it. Cheap and idempotent -- also called from `openFile`.
-    fn selectHighlightLanguage(self: *Ui, path: ?[]const u8) void {
-        const h = if (self.hl) |*x| x else return;
+    /// Opens `path` -- or an empty scratch buffer when null -- as a new,
+    /// unlisted slot: the caller adds it to `buffers`. A path that can't
+    /// be read is a new empty buffer carrying that name, which is how
+    /// `zoe newfile.txt` creates one.
+    fn newSlot(self: *Ui, path: ?[]const u8) !*Slot {
+        const slot = try self.alloc.create(Slot);
+        errdefer self.alloc.destroy(slot);
+
+        const text: ?[]u8 = if (path) |p|
+            std.Io.Dir.cwd().readFileAlloc(self.io, p, self.alloc, .limited(max_file_bytes)) catch null
+        else
+            null;
+        defer if (text) |t| self.alloc.free(t);
+
+        slot.* = .{ .ed = try Editor.initFromText(self.alloc, text orelse "", path) };
+        errdefer slot.ed.deinit();
+
+        // Same line vim shows on opening: the file and its length, or
+        // that it doesn't exist yet.
+        if (path) |p| {
+            if (text == null) {
+                slot.ed.setStatus("\"{s}\" [New]", .{p});
+            } else {
+                slot.ed.setStatus("\"{s}\" {d}L", .{ p, slot.ed.buf.lineCount() });
+            }
+        }
+
+        if (self.hl_config) |cfg| {
+            // `page_lines` and the line-number gutter ride in on the same
+            // config load, whether or not highlighting itself ends up
+            // enabled below.
+            slot.ed.page_lines = cfg.page_lines;
+            slot.ed.line_numbers = cfg.line_numbers;
+
+            if (syntax.Highlighter.init(self.alloc, cfg.theme)) |h| {
+                slot.hl = h;
+                // The highlighter resolves injected grammars through the
+                // shared registry; `injections` is the `zoe.conf` switch.
+                const reg: ?*syntax.Registry = if (self.grammars) |*g| g else null;
+                slot.hl.?.configureInjections(reg, cfg.injections);
+                // From here on `Buffer` keeps the edit journal the
+                // incremental reparse replays.
+                slot.ed.buf.track_edits = true;
+                self.selectHighlightLanguage(slot, path);
+            } else |_| {}
+        }
+
+        // A `:set lineno=…` typed this session beats the config default,
+        // so a buffer opened afterwards matches the ones already open.
+        if (self.buffers.items.len > 0) {
+            slot.ed.line_numbers = self.buf.ed.line_numbers;
+            slot.ed.page_lines = self.buf.ed.page_lines;
+        }
+        return slot;
+    }
+
+    /// Points a slot's highlighter at the grammar for `path` (by
+    /// extension), or clears it. Cheap and idempotent.
+    fn selectHighlightLanguage(self: *Ui, slot: *Slot, path: ?[]const u8) void {
+        const h = if (slot.hl) |*x| x else return;
         const reg = if (self.grammars) |*x| x else return;
 
         h.clearLanguage();
@@ -331,7 +478,7 @@ pub const Ui = struct {
 
         // Nudge `hl_edits` off the buffer's value so the next
         // `renderBuffer` parses.
-        self.hl_edits = self.ed.buf.edits -% 1;
+        slot.hl_edits = slot.ed.buf.edits -% 1;
     }
 
     /// Tears down what `init` built on the server, not just this
@@ -347,10 +494,15 @@ pub const Ui = struct {
         self.tree.deinit();
         if (self.prev_cwd) |p| self.alloc.free(p);
 
+        // Every open buffer's text and parse tree, not just the visible
+        // one -- that is the bargain multiple buffers made.
+        for (self.buffers.items) |slot| slot.deinit(self.alloc);
+        self.buffers.deinit(self.alloc);
+        self.tab_spans.deinit(self.alloc);
+
         self.hl_scratch.deinit(self.alloc);
         self.hl_dirty_lines.deinit(self.alloc);
         self.hl_changed.deinit(self.alloc);
-        if (self.hl) |*h| h.deinit();
         if (self.grammars) |*g| g.deinit();
         for (self.hl_search_dirs) |d| self.alloc.free(d);
         self.alloc.free(self.hl_search_dirs);
@@ -367,11 +519,11 @@ pub const Ui = struct {
         if (self.tree_visible) {
             try self.client.setSplitChildren(self.pane_split, &.{
                 glyphwire.SplitChildInput.layerFixed(self.tree_layer, default_tree_cols),
-                glyphwire.SplitChildInput.layerWeighted(self.buffer_layer, 1),
+                glyphwire.SplitChildInput.splitWeighted(self.buffer_col_split, 1),
             });
         } else {
             try self.client.setSplitChildren(self.pane_split, &.{
-                glyphwire.SplitChildInput.layerWeighted(self.buffer_layer, 1),
+                glyphwire.SplitChildInput.splitWeighted(self.buffer_col_split, 1),
             });
         }
     }
@@ -380,6 +532,7 @@ pub const Ui = struct {
     /// startup; after that `layout` notifications keep them current.
     fn readBounds(self: *Ui) !void {
         self.tree_bounds = try self.boundsOf(self.tree_layer);
+        self.tabs_bounds = try self.boundsOf(self.tabs_layer);
         self.buffer_bounds = try self.boundsOf(self.buffer_layer);
         self.status_bounds = try self.boundsOf(self.status_layer);
         try self.syncContentSizes();
@@ -406,6 +559,13 @@ pub const Ui = struct {
         if (self.status_bounds.cols > 0) {
             try self.client.setLayerSize(self.status_layer, self.status_bounds.cols, 1);
         }
+        // The tab strip is client-scrolled the same way the buffer is:
+        // its grid is exactly the pane, and a strip wider than that is
+        // reported as a `content_extent` rather than drawn into cells
+        // nothing shows.
+        if (self.tabs_bounds.cols > 0) {
+            try self.client.setLayerSize(self.tabs_layer, self.tabs_bounds.cols, 1);
+        }
         if (self.tree_visible and self.tree_bounds.cols > 0) {
             try self.client.setLayerSize(
                 self.tree_layer,
@@ -420,7 +580,8 @@ pub const Ui = struct {
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
             try self.drainEvents();
-            if (self.buffer_dirty or self.tree_dirty or self.status_dirty) try self.render();
+            if (self.buffer_dirty or self.tree_dirty or self.tabs_dirty or self.status_dirty)
+                try self.render();
             if (self.quit) break;
 
             // Block until something arrives rather than spinning; the
@@ -443,15 +604,17 @@ pub const Ui = struct {
         while (self.listener.pollLayoutEvent()) |ev| {
             defer ev.deinit(self.alloc);
             if (ev.boundsFor(self.tree_layer)) |b| self.tree_bounds = toBounds(b);
+            if (ev.boundsFor(self.tabs_layer)) |b| self.tabs_bounds = toBounds(b);
             if (ev.boundsFor(self.buffer_layer)) |b| self.buffer_bounds = toBounds(b);
             if (ev.boundsFor(self.status_layer)) |b| self.status_bounds = toBounds(b);
             try self.syncContentSizes();
             // The buffer layer's grid was resized: the rows it holds no
             // longer line up with the panes, so the next frame can't
             // shift them -- it has to repaint. Every pane moved.
-            self.buffer_full_redraw = true;
+            self.buf.full_redraw = true;
             self.buffer_dirty = true;
             self.tree_dirty = true;
+            self.tabs_dirty = true;
             self.status_dirty = true;
         }
         while (self.listener.pollScrollOffsetEvent()) |ev| {
@@ -462,6 +625,15 @@ pub const Ui = struct {
             // Ctrl-Y). `pushed_bar` is updated so `syncBufferScrollbar`
             // doesn't immediately echo this straight back.
             if (ev.layer == self.buffer_layer) self.scrollBufferTo(ev.row, ev.col);
+            // A shift+wheel or thumb drag over the tab strip. Only the
+            // column matters -- the strip is one row tall -- and the
+            // offset is recorded as already pushed so `syncTabScrollbar`
+            // doesn't echo it straight back.
+            if (ev.layer == self.tabs_layer and ev.col != self.tab_scroll) {
+                self.tab_scroll = ev.col;
+                self.pushed_tab_bar[1] = ev.col;
+                self.tabs_dirty = true;
+            }
         }
         // Mouse moves before buttons: a drag's pending moves should
         // update the selection before its release closes it out.
@@ -488,7 +660,7 @@ pub const Ui = struct {
         // Snapshot the parts of the editor the buffer pane draws from so
         // `render` can skip repainting it (and re-running the syntax
         // pass) when none of them moved.
-        const before = EdSnapshot.of(self.ed);
+        const before = EdSnapshot.of(&self.buf.ed);
 
         switch (ev) {
             .key => |k| {
@@ -505,7 +677,7 @@ pub const Ui = struct {
                 // the statusline forever -- nothing else ever clears it,
                 // so it permanently hides the mode indicator underneath.
                 // Vim clears it on the next keystroke; this is that.
-                self.ed.status.clearRetainingCapacity();
+                self.buf.ed.status.clearRetainingCapacity();
 
                 // Ctrl+w switches panes, Ctrl+n toggles the sidebar --
                 // taken before the editor sees them so they work in any
@@ -527,6 +699,16 @@ pub const Ui = struct {
                         try self.toggleTree();
                         return;
                     }
+                    // Ctrl+Tab / Ctrl+Shift+Tab walk the tab strip, the
+                    // chord every tabbed application uses. Taken here so
+                    // they work in insert mode too, where a bare Tab is
+                    // still a Tab.
+                    if (std.mem.eql(u8, k.key, "tab")) {
+                        const back = self.listener.isKeyDown("left_shift") or
+                            self.listener.isKeyDown("right_shift");
+                        self.stepBuffer(!back);
+                        return;
+                    }
                     // Ctrl+Shift+X cut and Ctrl+Shift+P paste, both
                     // through the system clipboard. (Ctrl+Shift+C is
                     // swallowed by glyphwire-host, which broadcasts a
@@ -536,8 +718,8 @@ pub const Ui = struct {
                         self.listener.isKeyDown("right_shift");
                     if (shift and self.focus == .buffer) {
                         if (std.mem.eql(u8, k.key, "x")) {
-                            try self.applyOutcome(try self.ed.clipboardCut());
-                            self.buffer_full_redraw = true;
+                            try self.applyOutcome(try self.buf.ed.clipboardCut());
+                            self.buf.full_redraw = true;
                             self.buffer_dirty = true;
                             self.status_dirty = true;
                             return;
@@ -553,29 +735,29 @@ pub const Ui = struct {
                     self.status_dirty = true;
                     return;
                 }
-                try self.applyOutcome(try self.ed.feedKey(k.key, .{ .ctrl = ctrl }));
+                try self.applyOutcome(try self.buf.ed.feedKey(k.key, .{ .ctrl = ctrl }));
             },
             .text => |t| {
-                self.ed.status.clearRetainingCapacity();
+                self.buf.ed.status.clearRetainingCapacity();
                 if (self.focus == .tree) {
                     try self.treeText(t.text);
                     self.status_dirty = true;
                     return;
                 }
-                try self.applyOutcome(try self.ed.feedText(t.text));
+                try self.applyOutcome(try self.buf.ed.feedText(t.text));
             },
             .paste => |t| {
-                self.ed.status.clearRetainingCapacity();
+                self.buf.ed.status.clearRetainingCapacity();
                 if (self.focus == .buffer) {
-                    if (self.ed.mode == .insert) {
-                        try self.applyOutcome(try self.ed.feedText(t.text));
+                    if (self.buf.ed.mode == .insert) {
+                        try self.applyOutcome(try self.buf.ed.feedText(t.text));
                     } else {
                         // Normal / visual mode: splice the pasted text in
                         // like `p`, replacing any selection first, rather
                         // than obeying each character as a command.
-                        try self.ed.dropSelection();
-                        try self.ed.putText(t.text, true);
-                        self.buffer_full_redraw = true;
+                        try self.buf.ed.dropSelection();
+                        try self.buf.ed.putText(t.text, true);
+                        self.buf.full_redraw = true;
                         self.buffer_dirty = true;
                     }
                 }
@@ -586,7 +768,7 @@ pub const Ui = struct {
             // broadcast, and a backgrounded zoe would otherwise race the
             // shell's own answer.
             .copy_request => if (self.isVisible()) {
-                try self.applyOutcome(try self.ed.clipboardCopy());
+                try self.applyOutcome(try self.buf.ed.clipboardCopy());
                 self.buffer_dirty = true;
                 self.status_dirty = true;
             },
@@ -601,11 +783,23 @@ pub const Ui = struct {
         // is one row, so always redraw it. The buffer pane redraws only
         // when the editor state it shows actually moved.
         self.status_dirty = true;
-        const after = EdSnapshot.of(self.ed);
+        const after = EdSnapshot.of(&self.buf.ed);
         if (!after.eql(before)) self.buffer_dirty = true;
+        // The tab's `+` marker is the only thing the strip draws that a
+        // keystroke can change.
+        if (after.dirty != before.dirty) self.tabs_dirty = true;
         // `:set lineno=…` moves the text origin, which a row shift can't
-        // express -- the whole pane has to be re-laid-out.
-        if (after.line_numbers != before.line_numbers) self.buffer_full_redraw = true;
+        // express -- the whole pane has to be re-laid-out. The setting
+        // lives on the `Editor`, and there is one per buffer, so it is
+        // pushed to all of them: `:set` reads as a session-wide switch,
+        // not a per-tab one.
+        if (after.line_numbers != before.line_numbers) {
+            self.buf.full_redraw = true;
+            for (self.buffers.items) |slot| {
+                slot.ed.line_numbers = after.line_numbers;
+                slot.full_redraw = true;
+            }
+        }
         // A visual selection touches whole rows, not just the caret's:
         // any change to the anchor or the mode (entering/leaving visual,
         // or a motion that grew the selection over rows the caret didn't
@@ -613,7 +807,7 @@ pub const Ui = struct {
         if (after.mode != before.mode or after.anchor != before.anchor or
             (after.mode == .visual or after.mode == .visual_line))
         {
-            self.buffer_full_redraw = true;
+            self.buf.full_redraw = true;
         }
     }
 
@@ -621,10 +815,12 @@ pub const Ui = struct {
         self.tree_visible = !self.tree_visible;
         if (!self.tree_visible and self.focus == .tree) self.focus = .buffer;
         try self.applySplitChildren();
-        // The buffer pane is about to be re-laid-out wider or narrower.
-        self.buffer_full_redraw = true;
+        // The buffer pane -- and the strip above it -- is about to be
+        // re-laid-out wider or narrower.
+        self.buf.full_redraw = true;
         self.buffer_dirty = true;
         self.tree_dirty = true;
+        self.tabs_dirty = true;
         self.status_dirty = true;
     }
 
@@ -705,12 +901,20 @@ pub const Ui = struct {
         if (!std.mem.eql(u8, ev.button, "left")) return;
 
         if (ev.pressed) {
+            if (self.tabAt(ev.cell)) |h| {
+                if (h.close) {
+                    try self.closeBuffer(h.index, false);
+                } else {
+                    self.setActive(h.index);
+                }
+                return;
+            }
             if (self.cellInBuffer(ev.cell)) |byte| {
                 self.drag = .{ .anchor = byte, .moved = false };
-                if (self.ed.mode == .visual or self.ed.mode == .visual_line) self.ed.exitVisual();
-                self.ed.moveCursorTo(byte);
+                if (self.buf.ed.mode == .visual or self.buf.ed.mode == .visual_line) self.buf.ed.exitVisual();
+                self.buf.ed.moveCursorTo(byte);
                 self.focus = .buffer;
-                self.buffer_full_redraw = true;
+                self.buf.full_redraw = true;
                 self.buffer_dirty = true;
                 self.status_dirty = true;
             } else {
@@ -723,10 +927,10 @@ pub const Ui = struct {
         if (self.drag) |d| {
             self.drag = null;
             // A plain click (no drag): make sure no selection lingers.
-            if (!d.moved and (self.ed.mode == .visual or self.ed.mode == .visual_line)) {
-                self.ed.exitVisual();
+            if (!d.moved and (self.buf.ed.mode == .visual or self.buf.ed.mode == .visual_line)) {
+                self.buf.ed.exitVisual();
             }
-            self.buffer_full_redraw = true;
+            self.buf.full_redraw = true;
             self.buffer_dirty = true;
             self.status_dirty = true;
         }
@@ -742,11 +946,22 @@ pub const Ui = struct {
                 if (byte == d.anchor) return;
                 d.moved = true;
             }
-            self.ed.setVisualSelection(d.anchor, byte);
-            self.buffer_full_redraw = true;
+            self.buf.ed.setVisualSelection(d.anchor, byte);
+            self.buf.full_redraw = true;
             self.buffer_dirty = true;
             self.status_dirty = true;
         }
+    }
+
+    /// The tab under a root-grid cell, or null when the cell isn't in
+    /// the strip. Screen columns are strip columns less the scroll, so
+    /// the spans `renderTabs` recorded answer this directly.
+    fn tabAt(self: *Ui, cell: glyphwire.CellPos) ?tabs.Hit {
+        const b = self.tabs_bounds;
+        if (b.cols == 0 or b.rows == 0) return null;
+        if (cell.row < b.row or cell.row >= b.row + b.rows) return null;
+        if (cell.col < b.col or cell.col >= b.col + b.cols) return null;
+        return tabs.hit(self.tab_spans.items, cell.col - b.col + self.tab_scroll);
     }
 
     /// The buffer byte offset under grid cell `cell`, or null if the
@@ -767,16 +982,16 @@ pub const Ui = struct {
         const b = self.buffer_bounds;
         const rows = @max(b.rows, 1);
         const screen_row = std.math.clamp(cell.row, b.row, b.row + rows - 1) - b.row;
-        const line = @min(self.top_line + screen_row, self.ed.buf.lineCount() - 1);
+        const line = @min(self.buf.top_line + screen_row, self.buf.ed.buf.lineCount() - 1);
 
         const text_left = b.col + self.gutterWidth();
         const rel_col = if (cell.col > text_left) cell.col - text_left else 0;
-        const dcol = self.left_col + rel_col;
+        const dcol = self.buf.left_col + rel_col;
 
-        const line_text = self.ed.buf.lineText(self.alloc, line) catch
-            return self.ed.buf.lineStart(line);
+        const line_text = self.buf.ed.buf.lineText(self.alloc, line) catch
+            return self.buf.ed.buf.lineStart(line);
         defer self.alloc.free(line_text);
-        return self.ed.buf.lineStart(line) + byteAtDisplayCol(line_text, dcol);
+        return self.buf.ed.buf.lineStart(line) + byteAtDisplayCol(line_text, dcol);
     }
 
     /// Whether zoe's context is the one currently on screen. Used to
@@ -812,24 +1027,28 @@ pub const Ui = struct {
             .write => |target| self.save(target),
             .write_quit => |target| {
                 self.save(target);
-                if (!self.ed.buf.dirty) self.quit = true;
+                if (self.buf.ed.buf.dirty) return;
+                if (self.refuseQuitForDirtyBuffer()) return;
+                self.quit = true;
             },
-            .quit => self.quit = true,
+            .quit => |q| {
+                if (!q.force and self.refuseQuitForDirtyBuffer()) return;
+                self.quit = true;
+            },
+            // `:e <path>` opens a tab; a bare `:e` re-reads this one.
             .edit => |target| {
-                const path = target orelse self.ed.path orelse {
-                    self.ed.setStatus("E32: No file name", .{});
-                    return;
-                };
-                try self.openFile(path);
+                if (target) |t| try self.openFile(t) else try self.reloadCurrent();
             },
+            .buffer_step => |b| self.stepBuffer(b.forward),
+            .buffer_close => |b| try self.closeBuffer(self.active, b.force),
             .chdir => |target| self.changeDir(target),
             .pwd => {
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
                 const n = std.process.currentPath(self.io, &buf) catch {
-                    self.ed.setStatus("E: cannot read working directory", .{});
+                    self.buf.ed.setStatus("E: cannot read working directory", .{});
                     return;
                 };
-                self.ed.setStatus("{s}", .{buf[0..n]});
+                self.buf.ed.setStatus("{s}", .{buf[0..n]});
             },
             // The editor filled `ed.yank`; mirror it to the system
             // clipboard (glyphwire-host pushes it on to the OS).
@@ -848,9 +1067,9 @@ pub const Ui = struct {
         const text = self.client.getClipboard() catch return;
         defer self.alloc.free(text);
         if (text.len == 0) return;
-        try self.ed.putText(text, after);
+        try self.buf.ed.putText(text, after);
         // A paste can add lines and move the text origin; repaint the pane.
-        self.buffer_full_redraw = true;
+        self.buf.full_redraw = true;
         self.buffer_dirty = true;
         self.status_dirty = true;
     }
@@ -863,11 +1082,11 @@ pub const Ui = struct {
         var home_buf: [std.fs.max_path_bytes]u8 = undefined;
         const dest: []const u8 = blk: {
             const t = target orelse break :blk self.environ.get("HOME") orelse {
-                self.ed.setStatus("E: $HOME not set", .{});
+                self.buf.ed.setStatus("E: $HOME not set", .{});
                 return;
             };
             if (std.mem.eql(u8, t, "-")) break :blk self.prev_cwd orelse {
-                self.ed.setStatus("E: no previous directory", .{});
+                self.buf.ed.setStatus("E: no previous directory", .{});
                 return;
             };
             if (std.mem.eql(u8, t, "~") or std.mem.startsWith(u8, t, "~/")) {
@@ -883,7 +1102,7 @@ pub const Ui = struct {
         const cur_n = std.process.currentPath(self.io, &cur_buf) catch 0;
 
         std.process.setCurrentPath(self.io, dest) catch {
-            self.ed.setStatus("E344: Can't chdir to \"{s}\"", .{dest});
+            self.buf.ed.setStatus("E344: Can't chdir to \"{s}\"", .{dest});
             return;
         };
 
@@ -909,42 +1128,167 @@ pub const Ui = struct {
 
         self.tree_dirty = true;
         self.status_dirty = true;
-        self.ed.setStatus("{s}", .{new_root});
+        self.buf.ed.setStatus("{s}", .{new_root});
     }
 
+    // ── Buffers ─────────────────────────────────────────────────────────
+
+    /// Opens `path` in a new tab, or switches to it when it is already
+    /// open -- both `:e` and Enter on a file in the tree land here. The
+    /// buffer being left keeps its text, its cursor and its parse tree,
+    /// so coming back to it is a switch rather than a reload.
     fn openFile(self: *Ui, path: []const u8) !void {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.alloc, .limited(64 * 1024 * 1024)) catch {
-            self.ed.setStatus("E484: Can't open file {s}", .{path});
+        if (self.indexOfPath(path)) |i| {
+            self.setActive(i);
+            self.buf.ed.setStatus("\"{s}\"", .{path});
+            return;
+        }
+
+        const slot = try self.newSlot(path);
+        errdefer slot.deinit(self.alloc);
+        // Inserted next to the current tab rather than at the far end:
+        // the file you just opened belongs beside the one you opened it
+        // from, and `:bp` goes back to it.
+        try self.buffers.insert(self.alloc, self.active + 1, slot);
+        self.setActive(self.active + 1);
+    }
+
+    /// A bare `:e` -- re-reads the current buffer from disk, in place.
+    /// The tab stays where it is and keeps its position in the strip;
+    /// only the text and the cursor reset. `:e <path>` is the other
+    /// thing entirely, a tab of its own.
+    fn reloadCurrent(self: *Ui) !void {
+        const path = self.buf.ed.path orelse {
+            self.buf.ed.setStatus("E32: No file name", .{});
+            return;
+        };
+        const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.alloc, .limited(max_file_bytes)) catch {
+            self.buf.ed.setStatus("E484: Can't open file {s}", .{path});
             return;
         };
         defer self.alloc.free(bytes);
 
-        try self.ed.loadText(bytes, path);
-        self.selectHighlightLanguage(path);
-        self.top_line = 0;
-        self.left_col = 0;
-        // A whole new buffer -- nothing on screen carries over.
-        self.buffer_full_redraw = true;
-        self.ed.setStatus("\"{s}\" {d}L", .{ path, self.ed.buf.lineCount() });
+        // `loadText` re-owns the path, freeing the string `path` points
+        // at, so everything below reads it back off the editor.
+        try self.buf.ed.loadText(bytes, path);
+        self.selectHighlightLanguage(self.buf, self.buf.ed.path);
+        self.buf.top_line = 0;
+        self.buf.left_col = 0;
+        // Fresh contents -- nothing on screen carries over.
+        self.buf.full_redraw = true;
+        self.buf.ed.setStatus("\"{s}\" {d}L", .{ self.buf.ed.path.?, self.buf.ed.buf.lineCount() });
         self.buffer_dirty = true;
+        self.tabs_dirty = true;
         self.status_dirty = true;
     }
 
+    /// Whether `:q` / `:wq` has to be refused because some *other* tab
+    /// holds unsaved changes, reporting the first one it finds. An
+    /// `Editor` only knows its own modified flag, and `:q` takes the
+    /// whole editor down with every buffer in it, so this guard can only
+    /// live here. `:q!` skips it, the way `!` always does.
+    fn refuseQuitForDirtyBuffer(self: *Ui) bool {
+        for (self.buffers.items) |slot| {
+            if (!slot.ed.buf.dirty) continue;
+            self.buf.ed.setStatus(
+                "E162: No write since last change for buffer \"{s}\"",
+                .{slot.ed.path orelse "[No Name]"},
+            );
+            self.status_dirty = true;
+            return true;
+        }
+        return false;
+    }
+
+    /// The tab holding `path`, if one is open. Paths are compared as
+    /// they were given, so `:e ./x.zig` and `:e x.zig` are two tabs --
+    /// resolving them would mean touching the filesystem for what is a
+    /// convenience. The tree is self-consistent, so clicking the same
+    /// entry twice always finds the tab it opened.
+    fn indexOfPath(self: *Ui, path: []const u8) ?usize {
+        for (self.buffers.items, 0..) |slot, i| {
+            const p = slot.ed.path orelse continue;
+            if (std.mem.eql(u8, p, path)) return i;
+        }
+        return null;
+    }
+
+    /// Makes tab `index` the one being edited -- the only writer of the
+    /// `active` / `buf` pair. Focus is left alone: opening a file from
+    /// the tree shouldn't yank the keyboard out of the tree.
+    fn setActive(self: *Ui, index: usize) void {
+        self.active = @min(index, self.buffers.items.len - 1);
+        self.buf = self.buffers.items[self.active];
+        // The buffer layer's cells belong to whichever buffer drew last,
+        // and its scrollbar to that buffer's line count. Neither carries
+        // over, so the incoming buffer repaints and re-pushes its extent.
+        self.buf.full_redraw = true;
+        self.buf.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
+        self.buffer_dirty = true;
+        self.tabs_dirty = true;
+        self.status_dirty = true;
+    }
+
+    /// `:bn` / `:bp`, and Ctrl+Tab / Ctrl+Shift+Tab. Wraps at both ends,
+    /// so two buffers can be flipped between with one chord.
+    fn stepBuffer(self: *Ui, forward: bool) void {
+        const n = self.buffers.items.len;
+        if (n < 2) return;
+        self.setActive(if (forward) (self.active + 1) % n else (self.active + n - 1) % n);
+    }
+
+    /// Closes tab `index`. A modified buffer refuses unless `force`, the
+    /// same E37 guard `:q` uses and what the tab's `×` reports when it
+    /// can't close. Closing the last buffer leaves an empty scratch one:
+    /// `buf` always points somewhere, and the strip always has a tab.
+    fn closeBuffer(self: *Ui, index: usize, force: bool) !void {
+        if (index >= self.buffers.items.len) return;
+        const slot = self.buffers.items[index];
+        if (slot.ed.buf.dirty and !force) {
+            self.buf.ed.setStatus("E37: No write since last change (add ! to override)", .{});
+            self.status_dirty = true;
+            return;
+        }
+
+        const closed_active = index == self.active;
+        _ = self.buffers.orderedRemove(index);
+        slot.deinit(self.alloc);
+
+        if (self.buffers.items.len == 0) {
+            const fresh = try self.newSlot(null);
+            errdefer fresh.deinit(self.alloc);
+            try self.buffers.append(self.alloc, fresh);
+        }
+
+        // Closing the active tab focuses whatever slid into its place
+        // (or the new last tab); closing one to its left just shifts its
+        // index down.
+        const target = if (closed_active)
+            @min(index, self.buffers.items.len - 1)
+        else if (self.active > index)
+            self.active - 1
+        else
+            self.active;
+        self.setActive(target);
+    }
+
     fn save(self: *Ui, target: ?[]const u8) void {
-        const dest = target orelse self.ed.path orelse {
-            self.ed.setStatus("E32: No file name", .{});
+        const dest = target orelse self.buf.ed.path orelse {
+            self.buf.ed.setStatus("E32: No file name", .{});
             return;
         };
-        const bytes = self.ed.buf.text(self.alloc) catch return;
+        const bytes = self.buf.ed.buf.text(self.alloc) catch return;
         defer self.alloc.free(bytes);
 
         std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = dest, .data = bytes }) catch {
-            self.ed.setStatus("E212: Can't open file for writing: {s}", .{dest});
+            self.buf.ed.setStatus("E212: Can't open file for writing: {s}", .{dest});
             return;
         };
-        if (target) |t| self.ed.setPath(t) catch {};
-        self.ed.markSaved();
-        self.ed.setStatus("\"{s}\" {d}L written", .{ dest, self.ed.buf.lineCount() });
+        if (target) |t| self.buf.ed.setPath(t) catch {};
+        self.buf.ed.markSaved();
+        // The tab loses its `+`, and a `:w <name>` also renamed it.
+        self.tabs_dirty = true;
+        self.buf.ed.setStatus("\"{s}\" {d}L written", .{ dest, self.buf.ed.buf.lineCount() });
     }
 
     // ── Render ──────────────────────────────────────────────────────────
@@ -961,12 +1305,14 @@ pub const Ui = struct {
 
         if (self.buffer_dirty) try self.renderBuffer(&batch);
         if (self.tree_visible and self.tree_dirty) try self.renderTree(&batch);
+        if (self.tabs_dirty) try self.renderTabs(&batch);
         if (self.status_dirty) try self.renderStatus(&batch);
 
         _ = try batch.send();
 
         self.buffer_dirty = false;
         self.tree_dirty = false;
+        self.tabs_dirty = false;
         self.status_dirty = false;
     }
 
@@ -1001,7 +1347,7 @@ pub const Ui = struct {
     /// less than a screen, shift the rows already on the layer with one
     /// `move_content` and repaint only the band the scroll exposed. An
     /// edit, a horizontal scroll, a jump of a screen or more, or a
-    /// bounds change (`buffer_full_redraw`) still repaints in full --
+    /// bounds change (`Slot.full_redraw`) still repaints in full --
     /// cases a row shift can't represent -- except that an edit whose
     /// highlighting effect an incremental reparse could bound repaints
     /// only the rows it touched (`renderChangedRows`).
@@ -1016,15 +1362,15 @@ pub const Ui = struct {
         // when it can, whole-buffer otherwise -- and reports whether the
         // repaint can be confined to `hl_dirty_lines`.
         var localized = false;
-        if (self.hl) |*h| {
-            if (h.languageSet() and self.ed.buf.edits != self.hl_edits) {
+        if (self.buf.hl) |*h| {
+            if (h.languageSet() and self.buf.ed.buf.edits != self.buf.hl_edits) {
                 localized = self.syncHighlight(h) catch blk: {
-                    self.buffer_full_redraw = true;
+                    self.buf.full_redraw = true;
                     break :blk false;
                 };
-                self.hl_edits = self.ed.buf.edits;
+                self.buf.hl_edits = self.buf.ed.buf.edits;
             }
-            self.ed.buf.clearEdits();
+            self.buf.ed.buf.clearEdits();
         }
 
         // A visual selection spans whole rows the incremental paths don't
@@ -1032,30 +1378,30 @@ pub const Ui = struct {
         // clears -- repaint the whole pane so the highlight is always
         // current. `handleInput` already forces this for a keyboard
         // selection; this covers the mouse-drag and paste paths too.
-        const sel_active = self.ed.selectionSpan() != null;
-        if (sel_active or self.prev_sel_active) self.buffer_full_redraw = true;
+        const sel_active = self.buf.ed.selectionSpan() != null;
+        if (sel_active or self.buf.prev_sel_active) self.buf.full_redraw = true;
 
-        const cursor = self.ed.pos();
-        const scrolled = self.top_line != self.prev_top_line or self.left_col != self.prev_left_col;
-        const edited = self.ed.buf.edits != self.prev_edits;
-        if (!self.buffer_full_redraw and !scrolled and !edited and !localized) {
+        const cursor = self.buf.ed.pos();
+        const scrolled = self.buf.top_line != self.buf.prev_top_line or self.buf.left_col != self.buf.prev_left_col;
+        const edited = self.buf.ed.buf.edits != self.buf.prev_edits;
+        if (!self.buf.full_redraw and !scrolled and !edited and !localized) {
             // Nothing but the caret moved (a bare `h`/`j`/`k`/`l`, a
             // word motion, an on-screen `:23k`): the pane is already
             // right everywhere except the rows the caret left and
             // landed on. Repaint just those -- no per-row syntax pass
             // over the whole viewport.
             try self.repaintCaretRows(batch, cursor.line);
-        } else if (localized and !self.buffer_full_redraw and !scrolled) {
+        } else if (localized and !self.buf.full_redraw and !scrolled) {
             try self.renderChangedRows(batch, cursor.line);
         } else switch (planBufferRender(.{
-            .prev_top = self.prev_top_line,
-            .top = self.top_line,
-            .prev_left = self.prev_left_col,
-            .left = self.left_col,
-            .prev_edits = self.prev_edits,
-            .edits = self.ed.buf.edits,
+            .prev_top = self.buf.prev_top_line,
+            .top = self.buf.top_line,
+            .prev_left = self.buf.prev_left_col,
+            .left = self.buf.left_col,
+            .prev_edits = self.buf.prev_edits,
+            .edits = self.buf.ed.buf.edits,
             .rows = b.rows,
-            .force_full = self.buffer_full_redraw,
+            .force_full = self.buf.full_redraw,
         })) {
             .full => try self.renderBufferRows(batch, 0, b.rows),
             .shift => |s| {
@@ -1067,9 +1413,9 @@ pub const Ui = struct {
                 // The caret is drawn as an inverted cell over its row;
                 // repaint the row it left (to clear that cell) and the row
                 // it's on now, unless the exposed band already covered them.
-                for ([_]usize{ self.prev_cursor_line, cursor.line }) |line| {
-                    if (line < self.top_line or line >= self.top_line + b.rows) continue;
-                    const screen_row = line - self.top_line;
+                for ([_]usize{ self.buf.prev_cursor_line, cursor.line }) |line| {
+                    if (line < self.buf.top_line or line >= self.buf.top_line + b.rows) continue;
+                    const screen_row = line - self.buf.top_line;
                     if (screen_row >= s.exposed_lo and screen_row < s.exposed_hi) continue;
                     try self.renderBufferRow(batch, screen_row);
                 }
@@ -1083,7 +1429,7 @@ pub const Ui = struct {
         // row's distance. Repaint the whole gutter then -- it is one short
         // write per row, no syntax pass.
         if (self.gutterWidth() > 0 and (scrolled or
-            (self.ed.line_numbers == .relative and cursor.line != self.prev_cursor_line)))
+            (self.buf.ed.line_numbers == .relative and cursor.line != self.buf.prev_cursor_line)))
         {
             var r: usize = 0;
             while (r < b.rows) : (r += 1) try self.renderGutterCell(batch, r);
@@ -1093,16 +1439,16 @@ pub const Ui = struct {
         // row just (re)painted. The host's own caret renderer only knows
         // about the root layer, and a client that owns its pane knows
         // better than the host where its cursor is anyway.
-        if (cursor.line >= self.top_line and cursor.line < self.top_line + b.rows) {
+        if (cursor.line >= self.buf.top_line and cursor.line < self.buf.top_line + b.rows) {
             const display_col = try self.cursorDisplayCol();
-            if (display_col >= self.left_col and display_col - self.left_col < self.textCols()) {
+            if (display_col >= self.buf.left_col and display_col - self.buf.left_col < self.textCols()) {
                 const under = try self.cursorGrapheme();
                 defer self.alloc.free(under);
                 try writeAt(
                     batch,
                     self.buffer_layer,
-                    cursor.line - self.top_line,
-                    self.gutterWidth() + display_col - self.left_col,
+                    cursor.line - self.buf.top_line,
+                    self.gutterWidth() + display_col - self.buf.left_col,
                     under,
                     fg_cursor,
                     bg_cursor,
@@ -1110,12 +1456,12 @@ pub const Ui = struct {
             }
         }
 
-        self.prev_top_line = self.top_line;
-        self.prev_left_col = self.left_col;
-        self.prev_cursor_line = cursor.line;
-        self.prev_edits = self.ed.buf.edits;
-        self.prev_sel_active = sel_active;
-        self.buffer_full_redraw = false;
+        self.buf.prev_top_line = self.buf.top_line;
+        self.buf.prev_left_col = self.buf.left_col;
+        self.buf.prev_cursor_line = cursor.line;
+        self.buf.prev_edits = self.buf.ed.buf.edits;
+        self.buf.prev_sel_active = sel_active;
+        self.buf.full_redraw = false;
     }
 
     /// Repaints the buffer rows the caret just left and just landed on.
@@ -1124,9 +1470,9 @@ pub const Ui = struct {
     /// cursor on top afterwards.
     fn repaintCaretRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor_line: usize) !void {
         const b = self.buffer_bounds;
-        const top = self.top_line;
-        try self.repaintRowIfOnScreen(batch, self.prev_cursor_line, top, b.rows);
-        if (cursor_line != self.prev_cursor_line)
+        const top = self.buf.top_line;
+        try self.repaintRowIfOnScreen(batch, self.buf.prev_cursor_line, top, b.rows);
+        if (cursor_line != self.buf.prev_cursor_line)
             try self.repaintRowIfOnScreen(batch, cursor_line, top, b.rows);
     }
 
@@ -1146,17 +1492,17 @@ pub const Ui = struct {
     /// filled `hl_dirty_lines` with a bounded set of buffer lines that
     /// -- together with the edited lines -- covers every highlighting
     /// change, so the caller can repaint just those rows. Returns false
-    /// (and sets `buffer_full_redraw`) when the whole visible pane must
+    /// (and sets `Slot.full_redraw`) when the whole visible pane must
     /// be repainted: no retained tree, the edit journal overflowed, the
     /// line count changed, the injection layout shifted, or the change
     /// is simply too broad to localise.
     fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
-        const buf = &self.ed.buf;
+        const buf = &self.buf.ed.buf;
         self.hl_dirty_lines.clearRetainingCapacity();
 
         if (!h.ready() or buf.edits_overflowed or buf.pending_edits.items.len == 0) {
             try h.reparse(buf);
-            self.buffer_full_redraw = true;
+            self.buf.full_redraw = true;
             return false;
         }
 
@@ -1173,11 +1519,11 @@ pub const Ui = struct {
 
         self.hl_changed.clearRetainingCapacity();
         const localized = h.reparseIncremental(buf, &self.hl_changed) catch {
-            self.buffer_full_redraw = true;
+            self.buf.full_redraw = true;
             return false;
         };
         if (!localized or !line_count_stable) {
-            self.buffer_full_redraw = true;
+            self.buf.full_redraw = true;
             return false;
         }
 
@@ -1190,13 +1536,13 @@ pub const Ui = struct {
             const lo = buf.lineAt(cr.start);
             const hi = buf.lineAt(if (cr.end > cr.start) cr.end - 1 else cr.start);
             if (hi -| lo > self.buffer_bounds.rows) {
-                self.buffer_full_redraw = true;
+                self.buf.full_redraw = true;
                 return false;
             }
             var line = lo;
             while (line <= hi) : (line += 1) try self.addDirtyLine(line);
             if (self.hl_dirty_lines.items.len > self.buffer_bounds.rows) {
-                self.buffer_full_redraw = true;
+                self.buf.full_redraw = true;
                 return false;
             }
         }
@@ -1217,13 +1563,13 @@ pub const Ui = struct {
     /// as it was. `renderBuffer`'s caret pass runs afterwards.
     fn renderChangedRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor_line: usize) !void {
         const b = self.buffer_bounds;
-        const top = self.top_line;
+        const top = self.buf.top_line;
 
         for (self.hl_dirty_lines.items) |line| {
             if (line < top or line >= top + b.rows) continue;
             try self.renderBufferRow(batch, line - top);
         }
-        for ([_]usize{ self.prev_cursor_line, cursor_line }) |line| {
+        for ([_]usize{ self.buf.prev_cursor_line, cursor_line }) |line| {
             if (line < top or line >= top + b.rows) continue;
             if (self.dirtyLineListed(line)) continue;
             try self.renderBufferRow(batch, line - top);
@@ -1251,7 +1597,7 @@ pub const Ui = struct {
     /// the count already forces a full pane repaint, so it is always safe
     /// to read fresh.
     fn gutterWidth(self: *const Ui) usize {
-        return gutterWidthFor(self.ed.line_numbers, self.ed.buf.lineCount());
+        return gutterWidthFor(self.buf.ed.line_numbers, self.buf.ed.buf.lineCount());
     }
 
     /// Buffer-text width: the pane less the gutter. Saturates to zero if
@@ -1268,18 +1614,18 @@ pub const Ui = struct {
     fn renderGutterCell(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize) !void {
         const width = self.gutterWidth();
         if (width == 0) return;
-        const line = self.top_line + r;
-        const cursor_line = self.ed.pos().line;
-        const past_end = line >= self.ed.buf.lineCount();
+        const line = self.buf.top_line + r;
+        const cursor_line = self.buf.ed.pos().line;
+        const past_end = line >= self.buf.ed.buf.lineCount();
 
         var buf: [32]u8 = undefined;
-        const cell = gutterCellText(&buf, self.ed.line_numbers, width, line, cursor_line, past_end);
+        const cell = gutterCellText(&buf, self.buf.ed.line_numbers, width, line, cursor_line, past_end);
         const fg = if (!past_end and line == cursor_line) fg_text else fg_dim;
         try writeAt(batch, self.buffer_layer, r, 0, cell, fg, bg_buffer);
     }
 
     fn renderBufferRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize) !void {
-        const line = self.top_line + r;
+        const line = self.buf.top_line + r;
         const gutter = self.gutterWidth();
         const cols = self.textCols();
 
@@ -1288,7 +1634,7 @@ pub const Ui = struct {
         var pad: std.ArrayList(u8) = .empty;
         defer pad.deinit(self.alloc);
 
-        if (line >= self.ed.buf.lineCount()) {
+        if (line >= self.buf.ed.buf.lineCount()) {
             // vim's marker for "past the end of the buffer".
             try pad.append(self.alloc, '~');
             try padTo(self.alloc, &pad, 1, cols);
@@ -1296,17 +1642,17 @@ pub const Ui = struct {
             return;
         }
 
-        const text = try self.ed.buf.lineText(self.alloc, line);
+        const text = try self.buf.ed.buf.lineText(self.alloc, line);
         defer self.alloc.free(text);
 
         // Highlighted rows are painted a colour run at a time; on any
         // failure (or with no grammar) fall through to one plain write.
         var painted = false;
-        if (self.hl) |*h| {
+        if (self.buf.hl) |*h| {
             if (h.ready() and self.renderRowSpans(batch, r, line, text)) painted = true;
         }
         if (!painted) {
-            const visible = sliceCols(text, self.left_col, cols);
+            const visible = sliceCols(text, self.buf.left_col, cols);
             try pad.appendSlice(self.alloc, visible);
             try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), cols);
             try writeAt(batch, self.buffer_layer, r, gutter, pad.items, fg_text, bg_buffer);
@@ -1330,14 +1676,14 @@ pub const Ui = struct {
         line: usize,
         text: []const u8,
     ) !void {
-        const span = self.ed.selectionSpan() orelse return;
-        const ls = self.ed.buf.lineStart(line);
+        const span = self.buf.ed.selectionSpan() orelse return;
+        const ls = self.buf.ed.buf.lineStart(line);
         // One past the line's last byte, including its newline if it has
         // one -- the range a linewise / cross-line selection can cover.
-        const line_hi = if (line + 1 < self.ed.buf.lineCount())
-            self.ed.buf.lineStart(line + 1)
+        const line_hi = if (line + 1 < self.buf.ed.buf.lineCount())
+            self.buf.ed.buf.lineStart(line + 1)
         else
-            self.ed.buf.len();
+            self.buf.ed.buf.len();
         if (span.hi <= ls or span.lo > line_hi) return;
 
         const gutter = self.gutterWidth();
@@ -1351,13 +1697,13 @@ pub const Ui = struct {
 
         const start_dc = displayColOfByte(text, @min(sel_lo_b, text.len));
         const end_dc = if (to_eol)
-            self.left_col + cols
+            self.buf.left_col + cols
         else
             displayColOfByte(text, @min(sel_hi_b, text.len));
-        if (end_dc <= self.left_col or start_dc >= self.left_col + cols) return;
+        if (end_dc <= self.buf.left_col or start_dc >= self.buf.left_col + cols) return;
 
-        const vis_lo = @max(start_dc, self.left_col);
-        const vis_hi = @min(end_dc, self.left_col + cols);
+        const vis_lo = @max(start_dc, self.buf.left_col);
+        const vis_hi = @min(end_dc, self.buf.left_col + cols);
         if (vis_hi <= vis_lo) return;
 
         // The characters under the highlight, then spaces out to the
@@ -1369,7 +1715,7 @@ pub const Ui = struct {
         try overlay.appendSlice(self.alloc, chars);
         try padTo(self.alloc, &overlay, glyphwire.stringWidth(chars), vis_hi - vis_lo);
 
-        try writeAt(batch, self.buffer_layer, r, gutter + vis_lo - self.left_col, overlay.items, fg_text, bg_selected);
+        try writeAt(batch, self.buffer_layer, r, gutter + vis_lo - self.buf.left_col, overlay.items, fg_text, bg_selected);
     }
 
     /// Paints buffer row `r` (buffer line `line`, whole text `text`) as
@@ -1383,9 +1729,9 @@ pub const Ui = struct {
         line: usize,
         text: []const u8,
     ) bool {
-        const h = &self.hl.?;
-        const ls = self.ed.buf.lineStart(line);
-        const le = self.ed.buf.lineEnd(line);
+        const h = &self.buf.hl.?;
+        const ls = self.buf.ed.buf.lineStart(line);
+        const le = self.buf.ed.buf.lineEnd(line);
         h.lineSpans(ls, le, &self.hl_scratch) catch return false;
         self.rowSpansImpl(batch, r, text, self.hl_scratch.items) catch return false;
         return true;
@@ -1399,7 +1745,7 @@ pub const Ui = struct {
         spans: []const syntax.Span,
     ) !void {
         const cols = self.textCols();
-        const left = self.left_col;
+        const left = self.buf.left_col;
         // Text starts after the line-number gutter (zero when it is off).
         const gutter = self.gutterWidth();
 
@@ -1461,8 +1807,8 @@ pub const Ui = struct {
         bytes: []const u8,
         color: ?Color,
     ) !void {
-        if (bytes.len == 0 or start_dc < self.left_col) return;
-        const col = self.gutterWidth() + start_dc - self.left_col;
+        if (bytes.len == 0 or start_dc < self.buf.left_col) return;
+        const col = self.gutterWidth() + start_dc - self.buf.left_col;
         try writeAt(batch, self.buffer_layer, r, col, bytes, color orelse fg_text, bg_buffer);
     }
 
@@ -1478,15 +1824,15 @@ pub const Ui = struct {
     fn scrollBufferToCursor(self: *Ui) void {
         const b = self.buffer_bounds;
         if (b.rows == 0 or b.cols == 0) return;
-        const pos = self.ed.pos();
+        const pos = self.buf.ed.pos();
 
-        if (pos.line < self.top_line) self.top_line = pos.line;
-        if (pos.line >= self.top_line + b.rows) self.top_line = pos.line - b.rows + 1;
+        if (pos.line < self.buf.top_line) self.buf.top_line = pos.line;
+        if (pos.line >= self.buf.top_line + b.rows) self.buf.top_line = pos.line - b.rows + 1;
 
         const col = self.cursorDisplayCol() catch return;
         const cols = self.textCols();
-        if (col < self.left_col) self.left_col = col;
-        if (cols > 0 and col >= self.left_col + cols) self.left_col = col - cols + 1;
+        if (col < self.buf.left_col) self.buf.left_col = col;
+        if (cols > 0 and col >= self.buf.left_col + cols) self.buf.left_col = col - cols + 1;
     }
 
     /// Applies a host-driven scroll of the buffer pane (wheel or thumb
@@ -1496,16 +1842,16 @@ pub const Ui = struct {
     fn scrollBufferTo(self: *Ui, row: usize, col: usize) void {
         const b = self.buffer_bounds;
         if (b.rows == 0) return;
-        self.top_line = row;
-        self.left_col = col;
+        self.buf.top_line = row;
+        self.buf.left_col = col;
 
-        const cur = self.ed.pos();
-        const last = self.ed.buf.lineCount() -| 1;
+        const cur = self.buf.ed.pos();
+        const last = self.buf.ed.buf.lineCount() -| 1;
         const clamped_line = std.math.clamp(cur.line, row, @min(row + b.rows - 1, last));
         if (clamped_line != cur.line) {
-            self.ed.cursor = self.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
+            self.buf.ed.cursor = self.buf.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
         }
-        self.pushed_bar = .{ self.ed.buf.lineCount(), b.cols, self.top_line, self.left_col };
+        self.buf.pushed_bar = .{ self.buf.ed.buf.lineCount(), b.cols, self.buf.top_line, self.buf.left_col };
         // The view moved and the cursor may have been dragged with it;
         // the status row shows both.
         self.buffer_dirty = true;
@@ -1521,34 +1867,34 @@ pub const Ui = struct {
     /// `drainEvents`).
     fn syncBufferScrollbar(self: *Ui) !void {
         const b = self.buffer_bounds;
-        const now: [4]usize = .{ self.ed.buf.lineCount(), b.cols, self.top_line, self.left_col };
-        if (std.mem.eql(usize, &now, &self.pushed_bar)) return;
+        const now: [4]usize = .{ self.buf.ed.buf.lineCount(), b.cols, self.buf.top_line, self.buf.left_col };
+        if (std.mem.eql(usize, &now, &self.buf.pushed_bar)) return;
 
-        if (now[0] != self.pushed_bar[0] or now[1] != self.pushed_bar[1]) {
+        if (now[0] != self.buf.pushed_bar[0] or now[1] != self.buf.pushed_bar[1]) {
             try self.client.setLayerContentExtent(self.buffer_layer, now[1], now[0]);
         }
-        try self.client.setLayerScrollOffset(self.buffer_layer, self.top_line, self.left_col);
-        self.pushed_bar = now;
+        try self.client.setLayerScrollOffset(self.buffer_layer, self.buf.top_line, self.buf.left_col);
+        self.buf.pushed_bar = now;
     }
 
     /// The caret's column in *display* cells, which is not its byte
     /// column once a line holds anything multi-byte or double-width.
     fn cursorDisplayCol(self: *Ui) !usize {
-        const pos = self.ed.pos();
-        const start = self.ed.buf.lineStart(pos.line);
-        const text = try self.ed.buf.gap.read(self.alloc, start, start + pos.col);
+        const pos = self.buf.ed.pos();
+        const start = self.buf.ed.buf.lineStart(pos.line);
+        const text = try self.buf.ed.buf.gap.read(self.alloc, start, start + pos.col);
         defer self.alloc.free(text);
         return glyphwire.stringWidth(text);
     }
 
     /// The grapheme the caret sits on, or a space at end of line.
     fn cursorGrapheme(self: *Ui) ![]u8 {
-        const c = self.ed.cursor;
-        if (c >= self.ed.buf.len() or self.ed.buf.byteAt(c) == '\n') {
+        const c = self.buf.ed.cursor;
+        if (c >= self.buf.ed.buf.len() or self.buf.ed.buf.byteAt(c) == '\n') {
             return self.alloc.dupe(u8, " ");
         }
-        const seq = std.unicode.utf8ByteSequenceLength(self.ed.buf.byteAt(c)) catch 1;
-        return self.ed.buf.gap.read(self.alloc, c, c + seq);
+        const seq = std.unicode.utf8ByteSequenceLength(self.buf.ed.buf.byteAt(c)) catch 1;
+        return self.buf.ed.buf.gap.read(self.alloc, c, c + seq);
     }
 
     fn renderTree(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
@@ -1614,6 +1960,112 @@ pub const Ui = struct {
         return ls_icons.iconForFileName(e.name) orelse ls_icons.iconForExtension(e.name);
     }
 
+    /// Redraws the tab strip.
+    ///
+    /// The strip is laid out in *strip* columns (`zoe/tabs.zig`), scrolled
+    /// so the active tab is fully on screen, then written one run per tab
+    /// -- clipped to the pane, since a tab at either edge may be half off
+    /// it. The row is painted with the bar's background first, so a tab
+    /// that just closed leaves no cells of its own behind.
+    fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
+        const b = self.tabs_bounds;
+        if (b.cols == 0 or b.rows == 0) return;
+
+        var labels: std.ArrayList(tabs.Tab) = .empty;
+        defer labels.deinit(self.alloc);
+        for (self.buffers.items) |slot| {
+            try labels.append(self.alloc, .{
+                .label = tabs.labelFor(slot.ed.path),
+                .dirty = slot.ed.buf.dirty,
+            });
+        }
+
+        self.tab_total = try tabs.layout(self.alloc, labels.items, &self.tab_spans);
+        if (self.active < self.tab_spans.items.len) {
+            self.tab_scroll = tabs.scrollToShow(
+                self.tab_spans.items[self.active],
+                b.cols,
+                self.tab_scroll,
+                self.tab_total,
+            );
+        }
+        try self.syncTabScrollbar();
+
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(self.alloc);
+
+        try text.appendNTimes(self.alloc, ' ', b.cols);
+        try writeAt(batch, self.tabs_layer, 0, 0, text.items, fg_dim, bg_tab_bar);
+
+        for (self.tab_spans.items, labels.items, 0..) |span, tab, i| {
+            const active = i == self.active;
+            text.clearRetainingCapacity();
+            try text.append(self.alloc, ' ');
+            try text.appendSlice(self.alloc, tab.label);
+            if (tab.dirty) {
+                try text.append(self.alloc, ' ');
+                try text.appendSlice(self.alloc, tabs.dirty_mark);
+            }
+            try text.append(self.alloc, ' ');
+            try text.appendSlice(self.alloc, tabs.close_glyph);
+            try text.append(self.alloc, ' ');
+
+            try self.writeStripRun(
+                batch,
+                span.start,
+                text.items,
+                if (active) fg_text else fg_dim,
+                if (active) bg_buffer else bg_tab,
+            );
+            if (i + 1 < self.tab_spans.items.len) {
+                try self.writeStripRun(batch, span.end, tabs.separator, fg_dim, bg_tab_bar);
+            }
+        }
+    }
+
+    /// Writes one run of the tab strip, positioned in strip columns and
+    /// clipped to the visible window. A run entirely off the pane writes
+    /// nothing; one straddling an edge is sliced at a display column, so
+    /// a double-width character is never cut in half.
+    fn writeStripRun(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        start: usize,
+        text: []const u8,
+        fg: Color,
+        bg: Color,
+    ) !void {
+        const width = glyphwire.stringWidth(text);
+        const view_lo = self.tab_scroll;
+        const view_hi = self.tab_scroll + self.tabs_bounds.cols;
+        const lo = @max(start, view_lo);
+        const hi = @min(start + width, view_hi);
+        if (lo >= hi) return;
+
+        const slice = text[byteAtDisplayCol(text, lo - start)..byteAtDisplayCol(text, hi - start)];
+        try writeAt(batch, self.tabs_layer, 0, lo - view_lo, slice, fg, bg);
+    }
+
+    /// Keeps the tabs layer's virtual extent and offset in step with the
+    /// strip, the same arrangement the buffer pane has: the layer's grid
+    /// is only pane-wide, and reporting the strip's real width is what
+    /// lets the host turn a shift+wheel or a drag over it into the
+    /// `scroll_offset` `drainEvents` follows. Silent when nothing moved.
+    fn syncTabScrollbar(self: *Ui) !void {
+        const now: [2]usize = .{ self.tab_total, self.tab_scroll };
+        if (std.mem.eql(usize, &now, &self.pushed_tab_bar)) return;
+
+        if (now[0] != self.pushed_tab_bar[0]) {
+            try self.client.setLayerContentExtent(
+                self.tabs_layer,
+                @max(self.tab_total, self.tabs_bounds.cols),
+                1,
+            );
+        }
+        try self.client.setLayerScrollOffset(self.tabs_layer, 0, self.tab_scroll);
+        self.pushed_tab_bar = now;
+    }
+
     fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const b = self.status_bounds;
         if (b.cols == 0) return;
@@ -1622,19 +2074,24 @@ pub const Ui = struct {
         defer line.deinit(self.alloc);
         var fg = fg_status;
 
-        if (self.ed.mode == .command) {
+        if (self.buf.ed.mode == .command) {
             try line.append(self.alloc, ':');
-            try line.appendSlice(self.alloc, self.ed.cmdline.items);
-        } else if (self.ed.status.items.len > 0) {
-            if (std.mem.startsWith(u8, self.ed.status.items, "E")) fg = fg_error;
-            try line.appendSlice(self.alloc, self.ed.status.items);
+            try line.appendSlice(self.alloc, self.buf.ed.cmdline.items);
+        } else if (self.buf.ed.status.items.len > 0) {
+            if (std.mem.startsWith(u8, self.buf.ed.status.items, "E")) fg = fg_error;
+            try line.appendSlice(self.alloc, self.buf.ed.status.items);
         } else {
-            const pos = self.ed.pos();
+            const pos = self.buf.ed.pos();
             try line.print(self.alloc, " {s}  {s}{s}", .{
-                modeName(self.ed.mode),
-                self.ed.path orelse "[No Name]",
-                if (self.ed.buf.dirty) " [+]" else "",
+                modeName(self.buf.ed.mode),
+                self.buf.ed.path orelse "[No Name]",
+                if (self.buf.ed.buf.dirty) " [+]" else "",
             });
+            // Which tab this is, once there is more than one. The strip
+            // above shows the names; this is the count.
+            if (self.buffers.items.len > 1) {
+                try line.print(self.alloc, "  [{d}/{d}]", .{ self.active + 1, self.buffers.items.len });
+            }
             // The position is right-aligned, so the mode and filename on
             // the left don't shift it around as they change length.
             var right: [48]u8 = undefined;
@@ -1649,8 +2106,8 @@ pub const Ui = struct {
 
         // The mode word gets its own colour, over the top of the run just
         // written -- cheaper than splitting the line into two runs.
-        if (self.ed.mode != .command and self.ed.status.items.len == 0) {
-            try writeAt(batch, self.status_layer, 0, 1, modeName(self.ed.mode), fg_mode, bg_status);
+        if (self.buf.ed.mode != .command and self.buf.ed.status.items.len == 0) {
+            try writeAt(batch, self.status_layer, 0, 1, modeName(self.buf.ed.mode), fg_mode, bg_status);
         }
     }
 

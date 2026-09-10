@@ -121,7 +121,8 @@ see it.
 | Counts | `3j`, `10l`, `3G`, `2gg`, and `2d3w` (the counts multiply, as in vim) |
 | Insert | `i` `a` `I` `A` `o` `O`, Escape, Backspace, Enter, Delete |
 | Edits | `x` `X` `D` `C` `s`, `dd`, `d{w,b,e,h,l,0,^,$}`, `dj` `dk` `dG` `dgg` |
-| Command line | `:w [file]`, `:q`, `:q!`, `:wq` / `:x`, `:e[!] [file]`, `:cd [dir]` / `:pwd`, `:<number>`, `:$` / `:.` / `:+N` / `:-N`, and `:{count}{motion}` (`:23k`) |
+| Command line | `:w [file]`, `:q`, `:q!`, `:wq` / `:x`, `:e[!] [file]`, `:bn` / `:bp`, `:bd[!]`, `:set lineno=…`, `:cd [dir]` / `:pwd`, `:<number>`, `:$` / `:.` / `:+N` / `:-N`, and `:{count}{motion}` (`:23k`) |
+| Buffers | Ctrl+Tab / Ctrl+Shift+Tab step through the open buffers (wrapping); a click on a tab switches to it, one on its `×` closes it. `:e <path>` and Enter on a file in the tree open a tab, or switch to it when it is already open. `:q` still quits the editor, not the buffer. |
 
 Two vim behaviours worth calling out because they are the ones people
 notice when they're missing, and both are covered by tests: the sticky

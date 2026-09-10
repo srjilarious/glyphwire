@@ -21,7 +21,9 @@ const usage =
     \\
     \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
     \\glyphwire display server. Ctrl+W switches panes, Ctrl+N toggles the
-    \\file tree. See docs/investigations/zoe-editor.md.
+    \\file tree, Ctrl+Tab / Ctrl+Shift+Tab walk the open buffers (also
+    \\:bn / :bp, closed with :bd or a tab's ×).
+    \\See docs/investigations/zoe-editor.md.
     \\
 ;
 
@@ -54,6 +56,14 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // `--keys` always means the headless driver, even under a display
+    // server: it's how the core is tested, and a script racing a live UI
+    // would be neither. The UI opens `path` itself: it owns every buffer
+    // in its tab strip, and the first one is no different.
+    if (script == null) {
+        if (try runUi(alloc, io, path, init.environ_map)) return;
+    }
+
     // A missing file is a new buffer, not an error -- `zoe newfile.txt`
     // is how you create one.
     const text: []u8 = if (path) |p|
@@ -68,19 +78,12 @@ pub fn main(init: std.process.Init) !void {
     var ed = try zoe.Editor.initFromText(alloc, text, path);
     defer ed.deinit();
 
-    // `--keys` always means the headless driver, even under a display
-    // server: it's how the core is tested, and a script racing a live UI
-    // would be neither.
-    if (script == null) {
-        if (try runUi(alloc, io, &ed, init.environ_map)) return;
-    }
-
     if (script) |s| {
         switch (try zoe.keys.feed(&ed, s)) {
-            // `:cd` / `:pwd` need a live client and a real cwd to act
-            // on; the clipboard outcomes need a live host. The headless
-            // driver just reports what parsed.
-            .none, .quit, .chdir, .pwd, .set_clipboard, .paste => {},
+            // `:bn` / `:bp` / `:bd` need the UI's buffer list, `:cd` /
+            // `:pwd` a live client and a real cwd, the clipboard ones a
+            // live host. The headless driver just reports what parsed.
+            .none, .quit, .chdir, .pwd, .set_clipboard, .paste, .buffer_step, .buffer_close => {},
             .write, .write_quit, .edit => |target| try headlessSave(io, &ed, target),
         }
     }
@@ -103,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
 fn runUi(
     alloc: std.mem.Allocator,
     io: std.Io,
-    ed: *zoe.Editor,
+    path: ?[]const u8,
     environ: *const std.process.Environ.Map,
 ) !bool {
     var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch return false;
@@ -129,7 +132,7 @@ fn runUi(
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
     const cwd = cwd_buf[0..cwd_len];
 
-    const ui = try zoe.Ui.init(alloc, io, &client, listener, ed, cwd, environ);
+    const ui = try zoe.Ui.init(alloc, io, &client, listener, path, cwd, environ);
     defer ui.deinit();
 
     try ui.run();

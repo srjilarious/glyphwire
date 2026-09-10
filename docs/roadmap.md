@@ -2579,6 +2579,62 @@ server-side. See `docs/api.md`'s `find_metadata` row and
   (`browsescroll.locate` placement math), `dispatch_tests.zig` +1
   (`find_metadata` round trip + bad direction). 826 pass.
 
+## zoe: multiple buffers with a tab strip
+
+Several files open at once, walked with `:bn` / `:bp` or Ctrl+Tab and
+listed in a tab strip above the buffer pane. See `docs/decisions.md`'s
+"zoe multiple buffers" for the *why*; this is the shape. No wire change.
+
+- **`Slot` in `zoe/ui.zig`** — one open buffer: its `Editor`, its
+  `top_line` / `left_col` and the `prev_*` / `full_redraw` /
+  `pushed_bar` redraw bookkeeping the buffer pane keeps between frames,
+  and its own `syntax.Highlighter` + `hl_edits`. `Ui.buffers:
+  ArrayList(*Slot)` (heap slots — `buf` points into the list) with
+  `active` and `buf`, written only by `setActive`, which forces a repaint
+  and re-pushes the pane's scrollbar extent because the layer's cells
+  belong to whichever buffer drew last. `Ui` keeps only what is shared:
+  the config, the grammar `Registry` every highlighter resolves through,
+  and the per-frame span scratch.
+- **`Ui` owns every buffer, including the first.** `Ui.init` takes the
+  initial path instead of a borrowed `*Editor` and reads it itself
+  (`newSlot`); `zoe/main.zig` only builds an `Editor` for the headless
+  `--keys` driver, after `runUi` has declined. `newSlot` applies the
+  `zoe.conf` settings, builds the slot's highlighter, and reports vim's
+  `"file" NL` / `"file" [New]` on the status line.
+- **`editor.zig`** — `Outcome.buffer_step{forward}` and
+  `Outcome.buffer_close{force}`; `:bn`/`:bnext`, `:bp`/`:bprev`/
+  `:bprevious`, `:bd`/`:bdelete` (+`!`). `:bd` carries the same E37
+  dirty guard `:q` has. `:e <path>` lost its guard (it opens a tab now
+  and abandons nothing); a bare `:e` keeps it and reloads in place
+  (`Ui.reloadCurrent`, which also fixes a latent use-after-free — the old
+  path was read for the status line after `loadText` had freed it).
+- **`zoe/tabs.zig`** — the strip's pure geometry: `tabWidth` /
+  `layout` (spans + total width, ` label × ` with ` +` when modified and
+  a `│` between neighbours), `scrollToShow` (the least scroll that brings
+  the active tab fully on screen), `hit` (body vs close box vs the gap),
+  `labelFor` (basename, or `[No Name]`). All measured in display columns,
+  so a CJK label is counted at 2 a glyph.
+- **The strip as a pane** — a 1-row `tabs_layer` fixed above
+  `buffer_layer` in a new non-resizable `buffer_col_split`, which
+  `pane_split` now holds in the buffer's place. `renderTabs` paints the
+  bar, then one clipped run per tab (`writeStripRun` slices at a display
+  column, so a half-visible tab never cuts a wide glyph); `syncTabScrollbar`
+  pushes the strip's real width as a `content_extent` and follows the
+  `scroll_offset` a shift+wheel over it comes back as. A new `tabs_dirty`
+  flag joins the per-pane redraw gate — the strip redraws on a
+  switch/open/close, a layout change, a scroll, and when the active
+  buffer's modified flag flips, not on every keystroke.
+- **Input** — Ctrl+Tab / Ctrl+Shift+Tab step buffers (taken before the
+  editor, so they work in insert mode); a left press on a tab switches to
+  it and one on its `×` closes it; the statusline gains `[2/5]` once more
+  than one buffer is open. `:q` / `:wq` now refuse with `E162` when *any*
+  buffer is modified, since they take the whole editor down.
+- **Tests:** `zoe_tests.zig` +11 (`:bn`/`:bp`/`:bnext`/`:bprevious`
+  directions, `:bd` E37 + `:bd!` force, bare `:e` guard vs `:e <path>`
+  abandoning nothing, `tabWidth` padding/dirty/wide-glyph, `layout` spans
+  + separators + total, `hit` body/close/gap, `scrollToShow` both edges +
+  clamp, `labelFor`). 834 pass.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

@@ -16,6 +16,7 @@ const Buffer = zoe.Buffer;
 const Editor = zoe.Editor;
 const motion = zoe.motion;
 const keys = zoe.keys;
+const tabs = zoe.tabs;
 
 /// Builds an editor over `text`, runs `script`, and asserts the buffer
 /// matches `expected`. Most cases below are one call to this.
@@ -790,6 +791,53 @@ pub fn commandLineQuitRefusesADirtyBufferTest(_: std.Io, alloc: std.mem.Allocato
     }
 }
 
+pub fn commandLineBufferStepReturnsADirectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+
+    switch (try keys.feed(&ed, ":bn<cr>")) {
+        .buffer_step => |b| try testz.expectTrue(b.forward),
+        else => try testz.fail(),
+    }
+    switch (try keys.feed(&ed, ":bp<cr>")) {
+        .buffer_step => |b| try testz.expectFalse(b.forward),
+        else => try testz.fail(),
+    }
+    // The spelled-out forms are the same commands.
+    switch (try keys.feed(&ed, ":bnext<cr>")) {
+        .buffer_step => |b| try testz.expectTrue(b.forward),
+        else => try testz.fail(),
+    }
+    switch (try keys.feed(&ed, ":bprevious<cr>")) {
+        .buffer_step => |b| try testz.expectFalse(b.forward),
+        else => try testz.fail(),
+    }
+}
+
+pub fn commandLineBufferDeleteRefusesADirtyBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+
+    // Clean: `:bd` closes.
+    switch (try keys.feed(&ed, ":bd<cr>")) {
+        .buffer_close => |b| try testz.expectFalse(b.force),
+        else => try testz.fail(),
+    }
+
+    _ = try keys.feed(&ed, "iy<esc>");
+    switch (try keys.feed(&ed, ":bd<cr>")) {
+        .none => {},
+        else => try testz.fail(),
+    }
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E37:"));
+
+    // `!` overrides, the same guard `:q` uses.
+    switch (try keys.feed(&ed, ":bd!<cr>")) {
+        .buffer_close => |b| try testz.expectTrue(b.force),
+        else => try testz.fail(),
+    }
+}
+
 pub fn commandLineQuitAfterSaveIsCleanTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
@@ -945,22 +993,38 @@ pub fn commandLineEditReturnsAnOutcomeTest(_: std.Io, alloc: std.mem.Allocator) 
     }
 }
 
-pub fn commandLineEditRefusesADirtyBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
+pub fn commandLineBareEditRefusesADirtyBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "iy<esc>");
 
-    // Same rule `:q` has -- unsaved work isn't discarded silently.
-    switch (try keys.feed(&ed, ":e other<cr>")) {
+    // A *bare* `:e` re-reads this buffer over the top of the changes, so
+    // it keeps the rule `:q` has -- unsaved work isn't discarded
+    // silently.
+    switch (try keys.feed(&ed, ":e<cr>")) {
         .none => {},
         else => try testz.fail(),
     }
     try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E37:"));
 
-    switch (try keys.feed(&ed, ":e! other<cr>")) {
+    switch (try keys.feed(&ed, ":e!<cr>")) {
+        .edit => |path| try testz.expectTrue(path == null),
+        else => try testz.fail(),
+    }
+}
+
+pub fn commandLineEditWithAPathAbandonsNothingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "iy<esc>");
+
+    // `:e <path>` opens another tab now: this buffer stays open and
+    // modified, so there is nothing to guard against.
+    switch (try keys.feed(&ed, ":e other<cr>")) {
         .edit => |path| try testz.expectEqualStr(path.?, "other"),
         else => try testz.fail(),
     }
+    try testz.expectTrue(ed.buf.dirty);
 }
 
 // ─── Tree flattening ────────────────────────────────────────────────────
@@ -1385,4 +1449,87 @@ pub fn syntaxInjectionSurvivesIncrementalEditTest(io: std.Io, alloc: std.mem.All
 
     try hl.lineSpans(buf.lineStart(1), buf.lineEnd(1), &spans);
     try testz.expectTrue(spans.items.len >= 1);
+}
+
+// ─── Buffer tabs ───────────────────────────────────────────────────────
+
+pub fn tabWidthCountsPaddingAndCloseBoxTest(_: std.Io, _: std.mem.Allocator) !void {
+    // ` main.zig × ` -- a space either side of the label, the close box
+    // and its own leading space.
+    try testz.expectEqual(tabs.tabWidth("main.zig", false), 12);
+    // ` main.zig + × ` -- the modified marker costs two more cells.
+    try testz.expectEqual(tabs.tabWidth("main.zig", true), 14);
+    // Measured in display columns, so a double-width label is 2 a glyph.
+    try testz.expectEqual(tabs.tabWidth("\u{65e5}\u{672c}", false), 8);
+}
+
+pub fn tabLayoutPlacesSpansAndSeparatorsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var spans: std.ArrayList(tabs.Span) = .empty;
+    defer spans.deinit(alloc);
+
+    const total = try tabs.layout(alloc, &.{
+        .{ .label = "a.zig", .dirty = false },
+        .{ .label = "b.md", .dirty = true },
+    }, &spans);
+
+    try testz.expectEqual(spans.items.len, 2);
+    // ` a.zig × ` is 9 cells, then a one-cell separator.
+    try testz.expectEqual(spans.items[0].start, 0);
+    try testz.expectEqual(spans.items[0].end, 9);
+    // The close box is one space in from the tab's right edge.
+    try testz.expectEqual(spans.items[0].close, 7);
+    // ` b.md + × ` is 10 cells, starting after tab + separator.
+    try testz.expectEqual(spans.items[1].start, 10);
+    try testz.expectEqual(spans.items[1].end, 20);
+    try testz.expectEqual(spans.items[1].close, 18);
+    // The total includes the separator but not a trailing one.
+    try testz.expectEqual(total, 20);
+}
+
+pub fn tabHitDistinguishesCloseFromBodyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var spans: std.ArrayList(tabs.Span) = .empty;
+    defer spans.deinit(alloc);
+    _ = try tabs.layout(alloc, &.{
+        .{ .label = "a.zig", .dirty = false },
+        .{ .label = "b.md", .dirty = false },
+    }, &spans);
+
+    // Somewhere in the first label: the tab, not its close box.
+    const body = tabs.hit(spans.items, 3).?;
+    try testz.expectEqual(body.index, 0);
+    try testz.expectFalse(body.close);
+
+    // Exactly on the ×.
+    const close = tabs.hit(spans.items, spans.items[0].close).?;
+    try testz.expectEqual(close.index, 0);
+    try testz.expectTrue(close.close);
+
+    // The separator between tabs belongs to neither, and so does the
+    // empty bar past the last tab.
+    try testz.expectTrue(tabs.hit(spans.items, spans.items[0].end) == null);
+    try testz.expectTrue(tabs.hit(spans.items, 999) == null);
+}
+
+pub fn tabScrollFollowsTheActiveTabTest(_: std.Io, _: std.mem.Allocator) !void {
+    const span = tabs.Span{ .start = 30, .end = 42, .close = 40 };
+
+    // A strip that fits the pane never scrolls.
+    try testz.expectEqual(tabs.scrollToShow(span, 60, 0, 50), 0);
+
+    // Off the right edge: scrolls just far enough to show the whole tab.
+    try testz.expectEqual(tabs.scrollToShow(span, 20, 0, 80), 22);
+    // Off the left edge: scrolls back to the tab's leading space.
+    try testz.expectEqual(tabs.scrollToShow(span, 20, 35, 80), 30);
+    // Already fully visible: left where it was.
+    try testz.expectEqual(tabs.scrollToShow(span, 20, 25, 80), 25);
+    // Never past the end of the strip.
+    try testz.expectEqual(tabs.scrollToShow(.{ .start = 78, .end = 80, .close = 79 }, 20, 0, 80), 60);
+}
+
+pub fn tabLabelIsTheBasenameTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(tabs.labelFor("src/zoe/ui.zig"), "ui.zig");
+    try testz.expectEqualStr(tabs.labelFor("ui.zig"), "ui.zig");
+    // A scratch buffer has no path, and says so the way the statusline
+    // does.
+    try testz.expectEqualStr(tabs.labelFor(null), "[No Name]");
 }
