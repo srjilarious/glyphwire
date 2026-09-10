@@ -1553,6 +1553,71 @@ surface.
   the in-process host renderer, and the sender gets the state in the
   reply). glyphwire-shell drives this for its `ls` multi-select marks —
   see the Shell section.
+- **A client that owns the visible context runs its own selection; the
+  host stands down.** glyphwire-host's grid drag-selection and its
+  Ctrl+Shift+C/V shortcuts assume it knows what's on screen — true for
+  the shell's root context, false for a client like zoe that paints its
+  own panes into its own `create_context` surface and highlights its own
+  selection. So `Selection.handleMouseSelection` early-returns when
+  `Server.visibleContextClientOwned()` (the visible `Context` is
+  `connection_owned`) and no host drag is already in flight: chrome —
+  dividers, pane scrollbars, the window scrollbar — still gets first
+  refusal (it already did, via `skip_left`), but a plain press into the
+  client's content passes through to the wire as a real
+  `report_mouse_button`, and `report_mouse_move` keeps flowing, so the
+  client can build its own selection from them. The clipboard shortcuts
+  need no host change: Ctrl+Shift+C with no host selection already
+  broadcasts `copy_request` (zoe answers it), and Ctrl+Shift+V already
+  broadcasts `paste`. The host never accumulates a root-layer selection
+  over the client, so `copy_request` always fires. This is the minimal
+  version of "only capture drags that hit one of the host's own pieces" —
+  it's scoped to client-owned contexts so the shell's terminal-grid
+  selection is untouched.
+
+#### zoe: visual mode, mouse highlighting, clipboard
+- **Visual mode is charwise (`v`) and linewise (`V`), no block/column
+  mode.** Block mode threads a rectangular flag through every yank / cut /
+  paste path for a rare need — the same reason the wire's `Selection` is
+  linear-only. `selectionSpan()` is the one place anchor + cursor + mode
+  become a byte range; the renderer and the operators both read it.
+- **The clipboard is the system clipboard, via `set_clipboard` /
+  `get_clipboard` — no zoe-only register.** A yank or delete emits
+  `Outcome.set_clipboard` and `zoe/ui.zig` calls `client.setClipboard`,
+  which glyphwire-host mirrors to the OS. `p` / `P` emit `Outcome.paste`;
+  the editor can't read the clipboard itself (a wire round-trip), so the
+  host fetches it with `get_clipboard` and calls `Editor.putText`.
+  Consequence: `p` sees the `get_clipboard` freshness caveat above — it's
+  current for anything copied inside glyphwire (zoe's own yank, a shell
+  copy, a host selection copy) and lags an external app's copy until the
+  host next syncs. Acceptable for an editor whose common case is yanking
+  and putting its own text.
+- **Every delete feeds the clipboard, matching vim's unnamed register**
+  (`x`, `dd`, `dw`, `D`, `C`, `s`, and the `d` operator), so `dd` then
+  `p` works. `y` is a full operator too (`yy`, `yw`, `y$`, `ygg`).
+- **The `set_clipboard` outcome is deferred to the end of the input, not
+  returned mid-command.** `s` / `c` delete then enter insert mode, and
+  the rest of a typed chunk must still land as inserted text — returning
+  an `Outcome` from the delete would abort `feedText`'s loop. So a delete
+  sets `Editor.yank_pending` and `feedText` / `feedKey` emit one
+  `set_clipboard` once the whole input is processed.
+- **Linewise-ness rides on a trailing newline, not a flag.** The
+  clipboard is plain text; a linewise yank's text always ends in `\n`
+  (`stashYankRange` adds one for a last-line yank that has none), so
+  `putText` reconstructs "paste as whole lines below/above" from the text
+  alone.
+- **Ctrl+Shift+C / Ctrl+Shift+X / Ctrl+Shift+P are the chords**, per the
+  request. `X` and `P` reach zoe as ordinary key events and are handled
+  before `feedKey`; `C` is swallowed by the host, so zoe answers the
+  `copy_request` broadcast instead. (Ctrl+Shift+P is only swallowed by
+  the host when the frame-timing profiler HUD is enabled, an opt-in
+  `host.conf` setting.) The conventional Ctrl+Shift+V still works via its
+  `paste` notification.
+- **The selection highlight is a second write over the row, not a colour
+  in every run.** `paintSelectionRow` repaints the selected columns with
+  `bg_selected` after `renderBufferRow` lays the text down. `renderBuffer`
+  forces a full pane repaint whenever a selection is active (and once
+  more the frame it clears): a selection covers whole rows that the
+  caret-only / move-content incremental paths have no reason to touch.
 
 ### Events
 - No separate wire-level "event" mechanism — events are just notifications

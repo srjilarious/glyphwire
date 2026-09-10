@@ -2471,6 +2471,74 @@ section (`#### on{ chdir }: auto-list after a directory change`) for the
   only keeps the default command, merge across calls, unknown `list`
   rejected, empty `on{}` harmless). 774 pass.
 
+## zoe: visual mode, mouse highlighting, and clipboard integration
+
+zoe-local plus one small host tweak; no new wire messages (mouse, copy /
+paste and `set_clipboard` / `get_clipboard` already exist). See
+`docs/decisions.md`'s Selection & clipboard section for the *why*.
+
+- **`zoe/editor.zig`.** Two new `Mode`s, `visual` and `visual_line`.
+  `Editor.select_anchor` (`?usize`, the fixed end; the cursor is the
+  moving end) and `Editor.yank` (an `ArrayList(u8)`, vim's unnamed
+  register — except the real register is the system clipboard).
+  `selectionSpan()` turns anchor + cursor + mode into a `{lo, hi,
+  linewise}` byte range: charwise is inclusive of the cursor cell,
+  linewise covers whole lines including the trailing newline.
+- **New `Outcome`s:** `set_clipboard: []const u8` (a yank/delete borrowing
+  `Editor.yank`) and `paste: struct { after: bool }` (the editor can't
+  read the clipboard, so the host fetches it and calls `putText`). The
+  motion switch in `command` moved to a shared `applyMotion` so visual
+  mode reuses it verbatim. `y` joined `d` as an operator (`yy`, `yw`,
+  `y$`, `ygg`, ...). Every normal-mode delete (`x`, `X`, `D`, `C`, `s`,
+  `dd`, `dw`, ...) now fills `yank`.
+- **Deferred clipboard outcome.** A delete can't return `set_clipboard`
+  mid-command — `s` / `c` need the rest of a typed chunk to still land as
+  inserted text. So `feedText` / `feedKey` set `yank_pending` and emit one
+  `set_clipboard` when the input is fully processed (`takeYankPending`).
+- **`putText(text, after)`** splices a paste in: linewise (text ends with
+  a newline) goes whole lines above/below the current one, adding the
+  separator for a last-line paste; anything else splices charwise and
+  leaves the cursor on the last pasted character.
+- **`clipboardCopy` / `clipboardCut`** back the chords: with a selection
+  they act on it, without one on the current line (linewise, like `yy`).
+  `dropSelection` removes a selection's text without touching the
+  clipboard — the host calls it before a `paste` notification lands over
+  a selection.
+- **`zoe/ui.zig`.** `paintSelectionRow` overpaints each visible selected
+  row's columns with `bg_selected` after the text is laid down (a second
+  write, not threaded through every colour run); a linewise selection
+  runs to the pane's right edge. `renderBuffer` forces a full pane
+  repaint while a selection is active (and once more the frame it clears)
+  — a selection spans rows the incremental paths don't track.
+  `EdSnapshot` gained `mode` + `anchor` so a bare `v` / `V` / `o` /
+  `<esc>` still repaints.
+- **Mouse.** `zoe/main.zig` subscribes to `"mouse_move"`. A left press in
+  the buffer pane arms a drag (`Ui.drag`) and moves the caret; the first
+  `mouse_move` with the button down enters charwise visual mode
+  (`setVisualSelection`) and drags the cursor end; a release with no move
+  is a plain click that clears any selection. `cellToBufferByte` maps a
+  grid cell to a byte offset (`byteAtDisplayCol` is the inverse of the
+  existing `displayColOfByte`).
+- **Chords.** Ctrl+Shift+X (cut) and Ctrl+Shift+P (paste) arrive as key
+  events and are handled in `Ui.handleInput` before `feedKey`.
+  Ctrl+Shift+C is swallowed by glyphwire-host, which broadcasts
+  `copy_request` instead — `Ui.handleInput`'s `.copy_request` arm answers
+  it with `clipboardCopy`. Ctrl+Shift+V's existing `paste` notification
+  now routes through `putText` (or `feedText` in insert mode) rather than
+  obeying each character as a command.
+- **Host (`host/selection.zig` + `src/server.zig`).** New
+  `Server.visibleContextClientOwned()` (a locked read of
+  `ctx.connection_owned`). `Selection.handleMouseSelection` stands down
+  when the visible context is client-owned and no drag is already in
+  flight: chrome (dividers, scrollbars) still gets first refusal via
+  `skip_left`, but a press into zoe's content passes through to the wire
+  instead of starting a host grid selection that would fight zoe's own.
+- **Tests:** `zoe_tests.zig` +22 (visual yank/delete/change charwise and
+  linewise, submode switching, escape, visual paste, normal-mode deletes
+  and the `y` operator feeding the clipboard, `putText` charwise /
+  linewise / last-line, `selectionSpan`, `clipboardCopy` / `clipboardCut`
+  / `dropSelection`, mouse-drag selection). 815 pass.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

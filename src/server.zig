@@ -401,6 +401,19 @@ pub const Server = struct {
         return self.session.visible_gen.load(.monotonic);
     }
 
+    /// Whether the currently-visible context belongs to a connected
+    /// client (created over the wire with `create_context`) rather than
+    /// being the root/shell context. glyphwire-host uses this to stand
+    /// down its own grid selection: a client that owns its context (zoe)
+    /// paints its own panes and runs its own mouse/keyboard selection, so
+    /// the host forwards raw mouse events into it instead of consuming
+    /// drags for a root-layer selection the client never asked for.
+    pub fn visibleContextClientOwned(self: *Server) bool {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        return self.ctx.connection_owned;
+    }
+
     /// Fans a `context` notification (`{context, cols, rows}` -- the
     /// now-visible context's handle and size) out to every `"context"`
     /// subscriber. Sent by `create_context` / `activate_context` /

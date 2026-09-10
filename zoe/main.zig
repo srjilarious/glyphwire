@@ -78,8 +78,9 @@ pub fn main(init: std.process.Init) !void {
     if (script) |s| {
         switch (try zoe.keys.feed(&ed, s)) {
             // `:cd` / `:pwd` need a live client and a real cwd to act
-            // on; the headless driver just reports what parsed.
-            .none, .quit, .chdir, .pwd => {},
+            // on; the clipboard outcomes need a live host. The headless
+            // driver just reports what parsed.
+            .none, .quit, .chdir, .pwd, .set_clipboard, .paste => {},
             .write, .write_quit, .edit => |target| try headlessSave(io, &ed, target),
         }
     }
@@ -119,6 +120,7 @@ fn runUi(
         "scroll",
         "layout",
         "mouse_button",
+        "mouse_move",
         "context",
     }) catch return false;
     defer listener.deinit();
