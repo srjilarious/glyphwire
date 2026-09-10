@@ -249,4 +249,14 @@ pub fn build(b: *std.Build) void {
 
     const notify_step = b.step("notify", "Run the glyphwire notification client (glyphwire-notify <message>)");
     notify_step.dependOn(&run_notify.step);
+
+    // `zig build package` installs just the user-facing programs that ship
+    // in the Linux release tarball -- host, shell, notify, demo, view, ls --
+    // without also building the test runner or the internal server/client
+    // tools that plain `zig build` pulls in. The CI packaging job
+    // (.github/workflows/linux-package.yml) drives this step.
+    const package_step = b.step("package", "Install the shipped programs (host, shell, notify, demo, view, ls) into zig-out/bin");
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, ls_exe }) |exe| {
+        package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+    }
 }

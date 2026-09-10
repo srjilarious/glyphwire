@@ -1,0 +1,104 @@
+name: Linux Package
+
+# Builds and packages the user-facing glyphwire programs for Linux
+# x86_64: glyphwire-host, glyphwire-shell, glyphwire-notify, glyphwire-demo,
+# glyphwire-view and ls (via the `zig build package` step). The
+# server/client/table-demo tools and the test runner are deliberately left
+# out.
+#
+# Windows is intentionally not covered yet: the host needs more work
+# before it runs there, and cross-building it wants its own job. When
+# that lands, add a `build-windows` job here alongside `build-linux`.
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
+  pull_request:
+  workflow_dispatch:
+
+# `contents: write` is only exercised by the release step on a tag push;
+# every other trigger just reads the repo and uploads a run artifact.
+permissions:
+  contents: write
+
+concurrency:
+  group: linux-package-${{ github.ref }}
+  # Keep tag/release runs; collapse redundant branch and PR runs.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out glyphwire
+        uses: actions/checkout@v4
+        with:
+          path: glyphwire
+
+      # glyphwire's build.zig.zon points `pixzig` at `../pixzig` (a sibling
+      # checkout). CI reproduces that layout: glyphwire/ and pixzig/ side by
+      # side in the workspace root. Tracks pixzig's `main` branch.
+      - name: Check out pixzig (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: srjilarious/pixzig
+          ref: main
+          path: pixzig
+
+      # zglfw (pulled in transitively by the host through pixzig) links
+      # libX11 on Linux. Wayland is loaded at runtime via dlopen, so only
+      # the X11 dev package is needed to compile.
+      - name: Install X11 headers for the pixzig host
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev
+
+      # Matches build.zig.zon's minimum_zig_version and pixzig's own CI.
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # `zig build package` (defined in build.zig) installs only the shipped
+      # programs, skipping the test runner and the internal
+      # server/client/table-demo tools.
+      - name: Build (ReleaseSafe)
+        working-directory: glyphwire
+        run: zig build package -Doptimize=ReleaseSafe
+
+      # Layout mirrors a dev checkout: binaries sit next to `assets/` so the
+      # host resolves its default font paths ("assets/...") relative to the
+      # extracted directory. The example conf files live inside assets/ and
+      # come along with the recursive copy.
+      - name: Stage package
+        working-directory: glyphwire
+        run: |
+          pkg="glyphwire-linux-x86_64"
+          mkdir -p "$pkg"
+          cp zig-out/bin/glyphwire-host   "$pkg/"
+          cp zig-out/bin/glyphwire-shell  "$pkg/"
+          cp zig-out/bin/glyphwire-notify "$pkg/"
+          cp zig-out/bin/glyphwire-demo   "$pkg/"
+          cp zig-out/bin/glyphwire-view   "$pkg/"
+          cp zig-out/bin/ls               "$pkg/"
+          cp -r assets                    "$pkg/assets"
+          cp README.md                    "$pkg/"
+          tar czf "$pkg.tar.gz" "$pkg"
+          tar tzf "$pkg.tar.gz"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glyphwire-linux-x86_64
+          path: glyphwire/glyphwire-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+      # Only on a vX.Y.Z tag push: attach the same tarball to the GitHub
+      # Release for that tag (created if it does not exist yet).
+      - name: Attach tarball to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: glyphwire/glyphwire-linux-x86_64.tar.gz
+          fail_on_unmatched_files: true

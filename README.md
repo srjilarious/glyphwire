@@ -150,11 +150,19 @@ host, a working GLFW/OpenGL setup. `pixzig` is a path dependency at
 zig build                 # build every executable into zig-out/bin/
 zig build tests           # run the unit + e2e test suite
 zig build host            # build + run glyphwire-host (spawns glyphwire-shell)
+zig build package         # build just the shipped programs (host, shell,
+                          #   notify, demo, view, ls) into zig-out/bin/
 ```
 
 Individual run steps: `zig build shell`, `zig build ls`, `zig build demo`,
 `zig build table_demo`, `zig build view`, `zig build notify`,
 `zig build server`, `zig build client`.
+
+The `.github/workflows/linux-package.yml` workflow runs `zig build package`
+in ReleaseSafe on every push and pull request, uploading a
+`glyphwire-linux-x86_64.tar.gz` (the six binaries plus `assets/`) as a run
+artifact; on a `vX.Y.Z` tag push it also attaches that tarball to the
+GitHub Release. Windows packaging is not wired up yet.
 
 Once `glyphwire-host` is running, its shell prompt launches the client
 programs (`ls`, `glyphwire-demo`, `glyphwire-view <img.png>`,
