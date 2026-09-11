@@ -95,14 +95,24 @@ From a glyphwire-shell session sitting in a glyphwire checkout:
 provision_remote myuser@myhost
 ```
 
-This runs `zig build install-local` and streams the result (`bin/` +
-`share/glyphwire/`) to `~/.local/share/glyphwire` on the remote over
-`tar | ssh` -- no scp, so a port/identity flag given after the
-destination (`provision_remote myuser@myhost -p 2222`) only has to be
-spelled the ssh way. It then drops `shell.conf` / `zoe.conf` from this
-repo's templates onto the remote *only if it doesn't already have one*.
-Binaries are always overwritten; run it again any time you want the
-remote caught up with a local rebuild.
+This runs `zig build install-local -Dcpu=baseline` and streams the
+result (`bin/` + `share/glyphwire/`) to `~/.local/share/glyphwire` on the
+remote over `tar | ssh` -- no scp, so a port/identity flag given after
+the destination (`provision_remote myuser@myhost -p 2222`) only has to be
+spelled the ssh way. `-Dcpu=baseline` (rather than a plain `zig build`'s
+default of tuning for this exact machine) is what makes the build run on
+a remote CPU that's older or simply different -- without it, a mismatch
+shows up as the remote binary dying with "Illegal instruction" the
+moment it hits an instruction the remote CPU doesn't have. Costs a little
+raw throughput; for this shell/RPC/PTY workload that's not something
+you'd notice interactively. Know your fleet is uniform, recent hardware?
+`GW_PROVISION_CPU=native provision_remote ...` (or a specific `-Dcpu`
+value) skips the safety margin.
+
+It then drops `shell.conf` / `zoe.conf` from this repo's templates onto
+the remote *only if it doesn't already have one*. Binaries are always
+overwritten; run it again any time you want the remote caught up with a
+local rebuild.
 
 It needs passwordless ssh (key or agent) to the target already working --
 see the script's header comment for why. The command it prints at the

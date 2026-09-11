@@ -25,6 +25,18 @@
 -- Binaries always get overwritten (the point is "latest"); the two
 -- config files are only ever created, never touched if already there.
 --
+-- Built with `-Dcpu=baseline` -- a plain `zig build` tunes for *this*
+-- machine's exact CPU, and a remote box with an older or just different
+-- CPU (very plausible: a VM whose hypervisor exposes a generic virtual
+-- CPU, older server hardware, ...) can flat out crash on the first
+-- instruction it doesn't recognize ("Illegal instruction", not a hang or
+-- a clean error). `baseline` costs a little raw throughput -- for a
+-- shell/RPC/PTY workload like this one, expect nothing you'd notice
+-- interactively; the one place it could show up is decode-heavy work on
+-- a large image in gw-view. Know your fleet is uniform, recent hardware
+-- and want the speed back anyway? `GW_PROVISION_CPU=native
+-- provision_remote ...` (or a specific `-Dcpu` value, e.g. `x86_64_v3`).
+--
 -- Afterwards, run the host with the printed command, e.g.:
 --   glyphwire --ssh myuser@myhost --remote-command ~/.local/share/glyphwire/bin/gw-agent
 
@@ -95,9 +107,12 @@ if not sh.realpath("build.zig.zon") then
   return 1
 end
 
+local cpu = sh.getenv("GW_PROVISION_CPU")
+if not cpu or cpu == "" then cpu = "baseline" end
+
 local dist = ".provision-dist"
-print("provision_remote: zig build install-local -p " .. dist .. " ...")
-local build_code = sh.exec("zig build install-local -p " .. dist)
+print("provision_remote: zig build install-local -Dcpu=" .. cpu .. " -p " .. dist .. " ...")
+local build_code = sh.exec("zig build install-local -Dcpu=" .. cpu .. " -p " .. dist)
 if build_code ~= 0 then
   print("provision_remote: build failed (exit " .. build_code .. ")")
   return build_code
