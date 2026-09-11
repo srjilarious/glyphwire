@@ -12,6 +12,7 @@ cp *.lua ~/.config/glyphwire/scripts/
 | `up.lua` | `up [N]` -- `cd` this shell N directories toward the root (default 1). |
 | `venv_activate.lua` / `venv_deactivate.lua` | activate / deactivate a Python virtualenv for the session (see below). |
 | `drop.lua` / `yoink.lua` | `rsync` files to / from a "dropbox" directory on a remote host. Set the target with `sh.setenv("GW_DROPBOX", "myhost:dropbox/")` in `shell.conf`. |
+| `provision_remote.lua` | `provision_remote <user@host> [ssh options...]` -- build and copy the remote-side glyphwire programs to a real server for `glyphwire --ssh` (see below). |
 
 ## How script builtins work
 
@@ -46,6 +47,9 @@ shadow the real `cd`; a `ls.lua` does shadow `/usr/bin/ls`.
 | `sh.getenv(name)` | the shell's live value (script-set values included), or `nil` |
 | `sh.cwd()` | absolute working directory |
 | `sh.realpath(path)` | canonical absolute path, or `nil` if it doesn't resolve on disk |
+| `sh.chdir(path)` | change this shell's working directory; `true`/`false` |
+| `sh.exec(line)` | run `line` (pipes, `&&`/`\|\|`/`;`, quoting -- the same parser a typed command gets) with output streamed straight to the grid; returns just the exit status |
+| `sh.run(line, stdin?)` | like `sh.exec`, but captures output instead of drawing it: returns `{code, ok, out, err}`. `stdin`, if given, feeds the first stage |
 
 Everything else a script needs -- path joining, reading a file, string
 work -- is in Lua's standard library.
@@ -78,3 +82,30 @@ prompt {
   },
 }
 ```
+
+## The provision_remote example
+
+```
+cp provision_remote.lua ~/.config/glyphwire/scripts/
+```
+
+From a glyphwire-shell session sitting in a glyphwire checkout:
+
+```
+provision_remote myuser@myhost
+```
+
+This runs `zig build install-local` and streams the result (`bin/` +
+`share/glyphwire/`) to `~/.local/share/glyphwire` on the remote over
+`tar | ssh` -- no scp, so a port/identity flag given after the
+destination (`provision_remote myuser@myhost -p 2222`) only has to be
+spelled the ssh way. It then drops `shell.conf` / `zoe.conf` from this
+repo's templates onto the remote *only if it doesn't already have one*.
+Binaries are always overwritten; run it again any time you want the
+remote caught up with a local rebuild.
+
+It needs passwordless ssh (key or agent) to the target already working --
+see the script's header comment for why. The command it prints at the
+end is what to hand `glyphwire --ssh` (see docs/decisions.md's "Remote
+sessions" section, and `docker/remote-test/` for trying the same flow
+against a disposable local container instead of a real server).
