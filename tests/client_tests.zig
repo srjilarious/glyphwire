@@ -116,6 +116,53 @@ pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.
     try testz.expectEqualStr("x", ctx.root.cell(1, 3).grapheme());
 }
 
+/// `Client.default_layer` retargets every root-implicit method (see its
+/// doc comment) onto a non-root layer instead -- what `glyphwire-shell`
+/// sets from `GLYPHWIRE_LAYER` to run embedded in a `gmux` pane. Checks
+/// both write and read paths land on the target layer, and that the root
+/// layer is left completely untouched.
+pub fn clientDefaultLayerRetargetsRootImplicitCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    const pane = try ctx.createLayer(6, 2, 0);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    errdefer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    errdefer client.deinit();
+    client.default_layer = pane;
+
+    const size = try client.getSize();
+    try testz.expectEqual(size.cols, 6);
+    try testz.expectEqual(size.rows, 2);
+
+    try client.writeText("hi", null, null);
+    const cursor = try client.getCursor();
+    try testz.expectEqual(cursor.row, 0);
+    try testz.expectEqual(cursor.col, 2);
+
+    try client.setCursor(1, 0);
+    try client.writeText("x", null, null);
+    try client.clear(0, 0, 1, null);
+
+    client.deinit();
+    thread.join();
+
+    try testz.expectEqualStr("", ctx.layerPtr(pane).?.cell(0, 0).grapheme());
+    try testz.expectEqualStr("x", ctx.layerPtr(pane).?.cell(1, 0).grapheme());
+    // The root layer never saw any of it.
+    try testz.expectEqualStr("", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("", ctx.root.cell(1, 0).grapheme());
+}
+
 /// Exercises the full client-library path (not just the raw-socket
 /// dispatch-level version in server_tests.zig): a subscribed
 /// `InputListener` on one connection receives what a `Client` on another

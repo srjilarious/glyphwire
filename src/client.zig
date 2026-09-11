@@ -57,6 +57,22 @@ pub const Client = struct {
     /// real round trip while still bounded; a test that wants to *assert*
     /// the timeout fires can shorten this field after `connect`.
     read_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(30_000), .clock = .awake } },
+    /// Overrides the implicit root target of every "root-implicit" method
+    /// below (`writeText`, `clear`, `setCursor`, `getCursor`, `getSize`,
+    /// `getCells`, `getScroll`/`scrollView`, `drawIconStyled`, ...) and is
+    /// substituted for an explicit `null` `layer` argument on the methods
+    /// that already take one (`getMetadata`, `findMetadata`,
+    /// `toggleHighlight`, `clearHighlight`, ...). Null (the default) keeps
+    /// every existing caller's behavior exactly as it was -- this only
+    /// changes anything once a caller sets it. For a client that is
+    /// itself layer-agnostic code embedded onto someone else's layer
+    /// (`glyphwire-shell` run as a `gmux` pane's pty child, via
+    /// `GLYPHWIRE_LAYER`): set this once after connecting and every
+    /// existing root-implicit call site keeps working unchanged, now
+    /// targeting that layer instead. `Client.Batch` reads it through its
+    /// owning `client` field, so a batch built after this is set is
+    /// layer-targeted too.
+    default_layer: ?core.LayerHandle = null,
 
     pub const ConnectError = std.Io.net.UnixAddress.InitError || std.Io.net.UnixAddress.ConnectError;
     pub const NoSessionError = error{NoSession};
@@ -118,6 +134,7 @@ pub const Client = struct {
     /// `core.default_style`), matching the wire params' optionality.
     pub fn writeText(self: *Client, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
         try self.notify("write_text", .{
+            .layer = self.default_layer,
             .text = text,
             .fg = colorToJson(fg),
             .bg = colorToJson(bg),
@@ -148,6 +165,7 @@ pub const Client = struct {
     /// has no default parameter values.
     pub fn writeTextTransparent(self: *Client, text: []const u8, fg: ?core.Color) !void {
         try self.notify("write_text", .{
+            .layer = self.default_layer,
             .text = text,
             .fg = colorToJson(fg),
             .transparent_bg = true,
@@ -156,7 +174,7 @@ pub const Client = struct {
 
     /// `set_property(layer, "cursor", {row, col})` -- a notification.
     pub fn setCursor(self: *Client, row: usize, col: usize) !void {
-        try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
+        try self.notify("set_property", .{ .layer = self.default_layer, .property = "cursor", .row = row, .col = col });
     }
 
     /// `insert_cells(count)` -- a notification. ECMA-48's ICH: shifts
@@ -201,7 +219,7 @@ pub const Client = struct {
 
     /// `get_property(layer, "cursor")` -- a request.
     pub fn getCursor(self: *Client) !core.Cursor {
-        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .property = "cursor" });
+        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .layer = self.default_layer, .property = "cursor" });
         defer parsed.deinit();
         return .{ .row = parsed.value.result.row, .col = parsed.value.result.col };
     }
@@ -216,26 +234,28 @@ pub const Client = struct {
     }
 
     /// `get_property(layer, "size")` -- a request returning the layer's
-    /// viewport size in cells. For the root layer this is the current
-    /// window size; `InputListener` subscribed to `"resize"` is the
-    /// live-updating counterpart for a client that wants to react to
-    /// window resizes rather than poll.
+    /// viewport size in cells (`self.default_layer`, root unless set).
+    /// For the root layer this is the current window size; `InputListener`
+    /// subscribed to `"resize"` is the live-updating counterpart for a
+    /// client that wants to react to window resizes rather than poll --
+    /// `"layout"` is the counterpart for a `default_layer`-targeted one,
+    /// since `"resize"` only ever reports the root layer's size.
     pub fn getSize(self: *Client) !core.LayerSize {
-        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .property = "size" });
+        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .layer = self.default_layer, .property = "size" });
         defer parsed.deinit();
         return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
     }
 
     /// `get_cells(layer?)` -- a request returning a full row-major
-    /// snapshot of the given layer's (default: root's) visible viewport.
-    /// Owns its own parsed JSON arena; caller must call `.deinit()` on
-    /// the result. `.{ .layer = null }`, not a bare `.{}`: an empty
-    /// anonymous struct serializes as a JSON *array* (Zig's tuple
-    /// encoding), not `{}` -- fine for a method the server never parses
-    /// params for, but `get_cells` now does (`GetCellsParams`), so it
-    /// needs a real single-field object on the wire.
+    /// snapshot of `self.default_layer`'s (root unless set) visible
+    /// viewport. Owns its own parsed JSON arena; caller must call
+    /// `.deinit()` on the result. `.{ .layer = ... }`, not a bare `.{}`:
+    /// an empty anonymous struct serializes as a JSON *array* (Zig's
+    /// tuple encoding), not `{}` -- fine for a method the server never
+    /// parses params for, but `get_cells` now does (`GetCellsParams`), so
+    /// it needs a real single-field object on the wire.
     pub fn getCells(self: *Client) !CellsSnapshot {
-        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = @as(?core.LayerHandle, null) });
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = self.default_layer });
         return .{ .parsed = parsed };
     }
 
@@ -246,34 +266,36 @@ pub const Client = struct {
         return .{ .parsed = parsed };
     }
 
-    /// `get_cells(layer?, view_offset)` -- the root layer's grid as it
-    /// appears scrolled back by `view_offset` rows of history (see
-    /// `core.Layer.viewRow`). `view_offset == 0` is identical to
-    /// `getCells`.
+    /// `get_cells(layer?, view_offset)` -- `self.default_layer`'s (root
+    /// unless set) grid as it appears scrolled back by `view_offset` rows
+    /// of history (see `core.Layer.viewRow`). `view_offset == 0` is
+    /// identical to `getCells`.
     pub fn getCellsView(self: *Client, view_offset: usize) !CellsSnapshot {
-        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = @as(?core.LayerHandle, null), .view_offset = view_offset });
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = self.default_layer, .view_offset = view_offset });
         return .{ .parsed = parsed };
     }
 
-    /// `get_property(layer, "scroll")` -- a request returning the root
-    /// layer's scrollback view state (`{offset, max}`): `offset` rows of
-    /// history currently showing above the live viewport, out of `max`
-    /// retained. `scrollView` is how a client moves it; `InputListener`
-    /// subscribed to `"scroll"` is the live-updating counterpart.
+    /// `get_property(layer, "scroll")` -- a request returning
+    /// `self.default_layer`'s (root unless set) scrollback view state
+    /// (`{offset, max}`): `offset` rows of history currently showing
+    /// above the live viewport, out of `max` retained. `scrollView` is
+    /// how a client moves it; `InputListener` subscribed to `"scroll"` is
+    /// the live-updating counterpart.
     pub fn getScroll(self: *Client) !core.LayerScroll {
-        var parsed = try self.request(struct { offset: usize, max: usize }, "get_property", .{ .property = "scroll" });
+        var parsed = try self.request(struct { offset: usize, max: usize }, "get_property", .{ .layer = self.default_layer, .property = "scroll" });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
 
-    /// `scroll_view(layer?, offset?, delta?)` -- a request that moves the
-    /// root layer's scrollback view offset (see `core.Layer.scrollView`)
-    /// and returns the resulting `{offset, max}`. `offset` is an absolute
-    /// target in rows; `delta` is added after; the result is clamped to
-    /// `0..max`. Passing neither is a pure query. The server also
-    /// broadcasts a `scroll` notification to other `"scroll"` subscribers.
+    /// `scroll_view(layer?, offset?, delta?)` -- a request that moves
+    /// `self.default_layer`'s (root unless set) scrollback view offset
+    /// (see `core.Layer.scrollView`) and returns the resulting `{offset,
+    /// max}`. `offset` is an absolute target in rows; `delta` is added
+    /// after; the result is clamped to `0..max`. Passing neither is a
+    /// pure query. The server also broadcasts a `scroll` notification to
+    /// other `"scroll"` subscribers.
     pub fn scrollView(self: *Client, offset: ?usize, delta: ?i64) !core.LayerScroll {
-        var parsed = try self.request(struct { offset: usize, max: usize }, "scroll_view", .{ .offset = offset, .delta = delta });
+        var parsed = try self.request(struct { offset: usize, max: usize }, "scroll_view", .{ .layer = self.default_layer, .offset = offset, .delta = delta });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
@@ -430,6 +452,7 @@ pub const Client = struct {
     /// `drawIcon` itself since Zig has no default parameter values.
     pub fn drawIconStyled(self: *Client, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
         try self.notify("draw_icon", .{
+            .layer = self.default_layer,
             .row = row,
             .col = col,
             .name = name,
@@ -514,12 +537,13 @@ pub const Client = struct {
         });
     }
 
-    /// `clear(row?, col?, rows?, cols?)` -- a notification. Resets cells in
-    /// the given region back to blank/default style. `rows`/`cols` null
-    /// means "the rest of the layer from `row`/`col`", so
-    /// `clear(0, 0, null, null)` wipes the whole layer.
+    /// `clear(layer?, row?, col?, rows?, cols?)` -- a notification.
+    /// Resets cells in the given region of `self.default_layer` (root
+    /// unless set) back to blank/default style. `rows`/`cols` null means
+    /// "the rest of the layer from `row`/`col`", so `clear(0, 0, null,
+    /// null)` wipes the whole layer.
     pub fn clear(self: *Client, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-        try self.notify("clear", .{ .row = row, .col = col, .rows = rows, .cols = cols });
+        try self.notify("clear", .{ .layer = self.default_layer, .row = row, .col = col, .rows = rows, .cols = cols });
     }
 
     /// `create_layer(width?, height?, scrollback_rows)` -- a request.
@@ -1112,8 +1136,10 @@ pub const Client = struct {
     /// pass 0 for the live viewport, or the `view_offset` from a
     /// `mouse_button` event so a click made while scrolled back lands on
     /// the row actually under the pointer.
+    /// `layer` null resolves to `self.default_layer` (root unless set) --
+    /// same rule every layer-optional method on this type follows.
     pub fn getMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, view_offset: usize) !struct { id: ?core.MetadataHandle, json: ?[]u8 } {
-        var parsed = try self.request(struct { id: ?core.MetadataHandle, json: ?[]const u8 }, "get_metadata", .{ .layer = layer, .row = row, .col = col, .view_offset = view_offset });
+        var parsed = try self.request(struct { id: ?core.MetadataHandle, json: ?[]const u8 }, "get_metadata", .{ .layer = layer orelse self.default_layer, .row = row, .col = col, .view_offset = view_offset });
         defer parsed.deinit();
         const json = if (parsed.value.result.json) |j| try self.alloc.dupe(u8, j) else null;
         return .{ .id = parsed.value.result.id, .json = json };
@@ -1135,7 +1161,7 @@ pub const Client = struct {
         var parsed = try self.request(
             struct { found: bool, above: i64 = 0, col: usize = 0, id: ?core.MetadataHandle = null },
             "find_metadata",
-            .{ .layer = layer, .above = above, .col = col, .direction = @tagName(dir) },
+            .{ .layer = layer orelse self.default_layer, .above = above, .col = col, .direction = @tagName(dir) },
         );
         defer parsed.deinit();
         const r = parsed.value.result;
@@ -1210,7 +1236,7 @@ pub const Client = struct {
     /// call `.deinit()`.
     pub fn toggleHighlight(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, view_offset: usize) !HighlightSnapshot {
         return .{ .parsed = try self.request(protocol.HighlightState, "toggle_highlight", .{
-            .layer = layer,
+            .layer = layer orelse self.default_layer,
             .row = row,
             .col = col,
             .view_offset = view_offset,
@@ -1228,7 +1254,7 @@ pub const Client = struct {
     /// and returns the (now empty) `HighlightState`. Caller owns the
     /// snapshot.
     pub fn clearHighlight(self: *Client, layer: ?core.LayerHandle) !HighlightSnapshot {
-        return .{ .parsed = try self.request(protocol.HighlightState, "clear_highlight", .{ .layer = layer }) };
+        return .{ .parsed = try self.request(protocol.HighlightState, "clear_highlight", .{ .layer = layer orelse self.default_layer }) };
     }
 
     /// `get_highlight(layer?)` -- a request. The layer's current
@@ -1392,19 +1418,21 @@ pub const Client = struct {
         }
 
         /// Batched `set_property(cursor)` -- see `Client.setCursor`.
+        /// Targets `self.client.default_layer` (root unless set), same as
+        /// every other root-implicit `Batch` method.
         pub fn setCursor(self: *Batch, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
+            try self.notify("set_property", .{ .layer = self.client.default_layer, .property = "cursor", .row = row, .col = col });
         }
 
         /// Batched `clear` -- see `Client.clear`. `rows`/`cols` null means
         /// "the rest of the layer from `row`/`col`".
         pub fn clear(self: *Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-            try self.notify("clear", .{ .row = row, .col = col, .rows = rows, .cols = cols });
+            try self.notify("clear", .{ .layer = self.client.default_layer, .row = row, .col = col, .rows = rows, .cols = cols });
         }
 
         /// Batched `write_text` -- see `Client.writeText`.
         pub fn writeText(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
-            try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg) });
+            try self.notify("write_text", .{ .layer = self.client.default_layer, .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg) });
         }
 
         /// Batched `write_text` with a metadata tag -- see
@@ -1416,7 +1444,7 @@ pub const Client = struct {
         /// Batched `write_text(text, fg?, transparent_bg: true)` -- see
         /// `Client.writeTextTransparent`.
         pub fn writeTextTransparent(self: *Batch, text: []const u8, fg: ?core.Color) !void {
-            try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .transparent_bg = true });
+            try self.notify("write_text", .{ .layer = self.client.default_layer, .text = text, .fg = Client.colorToJson(fg), .transparent_bg = true });
         }
 
         /// Batched `tag_metadata` -- see `Client.tagMetadata`.
@@ -1446,6 +1474,7 @@ pub const Client = struct {
         /// Batched `draw_icon` with options -- see `Client.drawIconStyled`.
         pub fn drawIconStyled(self: *Batch, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
             try self.notify("draw_icon", .{
+                .layer = self.client.default_layer,
                 .row = row,
                 .col = col,
                 .name = name,

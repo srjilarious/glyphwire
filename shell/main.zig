@@ -302,14 +302,28 @@ fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
 /// `glyphwire.configDirPath`.
 const configDirPath = glyphwire.configDirPath;
 
-/// Drains every queued `resize` notification into `prompt.pending_resize`
-/// (see `Prompt.noteResize`) and then applies it if the size has settled
-/// (`applyPendingResize`). The prompt is *not* redrawn while a resize is
-/// still in flight.
+/// Drains every queued `resize` (or, when `client.default_layer` is set --
+/// see `runPrompt`'s `GLYPHWIRE_LAYER` handling -- every queued `layout`
+/// naming that layer) into `prompt.pending_resize` (see `Prompt.noteResize`)
+/// and then applies it if the size has settled (`applyPendingResize`).
+/// `resize` only ever reports the *root* layer's size, so a layer-targeted
+/// prompt has to watch `layout` instead -- the same notification `gmux`'s
+/// own split-tree re-layout already broadcasts for that layer whenever its
+/// pane is resized. The prompt is *not* redrawn while a resize is still in
+/// flight.
 fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
-    var last: ?glyphwire.ResizeEvent = null;
-    while (listener.pollResizeEvent()) |rev| last = rev;
-    if (last) |rev| prompt.noteResize(rev.cols, rev.rows);
+    if (prompt.client.default_layer) |layer| {
+        var last: ?glyphwire.LayoutBounds = null;
+        while (listener.pollLayoutEvent()) |ev| {
+            defer ev.deinit(prompt.client.alloc);
+            if (ev.boundsFor(layer)) |b| last = b;
+        }
+        if (last) |b| prompt.noteResize(b.cols, b.rows);
+    } else {
+        var last: ?glyphwire.ResizeEvent = null;
+        while (listener.pollResizeEvent()) |rev| last = rev;
+        if (last) |rev| prompt.noteResize(rev.cols, rev.rows);
+    }
     prompt.applyPendingResize(false) catch {};
 }
 
@@ -383,11 +397,29 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     };
     defer client.deinit();
 
+    // `GLYPHWIRE_LAYER`: embeds this prompt onto someone else's layer
+    // instead of the implicit root -- `gmux` sets this when it spawns a
+    // pane's shell. Every root-implicit `Client`/`Batch` call this prompt
+    // makes already resolves through `Client.default_layer` (see its doc
+    // comment), so setting it here before anything else runs is the whole
+    // change; nothing below needs to know it's layer-targeted. An
+    // unparseable value is logged and ignored (root), not fatal --
+    // matches the shell's general "never partially assume the grid is
+    // present" stance for a malformed env var over a missing session.
+    if (environ_map.get("GLYPHWIRE_LAYER")) |s| {
+        client.default_layer = std.fmt.parseInt(glyphwire.LayerHandle, s, 10) catch blk: {
+            std.log.warn("prompt: GLYPHWIRE_LAYER=\"{s}\" is not a layer handle; using root", .{s});
+            break :blk null;
+        };
+    }
+
     // `mouse_move` is subscribed session-wide but only consumed by the
     // pty foreground loop (`runCommand`) when a child turns on motion
     // reporting; the prompt loop lets `InputListener`'s own cap drop the
-    // backlog.
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "shutdown", "clipboard", "terminal" }) catch |err| {
+    // backlog. `layout` is only consumed when `client.default_layer` is
+    // set (see `drainResizes`) -- subscribing unconditionally is free for
+    // a session with no split tree, since nothing broadcasts it then.
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "layout", "shutdown", "clipboard", "terminal" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };

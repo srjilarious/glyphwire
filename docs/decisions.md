@@ -95,6 +95,42 @@ final.
   close-on-exec pipe (`Pty.spawn`), which turns it into
   `error.CommandNotFound` and a red `"<cmd>: command not found"` on the
   grid.
+- **`GLYPHWIRE_LAYER` and `Client.default_layer` — embedding a whole
+  glyphwire client onto someone else's layer.** `glyphwire-shell` is
+  itself a glyphwire client (it draws its prompt over its own wire
+  connection, not by writing ANSI to a terminal), so running it as a
+  `gmux` pane's pty child doesn't work the way `bash` does: every one of
+  its ~15 "root-implicit" `Client`/`Batch` calls (`writeText`, `clear`,
+  `setCursor`/`getCursor`, `getSize`, `getCells`, `getScroll`/
+  `scrollView`, `drawIconStyled`, ...) would draw on the *context's* root
+  layer — which in a split-tree client like `gmux` is never part of the
+  layout, so the nested shell would be invisible underneath whichever
+  pane actually covers the screen. Fixed generically, not gw-shell-
+  specifically: `Client` gained one field, `default_layer: ?LayerHandle`
+  (null = root, matching every existing caller's behavior exactly).
+  Every root-implicit method now sends `.layer = self.default_layer`
+  instead of omitting the field, and every method that already took an
+  optional `layer` param resolves a `null` argument through it
+  (`layer orelse self.default_layer`) — so setting it once after
+  `connect` retargets literally everything the caller already does,
+  with no call-site changes anywhere. `glyphwire-shell` reads
+  `GLYPHWIRE_LAYER` (a decimal layer handle) at the top of `runPrompt`
+  and sets `client.default_layer` from it before anything else runs;
+  `gmux` is the first (and so far only) setter, once it spawns `gw-shell`
+  as a pane's shell instead of `$SHELL`. The one further wrinkle: the
+  `resize` notification only ever reports the *root* layer's size, so a
+  `default_layer`-targeted shell can't use it to notice its pane being
+  resized — it subscribes to `"layout"` instead (already broadcast by
+  `gmux`'s own split-tree re-layout for that pane) and reads
+  `boundsFor(default_layer)`, feeding the same `noteResize`/
+  `resize_settle_ms` debounce the root-`resize` path already used.
+  Deliberately **not solved here**: two or more `gw-shell` instances
+  sharing the same `~/.config/glyphwire/history` and `zj` database both
+  do a full-file rewrite after every line, so concurrent panes running
+  gw-shell can clobber each other's persisted history/frecency data --
+  the same rough tradeoff multiple `bash` instances sharing
+  `.bash_history` already accept. Tracked as a follow-up, not blocking
+  this feature.
 
 ### Transport & wire format
 - Primary transport: a Unix domain socket. An inherited-fd variant (à la

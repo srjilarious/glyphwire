@@ -2635,6 +2635,52 @@ listed in a tab strip above the buffer pane. See `docs/decisions.md`'s
   + separators + total, `hit` body/close/gap, `scrollToShow` both edges +
   clamp, `labelFor`). 834 pass.
 
+## `Client.default_layer` + `GLYPHWIRE_LAYER`: embedding gw-shell onto another layer
+
+`/feature`, one `AskUserQuestion` round (concurrent history/zj writes
+across embedded instances: parked as a known limitation, not solved
+here). Motivated by wanting `gmux` to run `gw-shell` in a pane instead of
+`$SHELL` -- see decisions.md's "GLYPHWIRE_LAYER and Client.default_layer"
+entry for the full design rationale; this is the implementation log.
+
+- **`Client` gained `default_layer: ?core.LayerHandle`** (null default,
+  unchanged behavior for every existing caller). Every "root-implicit"
+  method (`writeText`, `writeTextTransparent`, `setCursor`, `getCursor`,
+  `getSize`, `getCells`, `getCellsView`, `getScroll`, `scrollView`,
+  `clear`, `drawIconStyled`) now sends `.layer = self.default_layer`
+  instead of omitting the field or hardcoding `null`; every method that
+  already took an optional `layer` param and that `glyphwire-shell` calls
+  (`getMetadata`, `findMetadata`, `toggleHighlight`, `clearHighlight`)
+  resolves a `null` argument through it. Same treatment on `Client.Batch`
+  (`setCursor`, `clear`, `writeText`, `writeTextTransparent`,
+  `drawIconStyled`), reading `self.client.default_layer`. No wire change
+  at all -- `layer` was already an accepted param everywhere it's now
+  sent; this only changes what the *client library* fills in.
+- **`glyphwire-shell` reads `GLYPHWIRE_LAYER`** (a decimal layer handle)
+  at the top of `runPrompt`, right after connecting, and sets
+  `client.default_layer` from it -- an unparseable value logs a warning
+  and falls back to root rather than failing the whole prompt.
+- **Resize:** `resize` only ever reports the root layer's size, so
+  `drainResizes` now branches on `client.default_layer` -- root-implicit
+  keeps polling `resize` as before; layer-targeted subscribes to
+  `"layout"` (added to the prompt's subscribe list unconditionally --
+  free when nothing broadcasts it) and feeds `noteResize` from
+  `boundsFor(default_layer)` instead, the same debounced
+  `applyPendingResize` path either way.
+- **Tests:** `client_tests.zig` +1
+  (`clientDefaultLayerRetargetsRootImplicitCallsTest` -- write/read round
+  trip lands on the target layer, root layer left completely untouched).
+- **Deliberately not solved:** concurrent `gw-shell` instances (multiple
+  `gmux` panes) share one `~/.config/glyphwire/history` and one `zj`
+  database, both full-file-rewritten after every line -- so they can
+  clobber each other's persisted state. Same rough tradeoff multiple
+  `bash` instances sharing `.bash_history` already have; tracked as a
+  follow-up.
+- **Next step (separate worktree):** `gmux` itself needs to default its
+  spawned command to `gw-shell` and set `GLYPHWIRE_LAYER` to the pane's
+  layer handle when it does -- not done in this branch, which is scoped
+  to the `gw-shell`/`Client` half only.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).
