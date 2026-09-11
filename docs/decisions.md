@@ -1866,14 +1866,30 @@ surface.
   `follow_symlinks = true` stat) and, when the target is a plain
   directory or file, tags the entry *as* that kind — a link to a
   directory now activates exactly like a real one (`cd`), a link to a
-  `.png` like a real `.png` (`glyphwire-view`). Display is untouched: the
-  icon, cyan color, `name -> target` text and `-l` type column all still
-  come from the entry's real, unresolved kind (`FileEntry.kind`) — only
-  the JSON tag driving `open_actions` changes, plus the added `symlink`
-  boolean so a reader can still tell a tagged-as-directory entry is
-  actually a link. A broken link, or one pointing at something that's
-  neither a file nor a directory (device, fifo, socket), keeps reporting
-  itself as `"symlink"` with no `mimetype` — unchanged, no default action.
+  `.png` like a real `.png` (`glyphwire-view`). Color, `name -> target`
+  text and the `-l` type column still come from the entry's real,
+  unresolved kind (`FileEntry.kind`) — only the JSON tag driving
+  `open_actions` changes, plus the added `symlink` boolean so a reader
+  can still tell a tagged-as-directory entry is actually a link. A
+  broken link, or one pointing at something that's neither a file nor a
+  directory (device, fifo, socket), keeps reporting itself as
+  `"symlink"` with no `mimetype` — unchanged, no default action.
+  Regression test: `shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest`
+  (e2e) — browses to and activates a symlink-to-directory entry through
+  the real grid/highlight protocol and confirms an actual `cd` ran, not
+  just that `resolve()` returns the right `Action` in isolation.
+- **The icon *does* follow the resolved kind too (asked, a follow-up
+  after the first cut left it generic).** `iconForEntry` looked up a
+  symlink's icon by its own `EntryKind` (always the shared, undifferentiated
+  `"file/file"`), independent of the `kind`/`mimetype` substitution above
+  — a link to a directory or a well-known project file listed with a
+  plain file icon instead of a folder or the file's own dev-tool icon.
+  Fixed the same way as the metadata: `iconForEntry` now looks up by
+  `entry.link_target_kind orelse entry.kind`, so a resolvable symlink
+  picks its icon exactly like a real entry of that kind — a link to
+  `node_modules` gets the well-known-dirname logo, a link to
+  `build.zig` gets `dev/zig`. Cyan color and `-> target` text are the
+  one remaining tell that it's a link, deliberately (see above).
   Scope decided when asked: also cover file targets (mimetype-based
   actions like image preview), not just the literal directory complaint,
   since "metadata tagging based on the target" was the broader ask.
@@ -2551,22 +2567,45 @@ surface.
   `std.fs.path.resolve` already does. `shell/logicalpath.zig`'s
   `resolve(alloc, base, target)` is that one call, pulled into its own
   pure module (in `shell_support`, unit-tested) since it's the crux of
-  the feature. `chdir` calls it before the real `openDir`/`setCurrentDir`
-  (using `target`, unresolved, so the kernel still follows any symlinks
-  normally), then sets `$OLDPWD`/`$PWD` via the existing `setEnvVar` (the
-  `export`/`unset` builtins' plumbing) so real env vars, not just the
-  prompt, see the shorthand — a spawned command's own `pwd` now agrees
-  with the glyphwire prompt. `{cwd}`/`{cwd_full}` and the unconfigured
-  default prompt read `$PWD` (`Prompt.logicalCwd`) instead of calling
-  `currentPath` directly; `$PWD` is seeded from the real physical cwd at
-  shell startup (`runPrompt`) rather than trusted from whatever launched
-  the process, so a stale inherited value can't leak in.
-- **`cd ..` from inside a symlinked directory returns to the symlink's
-  own parent, not the parent of the physical target it points at** —
-  the direct consequence of never consulting the filesystem: `..` strips
-  the last lexical component of `$PWD`, same as bash's default (non-`-P`)
-  behavior. There is no `cd -P` / physical mode in this shell; out of
-  scope for what was asked.
+  the feature. `chdir` computes the new logical path *before* touching
+  the filesystem, then sets `$OLDPWD`/`$PWD` via the existing `setEnvVar`
+  (the `export`/`unset` builtins' plumbing) so real env vars, not just
+  the prompt, see the shorthand — a spawned command's own `pwd` now
+  agrees with the glyphwire prompt. `{cwd}`/`{cwd_full}` and the
+  unconfigured default prompt read `$PWD` (`Prompt.logicalCwd`) instead
+  of calling `currentPath` directly; `$PWD` is seeded from the real
+  physical cwd at shell startup (`runPrompt`) rather than trusted from
+  whatever launched the process, so a stale inherited value can't leak
+  in.
+- **The real `chdir(2)` targets the *computed logical path*, not the
+  typed `target` argument (fixed after an initial version got this
+  wrong; found by testing).** The first cut called `openDir`/
+  `setCurrentDir` on the raw `target` (e.g. a literal `".."`), which the
+  kernel resolves relative to wherever the *physical* cwd already is --
+  fine for entering a symlink (kernel-resolving `target` and
+  lexically-joining it onto the logical `$PWD` land in the same place),
+  but wrong for `cd ..` *after* a symlink hop: `/home/j/temp/pics`
+  (`pics -> /home/j/Pictures`) then `cd ..`'s literal kernel `..`
+  lands in `/home/j` (one level up from the physical target), while the
+  lexically-computed `$PWD` said `/home/j/temp` -- the display and the
+  real process cwd silently diverged, breaking every relative-path
+  operation after that point. Real bash avoids exactly this by
+  `chdir`ing to its own computed logical path rather than the typed
+  argument; `Prompt.chdir` now does the same -- computes `new_pwd` via
+  `logicalpath.resolve` first, then opens *that* absolute string. This
+  keeps `cd ..` matching bash's well-known default (non-`-P`) quirk
+  correctly instead of half-implementing it: it returns to the
+  symlink's own lexical parent, and the real process cwd goes there
+  too, in agreement with what's displayed. The cost, same as bash: a
+  `cd` fails outright, rather than silently landing somewhere else, if
+  the lexical collapse ever names a path that doesn't itself exist --
+  no `cd -P` physical-mode fallback is offered for that case, out of
+  scope for what was asked. Regression test:
+  `shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest` (e2e) -- cds
+  through a symlink to a directory *outside* the symlink's own parent,
+  `cd ..`s, then runs a real `pwd` and checks its actual output, which
+  only agrees with the intended fix if the physical and logical paths
+  really did stay in sync.
 - **`recordVisit` (the `zj` database) deliberately keeps using the real
   physical cwd, not this logical `$PWD`.** Two different symlinks to the
   same real directory should accumulate one frecency ranking, not split

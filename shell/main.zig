@@ -3802,27 +3802,42 @@ const Prompt = struct {
     /// `openDir` / `setCurrentDir` error is returned unreported: `cd` and
     /// `zj` word their failure messages differently.
     ///
-    /// Also maintains `$PWD`/`$OLDPWD` the way bash/fish do: the kernel
-    /// `chdir` still happily follows a symlink in `target`, but `$PWD`
-    /// itself is only ever built by joining `target` onto the *previous*
-    /// `$PWD` (`logicalpath.resolve`) -- lexical `.`/`..` collapsing, no
+    /// Also maintains `$PWD`/`$OLDPWD` the way bash/fish do: `$PWD` is
+    /// built by joining `target` onto the *previous* `$PWD`
+    /// (`logicalpath.resolve`) -- lexical `.`/`..` collapsing, no
     /// filesystem lookups -- so a linked directory keeps its own name
-    /// instead of expanding to whatever it points at. `recordVisit`
-    /// (the `zj` frecency database) intentionally keeps using the real
-    /// physical cwd, not this logical one, so two different links to the
-    /// same real directory accumulate one ranking, not two.
+    /// instead of expanding to whatever it points at.
+    ///
+    /// Critically, the actual `chdir(2)` targets that computed logical
+    /// path, not the raw `target` -- otherwise the two would drift apart
+    /// the moment a `..` follows a symlink hop. E.g. from
+    /// `/home/j/temp/pics` (`pics -> /home/j/Pictures`), `cd ..`'s literal
+    /// kernel `..` is relative to the *physical* cwd, landing in
+    /// `/home/j` -- one level up from the symlink target, not from the
+    /// symlink itself -- while the lexical `$PWD` computation says
+    /// `/home/j/temp`. Real bash avoids exactly this split by `chdir`ing
+    /// to its own computed logical path rather than the typed argument;
+    /// doing the same here keeps the process's real cwd and the displayed
+    /// `$PWD` in agreement, at the cost of a `cd` that fails outright
+    /// (rather than silently landing somewhere else) if the lexical
+    /// collapse ever names a path that doesn't itself exist -- no `cd -P`
+    /// physical mode is offered as a fallback for that case.
+    ///
+    /// `recordVisit` (the `zj` frecency database) intentionally keeps
+    /// using the real physical cwd, not this logical one, so two
+    /// different links to the same real directory accumulate one
+    /// ranking, not two.
     fn chdir(self: *Prompt, target: []const u8) !void {
         const io = self.client.io;
         const alloc = self.client.alloc;
-
-        var dir = try std.Io.Dir.cwd().openDir(io, target, .{});
-        defer dir.close(io);
 
         var old_buf: [std.fs.max_path_bytes]u8 = undefined;
         const old_pwd = self.logicalCwd(&old_buf);
         const new_pwd = try logicalpath.resolve(alloc, old_pwd, target);
         defer alloc.free(new_pwd);
 
+        var dir = try std.Io.Dir.cwd().openDir(io, new_pwd, .{});
+        defer dir.close(io);
         try std.process.setCurrentDir(io, dir);
 
         self.setEnvVar("OLDPWD", old_pwd);

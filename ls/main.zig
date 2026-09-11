@@ -544,20 +544,26 @@ fn sizeColor(size: u64) glyphwire.Color {
 // ── Icons ──────────────────────────────────────────────────────────────────
 
 /// The icon-catalog name for one entry (see `ls/icons.zig` for the tables
-/// and the `dev/*` vs `file/*` split):
+/// and the `dev/*` vs `file/*` split), keyed off the entry's *effective*
+/// kind -- a symlink whose target resolves (`FileEntry.link_target_kind`)
+/// picks its icon exactly like a real entry of that kind would, same as
+/// `entryMetadataJson` resolves its `open_actions` kind:
 ///
-///   * directory -- its `dev/*` tool logo if the basename is well-known
-///     (`.vscode`, `.claude`, `.git`, `node_modules`, ...), else
-///     `"file/folder"`.
-///   * regular file -- its `dev/*` logo by exact basename (`Dockerfile`,
-///     ...) or by extension (`.zig` -> `dev/zig`, `.ex` -> `dev/elixir`,
-///     ...), falling back through the coarse `file/*` file-type buckets
-///     to `"file/file"` for an unrecognized one.
-///   * symlink -- `"file/file"` (no dedicated symlink icon in the
-///     bundled set yet).
+///   * directory (real, or a symlink to one) -- its `dev/*` tool logo if
+///     the basename is well-known (`.vscode`, `.claude`, `.git`,
+///     `node_modules`, ...), else `"file/folder"`.
+///   * regular file (real, or a symlink to one) -- its `dev/*` logo by
+///     exact basename (`Dockerfile`, ...) or by extension (`.zig` ->
+///     `dev/zig`, `.ex` -> `dev/elixir`, ...), falling back through the
+///     coarse `file/*` file-type buckets to `"file/file"` for an
+///     unrecognized one.
+///   * a symlink whose target doesn't resolve to a file or directory
+///     (broken, or pointing at a device/fifo/socket) -- `"file/file"`
+///     (no dedicated symlink icon in the bundled set yet).
 ///   * anything else (device files, sockets, ...) -- `"file/unknown"`.
 fn iconForEntry(entry: FileEntry) []const u8 {
-    return switch (entry.kind) {
+    const effective_kind = entry.link_target_kind orelse entry.kind;
+    return switch (effective_kind) {
         .directory => lsicons.iconForDirName(entry.name) orelse "file/folder",
         .sym_link => "file/file",
         .other => "file/unknown",

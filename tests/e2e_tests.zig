@@ -1290,6 +1290,250 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     try testz.expectTrue(found);
 }
 
+/// Same drill as `shellBrowseUpAndEnterAutoCdsIntoDirectoryTest`, but the
+/// browsed entry is a *symlink to a directory* rather than a real one --
+/// regression coverage for `entryMetadataJson` tagging a resolvable
+/// symlink with its target's effective kind (`"directory"`) rather than
+/// `"symlink"`, so `shell/openaction.zig`'s built-in `cd {sel}` default
+/// fires on activation exactly as it would for a real directory. Reuses
+/// the parent test's exact row/column math: the entry is still named
+/// "target" (now a symlink, at `dir_path/target -> real_target_dir`, a
+/// directory that deliberately lives *outside* `dir_path` so a successful
+/// `cd` can only have followed the link, not stumbled onto a same-named
+/// real directory) so the icon-column width and name-start column are
+/// identical to the real-directory case.
+pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir_name = try std.fmt.allocPrint(alloc, "glyphwire-browse-cd-symlink-test-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(dir_name);
+    const dir_path = try std.fs.path.join(alloc, &.{ "/tmp", dir_name });
+    defer alloc.free(dir_path);
+    const real_target_dir = try std.fmt.allocPrint(alloc, "/tmp/{s}-realtarget", .{dir_name});
+    defer alloc.free(real_target_dir);
+    const link_path = try std.fs.path.join(alloc, &.{ dir_path, "target" });
+    defer alloc.free(link_path);
+
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io, dir_path) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, real_target_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, real_target_dir) catch {};
+    try std.Io.Dir.symLinkAbsolute(io, real_target_dir, link_path, .{});
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-browse-cd-symlink-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    var cmd_buf: [128]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "gw-ls {s}", .{dir_path});
+    try typeText(&reporter, cmd);
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    try waitForCell(&reporter, 2, 4, "t");
+    try waitForCell(&reporter, 6, arrow_col, ">");
+
+    try reporter.reportKey("left_control", true);
+    try reporter.reportKey("up", true);
+    try reporter.reportKey("up", false);
+    try waitForCursorRow(&reporter, 5);
+    try reporter.reportKey("left_control", false);
+
+    var row_presses: usize = 0;
+    while (row_presses < 3) : (row_presses += 1) {
+        try reporter.reportKey("up", true);
+        try reporter.reportKey("up", false);
+    }
+    try waitForCursorRow(&reporter, 2);
+
+    const line_start_col = cwd_len + 3;
+    const icon_col_width = 4;
+    var col_presses: usize = 0;
+    while (col_presses < line_start_col - icon_col_width) : (col_presses += 1) {
+        try reporter.reportKey("left", true);
+        try reporter.reportKey("left", false);
+    }
+    try waitForCursorCol(&reporter, icon_col_width);
+
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // Proves the click resolved the symlink to a directory action, not to
+    // nothing: the next prompt's cwd echo names the *symlink's* path
+    // (`link_path`, matching `Prompt.chdir`'s logical `$PWD` -- see
+    // `shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest`), which only
+    // ever appears there if a real `cd` ran.
+    try waitForTextInRows(&reporter, alloc, 12, link_path);
+}
+
+/// Polls `get_cells` until some cell in `[0, row_limit)` starts a run of
+/// `expected`'s length matching it exactly, scanning the whole row width.
+/// Used where the exact column varies (unlike `waitForCell`) -- e.g. a
+/// `pwd` result whose column depends on how long the path is.
+fn waitForTextInRows(client: *glyphwire.Client, alloc: std.mem.Allocator, row_limit: usize, expected: []const u8) !void {
+    var attempts: usize = 0;
+    while (attempts < 1000) : (attempts += 1) {
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+        var row: usize = 0;
+        while (row < row_limit) : (row += 1) {
+            var line: std.ArrayList(u8) = .empty;
+            defer line.deinit(alloc);
+            var col: usize = 0;
+            while (col < snapshot.cols()) : (col += 1) {
+                const g = snapshot.cellAt(row, col).grapheme;
+                if (g.len == 1) try line.append(alloc, g[0]);
+            }
+            if (std.mem.indexOf(u8, line.items, expected) != null) return;
+        }
+        std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.TimedOutWaitingForText;
+}
+
+/// Regression test for the `Prompt.chdir` logical-`$PWD` bug where `cd ..`
+/// after entering a symlinked directory left the *real* process cwd out of
+/// sync with the displayed `$PWD`: `chdir` used to open the raw typed
+/// target (a literal ".."), which the kernel resolves relative to whatever
+/// the *physical* cwd already is -- the symlink's target, not the symlink
+/// itself -- landing one level up from there instead of one level up from
+/// the symlink. The fix chdirs to the same lexically-collapsed logical
+/// path `$PWD` is set to, so both stay in agreement. See
+/// `shell/logicalpath.zig` and `Prompt.chdir`'s doc comment.
+///
+/// Layout: `<base>/temp` (a real directory) holds a symlink `link ->
+/// <base>/otherreal` (a real directory that is *not* a child of `temp`).
+/// `cd <base>/temp`, `cd link`, `cd ..`, then a real `pwd` -- fixed
+/// behavior lands back in `<base>/temp` (the symlink's own parent);
+/// the pre-fix bug landed in `<base>` (the physical parent of
+/// `otherreal`, one level higher and a different directory entirely).
+pub fn shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const base_name = try std.fmt.allocPrint(alloc, "glyphwire-cdlink-e2e-test-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(base_name);
+    const base = try std.fs.path.join(alloc, &.{ "/tmp", base_name });
+    defer alloc.free(base);
+    const temp_dir = try std.fs.path.join(alloc, &.{ base, "temp" });
+    defer alloc.free(temp_dir);
+    const other_dir = try std.fs.path.join(alloc, &.{ base, "otherreal" });
+    defer alloc.free(other_dir);
+    const link_path = try std.fs.path.join(alloc, &.{ temp_dir, "link" });
+    defer alloc.free(link_path);
+
+    try std.Io.Dir.cwd().createDirPath(io, temp_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, other_dir);
+    try std.Io.Dir.symLinkAbsolute(io, other_dir, link_path, .{});
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-cdlink-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+    // `pwd` is a shell builtin in most real shells but not this one, so it
+    // resolves to the real coreutils binary -- needs the real PATH, same
+    // reasoning as shellCapturesPlainCommandStdoutTest's `echo`.
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    var cmd_buf: [512]u8 = undefined;
+    const cd_temp = try std.fmt.bufPrint(&cmd_buf, "cd {s}", .{temp_dir});
+    try typeText(&reporter, cd_temp);
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+    // `cd`'s own success writes nothing to the grid -- wait for `link`'s
+    // prompt (identifiable by its now-longer cwd echo) before typing the
+    // next command, so keystrokes land at the live prompt rather than
+    // mid-redraw.
+    try waitForTextInRows(&reporter, alloc, 4, temp_dir);
+
+    try typeText(&reporter, "cd link");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+    try waitForTextInRows(&reporter, alloc, 6, link_path);
+
+    try typeText(&reporter, "cd ..");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+    try waitForTextInRows(&reporter, alloc, 8, temp_dir);
+
+    try typeText(&reporter, "pwd");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // The real, physical process cwd -- if `cd ..` chdir'd using the raw
+    // ".." (the pre-fix bug), this prints `otherreal`'s physical parent
+    // (`base`) instead of `temp_dir`.
+    try waitForTextInRows(&reporter, alloc, 12, temp_dir);
+}
+
 /// Proves the real `glyphwire-ls` binary (see ls/main.zig, the first
 /// "ported real program" client, built on lsz's directory-scanning logic)
 /// connects, lists a directory, and writes the entries onto the grid --
