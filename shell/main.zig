@@ -169,6 +169,7 @@ pub fn main(init: std.process.Init) !void {
     // the exec path a few lines down and everything Prompt.runCommand
     // spawns later) -- see the doc comment for why.
     try prependZigOutBinToPath(init.io, arena, init.environ_map);
+    try assertTermEnv();
 
     const socket_path = if (init.environ_map.get("GLYPHWIRE_SOCK")) |sp|
         sp
@@ -216,6 +217,31 @@ fn prependZigOutBinToPath(io: std.Io, alloc: std.mem.Allocator, environ_map: *co
     const new_path = try std.fmt.allocPrintSentinel(alloc, "{s}:{s}", .{ bin_dir, old_path }, 0);
     defer alloc.free(new_path);
     if (c.setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
+}
+
+/// Forces `TERM` / `COLORTERM` to a known-good pair for every command the
+/// shell spawns. Like `prependZigOutBinToPath`, this mutates *this*
+/// process's real environment (`libc` `setenv`) so `pty.zig` / `pipeexec`
+/// children -- which `execvp` against the live environ -- inherit it.
+///
+/// A command run under glyphwire-shell talks to glyphwire's own cell grid
+/// through the pty, not to whatever terminal emulator launched the host,
+/// so an inherited `TERM` (`kitty`, `foot`, an unset value from a desktop
+/// launcher, ...) describes the wrong terminal. Left alone, a bad value
+/// breaks anything that initialises terminfo: `bat` / `git` / `delta`
+/// spawn `less` as a pager, `less` calls ncurses `setupterm`, and an
+/// unset or unknown `TERM` makes that abort with
+/// `'unknown': I need something more specific.` -- the pager then prints
+/// nothing, so `bat` shows only that one line and no highlighted file.
+///
+/// `xterm-256color` is the closest ubiquitous terminfo entry to what
+/// `core.Layer.writeText` actually interprets (SGR incl. 256-colour and
+/// truecolor, basic cursor/erase); `COLORTERM=truecolor` advertises the
+/// 24-bit `38;2;R;G;B` support `core.zig` has. Both are set
+/// unconditionally -- the inherited values are never right here.
+fn assertTermEnv() !void {
+    if (c.setenv("TERM", "xterm-256color", 1) != 0) return error.SetEnvFailed;
+    if (c.setenv("COLORTERM", "truecolor", 1) != 0) return error.SetEnvFailed;
 }
 
 /// Sets up its own server and discovery env vars (GLYPHWIRE_SOCK isn't

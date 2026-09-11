@@ -1703,6 +1703,27 @@ surface.
   natural place to set the discovery env var before exec. No further
   mechanism needed beyond that — see Discovery & Connection above.
 
+#### `TERM` / `COLORTERM` for spawned commands
+- **The shell forces `TERM=xterm-256color` and `COLORTERM=truecolor`
+  unconditionally at startup** (`assertTermEnv` in `shell/main.zig`,
+  alongside `prependZigOutBinToPath` and for the same reason: `libc`
+  `setenv` so `pty.zig` / `pipeexec` `execvp` children inherit it). A
+  command run here talks to glyphwire's own cell grid through the pty, not
+  to the terminal emulator that launched the host, so whatever `TERM` was
+  inherited (`kitty`, `foot`, or nothing at all from a desktop launcher)
+  describes the wrong terminal and is never worth keeping.
+- The concrete failure this fixes: `bat` / `git` / `delta` spawn `less` as
+  their pager, `less` initialises ncurses with `setupterm`, and an unset
+  or unknown `TERM` makes that abort with
+  `'unknown': I need something more specific.`. The pager then prints
+  nothing, so `bat` shows only that error line and no highlighted file.
+- `xterm-256color` is the closest ubiquitous terminfo entry to the subset
+  `core.Layer.writeText` actually interprets (SGR incl. 256-colour and
+  truecolor, simple cursor/erase); `COLORTERM=truecolor` matches the
+  24-bit `38;2;R;G;B` path `core.zig` already has. A bespoke `glyphwire`
+  terminfo entry would be more precise but adds an install-time
+  dependency for no practical gain today.
+
 #### Prompt word-splitting, quoting, aliases
 - The prompt used to split lines on bare whitespace (`std.mem.tokenizeAny`).
   It now runs through `shell/wordsplit.zig`'s `split`, which is quote- and
