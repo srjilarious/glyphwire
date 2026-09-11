@@ -285,6 +285,80 @@ pub fn reportScrollMovesViewOffsetAndBroadcastsToSubscribersTest(io: std.Io, all
     try testz.expectEqual(ctx.root.view_scroll, 1);
 }
 
+/// `reportLayerScroll` is the pane-ring counterpart of `reportScroll`
+/// (root-only) -- glyphwire-host's wheel over a `gmux` pane that has a
+/// scrollback ring but no viewport slack. Moves that layer's own
+/// `view_scroll`, leaves the root untouched, and broadcasts `scroll`
+/// carrying the layer's handle.
+pub fn reportLayerScrollMovesANonRootLayersRingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    const pane = try ctx.createLayer(4, 2, 5);
+    // 3 rows of content over a 2-tall viewport => history_len 1.
+    try ctx.layerPtr(pane).?.writeText("aaaabbbbcccc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-layer-scroll-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer accept_thread.join();
+
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["scroll"]}}
+    );
+    try w.interface.flush();
+
+    const ack = try readOneFrame(io, alloc, &stream, &decoder);
+    alloc.free(ack);
+
+    // delta past history clamps to history_len (1); the root is untouched.
+    try srv.reportLayerScroll(alloc, pane, null, 9);
+
+    const notif_body = try readOneFrame(io, alloc, &stream, &decoder);
+    defer alloc.free(notif_body);
+
+    const Notification = struct {
+        method: []const u8,
+        params: struct { layer: ?glyphwire.LayerHandle = null, offset: usize, max: usize },
+    };
+    const parsed = try std.json.parseFromSlice(Notification, alloc, notif_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try testz.expectEqualStr("scroll", parsed.value.method);
+    try testz.expectEqual(parsed.value.params.layer.?, pane);
+    try testz.expectEqual(parsed.value.params.offset, 1);
+    try testz.expectEqual(ctx.layerPtr(pane).?.view_scroll, 1);
+    try testz.expectEqual(ctx.root.view_scroll, 0);
+}
+
+/// An unknown layer handle is a silent no-op, not an error -- the same
+/// "fire and forget from an in-process caller" shape every other
+/// `Server.report*` method has.
+pub fn reportLayerScrollOnUnknownLayerIsANoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-layer-scroll-unknown-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    try srv.reportLayerScroll(alloc, 99, null, 1);
+}
+
 /// A notification whose dispatch fails server-side (here: draw_icon
 /// naming an icon nothing registered) has no response channel to report
 /// the error on anyway -- should just be logged, not sever the whole

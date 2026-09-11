@@ -20,6 +20,11 @@ const App = app_mod.App;
 pub const PaneHit = struct {
     layer: glyphwire.LayerHandle,
     rect: geometry.RectPx,
+    /// True when the pane has viewport slack over a larger content grid
+    /// (a file tree, an editor buffer) -- a wheel moves its `scroll_offset`.
+    /// False when it only has a scrollback ring (a `gmux` terminal pane) --
+    /// a wheel moves its `view_scroll` through `Server.reportLayerScroll`.
+    scrolls_viewport: bool,
 };
 
 /// The topmost visible, scrollable layer whose viewport contains
@@ -27,9 +32,11 @@ pub const PaneHit = struct {
 ///
 /// Walks `layer_order` backwards because later entries composite on top,
 /// so the last match is the one the user is actually pointing at.
-/// `scrollsAnywhere` is part of the test on purpose: a wheel over a pane
-/// with nothing to scroll should fall through to the shell's scrollback
-/// underneath rather than being silently swallowed.
+/// The "has something to scroll" test (`scrollsAnywhere` for a viewport
+/// over a bigger content grid, `hasScrollback` for a terminal-style pane
+/// with a retained ring) is on purpose: a wheel over a pane with nothing
+/// to scroll should fall through to the shell's scrollback underneath
+/// rather than being silently swallowed.
 ///
 /// The caller must hold `ctx_mutex`.
 pub fn scrollablePaneAt(ctx: *glyphwire.Context, px: f32, py: f32) ?PaneHit {
@@ -39,9 +46,10 @@ pub fn scrollablePaneAt(ctx: *glyphwire.Context, px: f32, py: f32) ?PaneHit {
         const handle = ctx.layer_order.items[i];
         const layer = ctx.layers.getPtr(handle) orelse continue;
         if (!layer.visible) continue;
-        if (!layer.scrollsAnywhere()) continue;
+        const slack = layer.scrollsAnywhere();
+        if (!slack and !layer.hasScrollback()) continue;
         const rect = geometry.layerRect(layer.pos, layer.viewportCols(), layer.viewportRows());
-        if (rect.contains(px, py)) return .{ .layer = handle, .rect = rect };
+        if (rect.contains(px, py)) return .{ .layer = handle, .rect = rect, .scrolls_viewport = slack };
     }
     return null;
 }

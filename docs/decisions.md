@@ -726,6 +726,31 @@ surface.
     configured shape and blink, and needs a shadow of the cell under the
     caret to erase it, which a client that doesn't interpret its own VT
     stream (that lives in `core.Layer`) can't cheaply keep.
+  - **A pane can have its own scrollback ring, the same way root does —
+    no new abstraction, just `scrollback_rows > 0` on a `create_layer`
+    layer.** The gap was routing, not the ring: a wheel over a pane
+    always moved `scroll_offset` (the viewport-over-content-grid case —
+    a file tree, an editor buffer), because `Layer.scrollsAnywhere`
+    (the "does this pane have anything to scroll" test `panes.
+    scrollablePaneAt` gates on) only ever looked at viewport-vs-content
+    slack, never at `history_len`. A `gmux` terminal pane's content grid
+    is exactly its viewport (it doesn't pre-render history into cells)
+    so it never had slack, and the wheel fell straight through to the
+    root. Fixed with one new predicate, `Layer.hasScrollback()`
+    (`history_len > 0`), OR'd into the same gate, plus a new
+    `Server.reportLayerScroll(layer, offset?, delta?)` — the non-root
+    twin of the existing root-only `reportScroll` — that
+    `panes.PaneHit.scrolls_viewport` picks between: viewport slack still
+    goes to `reportScrollOffset`, a ring-only pane goes to
+    `reportLayerScroll`. `scroll_view`'s existing `layer?` param already
+    let a client scroll a non-root ring; it just didn't say which layer
+    moved in the resulting broadcast (`ScrollParams` gained
+    `layer: ?LayerHandle`, defaulted so every existing root-only reader
+    is unaffected) — the same fix serves both paths. Per-pane scrollback
+    *bars* (the thumb, not just the wheel) are left for later:
+    retrofitting the ring into `scrollbarState`/`paneScrollbars` is a
+    bigger change than gmux's first version needs, and the pane can show
+    its scroll position in its own border/status line meanwhile.
 - **v1 built — layer ownership & lifecycle:** every `create_layer` over a
   socket connection records that connection as the layer's first
   **owner**. `adopt_layer` adds more owners (one process handing ongoing

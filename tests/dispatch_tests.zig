@@ -938,6 +938,30 @@ pub fn scrollViewMovesOffsetClampsAndBroadcastsTest(io: std.Io, alloc: std.mem.A
     try testz.expectTrue(std.mem.indexOf(u8, result.broadcast.?.body, "\"offset\":1") != null);
 }
 
+/// `scroll_view` on a non-root layer carries that layer's handle in the
+/// broadcast `scroll` notification -- root-only was the old shape (before
+/// `gmux` panes could have their own scrollback ring), and a subscriber
+/// needs to know which layer moved when it isn't the root.
+pub fn scrollViewOnANonRootLayerCarriesItsHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const pane = try ctx.createLayer(4, 2, 5);
+    try ctx.layerPtr(pane).?.writeText("aaaabbbbcccc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":7,"method":"scroll_view","params":{"layer":1,"delta":9}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    defer if (result.broadcast) |b| alloc.free(b.body);
+
+    try testz.expectTrue(result.broadcast != null);
+    try testz.expectEqualStr("scroll", result.broadcast.?.event);
+    try testz.expectTrue(std.mem.indexOf(u8, result.broadcast.?.body, "\"layer\":1") != null);
+}
+
 /// `get_property("scroll")` reports the same `{offset, max}` a preceding
 /// `scroll_view` landed on.
 pub fn getPropertyScrollReportsOffsetAndMaxTest(io: std.Io, alloc: std.mem.Allocator) !void {

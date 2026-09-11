@@ -259,15 +259,24 @@ pub const Scroll = struct {
             break :pane panes_mod.scrollablePaneAt(server.ctx, pos.x, pos.y);
         };
         if (pane) |hit| {
-            // Wheel *up* shows earlier content, which is a *smaller*
-            // offset -- the opposite sign from the root layer's
-            // scrollback, where a bigger offset means further back.
-            self.app.server.reportScrollOffset(self.app.alloc, hit.layer, null, .{
-                .row = -delta,
-                .col = delta_x,
-            }) catch |err| {
-                std.log.err("glyphwire-host: reportScrollOffset(wheel) failed: {t}", .{err});
-            };
+            if (hit.scrolls_viewport) {
+                // Wheel *up* shows earlier content, which is a *smaller*
+                // offset -- the opposite sign from the root layer's
+                // scrollback, where a bigger offset means further back.
+                self.app.server.reportScrollOffset(self.app.alloc, hit.layer, null, .{
+                    .row = -delta,
+                    .col = delta_x,
+                }) catch |err| {
+                    std.log.err("glyphwire-host: reportScrollOffset(wheel) failed: {t}", .{err});
+                };
+            } else {
+                // A ring-only pane (a `gmux` terminal pane): same sense as
+                // the root layer's own scrollback, bigger offset further
+                // back.
+                self.app.server.reportLayerScroll(self.app.alloc, hit.layer, null, delta) catch |err| {
+                    std.log.err("glyphwire-host: reportLayerScroll(wheel) failed: {t}", .{err});
+                };
+            }
             return;
         }
 

@@ -83,10 +83,11 @@ pub fn mouseMoveNotification(alloc: std.mem.Allocator, px: protocol.PxPos, cell:
     return notification(alloc, "mouse_move", protocol.MouseMoveParams{ .px = px, .cell = cell });
 }
 
-/// `scroll` -- the root layer's scrollback view moved to `offset` (of
-/// `max` retained rows).
-pub fn scrollNotification(alloc: std.mem.Allocator, offset: usize, max: usize) ![]u8 {
-    return notification(alloc, "scroll", protocol.ScrollParams{ .offset = offset, .max = max });
+/// `scroll` -- a layer's scrollback-ring view moved to `offset` (of
+/// `max` retained rows). `layer` is `null` for the root layer's
+/// scrollback, a handle for a non-root layer's ring.
+pub fn scrollNotification(alloc: std.mem.Allocator, layer: ?core.LayerHandle, offset: usize, max: usize) ![]u8 {
+    return notification(alloc, "scroll", protocol.ScrollParams{ .layer = layer, .offset = offset, .max = max });
 }
 
 /// `scroll_offset` -- a layer's viewport moved over its content grid.

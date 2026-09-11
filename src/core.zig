@@ -1349,6 +1349,17 @@ pub const Layer = struct {
         return max.row > 0 or max.col > 0;
     }
 
+    /// Whether this layer has retained cell-grid scrollback the view can
+    /// be moved back into (`view_scroll` / `scrollView`) -- distinct from
+    /// `scrollsAnywhere`, which is about a viewport smaller than the
+    /// content grid. A `gmux` pane's content grid is exactly its
+    /// viewport, so only this is ever true for it; the host routes a
+    /// wheel over such a pane to `Server.reportLayerScroll` (the ring)
+    /// rather than `reportScrollOffset` (the viewport).
+    pub fn hasScrollback(self: *const Layer) bool {
+        return self.history_len > 0;
+    }
+
     /// Moves the viewport, clamped to `maxScroll`, and returns where it
     /// landed. The single writer for the scroll offset -- the wheel, a
     /// scrollbar drag and `set_property` all come through here, so the

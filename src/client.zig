@@ -2011,10 +2011,15 @@ pub const LayoutEvent = struct {
         return null;
     }
 };
-/// One `scroll` notification: the root layer's scrollback view offset
+/// One `scroll` notification: a layer's scrollback-ring view offset
 /// (`offset` rows shown above the live viewport, out of `max` retained).
-/// No owned memory -- handed back by value like `ResizeEvent`.
-pub const ScrollEvent = struct { offset: usize, max: usize };
+/// `layer` is `null` for the root layer's scrollback -- the common case,
+/// the window wheel / right-edge bar and `glyphwire-shell`'s browse
+/// cursor -- and a handle when a non-root layer's ring moved (a
+/// `scroll_view` on it, or a `gmux` pane wheel). A root-only consumer
+/// filters on `layer == null`. No owned memory -- handed back by value
+/// like `ResizeEvent`.
+pub const ScrollEvent = struct { layer: ?core.LayerHandle = null, offset: usize, max: usize };
 
 /// One `context` notification: the now-visible context's handle and the
 /// size of its root layer. A client that manages its own context
@@ -2549,7 +2554,7 @@ pub const InputListener = struct {
             });
             defer p.deinit();
 
-            const ev: ScrollEvent = .{ .offset = p.value.offset, .max = p.value.max };
+            const ev: ScrollEvent = .{ .layer = p.value.layer, .offset = p.value.offset, .max = p.value.max };
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             self.last_scroll = ev;

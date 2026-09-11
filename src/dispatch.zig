@@ -1884,7 +1884,10 @@ pub const Dispatcher = struct {
         const resp_body = try rpc.response(alloc, id, ScrollResult{ .offset = new_offset, .max = layer.history_len });
         errdefer alloc.free(resp_body);
 
-        const notif_body = try rpc.scrollNotification(alloc, new_offset, layer.history_len);
+        // `p.layer` is null for the root layer's scrollback, a handle for
+        // a non-root layer's ring -- exactly what `scroll`'s `layer` field
+        // now carries.
+        const notif_body = try rpc.scrollNotification(alloc, p.layer, new_offset, layer.history_len);
         return .{ .response = resp_body, .broadcast = .{ .event = "scroll", .body = notif_body } };
     }
 

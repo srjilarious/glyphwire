@@ -539,7 +539,32 @@ pub const Server = struct {
         };
         if (!result.changed) return;
 
-        const body = try rpc.scrollNotification(alloc, result.offset, result.max);
+        const body = try rpc.scrollNotification(alloc, null, result.offset, result.max);
+        defer alloc.free(body);
+        self.broadcast(null, "scroll", body);
+    }
+
+    /// In-process scroll of a **non-root** layer's scrollback ring (see
+    /// `core.Layer.scrollView`) -- glyphwire-host's mouse wheel over a
+    /// `gmux` pane that carries its own scrollback (`scrollback_rows > 0`,
+    /// content grid == viewport, so there is no `scroll_offset` slack for
+    /// `reportScrollOffset` to move). `offset` (absolute) and/or `delta`
+    /// (relative) are clamped to `0..history_len`. Broadcasts a `scroll`
+    /// notification carrying the layer handle, only on an actual change.
+    /// A no-op (not an error) for an unknown handle.
+    pub fn reportLayerScroll(self: *Server, alloc: std.mem.Allocator, layer: core.LayerHandle, offset: ?usize, delta: ?i64) !void {
+        const result = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const l = self.ctx.layers.getPtr(layer) orelse break :blk null;
+            const before = l.view_scroll;
+            const after = l.scrollView(offset, delta);
+            break :blk .{ .changed = before != after, .offset = after, .max = l.history_len };
+        };
+        const r = result orelse return;
+        if (!r.changed) return;
+
+        const body = try rpc.scrollNotification(alloc, layer, r.offset, r.max);
         defer alloc.free(body);
         self.broadcast(null, "scroll", body);
     }

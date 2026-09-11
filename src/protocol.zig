@@ -216,9 +216,14 @@ pub const MouseMoveParams = struct {
     cell: CellPos,
 };
 
-/// `scroll` params: the root layer's scrollback view offset and the
-/// retained-history maximum it's clamped to.
-pub const ScrollParams = struct { offset: usize, max: usize };
+/// `scroll` params: a layer's scrollback-ring view offset and the
+/// retained-history maximum it's clamped to. `layer` is `null` for the
+/// **root** layer's scrollback (the window's wheel / right-edge bar, and
+/// `glyphwire-shell`'s browse cursor) — the common case — and carries a
+/// handle when a client-`scroll_view`'d or `gmux`-pane-wheeled non-root
+/// layer's ring moved. A root-only subscriber ignores the ones with a
+/// handle.
+pub const ScrollParams = struct { layer: ?core.LayerHandle = null, offset: usize, max: usize };
 
 /// `scroll_offset` params: a layer's viewport moved over its content
 /// grid -- the host's wheel or scrollbar drag, or another client's
