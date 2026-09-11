@@ -13,6 +13,7 @@ const keyencode = @import("shell_support").keyencode;
 const pty = @import("shell_support").pty;
 const lineedit = @import("shell_support").lineedit;
 const browsescroll = @import("shell_support").browsescroll;
+const logicalpath = @import("shell_support").logicalpath;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -776,4 +777,50 @@ pub fn locateForTargetInLiveViewportStillLeavesMarginTest(_: std.Io, _: std.mem.
     const r = browsescroll.locate(-3, 8, 200, 19);
     try testz.expectEqual(r.bp_row, @as(usize, 8));
     try testz.expectEqual(r.view_scroll, @as(usize, 5));
+}
+
+// ─── logicalpath.resolve: bash/fish-style logical $PWD after `cd` ───────
+
+pub fn resolveJoinsRelativeTargetOntoBaseTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try logicalpath.resolve(alloc, "/home/jeff", "download");
+    defer alloc.free(p);
+    try testz.expectEqualStr("/home/jeff/download", p);
+}
+
+pub fn resolveKeepsSymlinkNameInsteadOfItsTargetTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The whole point: `cd`ing into a symlink (`download -> /mnt/shares/
+    // downloads`) reports the link's own path, not where it points --
+    // `logicalpath.resolve` never touches the filesystem, so it has no way
+    // to know `download` is a link and just joins the string.
+    const p = try logicalpath.resolve(alloc, "/home/jeff", "download");
+    defer alloc.free(p);
+    try testz.expectEqualStr("/home/jeff/download", p);
+    try testz.expectTrue(!std.mem.eql(u8, p, "/mnt/shares/downloads"));
+}
+
+pub fn resolveAbsoluteTargetReplacesBaseTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try logicalpath.resolve(alloc, "/home/jeff/download", "/etc");
+    defer alloc.free(p);
+    try testz.expectEqualStr("/etc", p);
+}
+
+pub fn resolveDotDotCollapsesLexicallyNotPhysicallyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `cd ..` from inside a symlinked directory returns to the symlink's
+    // own parent (here, back to `/home/jeff`), not the parent of whatever
+    // physical directory it points at.
+    const p = try logicalpath.resolve(alloc, "/home/jeff/download", "..");
+    defer alloc.free(p);
+    try testz.expectEqualStr("/home/jeff", p);
+}
+
+pub fn resolveDotDotPastRootStaysAtRootTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try logicalpath.resolve(alloc, "/", "..");
+    defer alloc.free(p);
+    try testz.expectEqualStr("/", p);
+}
+
+pub fn resolveMultiSegmentRelativeTargetTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try logicalpath.resolve(alloc, "/home/jeff", "download/../projects/./glyphwire");
+    defer alloc.free(p);
+    try testz.expectEqualStr("/home/jeff/projects/glyphwire", p);
 }

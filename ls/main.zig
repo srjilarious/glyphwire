@@ -165,6 +165,14 @@ const FileEntry = struct {
     name: []const u8,
     kind: EntryKind,
     link_target: ?[]const u8, // non-null for symlinks; caller owns memory
+    /// For a symlink whose target exists and is itself a plain
+    /// directory or file, the target's kind -- what `entryMetadataJson`
+    /// tags the entry's *action* metadata with (so activating it behaves
+    /// like its target), while `kind` above stays `.sym_link` for
+    /// coloring/icon/`-l` type-column purposes. Null for a non-symlink, a
+    /// broken symlink, or one pointing at something else (device, fifo,
+    /// socket) -- those keep reporting themselves as a plain symlink.
+    link_target_kind: ?EntryKind = null,
     /// Absolute, `.`/`..`-normalized path to this entry -- what the
     /// metadata tag's `path` field carries for `glyphwire-shell`'s
     /// `browseEnter`. Stored per entry rather than joined on the fly in
@@ -197,6 +205,19 @@ const Listing = struct {
     entries: []FileEntry,
 };
 
+/// Follows a symlink (already known to be one, `name` relative to `dir`)
+/// via a stat *with* `follow_symlinks = true` -- the target's kind if it
+/// resolves to a plain directory or file, else null (a broken link, or a
+/// target that's something else again -- device, fifo, socket).
+fn followSymlinkKind(io: std.Io, dir: std.Io.Dir, name: []const u8) ?EntryKind {
+    const st = dir.statFile(io, name, .{ .follow_symlinks = true }) catch return null;
+    return switch (st.kind) {
+        .directory => .directory,
+        .file => .file,
+        else => null,
+    };
+}
+
 fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidden: bool, long_list: bool) ![]FileEntry {
     var entries: std.ArrayList(FileEntry) = .empty;
     errdefer freeEntries(alloc, entries.items);
@@ -224,11 +245,13 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
         };
 
         var link_target: ?[]const u8 = null;
+        var link_target_kind: ?EntryKind = null;
         if (kind == .sym_link) {
             var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             if (dir.readLink(io, entry.name, &target_buf)) |len| {
                 link_target = try alloc.dupe(u8, target_buf[0..len]);
             } else |_| {}
+            link_target_kind = followSymlinkKind(io, dir, entry.name);
         }
         errdefer if (link_target) |t| alloc.free(t);
 
@@ -265,6 +288,7 @@ fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, show_hidd
             .name = name_copy,
             .kind = kind,
             .link_target = link_target,
+            .link_target_kind = link_target_kind,
             .abs_path = abs_path,
             .size = size,
             .mtime_sec = mtime_sec,
@@ -320,11 +344,13 @@ fn statOperand(io: std.Io, alloc: std.mem.Allocator, path: []const u8, long_list
     };
 
     var link_target: ?[]const u8 = null;
+    var link_target_kind: ?EntryKind = null;
     if (kind == .sym_link) {
         var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         if (std.Io.Dir.cwd().readLink(io, path, &target_buf)) |len| {
             link_target = try alloc.dupe(u8, target_buf[0..len]);
         } else |_| {}
+        link_target_kind = followSymlinkKind(io, std.Io.Dir.cwd(), path);
     }
     errdefer if (link_target) |t| alloc.free(t);
 
@@ -340,6 +366,7 @@ fn statOperand(io: std.Io, alloc: std.mem.Allocator, path: []const u8, long_list
         .name = name_copy,
         .kind = kind,
         .link_target = link_target,
+        .link_target_kind = link_target_kind,
         .abs_path = abs_path,
         .size = if (long_list) st.size else 0,
         .mtime_sec = if (long_list) st.mtime.toSeconds() else 0,
@@ -617,11 +644,13 @@ const extension_mimetypes = [_]struct { ext: []const u8, mime: []const u8 }{
     .{ .ext = ".go", .mime = "text/x-go" },
 };
 
-/// The `kind` string an entry's metadata tag carries -- one of the four
-/// values `glyphwire-shell`'s `open_actions` accepts as a fallback key
-/// (`"file"` / `"directory"` / `"symlink"` / `"other"`). Symlinks are
-/// reported as themselves, not resolved to the target's type -- the same
-/// "treat uniformly, don't follow" choice `iconForEntry` makes.
+/// The `kind` string for one of the four `EntryKind` values --
+/// `glyphwire-shell`'s `open_actions` accepts each as a fallback key.
+/// `entryMetadataJson` is the only caller, and passes a symlink's
+/// *effective* kind (see `FileEntry.link_target_kind`) rather than
+/// `.sym_link` itself whenever the target resolves to a plain file or
+/// directory -- display (icon/color/`-l` type column) still always uses
+/// the entry's real `.kind`, untouched by any of this.
 fn entryKindName(kind: EntryKind) []const u8 {
     return switch (kind) {
         .file => "file",
@@ -632,24 +661,38 @@ fn entryKindName(kind: EntryKind) []const u8 {
 }
 
 /// The JSON metadata blob an entry's cells are tagged with (`create_metadata`,
-/// one per entry -- see `writeGrid` / `writeLongTable`). Always carries the
-/// entry's `kind` and absolute `path`; a regular file additionally carries a
-/// real extension-derived `mimetype` (falling back to
-/// `"application/octet-stream"` for an unknown extension). A directory or
-/// symlink gets no `mimetype` -- it has no meaningful one, and the shell
-/// keys its action table off `kind` for those. No command is embedded:
-/// deciding what to *do* on activation is entirely the reader's policy.
+/// one per entry -- see `writeGrid` / `writeLongTable`). Always carries a
+/// `kind` and absolute `path`; a regular file additionally carries a real
+/// extension-derived `mimetype` (falling back to
+/// `"application/octet-stream"` for an unknown extension). No command is
+/// embedded: deciding what to *do* on activation is entirely the reader's
+/// policy (`shell/openaction.zig`'s `open_actions` table).
+///
+/// A symlink reports `kind`/`mimetype` as if it *were* its target -- a
+/// link to a directory tags `"directory"` (so the shell's default `cd`
+/// action fires), a link to a file tags `"file"` plus that mimetype (so
+/// e.g. a link to a `.png` triggers the same default image-preview action
+/// a real `.png` would) -- alongside a `symlink` boolean (true only for an
+/// actual link) so nothing reading the metadata loses the fact. A broken
+/// link, or one pointing at something that's neither a file nor a
+/// directory (device, fifo, socket), keeps reporting itself plainly as
+/// `"symlink"` with no mimetype and no default action, same as before this
+/// changed -- see `FileEntry.link_target_kind`.
 fn entryMetadataJson(alloc: std.mem.Allocator, entry: FileEntry) ![]u8 {
-    const kind = entryKindName(entry.kind);
-    return switch (entry.kind) {
+    const effective_kind = entry.link_target_kind orelse entry.kind;
+    const kind = entryKindName(effective_kind);
+    const symlink = entry.kind == .sym_link;
+    return switch (effective_kind) {
         .file => std.json.Stringify.valueAlloc(alloc, .{
             .kind = kind,
             .path = entry.abs_path,
             .mimetype = mimetypeForExtension(entry.name),
+            .symlink = symlink,
         }, .{}),
         else => std.json.Stringify.valueAlloc(alloc, .{
             .kind = kind,
             .path = entry.abs_path,
+            .symlink = symlink,
         }, .{}),
     };
 }

@@ -17,6 +17,7 @@ const lineedit = @import("shell_support").lineedit;
 const prompt_template = @import("shell_support").prompt_template;
 const browsescroll = @import("shell_support").browsescroll;
 const openaction = @import("shell_support").openaction;
+const logicalpath = @import("shell_support").logicalpath;
 const Pty = glyphwire.Pty;
 const ModeTracker = glyphwire.ModeTracker;
 
@@ -442,6 +443,14 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     {
         const live: std.process.Environ.PosixBlock.View = .{ .slice = @ptrCast(std.mem.span(std.c.environ)) };
         try prompt.env.putPosixBlock(live);
+    }
+    // `$PWD` is set from the real cwd here rather than trusted from
+    // whatever launched this process -- see `Prompt.chdir` for why the
+    // shell maintains it itself from this point on.
+    {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = std.process.currentPath(io, &cwd_buf) catch 0;
+        if (n > 0) prompt.setEnvVar("PWD", cwd_buf[0..n]);
     }
     // Unreachable before `exit` gave this loop a clean return path --
     // every previous exit was a hard kill, so this never ran and the leak
@@ -1358,14 +1367,26 @@ const Prompt = struct {
         return .{ .row = from.row + abs / self.grid_cols, .col = abs % self.grid_cols };
     }
 
+    /// The working directory shown in the prompt -- the maintained
+    /// `$PWD` (see `chdir`'s doc comment) rather than the process's raw
+    /// physical cwd, so a directory reached through a symlink keeps the
+    /// symlink's own name. Falls back to the real physical cwd if `$PWD`
+    /// is somehow unset (seeded at startup in `runPrompt`, so only a
+    /// script explicitly unsetting it hits this path).
+    fn logicalCwd(self: *Prompt, buf: []u8) []const u8 {
+        if (self.env.get("PWD")) |pwd| return pwd;
+        const n = std.process.currentPath(self.client.io, buf) catch 0;
+        return buf[0..n];
+    }
+
     /// The built-in prompt: the absolute working directory followed by
     /// `" > "`. Unchanged from before prompt templating existed.
     fn writeDefaultPrefix(self: *Prompt, sink: ChainSink) !glyphwire.Cursor {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd_len = std.process.currentPath(self.client.io, &cwd_buf) catch 0;
+        const cwd = self.logicalCwd(&cwd_buf);
 
         var prefix_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&prefix_buf, "{s} > ", .{cwd_buf[0..cwd_len]}) catch "> ";
+        const prefix = std.fmt.bufPrint(&prefix_buf, "{s} > ", .{cwd}) catch "> ";
 
         const start = try self.client.getCursor();
 
@@ -1393,7 +1414,7 @@ const Prompt = struct {
     /// Fills a `prompt_template.Data` from the shell's live state, using
     /// `b` for the strings that need somewhere to live.
     fn buildPromptData(self: *Prompt, b: *PromptDataBufs, p: *const config.PromptConfig) prompt_template.Data {
-        const cwd_full = b.cwd[0 .. std.process.currentPath(self.client.io, &b.cwd) catch 0];
+        const cwd_full = self.logicalCwd(&b.cwd);
         return .{
             .cwd = self.collapseHome(cwd_full, &b.tilde),
             .cwd_full = cwd_full,
@@ -3780,11 +3801,33 @@ const Prompt = struct {
     /// is recorded exactly once per change and in exactly one place. The
     /// `openDir` / `setCurrentDir` error is returned unreported: `cd` and
     /// `zj` word their failure messages differently.
+    ///
+    /// Also maintains `$PWD`/`$OLDPWD` the way bash/fish do: the kernel
+    /// `chdir` still happily follows a symlink in `target`, but `$PWD`
+    /// itself is only ever built by joining `target` onto the *previous*
+    /// `$PWD` (`logicalpath.resolve`) -- lexical `.`/`..` collapsing, no
+    /// filesystem lookups -- so a linked directory keeps its own name
+    /// instead of expanding to whatever it points at. `recordVisit`
+    /// (the `zj` frecency database) intentionally keeps using the real
+    /// physical cwd, not this logical one, so two different links to the
+    /// same real directory accumulate one ranking, not two.
     fn chdir(self: *Prompt, target: []const u8) !void {
         const io = self.client.io;
+        const alloc = self.client.alloc;
+
         var dir = try std.Io.Dir.cwd().openDir(io, target, .{});
         defer dir.close(io);
+
+        var old_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const old_pwd = self.logicalCwd(&old_buf);
+        const new_pwd = try logicalpath.resolve(alloc, old_pwd, target);
+        defer alloc.free(new_pwd);
+
         try std.process.setCurrentDir(io, dir);
+
+        self.setEnvVar("OLDPWD", old_pwd);
+        self.setEnvVar("PWD", new_pwd);
+
         self.recordVisit();
         self.queueChdirListing();
     }

@@ -4,7 +4,8 @@
 //! relative `@import`.
 //!
 //! `wordsplit` / `envassign` / `complete` / `glob` / `handshake` /
-//! `history` / `lineedit` / `prompt_template` are pure (no libc, no IO).
+//! `history` / `lineedit` / `prompt_template` / `logicalpath` are pure (no
+//! libc, no IO).
 //! `config` and `script_engine` are the exceptions: they embed a Lua
 //! state (via
 //! ziglua) -- `config` for a one-shot `shell.conf` parse, `script_engine`
@@ -29,3 +30,4 @@ pub const pipeexec = @import("glyphwire").pipeexec;
 pub const prompt_template = @import("prompt_template.zig");
 pub const browsescroll = @import("browsescroll.zig");
 pub const openaction = @import("openaction.zig");
+pub const logicalpath = @import("logicalpath.zig");

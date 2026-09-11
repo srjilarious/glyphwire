@@ -1854,6 +1854,29 @@ surface.
   directory or symlink gets no `mimetype`. Deciding what to *do* on
   activation is the reader's policy, not baked into the listing — so a
   user can teach the shell new types without `glyphwire-ls` changing.
+- **A symlink's metadata reports its target's effective `kind` (and, for
+  a file target, `mimetype`), not `"symlink"` — plus a `symlink: true`
+  flag so that fact isn't lost (asked).** Before this, a symlink always
+  tagged `kind: "symlink"` with no `mimetype`, so activating a link to a
+  directory did nothing (no built-in or user `open_actions` entry keys
+  off `"symlink"`) — the request that prompted this: "a link to a
+  directory should still `cd` into it as if it were a directory." Rather
+  than add a fourth kind-matching tier to `shell/openaction.zig`,
+  `ls/main.zig` resolves the symlink itself (`followSymlinkKind`, a
+  `follow_symlinks = true` stat) and, when the target is a plain
+  directory or file, tags the entry *as* that kind — a link to a
+  directory now activates exactly like a real one (`cd`), a link to a
+  `.png` like a real `.png` (`glyphwire-view`). Display is untouched: the
+  icon, cyan color, `name -> target` text and `-l` type column all still
+  come from the entry's real, unresolved kind (`FileEntry.kind`) — only
+  the JSON tag driving `open_actions` changes, plus the added `symlink`
+  boolean so a reader can still tell a tagged-as-directory entry is
+  actually a link. A broken link, or one pointing at something that's
+  neither a file nor a directory (device, fifo, socket), keeps reporting
+  itself as `"symlink"` with no `mimetype` — unchanged, no default action.
+  Scope decided when asked: also cover file targets (mimetype-based
+  actions like image preview), not just the literal directory complaint,
+  since "metadata tagging based on the target" was the broader ask.
 - **The shell resolves activation through a `shell.conf` `open_actions`
   table over built-in defaults.** `shell/openaction.zig` maps a key —
   a mimetype (`image/png`), a mimetype group (`image/*`) or a `kind`
@@ -2513,6 +2536,45 @@ surface.
   can't do it — `sh.exec("cd ...")` goes straight to `runPipeline`, which
   never consults builtin dispatch, so `cd` there would try to exec a
   binary.
+
+#### Logical `$PWD`/`$OLDPWD` after `cd` (bash/fish convention)
+- **`Prompt.chdir` now maintains `$PWD`/`$OLDPWD` as a logical string,
+  the way bash/fish do, instead of always showing the kernel's physical
+  cwd (asked).** Before this, `cd`ing through a symlinked directory (e.g.
+  `~/download -> /mnt/shares/downloads`) made the prompt (and any spawned
+  command's own `pwd`/`$PWD`) show the fully-resolved physical path —
+  the kernel's `getcwd` has no notion of "which symlink you took to get
+  here", only where you physically are. Real shells solve this by never
+  asking the kernel: they keep `$PWD` as a string, built by joining the
+  `cd` argument onto the *previous* `$PWD` and lexically collapsing
+  `.`/`..` — no filesystem lookups — which is also exactly what
+  `std.fs.path.resolve` already does. `shell/logicalpath.zig`'s
+  `resolve(alloc, base, target)` is that one call, pulled into its own
+  pure module (in `shell_support`, unit-tested) since it's the crux of
+  the feature. `chdir` calls it before the real `openDir`/`setCurrentDir`
+  (using `target`, unresolved, so the kernel still follows any symlinks
+  normally), then sets `$OLDPWD`/`$PWD` via the existing `setEnvVar` (the
+  `export`/`unset` builtins' plumbing) so real env vars, not just the
+  prompt, see the shorthand — a spawned command's own `pwd` now agrees
+  with the glyphwire prompt. `{cwd}`/`{cwd_full}` and the unconfigured
+  default prompt read `$PWD` (`Prompt.logicalCwd`) instead of calling
+  `currentPath` directly; `$PWD` is seeded from the real physical cwd at
+  shell startup (`runPrompt`) rather than trusted from whatever launched
+  the process, so a stale inherited value can't leak in.
+- **`cd ..` from inside a symlinked directory returns to the symlink's
+  own parent, not the parent of the physical target it points at** —
+  the direct consequence of never consulting the filesystem: `..` strips
+  the last lexical component of `$PWD`, same as bash's default (non-`-P`)
+  behavior. There is no `cd -P` / physical mode in this shell; out of
+  scope for what was asked.
+- **`recordVisit` (the `zj` database) deliberately keeps using the real
+  physical cwd, not this logical `$PWD`.** Two different symlinks to the
+  same real directory should accumulate one frecency ranking, not split
+  across two logical paths that happen to point at the same place; this
+  matches the database's existing "keyed by the real cwd" design (see
+  below). `sh.cwd()` (the Lua script hook) is likewise left reading the
+  physical cwd, unchanged — scripts doing real filesystem work want the
+  real path, not a display shorthand.
 
 #### `zj` directory jumping
 - **`zj QUERY` is a `z`/zoxide-style jump built in, not a shipped Lua
