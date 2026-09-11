@@ -30,11 +30,17 @@
 --
 --     ---- Fonts --------------------------------------------------------
 --
---     -- Primary font file. The built-in default is resolved under
---     -- GLYPHWIRE_ASSET_DIR when set, otherwise under
---     -- ../share/glyphwire/assets relative to the glyphwire executable.
---     -- Use an explicit absolute path for a custom TTF/OTF, or a TTC
---     -- collection (then set `font_face_name`).
+--     -- Primary font. Any of:
+--     --   * a bare name -> the bundled asset of that name, resolved under
+--     --     GLYPHWIRE_ASSET_DIR when set, otherwise under
+--     --     ../share/glyphwire/assets relative to the glyphwire executable;
+--     --   * an absolute or cwd-relative path to a TTF/OTF/TTC file;
+--     --   * a system font family name ("DejaVu Sans Mono", "Fira Code")
+--     --     or a fontconfig generic ("monospace") -- looked up with
+--     --     `fc-match`, so fontconfig has to be installed.
+--     -- A name that matches none of these warns and the bundled default
+--     -- is used. For a TTC, also set `font_face_name` (a system TTC uses
+--     -- the face fc-match picked unless you do).
 --     font_face = "NotoSansCJK-Regular.ttc",
 --
 --     -- For a TTC: a substring of the desired face's name
@@ -43,7 +49,8 @@
 --     font_face_name = "Mono CJK JP",
 --
 --     -- Face tried for any codepoint the primary font lacks, before the
---     -- atlas falls back to its .notdef (tofu) box.
+--     -- atlas falls back to its .notdef (tofu) box. Same accepted forms
+--     -- as `font_face` (bundled name, path, or system family name).
 --     font_fallback = "JetBrainsMono-Regular.ttf",
 --
 --     -- Starting cell size in pixels. Clamped to 8..72. At runtime,

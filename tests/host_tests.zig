@@ -8,6 +8,7 @@ const glyphwire = @import("glyphwire");
 const hs = @import("host_support");
 const geometry = hs.geometry;
 const config = hs.config;
+const system_font = hs.system_font;
 const key_repeat = hs.key_repeat;
 const redraw = hs.redraw;
 
@@ -117,6 +118,57 @@ pub fn cursorShapeFromStrTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(config.cursorShapeFromStr("block").?, .block);
     try testz.expectEqual(config.cursorShapeFromStr("underline").?, .underline);
     try testz.expectTrue(config.cursorShapeFromStr("diamond") == null);
+}
+
+// ─── system_font (fc-match parsing / match judging) ──────────────────
+
+pub fn fcMatchOutputParsesFourFieldsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const raw = system_font.parseFcMatchOutput(
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf|DejaVu Sans Mono|DejaVu Sans Mono Book|0\n",
+    ).?;
+    try testz.expectEqualStr(raw.file, "/usr/share/fonts/TTF/DejaVuSansMono.ttf");
+    try testz.expectEqualStr(raw.family, "DejaVu Sans Mono");
+    try testz.expectEqualStr(raw.fullname, "DejaVu Sans Mono Book");
+    try testz.expectEqual(raw.index, @as(i32, 0));
+}
+
+pub fn fcMatchOutputReadsCollectionIndexTest(_: std.Io, _: std.mem.Allocator) !void {
+    const raw = system_font.parseFcMatchOutput("/f/NotoSansCJK-Regular.ttc|Noto Sans Mono CJK JP|Noto Sans Mono CJK JP Regular|2").?;
+    try testz.expectEqual(raw.index, @as(i32, 2));
+}
+
+pub fn fcMatchOutputRejectsShortLineTest(_: std.Io, _: std.mem.Allocator) !void {
+    // An old fontconfig that doesn't understand `%{fullname}` leaves the
+    // token literal, so the `|` count is wrong -- treat as unparseable.
+    try testz.expectTrue(system_font.parseFcMatchOutput("only|three|fields\n") == null);
+    try testz.expectTrue(system_font.parseFcMatchOutput("") == null);
+    try testz.expectTrue(system_font.parseFcMatchOutput("|empty|file|0") == null);
+}
+
+pub fn genericAliasRecognizedTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(system_font.isGenericAlias("monospace"));
+    try testz.expectTrue(system_font.isGenericAlias("Monospace"));
+    try testz.expectTrue(system_font.isGenericAlias("sans-serif"));
+    try testz.expectFalse(system_font.isGenericAlias("DejaVu Sans Mono"));
+}
+
+pub fn nameSatisfiesRequestMatchesFamilyTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Exact family.
+    try testz.expectTrue(system_font.nameSatisfiesRequest("DejaVu Sans Mono", "DejaVu Sans Mono", "DejaVu Sans Mono Book"));
+    // Space/hyphen-insensitive, case-insensitive.
+    try testz.expectTrue(system_font.nameSatisfiesRequest("jetbrainsmono", "JetBrains Mono", "JetBrains Mono Regular"));
+    try testz.expectTrue(system_font.nameSatisfiesRequest("JetBrains Mono", "JetBrainsMono", "JetBrainsMono-Regular"));
+    // Match via the full name when the family alone doesn't carry it.
+    try testz.expectTrue(system_font.nameSatisfiesRequest("Fira Code Retina", "Fira Code", "Fira Code Retina"));
+    // A generic alias is always satisfied.
+    try testz.expectTrue(system_font.nameSatisfiesRequest("monospace", "Noto Sans Mono", "Noto Sans Mono Regular"));
+}
+
+pub fn nameSatisfiesRequestRejectsFallbackTest(_: std.Io, _: std.mem.Allocator) !void {
+    // fontconfig fell back to its default (Noto Sans) for a font that
+    // isn't installed -- the request name is nowhere in the result.
+    try testz.expectFalse(system_font.nameSatisfiesRequest("Comic Sans MS", "Noto Sans", "Noto Sans Regular"));
+    try testz.expectFalse(system_font.nameSatisfiesRequest("NoSuchFontXYZ", "DejaVu Sans", "DejaVu Sans Book"));
 }
 
 // ─── geometry.resizeSettleStep ──────────────────────────────────────

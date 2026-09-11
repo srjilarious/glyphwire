@@ -7,6 +7,7 @@ const config = @import("config.zig");
 const config_load = @import("config_load.zig");
 const geometry = @import("geometry.zig");
 const icons = @import("icons.zig");
+const system_font = @import("system_font.zig");
 
 pub const panic = host_eng.system.panic;
 pub const std_options = host_eng.system.std_options;
@@ -93,19 +94,69 @@ fn bundledAssetPath(alloc: std.mem.Allocator, asset_dir: []const u8, rel_path: [
     return std.fs.path.joinZ(alloc, &.{ asset_dir, rel_path });
 }
 
-fn resolveDefaultAssetPath(
-    alloc: std.mem.Allocator,
-    asset_dir: []const u8,
+/// A resolved `host.conf` `font_face` / `font_fallback`: the file on disk,
+/// plus a face index when `fc-match` picked one for a system `.ttc`
+/// (`null` otherwise -- face selection then follows the `font_face_name`
+/// scan in `main`, as it always has).
+const ResolvedFont = struct {
     path: [:0]const u8,
+    fc_index: ?i32 = null,
+};
+
+/// Turns a `host.conf` `font_face` / `font_fallback` value into a file on
+/// disk, trying in order:
+///   1. the untouched `*_default` value (or a legacy `assets/`-prefixed
+///      one) -> the bundled asset of the same name;
+///   2. the value as a path -> that file, if it exists (an absolute path,
+///      or one resolved against the cwd);
+///   3. `<asset_dir>/<value>` -> that file, if it exists (skipped for an
+///      absolute value);
+///   4. a system font `fc-match` resolves `<value>` to as a family name.
+/// Returns `null` when none of those land -- `main` then falls back to the
+/// bundled default face for the slot -- and logs which step failed.
+fn resolveFontFile(
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    asset_dir: []const u8,
+    value: [:0]const u8,
     default_rel_path: []const u8,
-) ![:0]const u8 {
+) ?ResolvedFont {
     const legacy_prefix = "assets/";
-    if (std.mem.eql(u8, path, default_rel_path) or
-        (std.mem.startsWith(u8, path, legacy_prefix) and std.mem.eql(u8, path[legacy_prefix.len..], default_rel_path)))
+
+    // 1. Untouched default -> the bundled file of that name.
+    if (std.mem.eql(u8, value, default_rel_path) or
+        (std.mem.startsWith(u8, value, legacy_prefix) and
+            std.mem.eql(u8, value[legacy_prefix.len..], default_rel_path)))
     {
-        return bundledAssetPath(alloc, asset_dir, default_rel_path);
+        const p = bundledAssetPath(arena, asset_dir, default_rel_path) catch return null;
+        return .{ .path = p };
     }
-    return path;
+
+    // 2. The value as a path -- absolute, or relative to the cwd.
+    if (fileExists(io, value)) return .{ .path = value };
+
+    // 3. The value as a basename inside the bundled assets directory.
+    if (!std.fs.path.isAbsolute(value)) {
+        const p = std.fs.path.joinZ(arena, &.{ asset_dir, value }) catch return null;
+        if (fileExists(io, p)) return .{ .path = p };
+    }
+
+    // 4. The value as a system font family name, via fc-match.
+    if (system_font.resolve(arena, gpa, io, value)) |m| {
+        std.log.info("glyphwire-host: font '{s}' -> system font {s} (face {d})", .{ value, m.path, m.index });
+        return .{ .path = m.path, .fc_index = m.index };
+    }
+
+    std.log.warn("glyphwire-host: font '{s}' is not a readable path, a bundled asset, or an installed font; using the bundled default", .{value});
+    return null;
+}
+
+/// True when `path` names an existing file reachable from the cwd (an
+/// absolute path included).
+fn fileExists(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return true;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -129,8 +180,16 @@ pub fn main(init: std.process.Init) !void {
     // `grid_cols` / `grid_rows`.
     const host_cfg = config_load.loadConfig(arena, alloc, io, init.environ_map);
     var font_cfg = host_cfg.font;
-    font_cfg.face = try resolveDefaultAssetPath(arena, asset_dir, font_cfg.face, config.font_path_default);
-    font_cfg.fallback = try resolveDefaultAssetPath(arena, asset_dir, font_cfg.fallback, config.font_fallback_default);
+    // Resolve `font_face` / `font_fallback` to real files: a bundled asset,
+    // an absolute/cwd-relative path, or a system font by family name (see
+    // `resolveFontFile`). An unresolvable value warns and falls back to the
+    // bundled default for that slot rather than aborting startup.
+    const face_resolved = resolveFontFile(arena, alloc, io, asset_dir, font_cfg.face, config.font_path_default) orelse
+        ResolvedFont{ .path = try bundledAssetPath(arena, asset_dir, config.font_path_default) };
+    const fallback_resolved = resolveFontFile(arena, alloc, io, asset_dir, font_cfg.fallback, config.font_fallback_default) orelse
+        ResolvedFont{ .path = try bundledAssetPath(arena, asset_dir, config.font_fallback_default) };
+    font_cfg.face = face_resolved.path;
+    font_cfg.fallback = fallback_resolved.path;
     if (host_cfg.grid.cols) |v| geometry.grid_cols = v;
     if (host_cfg.grid.rows) |v| geometry.grid_rows = v;
     if (host_cfg.grid.scrollback) |v| config.scrollback_rows = v;
@@ -173,16 +232,24 @@ pub fn main(init: std.process.Init) !void {
     const socket_path = try socketPath(arena, init.environ_map);
 
     // The primary font may be a `.ttc` collection; find the index of the
-    // named face inside it so both the metrics measured here and the atlas
-    // packed later (in AppRunner.init) use the same face. A plain `.ttf`
-    // has no named faces, so this falls through to face 0.
+    // wanted face inside it so both the metrics measured here and the atlas
+    // packed later (in AppRunner.init) use the same face. When `fc-match`
+    // already resolved a face for a system `.ttc`, use that -- unless
+    // `host.conf` also set an explicit `font_face_name`, which still wins
+    // by re-scanning the resolved file. Otherwise scan for `font_face_name`
+    // (the bundled Noto collection's "Mono CJK JP" default when unset); a
+    // plain `.ttf` has no named faces, so this falls through to face 0.
     const font_face_index: i32 = blk: {
+        if (face_resolved.fc_index) |idx| {
+            if (font_cfg.face_name == null) break :blk idx;
+        }
+        const scan_name = font_cfg.face_name orelse config.font_face_name_default;
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, font_cfg.face, alloc, .limited(64 * 1024 * 1024)) catch |err| {
             std.log.err("failed to read font '{s}': {t}", .{ font_cfg.face, err });
             return err;
         };
         defer alloc.free(bytes);
-        break :blk host_eng.renderer.findFaceIndexByName(bytes, font_cfg.face_name) orelse 0;
+        break :blk host_eng.renderer.findFaceIndexByName(bytes, scan_name) orelse 0;
     };
 
     // Measuring metrics needs only the font's own bytes (stb_truetype's
@@ -271,8 +338,10 @@ pub fn main(init: std.process.Init) !void {
 
     // Register the fallback face: codepoints the primary lacks are drawn
     // from it, and anything neither face has renders as the atlas's tofu
-    // box. Non-fatal -- text still works from the primary alone.
-    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, font_cfg.fallback, 0) catch |err| {
+    // box. Non-fatal -- text still works from the primary alone. Uses the
+    // face `fc-match` picked when the fallback is a system `.ttc`, else
+    // face 0.
+    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, font_cfg.fallback, fallback_resolved.fc_index orelse 0) catch |err| {
         std.log.warn("could not add fallback font '{s}': {t}", .{ font_cfg.fallback, err });
     };
 

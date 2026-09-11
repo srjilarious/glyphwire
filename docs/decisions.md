@@ -711,6 +711,28 @@ surface.
   connected client isn't notified of a cell-metric change (only new
   `get_cell_metrics` queries see it), and a tiling WM that pins the
   window makes the grid reflow instead of the window resizing.
+- **v1.1 — `font_face` / `font_fallback` can name a system font:**
+  originally each value was a bundled-asset basename, and anything else
+  was passed through as a cwd-relative path (undocumented, and a bad
+  value aborted startup). `host/main.zig`'s `resolveFontFile` now walks a
+  four-step chain per value: (1) the untouched `*_default` (or a legacy
+  `assets/`-prefixed one) → the bundled asset; (2) the value as an
+  absolute / cwd-relative path, if the file exists; (3)
+  `<asset_dir>/<value>`, if it exists; (4) the value as a font family
+  name handed to `fc-match` (fontconfig's CLI — a runtime dep, not a
+  build/link one) via `host/system_font.zig`. A value that resolves
+  nowhere now *warns and falls back to the bundled default face* for
+  that slot instead of a fatal error — the same leniency the fallback
+  slot always had. `fc-match` never fails a match, so a non-generic
+  request is only accepted when the resolved family / full name actually
+  contains it (space- and case-insensitively); a fontconfig generic
+  (`monospace`, `sans-serif`, …) is always accepted. `fc-match` also
+  reports the face index for a system `.ttc`, so a collection font works
+  with no `font_face_name` — an explicit `font_face_name` still wins by
+  re-scanning the resolved file. Kept host-local like the rest of the
+  font config: it's a front-end property, no wire surface. `fc-match`
+  is Linux/BSD's answer; a future macOS/Windows host would need its own
+  resolver behind the same `system_font.resolve` seam.
 - **v1 built — caret shape + blink (host-local):** `host.conf`'s
   `config` table also carries `cursor_shape` (`line` \| `block` \| `box` \|
   `underline`; default `line`, the original left-edge bar), `cursor_blink`

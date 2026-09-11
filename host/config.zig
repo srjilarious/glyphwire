@@ -10,6 +10,11 @@ const geometry = @import("geometry.zig");
 // the Japanese monospaced face out of it (a plain `.ttf` ignores the name
 // and uses face 0). The fallback face is tried for any codepoint the
 // primary lacks before the atlas falls back to its `.notdef` (tofu) box.
+//
+// `font_face` / `font_fallback` need not be bundled assets: `host/main.zig`
+// (`resolveFontFile`) also accepts an absolute or cwd-relative path, and a
+// bare family name it hands to `fc-match` to pick a system-installed font
+// (see `host/system_font.zig`).
 pub const font_path_default = "NotoSansCJK-Regular.ttc";
 pub const font_face_name_default = "Mono CJK JP";
 pub const font_fallback_default = "JetBrainsMono-Regular.ttf";
@@ -44,7 +49,11 @@ pub var scrollback_rows: usize = scrollback_rows_default;
 /// (process-lifetime) memory, or the default string literals.
 pub const FontConfig = struct {
     face: [:0]const u8 = font_path_default,
-    face_name: []const u8 = font_face_name_default,
+    /// null unless `host.conf` set `font_face_name`. When set it picks a
+    /// named face out of a `.ttc` (see `host/main.zig`); when null the
+    /// bundled default collection is scanned for `font_face_name_default`,
+    /// and a system `.ttc` uses the face `fc-match` resolved.
+    face_name: ?[]const u8 = null,
     fallback: [:0]const u8 = font_fallback_default,
     size: f32 = font_size_default,
 };
