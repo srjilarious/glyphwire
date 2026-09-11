@@ -1,6 +1,9 @@
 const core = @import("core.zig");
 pub const configDirPath = @import("config_dir.zig").configDirPath;
 pub const wire = @import("wire.zig");
+pub const mux = @import("mux.zig");
+pub const conn_stream = @import("conn_stream.zig");
+pub const ConnStream = conn_stream.ConnStream;
 pub const protocol = @import("protocol.zig");
 pub const rpc = @import("rpc.zig");
 pub const dispatch = @import("dispatch.zig");

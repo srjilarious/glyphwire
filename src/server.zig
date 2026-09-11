@@ -4,6 +4,9 @@ const wire = @import("wire.zig");
 const dispatch = @import("dispatch.zig");
 const rpc = @import("rpc.zig");
 const protocol = @import("protocol.zig");
+const conn_stream = @import("conn_stream.zig");
+
+pub const ConnStream = conn_stream.ConnStream;
 
 /// Tracks one accepted connection long enough for *other* connections'
 /// dispatch to push a notification to it -- see `Server.broadcastToOthers`.
@@ -11,7 +14,11 @@ const protocol = @import("protocol.zig");
 /// or a `serveForever`-spawned thread), registered in `Server.connections`
 /// for exactly that lifetime.
 pub const Connection = struct {
-    stream: std.Io.net.Stream,
+    stream: ConnStream,
+    /// Held for `send`'s framing allocation (`wire.framedAlloc` for a
+    /// mux-channel peer). The connection's serving call passes its own
+    /// allocator in when it builds the `Connection`.
+    alloc: std.mem.Allocator,
     /// This connection's identity for layer ownership (see `core.ConnId`),
     /// assigned from `Server.next_conn_id` when the connection is accepted.
     /// Handed to the connection's `Dispatcher` and, on disconnect, to
@@ -37,10 +44,9 @@ pub const Connection = struct {
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
 
-        var write_buf: [4096]u8 = undefined;
-        var w = self.stream.writer(io, &write_buf);
-        try wire.writeFrame(&w.interface, body);
-        try w.interface.flush();
+        const framed = try wire.framedAlloc(self.alloc, body);
+        defer self.alloc.free(framed);
+        try self.stream.writeAll(io, framed);
     }
 };
 
@@ -171,17 +177,26 @@ pub const Server = struct {
     pub fn serveForever(self: *Server, alloc: std.mem.Allocator) !void {
         while (true) {
             const stream = try self.listener.accept(self.io);
-            const t = try std.Thread.spawn(.{}, serveConnectionThread, .{ self, alloc, stream });
+            const t = try std.Thread.spawn(.{}, serveConnectionThread, .{ self, alloc, ConnStream{ .net = stream } });
             self.threads_mutex.lockUncancelable(self.io);
             try self.connection_threads.append(alloc, t);
             self.threads_mutex.unlock(self.io);
         }
     }
 
-    fn serveConnectionThread(self: *Server, alloc: std.mem.Allocator, stream: std.Io.net.Stream) void {
+    fn serveConnectionThread(self: *Server, alloc: std.mem.Allocator, stream: ConnStream) void {
         self.serveConnection(alloc, stream) catch |err| {
             std.log.err("glyphwire connection error: {t}", .{err});
         };
+    }
+
+    /// Serves one already-connected peer to completion, on the calling
+    /// thread -- no `accept`. The host's remote-session demux calls this
+    /// per `gw-agent` trunk channel (`stream` = `.channel`), so a remote
+    /// `gw-shell` / `gw-ls` / `zoe` drives this `Server`'s context exactly
+    /// as a local socket client would.
+    pub fn servePreconnected(self: *Server, alloc: std.mem.Allocator, stream: ConnStream) !void {
+        try self.serveConnection(alloc, stream);
     }
 
     /// Accepts and serves exactly one connection to completion, on the
@@ -192,14 +207,14 @@ pub const Server = struct {
     /// driving two `acceptOne` calls on two threads.
     pub fn acceptOne(self: *Server, alloc: std.mem.Allocator) !void {
         const stream = try self.listener.accept(self.io);
-        try self.serveConnection(alloc, stream);
+        try self.serveConnection(alloc, ConnStream{ .net = stream });
     }
 
-    fn serveConnection(self: *Server, alloc: std.mem.Allocator, stream_in: std.Io.net.Stream) !void {
+    fn serveConnection(self: *Server, alloc: std.mem.Allocator, stream_in: ConnStream) !void {
         var stream = stream_in;
         defer stream.close(self.io);
 
-        var conn: Connection = .{ .stream = stream, .id = self.next_conn_id.fetchAdd(1, .monotonic) };
+        var conn: Connection = .{ .stream = stream, .alloc = alloc, .id = self.next_conn_id.fetchAdd(1, .monotonic) };
         try self.registerConnection(alloc, &conn);
         defer self.unregisterConnection(alloc, &conn);
 
@@ -216,8 +231,7 @@ pub const Server = struct {
 
         var read_buf: [4096]u8 = undefined;
         while (true) {
-            var data: [1][]u8 = .{&read_buf};
-            const n = try stream.read(self.io, &data);
+            const n = try stream.read(self.io, &read_buf);
             if (n == 0) return; // peer closed the connection
 
             try decoder.feed(alloc, read_buf[0..n]);

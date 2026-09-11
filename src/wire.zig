@@ -1,4 +1,5 @@
 const std = @import("std");
+const conn_stream = @import("conn_stream.zig");
 
 /// LSP-style framing: a `Content-Length` header, a blank line, then exactly
 /// that many body bytes. Chosen so JSON bodies never need newline-escaping
@@ -14,6 +15,14 @@ pub const FrameError = error{
 pub fn writeFrame(writer: *std.Io.Writer, body: []const u8) !void {
     try writer.print("Content-Length: {d}\r\n\r\n", .{body.len});
     try writer.writeAll(body);
+}
+
+/// Returns `"Content-Length: <n>\r\n\r\n" ++ body` as one owned slice
+/// (caller frees with `alloc`). For a transport that only takes a whole
+/// buffer -- a `mux.Channel`, which frames each write onto the trunk --
+/// rather than a streaming `std.Io.Writer`.
+pub fn framedAlloc(alloc: std.mem.Allocator, body: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc, "Content-Length: {d}\r\n\r\n{s}", .{ body.len, body });
 }
 
 /// Incrementally reassembles frames from bytes fed in arbitrary-sized
@@ -79,17 +88,16 @@ pub const FrameDecoder = struct {
 /// the binary side-channel's payload following a JSON header frame that
 /// declared the count. Drains `decoder`'s already-buffered leftover bytes
 /// first (a single socket read can pull in bytes past the header frame's
-/// boundary), then reads more directly off the socket as needed. Shared by
-/// server.zig (reading a `load_image` request's payload) and client.zig
-/// (symmetric handling, if a server-to-client binary payload is ever
-/// added) since both use the same `std.Io.net.Stream` type.
-pub fn readRaw(io: std.Io, stream: *std.Io.net.Stream, decoder: *FrameDecoder, alloc: std.mem.Allocator, n: usize) ![]u8 {
+/// boundary), then reads more directly off the stream as needed. Takes a
+/// `ConnStream` so it serves a local socket peer and a muxed remote peer
+/// (a `gw-agent` trunk channel) the same way -- server.zig reads a
+/// `load_image` request's payload through it.
+pub fn readRaw(io: std.Io, stream: *conn_stream.ConnStream, decoder: *FrameDecoder, alloc: std.mem.Allocator, n: usize) ![]u8 {
     while (true) {
         if (try decoder.takeRaw(alloc, n)) |raw| return raw;
 
         var read_buf: [4096]u8 = undefined;
-        var data: [1][]u8 = .{&read_buf};
-        const read_n = try stream.read(io, &data);
+        const read_n = try stream.read(io, &read_buf);
         if (read_n == 0) return error.ConnectionClosed;
         try decoder.feed(alloc, read_buf[0..read_n]);
     }
