@@ -823,6 +823,71 @@ pub const Client = struct {
         return .{ .parsed = parsed };
     }
 
+    // ── Selection & clipboard ──────────────────────────────────────────
+
+    /// `set_selection(layer?, anchor, active)` -- a notification. Starts
+    /// or replaces the layer's selection (root when `layer` is omitted).
+    /// Points are `{above, col}` in the scroll-stable coordinate
+    /// `core.SelectionPoint` documents.
+    pub fn setSelection(self: *Client, layer: ?core.LayerHandle, anchor: core.SelectionPoint, active: core.SelectionPoint) !void {
+        try self.notify("set_selection", .{
+            .layer = layer,
+            .anchor = .{ .above = anchor.above, .col = anchor.col },
+            .active = .{ .above = active.above, .col = active.col },
+        });
+    }
+
+    /// `update_selection(layer?, active)` -- a notification. Moves only
+    /// the active (dragging) end; a no-op if nothing is selected.
+    pub fn updateSelection(self: *Client, layer: ?core.LayerHandle, active: core.SelectionPoint) !void {
+        try self.notify("update_selection", .{
+            .layer = layer,
+            .active = .{ .above = active.above, .col = active.col },
+        });
+    }
+
+    /// `clear_selection(layer?)` -- a notification.
+    pub fn clearSelection(self: *Client, layer: ?core.LayerHandle) !void {
+        try self.notify("clear_selection", .{ .layer = layer });
+    }
+
+    /// `get_selection(layer?)` -- a request. `active` false means nothing
+    /// is selected (`anchor`/`active_end` null then).
+    pub fn getSelection(self: *Client, layer: ?core.LayerHandle) !protocol.SelectionState {
+        var parsed = try self.request(protocol.SelectionState, "get_selection", .{ .layer = layer });
+        defer parsed.deinit();
+        const r = parsed.value.result;
+        return .{
+            .active = r.active,
+            .anchor = if (r.anchor) |a| .{ .above = a.above, .col = a.col } else null,
+            .active_end = if (r.active_end) |a| .{ .above = a.above, .col = a.col } else null,
+        };
+    }
+
+    /// `get_selection_text(layer?)` -- a request. Returns the selected
+    /// text (empty string when nothing is selected); caller owns it, free
+    /// with this Client's allocator.
+    pub fn getSelectionText(self: *Client, layer: ?core.LayerHandle) ![]u8 {
+        var parsed = try self.request(struct { text: []const u8 }, "get_selection_text", .{ .layer = layer });
+        defer parsed.deinit();
+        return try self.alloc.dupe(u8, parsed.value.result.text);
+    }
+
+    /// `set_clipboard(text)` -- a notification. Replaces the session
+    /// clipboard buffer; glyphwire-host mirrors it to the OS clipboard.
+    pub fn setClipboard(self: *Client, text: []const u8) !void {
+        try self.notify("set_clipboard", .{ .text = text });
+    }
+
+    /// `get_clipboard()` -- a request. Returns the session clipboard
+    /// buffer (see `core.Context.clipboard` for its freshness caveat on
+    /// glyphwire-host); caller owns the result.
+    pub fn getClipboard(self: *Client) ![]u8 {
+        var parsed = try self.request(struct { text: []const u8 }, "get_clipboard", .{});
+        defer parsed.deinit();
+        return try self.alloc.dupe(u8, parsed.value.result.text);
+    }
+
     fn colorToJson(c: ?core.Color) ?protocol.Color {
         const v = c orelse return null;
         return .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a };
@@ -1300,12 +1365,26 @@ pub const TextEvent = struct { text: []const u8 };
 pub const InputEvent = union(enum) {
     key: KeyEvent,
     text: TextEvent,
+    /// One `paste` notification: committed clipboard text to insert
+    /// (`text` owned, freed like `text`). Kept on the same ordered queue
+    /// as `key`/`text` so it lands in the line at the caret position it
+    /// was pasted at. Distinct from `text` so a consumer can treat it
+    /// differently -- glyphwire-shell inserts it literally, newlines and
+    /// all, without submitting.
+    paste: TextEvent,
+    /// One `copy_request` notification: the user pressed the copy
+    /// shortcut with nothing selected. No payload -- the consumer answers
+    /// by calling `Client.setClipboard` with whatever it wants copied
+    /// (glyphwire-shell: the current prompt line).
+    copy_request,
 
     /// Frees the owned string for whichever variant this is.
     pub fn deinit(self: InputEvent, alloc: std.mem.Allocator) void {
         switch (self) {
             .key => |k| alloc.free(k.key),
             .text => |t| alloc.free(t.text),
+            .paste => |t| alloc.free(t.text),
+            .copy_request => {},
         }
     }
 };
@@ -1692,6 +1771,24 @@ pub const InputListener = struct {
             self.last_size = ev;
             try self.resize_events.append(self.alloc, ev);
             self.resize_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "paste")) {
+            const p = try std.json.parseFromValue(protocol.ClipboardTextParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const owned_text = try self.alloc.dupe(u8, p.value.text);
+            errdefer self.alloc.free(owned_text);
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.input_events.append(self.alloc, .{ .paste = .{ .text = owned_text } });
+            self.input_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "copy_request")) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.input_events.append(self.alloc, .copy_request);
+            self.input_sem.post(self.io);
         }
     }
 };

@@ -75,3 +75,36 @@ pub fn resizeNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
         \\{"jsonrpc":"2.0","method":"resize","params":{"cols":80,"rows":24}}
     , body);
 }
+
+pub fn selectionNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const active = try rpc.selectionNotification(alloc, .{
+        .anchor = .{ .above = 2, .col = 0 },
+        .active = .{ .above = -1, .col = 7 },
+    });
+    defer alloc.free(active);
+    try testz.expectEqualStr(
+        \\{"jsonrpc":"2.0","method":"selection","params":{"active":true,"anchor":{"above":2,"col":0},"active_end":{"above":-1,"col":7}}}
+    , active);
+
+    const cleared = try rpc.selectionNotification(alloc, null);
+    defer alloc.free(cleared);
+    try testz.expectEqualStr(
+        \\{"jsonrpc":"2.0","method":"selection","params":{"active":false,"anchor":null,"active_end":null}}
+    , cleared);
+}
+
+pub fn copyRequestAndPasteNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const copy = try rpc.copyRequestNotification(alloc);
+    defer alloc.free(copy);
+    try testz.expectEqualStr(
+        \\{"jsonrpc":"2.0","method":"copy_request","params":{}}
+    , copy);
+
+    const paste = try rpc.pasteNotification(alloc, "pasted text");
+    defer alloc.free(paste);
+    try testz.expectEqualStr(
+        \\{"jsonrpc":"2.0","method":"paste","params":{"text":"pasted text"}}
+    , paste);
+}

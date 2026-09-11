@@ -379,6 +379,15 @@ pub const Subscriptions = struct {
     /// `Server.reportScroll` (mouse wheel / scrollbar) and
     /// `handleScrollView` (another client's browse cursor).
     scroll: bool = false,
+    /// `selection` server->client notifications (`SelectionState`), sent
+    /// when a layer's selection changes -- see `handleSetSelection` and
+    /// `Server.setSelection`.
+    selection: bool = false,
+    /// `copy_request` and `paste` server->client notifications -- the
+    /// clipboard interplay (see decisions.md's Selection & Clipboard
+    /// section). One flag covers both: a client that wants to answer
+    /// copy-with-nothing-selected also wants pasted text.
+    clipboard: bool = false,
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
@@ -386,6 +395,8 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "mouse_button")) return self.mouse_button;
         if (std.mem.eql(u8, event, "resize")) return self.resize;
         if (std.mem.eql(u8, event, "scroll")) return self.scroll;
+        if (std.mem.eql(u8, event, "selection")) return self.selection;
+        if (std.mem.eql(u8, event, "clipboard")) return self.clipboard;
         return false;
     }
 
@@ -397,6 +408,8 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "mouse_button")) s.mouse_button = true;
             if (std.mem.eql(u8, e, "resize")) s.resize = true;
             if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
+            if (std.mem.eql(u8, e, "selection")) s.selection = true;
+            if (std.mem.eql(u8, e, "clipboard")) s.clipboard = true;
         }
         return s;
     }
@@ -584,6 +597,24 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, envelope.method, "table_get_state")) {
             const id = envelope.id orelse return DispatchError.NotARequest;
             return .{ .response = try self.handleTableGetState(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "set_selection")) {
+            return try self.handleSetSelection(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "update_selection")) {
+            return try self.handleUpdateSelection(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "clear_selection")) {
+            return try self.handleClearSelection(alloc, envelope.params);
+        } else if (std.mem.eql(u8, envelope.method, "get_selection")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetSelection(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "get_selection_text")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetSelectionText(alloc, id, envelope.params) };
+        } else if (std.mem.eql(u8, envelope.method, "set_clipboard")) {
+            try self.handleSetClipboard(alloc, envelope.params);
+            return .{};
+        } else if (std.mem.eql(u8, envelope.method, "get_clipboard")) {
+            const id = envelope.id orelse return DispatchError.NotARequest;
+            return .{ .response = try self.handleGetClipboard(alloc, id) };
         } else if (std.mem.eql(u8, envelope.method, "batch")) {
             return try self.handleBatch(alloc, envelope.id, envelope.params);
         }
@@ -1491,5 +1522,86 @@ pub const Dispatcher = struct {
             },
             .revision = table.revision,
         });
+    }
+
+    // ── Selection & clipboard ──────────────────────────────────────────
+
+    fn pointFromWire(p: protocol.SelectionPointWire) core.SelectionPoint {
+        return .{ .above = p.above, .col = p.col };
+    }
+
+    /// Broadcasts the resolved layer's current selection as a `selection`
+    /// notification -- shared tail of `set_selection` / `update_selection`
+    /// / `clear_selection`, so all three fan out the same shape.
+    fn selectionBroadcast(alloc: std.mem.Allocator, layer: *const core.Layer) !HandleResult {
+        const body = try rpc.selectionNotification(alloc, layer.selection);
+        return .{ .broadcast = .{ .event = "selection", .body = body } };
+    }
+
+    fn handleSetSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(protocol.SetSelectionParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
+        layer.setSelection(pointFromWire(parsed.value.anchor), pointFromWire(parsed.value.active));
+        return selectionBroadcast(alloc, layer);
+    }
+
+    fn handleUpdateSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(protocol.UpdateSelectionParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
+        layer.updateSelectionActive(pointFromWire(parsed.value.active));
+        return selectionBroadcast(alloc, layer);
+    }
+
+    fn handleClearSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
+        layer.clearSelection();
+        return selectionBroadcast(alloc, layer);
+    }
+
+    fn handleGetSelection(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
+        const state: protocol.SelectionState = if (layer.selection) |s| .{
+            .active = true,
+            .anchor = .{ .above = s.anchor.above, .col = s.anchor.col },
+            .active_end = .{ .above = s.active.above, .col = s.active.col },
+        } else .{ .active = false };
+        return try rpc.response(alloc, id, state);
+    }
+
+    fn handleGetSelectionText(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const layer = try self.resolveLayer(parsed.value.layer);
+        const text = (try layer.selectionText(alloc)) orelse try alloc.dupe(u8, "");
+        defer alloc.free(text);
+        return try rpc.response(alloc, id, protocol.SelectionTextResult{ .text = text });
+    }
+
+    fn handleSetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(protocol.ClipboardTextParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        try self.ctx.setClipboard(parsed.value.text);
+    }
+
+    fn handleGetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        return try rpc.response(alloc, id, protocol.ClipboardResult{ .text = self.ctx.clipboardText() });
     }
 };

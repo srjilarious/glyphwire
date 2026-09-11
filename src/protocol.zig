@@ -206,3 +206,47 @@ pub const ScrollParams = struct { offset: usize, max: usize };
 
 /// `resize` params: the new host window size, in cells.
 pub const ResizeParams = struct { cols: usize, rows: usize };
+
+// ─── Selection & clipboard ───────────────────────────────────────────────
+
+/// One end of a selection on the wire -- mirrors `core.SelectionPoint`.
+/// `above` is rows above the live viewport's top (positive = scrollback);
+/// `col` is a 0-based cell column. See `core.SelectionPoint`'s doc
+/// comment for why it's content-anchored rather than a screen position.
+pub const SelectionPointWire = struct { above: i64, col: usize };
+
+/// `set_selection` params: both ends explicitly.
+pub const SetSelectionParams = struct {
+    layer: ?core.LayerHandle = null,
+    anchor: SelectionPointWire,
+    active: SelectionPointWire,
+};
+
+/// `update_selection` params: move only the active (dragging) end.
+pub const UpdateSelectionParams = struct {
+    layer: ?core.LayerHandle = null,
+    active: SelectionPointWire,
+};
+
+/// `clear_selection` params / `get_selection` / `get_selection_text`
+/// params -- just the target layer.
+pub const LayerOnlyParams = struct { layer: ?core.LayerHandle = null };
+
+/// `get_selection` result and the `selection` server->client
+/// notification: `active` is false when nothing is selected, in which
+/// case `anchor`/`active_end` are absent.
+pub const SelectionState = struct {
+    active: bool,
+    anchor: ?SelectionPointWire = null,
+    active_end: ?SelectionPointWire = null,
+};
+
+/// `get_selection_text` result.
+pub const SelectionTextResult = struct { text: []const u8 };
+
+/// `set_clipboard` params and the `paste` server->client notification --
+/// both just carry the text.
+pub const ClipboardTextParams = struct { text: []const u8 };
+
+/// `get_clipboard` result.
+pub const ClipboardResult = struct { text: []const u8 };

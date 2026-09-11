@@ -1235,6 +1235,67 @@ updated, `shell/shell.conf.template` documents both):
   calls, bad-entry / negative-timeout rejection, and a segment
   `when = "{var}"` kept as `when_expr`. 374 pass.
 
+## Layer selection + copy / paste
+
+**Done.** Text selection in a layer, Ctrl+Shift+C / Ctrl+Shift+V, and
+Ctrl+Shift+C with nothing selected copying the current prompt. Wire
+change — `docs/api.md` gained a Selection & Clipboard section and three
+server→client notifications; `docs/decisions.md` a Selection & clipboard
+subsection.
+
+- **`core.Layer.selection` (`?Selection`)** — two `SelectionPoint`
+  (`{above: i64, col}`) ends. `above` = rows above the live viewport top,
+  content-anchored: `scrollOne` bumps both ends by one (pin to content as
+  output scrolls), an end past retained history drops the whole
+  selection, `resize` drops it. `setSelection` / `updateSelectionActive`
+  / `clearSelection` mutate it; `selectionColRange(above)` (renderer, per
+  row) and `selectionText(alloc)` (extraction: interior rows whole,
+  first/last clipped to start/end col, trailing blanks trimmed,
+  `wide_spacer` skipped, rows joined `\n`, `""` for a zero-width
+  selection) read it.
+- **`core.Context.clipboard` (`std.ArrayList(u8)`) + `clipboard_serial`**
+  — one session buffer. `setClipboard` replaces + bumps the serial;
+  `clipboardText` borrows it.
+- **Wire:** `set_selection` / `update_selection` / `clear_selection`
+  (notifications, broadcast `selection`), `get_selection` /
+  `get_selection_text` (requests), `set_clipboard` (notification) /
+  `get_clipboard` (request). `Subscriptions` gained `selection` and
+  `clipboard` (the latter covers `copy_request` + `paste`).
+  `rpc.selectionNotification` / `copyRequestNotification` /
+  `pasteNotification`. `Server` in-process helpers: `setSelection` /
+  `clearSelection` / `selectionText` / `setClipboard` / `requestCopy` /
+  `broadcastPaste` / `clipboardSerial` / `clipboardText`.
+- **`src/client.zig`:** `setSelection` / `updateSelection` /
+  `clearSelection` / `getSelection` / `getSelectionText` / `setClipboard`
+  / `getClipboard`. `InputEvent` gained `.paste` (owned text, inserted
+  literally by the shell without submitting) and `.copy_request` (the
+  shell answers with `set_clipboard prompt.buffer.items`), both on the
+  same ordered queue as `key`/`text`. `InputListener.handleNotification`
+  parses `paste` / `copy_request`.
+- **`shell/main.zig`:** subscribes `"clipboard"`; the runPrompt loop
+  handles `.paste` (insert like `.text`, newlines kept) and
+  `.copy_request` (reply `client.setClipboard(prompt.buffer.items)`); the
+  pty-passthrough loop feeds `.paste` straight to the child.
+- **`host/main.zig`:** `handleSelectionKeys` (Ctrl+Shift+C/V/Space, plus
+  select-mode arrows / Home / End / Escape / Enter), `handleMouseSelection`
+  (left drag → selection, plain click → synthetic press+release so the
+  shell's `activateSelectionAt` still fires), `syncClipboardToOs` (push
+  `ctx.clipboard` to the OS on serial change, main-thread GLFW),
+  `selectionSwallows` (holds the shortcut/motion keys back from
+  `reportKeyEvents`), a translucent highlight drawn in `renderLayer`'s
+  `color_bg` pass. `select_mode` also short-circuits `handleRepeatKeys`.
+- **Not visually verified** — the highlight, keyboard select mode, mouse
+  drag, and OS-clipboard round trip need a `zig build host` eyeball
+  (flagged to the user; per `feedback_no_screenshots` don't screenshot).
+- **Tests:** `core_tests.zig` +8 (`selectionText` span / order / empty,
+  `selectionColRange` clipping, scroll-pin + eviction, resize clear,
+  clipboard buffer), `dispatch_tests.zig` +4 (`set_selection` →
+  `get_selection_text`, `clear_selection` inactive broadcast,
+  `set_clipboard` → `get_clipboard`, subscribe accepts the new events),
+  `rpc_tests.zig` +2 (`selection` / `copy_request` / `paste` shapes),
+  `client_tests.zig` +1 (selection + clipboard round trip over a
+  socket). 388 pass.
+
 ## Further out (sequencing noted, not detailed yet)
 
 - **Explicit `write_text` positioning.** `demo/main.zig` and

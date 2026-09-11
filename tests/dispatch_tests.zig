@@ -1433,3 +1433,104 @@ pub fn batchRequestFormWithOnlyNotificationsReturnsEmptyResponsesTest(io: std.Io
     try testz.expectEqual(parsed.value.id, 3);
     try testz.expectEqual(parsed.value.result.responses.len, 0);
 }
+
+// ─── selection & clipboard ─────────────────────────────────────────────
+
+/// `set_selection` applies the selection and broadcasts a `selection`
+/// notification; `get_selection_text` then returns the selected text.
+pub fn setSelectionAppliesAndGetSelectionTextReturnsItTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try testz.expectTrue((try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hello world"}}
+    )).response == null);
+
+    const set_result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_selection","params":{"anchor":{"above":0,"col":0},"active":{"above":0,"col":5}}}
+    );
+    const broadcast = set_result.broadcast.?;
+    defer alloc.free(broadcast.body);
+    try testz.expectEqualStr("selection", broadcast.event);
+    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "\"active\":true") != null);
+
+    const Response = struct { jsonrpc: []const u8, id: u32, result: struct { text: []const u8 } };
+    const text_body = (try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":7,"method":"get_selection_text","params":{}}
+    )).response.?;
+    defer alloc.free(text_body);
+    const parsed = try std.json.parseFromSlice(Response, alloc, text_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectEqualStr("hello", parsed.value.result.text);
+}
+
+/// `clear_selection` broadcasts an inactive `selection` and
+/// `get_selection` then reports nothing selected.
+pub fn clearSelectionBroadcastsInactiveTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const set_result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_selection","params":{"anchor":{"above":0,"col":0},"active":{"above":0,"col":3}}}
+    );
+    if (set_result.broadcast) |b| alloc.free(b.body);
+    const clear_result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"clear_selection","params":{}}
+    );
+    const broadcast = clear_result.broadcast.?;
+    defer alloc.free(broadcast.body);
+    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "\"active\":false") != null);
+
+    const Response = struct { jsonrpc: []const u8, id: u32, result: struct { active: bool } };
+    const body = (try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"get_selection","params":{}}
+    )).response.?;
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(Response, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectTrue(!parsed.value.result.active);
+}
+
+/// `set_clipboard` stores the text on the context; `get_clipboard`
+/// returns it.
+pub fn setClipboardThenGetClipboardRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try testz.expectTrue((try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_clipboard","params":{"text":"clip me"}}
+    )).response == null);
+    try testz.expectEqualStr("clip me", ctx.clipboardText());
+    try testz.expectEqual(ctx.clipboard_serial, 1);
+
+    const Response = struct { jsonrpc: []const u8, id: u32, result: struct { text: []const u8 } };
+    const body = (try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":9,"method":"get_clipboard","params":{}}
+    )).response.?;
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(Response, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectEqualStr("clip me", parsed.value.result.text);
+}
+
+/// A connection can subscribe to the new `selection` and `clipboard`
+/// event streams.
+pub fn subscribeAcceptsSelectionAndClipboardTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const ack = (try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["selection","clipboard"]}}
+    )).response.?;
+    alloc.free(ack);
+    try testz.expectTrue(d.subscriptions.selection);
+    try testz.expectTrue(d.subscriptions.clipboard);
+}
