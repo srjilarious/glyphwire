@@ -3295,6 +3295,33 @@ entirely in `core.zig`, no wire/host change:
   was a narrowly targeted fix for the specific htop symptom, not a step
   toward a full VT model.
 
+**Decision (`pty_mode` layer property — opt-in cross-call VT state):** the
+call-scoped reset above (`esc_state` / `pen` / charset back to ground at
+every `writeText` boundary) is correct for `glyphwire-shell`'s *root*
+layer, which interleaves the shell's own prompt/echo writes with a
+mirrored program's output — an un-closed sequence there must not eat the
+next prompt. But it is wrong for a layer that carries **one** program's
+byte stream with nothing else written to it: a `CSI` that a pty
+`read()` happened to split across two chunks then has its tail drawn as
+literal text (the escape garbage seen scrolling fast through `bat` /
+`git log`), and a colour set in one `write()` is lost by the next.
+`gmux` (one pty per pane layer) hits this constantly.
+
+Added a per-layer opt-in rather than a mode on the connection or a
+guess from the byte pattern: `set_property(layer, "pty_mode", {enabled})`
+(`core.Layer.pty_mode`, `PropertyName.pty_mode`). When set, `writeText`
+skips both resets — the machine stays armed across calls and the pen
+persists — giving terminal semantics. Setting the property (to **either**
+value) also clears `esc_state` / `csi_len` / `shift_out` / `g0`/`g1` /
+`pen`, so a client re-sends it after a foreground program exits as a
+clean re-arm (nothing that program left half-open bleeds into the next).
+No new message — it rides `set_property` / `get_property` like every
+other layer property. Consumers: `gmux` sets it on every pane at
+creation; `glyphwire-shell` sets it on the root layer around each
+foreground command and re-sends it on child reap. **Tests:**
+`core_tests.zig` +2 (partial CSI carries, colour persists + re-arm
+clears), `dispatch_tests.zig` +1 (wire round-trip).
+
 **Decision (function keys in `key_encode.toPtyBytes`):** `F1`-`F12`
 never reached a pty child at all — `toPtyBytes`'s `named` table had no
 entry for them, so htop's `F10` (quit) was silently swallowed. Added the

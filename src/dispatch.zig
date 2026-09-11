@@ -133,6 +133,9 @@ const PropertyParams = struct {
     visible: bool = true,
     vertical: bool = false,
     horizontal: bool = false,
+    /// `"pty_mode"`'s bool -- kept off `visible` so a client setting one
+    /// property doesn't have to think about the other's default.
+    enabled: bool = false,
 };
 
 const CursorResult = struct { row: usize, col: usize };
@@ -142,6 +145,7 @@ const CellPositionResult = struct { row: usize, col: usize };
 const SizeResult = struct { cols: usize, rows: usize };
 const ScrollResult = struct { offset: usize, max: usize };
 const VisibilityResult = struct { visible: bool };
+const PtyModeResult = struct { enabled: bool };
 const ScrollOffsetResult = struct { row: usize, col: usize, max_row: usize, max_col: usize };
 const ScrollbarsResult = struct {
     vertical: bool,
@@ -1249,6 +1253,8 @@ pub const Dispatcher = struct {
             } }
         else if (std.mem.eql(u8, p.property, "content_extent"))
             .{ .content_extent = .{ .cols = p.cols, .rows = p.rows } }
+        else if (std.mem.eql(u8, p.property, "pty_mode"))
+            .{ .pty_mode = p.enabled }
         else
             return DispatchError.UnknownProperty;
 
@@ -1350,6 +1356,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "scroll")) {
             const sc = layer.getProperty(.scroll).scroll;
             return try rpc.response(alloc, id, ScrollResult{ .offset = sc.offset, .max = sc.max });
+        } else if (std.mem.eql(u8, p.property, "pty_mode")) {
+            const on = layer.getProperty(.pty_mode).pty_mode;
+            return try rpc.response(alloc, id, PtyModeResult{ .enabled = on });
         }
         return DispatchError.UnknownProperty;
     }

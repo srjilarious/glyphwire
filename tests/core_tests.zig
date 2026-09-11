@@ -1646,6 +1646,48 @@ pub fn writeTextSgrColourDoesNotCarryAcrossCallsTest(io: std.Io, alloc: std.mem.
     try testz.expectEqual(layer.cell(1, 0).style.fg.b, glyphwire.default_style.fg.b);
 }
 
+pub fn layerPtyModeCarriesPartialCsiAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    // The default-mode trade (`writeTextDoesNotCarryPartialEscSequence...`)
+    // draws "2mX" literally when a CSI is split across two writes. A
+    // `pty_mode` layer keeps the machine armed: "\x1b[1" leaves it
+    // mid-CSI, "2mX" finishes `ESC [ 1 2 m` (SGR) and only "X" prints.
+    try layer.writeText("\x1b[1", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.esc_state, glyphwire.EscState.csi);
+    try layer.writeText("2mX", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqualStr("X", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cursor.col, 1);
+    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+}
+
+pub fn layerPtyModeKeepsSgrColourAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    // A colour set in one chunk stays in effect for the next -- a program
+    // that emits `ESC [ 31 m` then its text in separate `write()`s still
+    // comes out red, where a default-mode layer would reset the pen
+    // between the two.
+    try layer.writeText("\x1b[31m", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("still-red", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(1, 0).style.fg.r, 205);
+
+    // Re-setting the property is the "program exited" re-arm: it drops
+    // the lingering pen, so the following write is back to the default.
+    layer.setProperty(.{ .pty_mode = true });
+    layer.cursor = .{ .row = 2, .col = 0 };
+    try layer.writeText("plain", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(2, 0).style.fg.r, glyphwire.default_style.fg.r);
+}
+
 // --- CSI cursor / erase interpretation --------------------------------------
 
 pub fn writeTextInterpretsCsiEraseInLineTest(io: std.Io, alloc: std.mem.Allocator) !void {

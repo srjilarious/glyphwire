@@ -768,6 +768,25 @@ pub const Client = struct {
         try self.notify("set_property", .{ .layer = layer, .property = "content_extent", .cols = cols, .rows = rows });
     }
 
+    /// `set_property(layer, "pty_mode", {enabled})` -- a notification.
+    /// Turns on cross-`write_text`-call persistence of the layer's
+    /// escape-sequence / charset / SGR-pen state, so a sequence a PTY
+    /// child split across two chunks still parses as one and a colour
+    /// stays set until the program resets it (see `core.Layer.pty_mode`).
+    /// Sending it -- with either value -- also clears that transient
+    /// state, so a client re-sends `true` after a foreground program
+    /// exits to drop anything it left half-open.
+    pub fn setLayerPtyMode(self: *Client, layer: core.LayerHandle, enabled: bool) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "pty_mode", .enabled = enabled });
+    }
+
+    /// `get_property(layer?, "pty_mode")`.
+    pub fn getLayerPtyMode(self: *Client, layer: ?core.LayerHandle) !bool {
+        var parsed = try self.request(struct { enabled: bool }, "get_property", .{ .layer = layer, .property = "pty_mode" });
+        defer parsed.deinit();
+        return parsed.value.result.enabled;
+    }
+
     /// `set_property(layer, "scrollbars", {vertical, horizontal})` -- a
     /// notification. Opt in per axis; the host draws the bars inside the
     /// layer's own bounds and drives `scroll_offset` from them.

@@ -907,6 +907,14 @@ pub const PropertyName = enum {
     /// host-scrolled pane. Get reports the effective content size (the
     /// virtual one if set, else the real grid).
     content_extent,
+    /// Whether this layer keeps its escape-sequence / charset / SGR-pen
+    /// state across `write_text` calls instead of resetting it at each
+    /// call boundary (`{enabled: bool}`, default off). See
+    /// `Layer.pty_mode`: a pane fed one PTY child's byte stream wants it
+    /// on so a sequence split across `read()` chunks still parses as one.
+    /// Setting it -- to either value -- also clears that transient state,
+    /// so it doubles as the "a foreground program just exited" re-arm.
+    pty_mode,
 };
 
 pub const PropertyValue = union(PropertyName) {
@@ -921,6 +929,7 @@ pub const PropertyValue = union(PropertyName) {
     scroll_offset: CellPos,
     scrollbars: ScrollbarState,
     content_extent: Viewport,
+    pty_mode: bool,
 };
 
 pub const PropertyError = error{
@@ -1110,6 +1119,31 @@ pub const Layer = struct {
     /// (`consumeControl` -> `stepEscape` -> `execCsi`) needs somewhere to
     /// accumulate it mid-call.
     pen: SgrPen = .{},
+    /// When set, the escape-sequence machine (`esc_state` / `csi_buf` /
+    /// `csi_len`), the alternate-charset designation (`shift_out` /
+    /// `g0_line_drawing` / `g1_line_drawing`) and the SGR `pen` are **kept
+    /// across `writeText` calls** instead of being reset at the call
+    /// boundary -- see `EscState`'s "nothing carries across calls" note
+    /// for the default behaviour and why it exists.
+    ///
+    /// A layer fed one contiguous byte stream from a single PTY child --
+    /// `gmux`'s panes, and `glyphwire-shell`'s root layer while a
+    /// foreground program holds it -- wants real terminal semantics
+    /// instead: a `CSI` sequence a `read()` split across two chunks must
+    /// still parse as one, and an `ESC [ 31 m` stays in effect until the
+    /// program itself resets it. The call-scoped reset turns both of
+    /// those into "draw the tail as literal text" / "lose the colour",
+    /// which is the escape-garbage seen scrolling fast through `bat` or
+    /// `git log`.
+    ///
+    /// Off by default: the shell's prompt/echo path interleaves its own
+    /// writes with a mirrored program's on the same layer, and there the
+    /// call-scoped guard is what stops an interrupted colour or a
+    /// half-open `ESC ] ...` from poisoning the prompt. Set (or re-set)
+    /// via `set_property "pty_mode"`, which also clears the transient
+    /// state above -- a clean re-arm point for when a foreground program
+    /// exits.
+    pty_mode: bool = false,
     /// --- B1 screen model (see `execCsi` / decisions.md's VT fallback) ---
     /// Alternate-screen buffer (xterm `?1049` / `?47` / `?1047`): a
     /// lazily-allocated `width * height` cell array, row-major, with **no
@@ -1828,7 +1862,10 @@ pub const Layer = struct {
         // fg, so a colour a mirrored program left un-reset (a `cat`'d
         // file with raw escapes, an interrupted program) would poison the
         // prompt and everything after it. See `EscState` / `Layer.pen`.
-        self.pen = .{};
+        // A `pty_mode` layer opts out: it carries one program's byte
+        // stream and wants the colour to persist until that program
+        // resets it.
+        if (!self.pty_mode) self.pen = .{};
 
         const view = try std.unicode.Utf8View.init(text);
         var it = view.iterator();
@@ -1853,12 +1890,16 @@ pub const Layer = struct {
         // unterminated `ESC ] ...` (OSC) would otherwise leave the
         // machine armed and eat the start of whatever is written next
         // (glyphwire-shell's prompt, the following command's output).
-        // See `EscState`.
-        self.esc_state = .ground;
-        self.csi_len = 0;
-        self.shift_out = false;
-        self.g0_line_drawing = false;
-        self.g1_line_drawing = false;
+        // See `EscState`. A `pty_mode` layer keeps the machine armed: a
+        // sequence its PTY child split across two chunks finishes parsing
+        // on the next call rather than drawing its tail as literal text.
+        if (!self.pty_mode) {
+            self.esc_state = .ground;
+            self.csi_len = 0;
+            self.shift_out = false;
+            self.g0_line_drawing = false;
+            self.g1_line_drawing = false;
+        }
         self.revision += 1;
         self.render_gen +%= 1;
     }
@@ -2790,6 +2831,7 @@ pub const Layer = struct {
                 const c = self.effectiveContent();
                 break :blk .{ .cols = c.col, .rows = c.row };
             } },
+            .pty_mode => .{ .pty_mode = self.pty_mode },
         };
     }
 
@@ -2818,6 +2860,19 @@ pub const Layer = struct {
             .content_extent => |v| self.setContentExtent(
                 if (v.cols == 0 and v.rows == 0) null else .{ .row = v.rows, .col = v.cols },
             ),
+            .pty_mode => |v| {
+                self.pty_mode = v;
+                // Setting it either way is also the re-arm point: drop
+                // any half-parsed sequence and any lingering colour so a
+                // program that exited mid-escape can't bleed into what
+                // the next one draws. See `Layer.pty_mode`.
+                self.esc_state = .ground;
+                self.csi_len = 0;
+                self.shift_out = false;
+                self.g0_line_drawing = false;
+                self.g1_line_drawing = false;
+                self.pen = .{};
+            },
         }
         // `.position` moves where the layer composites; `.cursor` can scroll
         // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
@@ -4495,7 +4550,7 @@ pub const Context = struct {
                 layer.touchRender();
             },
             .revision, .scroll => return PropertyError.ReadOnlyProperty,
-            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .content_extent => layer.setProperty(value),
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .content_extent, .pty_mode => layer.setProperty(value),
         }
     }
 

@@ -1922,6 +1922,35 @@ pub fn visibilityPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectFalse(parsed.value.result.visible);
 }
 
+pub fn ptyModePropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const pane = try ctx.createLayer(20, 20, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"pty_mode","enabled":true}}
+    );
+    try testz.expectTrue(ctx.layerPtr(pane).?.pty_mode);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":8,"method":"get_property","params":{"layer":1,"property":"pty_mode"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+
+    const Response = struct { id: i64, result: struct { enabled: bool } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.id, 8);
+    try testz.expectTrue(parsed.value.result.enabled);
+}
+
 pub fn cellPositionPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
