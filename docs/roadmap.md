@@ -2676,10 +2676,47 @@ entry for the full design rationale; this is the implementation log.
   clobber each other's persisted state. Same rough tradeoff multiple
   `bash` instances sharing `.bash_history` already have; tracked as a
   follow-up.
-- **Next step (separate worktree):** `gmux` itself needs to default its
-  spawned command to `gw-shell` and set `GLYPHWIRE_LAYER` to the pane's
-  layer handle when it does -- not done in this branch, which is scoped
-  to the `gw-shell`/`Client` half only.
+- **Follow-up:** embedding a whole *program* in someone else's pane needs
+  more than a layer handle -- see the multiplexer groundwork below and
+  `docs/investigations/context-panes.md`.
+
+## Multiplexer groundwork: `pty_mode`, `set_caret_layer`, per-layer scroll
+
+Three small, independently useful additions, originally staged as the
+first step of a layer-per-pane `gmux`. That multiplexer design was
+abandoned (see `docs/investigations/context-panes.md`) but none of these
+three were part of what was wrong with it: each is an ordinary layer or
+context property, useful to any client.
+
+- **`pty_mode` layer property** (`core.Layer.pty_mode`, `set_property`/
+  `get_property`) — a layer can opt in to keeping its escape-sequence
+  machine, alternate-charset state and SGR pen across `write_text` calls
+  instead of resetting them at the call boundary. Fixes the escape-code
+  garbage a fast-scrolling `bat` / `git log` could leave when a `CSI`
+  sequence was split across two PTY reads. Needed wherever a PTY feeds a
+  grid. Tests: `core_tests.zig` +2, `dispatch_tests.zig` +1.
+- **`set_caret_layer` context notification** — points glyphwire-host's
+  caret at a `create_layer` layer instead of the root cursor, positioned
+  through that layer's pane bounds/viewport/scroll offset and sharing the
+  blink clock. How a multi-pane client points the real caret at its
+  focused pane instead of drawing its own. Tests: `dispatch_tests.zig` +2.
+- **Per-layer scrollback ring + `Server.reportLayerScroll`** — a layer
+  created with `scrollback_rows > 0` now has its own ring the host mouse
+  wheel scrolls (`Layer.hasScrollback`, `panes.PaneHit.scrolls_viewport`
+  picking between this and the existing `reportScrollOffset` path).
+  `scroll`'s wire shape (`ScrollParams`/`ScrollEvent`) gained an optional
+  `layer` so a subscriber can tell whose ring moved. Tests:
+  `server_tests.zig` +2, `dispatch_tests.zig` +1.
+- **`glyphwire-shell` adopts `pty_mode` too** (separate commit, so it can
+  be reverted on its own if it regresses the prompt-colour guard):
+  `runCommand` turns it on for the root layer right after a foreground
+  child's pty spawns, and back off (which also clears the transient
+  state -- the re-arm) once the child is reaped and joined, before the
+  post-run `?1049l`/`!p` reset write and the next prompt redraw. Fixes
+  the escape-garbage `bat` / `git log` could leave scrolling fast. No test
+  added directly (`runCommand` needs a real spawned process; covered
+  indirectly by the existing shell e2e suite) -- the property's own
+  behaviour is covered by `core_tests.zig`.
 
 ## Open questions to settle before writing code
 

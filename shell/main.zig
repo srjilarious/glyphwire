@@ -3527,6 +3527,16 @@ const Prompt = struct {
         };
         defer pty.deinit();
 
+        // A foreground child's output is the only thing this layer draws
+        // for the rest of `runCommand` -- turn on cross-call VT state
+        // (`core.Layer.pty_mode`) so a `CSI`/OSC sequence split across two
+        // master reads still parses as one and a colour it sets stays set
+        // until it resets it, instead of the shell's usual call-scoped
+        // reset (which exists for exactly the opposite reason: interleaved
+        // prompt/echo writes on this same layer). Best-effort -- a failure
+        // here just means this run keeps the old call-scoped behaviour.
+        self.client.setLayerPtyMode(glyphwire.root_layer_handle, true) catch {};
+
         // Record the run's outcome for the next prompt's `{exit}` / `{dur}`.
         // Runs before `pty.deinit` (defers are LIFO) so `pty` is still
         // valid; `pty.exit_code` is set by whichever of `reaped`/`wait`
@@ -3667,6 +3677,13 @@ const Prompt = struct {
         // Child reaped -> its slave is closed -> the reader's next master
         // read returns EOF/EIO and the thread exits on its own.
         reader.join();
+
+        // Back to the shell's own prompt/echo writes on this layer --
+        // restore the call-scoped reset (setting the property either way
+        // also clears whatever the child left half-open or un-reset, the
+        // re-arm `core.Layer.pty_mode`'s doc comment describes) before the
+        // reset write below and the next prompt redraw.
+        self.client.setLayerPtyMode(glyphwire.root_layer_handle, false) catch {};
 
         // Undo the screen state a program that died without cleaning up
         // could leave behind: `?1049l` exits the alt screen, then `! p`
