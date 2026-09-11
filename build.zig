@@ -399,6 +399,28 @@ pub fn build(b: *std.Build) void {
     const notify_step = b.step("notify", "Run the glyphwire notification client (glyphwire-notify <message>)");
     notify_step.dependOn(&run_notify.step);
 
+    // `gw-agent` -- the remote endpoint of `glyphwire --ssh <dest>`. Runs
+    // on the far host over ssh (`--stdio`), and doubles as the
+    // `SSH_ASKPASS` helper (`--askpass`). Installed alongside the shell
+    // tools; the remote box is expected to have it on PATH.
+    const agent_exe = b.addExecutable(.{
+        .name = "gw-agent",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("agent/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    agent_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    b.installArtifact(agent_exe);
+
+    const run_agent = b.addRunArtifact(agent_exe);
+    run_agent.step.dependOn(b.getInstallStep());
+    run_agent.addPassthruArgs();
+
+    const agent_step = b.step("gw-agent", "Run the glyphwire remote-session agent (gw-agent --stdio)");
+    agent_step.dependOn(&run_agent.step);
+
     // `zig build package` installs just the user-facing programs and
     // bundled assets that ship in the Linux release tarball -- glyphwire,
     // gw-shell, notify, demo, gw-view, gw-ls, zoe, the bundled
@@ -407,7 +429,7 @@ pub fn build(b: *std.Build) void {
     // pulls in. The CI packaging job
     // (.github/workflows/linux-package.yml) drives this step.
     const package_step = b.step("package", "Install the shipped programs and assets into zig-out");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, ls_exe, zoe_exe }) |exe| {
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, ls_exe, zoe_exe, agent_exe }) |exe| {
         package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     package_step.dependOn(&installed_assets_step.step);
@@ -415,8 +437,8 @@ pub fn build(b: *std.Build) void {
     // runtime, so the packaged tree has to carry them alongside the binary.
     package_step.dependOn(grammars_step);
 
-    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-view, gw-ls, zoe, grammars, and assets under the selected prefix");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, view_exe, ls_exe, zoe_exe }) |exe| {
+    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-agent, gw-view, gw-ls, zoe, grammars, and assets under the selected prefix");
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, agent_exe, view_exe, ls_exe, zoe_exe }) |exe| {
         install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     install_local_step.dependOn(&installed_assets_step.step);

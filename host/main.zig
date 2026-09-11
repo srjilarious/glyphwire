@@ -8,6 +8,7 @@ const config_load = @import("config_load.zig");
 const geometry = @import("geometry.zig");
 const icons = @import("icons.zig");
 const system_font = @import("system_font.zig");
+const remote_mod = @import("remote.zig");
 
 pub const panic = host_eng.system.panic;
 pub const std_options = host_eng.system.std_options;
@@ -36,6 +37,24 @@ fn reapChild(io: std.Io, child_in: std.process.Child, shell_exited: *std.atomic.
     var child = child_in;
     _ = child.wait(io) catch {};
     shell_exited.store(true, .monotonic);
+}
+
+/// Thread body for `--ssh`: brings up the remote session (see
+/// `host/remote.zig`). `Remote.start` blocks through the ssh auth
+/// handshake and, on any failure, has already flagged `session_exited`
+/// (aliased to the window loop's quit flag), so this just logs.
+fn startRemote(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    srv: *glyphwire.server.Server,
+    session_exited: *std.atomic.Value(bool),
+    environ_map: *const std.process.Environ.Map,
+    opts: remote_mod.Options,
+) void {
+    _ = remote_mod.Remote.start(alloc, io, srv, session_exited, environ_map, opts) catch |err| {
+        std.log.err("glyphwire: remote session failed to start: {t}", .{err});
+        session_exited.store(true, .monotonic);
+    };
 }
 
 /// Runs `Server.serveForever` for the lifetime of the process, on its own
@@ -203,8 +222,16 @@ pub fn main(init: std.process.Init) !void {
     //                                overriding host.conf's grid_cols / grid_rows
     //                                (handy for a screenshot whose output is
     //                                taller/wider than the default 120x50)
+    //   --ssh <dest>                 run the shell on <dest> over ssh (see host/remote.zig)
+    //                                instead of spawning a local gw-shell
+    //   --remote-command <cmd>       the agent command run on the far side (default: gw-agent)
+    //   --                           everything after this is passed straight to ssh
+    //                                (before the destination), e.g. -p 2222 / -J jump
     var screenshot_path: ?[]const u8 = null;
     var screenshot_delay_ms: f64 = 2500;
+    var ssh_dest: ?[]const u8 = null;
+    var remote_command: []const u8 = "gw-agent";
+    var ssh_extra: std.ArrayList([]const u8) = .empty;
     var forwarded: std.ArrayList([]const u8) = .empty;
     {
         var i: usize = 1;
@@ -222,6 +249,15 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, a, "--grid-rows") and i + 1 < args.len) {
                 i += 1;
                 geometry.grid_rows = @max(geometry.min_grid_rows, std.fmt.parseInt(usize, args[i], 10) catch geometry.grid_rows);
+            } else if (std.mem.eql(u8, a, "--ssh") and i + 1 < args.len) {
+                i += 1;
+                ssh_dest = args[i];
+            } else if (std.mem.eql(u8, a, "--remote-command") and i + 1 < args.len) {
+                i += 1;
+                remote_command = args[i];
+            } else if (std.mem.eql(u8, a, "--")) {
+                try ssh_extra.appendSlice(arena, args[i + 1 ..]);
+                break;
             } else {
                 try forwarded.append(arena, a);
             }
@@ -304,20 +340,40 @@ pub fn main(init: std.process.Init) !void {
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
-    var shell_env = try init.environ_map.clone(arena);
-    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
-    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
-
-    const shell_path = try resolveSibling(arena, io, init.environ_map, "gw-shell");
-    const shell_argv = try std.mem.concat(arena, []const u8, &.{ &.{shell_path}, shell_child_argv });
-
-    // Left false (no other way to quit) if the spawn itself fails --
-    // an edge case not worth a fallback keybinding for.
+    // Set false only if the local shell spawn fails and there's no `--ssh`
+    // remote to end the session either -- an edge case not worth a
+    // fallback keybinding for.
     var shell_exited: std.atomic.Value(bool) = .init(false);
-    if (std.process.spawn(io, .{ .argv = shell_argv, .environ_map = &shell_env })) |shell_child| {
-        _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child, &shell_exited });
-    } else |err| {
-        std.log.err("failed to spawn gw-shell: {t}", .{err});
+
+    if (ssh_dest) |dest| {
+        // `--ssh`: no local gw-shell. The remote agent's clients drive
+        // this same `Context` over an ssh trunk instead. `Remote.start`
+        // blocks through the ssh auth handshake, so it runs on its own
+        // thread while the window loop below comes up to render the
+        // auth-prompt UI. `shell_exited` doubles as the "ssh exited" flag.
+        const agent_path = try resolveSibling(arena, io, init.environ_map, "gw-agent");
+        const remote_opts = remote_mod.Options{
+            .dest = dest,
+            .remote_command = remote_command,
+            .ssh_args = ssh_extra.items,
+            .agent_path = agent_path,
+            .host_sock = socket_path,
+            .ctx_id = glyphwire.default_context_id,
+        };
+        _ = try std.Thread.spawn(.{}, startRemote, .{ alloc, io, &srv, &shell_exited, init.environ_map, remote_opts });
+    } else {
+        var shell_env = try init.environ_map.clone(arena);
+        try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+        try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+
+        const shell_path = try resolveSibling(arena, io, init.environ_map, "gw-shell");
+        const shell_argv = try std.mem.concat(arena, []const u8, &.{ &.{shell_path}, shell_child_argv });
+
+        if (std.process.spawn(io, .{ .argv = shell_argv, .environ_map = &shell_env })) |shell_child| {
+            _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child, &shell_exited });
+        } else |err| {
+            std.log.err("failed to spawn gw-shell: {t}", .{err});
+        }
     }
 
     // Font atlas packing (unlike the metrics measured above) does need a GL

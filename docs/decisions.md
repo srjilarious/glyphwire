@@ -128,6 +128,83 @@ final.
   subscribed client legitimately waits arbitrarily long for the next
   event.
 
+### Remote sessions (`glyphwire --ssh <dest>`)
+
+- **Goal:** run the host (window, renderer, `Context`, `Server`) locally
+  while the shell — and the `gw-ls` / `gw-view` / `zoe` it launches — run
+  on a remote box, over one `ssh` connection, so the image viewing and
+  the rest work against remote files. Phase 1: `--ssh` replaces the local
+  `gw-shell` for that window; no drop-survival, no `mosh`-style UDP.
+
+- **The socket boundary moves onto the network unchanged.** The host
+  already is a `Server` its clients dial; a remote client just reaches it
+  over `ssh` instead of a Unix socket. `ssh` *is* the entire network —
+  glyphwire has no transport code of its own, only a byte-stream fd. Auth,
+  host keys, `~/.ssh/config`, `ProxyJump`, multiplexing all stay `ssh`'s
+  job; a `libssh2`/`russh` embed was rejected as a large permanent
+  maintenance load for a dev tool.
+
+- **`ssh -T <dest> -- gw-agent --stdio`.** The child's stdin/stdout is the
+  *trunk*. `gw-agent` (new binary, installed with the shell tools; the
+  remote box is expected to have it, like `sshd`) opens a normal
+  `GLYPHWIRE_SOCK` on the far side, spawns the remote `gw-shell`, and
+  bridges every client that dials that socket onto its own *mux channel*
+  on the trunk. The host's demux turns each channel back into a
+  `Server.servePreconnected` connection. `gw-agent` never parses the
+  glyphwire protocol; it shuttles bytes, so the JSON-RPC + `Content-Length`
+  framing and the `load_image` side-channel ride each channel verbatim,
+  end to end.
+
+- **Why a mux, not one `ssh` channel per client:** the shell, its
+  sub-programs, and each program's `InputListener` are several concurrent
+  socket connections, and opening an `ssh` channel per connection means
+  managing N `ssh` processes / `ControlMaster` state. One trunk carrying
+  tagged substreams keeps it to a single connection and mirrors the
+  existing multi-connection `Server` model, with the mux crossing the
+  wire.
+
+- **Mux frame format** (see `src/mux.zig`), same house style as the
+  `Content-Length` framing so the trunk stays `hexdump`-legible:
+
+      GW-Mux: <kind> <channel> <len>\r\n\r\n<payload>
+
+  `kind` ∈ `hello` (agent → host once at startup, so "agent is up" is
+  distinguishable from "`ssh` printed an error to stdout"), `open` /
+  `close` (channel lifecycle, agent-originated ids), `data` (a chunk of
+  that channel's byte substream, ≤ 16 KiB; larger writes span consecutive
+  `data` frames — it is a stream, so the receiver just concatenates). A
+  binary length-prefixed mux was rejected to keep the trunk debuggable;
+  the payload itself is opaque bytes, not required to be JSON.
+
+- **The one server-side refactor is `ConnStream`** (`src/conn_stream.zig`):
+  a `union(enum){ net: std.Io.net.Stream, channel: *mux.Channel }` that
+  `Server.serveConnection` and `wire.readRaw` are written against.
+  `Client` / `InputListener` are untouched — a remote client speaks to the
+  agent's local socket exactly as if the host were local.
+
+- **`ssh` auth prompts surface in the window.** `BatchMode` is *not*
+  forced. The host points `SSH_ASKPASS` at `gw-agent` (its `--askpass`
+  mode, selected when `GLYPHWIRE_ASKPASS_SOCK` is set), `SSH_ASKPASS_REQUIRE=force`,
+  and hands it a Unix socket. Each relayed prompt is drawn onto the grid
+  by a tiny in-process client that dials the host's *own* socket
+  (reusing the whole `Client` + `InputListener` + render path rather than
+  new host-side UI code); the typed line is sent back over the same
+  socket. Input is masked when the prompt mentions "password" /
+  "passphrase". Older OpenSSH that reads host-key confirmation from
+  `/dev/tty` rather than `SSH_ASKPASS` is a known phase-1 gap — set
+  `StrictHostKeyChecking=accept-new` for those.
+
+- **Ending the session:** `ssh` exiting flips the same quit flag a local
+  `gw-shell` exiting would; the trunk closing fails every live channel so
+  its `serveConnection` returns. No resync / reconnect in phase 1.
+
+- **Deferred:** auto-upload of a static `gw-agent`, `ControlPersist`
+  tuning, reconnect + full-grid resync, detached persistent remote
+  sessions, image bandwidth adaptation, `host.conf` named remotes, and
+  several local + remote contexts live in one window (the `Context` is
+  where local-vs-remote will eventually be modelled; phase 1 binds the
+  trunk's channels to the default context).
+
 ### Protocol shape
 - Fully duplex on one connection. Input (key/mouse/gamepad/resize) flows
   server→client as notifications; draw/layer/animation commands flow

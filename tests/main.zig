@@ -9,6 +9,7 @@ const Tests = blk: {
     break :blk testz.discoverTests(.{
         testz.Group{ .name = "Core Tests", .tag = "core", .mod = @import("./core_tests.zig") },
         testz.Group{ .name = "Wire Tests", .tag = "wire", .mod = @import("./wire_tests.zig") },
+        testz.Group{ .name = "Mux Tests", .tag = "mux", .mod = @import("./mux_tests.zig") },
         testz.Group{ .name = "RPC Tests", .tag = "rpc", .mod = @import("./rpc_tests.zig") },
         testz.Group{ .name = "Profiler Tests", .tag = "profiler", .mod = @import("./profiler_tests.zig") },
         testz.Group{ .name = "Dispatch Tests", .tag = "dispatch", .mod = @import("./dispatch_tests.zig") },

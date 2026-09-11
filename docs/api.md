@@ -413,6 +413,30 @@ point of the "no negotiation for the common case" decision.
 | `initialize` | request | client capabilities (subscriptions wanted) | server capabilities (max layers, image formats, easings, color depth) | 🔶 |
 | `initialized` | notification | — | — | 🔶 |
 
+## Remote transport (`glyphwire --ssh`)
+
+Not a message catalog change — the client-facing wire is identical. When
+the host runs `--ssh <dest>`, a `gw-agent` on the far side carries every
+remote client's socket bytes over one `ssh` trunk, tagged by channel.
+The trunk framing (its own layer, below the `Content-Length` frames it
+carries) is:
+
+```
+GW-Mux: <kind> <channel> <len>\r\n\r\n<payload>
+```
+
+- `kind`: `hello` (agent→host, once), `open` / `close` (channel
+  lifecycle, ids allocated by the agent), `data` (≤ 16384 payload bytes;
+  a larger write spans consecutive `data` frames).
+- `channel`: `u32`, decimal.
+- `len`: payload byte count, decimal; always `0` for `hello` / `open` /
+  `close`.
+
+Each channel's payload is one client connection's ordinary byte stream
+(`Content-Length` frames + the `load_image` side-channel), spoken
+verbatim end to end. See `src/mux.zig` and decisions.md's "Remote
+sessions" section.
+
 ## Not planned for v1
 
 - Capability caching (server-side, keyed by connecting binary path — see
