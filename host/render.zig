@@ -882,9 +882,20 @@ pub const Renderer = struct {
             const root_view: usize = if (scroll.rootOwned(&server.ctx.root)) 0 else server.ctx.root.view_scroll;
 
             self.drawLayerBatches(eng, glyphwire.root_layer_handle);
-            // Root caret: on top of root's content, below any popup layer
-            // -- matches the old per-layer caret draw order.
-            self.drawRootCaret(eng, &server.ctx.root, geometry.content_pad_px, 0, root_view);
+
+            // The caret follows `ctx.caret_layer` when a multi-pane client
+            // set one (`gmux`'s focused pane) -- otherwise the root
+            // cursor. Drawn here, on top of root's content and below any
+            // popup layer, matching the old per-layer caret draw order;
+            // the pane version is drawn again after its own layer batches
+            // below so it sits over the pane's own content.
+            const focus_caret: ?*const glyphwire.Layer = blk: {
+                const h = server.ctx.caret_layer orelse break :blk null;
+                const l = server.ctx.layers.getPtr(h) orelse break :blk null;
+                break :blk if (l.visible) l else null;
+            };
+            if (focus_caret == null)
+                self.drawRootCaret(eng, &server.ctx.root, geometry.content_pad_px, 0, root_view);
             // IME composition, over both: it covers the cells the caret is
             // about to write into, so it has to sit above the caret too.
             self.drawPreedit(eng, &server.ctx.root, geometry.content_pad_px, 0, root_view);
@@ -893,6 +904,7 @@ pub const Renderer = struct {
                 const layer = server.ctx.layers.getPtr(handle) orelse continue;
                 if (!layer.visible) continue;
                 self.drawLayerBatches(eng, handle);
+                if (focus_caret == layer) self.drawFocusedCaret(eng, layer);
             }
         }
 
@@ -999,6 +1011,34 @@ pub const Renderer = struct {
 
         eng.renderer.begin(eng.projMat);
         self.drawCaret(eng, root, origin_x, origin_y, cell.row, cell.col, view_offset);
+        eng.renderer.end();
+    }
+
+    /// The caret for a `caret_layer` pane (see `core.Context.caret_layer`):
+    /// `gmux` points it at the focused pane, whose cursor is driven by
+    /// that pane's PTY. Positioned through the pane's own bounds
+    /// (`layer.pos`, set by the split layout), viewport and scroll
+    /// offset -- the same transform `syncOneLayer` uses for the pane's
+    /// content. Hidden while the pane has DECTCEM cursor-hide set, while
+    /// it is scrolled back into its own history (`view_scroll != 0`), or
+    /// while the cursor sits outside the visible viewport. Shares the
+    /// blink clock with the root caret.
+    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer) void {
+        if (!layer.cursor_visible) return;
+        if (!self.app.caret.blinkOn()) return;
+        if (layer.view_scroll != 0) return;
+
+        const off = layer.scroll_off;
+        if (layer.cursor.row < off.row or layer.cursor.col < off.col) return;
+        const crow = layer.cursor.row - off.row;
+        const ccol = layer.cursor.col - off.col;
+        if (crow >= layer.viewportRows() or ccol >= layer.viewportCols()) return;
+
+        const ox = @as(i32, @intFromFloat(@round(layer.pos.x))) + geometry.content_pad_px;
+        const oy: i32 = @intFromFloat(@round(layer.pos.y));
+
+        eng.renderer.begin(eng.projMat);
+        self.drawCaret(eng, layer, ox, oy, crow, ccol, 0);
         eng.renderer.end();
     }
 

@@ -206,6 +206,9 @@ const ContextHandleParams = struct { context: core.ContextHandle };
 /// issuing connection's active context after the fact -- the runtime
 /// counterpart of `create_context`'s `window_scrollbar`.
 const SetWindowScrollbarParams = struct { visible: bool };
+/// `set_caret_layer`: which layer glyphwire-host draws its caret for, or
+/// `null` for the root cursor. See `core.Context.caret_layer`.
+const SetCaretLayerParams = struct { layer: ?core.LayerHandle = null };
 
 const DestroyLayerParams = struct {
     layer: core.LayerHandle,
@@ -971,6 +974,7 @@ pub const Dispatcher = struct {
         .{ "attach_context", catVoid(handleAttachContext) },
         .{ "adopt_context", catVoid(handleAdoptContext) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
+        .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
         .{ "create_split", catBytesId(handleCreateSplit) },
         .{ "destroy_split", catResult(handleDestroySplit) },
         .{ "set_split_children", catResult(handleSetSplitChildren) },
@@ -1565,6 +1569,22 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         self.ctx.window_scrollbar = parsed.value.visible;
+    }
+
+    /// `set_caret_layer`: points glyphwire-host's caret at a
+    /// `create_layer` layer for this connection's active context, or
+    /// `null` to restore the root cursor (see `core.Context.caret_layer`).
+    /// An unknown or root handle reports `UnknownLayer` and leaves the
+    /// setting as it was. Changes nothing else; the host picks it up on
+    /// its next repaint (`host/redraw.zig` folds it into the fingerprint).
+    fn handleSetCaretLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetCaretLayerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.setCaretLayer(parsed.value.layer) catch |err| return switch (err) {
+            error.UnknownLayer => DispatchError.UnknownLayer,
+        };
     }
 
     /// Re-lays-out the split tree and, if any pane's bounds moved, builds

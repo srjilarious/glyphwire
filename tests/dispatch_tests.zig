@@ -1951,6 +1951,49 @@ pub fn ptyModePropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectTrue(parsed.value.result.enabled);
 }
 
+pub fn setCaretLayerPointsAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const pane = try ctx.createLayer(20, 20, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_caret_layer","params":{"layer":1}}
+    );
+    try testz.expectEqual(ctx.caret_layer.?, pane);
+
+    // A null layer restores the root cursor.
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_caret_layer","params":{"layer":null}}
+    );
+    try testz.expectEqual(ctx.caret_layer, null);
+}
+
+pub fn setCaretLayerRejectsUnknownHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    _ = try ctx.createLayer(20, 20, 0);
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_caret_layer","params":{"layer":1}}
+    );
+
+    // An unknown handle is refused and the current setting is left alone
+    // (root handle 0 counts as unknown here -- it has no lifecycle).
+    const decoded = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","method":"set_caret_layer","params":{"layer":99}}
+    );
+    defer alloc.free(decoded);
+    try testz.expectError(d.handle(alloc, decoded), dispatch.DispatchError.UnknownLayer);
+    try testz.expectEqual(ctx.caret_layer.?, @as(glyphwire.LayerHandle, 1));
+
+    // Destroying the tracked layer drops the dangling handle.
+    try ctx.destroyLayer(1);
+    try testz.expectEqual(ctx.caret_layer, null);
+}
+
 pub fn cellPositionPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

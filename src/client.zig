@@ -621,6 +621,15 @@ pub const Client = struct {
         try self.notify("set_window_scrollbar", .{ .visible = visible });
     }
 
+    /// `set_caret_layer(layer)` -- a notification. Points glyphwire-host's
+    /// caret at `layer` for this connection's active context instead of
+    /// the root cursor; `null` restores the root cursor (see
+    /// `core.Context.caret_layer`). A multi-pane client re-sends this on
+    /// every focus change so the caret follows the active pane.
+    pub fn setCaretLayer(self: *Client, layer: ?core.LayerHandle) !void {
+        try self.notify("set_caret_layer", .{ .layer = layer });
+    }
+
     /// `destroy_context(context)` -- a notification. Frees a context
     /// created by `createContext` and everything in it, and (if it was
     /// visible) drops visibility back to whatever context was under it --

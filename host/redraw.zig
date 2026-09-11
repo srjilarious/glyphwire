@@ -69,6 +69,10 @@ pub fn contextSig(ctx: *const glyphwire.Context) ContextSig {
         const visible: u64 = if (ctx.layers.getPtr(handle)) |l| @intFromBool(l.visible) else 0;
         topo = mix(topo, visible);
     }
+    // Which layer the caret tracks (`set_caret_layer`): the tracked
+    // layer's cursor moves already show up in `gen_sum`, but the handle
+    // switching between panes on a focus change does not.
+    topo = mix(topo, ctx.caret_layer orelse 0);
     sig.topo = topo;
 
     sig.root_view = ctx.root.view_scroll;

@@ -4208,6 +4208,17 @@ pub const Context = struct {
     /// `window_scrollbar`, or the `set_window_scrollbar` notification) so
     /// the window doesn't show a permanently full, inert bar.
     window_scrollbar: bool = true,
+    /// Which `create_layer` layer glyphwire-host draws its blinking caret
+    /// for, instead of the root layer's live cursor. Null (the default)
+    /// means the root cursor, which is what every terminal-style client
+    /// and zoe want. A multi-pane client like `gmux`, whose focused pane
+    /// is a non-root layer fed by that pane's PTY, points this at the
+    /// focused pane and moves it on a focus switch -- the host then
+    /// positions the caret through that layer's pane bounds, viewport and
+    /// scroll offset. Set with the `set_caret_layer` notification; an
+    /// unknown or destroyed handle falls back to the root cursor rather
+    /// than showing nothing.
+    caret_layer: ?LayerHandle = null,
     /// Bumped whenever the split tree or the context size changes, i.e.
     /// whenever a previously computed layout (and its divider rects) went
     /// stale. glyphwire-host caches the divider geometry it hit-tests
@@ -4392,6 +4403,10 @@ pub const Context = struct {
                 break;
             }
         }
+        // The host would fall back to the root cursor on its own, but drop
+        // the dangling handle so a reused number can't later resolve to an
+        // unrelated layer.
+        if (self.caret_layer == handle) self.caret_layer = null;
     }
 
     /// Records `conn` as an owner of `handle` (see `ConnId`). Called by
@@ -4552,6 +4567,19 @@ pub const Context = struct {
             .revision, .scroll => return PropertyError.ReadOnlyProperty,
             .cursor, .position, .viewport, .scroll_offset, .scrollbars, .content_extent, .pty_mode => layer.setProperty(value),
         }
+    }
+
+    /// `set_caret_layer`: points glyphwire-host's caret at a
+    /// `create_layer` layer (see `Context.caret_layer`) instead of the
+    /// root cursor. `null` restores the root cursor. A handle that
+    /// doesn't resolve to a live non-root layer reports `UnknownLayer`
+    /// and leaves the current setting untouched -- a client clears it
+    /// with `null`, not with a stale handle.
+    pub fn setCaretLayer(self: *Context, handle: ?LayerHandle) LayerError!void {
+        if (handle) |h| {
+            if (h == root_layer_handle or self.layers.getPtr(h) == null) return LayerError.UnknownLayer;
+        }
+        self.caret_layer = handle;
     }
 
     /// `raise_layer`: moves `handle` up the compositing order

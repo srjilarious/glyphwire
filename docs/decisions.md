@@ -703,6 +703,29 @@ surface.
     `scroll_offset` move: that property drives a host viewport over a
     larger content grid, which is exactly what this kind of pane doesn't
     have.
+  - **The caret can follow a pane, not just the root cursor.**
+    glyphwire-host draws its blinking caret at the root layer's live
+    cursor — right for the shell and for zoe (which paints its own
+    block caret into the buffer pane's cells). A terminal multiplexer
+    (`gmux`) can't: its focused pane is a non-root layer whose cursor is
+    driven by that pane's PTY, and nothing was drawing a caret there.
+    `set_caret_layer` (`{layer?}`, `core.Context.caret_layer`, `null` to
+    restore the root cursor) points the host caret at a `create_layer`
+    layer instead; the host transforms the layer's cursor through that
+    pane's bounds (`layer.pos` from the split layout), viewport and
+    scroll offset, honours the layer's own DECTCEM cursor-hide, and
+    hides the caret while the pane is scrolled into its own history or
+    the cursor is off the visible viewport. The blink clock is shared —
+    `Caret.tickBlink` watches whichever layer the caret tracks so the
+    phase still resets the instant the pane cursor moves. A context
+    property, not a per-layer one: only one caret is on screen at a
+    time, and "which pane has focus" is a context-level fact. Destroying
+    the tracked layer clears it; an unknown handle is refused and the
+    setting left alone. Considered and rejected: teaching every client
+    to paint its own caret cell the way zoe does — it loses the
+    configured shape and blink, and needs a shadow of the cell under the
+    caret to erase it, which a client that doesn't interpret its own VT
+    stream (that lives in `core.Layer`) can't cheaply keep.
 - **v1 built — layer ownership & lifecycle:** every `create_layer` over a
   socket connection records that connection as the layer's first
   **owner**. `adopt_layer` adds more owners (one process handing ongoing

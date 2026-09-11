@@ -52,8 +52,17 @@ pub const Caret = struct {
         const now: @TypeOf(self.blink_ref) = blk: {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
-            const root = &server.ctx.root;
-            break :blk .{ .row = root.cursor.row, .col = root.cursor.col, .scroll = root.view_scroll };
+            // Watch whichever layer the caret actually tracks -- the
+            // focused pane's cursor for `gmux`, the root cursor otherwise
+            // -- so the blink phase still resets the instant the caret
+            // moves (see `Context.caret_layer`).
+            const tracked: *const @import("glyphwire").Layer = trk: {
+                if (server.ctx.caret_layer) |h| {
+                    if (server.ctx.layers.getPtr(h)) |l| break :trk l;
+                }
+                break :trk &server.ctx.root;
+            };
+            break :blk .{ .row = tracked.cursor.row, .col = tracked.cursor.col, .scroll = tracked.view_scroll };
         };
         if (now.row != self.blink_ref.row or now.col != self.blink_ref.col or now.scroll != self.blink_ref.scroll) {
             self.blink_ref = now;
@@ -63,15 +72,22 @@ pub const Caret = struct {
         self.blink_elapsed_ms += delta_ms;
     }
 
-    /// Whether the caret should be painted this frame: never while the
-    /// root layer has DECTCEM cursor-hide set (`CSI ? 25 l` from a
-    /// foregrounded program), otherwise always unless blinking is enabled
-    /// and the phase clock is in its "off" half.
-    pub fn visible(self: *const Caret) bool {
-        if (!self.app.server.ctx.root.cursor_visible) return false;
+    /// Whether the blink phase clock is in its "on" half this frame (or
+    /// blinking is off, so always on). The DECTCEM cursor-hide flag is a
+    /// per-layer concern the caller folds in -- see `visible` for the
+    /// root caret, `render.drawFocusedCaret` for a `caret_layer` pane.
+    pub fn blinkOn(self: *const Caret) bool {
         if (!self.blink) return true;
         const period = self.blink_ms * 2;
         return @mod(self.blink_elapsed_ms, period) < self.blink_ms;
+    }
+
+    /// Whether the root caret should be painted this frame: never while
+    /// the root layer has DECTCEM cursor-hide set (`CSI ? 25 l` from a
+    /// foregrounded program), otherwise on the blink phase.
+    pub fn visible(self: *const Caret) bool {
+        if (!self.app.server.ctx.root.cursor_visible) return false;
+        return self.blinkOn();
     }
 
     /// Where the caret sits on screen this frame, as a root-layer cell, or
