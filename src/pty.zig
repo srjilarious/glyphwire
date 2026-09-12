@@ -39,7 +39,7 @@ const PtyStub = struct {
     pid: c.pid_t = -1,
     exit_code: u8 = 0,
 
-    pub fn spawn(_: [*:null]const ?[*:0]const u8, _: u16, _: u16) SpawnError!PtyStub {
+    pub fn spawn(_: [*:null]const ?[*:0]const u8, _: u16, _: u16, _: ?[*:null]const ?[*:0]const u8) SpawnError!PtyStub {
         return error.Unsupported;
     }
     pub fn resize(_: PtyStub, _: u16, _: u16) void {}
@@ -78,6 +78,38 @@ extern "c" fn openpty(
 // (shell startup) and libc's `execvp` reads it from the live environment.
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
+// glibc extension: PATH-searching exec that also takes an explicit envp,
+// for `spawn`'s `envp` argument (a pane that needs `GLYPHWIRE_LAYER` set
+// to something other than the parent's own environment -- see `gmux`'s
+// `pane.zig`). Building that envp is the caller's job, done *before*
+// `fork` (see `buildEnvWith`): the child may only call async-signal-safe
+// libc between `fork` and `exec`, and neither `setenv` nor an allocation
+// is one of those.
+extern "c" fn execvpe(
+    file: [*:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+) c_int;
+
+/// Builds a full envp array for `spawn`'s `envp` argument: every entry of
+/// the *current* process's own environment (`c.environ`), followed by
+/// `extra` (each already a `NAME=VALUE` string). Allocates and returns
+/// the array itself (free with `alloc` once `spawn` returns -- the
+/// entries alias `c.environ` and `extra`, not copies, so only the outer
+/// array is ever freed here). Must be called before `fork` (walks
+/// `c.environ` and allocates, neither of which `spawn`'s child may do
+/// after it).
+pub fn buildEnvWith(alloc: std.mem.Allocator, extra: []const [:0]const u8) ![:null]?[*:0]const u8 {
+    var count: usize = 0;
+    while (c.environ[count] != null) count += 1;
+
+    const out = try alloc.allocSentinel(?[*:0]const u8, count + extra.len, null);
+    var i: usize = 0;
+    while (i < count) : (i += 1) out[i] = c.environ[i];
+    for (extra, 0..) |e, j| out[count + j] = e.ptr;
+    return out;
+}
+
 // A close-on-exec pipe carries the child's exec success/failure back to
 // the parent: a successful `execvp` closes the write end (EOF for the
 // parent's read), a failed one writes a byte first. Standard fork/exec
@@ -108,6 +140,16 @@ const PtyLinux = struct {
     /// signalled death, `0` before either has reaped it. `shell/main.zig`
     /// reads this for the prompt's `{exit}` token.
     exit_code: u8 = 0,
+    /// True once the child has actually been reaped, by whichever of
+    /// `reaped`/`wait` got there first. Makes both idempotent: without
+    /// it, a second reap attempt on an already-reaped pid (e.g. `gmux`'s
+    /// `deinit` sweeping every pane with an unconditional `kill` after
+    /// its reader thread already noticed that pane's child exit on its
+    /// own) calls `waitpid` on a pid the kernel no longer knows about,
+    /// which fails `ECHILD` forever -- `wait`'s blocking
+    /// `while (waitpid(...) < 0) {}` loop then spins forever instead of
+    /// ever returning.
+    exited: bool = false,
 
     /// Allocates a pty, forks, and in the child: starts a new session,
     /// makes the slave its controlling terminal, wires the slave to
@@ -116,10 +158,21 @@ const PtyLinux = struct {
     ///
     /// `argv` is a NULL-terminated array of NUL-terminated C strings
     /// (`argv[0]` must be non-null). The child path between `fork` and
-    /// `execvp` calls only async-signal-safe libc functions -- the usual
-    /// fork/exec caveat for a process with other live threads (the
-    /// `InputListener` runs one).
-    pub fn spawn(argv: [*:null]const ?[*:0]const u8, cols: u16, rows: u16) SpawnError!PtyLinux {
+    /// `execvp`/`execvpe` calls only async-signal-safe libc functions --
+    /// the usual fork/exec caveat for a process with other live threads
+    /// (the `InputListener` runs one).
+    ///
+    /// `envp` null execs with the current process's own environment
+    /// unchanged (`execvp`, same as before); non-null execs with exactly
+    /// that environment instead (`execvpe`) -- build it with
+    /// `buildEnvWith` before calling `spawn`, never after (see its doc
+    /// comment).
+    pub fn spawn(
+        argv: [*:null]const ?[*:0]const u8,
+        cols: u16,
+        rows: u16,
+        envp: ?[*:null]const ?[*:0]const u8,
+    ) SpawnError!PtyLinux {
         var master: c_int = undefined;
         var slave: c_int = undefined;
         const ws = Winsize{ .row = rows, .col = cols };
@@ -151,8 +204,12 @@ const PtyLinux = struct {
             _ = c.dup2(slave, 2);
             if (slave > 2) _ = c.close(slave);
             _ = c.close(master);
-            _ = execvp(argv[0].?, argv);
-            // execvp only returns on failure: tell the parent, then exit.
+            if (envp) |e| {
+                _ = execvpe(argv[0].?, argv, e);
+            } else {
+                _ = execvp(argv[0].?, argv);
+            }
+            // execvp/execvpe only return on failure: tell the parent, then exit.
             var fail = [1]u8{1};
             _ = c.write(efd[1], &fail, 1);
             c._exit(127);
@@ -200,9 +257,11 @@ const PtyLinux = struct {
     /// reaped (no zombie left); false while it's still running. On the
     /// reaping call it decodes the wait status into `exit_code`.
     pub fn reaped(self: *PtyLinux) bool {
+        if (self.exited) return true;
         var status: c_int = undefined;
         if (c.waitpid(self.pid, &status, 1) != self.pid) return false; // WNOHANG
         self.exit_code = decodeWaitStatus(status);
+        self.exited = true;
         return true;
     }
 
@@ -216,9 +275,11 @@ const PtyLinux = struct {
     /// `reaped`, for when the caller can't spin. Decodes the wait status
     /// into `exit_code`, same as `reaped`.
     pub fn wait(self: *PtyLinux) void {
+        if (self.exited) return;
         var status: c_int = undefined;
         while (c.waitpid(self.pid, &status, 0) < 0) {}
         self.exit_code = decodeWaitStatus(status);
+        self.exited = true;
     }
 
     /// Closes the master. Call after the child has been reaped.

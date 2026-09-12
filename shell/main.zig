@@ -3511,7 +3511,7 @@ const Prompt = struct {
         // prompt (this reduced std has no `std.time.Timer`).
         const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
 
-        var pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows)) catch |err| {
+        var pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows), null) catch |err| {
             var buf: [160]u8 = undefined;
             const msg = switch (err) {
                 error.CommandNotFound => std.fmt.bufPrint(&buf, "{s}: command not found", .{argv[0]}) catch "command not found",
