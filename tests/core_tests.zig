@@ -3626,9 +3626,9 @@ pub fn sessionOnlyOneConnectionHoldsTheWindowManagerRoleTest(io: std.Io, alloc: 
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    try testz.expectTrue(session.claimManager(1));
-    try testz.expectTrue(session.claimManager(1)); // idempotent for the holder
-    try testz.expectTrue(!session.claimManager(2));
+    try testz.expectTrue(session.claimManager(1, 0) != null);
+    try testz.expectTrue(session.claimManager(1, 0) != null); // idempotent for the holder
+    try testz.expectTrue(session.claimManager(2, 0) == null);
     try testz.expectTrue(session.isManager(1));
     try testz.expectTrue(!session.isManager(2));
 
@@ -3636,7 +3636,7 @@ pub fn sessionOnlyOneConnectionHoldsTheWindowManagerRoleTest(io: std.Io, alloc: 
     session.releaseManager(2);
     try testz.expectTrue(session.isManager(1));
     session.releaseManager(1);
-    try testz.expectTrue(session.claimManager(2));
+    try testz.expectTrue(session.claimManager(2, 0) != null);
 }
 
 pub fn movePaneDividerRebalancesWeightsWithoutChangingSizingModeTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3786,7 +3786,7 @@ pub fn releaseManagerClearsThePrefixSoNoKeysVanishTest(io: std.Io, alloc: std.me
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    _ = session.claimManager(1);
+    _ = session.claimManager(1, 0);
     session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
     try testz.expectEqual(session.routeKey("b", true, true, false, false), .swallow);
 

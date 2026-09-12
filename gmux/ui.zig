@@ -88,7 +88,11 @@ pub const Ui = struct {
         // Before anything else: only one multiplexer per window. Answered
         // rather than thrown by the server, so this is a clean message to
         // the user instead of a wire error.
-        if (!try client.requestWindowManager()) return Error.WindowManagerTaken;
+        const token = try client.requestWindowManager() orelse return Error.WindowManagerTaken;
+        // The role has two halves and gmux is two connections: this one
+        // issues the pane calls, and the listener receives the window
+        // commands. The token is how the listener joins the same role.
+        try listener.joinWindowManager(token);
 
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);

@@ -754,13 +754,23 @@ pub const Client = struct {
     }
 
     /// `request_role "window_manager"`: asks for permission to reshape the
-    /// window. Answers false (rather than failing) when another connection
-    /// already holds it, so a second multiplexer can tell the user there
-    /// is already one instead of dying on a wire error.
-    pub fn requestWindowManager(self: *Client) !bool {
-        var parsed = try self.request(struct { granted: bool }, "request_role", .{ .role = "window_manager" });
+    /// window. Answers null (rather than failing) when another program
+    /// already holds it, so a second multiplexer can tell the user there is
+    /// already one instead of dying on a wire error.
+    ///
+    /// The returned token is what this program's *other* connection passes
+    /// to `InputListener.joinWindowManager` so it can receive the window
+    /// command stream -- a manager is two connections, and both need the
+    /// role for different halves of it (see `core.Session.managers`).
+    pub fn requestWindowManager(self: *Client) !?u64 {
+        var parsed = try self.request(
+            struct { granted: bool, token: ?u64 = null },
+            "request_role",
+            .{ .role = "window_manager" },
+        );
         defer parsed.deinit();
-        return parsed.value.result.granted;
+        if (!parsed.value.result.granted) return null;
+        return parsed.value.result.token;
     }
 
     /// `create_pane`: a new pane and the context it displays. The pane is
@@ -2677,6 +2687,30 @@ pub const InputListener = struct {
             params: struct { context: core.ContextHandle },
         };
         const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .params = .{ .context = context } }, .{});
+        defer self.alloc.free(body);
+
+        var write_buf: [256]u8 = undefined;
+        var w = self.stream.writer(self.io, &write_buf);
+        try wire.writeFrame(&w.interface, body);
+        try w.interface.flush();
+    }
+
+    /// Joins the window-manager role its paired `Client` already claimed,
+    /// using the token that claim returned. Without this the role is held
+    /// by the connection that issues pane calls while the window command
+    /// stream arrives on this one, and the commands reach nobody.
+    ///
+    /// A notification for the same reason `attachContext` is: the reader
+    /// thread is already running, so there is nowhere to read an ack.
+    /// Ordering makes it safe anyway -- everything this connection receives
+    /// afterwards is decided on the server, after this has been processed.
+    pub fn joinWindowManager(self: *InputListener, token: u64) !void {
+        const Msg = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8 = "join_role",
+            params: struct { role: []const u8 = "window_manager", token: u64 },
+        };
+        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .params = .{ .token = token } }, .{});
         defer self.alloc.free(body);
 
         var write_buf: [256]u8 = undefined;

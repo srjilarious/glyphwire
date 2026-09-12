@@ -1256,7 +1256,17 @@ pub const Renderer = struct {
             const server = self.app.server;
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
-            used_rows = @max(geometry.min_grid_rows, server.ctx.root.cursor.row + 2);
+            // Cropping to the cursor row keeps a one-line shell session's
+            // screenshot from being mostly blank, which is what the README
+            // assets want. It only makes sense for a single pane, though:
+            // with a pane tree installed, one pane's cursor says nothing
+            // about how far down the window has content, so capture the
+            // whole grid.
+            if (server.session.root_pane_split != null) {
+                used_rows = geometry.grid_rows;
+            } else {
+                used_rows = @max(geometry.min_grid_rows, server.ctx.root.cursor.row + 2);
+            }
             gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
         }
         const w: i32 = @min(@as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w, fb.x - gutter - 2 * geometry.content_pad_px);

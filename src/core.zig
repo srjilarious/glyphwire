@@ -5328,6 +5328,11 @@ pub const WindowPrefix = struct {
     }
 };
 
+/// How many connections may hold the window-manager role at once. Two in
+/// practice -- a program's `Client` and its paired `InputListener` -- with
+/// headroom rather than an exact fit.
+pub const max_managers = 4;
+
 pub const Session = struct {
     alloc: std.mem.Allocator,
     /// Every context, keyed by handle. Key 0 is the root context, whose
@@ -5368,7 +5373,27 @@ pub const Session = struct {
     /// The connection currently holding the window-manager role, or null.
     /// At most one at a time; every pane-tree mutation requires it. See
     /// `claimManager`.
-    manager: ?ConnId = null,
+    /// The connections holding the window-manager role.
+    ///
+    /// A set rather than one connection because a program is two
+    /// connections: a `Client` that issues the pane calls and an
+    /// `InputListener` that receives the window commands. Both need the
+    /// role, for different halves of it.
+    ///
+    /// The second one joins by presenting the token the first was given
+    /// (see `claimManager`) -- the same shape `attach_context` uses to let
+    /// a paired listener join the context its client created, and for the
+    /// same reason: the two connections share knowledge in-process, so a
+    /// token passed between them is proof of association that the server
+    /// can check without inventing a notion of process identity.
+    managers: [max_managers]ConnId = @splat(0),
+    /// The token that joins the role, or 0 before anyone holds it.
+    manager_token: u64 = 0,
+    /// Lock-free mirror of `managers`, so the addressed `window_key` /
+    /// `window_text` delivery can find its recipients while the connection
+    /// registry is already locked. Same denormalisation, and the same
+    /// reason, as `focused_context`.
+    manager_conns: [max_managers]std.atomic.Value(ConnId) = @splat(.init(0)),
     /// The manager's registered prefix chord, or null when none is (which
     /// is every session without a multiplexer). See `WindowPrefix`.
     window_prefix: ?WindowPrefix = null,
@@ -5516,33 +5541,74 @@ pub const Session = struct {
 
     // ── The window-manager role ─────────────────────────────────────────
 
-    /// Grants `conn` the window-manager role if nobody holds it (or
-    /// `conn` already does). Returns false when someone else has it --
-    /// two multiplexers in one window would fight over the same tree, so
-    /// the second one is told no rather than silently interleaving edits.
-    pub fn claimManager(self: *Session, conn: ConnId) bool {
-        if (self.manager) |held| return held == conn;
-        self.manager = conn;
-        return true;
+    /// Grants `conn` the window-manager role and returns the token its
+    /// sibling connection joins with, or null when another program already
+    /// holds it -- two multiplexers in one window would fight over the same
+    /// tree, so the second is told no rather than silently interleaving
+    /// edits.
+    ///
+    /// `token` non-zero is a join: granted when it matches the one this
+    /// session issued. A connection that already holds the role is answered
+    /// again with the same token, so the call is idempotent.
+    pub fn claimManager(self: *Session, conn: ConnId, token: u64) ?u64 {
+        if (self.isManager(conn)) return self.manager_token;
+
+        if (self.manager_token != 0) {
+            // Someone holds it. A matching token means this is the holder's
+            // other connection; anything else is a different program.
+            if (token == 0 or token != self.manager_token) return null;
+            if (!self.addManager(conn)) return null;
+            return self.manager_token;
+        }
+
+        // First claim. The token only has to be unguessable by accident,
+        // not by an attacker: every connection here is already inside the
+        // user's own session.
+        self.manager_token = std.hash.Wyhash.hash(0x9177, std.mem.asBytes(&conn)) | 1;
+        if (!self.addManager(conn)) {
+            self.manager_token = 0;
+            return null;
+        }
+        return self.manager_token;
+    }
+
+    fn addManager(self: *Session, conn: ConnId) bool {
+        for (&self.managers, 0..) |*slot, i| {
+            if (slot.* != 0) continue;
+            slot.* = conn;
+            self.manager_conns[i].store(conn, .monotonic);
+            return true;
+        }
+        return false;
     }
 
     pub fn isManager(self: *const Session, conn: ConnId) bool {
-        const held = self.manager orelse return false;
-        return held == conn;
+        if (conn == 0) return false;
+        for (self.managers) |held| {
+            if (held == conn) return true;
+        }
+        return false;
     }
 
-    /// Drops the role if `conn` holds it, along with its prefix chord --
-    /// a prefix with nobody to deliver to would swallow keystrokes into
-    /// nothing. Called when the manager disconnects, so the next
-    /// multiplexer to start can claim the role cleanly.
+    /// Drops `conn` from the role. When the last holder goes, the prefix
+    /// chord goes with it -- a prefix with nobody to deliver to would
+    /// swallow keystrokes into nothing -- and the token is cleared so the
+    /// next multiplexer can claim cleanly.
     pub fn releaseManager(self: *Session, conn: ConnId) void {
-        if (self.manager) |held| {
-            if (held != conn) return;
-            self.manager = null;
-            self.window_prefix = null;
-            self.prefix_armed = false;
-            self.swallowed_key_len = 0;
+        var any_left = false;
+        for (&self.managers, 0..) |*slot, i| {
+            if (slot.* == conn) {
+                slot.* = 0;
+                self.manager_conns[i].store(0, .monotonic);
+                continue;
+            }
+            if (slot.* != 0) any_left = true;
         }
+        if (any_left) return;
+        self.manager_token = 0;
+        self.window_prefix = null;
+        self.prefix_armed = false;
+        self.swallowed_key_len = 0;
     }
 
     /// What should happen to one key event, given the prefix state.
@@ -5785,7 +5851,33 @@ pub const Session = struct {
             try ctx.resize(@max(pane.rect.cols, 1), @max(pane.rect.rows, 1));
         }
 
+        self.rescueFocus();
         self.republish();
+    }
+
+    /// Moves focus off a pane the layout just left unmapped, so input never
+    /// goes somewhere invisible.
+    ///
+    /// This happens routinely, not exceptionally: a multiplexer taking over
+    /// the window unmaps the pane it was launched from, and zooming unmaps
+    /// every pane but one. Fixing it here rather than requiring the manager
+    /// to call `focus_pane` at exactly the right moment removes a whole
+    /// class of "keystrokes went nowhere" bug from every future manager.
+    fn rescueFocus(self: *Session) void {
+        const current = self.focused_pane.load(.monotonic);
+        if (self.panes.getPtr(current)) |pane| {
+            if (pane.mapped) return;
+        }
+        var it = self.panes.iterator();
+        while (it.next()) |e| {
+            if (!e.value_ptr.mapped) continue;
+            self.focused_pane.store(e.key_ptr.*, .monotonic);
+            return;
+        }
+        // Nothing is mapped at all (no tree, or a tree naming only dead
+        // panes). The root pane always exists, so fall back to it rather
+        // than leaving focus dangling.
+        self.focused_pane.store(root_pane_handle, .monotonic);
     }
 
     fn layoutPaneSplit(

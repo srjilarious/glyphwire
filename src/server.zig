@@ -301,7 +301,9 @@ pub const Server = struct {
                 // comment for why.
                 const result = handle_result catch |err| result: {
                     if (dispatch.isNotification(alloc, body) catch true) {
-                        std.log.warn("glyphwire: notification failed: {t}", .{err});
+                        var name_buf: [64]u8 = undefined;
+                        const method = dispatch.peekMethod(alloc, body, &name_buf);
+                        std.log.warn("glyphwire: notification '{s}' failed: {t}", .{ method, err });
                         break :result dispatch.HandleResult{};
                     }
                     return err;
@@ -445,6 +447,16 @@ pub const Server = struct {
         // a backgrounded or unfocused client wants to know its panes moved
         // so it can redraw before it's shown again. `focused_context` is
         // the lock-free denormalised copy of the focused pane's stack top.
+        // A window event is addressed, not fanned out: it has exactly one
+        // recipient by definition. Re-routed here rather than only at the
+        // `report*` call sites, so a window command can never be broadcast
+        // no matter which path produced it (the in-process input loop, or a
+        // client's `report_key` / `report_text`).
+        if (isWindowEvent(event)) {
+            self.deliverToManagerLocked(event, body);
+            return;
+        }
+
         const gated = isFocusGatedEvent(event);
         const focused = self.session.focused_context.load(.monotonic);
 
@@ -460,6 +472,14 @@ pub const Server = struct {
 
     /// Whether `event` is a raw input stream that only the focused pane's
     /// on-screen client should receive (see `broadcast`).
+    /// Whether `event` is addressed to the window manager rather than fanned
+    /// out to subscribers.
+    fn isWindowEvent(event: []const u8) bool {
+        return std.mem.eql(u8, event, "window_key_down") or
+            std.mem.eql(u8, event, "window_key_up") or
+            std.mem.eql(u8, event, "window_text");
+    }
+
     fn isFocusGatedEvent(event: []const u8) bool {
         return std.mem.eql(u8, event, "key") or
             std.mem.eql(u8, event, "text") or
@@ -727,22 +747,27 @@ pub const Server = struct {
     /// rather than fanned out (`window_key` / `window_text`): a window
     /// command has exactly one recipient by definition.
     fn deliverToManager(self: *Server, event: []const u8, body: []const u8) void {
-        const manager = blk: {
-            self.ctx_mutex.lockUncancelable(self.io);
-            defer self.ctx_mutex.unlock(self.io);
-            break :blk self.session.manager;
-        };
-        const target = manager orelse return;
-
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
-        for (self.connections.items) |conn| {
-            if (conn.id != target) continue;
-            if (!conn.subscriptions.has(event)) continue;
-            conn.send(self.io, body) catch |err| {
-                std.log.err("glyphwire: window command to the manager failed: {t}", .{err});
-            };
-            return;
+        self.deliverToManagerLocked(event, body);
+    }
+
+    /// `deliverToManager` with `registry_mutex` already held -- what
+    /// `broadcast` uses when it re-routes a window event it was handed.
+    fn deliverToManagerLocked(self: *Server, event: []const u8, body: []const u8) void {
+        // The role is held by both of a manager's connections (see
+        // `core.Session.managers`); only the one that subscribed to the
+        // window stream wants this, which is its `InputListener`.
+        for (self.session.manager_conns) |slot| {
+            const target = slot.load(.monotonic);
+            if (target == 0) continue;
+            for (self.connections.items) |conn| {
+                if (conn.id != target) continue;
+                if (!conn.subscriptions.has(event)) continue;
+                conn.send(self.io, body) catch |err| {
+                    std.log.err("glyphwire: window command to the manager failed: {t}", .{err});
+                };
+            }
         }
     }
 

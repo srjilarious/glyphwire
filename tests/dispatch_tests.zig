@@ -3043,7 +3043,7 @@ pub fn setWindowPrefixRequiresTheRoleAndRegistersTheChordTest(io: std.Io, alloc:
         \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":"b"}}
     ), error.NotWindowManager);
 
-    try testz.expectTrue(session.claimManager(4));
+    try testz.expectTrue(session.claimManager(4, 0) != null);
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":"a","ctrl":true}}
     );
@@ -3067,7 +3067,7 @@ pub fn spawnInPaneWithoutASpawnerIsUnsupportedTest(io: std.Io, alloc: std.mem.Al
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
     var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
-    try testz.expectTrue(session.claimManager(4));
+    try testz.expectTrue(session.claimManager(4, 0) != null);
     _ = try session.createPane(4, 0);
 
     // The headless server has no window to put a program in and no
@@ -3084,7 +3084,7 @@ pub fn paneSplitChildNamingBothTargetsIsRejectedTest(io: std.Io, alloc: std.mem.
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
     var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
-    try testz.expectTrue(session.claimManager(4));
+    try testz.expectTrue(session.claimManager(4, 0) != null);
 
     const created = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_pane_split","params":{"axis":"row"}}
@@ -3106,7 +3106,7 @@ pub fn createPaneSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) 
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
     var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
-    try testz.expectTrue(session.claimManager(4));
+    try testz.expectTrue(session.claimManager(4, 0) != null);
 
     try testz.expectError(d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_pane_split","params":{"axis":"diagonal"}}

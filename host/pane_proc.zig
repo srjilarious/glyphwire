@@ -143,8 +143,13 @@ pub const PaneProcs = struct {
         var made: usize = 0;
         defer for (0..made) |i| self.alloc.free(std.mem.span(argv_z[i].?));
         for (argv, 0..) |a, i| {
-            const dup = try self.alloc.allocSentinel(u8, a.len, 0);
-            @memcpy(dup, a);
+            // argv[0] prefers this build's own sibling binary over whatever
+            // `PATH` finds -- see `resolveProgram`.
+            const resolved = if (i == 0) try self.resolveProgram(a) else null;
+            defer if (resolved) |r| self.alloc.free(r);
+            const src = resolved orelse a;
+            const dup = try self.alloc.allocSentinel(u8, src.len, 0);
+            @memcpy(dup, src);
             argv_z[i] = dup.ptr;
             made += 1;
         }
@@ -166,6 +171,37 @@ pub const PaneProcs = struct {
             try self.procs.put(self.alloc, pane, proc);
         }
         return proc.pty.pid;
+    }
+
+    /// Resolves a bare program name against the directory this build's
+    /// binaries live in, falling back to `PATH` (by returning null) when
+    /// there is no such sibling.
+    ///
+    /// The same `GLYPHWIRE_BIN_DIR`-then-exe-dir rule `host/main.zig` uses
+    /// to find its own `gw-shell`, applied to whatever a window manager
+    /// asks to spawn. Without it a `gmux` from a work tree would run
+    /// whichever `gw-shell` happens to be installed system-wide, which is a
+    /// genuinely confusing failure: the two speak different versions of the
+    /// protocol and the symptom is a pane that draws in the wrong place.
+    ///
+    /// Only argv[0], and only a bare name: an explicit path or a program
+    /// with no sibling here goes through `PATH` untouched.
+    fn resolveProgram(self: *PaneProcs, name: []const u8) !?[]const u8 {
+        if (std.mem.indexOfScalar(u8, name, '/') != null) return null;
+
+        const dir = if (self.environ.get("GLYPHWIRE_BIN_DIR")) |d|
+            try self.alloc.dupe(u8, d)
+        else
+            try std.process.executableDirPathAlloc(self.io, self.alloc);
+        defer self.alloc.free(dir);
+
+        const candidate = try std.fs.path.join(self.alloc, &.{ dir, name });
+        errdefer self.alloc.free(candidate);
+        std.Io.Dir.cwd().access(self.io, candidate, .{}) catch {
+            self.alloc.free(candidate);
+            return null;
+        };
+        return candidate;
     }
 
     const PaneEnv = struct {

@@ -239,8 +239,19 @@ const SetCaretLayerParams = struct { layer: ?core.LayerHandle = null };
 
 /// `request_role`: asks for a privileged role. The only one today is
 /// `"window_manager"`, which gates every message below.
-const RequestRoleParams = struct { role: []const u8 };
-const RequestRoleResult = struct { granted: bool };
+/// `request_role`: claims a privileged role, or joins one this program's
+/// other connection already holds by presenting its `token`.
+const RequestRoleParams = struct {
+    role: []const u8,
+    token: ?u64 = null,
+};
+
+/// The token is what a program's second connection passes to join the same
+/// role -- see `core.Session.managers`. Null when the role was refused.
+const RequestRoleResult = struct {
+    granted: bool,
+    token: ?u64 = null,
+};
 
 /// `attach_pane`: binds this connection to a pane. Sent as a connection's
 /// first message by anything started with `GLYPHWIRE_PANE` set.
@@ -759,6 +770,8 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "pane_layout")) return self.panes;
         if (std.mem.eql(u8, event, "pane_exit")) return self.panes;
         if (std.mem.eql(u8, event, "window_key")) return self.window_keys;
+        if (std.mem.eql(u8, event, "window_key_down")) return self.window_keys;
+        if (std.mem.eql(u8, event, "window_key_up")) return self.window_keys;
         if (std.mem.eql(u8, event, "window_text")) return self.window_keys;
         return false;
     }
@@ -907,6 +920,20 @@ pub fn isNotification(alloc: std.mem.Allocator, body: []const u8) !bool {
     });
     defer parsed.deinit();
     return parsed.value.id == null;
+}
+
+/// The method name in `body`, copied into `out` and returned as a slice of
+/// it, or `"?"` when the body won't parse. For log messages about a failed
+/// message: "notification failed: UnknownMethod" on its own gives a reader
+/// nothing to act on.
+pub fn peekMethod(alloc: std.mem.Allocator, body: []const u8, out: []u8) []const u8 {
+    const parsed = std.json.parseFromSlice(Envelope, alloc, body, .{
+        .ignore_unknown_fields = true,
+    }) catch return "?";
+    defer parsed.deinit();
+    const n = @min(parsed.value.method.len, out.len);
+    @memcpy(out[0..n], parsed.value.method[0..n]);
+    return out[0..n];
 }
 
 /// How many recent notification-dispatch errors a connection's ring
@@ -1198,6 +1225,7 @@ pub const Dispatcher = struct {
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
         .{ "request_role", catBytesId(handleRequestRole) },
+        .{ "join_role", catVoid(handleJoinRole) },
         .{ "attach_pane", catVoid(handleAttachPane) },
         .{ "create_pane", catResultId(handleCreatePane) },
         .{ "destroy_pane", catResult(handleDestroyPane) },
@@ -1833,8 +1861,32 @@ pub const Dispatcher = struct {
         // real client.
         const cid = self.conn_id orelse
             return try rpc.response(alloc, id, RequestRoleResult{ .granted = true });
-        const granted = session.claimManager(cid);
-        return try rpc.response(alloc, id, RequestRoleResult{ .granted = granted });
+        const token = session.claimManager(cid, parsed.value.token orelse 0);
+        return try rpc.response(alloc, id, RequestRoleResult{
+            .granted = token != null,
+            .token = token,
+        });
+    }
+
+    /// `join_role`: joins a role this program's other connection already
+    /// holds, by presenting the token that claim returned.
+    ///
+    /// A notification rather than a request because the joining connection
+    /// is a subscribed `InputListener` with a reader thread already
+    /// running, so it has nowhere to read a response -- the same reason
+    /// `attach_context` is a notification. It needs no answer: the caller
+    /// already has the token, and a bad one simply grants nothing.
+    fn handleJoinRole(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const parsed = try std.json.parseFromValue(RequestRoleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        if (!std.mem.eql(u8, parsed.value.role, "window_manager")) return DispatchError.UnknownRole;
+        const cid = self.conn_id orelse return;
+        if (session.claimManager(cid, parsed.value.token orelse 0) == null) {
+            return DispatchError.NotWindowManager;
+        }
     }
 
     /// `attach_pane`: binds this connection to a pane, and to whatever
@@ -2398,6 +2450,31 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         const changed = try self.ctx.input.setKey(p.key, p.pressed);
+
+        // The same routing the in-process path does (`Server.reportKey`):
+        // a window manager's prefix has to work regardless of who injected
+        // the keystroke, or a client-driven session behaves differently
+        // from a real keyboard.
+        if (self.session) |session| {
+            const route = session.routeKey(
+                p.key,
+                p.pressed,
+                self.ctx.input.isKeyDown("left_control") or self.ctx.input.isKeyDown("right_control"),
+                self.ctx.input.isKeyDown("left_alt") or self.ctx.input.isKeyDown("right_alt"),
+                self.ctx.input.isKeyDown("left_shift") or self.ctx.input.isKeyDown("right_shift"),
+            );
+            switch (route) {
+                .swallow => return .{},
+                .manager => {
+                    const body = try rpc.windowKeyNotification(alloc, p.key, p.pressed);
+                    return .{ .broadcast = .{
+                        .event = if (p.pressed) "window_key_down" else "window_key_up",
+                        .body = body,
+                    } };
+                },
+                .pass => {},
+            }
+        }
         if (!changed) return .{};
 
         const notif_body = try rpc.keyNotification(alloc, p.key, p.pressed);
@@ -2410,7 +2487,6 @@ pub const Dispatcher = struct {
     /// `text` broadcast out to `"text"` subscribers. An empty string is
     /// dropped.
     fn handleReportText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        _ = self;
         const parsed = try std.json.parseFromValue(ReportTextParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
@@ -2418,6 +2494,14 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         if (p.text.len == 0) return .{};
+
+        // See `handleReportKey`: injected text routes like typed text.
+        if (self.session) |session| {
+            if (session.routeText() == .manager) {
+                const body = try rpc.windowTextNotification(alloc, p.text);
+                return .{ .broadcast = .{ .event = "window_text", .body = body } };
+            }
+        }
 
         const notif_body = try rpc.textNotification(alloc, p.text);
         return .{ .broadcast = .{ .event = "text", .body = notif_body } };
