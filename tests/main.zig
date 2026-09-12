@@ -30,6 +30,7 @@ const Tests = blk: {
         testz.Group{ .name = "Host Tests", .tag = "host", .mod = @import("./host_tests.zig") },
         testz.Group{ .name = "Host Engine Tests", .tag = "host-eng", .mod = @import("./host_eng_tests.zig") },
         testz.Group{ .name = "Zoe Tests", .tag = "zoe", .mod = @import("./zoe_tests.zig") },
+        testz.Group{ .name = "Gmux Tests", .tag = "gmux", .mod = @import("./gmux_tests.zig") },
     }, .{});
 };
 

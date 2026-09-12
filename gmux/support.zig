@@ -9,11 +9,9 @@
 
 pub const layout = @import("layout.zig");
 pub const config = @import("config.zig");
-pub const pane = @import("pane.zig");
 pub const ui = @import("ui.zig");
 
 pub const Tree = layout.Tree;
 pub const Axis = layout.Axis;
 pub const PaneId = layout.PaneId;
-pub const Pane = pane.Pane;
 pub const Ui = ui.Ui;

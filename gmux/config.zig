@@ -3,9 +3,7 @@
 //! `ls.conf` / `shell.conf` use. Deliberately tiny for the first version:
 //! the prefix key, the shell to run in a fresh pane, and how much
 //! scrollback each pane's ring keeps. With no file present gmux runs on
-//! Ctrl-B, `gw-shell` (glyphwire-aware, so it draws on its own pane's
-//! layer instead of the implicit root -- see `GLYPHWIRE_LAYER` in
-//! `pane.zig`/`ui.zig`), and 2000 rows.
+//! Ctrl-B, `gw-shell`, and 2000 rows.
 
 const std = @import("std");
 const ziglua = @import("ziglua");
@@ -24,14 +22,14 @@ pub const Config = struct {
     prefix_key: u8 = 'b',
     /// `config.shell` overrides the default `gw-shell` for every pane
     /// spawned from here on -- `/bin/bash`, `$SHELL`, whatever a user
-    /// wants instead. Not itself defaulted from `$SHELL`: gmux's panes
-    /// default to `gw-shell` specifically, not to whatever login shell
-    /// happens to be set, since it's the one program that already knows
-    /// how to draw on the `GLYPHWIRE_LAYER` a pane hands it instead of
-    /// the implicit root (see `pane.zig`).
+    /// wants instead. Any program works -- a pane is a sequestered host,
+    /// so a plain `bash` gets a real PTY and a terminal of exactly the
+    /// pane's size (see `host/pane_proc.zig`). `gw-shell` is merely the
+    /// better default, since a glyphwire-aware program draws on the
+    /// pane's own context rather than through VT emulation.
     shell: ?[]const u8 = null,
-    /// `config.scrollback_rows` -- the ring every new pane's layer is
-    /// created with.
+    /// `config.scrollback_rows` -- the ring every new pane's base context
+    /// root layer is created with.
     scrollback_rows: usize = 2000,
 
     pub fn deinit(self: *Config) void {
@@ -121,10 +119,9 @@ fn readConf(arena: *std.heap.ArenaAllocator, io: std.Io, environ: *const std.pro
 }
 
 /// The command to run in a fresh pane: `config.shell`, else `gw-shell`.
-/// Deliberately doesn't fall back to `$SHELL` the way a plain login-shell
-/// replacement would: `gw-shell` is what makes `GLYPHWIRE_LAYER`
-/// targeting (see `pane.zig`) work at all, so it's the default a user has
-/// to explicitly opt out of via `config.shell`, not something `$SHELL`
+/// Deliberately doesn't fall back to `$SHELL`: `gw-shell` in a pane is a
+/// strictly better experience than a plain shell under VT emulation, so it
+/// is the default a user opts out of explicitly, not something `$SHELL`
 /// can silently override.
 pub fn shellCommand(cfg: *const Config) []const u8 {
     return cfg.shell orelse "gw-shell";

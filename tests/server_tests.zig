@@ -503,3 +503,188 @@ pub fn dispatchWorksWithNoWakeCallbackTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqualStr("o", ctx.root.cell(0, 0).grapheme());
     try testz.expectEqualStr("k", ctx.root.cell(0, 1).grapheme());
 }
+
+// ─── Panes ──────────────────────────────────────────────────────────────
+
+/// The load-bearing guarantee of the whole pane design: a keystroke reaches
+/// the program in the *focused* pane and no other. Two connections, each
+/// bound to its own pane, and only one of them hears the key.
+///
+/// Proved by ordering rather than by a read timeout (`std.Io.net.Stream` has
+/// none): the key is reported while pane A has focus, then focus moves and a
+/// second key is reported. If the gate were broken, B's first read would
+/// return the first key rather than the second.
+pub fn inputReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pane-focus-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // Two panes side by side, both mapped, root focused.
+    const made = try srv.session.createPane(0, 0);
+    const split = try srv.session.createPaneSplit(.row, true);
+    try srv.session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try srv.session.setRootPaneSplit(split);
+    try srv.session.layoutPanes(null, null);
+
+    const t_a = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_a.join();
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var a = try addr.connect(io);
+    defer a.close(io);
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+
+    // The root pane's client. `pane` folded into `subscribe`, exactly as a
+    // real client does it.
+    var a_buf: [4096]u8 = undefined;
+    var a_w = a.writer(io, &a_buf);
+    try wire.writeFrame(&a_w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"],"pane":0}}
+    );
+    try a_w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &a, &a_dec));
+
+    const t_b = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_b.join();
+    var b = try addr.connect(io);
+    defer b.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+
+    var b_buf: [4096]u8 = undefined;
+    var b_w = b.writer(io, &b_buf);
+    try wire.writeFrame(&b_w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"],"pane":1}}
+    );
+    try b_w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &b, &b_dec));
+
+    // Root pane has focus: `a` gets this, `b` must not.
+    try srv.reportKey(alloc, "x", true);
+    const a_got = try readOneFrame(io, alloc, &a, &a_dec);
+    defer alloc.free(a_got);
+    try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
+
+    // Focus moves to the other pane, and now only `b` hears.
+    try srv.session.focusPane(made.pane);
+    srv.ctx = srv.session.focusedContext();
+    try srv.reportKey(alloc, "y", true);
+
+    const b_got = try readOneFrame(io, alloc, &b, &b_dec);
+    defer alloc.free(b_got);
+    // `y`, not `x`: the first key never reached this connection at all.
+    try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"key\":\"y\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"key\":\"x\"") == null);
+}
+
+/// A pane-tree change sends each client *its own* context's new size, not
+/// the window's -- the per-connection `resize` that replaces one broadcast.
+pub fn paneLayoutSendsEachClientItsOwnSizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 41, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pane-resize-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer accept_thread.join();
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["resize"],"pane":0}}
+    );
+    try w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &stream, &decoder));
+
+    // Split the window in two. The client is in the left pane, so it must
+    // be told 20 columns, not the window's 41.
+    const made = try srv.session.createPane(0, 0);
+    const split = try srv.session.createPaneSplit(.row, true);
+    try srv.session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try srv.session.setRootPaneSplit(split);
+    try srv.applyPaneLayout(alloc);
+
+    const body = try readOneFrame(io, alloc, &stream, &decoder);
+    defer alloc.free(body);
+    const Notification = struct {
+        method: []const u8,
+        params: struct { cols: usize, rows: usize },
+    };
+    const parsed = try std.json.parseFromSlice(Notification, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectEqualStr("resize", parsed.value.method);
+    try testz.expectEqual(parsed.value.params.cols, 20);
+    try testz.expectEqual(parsed.value.params.rows, 10);
+}
+
+/// The prefix chord never reaches the program in the focused pane, and the
+/// key after it is addressed to the manager instead. Same ordering trick as
+/// the focus test: the program's next read must see the key that followed
+/// the whole prefix sequence, not anything inside it.
+pub fn thePrefixSequenceNeverReachesTheProgramTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-prefix-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer accept_thread.join();
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key","text"]}}
+    );
+    try w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &stream, &decoder));
+
+    srv.session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+
+    // Ctrl-B then `q`: the whole sequence is withheld from this program.
+    try srv.reportKey(alloc, "left_control", true);
+    alloc.free(try readOneFrame(io, alloc, &stream, &decoder)); // the modifier itself passes
+    try srv.reportKey(alloc, "b", true);
+    try srv.reportKey(alloc, "b", false);
+    try srv.reportText(alloc, "q");
+
+    // An ordinary keystroke afterwards, which must be the next thing the
+    // program sees.
+    try srv.reportText(alloc, "z");
+    const body = try readOneFrame(io, alloc, &stream, &decoder);
+    defer alloc.free(body);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"text\":\"z\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"q\"") == null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"b\"") == null);
+}

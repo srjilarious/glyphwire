@@ -3459,3 +3459,342 @@ pub fn adjacentMetadataSpanReturnsNullWhenNothingTaggedTest(io: std.Io, alloc: s
     try testz.expectTrue(layer.adjacentMetadataSpan(0, 0, .next) == null);
     try testz.expectTrue(layer.adjacentMetadataSpan(0, 5, .prev) == null);
 }
+
+// ─── Panes ──────────────────────────────────────────────────────────────
+
+pub fn sessionStartsWithOneMappedRootPaneFillingTheWindowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    try session.layoutPanes(null, null);
+
+    const pane = session.rootPane();
+    try testz.expectTrue(pane.mapped);
+    try testz.expectEqual(pane.rect.cols, @as(usize, 40));
+    try testz.expectEqual(pane.rect.rows, @as(usize, 10));
+    try testz.expectEqual(pane.top(), glyphwire.root_context_handle);
+    // A single-pane session puts its context at the window origin, which is
+    // why every pre-panes client is unaffected by panes existing.
+    try testz.expectEqual(root.origin_row, @as(usize, 0));
+    try testz.expectEqual(root.origin_col, @as(usize, 0));
+    try testz.expectEqual(session.focusedPaneHandle(), glyphwire.root_pane_handle);
+}
+
+pub fn sessionCreatePaneGetsItsOwnContextAndStaysUnmappedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(3, 100);
+    try testz.expectTrue(made.pane != glyphwire.root_pane_handle);
+    try testz.expectTrue(made.context != glyphwire.root_context_handle);
+
+    const pane = session.panePtr(made.pane).?;
+    try testz.expectEqual(pane.base, made.context);
+    try testz.expectEqual(pane.top(), made.context);
+    try testz.expectEqual(pane.owner, @as(glyphwire.ConnId, 3));
+    // Created but not placed: the manager puts it in the tree separately.
+    try testz.expectTrue(!pane.mapped);
+
+    const ctx = session.contextPtr(made.context).?;
+    try testz.expectEqual(ctx.pane, made.pane);
+    try testz.expectEqual(ctx.asset_fallback, &root);
+    // A pane holds one program's whole surface, so no window scrollbar.
+    try testz.expectTrue(!ctx.window_scrollbar);
+}
+
+pub fn sessionLayoutPanesSplitsTheWindowAndSetsContextOriginsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 41, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    const split = try session.createPaneSplit(.row, true);
+    try session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try session.setRootPaneSplit(split);
+
+    var dividers: std.ArrayList(glyphwire.PaneDividerRect) = .empty;
+    defer dividers.deinit(alloc);
+    try session.layoutPanes(null, &dividers);
+
+    // 41 cols, one divider cell between them: 20 | divider | 20.
+    const left = session.panePtr(glyphwire.root_pane_handle).?;
+    const right = session.panePtr(made.pane).?;
+    try testz.expectEqual(left.rect.col, @as(usize, 0));
+    try testz.expectEqual(left.rect.cols, @as(usize, 20));
+    try testz.expectEqual(right.rect.col, @as(usize, 21));
+    try testz.expectEqual(right.rect.cols, @as(usize, 20));
+    try testz.expectEqual(dividers.items.len, @as(usize, 1));
+    try testz.expectEqual(dividers.items[0].rect.col, @as(usize, 20));
+
+    // Each pane's context is resized to its rect and told where it sits.
+    try testz.expectEqual(root.root.width, @as(usize, 20));
+    try testz.expectEqual(root.origin_col, @as(usize, 0));
+    const rctx = session.contextPtr(made.context).?;
+    try testz.expectEqual(rctx.root.width, @as(usize, 20));
+    try testz.expectEqual(rctx.origin_col, @as(usize, 21));
+}
+
+pub fn sessionCreateContextCoversItsOwnPaneNotTheWindowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    // A full-screen program inside that pane opens its own context. Under
+    // the old model this replaced the whole window; now it covers the pane.
+    const alt = try session.createContext(made.pane, null, null, 0);
+
+    try testz.expectEqual(session.panePtr(made.pane).?.top(), alt);
+    // The other pane is untouched, and focus hasn't moved.
+    try testz.expectEqual(session.rootPane().top(), glyphwire.root_context_handle);
+    try testz.expectEqual(session.focusedPaneHandle(), glyphwire.root_pane_handle);
+    try testz.expectEqual(session.focusedContextHandle(), glyphwire.root_context_handle);
+
+    // Dismissing it pops back to the pane's base -- alt-screen restore at
+    // pane scope.
+    try session.destroyContext(alt);
+    try testz.expectEqual(session.panePtr(made.pane).?.top(), made.context);
+}
+
+pub fn sessionDestroyPaneTakesEveryContextInItTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    const alt = try session.createContext(made.pane, null, null, 0);
+    try testz.expectTrue(session.contextPtr(alt) != null);
+
+    try session.destroyPane(made.pane);
+    try testz.expectTrue(session.panePtr(made.pane) == null);
+    try testz.expectTrue(session.contextPtr(made.context) == null);
+    try testz.expectTrue(session.contextPtr(alt) == null);
+    // The root pane and its context are untouched.
+    try testz.expectTrue(session.contextPtr(glyphwire.root_context_handle) != null);
+}
+
+pub fn sessionRootPaneAndBaseContextsCannotBeDestroyedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    try testz.expectError(session.destroyPane(glyphwire.root_pane_handle), error.RootPaneImmutable);
+    try testz.expectError(session.destroyContext(glyphwire.root_context_handle), error.RootContextImmutable);
+
+    // A created pane's base context is equally protected: it lives and dies
+    // with its pane, not on its own.
+    const made = try session.createPane(1, 0);
+    try testz.expectTrue(session.isBaseContext(made.context));
+    try testz.expectError(session.destroyContext(made.context), error.RootContextImmutable);
+}
+
+pub fn sessionFocusPaneRefusesAnUnmappedPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    // Not placed in the tree yet: focusing it would send every keystroke
+    // somewhere invisible.
+    try testz.expectError(session.focusPane(made.pane), error.UnknownPane);
+    try testz.expectEqual(session.focusedPaneHandle(), glyphwire.root_pane_handle);
+}
+
+pub fn sessionOnlyOneConnectionHoldsTheWindowManagerRoleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    try testz.expectTrue(session.claimManager(1));
+    try testz.expectTrue(session.claimManager(1)); // idempotent for the holder
+    try testz.expectTrue(!session.claimManager(2));
+    try testz.expectTrue(session.isManager(1));
+    try testz.expectTrue(!session.isManager(2));
+
+    // Releasing from a non-holder does nothing.
+    session.releaseManager(2);
+    try testz.expectTrue(session.isManager(1));
+    session.releaseManager(1);
+    try testz.expectTrue(session.claimManager(2));
+}
+
+pub fn movePaneDividerRebalancesWeightsWithoutChangingSizingModeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 41, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    const split = try session.createPaneSplit(.row, true);
+    try session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try session.setRootPaneSplit(split);
+    try session.layoutPanes(null, null);
+
+    try session.movePaneDivider(split, 0, 5);
+    try session.layoutPanes(null, null);
+
+    const left = session.panePtr(glyphwire.root_pane_handle).?;
+    const right = session.panePtr(made.pane).?;
+    try testz.expectEqual(left.rect.cols, @as(usize, 25));
+    try testz.expectEqual(right.rect.cols, @as(usize, 15));
+    // Still weighted, not silently converted to fixed.
+    const children = session.pane_splits.getPtr(split).?.children.items;
+    try testz.expectTrue(children[0].size == .weight);
+    try testz.expectTrue(children[1].size == .weight);
+}
+
+pub fn resizeWindowReflowsEveryPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 41, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    const split = try session.createPaneSplit(.row, true);
+    try session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try session.setRootPaneSplit(split);
+    try session.layoutPanes(null, null);
+
+    try session.resizeWindow(81, 20);
+    try testz.expectEqual(session.panePtr(glyphwire.root_pane_handle).?.rect.cols, @as(usize, 40));
+    try testz.expectEqual(session.panePtr(made.pane).?.rect.cols, @as(usize, 40));
+    // And each pane's context followed, size and origin both.
+    try testz.expectEqual(root.root.width, @as(usize, 40));
+    try testz.expectEqual(root.root.height, @as(usize, 20));
+    const rctx = session.contextPtr(made.context).?;
+    try testz.expectEqual(rctx.root.width, @as(usize, 40));
+    try testz.expectEqual(rctx.origin_col, @as(usize, 41));
+}
+
+pub fn paneAtResolvesAWindowCellToItsPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 41, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    const split = try session.createPaneSplit(.row, true);
+    try session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try session.setRootPaneSplit(split);
+    try session.layoutPanes(null, null);
+
+    try testz.expectEqual(session.paneAt(0, 0).?, glyphwire.root_pane_handle);
+    try testz.expectEqual(session.paneAt(5, 19).?, glyphwire.root_pane_handle);
+    try testz.expectEqual(session.paneAt(5, 21).?, made.pane);
+    // Column 20 is the divider band: not inside any pane.
+    try testz.expectTrue(session.paneAt(5, 20) == null);
+}
+
+// ─── The window prefix ──────────────────────────────────────────────────
+
+pub fn routeKeyWithoutAPrefixPassesEverythingThroughTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    try testz.expectEqual(session.routeKey("b", true, true, false, false), .pass);
+    try testz.expectEqual(session.routeText(), .pass);
+}
+
+pub fn routeKeySwallowsThePrefixAndSendsTheNextToTheManagerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+
+    // Ctrl-B is withheld from the program entirely.
+    try testz.expectEqual(session.routeKey("b", true, true, false, false), .swallow);
+    // Its release goes with it, so the program never sees half a keystroke.
+    try testz.expectEqual(session.routeKey("b", false, true, false, false), .swallow);
+    // The next keystroke is a window command. `q` arrives as text, which is
+    // how most prefix commands come in.
+    try testz.expectEqual(session.routeText(), .manager);
+    // One-shot: the following text is ordinary input again.
+    try testz.expectEqual(session.routeText(), .pass);
+}
+
+pub fn routeKeyRequiresTheExactModifiersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+
+    // A bare `b` is just a letter, and Ctrl-Alt-B isn't the chord either.
+    try testz.expectEqual(session.routeKey("b", true, false, false, false), .pass);
+    try testz.expectEqual(session.routeKey("b", true, true, true, false), .pass);
+    try testz.expectTrue(!session.prefix_armed);
+}
+
+pub fn routeKeyDeliversANamedKeyCommandToTheManagerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+
+    try testz.expectEqual(session.routeKey("b", true, true, false, false), .swallow);
+    // An arrow (a named key, not text) after the prefix: also a command,
+    // and its release is swallowed rather than reaching the program.
+    try testz.expectEqual(session.routeKey("left", true, false, false, false), .manager);
+    try testz.expectEqual(session.routeKey("left", false, false, false, false), .swallow);
+    try testz.expectEqual(session.routeKey("left", true, false, false, false), .pass);
+}
+
+pub fn releaseManagerClearsThePrefixSoNoKeysVanishTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    _ = session.claimManager(1);
+    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    try testz.expectEqual(session.routeKey("b", true, true, false, false), .swallow);
+
+    // The multiplexer dies mid-sequence. A prefix with nobody to deliver to
+    // would swallow keystrokes into nothing.
+    session.releaseManager(1);
+    try testz.expectTrue(session.window_prefix == null);
+    try testz.expectTrue(!session.prefix_armed);
+    try testz.expectEqual(session.routeKey("b", true, true, false, false), .pass);
+    try testz.expectEqual(session.routeText(), .pass);
+}

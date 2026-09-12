@@ -760,7 +760,7 @@ pub const Client = struct {
     pub fn requestWindowManager(self: *Client) !bool {
         var parsed = try self.request(struct { granted: bool }, "request_role", .{ .role = "window_manager" });
         defer parsed.deinit();
-        return parsed.value.granted;
+        return parsed.value.result.granted;
     }
 
     /// `create_pane`: a new pane and the context it displays. The pane is
@@ -773,7 +773,7 @@ pub const Client = struct {
             .{ .scrollback_rows = scrollback_rows },
         );
         defer parsed.deinit();
-        return .{ .pane = parsed.value.pane, .context = parsed.value.context };
+        return .{ .pane = parsed.value.result.pane, .context = parsed.value.result.context };
     }
 
     /// `destroy_pane`: stops whatever is running in the pane and frees it
@@ -794,7 +794,7 @@ pub const Client = struct {
             .{ .axis = @tagName(axis), .resizable = resizable },
         );
         defer parsed.deinit();
-        return parsed.value.split;
+        return parsed.value.result.split;
     }
 
     pub fn destroyPaneSplit(self: *Client, split: core.PaneSplitHandle) !void {
@@ -840,7 +840,7 @@ pub const Client = struct {
             .{ .pane = pane, .argv = argv, .cols = cols, .rows = rows },
         );
         defer parsed.deinit();
-        return parsed.value.pid;
+        return parsed.value.result.pid;
     }
 
     /// `set_property(layer, "cursor", {row, col})` on a non-root layer --

@@ -2,8 +2,13 @@
 //! `PaneId`s, with no glyphwire dependency at all -- just structure, so
 //! `tests/gmux_tests.zig` can exercise split/kill/promote without a
 //! server. `ui.zig` is the half that turns a mutation into the matching
-//! `create_split`/`set_split_children`/`set_root_split`/`destroy_split`
-//! wire calls.
+//! `create_pane_split`/`set_pane_split_children`/`set_root_pane_split`/
+//! `destroy_pane_split` wire calls.
+//!
+//! The ids here are real `glyphwire.PaneHandle`s and the `wire_id`s are
+//! `glyphwire.PaneSplitHandle`s, but this file never says so: it is pure
+//! structure over `u32`, which is what keeps it unit-testable without a
+//! server and unchanged by the move from layer-panes to context-panes.
 //!
 //! **Binary, not N-ary** (user's call): splitting a pane always turns one
 //! leaf into a 2-child `Split`; closing a pane always removes a leaf and
@@ -13,12 +18,12 @@
 //! unambiguous -- there's only ever one neighbour to grow into.
 //!
 //! **Minimal edits, not a rebuild-the-whole-tree-every-time approach.**
-//! glyphwire has no `get_split_state` to read a split's current
-//! (possibly mouse-dragged) child weights back, so `ui.zig` must never
-//! call `set_split_children` on a node it isn't actually changing --
+//! glyphwire has no way to read a split's current (possibly
+//! mouse-dragged) child weights back, so `ui.zig` must never call
+//! `set_pane_split_children` on a node it isn't actually changing --
 //! doing so would silently reset a divider the user just dragged back to
 //! a 1:1 split. `SplitNode.wire_id` is scratch space for `ui.zig` to
-//! track which live `create_split` handle each node corresponds to, so a
+//! track which live pane-split handle each node corresponds to, so a
 //! `split`/`kill` touches only the nodes on the direct path between the
 //! edit and its nearest surviving ancestor -- everywhere else in the tree
 //! is untouched, wire handle and all.
@@ -52,15 +57,15 @@ pub const SplitNode = struct {
     axis: Axis,
     a: *Node,
     b: *Node,
-    /// The `create_split` handle this node currently maps to on the wire,
-    /// or 0 before `ui.zig` has created one. Never read or written by
+    /// The `create_pane_split` handle this node currently maps to on the
+    /// wire, or 0 before `ui.zig` has created one. Never read or written by
     /// this file except to carry it along during a structural edit --
     /// see the module doc comment.
     wire_id: u32 = 0,
 };
 
 /// A pane leaf, or a live split, described by whatever it currently is --
-/// what `set_split_children` wants for one child slot. Reads straight off
+/// what `set_pane_split_children` wants for one child slot. Reads straight off
 /// a `Node` with no allocation.
 pub const ChildRef = union(enum) { pane: PaneId, split: u32 };
 
@@ -72,7 +77,7 @@ pub fn childRef(node: *const Node) ChildRef {
 }
 
 /// The two child refs of a split node, in `a`/`b` order -- what a caller
-/// pushes via `set_split_children` after touching either child.
+/// pushes via `set_pane_split_children` after touching either child.
 pub fn childRefs(s: *const SplitNode) [2]ChildRef {
     return .{ childRef(s.a), childRef(s.b) };
 }
@@ -120,8 +125,8 @@ pub const Tree = struct {
     alloc: Allocator,
     /// Never null after `init`. A single pane is a bare `.leaf` (no
     /// synthetic wrapper split in the *structure* -- `ui.zig` wraps one
-    /// only when it needs an actual wire root, since `set_root_split`
-    /// requires a split handle even for one pane).
+    /// only when it needs an actual wire root, since
+    /// `set_root_pane_split` requires a split handle even for one pane).
     root: *Node,
 
     pub fn init(alloc: Allocator, first_pane: PaneId) !Tree {

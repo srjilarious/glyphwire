@@ -124,6 +124,7 @@ pub const PaneSplitError = core.PaneSplitError;
 pub const PaneBounds = core.PaneBounds;
 pub const PaneDividerRect = core.PaneDividerRect;
 pub const PaneSpawner = dispatch.PaneSpawner;
+pub const WindowPrefix = core.WindowPrefix;
 pub const ProfileSnapshot = core.ProfileSnapshot;
 pub const ProfilePhase = core.ProfilePhase;
 pub const ProfileCount = core.ProfileCount;

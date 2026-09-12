@@ -2879,3 +2879,236 @@ pub fn contextMessagesOnASessionlessDispatcherReportNoContextSessionTest(io: std
         \\{"jsonrpc":"2.0","method":"attach_context","params":{"context":1}}
     ), dispatch.DispatchError.NoContextSession);
 }
+
+// ─── Panes ──────────────────────────────────────────────────────────────
+
+pub fn paneTreeOpsRequireTheWindowManagerRoleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+
+    // A program that merely runs inside a pane must not be able to reshape
+    // the window around itself.
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_pane","params":{}}
+    ), error.NotWindowManager);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_root_pane_split","params":{"split":null}}
+    ), error.NotWindowManager);
+
+    // Claim the role, and the same calls go through.
+    const role = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"request_role","params":{"role":"window_manager"}}
+    );
+    defer if (role.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, role.response.?, "\"granted\":true") != null);
+
+    const made = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":3,"method":"create_pane","params":{"scrollback_rows":0}}
+    );
+    defer if (made.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, made.response.?, "\"pane\":1") != null);
+    // A pane-tree edit tells the caller to re-lay-out.
+    try testz.expectTrue(made.panes_changed);
+}
+
+pub fn requestRoleIsRefusedWhenAnotherConnectionHoldsItTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var first = dispatch.Dispatcher.initForConnection(&session, 1, null);
+    var second = dispatch.Dispatcher.initForConnection(&session, 2, null);
+
+    const a = try first.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"request_role","params":{"role":"window_manager"}}
+    );
+    defer if (a.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, a.response.?, "\"granted\":true") != null);
+
+    // Answered, not thrown -- a second multiplexer gets to say so cleanly.
+    const b = try second.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"request_role","params":{"role":"window_manager"}}
+    );
+    defer if (b.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, b.response.?, "\"granted\":false") != null);
+}
+
+pub fn subscribeWithAPaneBindsTheConnectionAtomicallyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+
+    // What a program spawned into a pane sends: the pane rides inside
+    // `subscribe`, so there is no window in which it is subscribed but
+    // still bound to the wrong pane.
+    var d = dispatch.Dispatcher.initForConnection(&session, 9, null);
+    try testz.expectEqual(d.active_pane, glyphwire.root_pane_handle);
+
+    const resp = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"],"pane":1}}
+    );
+    defer if (resp.response) |r| alloc.free(r);
+
+    try testz.expectEqual(d.active_pane, made.pane);
+    try testz.expectEqual(d.active_ctx, made.context);
+    try testz.expectEqual(d.ctx, session.contextPtr(made.context).?);
+}
+
+pub fn subscribeWithAnUnknownPaneStillSubscribesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 9, null);
+
+    // The pane was destroyed between the spawn and the connect. Leaving the
+    // connection in the focused pane beats refusing to subscribe at all.
+    const resp = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"],"pane":99}}
+    );
+    defer if (resp.response) |r| alloc.free(r);
+    try testz.expectTrue(d.subscriptions.has("key"));
+    try testz.expectEqual(d.active_pane, glyphwire.root_pane_handle);
+}
+
+pub fn attachPaneRetargetsAConnectionOntoItsPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    var d = dispatch.Dispatcher.initForConnection(&session, 9, null);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_pane","params":{"pane":1}}
+    );
+    try testz.expectEqual(d.active_pane, made.pane);
+    try testz.expectEqual(d.active_ctx, made.context);
+
+    // Needs no role: declaring where you live is not a privilege.
+    try testz.expectTrue(!session.isManager(9));
+}
+
+pub fn createContextLandsInTheConnectionsOwnPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const made = try session.createPane(1, 0);
+    var d = dispatch.Dispatcher.initForConnection(&session, 9, null);
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_pane","params":{"pane":1}}
+    );
+
+    // A full-screen program in that pane opens its own context. It must
+    // cover the pane, not the window.
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    defer if (created.response) |r| alloc.free(r);
+    defer if (created.broadcast) |b| alloc.free(b.body);
+
+    const ctx = session.contextPtr(d.active_ctx).?;
+    try testz.expectEqual(ctx.pane, made.pane);
+    try testz.expectEqual(session.panePtr(made.pane).?.top(), d.active_ctx);
+    // The root pane, and focus, are untouched.
+    try testz.expectEqual(session.rootPane().top(), glyphwire.root_context_handle);
+    try testz.expectEqual(session.focusedContextHandle(), glyphwire.root_context_handle);
+}
+
+pub fn setWindowPrefixRequiresTheRoleAndRegistersTheChordTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":"b"}}
+    ), error.NotWindowManager);
+
+    try testz.expectTrue(session.claimManager(4));
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":"a","ctrl":true}}
+    );
+    try testz.expectTrue(session.window_prefix != null);
+    try testz.expectEqualStr(session.window_prefix.?.key(), "a");
+    try testz.expectTrue(session.window_prefix.?.ctrl);
+
+    // Clearing it re-arms nothing.
+    session.prefix_armed = true;
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":null}}
+    );
+    try testz.expectTrue(session.window_prefix == null);
+    try testz.expectTrue(!session.prefix_armed);
+}
+
+pub fn spawnInPaneWithoutASpawnerIsUnsupportedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
+    try testz.expectTrue(session.claimManager(4));
+    _ = try session.createPane(4, 0);
+
+    // The headless server has no window to put a program in and no
+    // business forking one.
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"spawn_in_pane","params":{"pane":1,"argv":["true"]}}
+    ), error.SpawnUnsupported);
+}
+
+pub fn paneSplitChildNamingBothTargetsIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
+    try testz.expectTrue(session.claimManager(4));
+
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_pane_split","params":{"axis":"row"}}
+    );
+    defer if (created.response) |r| alloc.free(r);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_pane_split_children","params":{"split":1,"children":[{"pane":0,"split":1}]}}
+    ), error.InvalidPaneSplitChild);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_pane_split_children","params":{"split":1,"children":[{}]}}
+    ), error.InvalidPaneSplitChild);
+}
+
+pub fn createPaneSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
+    try testz.expectTrue(session.claimManager(4));
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_pane_split","params":{"axis":"diagonal"}}
+    ), error.InvalidSplitAxis);
+}
