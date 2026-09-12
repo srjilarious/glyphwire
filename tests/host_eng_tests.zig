@@ -257,6 +257,40 @@ pub fn keyRepeatDisabledNeverFiresTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectFalse(kb.repeated(.backspace));
 }
 
+pub fn keyRepeatDueMsTracksTheScheduleTest(_: std.Io, _: std.mem.Allocator) !void {
+    // What an idle-blocking event loop waits on: how long it may sleep
+    // before this key's next repeat comes due.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 100, .interval_ms = 20 };
+
+    // Nothing held: nothing to wake for.
+    try testz.expectEqual(kb.repeatDueMs(.down), null);
+
+    kb.set(.down, true);
+    repeatTick(&kb, 16); // the press tick starts the schedule
+    try testz.expectEqual(kb.repeatDueMs(.down).?, 100.0);
+
+    repeatTick(&kb, 60);
+    try testz.expectEqual(kb.repeatDueMs(.down).?, 40.0);
+
+    // After the first repeat the deadline is one interval out.
+    repeatTick(&kb, 40);
+    try testz.expectEqual(kb.repeatDueMs(.down).?, 20.0);
+
+    kb.set(.down, false);
+    repeatTick(&kb, 16);
+    try testz.expectEqual(kb.repeatDueMs(.down), null);
+}
+
+pub fn keyRepeatDueMsIsNullWhenDisabledTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Repeats off: the loop has no repeat deadline to wake for at all.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 10, .interval_ms = 10, .enabled = false };
+    kb.set(.down, true);
+    repeatTick(&kb, 16);
+    try testz.expectEqual(kb.repeatDueMs(.down), null);
+}
+
 pub fn keyRepeatClearDropsPendingRepeatTest(_: std.Io, _: std.mem.Allocator) !void {
     // Focus loss drops the hold along with the key itself, so a key held
     // as the window went away can't keep repeating into the next focus.

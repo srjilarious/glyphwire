@@ -115,17 +115,20 @@ pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
                     // Idle until an OS event arrives, `Engine.wakeEventLoop`
                     // is called from another thread, or the app's own
                     // timeout elapses (a blinking caret, a pending
-                    // screenshot).
+                    // screenshot, a held key's next typematic repeat).
+                    // The app is handed the engine because that timeout
+                    // is usually a deadline on engine state -- the
+                    // keyboard's repeat schedule, say.
                     if (comptime prof) {
                         if (app.profileActive()) {
                             const t0 = app.profileNow();
-                            self.engine.waitEvents(app.idleTimeoutMs());
+                            self.engine.waitEvents(app.idleTimeoutMs(self.engine));
                             app.profileWait(t0);
                         } else {
-                            self.engine.waitEvents(app.idleTimeoutMs());
+                            self.engine.waitEvents(app.idleTimeoutMs(self.engine));
                         }
                     } else {
-                        self.engine.waitEvents(app.idleTimeoutMs());
+                        self.engine.waitEvents(app.idleTimeoutMs(self.engine));
                     }
                 }
             }

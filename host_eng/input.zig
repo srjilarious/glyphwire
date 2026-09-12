@@ -424,6 +424,22 @@ pub const Keyboard = struct {
         return self.repeat_bits.isSet(keyIndex(key));
     }
 
+    /// Milliseconds until `key`'s next typematic repeat is due, or null
+    /// when it is up, when repeats are off, or when it hasn't been held
+    /// long enough for the press tick to have started its schedule.
+    ///
+    /// For an app that blocks on the OS event queue when idle
+    /// (`redrawOnDemand`): the hold timer only advances while the loop is
+    /// running, so a loop parked in `waitEvents` has to be woken for the
+    /// repeat, or it sleeps through the schedule and then fires the whole
+    /// backlog in one frame. See `host/app.zig`'s `idleTimeoutMs`.
+    pub fn repeatDueMs(self: *const Keyboard, key: Key) ?f64 {
+        if (!self.repeat.enabled) return null;
+        const idx = keyIndex(key);
+        if (!self.curr.isSet(idx)) return null;
+        return @max(0, self.next_repeat_ms[idx] - self.held_ms[idx]);
+    }
+
     /// Advances every held key's hold timer by `delta_ms` and republishes
     /// `repeat_bits` for this tick. A key pressed this tick starts its
     /// schedule over at `repeat.delay_ms`; a key that is up has its timer

@@ -311,3 +311,35 @@ pub const KeyInput = struct {
         layer.cursor.row = @intCast(std.math.clamp(row, 0, @as(i32, @intCast(layer.height - 1))));
     }
 };
+
+/// How long the event loop may sleep before a held key's next typematic
+/// repeat comes due, or null when nothing repeatable is held.
+///
+/// The host blocks in `waitEvents` when idle and the hold timers only
+/// advance while the loop runs -- so without this deadline a held key
+/// sleeps through its whole schedule until something else (the caret
+/// blink, the OS's own first key-repeat event) happens to wake the loop,
+/// which then catches up several repeats' worth of simulated time in one
+/// frame. That reads as a burst of motion, a pause, then an uneven
+/// cadence. Waking on the schedule keeps the repeats evenly spaced.
+///
+/// Floored at one update step: the loop advances the hold timers in
+/// fixed steps, so waking sooner would only spin through iterations that
+/// can't move the clock far enough to fire anything.
+pub fn repeatTimeoutMs(eng: *Engine) ?f64 {
+    const kb = &eng.inputs.keyboard;
+    const ctrl = kb.ctrl();
+    const alt = kb.alt();
+    var soonest: ?f64 = null;
+    const field_names = @typeInfo(app_mod.Key).@"enum".field_names;
+    inline for (field_names) |field_name| {
+        const key = @field(app_mod.Key, field_name);
+        if (key_repeat.repeatsKey(key, ctrl, alt)) {
+            if (kb.repeatDueMs(key)) |due| {
+                soonest = if (soonest) |s| @min(s, due) else due;
+            }
+        }
+    }
+    const due = soonest orelse return null;
+    return @max(due, app_mod.update_step_ms);
+}

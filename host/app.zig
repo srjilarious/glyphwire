@@ -81,6 +81,12 @@ pub const EngOptions: host_eng.EngineOptions = .{
 };
 pub const AppRunner = host_eng.AppRunner(App, EngOptions);
 
+/// The loop's fixed update step in ms -- what one `App.update` call
+/// advances every clock the host keeps (`EngOptions.updateStepHz`).
+/// `input.KeyInput.repeatTimeoutMs` floors its idle wait at this: no
+/// point waking sooner than the clock can move.
+pub const update_step_ms: f64 = 1000.0 / EngOptions.updateStepHz;
+
 /// The engine instance type, aliased so the sub-struct modules
 /// (`input.zig`, `render.zig`, ...) can name it without re-deriving the
 /// `AppRunner` instantiation.
@@ -460,7 +466,7 @@ pub const App = struct {
     /// socket-driven grid change needs no timeout. A pending screenshot or
     /// a configured caret blink still needs the loop back on its own
     /// clock, so those return a bounded wait in milliseconds.
-    pub fn idleTimeoutMs(self: *App) ?f64 {
+    pub fn idleTimeoutMs(self: *App, eng: *Engine) ?f64 {
         // Forced every-frame redraw: never block on the event loop, so
         // the loop runs at the display's frame rate (vsync in
         // `swapBuffers` is then the only throttle).
@@ -479,6 +485,10 @@ pub const App = struct {
         // A resize still settling needs the loop back on its own clock to
         // commit it once the OS event stream goes quiet.
         wait = softMin(wait, self.window_sizing.settleTimeoutMs());
+        // A held key's next typematic repeat: its hold timer only moves
+        // while the loop runs, so sleeping past the schedule would land
+        // the backlog in one frame instead of an even cadence.
+        wait = softMin(wait, input_mod.repeatTimeoutMs(eng));
         return wait;
     }
 
