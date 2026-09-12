@@ -28,6 +28,45 @@ fn signalHandshake(io: std.Io) !void {
     try w.interface.flush();
 }
 
+/// Reads `GLYPHWIRE_PANE` from the process's own environment -- the pane a
+/// `spawn_in_pane` child was seated in. Null when unset (the program has
+/// the window to itself) or unparseable.
+///
+/// The pane this process was seated in (`GLYPHWIRE_PANE`), or null when it
+/// has the window to itself.
+///
+/// Process-global rather than per-connection because a pane binding is a
+/// property of the *process*: a program's drawing `Client` and its paired
+/// `InputListener` are two separate connections that must land in the same
+/// pane, and the listener never sees the caller's environment map. Set once
+/// by `notePaneFromEnviron` and read by every `connect` afterwards, so a
+/// program seated in a pane needs no pane-aware code of its own -- which is
+/// what lets an unmodified `gw-shell` or `zoe` run inside one.
+///
+/// Not read from a global environment block, because this module is used by
+/// binaries that don't link libc and this std provides no libc-free global
+/// `environ`.
+var process_pane: ?core.PaneHandle = null;
+
+/// Records `GLYPHWIRE_PANE` from an environment map. `connectFromEnv`
+/// calls this itself; a program that connects by explicit socket path
+/// (`glyphwire-shell`) should call it once at startup, before connecting.
+/// Harmless to call more than once, and a no-op when the variable is unset
+/// or unparseable.
+pub fn notePaneFromEnviron(environ_map: *const std.process.Environ.Map) void {
+    const raw = environ_map.get("GLYPHWIRE_PANE") orelse return;
+    process_pane = std.fmt.parseInt(core.PaneHandle, raw, 10) catch null;
+}
+
+/// The pane this process is seated in, if any -- see `process_pane`.
+pub fn processPane() ?core.PaneHandle {
+    return process_pane;
+}
+
+fn paneFromEnv() ?core.PaneHandle {
+    return process_pane;
+}
+
 /// A glyphwire client: wraps connecting to `GLYPHWIRE_SOCK`, JSON-RPC
 /// framing, and request/response correlation, so a program doesn't have to
 /// hand-build JSON strings to speak the protocol (as the early test clients
@@ -92,7 +131,28 @@ pub const Client = struct {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
         const stream = try addr.connect(io);
         signalHandshake(io) catch {};
-        return .{ .io = io, .alloc = alloc, .stream = stream };
+        var client: Client = .{ .io = io, .alloc = alloc, .stream = stream };
+        client.attachPaneFromEnv();
+        return client;
+    }
+
+    /// Binds this connection to the pane named by `GLYPHWIRE_PANE`, if it
+    /// is set. A no-op otherwise, which is every program that has the
+    /// window to itself.
+    ///
+    /// Called from `connect`, so *every* client is pane-correct with no
+    /// code of its own -- the property that lets an unmodified `gw-shell`
+    /// or `zoe` run inside a pane. It is deliberately the connection's
+    /// first message: everything else this client sends is ordered behind
+    /// it on the same stream, so there is no window during which the
+    /// connection is bound to the wrong pane. Failure is logged rather
+    /// than propagated, because a write that fails here means the
+    /// connection is already gone and the next call will surface it.
+    pub fn attachPaneFromEnv(self: *Client) void {
+        const pane = paneFromEnv() orelse return;
+        self.attachPane(pane) catch |err| {
+            std.log.warn("glyphwire: attach_pane({d}) failed: {t}", .{ pane, err });
+        };
     }
 
     /// Discovery per decisions.md: connects using `GLYPHWIRE_SOCK` from
@@ -105,6 +165,7 @@ pub const Client = struct {
         environ_map: *const std.process.Environ.Map,
     ) (ConnectError || NoSessionError)!Client {
         const socket_path = environ_map.get("GLYPHWIRE_SOCK") orelse return error.NoSession;
+        notePaneFromEnviron(environ_map);
         return connect(io, alloc, socket_path);
     }
 
@@ -665,6 +726,111 @@ pub const Client = struct {
     /// paired `InputListener` -- see `InputListener.attachContext`).
     pub fn attachContext(self: *Client, context: core.ContextHandle) !void {
         try self.notify("attach_context", .{ .context = context });
+    }
+
+    // ── Panes ───────────────────────────────────────────────────────────
+    //
+    // Everything from `requestRole` down is the window-manager side of the
+    // protocol: a program that merely *runs inside* a pane never calls any
+    // of it, and doesn't need to know panes exist. See core.zig's Panes
+    // section.
+
+    /// `attach_pane`: binds this connection to a pane. Called automatically
+    /// at connect time when `GLYPHWIRE_PANE` is set (see
+    /// `attachPaneFromEnv`), so a program seated in a pane by
+    /// `spawn_in_pane` needs no code of its own.
+    pub fn attachPane(self: *Client, pane: core.PaneHandle) !void {
+        try self.notify("attach_pane", .{ .pane = pane });
+    }
+
+    /// `request_role "window_manager"`: asks for permission to reshape the
+    /// window. Answers false (rather than failing) when another connection
+    /// already holds it, so a second multiplexer can tell the user there
+    /// is already one instead of dying on a wire error.
+    pub fn requestWindowManager(self: *Client) !bool {
+        var parsed = try self.request(struct { granted: bool }, "request_role", .{ .role = "window_manager" });
+        defer parsed.deinit();
+        return parsed.value.granted;
+    }
+
+    /// `create_pane`: a new pane and the context it displays. The pane is
+    /// not on screen until it is placed in the tree
+    /// (`setPaneSplitChildren` / `setRootPaneSplit`).
+    pub fn createPane(self: *Client, scrollback_rows: usize) !PaneCreated {
+        var parsed = try self.request(
+            struct { pane: core.PaneHandle, context: core.ContextHandle },
+            "create_pane",
+            .{ .scrollback_rows = scrollback_rows },
+        );
+        defer parsed.deinit();
+        return .{ .pane = parsed.value.pane, .context = parsed.value.context };
+    }
+
+    /// `destroy_pane`: stops whatever is running in the pane and frees it
+    /// and every context in it.
+    pub fn destroyPane(self: *Client, pane: core.PaneHandle) !void {
+        try self.notify("destroy_pane", .{ .pane = pane });
+    }
+
+    /// `focus_pane`: which pane raw input goes to.
+    pub fn focusPane(self: *Client, pane: core.PaneHandle) !void {
+        try self.notify("focus_pane", .{ .pane = pane });
+    }
+
+    pub fn createPaneSplit(self: *Client, axis: core.SplitAxis, resizable: bool) !core.PaneSplitHandle {
+        var parsed = try self.request(
+            struct { split: core.PaneSplitHandle },
+            "create_pane_split",
+            .{ .axis = @tagName(axis), .resizable = resizable },
+        );
+        defer parsed.deinit();
+        return parsed.value.split;
+    }
+
+    pub fn destroyPaneSplit(self: *Client, split: core.PaneSplitHandle) !void {
+        try self.notify("destroy_pane_split", .{ .split = split });
+    }
+
+    pub fn setPaneSplitChildren(
+        self: *Client,
+        split: core.PaneSplitHandle,
+        children: []const PaneSplitChildInput,
+    ) !void {
+        try self.notify("set_pane_split_children", .{ .split = split, .children = children });
+    }
+
+    pub fn setRootPaneSplit(self: *Client, split: ?core.PaneSplitHandle) !void {
+        try self.notify("set_root_pane_split", .{ .split = split });
+    }
+
+    /// `move_pane_divider`: drags the band after child `index` by `delta`
+    /// cells. Positive grows the child at `index` and shrinks its
+    /// neighbour.
+    pub fn movePaneDivider(self: *Client, split: core.PaneSplitHandle, index: usize, delta: i64) !void {
+        try self.notify("move_pane_divider", .{ .split = split, .index = index, .delta = delta });
+    }
+
+    /// `spawn_in_pane`: starts a program seated in a pane, and answers its
+    /// pid. The host handles the fork, the PTY, the environment that lets
+    /// the child find its pane, and the reaping -- see
+    /// `dispatch.PaneSpawner` for why that isn't the manager's job.
+    ///
+    /// `cols`/`rows` default to the pane's own size, which is almost always
+    /// what a program should get.
+    pub fn spawnInPane(
+        self: *Client,
+        pane: core.PaneHandle,
+        argv: []const []const u8,
+        cols: ?usize,
+        rows: ?usize,
+    ) !i64 {
+        var parsed = try self.request(
+            struct { pid: i64 },
+            "spawn_in_pane",
+            .{ .pane = pane, .argv = argv, .cols = cols, .rows = rows },
+        );
+        defer parsed.deinit();
+        return parsed.value.pid;
     }
 
     /// `set_property(layer, "cursor", {row, col})` on a non-root layer --
@@ -1944,6 +2110,40 @@ pub const ScrollOffsetState = struct {
 /// One `set_split_children` entry, in the shape the wire wants: exactly
 /// one of `layer`/`split`, and at most one of `weight`/`fixed`. The
 /// constructors below are the ergonomic way to build them.
+/// One `set_pane_split_children` entry. The window-level mirror of
+/// `SplitChildInput`: same sizing vocabulary, different child kind.
+pub const PaneSplitChildInput = struct {
+    pane: ?core.PaneHandle = null,
+    split: ?core.PaneSplitHandle = null,
+    weight: ?f32 = null,
+    fixed: ?usize = null,
+
+    /// A pane taking a share of whatever the fixed siblings leave.
+    pub fn paneWeighted(handle: core.PaneHandle, weight: f32) PaneSplitChildInput {
+        return .{ .pane = handle, .weight = weight };
+    }
+
+    /// A pane with an exact extent along the split's axis -- a fixed-width
+    /// sidebar pane, a one-row status pane.
+    pub fn paneFixed(handle: core.PaneHandle, cells: usize) PaneSplitChildInput {
+        return .{ .pane = handle, .fixed = cells };
+    }
+
+    pub fn splitWeighted(handle: core.PaneSplitHandle, weight: f32) PaneSplitChildInput {
+        return .{ .split = handle, .weight = weight };
+    }
+
+    pub fn splitFixed(handle: core.PaneSplitHandle, cells: usize) PaneSplitChildInput {
+        return .{ .split = handle, .fixed = cells };
+    }
+};
+
+/// What `create_pane` answers with: the pane, and the context it shows.
+pub const PaneCreated = struct {
+    pane: core.PaneHandle,
+    context: core.ContextHandle,
+};
+
 pub const SplitChildInput = struct {
     layer: ?core.LayerHandle = null,
     split: ?core.SplitHandle = null,
@@ -1996,6 +2196,43 @@ pub const LayoutBounds = struct {
 /// A `layout` notification: every pane whose bounds changed after the
 /// split tree was re-laid-out. Owns `layers`; `pollLayoutEvent` hands
 /// ownership to the caller, which must call `deinit`.
+/// One pane's window rect, as carried by a `pane_layout` notification.
+pub const PaneBounds = struct {
+    pane: core.PaneHandle,
+    row: usize,
+    col: usize,
+    cols: usize,
+    rows: usize,
+};
+
+/// A queued `pane_layout` notification: the panes whose window rects
+/// changed. Owns `panes`; `pollPaneLayoutEvent` hands ownership to the
+/// caller. Only a window manager ever subscribes to this -- it is the one
+/// message that exposes pane geometry.
+pub const PaneLayoutEvent = struct {
+    panes: []PaneBounds,
+
+    pub fn deinit(self: PaneLayoutEvent, alloc: std.mem.Allocator) void {
+        alloc.free(self.panes);
+    }
+
+    /// This event's bounds for `pane`, or null if it wasn't in it.
+    pub fn boundsFor(self: PaneLayoutEvent, pane: core.PaneHandle) ?PaneBounds {
+        for (self.panes) |b| {
+            if (b.pane == pane) return b;
+        }
+        return null;
+    }
+};
+
+/// A queued `pane_exit` notification: the program `spawn_in_pane` started
+/// in `pane` has finished. The pane itself is untouched -- it belongs to
+/// the manager, which decides whether to respawn or tear down.
+pub const PaneExitEvent = struct {
+    pane: core.PaneHandle,
+    status: i64,
+};
+
 pub const LayoutEvent = struct {
     layers: []LayoutBounds,
 
@@ -2090,6 +2327,13 @@ pub const InputListener = struct {
     /// ownership to the caller (`pollLayoutEvent`).
     layout_events: std.ArrayList(LayoutEvent) = .empty,
     layout_sem: std.Io.Semaphore = .{},
+    /// Queued `pane_layout` / `pane_exit` notifications, same
+    /// drain-on-poll shape as `layout_events`. Both stay empty unless this
+    /// connection subscribed to them, which only a window manager does.
+    pane_layout_events: std.ArrayList(PaneLayoutEvent) = .empty,
+    pane_layout_sem: std.Io.Semaphore = .{},
+    pane_exit_events: std.ArrayList(PaneExitEvent) = .empty,
+    pane_exit_sem: std.Io.Semaphore = .{},
     /// Queued `context` notifications (see `ContextEvent`), same
     /// drain-on-poll shape as `resize_events`. `last_context` caches the
     /// most recent for `visibleContext()`'s instant read; null until the
@@ -2138,6 +2382,7 @@ pub const InputListener = struct {
         events: []const []const u8,
     ) !*InputListener {
         const socket_path = environ_map.get("GLYPHWIRE_SOCK") orelse return error.NoSession;
+        notePaneFromEnviron(environ_map);
         return connect(io, alloc, socket_path, events);
     }
 
@@ -2162,6 +2407,9 @@ pub const InputListener = struct {
         self.scroll_offset_events.deinit(self.alloc);
         for (self.layout_events.items) |ev| ev.deinit(self.alloc);
         self.layout_events.deinit(self.alloc);
+        for (self.pane_layout_events.items) |ev| ev.deinit(self.alloc);
+        self.pane_layout_events.deinit(self.alloc);
+        self.pane_exit_events.deinit(self.alloc);
         self.scroll_events.deinit(self.alloc);
         self.context_events.deinit(self.alloc);
         self.alloc.destroy(self);
@@ -2272,6 +2520,23 @@ pub const InputListener = struct {
         defer self.mutex.unlock(self.io);
         if (self.layout_events.items.len == 0) return null;
         return self.layout_events.orderedRemove(0);
+    }
+
+    /// The next queued `pane_layout`, or null. The caller owns the returned
+    /// event and must `deinit` it.
+    pub fn pollPaneLayoutEvent(self: *InputListener) ?PaneLayoutEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.pane_layout_events.items.len == 0) return null;
+        return self.pane_layout_events.orderedRemove(0);
+    }
+
+    /// The next queued `pane_exit`, or null. Nothing to free.
+    pub fn pollPaneExitEvent(self: *InputListener) ?PaneExitEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.pane_exit_events.items.len == 0) return null;
+        return self.pane_exit_events.orderedRemove(0);
     }
 
     pub fn pollResizeEvent(self: *InputListener) ?ResizeEvent {
@@ -2393,14 +2658,29 @@ pub const InputListener = struct {
         try w.interface.flush();
     }
 
+    /// `subscribe`, carrying this connection's pane when `GLYPHWIRE_PANE`
+    /// is set.
+    ///
+    /// The pane rides *inside* `subscribe` rather than arriving as a
+    /// separate `attach_pane` first, because `subscribe` is what arms the
+    /// broadcast fan-out: a connection that were subscribed but not yet
+    /// bound would, for that window, be gated against the wrong pane and
+    /// could receive keystrokes meant for another program. Folding the two
+    /// into one message makes that window impossible rather than merely
+    /// small.
     fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8) !void {
         const Msg = struct {
             jsonrpc: []const u8 = "2.0",
             id: i64 = 1,
             method: []const u8 = "subscribe",
-            params: struct { events: []const []const u8 },
+            params: struct {
+                events: []const []const u8,
+                pane: ?core.PaneHandle = null,
+            },
         };
-        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .params = .{ .events = events } }, .{});
+        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{
+            .params = .{ .events = events, .pane = paneFromEnv() },
+        }, .{});
         defer self.alloc.free(body);
 
         var write_buf: [1024]u8 = undefined;
@@ -2595,6 +2875,38 @@ pub const InputListener = struct {
             defer self.mutex.unlock(self.io);
             try self.layout_events.append(self.alloc, .{ .layers = owned });
             self.layout_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "pane_layout")) {
+            const p = try std.json.parseFromValue(protocol.PaneLayoutParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            // Copied out of `p`'s arena, same as `layout` above.
+            const owned = try self.alloc.alloc(PaneBounds, p.value.panes.len);
+            errdefer self.alloc.free(owned);
+            for (p.value.panes, 0..) |b, i| {
+                owned[i] = .{ .pane = b.pane, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+            }
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.pane_layout_events.append(self.alloc, .{ .panes = owned });
+            self.pane_layout_sem.post(self.io);
+            // Wake a manager parked in `waitInputEvent` between keystrokes,
+            // the same way `mouse_button` does: a pane layout change is
+            // something it needs to act on now, not at the next timeout.
+            self.input_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "pane_exit")) {
+            const p = try std.json.parseFromValue(protocol.PaneExitParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.pane_exit_events.append(self.alloc, .{ .pane = p.value.pane, .status = p.value.status });
+            self.pane_exit_sem.post(self.io);
+            self.input_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "resize")) {
             const P = protocol.ResizeParams;
             const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{

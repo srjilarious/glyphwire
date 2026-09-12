@@ -457,6 +457,13 @@ const ReportMouseMoveParams = struct {
 
 const SubscribeParams = struct {
     events: []const []const u8,
+    /// Optional: binds this connection to a pane at the same time, exactly
+    /// as `attach_pane` would. Folded into `subscribe` because `subscribe`
+    /// is what arms the broadcast fan-out -- a connection that were
+    /// subscribed but not yet bound would, until the binding landed, be
+    /// gated against the wrong pane and could receive input meant for
+    /// another program. See `InputListener.sendSubscribeAndWaitForAck`.
+    pane: ?core.PaneHandle = null,
 };
 
 const SubscribeResult = struct {
@@ -711,6 +718,12 @@ pub const Subscriptions = struct {
     /// which the client pulls with `get_errors`. Named `_events` because
     /// `error` is a keyword.
     error_events: bool = false,
+    /// `pane_layout` / `pane_exit` server->client notifications -- the
+    /// window-manager stream. `pane_layout` is the only message that
+    /// reveals where panes sit, and `pane_exit` says a program in a pane
+    /// finished. Nothing but a window manager has a reason to subscribe,
+    /// which is why they are one flag: wanting one means wanting both.
+    panes: bool = false,
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
@@ -727,6 +740,8 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "terminal")) return self.terminal;
         if (std.mem.eql(u8, event, "context")) return self.context;
         if (std.mem.eql(u8, event, "error")) return self.error_events;
+        if (std.mem.eql(u8, event, "pane_layout")) return self.panes;
+        if (std.mem.eql(u8, event, "pane_exit")) return self.panes;
         return false;
     }
 
@@ -747,6 +762,11 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "terminal")) s.terminal = true;
             if (std.mem.eql(u8, e, "context")) s.context = true;
             if (std.mem.eql(u8, e, "error")) s.error_events = true;
+            if (std.mem.eql(u8, e, "panes")) s.panes = true;
+            // The event names are accepted as subscription names too, so a
+            // client can name what it wants rather than the flag.
+            if (std.mem.eql(u8, e, "pane_layout")) s.panes = true;
+            if (std.mem.eql(u8, e, "pane_exit")) s.panes = true;
         }
         return s;
     }
@@ -2399,6 +2419,21 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         self.subscriptions = Subscriptions.setFromEvents(parsed.value.events);
+
+        // Atomically with arming the fan-out -- see `SubscribeParams.pane`.
+        // An unknown pane is ignored rather than failing the subscribe: the
+        // pane may have been destroyed between the spawn and the connect,
+        // and leaving the connection in the focused pane is a better
+        // outcome than refusing to subscribe at all.
+        if (parsed.value.pane) |pane_handle| {
+            if (self.session) |session| {
+                if (session.panePtr(pane_handle)) |pane| {
+                    self.active_pane = pane_handle;
+                    self.active_ctx = pane.top();
+                    if (session.contextPtr(self.active_ctx)) |c| self.ctx = c;
+                }
+            }
+        }
 
         return try rpc.response(alloc, id, SubscribeResult{ .subscribed = parsed.value.events });
     }

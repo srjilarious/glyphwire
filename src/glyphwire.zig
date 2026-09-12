@@ -42,6 +42,12 @@ pub const ScrollOffsetEvent = client.ScrollOffsetEvent;
 pub const LayoutEvent = client.LayoutEvent;
 pub const LayoutBounds = client.LayoutBounds;
 pub const SplitChildInput = client.SplitChildInput;
+pub const PaneSplitChildInput = client.PaneSplitChildInput;
+pub const PaneCreated = client.PaneCreated;
+pub const PaneLayoutEvent = client.PaneLayoutEvent;
+pub const PaneExitEvent = client.PaneExitEvent;
+pub const notePaneFromEnviron = client.notePaneFromEnviron;
+pub const processPane = client.processPane;
 
 pub const Color = core.Color;
 pub const ImageHandle = core.ImageHandle;

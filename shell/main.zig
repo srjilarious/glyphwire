@@ -392,6 +392,12 @@ fn pumpPtyMouse(
 /// the rest of the process tree, same as any other long-lived child in
 /// this codebase).
 fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, environ_map: *const std.process.Environ.Map) !void {
+    // Before either connection: if a window manager seated this shell in a
+    // pane, both the drawing `Client` and the `InputListener` below have to
+    // bind to it. That's all the pane-awareness the shell needs -- see
+    // `client.notePaneFromEnviron`.
+    glyphwire.notePaneFromEnviron(environ_map);
+
     var client = glyphwire.Client.connect(io, alloc, socket_path) catch |err| {
         std.log.err("prompt: failed to connect: {t}", .{err});
         return;
