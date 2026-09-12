@@ -307,6 +307,16 @@ const SpawnInPaneParams = struct {
 };
 const SpawnInPaneResult = struct { pid: i64 };
 
+/// `set_window_prefix`: the chord after which one keystroke is delivered to
+/// the window manager instead of to the focused pane. Null `key` clears it.
+/// See `core.WindowPrefix`.
+const SetWindowPrefixParams = struct {
+    key: ?[]const u8 = null,
+    ctrl: bool = true,
+    alt: bool = false,
+    shift: bool = false,
+};
+
 const DestroyLayerParams = struct {
     layer: core.LayerHandle,
 };
@@ -724,6 +734,12 @@ pub const Subscriptions = struct {
     /// finished. Nothing but a window manager has a reason to subscribe,
     /// which is why they are one flag: wanting one means wanting both.
     panes: bool = false,
+    /// `window_key_down` / `window_key_up` / `window_text` -- the key
+    /// following the manager's registered prefix chord, addressed to the
+    /// manager instead of reaching the focused pane's program. See
+    /// `core.WindowPrefix` for why the session decides this rather than the
+    /// manager.
+    window_keys: bool = false,
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
@@ -742,6 +758,8 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "error")) return self.error_events;
         if (std.mem.eql(u8, event, "pane_layout")) return self.panes;
         if (std.mem.eql(u8, event, "pane_exit")) return self.panes;
+        if (std.mem.eql(u8, event, "window_key")) return self.window_keys;
+        if (std.mem.eql(u8, event, "window_text")) return self.window_keys;
         return false;
     }
 
@@ -767,6 +785,9 @@ pub const Subscriptions = struct {
             // client can name what it wants rather than the flag.
             if (std.mem.eql(u8, e, "pane_layout")) s.panes = true;
             if (std.mem.eql(u8, e, "pane_exit")) s.panes = true;
+            if (std.mem.eql(u8, e, "window_keys")) s.window_keys = true;
+            if (std.mem.eql(u8, e, "window_key")) s.window_keys = true;
+            if (std.mem.eql(u8, e, "window_text")) s.window_keys = true;
         }
         return s;
     }
@@ -1187,6 +1208,7 @@ pub const Dispatcher = struct {
         .{ "set_root_pane_split", catResult(handleSetRootPaneSplit) },
         .{ "move_pane_divider", catResult(handleMovePaneDivider) },
         .{ "spawn_in_pane", catBytesId(handleSpawnInPane) },
+        .{ "set_window_prefix", catVoid(handleSetWindowPrefix) },
         .{ "create_split", catBytesId(handleCreateSplit) },
         .{ "destroy_split", catResult(handleDestroySplit) },
         .{ "set_split_children", catResult(handleSetSplitChildren) },
@@ -1999,6 +2021,32 @@ pub const Dispatcher = struct {
         const pid = spawner.spawn(p.pane, base, p.argv, cols, rows) catch
             return DispatchError.SpawnFailed;
         return try rpc.response(alloc, id, SpawnInPaneResult{ .pid = pid });
+    }
+
+    /// `set_window_prefix`: registers the chord after which one keystroke
+    /// belongs to this window manager rather than to the focused pane.
+    ///
+    /// The session enforces it, not the manager -- see `core.WindowPrefix`
+    /// for why that distinction is the whole point. A manager therefore
+    /// receives *only* its own commands (`window_key_*` / `window_text`) and
+    /// never sees a program's keystrokes at all.
+    fn handleSetWindowPrefix(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(SetWindowPrefixParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        if (p.key) |k| {
+            session.window_prefix = core.WindowPrefix.init(k, p.ctrl, p.alt, p.shift);
+        } else {
+            session.window_prefix = null;
+        }
+        // Clearing or re-registering resets the one-shot, so a chord that
+        // was armed when the binding changed can't fire the new one.
+        session.prefix_armed = false;
+        session.swallowed_key_len = 0;
     }
 
     /// `set_window_scrollbar`: toggles glyphwire-host's always-on

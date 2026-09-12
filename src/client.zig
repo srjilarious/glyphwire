@@ -735,6 +735,16 @@ pub const Client = struct {
     // of it, and doesn't need to know panes exist. See core.zig's Panes
     // section.
 
+    /// `set_window_prefix`: the chord after which one keystroke is a window
+    /// command rather than input for the focused pane. `null` clears it.
+    ///
+    /// The session enforces this, so a manager receives only its own
+    /// commands and never a program's keystrokes -- see
+    /// `core.WindowPrefix`.
+    pub fn setWindowPrefix(self: *Client, key: ?[]const u8, ctrl: bool, alt: bool, shift: bool) !void {
+        try self.notify("set_window_prefix", .{ .key = key, .ctrl = ctrl, .alt = alt, .shift = shift });
+    }
+
     /// `attach_pane`: binds this connection to a pane. Called automatically
     /// at connect time when `GLYPHWIRE_PANE` is set (see
     /// `attachPaneFromEnv`), so a program seated in a pane by
@@ -2051,6 +2061,21 @@ pub const InputEvent = union(enum) {
     /// memory. glyphwire-shell treats it like a typed `exit` -- flush
     /// persistent state, then return from its prompt loop.
     shutdown: ShutdownEvent,
+    /// One `window_key_down` / `window_key_up`: a named key that followed
+    /// this connection's registered window prefix, so it is a window
+    /// command rather than input for any program. Only a window manager
+    /// ever receives these, and a window manager receives *nothing else* --
+    /// it is never in the focused pane, so no program's keystrokes reach it
+    /// at all. `key` owned, freed like `key`.
+    ///
+    /// A separate variant from `key` on purpose: a manager must never be
+    /// able to confuse a command for its own with input meant for a pane,
+    /// and the type system is a better place to enforce that than a comment.
+    window_key: KeyEvent,
+    /// One `window_text`: committed text that followed the window prefix.
+    /// How most prefix commands arrive, since a plain printable key with no
+    /// modifiers is delivered as text. `text` owned.
+    window_text: TextEvent,
 
     /// Frees the owned string for whichever variant this is.
     pub fn deinit(self: InputEvent, alloc: std.mem.Allocator) void {
@@ -2060,6 +2085,8 @@ pub const InputEvent = union(enum) {
             .paste => |t| alloc.free(t.text),
             .copy_request => {},
             .shutdown => {},
+            .window_key => |k| alloc.free(k.key),
+            .window_text => |t| alloc.free(t.text),
         }
     }
 };
@@ -2875,6 +2902,38 @@ pub const InputListener = struct {
             defer self.mutex.unlock(self.io);
             try self.layout_events.append(self.alloc, .{ .layers = owned });
             self.layout_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "window_key_down") or
+            std.mem.eql(u8, parsed.value.method, "window_key_up"))
+        {
+            const p = try std.json.parseFromValue(protocol.KeyParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const pressed = std.mem.eql(u8, parsed.value.method, "window_key_down");
+            const owned_key = try self.alloc.dupe(u8, p.value.key);
+            errdefer self.alloc.free(owned_key);
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            // Deliberately *not* folded into `state`'s down-set: this key
+            // never reached any program, so reporting it as held would make
+            // a manager's own modifier checks disagree with the keyboard.
+            try self.input_events.append(self.alloc, .{ .window_key = .{ .key = owned_key, .pressed = pressed } });
+            self.input_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "window_text")) {
+            const p = try std.json.parseFromValue(protocol.TextParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            const owned_text = try self.alloc.dupe(u8, p.value.text);
+            errdefer self.alloc.free(owned_text);
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.input_events.append(self.alloc, .{ .window_text = .{ .text = owned_text } });
+            self.input_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "pane_layout")) {
             const p = try std.json.parseFromValue(protocol.PaneLayoutParams, self.alloc, parsed.value.params, .{
                 .ignore_unknown_fields = true,

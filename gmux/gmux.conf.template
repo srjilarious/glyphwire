@@ -1,0 +1,48 @@
+-- gmux configuration template.
+--
+-- This is the full reference for `gmux.conf`, the file gmux runs once at
+-- startup (see gmux/config.zig `load`). Copy it to one of:
+--
+--   $GLYPHWIRE_CONFIG_DIR/gmux.conf
+--   $XDG_CONFIG_HOME/glyphwire/gmux.conf
+--   ~/.config/glyphwire/gmux.conf                   (the usual location)
+--
+-- Every key is listed below at its built-in default, with every line
+-- commented out -- so copying this file verbatim changes nothing.
+-- Uncomment and edit only the keys you want to override. With no file at
+-- all gmux uses Ctrl-B as the prefix, gw-shell for every pane, and a
+-- 2000-row scrollback ring per pane.
+--
+-- Syntax: a plain Lua script (standard libraries open). Assign a single
+-- global table named `config`. Unknown keys are ignored; a key of the
+-- wrong type is logged and the default stands. Any parse error is logged
+-- and whatever parsed before it is kept.
+--
+-- Keybindings, scrollback style, and the pane layout itself are not
+-- configurable yet -- gmux's first version.
+
+-- config = {
+--
+--     -- The letter after Ctrl that starts a command (screen-style
+--     -- Ctrl-A, tmux-style Ctrl-B, ...). One lowercase ASCII letter.
+--     -- After it: " splits the focused pane below, % splits it to the
+--     -- right, an arrow key moves focus in that direction, x kills the
+--     -- focused pane, z toggles zooming it to fill the window, H/L
+--     -- shrink/grow it along a row-axis split, J/K along a column-axis
+--     -- one, and q quits gmux.
+--     prefix_key = "b",
+--
+--     -- The command run in a fresh pane, overriding the default
+--     -- gw-shell. No arguments -- just the program itself, same as
+--     -- opening a new terminal window. Any ordinary shell (bash, fish,
+--     -- ...) works fine here too: gmux drives it as a plain pty child
+--     -- either way, gw-shell's only difference is being glyphwire-aware
+--     -- itself (it's handed GLYPHWIRE_LAYER, see gmux/pane.zig, so it can
+--     -- draw straight onto its pane's layer instead of through the pty).
+--     shell = "/bin/bash",
+--
+--     -- How many rows of scrollback each pane's layer keeps -- its own
+--     -- ring, scrolled with the mouse wheel over that pane, independent
+--     -- of every other pane's.
+--     scrollback_rows = 2000,
+-- }

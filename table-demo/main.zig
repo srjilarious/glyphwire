@@ -112,6 +112,9 @@ fn run(init: std.process.Init) !void {
             .text, .paste => {},
             .copy_request => {},
             .shutdown => return,
+            // A window manager's own commands (see `InputEvent.window_key`).
+            // Never delivered here: this program is not one.
+            .window_key, .window_text => {},
         }
     }
 }

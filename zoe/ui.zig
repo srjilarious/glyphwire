@@ -776,6 +776,9 @@ pub const Ui = struct {
             // that spawned it exits; nothing persistent to flush here that
             // isn't already the user's explicit `:w`.
             .shutdown => {},
+            // A window manager's own commands (see `InputEvent.window_key`).
+            // Never delivered here: this program is not one.
+            .window_key, .window_text => {},
         }
 
         // Any keystroke can change the status row -- the mode word, the

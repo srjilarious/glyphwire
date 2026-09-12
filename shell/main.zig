@@ -677,6 +677,16 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
                 prompt.should_exit = true;
                 return;
             },
+            // A window manager's own commands (see `InputEvent.window_key`).
+            // Never delivered here: this program is not one.
+            .window_key => |kev| {
+                alloc.free(kev.key);
+                continue;
+            },
+            .window_text => |tev| {
+                alloc.free(tev.text);
+                continue;
+            },
             .key => |kev| kev,
         };
         defer alloc.free(ev.key);
@@ -3387,6 +3397,9 @@ const Prompt = struct {
                 self.should_exit = true;
                 return true;
             },
+            // A window manager's own commands (see `InputEvent.window_key`).
+            // Never delivered here: this program is not one.
+            .window_key, .window_text => return false,
             .key => |kev| {
                 defer alloc.free(kev.key);
                 if (!kev.pressed) return false;
@@ -3436,6 +3449,10 @@ const Prompt = struct {
                 self.should_exit = true;
                 hit = true;
             },
+            // A window manager's own commands (see `InputEvent.window_key`).
+            // Never delivered here: this program is not one.
+            .window_key => |kev| self.client.alloc.free(kev.key),
+            .window_text => |tev| self.client.alloc.free(tev.text),
         };
         return hit;
     }
@@ -3624,6 +3641,9 @@ const Prompt = struct {
                         pty.signalGroup(std.posix.SIG.HUP);
                         break;
                     },
+                    // A window manager's own commands (see `InputEvent.window_key`).
+                    // Never delivered here: this program is not one.
+                    .window_key, .window_text => {},
                 }
                 continue;
             }
@@ -3660,6 +3680,16 @@ const Prompt = struct {
                     self.should_exit = true;
                     pty.signalGroup(std.posix.SIG.HUP);
                     break;
+                },
+                // A window manager's own commands (see
+                // `InputEvent.window_key`). Never delivered here.
+                .window_key => |kev| {
+                    alloc.free(kev.key);
+                    continue;
+                },
+                .window_text => |tev| {
+                    alloc.free(tev.text);
+                    continue;
                 },
                 .key => |kev| kev,
             };
@@ -4961,6 +4991,9 @@ fn hookPollInterrupt(ctx: *anyopaque) bool {
             self.should_exit = true;
             hit = true;
         },
+        // A window manager's own commands (see `InputEvent.window_key`).
+        // Never delivered here: this program is not one.
+        .window_key, .window_text => {},
     };
     return hit;
 }

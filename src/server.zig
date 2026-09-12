@@ -688,16 +688,62 @@ pub const Server = struct {
     /// change, broadcasts `key_down`/`key_up` to every subscribed
     /// connection.
     pub fn reportKey(self: *Server, alloc: std.mem.Allocator, key: []const u8, pressed: bool) !void {
-        const changed = changed: {
+        const decision = decision: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            break :changed try self.ctx.input.setKey(key, pressed);
+            // The down-set is updated either way: a program asking
+            // `get_input_state` should see the real keyboard, and the
+            // manager's own modifier checks read the same set.
+            const changed = try self.ctx.input.setKey(key, pressed);
+            const route = self.session.routeKey(
+                key,
+                pressed,
+                self.ctx.input.isKeyDown("left_control") or self.ctx.input.isKeyDown("right_control"),
+                self.ctx.input.isKeyDown("left_alt") or self.ctx.input.isKeyDown("right_alt"),
+                self.ctx.input.isKeyDown("left_shift") or self.ctx.input.isKeyDown("right_shift"),
+            );
+            break :decision .{ .changed = changed, .route = route };
         };
-        if (!changed) return;
+
+        switch (decision.route) {
+            .swallow => return,
+            .manager => {
+                const body = try rpc.windowKeyNotification(alloc, key, pressed);
+                defer alloc.free(body);
+                self.deliverToManager("window_key", body);
+                return;
+            },
+            .pass => {},
+        }
+        if (!decision.changed) return;
 
         const body = try rpc.keyNotification(alloc, key, pressed);
         defer alloc.free(body);
         self.broadcast(null, "key", body);
+    }
+
+    /// Sends `body` to the window-manager connection only. The targeted
+    /// counterpart of `broadcast`, for the two events that are addressed
+    /// rather than fanned out (`window_key` / `window_text`): a window
+    /// command has exactly one recipient by definition.
+    fn deliverToManager(self: *Server, event: []const u8, body: []const u8) void {
+        const manager = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            break :blk self.session.manager;
+        };
+        const target = manager orelse return;
+
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        for (self.connections.items) |conn| {
+            if (conn.id != target) continue;
+            if (!conn.subscriptions.has(event)) continue;
+            conn.send(self.io, body) catch |err| {
+                std.log.err("glyphwire: window command to the manager failed: {t}", .{err});
+            };
+            return;
+        }
     }
 
     /// Re-broadcasts `key_down` for an already-held `key`, for a caller
@@ -710,6 +756,15 @@ pub const Server = struct {
     /// `reportKey`'s -- no separate "this was a repeat" signal, since
     /// nothing here needs to tell the difference from a fresh press.
     pub fn reportKeyRepeat(self: *Server, alloc: std.mem.Allocator, key: []const u8) !void {
+        // A held key while the prefix is armed must not repeat-fire a
+        // window command, and must not reach the program either. Dropping
+        // the repeat is the whole handling needed: prefix commands are
+        // one-shot, so a repeat has nothing to mean.
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            if (self.session.prefix_armed) return;
+        }
         const body = try rpc.keyRepeatNotification(alloc, key);
         defer alloc.free(body);
         self.broadcast(null, "key", body);
@@ -723,6 +778,21 @@ pub const Server = struct {
     /// `"text"` subscriber. An empty string is a no-op.
     pub fn reportText(self: *Server, alloc: std.mem.Allocator, text: []const u8) !void {
         if (text.len == 0) return;
+
+        const route = route: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            break :route self.session.routeText();
+        };
+        // Most window commands arrive here rather than through `reportKey`:
+        // a plain printable key with no modifiers is delivered as text.
+        if (route == .manager) {
+            const body = try rpc.windowTextNotification(alloc, text);
+            defer alloc.free(body);
+            self.deliverToManager("window_text", body);
+            return;
+        }
+
         const body = try rpc.textNotification(alloc, text);
         defer alloc.free(body);
         self.broadcast(null, "text", body);

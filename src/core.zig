@@ -5282,6 +5282,52 @@ pub const Pane = struct {
     }
 };
 
+/// The window manager's prefix chord, and the one-shot state behind it.
+///
+/// This is what makes a multiplexer's key bindings work *without* the
+/// multiplexer seeing every keystroke. The session withholds the prefix
+/// itself from the focused pane, and hands the key that follows it to the
+/// manager as a `window_key` / `window_text` instead of to the program.
+///
+/// Keeping the decision here rather than in the manager is the fix for the
+/// failure the layer-based design kept hitting: a manager that has to
+/// observe every keystroke in order to recognise its own prefix has, by
+/// construction, already let the program have that keystroke by the time it
+/// decides to swallow it. No amount of care in the manager can close that,
+/// because the manager is not in the delivery path. Here it is decided
+/// before delivery, once, in the one place that knows what has focus.
+pub const WindowPrefix = struct {
+    /// Longest key name this holds inline (no allocation). Real key names
+    /// are one character or a short word ("b", "space", "left").
+    pub const max_key_name = 16;
+
+    key_buf: [max_key_name]u8 = @splat(0),
+    key_len: u8 = 0,
+    ctrl: bool = true,
+    alt: bool = false,
+    shift: bool = false,
+
+    /// Builds a chord, truncating an over-long key name (which can then
+    /// never match, rather than silently matching a prefix of itself).
+    pub fn init(key_name: []const u8, ctrl: bool, alt: bool, shift: bool) WindowPrefix {
+        var self: WindowPrefix = .{ .ctrl = ctrl, .alt = alt, .shift = shift };
+        const n = @min(key_name.len, max_key_name);
+        @memcpy(self.key_buf[0..n], key_name[0..n]);
+        self.key_len = @intCast(n);
+        return self;
+    }
+
+    pub fn key(self: *const WindowPrefix) []const u8 {
+        return self.key_buf[0..self.key_len];
+    }
+
+    /// Whether `key_name` with these modifiers held is this chord.
+    pub fn matches(self: *const WindowPrefix, key_name: []const u8, ctrl: bool, alt: bool, shift: bool) bool {
+        if (!std.mem.eql(u8, key_name, self.key())) return false;
+        return ctrl == self.ctrl and alt == self.alt and shift == self.shift;
+    }
+};
+
 pub const Session = struct {
     alloc: std.mem.Allocator,
     /// Every context, keyed by handle. Key 0 is the root context, whose
@@ -5323,6 +5369,17 @@ pub const Session = struct {
     /// At most one at a time; every pane-tree mutation requires it. See
     /// `claimManager`.
     manager: ?ConnId = null,
+    /// The manager's registered prefix chord, or null when none is (which
+    /// is every session without a multiplexer). See `WindowPrefix`.
+    window_prefix: ?WindowPrefix = null,
+    /// True between the prefix chord and the key that follows it -- a
+    /// one-shot, exactly as tmux's prefix is.
+    prefix_armed: bool = false,
+    /// The key name whose *press* was withheld from the focused pane, so
+    /// its matching release is withheld too. Without this a program sees a
+    /// release with no press, which a VT-aware one can act on.
+    swallowed_key: [WindowPrefix.max_key_name]u8 = @splat(0),
+    swallowed_key_len: u8 = 0,
 
     /// Denormalised copies of "which context is on screen in the focused
     /// pane" and a change-counter, kept so lock-free readers
@@ -5474,12 +5531,77 @@ pub const Session = struct {
         return held == conn;
     }
 
-    /// Drops the role if `conn` holds it. Called when the manager
-    /// disconnects, so the next multiplexer to start can claim it.
+    /// Drops the role if `conn` holds it, along with its prefix chord --
+    /// a prefix with nobody to deliver to would swallow keystrokes into
+    /// nothing. Called when the manager disconnects, so the next
+    /// multiplexer to start can claim the role cleanly.
     pub fn releaseManager(self: *Session, conn: ConnId) void {
         if (self.manager) |held| {
-            if (held == conn) self.manager = null;
+            if (held != conn) return;
+            self.manager = null;
+            self.window_prefix = null;
+            self.prefix_armed = false;
+            self.swallowed_key_len = 0;
         }
+    }
+
+    /// What should happen to one key event, given the prefix state.
+    pub const KeyRoute = enum {
+        /// Normal: on to the focused pane's program.
+        pass,
+        /// Withheld from everyone (the prefix itself, or a release whose
+        /// press was withheld).
+        swallow,
+        /// A window command: to the manager, not the program.
+        manager,
+    };
+
+    /// Routes one key press or release. Call under the server's
+    /// `ctx_mutex`; mutates the one-shot prefix state.
+    pub fn routeKey(self: *Session, key_name: []const u8, pressed: bool, ctrl: bool, alt: bool, shift: bool) KeyRoute {
+        const prefix = self.window_prefix orelse return .pass;
+
+        if (!pressed) {
+            // Pair the release with the press that was withheld, so a
+            // program never sees half a keystroke.
+            if (self.swallowed_key_len > 0 and
+                std.mem.eql(u8, key_name, self.swallowed_key[0..self.swallowed_key_len]))
+            {
+                self.swallowed_key_len = 0;
+                return .swallow;
+            }
+            return .pass;
+        }
+
+        if (self.prefix_armed) {
+            self.prefix_armed = false;
+            self.noteSwallowed(key_name);
+            return .manager;
+        }
+        if (prefix.matches(key_name, ctrl, alt, shift)) {
+            self.prefix_armed = true;
+            self.noteSwallowed(key_name);
+            return .swallow;
+        }
+        return .pass;
+    }
+
+    /// Routes committed text. Only ever a window command or normal input:
+    /// text has no press/release to pair up. Most prefix commands arrive
+    /// here rather than through `routeKey`, since a plain printable key
+    /// with no modifiers is delivered as text (see
+    /// `key_encode.toPtyBytes`).
+    pub fn routeText(self: *Session) KeyRoute {
+        if (self.window_prefix == null) return .pass;
+        if (!self.prefix_armed) return .pass;
+        self.prefix_armed = false;
+        return .manager;
+    }
+
+    fn noteSwallowed(self: *Session, key_name: []const u8) void {
+        const n = @min(key_name.len, WindowPrefix.max_key_name);
+        @memcpy(self.swallowed_key[0..n], key_name[0..n]);
+        self.swallowed_key_len = @intCast(n);
     }
 
     // ── Panes ───────────────────────────────────────────────────────────

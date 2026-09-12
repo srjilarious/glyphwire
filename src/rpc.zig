@@ -138,6 +138,26 @@ pub fn paneLayoutNotification(alloc: std.mem.Allocator, panes: []const protocol.
     return notification(alloc, "pane_layout", protocol.PaneLayoutParams{ .panes = panes });
 }
 
+/// `window_key_down` / `window_key_up` -- a key that belongs to the window
+/// manager rather than to the focused pane: the one following its
+/// registered prefix. Addressed to the manager alone, never broadcast,
+/// because a window command has exactly one recipient by definition.
+/// Press/release is in the method name, matching `key_down`/`key_up`.
+pub fn windowKeyNotification(alloc: std.mem.Allocator, key: []const u8, pressed: bool) ![]u8 {
+    return notification(
+        alloc,
+        if (pressed) "window_key_down" else "window_key_up",
+        protocol.KeyParams{ .key = key },
+    );
+}
+
+/// `window_text` -- committed text that belongs to the window manager. How
+/// most prefix commands arrive: a plain printable key with no modifiers is
+/// delivered as text, not as a key.
+pub fn windowTextNotification(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    return notification(alloc, "window_text", protocol.TextParams{ .text = text });
+}
+
 /// `pane_exit` -- the program `spawn_in_pane` started in `pane` has
 /// finished, with wait status `status`. The pane itself is untouched: it
 /// belongs to the manager, which decides whether to respawn or tear down.
