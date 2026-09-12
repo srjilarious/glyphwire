@@ -39,6 +39,10 @@ pub const Connection = struct {
     /// one currently visible. Starts at the root context (what a fresh
     /// connection inherits).
     active_ctx: core.ContextHandle = core.root_context_handle,
+    /// Mirrors `Dispatcher.active_pane`, same as `active_ctx`. What
+    /// `reportResize` uses to send each connection *its own pane's* size
+    /// rather than the window's.
+    active_pane: core.PaneHandle = core.root_pane_handle,
 
     fn send(self: *Connection, io: std.Io, body: []const u8) !void {
         self.write_mutex.lockUncancelable(io);
@@ -74,15 +78,26 @@ pub const Server = struct {
     /// `Context` in a fresh single-context session, and `create_context`
     /// grows it.
     session: core.Session,
-    /// The currently-visible context -- a cached, always-live pointer
-    /// into `session` (never null; the root context can't leave the
-    /// visibility stack). Re-pointed under `ctx_mutex` on every
-    /// visibility change, so every existing `server.ctx.*` access (the
-    /// host's caret/scroll/selection/render, the in-process `report*`
-    /// methods) keeps meaning "the context on screen right now" with no
-    /// change. Dispatch does *not* go through this -- a connection acts
-    /// on its own `Dispatcher.ctx`, which may be a backgrounded context.
+    /// The *focused* context: what is on screen in the focused pane, and
+    /// therefore where raw input goes. A cached, always-live pointer into
+    /// `session` (never null; the root pane's base context can't leave its
+    /// stack). Re-pointed under `ctx_mutex` on every visibility or focus
+    /// change.
+    ///
+    /// Before panes this also meant "the only thing on screen", and most
+    /// of the host still wants exactly this one (the caret, selection, the
+    /// in-process `report*` methods -- all of which follow focus). What
+    /// changed is that it is no longer the *whole* window: the renderer
+    /// composites every mapped pane's context, which it reaches through
+    /// `session.panes`, not through here. Dispatch does not go through
+    /// this either -- a connection acts on its own `Dispatcher.ctx`, which
+    /// may be in another pane or backgrounded within its own.
     ctx: *core.Context,
+    /// How `spawn_in_pane` starts a program, or null on a server that
+    /// can't (see `dispatch.PaneSpawner`). Registered once at startup by
+    /// whatever owns the window; stored by value so the pointer handed to
+    /// each `Dispatcher` stays stable.
+    pane_spawner: ?dispatch.PaneSpawner = null,
     listener: std.Io.net.Server,
     /// Guards every `Dispatcher.handle` call: concurrent connections all
     /// dispatch against the same `Context`.
@@ -218,13 +233,17 @@ pub const Server = struct {
         try self.registerConnection(alloc, &conn);
         defer self.unregisterConnection(alloc, &conn);
 
-        // `initForConnection` reads the visibility stack to inherit the
-        // context that's visible now -- take `ctx_mutex` so it can't race
-        // another connection's `create_context`.
+        // `initForConnection` reads the pane table to start this
+        // connection in the focused pane -- take `ctx_mutex` so it can't
+        // race another connection's `create_context` / `create_pane`. A
+        // program seated in a specific pane immediately retargets itself
+        // with `attach_pane`, which, being its first message, is ordered
+        // ahead of everything else it sends.
         var d = blk: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            break :blk dispatch.Dispatcher.initForConnection(&self.session, conn.id);
+            const sp: ?*const dispatch.PaneSpawner = if (self.pane_spawner) |*s| s else null;
+            break :blk dispatch.Dispatcher.initForConnection(&self.session, conn.id, sp);
         };
         var decoder: wire.FrameDecoder = .{};
         defer decoder.deinit(alloc);
@@ -266,10 +285,11 @@ pub const Server = struct {
                     defer self.ctx_mutex.unlock(self.io);
                     const r = d.handle(alloc, body);
                     // A `create_context` / `activate_context` /
-                    // `destroy_context` in this frame may have moved the
-                    // visible context -- keep `self.ctx` (the host's view
-                    // and the in-process `report*` path) pointing at it.
-                    self.ctx = self.session.visibleContext();
+                    // `destroy_context` / `focus_pane` in this frame may
+                    // have moved the focused context -- keep `self.ctx`
+                    // (the host's caret/selection view and the in-process
+                    // `report*` path) pointing at it.
+                    self.ctx = self.session.focusedContext();
                     break :blk r;
                 };
 
@@ -288,6 +308,7 @@ pub const Server = struct {
                 };
                 conn.subscriptions = d.subscriptions;
                 conn.active_ctx = d.active_ctx;
+                conn.active_pane = d.active_pane;
 
                 if (result.response) |r| {
                     defer alloc.free(r);
@@ -296,6 +317,16 @@ pub const Server = struct {
                 if (result.broadcast) |b| {
                     defer alloc.free(b.body);
                     self.broadcast(&conn, b.event, b.body);
+                }
+                // A pane-tree edit reshaped the window: re-lay-out, tell
+                // the manager the new rects, and tell every *other* client
+                // its own context changed size. Done after the response so
+                // the manager's `create_pane` handle arrives before the
+                // `pane_layout` mentioning it.
+                if (result.panes_changed) {
+                    self.applyPaneLayout(alloc) catch |err| {
+                        std.log.err("glyphwire: pane relayout failed: {t}", .{err});
+                    };
                 }
                 self.wake();
             }
@@ -326,6 +357,8 @@ pub const Server = struct {
         defer culled.deinit(alloc);
         var culled_ctx: std.ArrayList(core.ContextHandle) = .empty;
         defer culled_ctx.deinit(alloc);
+        var culled_panes: std.ArrayList(core.PaneHandle) = .empty;
+        defer culled_panes.deinit(alloc);
         var context_switched = false;
         {
             self.ctx_mutex.lockUncancelable(self.io);
@@ -339,21 +372,38 @@ pub const Server = struct {
                 };
             }
             // Then contexts this connection solely owned -- destroying one
-            // takes its layers/splits/tables with it. A visible context
-            // going this way pops visibility back to whatever was under
-            // it: the alt-screen auto-restore on a program's exit.
-            const visible_before = self.session.visibleStackTop();
-            self.session.reapConnection(conn.id, &culled_ctx) catch |err| {
+            // takes its layers/splits/tables with it. An on-screen context
+            // going this way pops its pane's stack back to whatever was
+            // under it: the alt-screen auto-restore on a program's exit,
+            // now at pane scope. Panes the connection created as window
+            // manager go too, and the window-manager role is released so
+            // the next multiplexer can claim it.
+            const visible_before = self.session.focusedContextHandle();
+            self.session.reapConnection(conn.id, &culled_ctx, &culled_panes) catch |err| {
                 std.log.err("glyphwire: context cull for closed connection {d} failed: {t}", .{ conn.id, err });
             };
-            self.ctx = self.session.visibleContext();
-            context_switched = self.session.visibleStackTop() != visible_before;
+            // A pane that just went away had programs running in it; stop
+            // them rather than leaving orphans writing to a freed context.
+            if (self.pane_spawner) |*sp| {
+                for (culled_panes.items) |h| sp.kill(h);
+            }
+            self.ctx = self.session.focusedContext();
+            context_switched = self.session.focusedContextHandle() != visible_before or
+                culled_panes.items.len > 0;
         }
         for (culled.items) |h| {
             std.log.debug("glyphwire: culled orphaned layer {d} (owning connection {d} closed)", .{ h, conn.id });
         }
         for (culled_ctx.items) |h| {
             std.log.debug("glyphwire: culled orphaned context {d} (owning connection {d} closed)", .{ h, conn.id });
+        }
+        for (culled_panes.items) |h| {
+            std.log.debug("glyphwire: culled pane {d} (its window manager, connection {d}, closed)", .{ h, conn.id });
+        }
+        if (culled_panes.items.len > 0) {
+            self.applyPaneLayout(alloc) catch |err| {
+                std.log.err("glyphwire: pane relayout after cull failed: {t}", .{err});
+            };
         }
         if (context_switched) {
             self.reportContext(alloc) catch |err| {
@@ -378,29 +428,39 @@ pub const Server = struct {
         defer self.registry_mutex.unlock(self.io);
 
         // Raw input streams reach only the connection whose context is on
-        // screen -- a backgrounded full-screen editor shouldn't see the
-        // keystrokes meant for the shell that's now visible, and vice
-        // versa. Every other event (`resize`, `layout`, `scroll`,
+        // screen *in the focused pane*. Two things are being excluded at
+        // once: a backgrounded full-screen editor (its context isn't on
+        // screen in its own pane), and every program in an unfocused pane
+        // (its context is perfectly visible, but the keystrokes aren't
+        // for it).
+        //
+        // This single test is what replaces addressing input to individual
+        // layers. A pane is a real addressable object with its own
+        // visibility, so "who gets this keystroke" is answerable here,
+        // once, from state the session already maintains -- rather than
+        // needing a multiplexer to relay every keystroke on to its panes.
+        //
+        // Every other event (`resize`, `layout`, `pane_layout`, `scroll`,
         // `selection`, `context`, ...) still fans out to all subscribers:
-        // a backgrounded client wants to know its panes moved so it can
-        // redraw before it's shown again. `visible_handle` is the
-        // lock-free denormalised copy of the visibility-stack top.
-        const gated = isVisibleGatedEvent(event);
-        const visible = self.session.visible_handle.load(.monotonic);
+        // a backgrounded or unfocused client wants to know its panes moved
+        // so it can redraw before it's shown again. `focused_context` is
+        // the lock-free denormalised copy of the focused pane's stack top.
+        const gated = isFocusGatedEvent(event);
+        const focused = self.session.focused_context.load(.monotonic);
 
         for (self.connections.items) |other| {
             if (sender != null and other == sender.?) continue;
             if (!other.subscriptions.has(event)) continue;
-            if (gated and other.active_ctx != visible) continue;
+            if (gated and other.active_ctx != focused) continue;
             other.send(self.io, body) catch |err| {
                 std.log.err("glyphwire broadcast to a connection failed: {t}", .{err});
             };
         }
     }
 
-    /// Whether `event` is a raw input stream that only the visible
-    /// context's client should receive (see `broadcast`).
-    fn isVisibleGatedEvent(event: []const u8) bool {
+    /// Whether `event` is a raw input stream that only the focused pane's
+    /// on-screen client should receive (see `broadcast`).
+    fn isFocusGatedEvent(event: []const u8) bool {
         return std.mem.eql(u8, event, "key") or
             std.mem.eql(u8, event, "text") or
             std.mem.eql(u8, event, "mouse_button") or
@@ -440,7 +500,7 @@ pub const Server = struct {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             break :blk .{
-                .handle = self.session.visibleStackTop(),
+                .handle = self.session.focusedContextHandle(),
                 .cols = self.ctx.root.width,
                 .rows = self.ctx.root.height,
             };
@@ -448,6 +508,97 @@ pub const Server = struct {
         const body = try rpc.contextNotification(alloc, info.handle, info.cols, info.rows);
         defer alloc.free(body);
         self.broadcast(null, "context", body);
+    }
+
+    // ─── Panes ─────────────────────────────────────────────────────────
+
+    /// Registers the `spawn_in_pane` implementation (see
+    /// `dispatch.PaneSpawner`). Call once at startup, before serving.
+    pub fn setPaneSpawner(self: *Server, spawner: dispatch.PaneSpawner) void {
+        self.pane_spawner = spawner;
+    }
+
+    /// The pane-tree layout change-counter -- glyphwire-host caches pane
+    /// divider geometry against this exactly as it does
+    /// `Context.layout_gen` for layer dividers.
+    pub fn paneLayoutGen(self: *Server) u64 {
+        return self.session.pane_layout_gen.load(.monotonic);
+    }
+
+    /// Re-lays-out the pane tree and tells everyone what moved. Called
+    /// after any pane-tree edit (`HandleResult.panes_changed`), after the
+    /// window resizes, and after a pane cull.
+    ///
+    /// Three separate notifications, because three different audiences
+    /// need three different things:
+    ///
+    /// - `pane_layout` to the window manager: every pane's new rect, in
+    ///   window cells. The only message in the protocol that reveals where
+    ///   panes sit, and only the manager subscribes to it.
+    /// - `resize` to each *other* connection: its own context's new cell
+    ///   size, with no hint that a pane was involved. This is why it can't
+    ///   be one broadcast -- each recipient gets a different body.
+    /// - `layout` per affected context: the layer bounds inside it, if it
+    ///   has a split tree of its own.
+    pub fn applyPaneLayout(self: *Server, alloc: std.mem.Allocator) !void {
+        var changed: std.ArrayList(core.PaneBounds) = .empty;
+        defer changed.deinit(alloc);
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            try self.session.layoutPanes(&changed, null);
+            self.ctx = self.session.focusedContext();
+        }
+
+        if (changed.items.len > 0) {
+            const bounds = try alloc.alloc(protocol.PaneBounds, changed.items.len);
+            defer alloc.free(bounds);
+            for (changed.items, 0..) |b, i| {
+                bounds[i] = .{ .pane = b.pane, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+            }
+            const body = try rpc.paneLayoutNotification(alloc, bounds);
+            defer alloc.free(body);
+            self.broadcast(null, "pane_layout", body);
+        }
+        try self.reportContextSizes(alloc);
+        try self.reportLayout(alloc);
+    }
+
+    /// Sends each subscribed connection a `resize` carrying *its own*
+    /// context's cell size. The per-pane replacement for one window-wide
+    /// `resize` broadcast: after panes exist, "the size" is a different
+    /// number for every client, and a program must see its pane's size or
+    /// it will draw outside its rectangle.
+    fn reportContextSizes(self: *Server, alloc: std.mem.Allocator) !void {
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+
+        for (self.connections.items) |conn| {
+            if (!conn.subscriptions.has("resize")) continue;
+            const size = blk: {
+                self.ctx_mutex.lockUncancelable(self.io);
+                defer self.ctx_mutex.unlock(self.io);
+                const ctx = self.session.contextPtr(conn.active_ctx) orelse continue;
+                break :blk .{ .cols = ctx.root.width, .rows = ctx.root.height };
+            };
+            const body = try rpc.resizeNotification(alloc, size.cols, size.rows);
+            defer alloc.free(body);
+            conn.send(self.io, body) catch |err| {
+                std.log.err("glyphwire: resize to a connection failed: {t}", .{err});
+            };
+        }
+    }
+
+    /// Broadcasts `pane_exit` -- a program spawned into a pane has
+    /// finished. Called by the host's pane process table when it reaps a
+    /// child. The window manager needs this to tear the pane down: unlike
+    /// a context cull, nothing about the *pane* changes on its own when
+    /// the program inside it dies, because the pane belongs to the manager
+    /// and not to the program.
+    pub fn reportPaneExit(self: *Server, alloc: std.mem.Allocator, pane: core.PaneHandle, status: i64) !void {
+        const body = try rpc.paneExitNotification(alloc, pane, status);
+        defer alloc.free(body);
+        self.broadcast(null, "pane_exit", body);
     }
 
     /// In-process equivalent of a connected client's `report_key` request
@@ -592,34 +743,29 @@ pub const Server = struct {
         self.broadcast(null, "mouse_move", body);
     }
 
-    /// Applies a new window size, in cells, to the context (resizing the
-    /// root layer and every base-size-tracking layer -- see
-    /// `Context.resize`) and, if that was a real change, broadcasts a
-    /// `resize` notification (`{cols, rows}`) to every connection
-    /// subscribed to `"resize"`. For the process that owns this `Server`
-    /// and captures its own window events (glyphwire-host), same in-process
-    /// path as `reportKey`. No broadcast when the size is unchanged, so
-    /// this is cheap to call every frame.
+    /// Applies a new window size, in cells. The window is the rect the
+    /// pane tree is laid out over, so this re-runs that layout, which is
+    /// what resizes each pane's contexts (and, through them, every
+    /// base-size-tracking layer). With no pane tree installed the root
+    /// pane simply takes the whole window, which is the single-program
+    /// case and behaves exactly as it did before panes existed.
+    ///
+    /// For the process that owns this `Server` and captures its own window
+    /// events (glyphwire-host), same in-process path as `reportKey`. A
+    /// no-op when the size is unchanged, so this is cheap to call every
+    /// frame.
     pub fn reportResize(self: *Server, alloc: std.mem.Allocator, cols: usize, rows: usize) !void {
         {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            if (cols == self.ctx.root.width and rows == self.ctx.root.height) return;
-            // Every context tracks the one window, so a backgrounded one
-            // is resized too rather than showing a stale grid when it's
-            // next made visible (`Session.resizeAll` is a no-op per
-            // context whose size is already current).
-            try self.session.resizeAll(cols, rows);
+            if (cols == self.session.window_cols and rows == self.session.window_rows) return;
+            try self.session.resizeWindow(cols, rows);
         }
-
-        const body = try rpc.resizeNotification(alloc, cols, rows);
-        defer alloc.free(body);
-        self.broadcast(null, "resize", body);
-
-        // The window changing size re-lays-out any split tree, which is a
-        // separate notification: `resize` is "the window is this big now",
-        // `layout` is "and here is where each of your panes ended up".
-        try self.reportLayout(alloc);
+        // `applyPaneLayout` is idempotent and does the rest: the
+        // `pane_layout` broadcast for the manager, a tailored `resize` for
+        // every client (its own pane's size, not the window's), and the
+        // per-context `layout` for layer trees.
+        try self.applyPaneLayout(alloc);
     }
 
     /// Broadcasts a `shutdown` notification (`{grace_ms}`) to every
@@ -647,7 +793,17 @@ pub const Server = struct {
         {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            try self.ctx.layoutSplits(&changed, null);
+            // Every pane's on-screen context, not just the focused one: a
+            // resize moves the layer trees in all of them at once, and each
+            // client needs its own bounds. Layer handles are per-context so
+            // there is no ambiguity in pooling them into one notification;
+            // a client only recognises its own.
+            var it = self.session.panes.valueIterator();
+            while (it.next()) |pane| {
+                if (!pane.mapped) continue;
+                const ctx = self.session.contextPtr(pane.top()) orelse continue;
+                try ctx.layoutSplits(&changed, null);
+            }
         }
         if (changed.items.len == 0) return;
 

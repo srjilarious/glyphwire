@@ -261,8 +261,31 @@ pub const LayoutParams = struct { layers: []const LayoutBounds };
 /// master so the foregrounded child sees its reply.
 pub const TerminalReplyParams = struct { bytes: []const u8 };
 
-/// `resize` params: the new host window size, in cells.
+/// `resize` params: the receiving connection's own context's new size, in
+/// cells. The window's size for a client that has the window to itself;
+/// its pane's size for one running inside a pane -- deliberately
+/// indistinguishable, so a program needs no awareness of being
+/// multiplexed (see core.zig's Panes section).
 pub const ResizeParams = struct { cols: usize, rows: usize };
+
+/// One pane's window rect inside a `pane_layout` notification.
+pub const PaneBounds = struct {
+    pane: core.PaneHandle,
+    row: usize,
+    col: usize,
+    cols: usize,
+    rows: usize,
+};
+
+/// `pane_layout` params: every pane whose window rect changed. The
+/// window-level counterpart of `LayoutParams`, and the only message that
+/// reveals pane geometry -- a window manager subscribes to it, and nothing
+/// else has a reason to.
+pub const PaneLayoutParams = struct { panes: []const PaneBounds };
+
+/// `pane_exit` params: the program in `pane` finished with wait status
+/// `status`.
+pub const PaneExitParams = struct { pane: core.PaneHandle, status: i64 };
 
 /// `shutdown` params: the host window is closing and this connection
 /// should flush any persistent state and exit. `grace_ms` is roughly how

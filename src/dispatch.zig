@@ -66,6 +66,28 @@ pub const DispatchError = error{
     /// headless caller from before multi-context). Nothing in production
     /// hits this.
     NoContextSession,
+    /// `create_pane` / `destroy_pane` / `focus_pane` / `attach_pane` /
+    /// a pane-split op named a pane that doesn't exist, or one that isn't
+    /// currently placed in the tree.
+    UnknownPane,
+    /// `destroy_pane` named the root pane, which has no lifecycle.
+    RootPaneImmutable,
+    UnknownPaneSplit,
+    /// A `set_pane_split_children` entry named both a pane and a split,
+    /// or neither.
+    InvalidPaneSplitChild,
+    /// A pane-tree message arrived from a connection that doesn't hold the
+    /// window-manager role. Claim it with `request_role` first; if another
+    /// connection holds it, there is already a multiplexer in this window.
+    NotWindowManager,
+    /// `request_role` named a role this server doesn't have.
+    UnknownRole,
+    /// `spawn_in_pane` reached a server with no spawner registered -- the
+    /// headless `server/main.zig`, which has no window to put a program in
+    /// and no business forking one.
+    SpawnUnsupported,
+    /// `spawn_in_pane`'s `argv` was empty, or the fork/exec failed.
+    SpawnFailed,
 };
 
 const Envelope = struct {
@@ -182,10 +204,10 @@ const CreateLayerParams = struct {
 
 const CreateLayerResult = struct { handle: core.LayerHandle };
 
-/// `create_context`: an independent, full-window context (its own root
-/// layer, split tree, layers, tables -- see `core.Session`). `width` /
-/// `height` default to the current visible context's size. Shown
-/// immediately.
+/// `create_context`: an independent context (its own root layer, split
+/// tree, layers, tables -- see `core.Session`), created in the issuing
+/// connection's pane and shown there immediately. `width` / `height`
+/// default to that pane's size.
 const CreateContextParams = struct {
     width: ?usize = null,
     height: ?usize = null,
@@ -209,6 +231,81 @@ const SetWindowScrollbarParams = struct { visible: bool };
 /// `set_caret_layer`: which layer glyphwire-host draws its caret for, or
 /// `null` for the root cursor. See `core.Context.caret_layer`.
 const SetCaretLayerParams = struct { layer: ?core.LayerHandle = null };
+
+// ─── Pane params ───────────────────────────────────────────────────────
+//
+// The window-level mirror of the split params above. See core.zig's Panes
+// section for what a pane is and why the two levels are separate types.
+
+/// `request_role`: asks for a privileged role. The only one today is
+/// `"window_manager"`, which gates every message below.
+const RequestRoleParams = struct { role: []const u8 };
+const RequestRoleResult = struct { granted: bool };
+
+/// `attach_pane`: binds this connection to a pane. Sent as a connection's
+/// first message by anything started with `GLYPHWIRE_PANE` set.
+const AttachPaneParams = struct { pane: core.PaneHandle };
+
+/// `create_pane`: a new pane plus the base context it shows.
+/// `scrollback_rows` is that context's root layer's ring, so a terminal
+/// pane asks for history and a TUI pane asks for none.
+const CreatePaneParams = struct { scrollback_rows: usize = 0 };
+const CreatePaneResult = struct {
+    pane: core.PaneHandle,
+    context: core.ContextHandle,
+};
+
+/// `destroy_pane` / `focus_pane` -- both just name one pane.
+const PaneHandleParams = struct { pane: core.PaneHandle };
+
+/// `create_pane_split`: an empty window-level container.
+const CreatePaneSplitParams = struct {
+    axis: []const u8,
+    /// Whether the bands between this split's children can be dragged.
+    /// See `core.PaneSplit.resizable`.
+    resizable: bool = true,
+};
+const CreatePaneSplitResult = struct { split: core.PaneSplitHandle };
+
+const PaneSplitHandleParams = struct { split: core.PaneSplitHandle };
+
+/// One `set_pane_split_children` entry: exactly one of `pane` / `split`,
+/// and exactly one of `weight` / `fixed` (both omitted means weight 1).
+const PaneSplitChildParams = struct {
+    pane: ?core.PaneHandle = null,
+    split: ?core.PaneSplitHandle = null,
+    weight: ?f32 = null,
+    fixed: ?usize = null,
+};
+
+const SetPaneSplitChildrenParams = struct {
+    split: core.PaneSplitHandle,
+    children: []const PaneSplitChildParams,
+};
+
+/// `set_root_pane_split`: null tears the window layout down, leaving the
+/// root pane as the whole window again.
+const SetRootPaneSplitParams = struct { split: ?core.PaneSplitHandle = null };
+
+const MovePaneDividerParams = struct {
+    split: core.PaneSplitHandle,
+    index: usize,
+    delta: i64,
+};
+
+/// `spawn_in_pane`: starts a program seated in a pane. `argv[0]` is
+/// resolved through `PATH`. The child is handed `GLYPHWIRE_PANE` so it
+/// binds itself to this pane on connect, which is the whole handshake --
+/// see `core.Pane`.
+const SpawnInPaneParams = struct {
+    pane: core.PaneHandle,
+    argv: []const []const u8,
+    /// PTY size for the child. Defaults to the pane's own cells, which is
+    /// what a program should almost always get.
+    cols: ?usize = null,
+    rows: ?usize = null,
+};
+const SpawnInPaneResult = struct { pid: i64 };
 
 const DestroyLayerParams = struct {
     layer: core.LayerHandle,
@@ -672,6 +769,57 @@ pub const HandleResult = struct {
     /// broadcasting.
     response: ?[]u8 = null,
     broadcast: ?Broadcast = null,
+    /// Set by every handler that reshaped the pane tree. The caller
+    /// (`server.zig`) re-runs `Session.layoutPanes`, broadcasts
+    /// `pane_layout`, and sends each affected connection a `resize` for
+    /// its *own* context's new size.
+    ///
+    /// A flag rather than the work itself because the work is
+    /// per-connection: the pane tree moved one rect, but every client in
+    /// an affected pane needs a different `resize` body, and only the
+    /// connection registry knows who they are.
+    panes_changed: bool = false,
+};
+
+/// How a `spawn_in_pane` request actually starts a program. Registered by
+/// whatever owns processes and a window (glyphwire-host, via
+/// `Server.setPaneSpawner`); left null by the headless server, which
+/// rejects `spawn_in_pane` with `SpawnUnsupported`.
+///
+/// Kept as an injected hook rather than built into the server so that
+/// `src/` never grows fork/exec policy: what env a pane's child gets, how
+/// its PTY output reaches the grid, and how it is reaped are all host
+/// concerns. See `host/pane_proc.zig`.
+pub const PaneSpawner = struct {
+    ctx: ?*anyopaque,
+    /// Starts `argv` seated in `pane`, whose base context is `context`,
+    /// with a PTY sized `cols` x `rows`. Returns the child pid.
+    spawn_fn: *const fn (
+        ctx: ?*anyopaque,
+        pane: core.PaneHandle,
+        context: core.ContextHandle,
+        argv: []const []const u8,
+        cols: usize,
+        rows: usize,
+    ) anyerror!i32,
+    /// Stops whatever is running in `pane` and reaps it. A no-op for a
+    /// pane with nothing spawned in it.
+    kill_fn: *const fn (ctx: ?*anyopaque, pane: core.PaneHandle) void,
+
+    pub fn spawn(
+        self: *const PaneSpawner,
+        pane: core.PaneHandle,
+        context: core.ContextHandle,
+        argv: []const []const u8,
+        cols: usize,
+        rows: usize,
+    ) anyerror!i32 {
+        return self.spawn_fn(self.ctx, pane, context, argv, cols, rows);
+    }
+
+    pub fn kill(self: *const PaneSpawner, pane: core.PaneHandle) void {
+        self.kill_fn(self.ctx, pane);
+    }
 };
 
 /// Peeks at a decoded frame body to see whether it's a `load_image`
@@ -794,37 +942,70 @@ pub const Dispatcher = struct {
     /// checked on `destroy_layer`; a null id owns nothing and bypasses
     /// the `destroy_layer` ownership check entirely. See `core.ConnId`.
     conn_id: ?core.ConnId = null,
+    /// Which pane this connection lives in. Every context it creates goes
+    /// into this pane, and a fallback after its own context is destroyed
+    /// stays inside it -- so a program can never be displaced into someone
+    /// else's pane by anything another client does.
+    ///
+    /// Set at connect time to the focused pane (which is the only pane in
+    /// a plain session), and retargeted by `attach_pane` -- what a program
+    /// spawned into a pane sends as its first message, from
+    /// `GLYPHWIRE_PANE`. Because it is the connection's *first* message,
+    /// ordered ahead of everything else on the same stream, there is no
+    /// window in which the connection is bound to the wrong pane.
+    active_pane: core.PaneHandle = core.root_pane_handle,
+    /// How `spawn_in_pane` starts a program, or null on a server that
+    /// can't (see `PaneSpawner`). Injected by `Server`.
+    spawner: ?*const PaneSpawner = null,
 
     pub fn init(ctx: *core.Context) Dispatcher {
         return .{ .ctx = ctx };
     }
 
     /// Like `init`, but for a dispatcher serving a real socket connection
-    /// whose id participates in layer/context ownership (see `conn_id`).
-    /// The connection inherits whatever context is visible now. Call
-    /// under the server's `ctx_mutex` -- it reads the visibility stack.
-    pub fn initForConnection(session: *core.Session, conn_id: core.ConnId) Dispatcher {
+    /// whose id participates in layer/context/pane ownership (see
+    /// `conn_id`). The connection starts in the focused pane, on whatever
+    /// context is on screen there. Call under the server's `ctx_mutex` --
+    /// it reads the pane table.
+    pub fn initForConnection(
+        session: *core.Session,
+        conn_id: core.ConnId,
+        spawner: ?*const PaneSpawner,
+    ) Dispatcher {
         return .{
-            .ctx = session.visibleContext(),
+            .ctx = session.focusedContext(),
             .session = session,
-            .active_ctx = session.visibleStackTop(),
+            .active_ctx = session.focusedContextHandle(),
+            .active_pane = session.focusedPaneHandle(),
             .conn_id = conn_id,
+            .spawner = spawner,
         };
     }
 
     /// Keeps `ctx` live: if this connection's `active_ctx` was destroyed
     /// by another owner (`adopt_context` + `destroy_context` elsewhere),
-    /// fall back to whatever is visible. Runs at the top of every
-    /// dispatch, under `ctx_mutex`, so the stack reads are safe. A no-op
-    /// for a sessionless `Dispatcher`.
+    /// fall back to whatever is on screen *in this connection's own pane*
+    /// -- never to another pane's context, which would silently move a
+    /// program's output into someone else's rectangle. Runs at the top of
+    /// every dispatch, under `ctx_mutex`. A no-op for a sessionless
+    /// `Dispatcher`.
     fn syncActiveContext(self: *Dispatcher) void {
         const session = self.session orelse return;
         if (session.contextPtr(self.active_ctx)) |c| {
             self.ctx = c;
-        } else {
-            self.active_ctx = session.visibleStackTop();
-            self.ctx = session.visibleContext();
+            return;
         }
+        if (session.panePtr(self.active_pane)) |pane| {
+            if (session.contextPtr(pane.top())) |c| {
+                self.active_ctx = pane.top();
+                self.ctx = c;
+                return;
+            }
+        }
+        // This connection's pane is gone too (the manager destroyed it).
+        self.active_pane = session.focusedPaneHandle();
+        self.active_ctx = session.focusedContextHandle();
+        self.ctx = session.focusedContext();
     }
 
     /// Handles one decoded frame body. See `HandleResult`.
@@ -975,6 +1156,17 @@ pub const Dispatcher = struct {
         .{ "adopt_context", catVoid(handleAdoptContext) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
+        .{ "request_role", catBytesId(handleRequestRole) },
+        .{ "attach_pane", catVoid(handleAttachPane) },
+        .{ "create_pane", catResultId(handleCreatePane) },
+        .{ "destroy_pane", catResult(handleDestroyPane) },
+        .{ "focus_pane", catResult(handleFocusPane) },
+        .{ "create_pane_split", catBytesId(handleCreatePaneSplit) },
+        .{ "destroy_pane_split", catResult(handleDestroyPaneSplit) },
+        .{ "set_pane_split_children", catResult(handleSetPaneSplitChildren) },
+        .{ "set_root_pane_split", catResult(handleSetRootPaneSplit) },
+        .{ "move_pane_divider", catResult(handleMovePaneDivider) },
+        .{ "spawn_in_pane", catBytesId(handleSpawnInPane) },
         .{ "create_split", catBytesId(handleCreateSplit) },
         .{ "destroy_split", catResult(handleDestroySplit) },
         .{ "set_split_children", catResult(handleSetSplitChildren) },
@@ -1434,10 +1626,10 @@ pub const Dispatcher = struct {
     /// handlers reject those before building it).
     fn contextBroadcast(self: *Dispatcher, alloc: std.mem.Allocator) !HandleResult {
         const session = self.session.?;
-        const visible = session.visibleContext();
+        const visible = session.focusedContext();
         const body = try rpc.contextNotification(
             alloc,
-            session.visibleStackTop(),
+            session.focusedContextHandle(),
             visible.root.width,
             visible.root.height,
         );
@@ -1458,7 +1650,13 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const p = parsed.value;
 
-        const new_handle = try session.createContext(p.width, p.height, p.scrollback_rows);
+        // Into *this connection's* pane. That is what makes a pane a
+        // sequestered host: a full-screen program inside a pane covers the
+        // pane, not the window, without knowing panes exist.
+        const new_handle = session.createContext(self.active_pane, p.width, p.height, p.scrollback_rows) catch |err| switch (err) {
+            error.UnknownPane => return DispatchError.UnknownPane,
+            else => |e| return e,
+        };
         if (self.conn_id) |cid| session.addContextOwner(new_handle, cid) catch {};
         self.active_ctx = new_handle;
         self.ctx = session.contextPtr(new_handle).?;
@@ -1486,10 +1684,10 @@ pub const Dispatcher = struct {
         const target = parsed.value.context;
 
         if (self.conn_id) |cid| {
-            // The root handle falls through to `RootContextImmutable`
-            // below rather than being reported as a permission problem
-            // (it's in `contexts` but never owned).
-            if (target != core.root_context_handle and
+            // A pane's base context falls through to
+            // `RootContextImmutable` below rather than being reported as a
+            // permission problem (it's in `contexts` but never owned).
+            if (!session.isBaseContext(target) and
                 session.contexts.contains(target) and
                 !session.contextHasOwner(target, cid))
                 return DispatchError.ContextPermissionDenied;
@@ -1538,6 +1736,10 @@ pub const Dispatcher = struct {
         const target = parsed.value.context;
         self.ctx = session.contextPtr(target) orelse return DispatchError.UnknownContext;
         self.active_ctx = target;
+        // Follow the context into its pane: attaching to a context means
+        // joining wherever it lives, and anything this connection creates
+        // afterwards belongs there too.
+        self.active_pane = self.ctx.pane;
     }
 
     /// `adopt_context`: adds this connection to a context's owner set, so
@@ -1554,6 +1756,229 @@ pub const Dispatcher = struct {
         if (self.conn_id) |cid| {
             session.addContextOwner(parsed.value.context, cid) catch return DispatchError.UnknownContext;
         }
+    }
+
+    // ── Panes ───────────────────────────────────────────────────────────
+
+    /// Every pane-tree mutation goes through here first. The role is
+    /// per-connection rather than per-message so that a program which
+    /// merely *runs inside* a pane can never reshape the window around
+    /// itself: only whoever explicitly asked to be the window manager, and
+    /// was granted it, can.
+    ///
+    /// An in-process caller (`conn_id` null -- glyphwire-host driving its
+    /// own session, tests) is always allowed: it *is* the window.
+    fn requireManager(self: *Dispatcher) !*core.Session {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const cid = self.conn_id orelse return session;
+        if (!session.isManager(cid)) return DispatchError.NotWindowManager;
+        return session;
+    }
+
+    /// `request_role`: claims a privileged role for this connection.
+    /// Answers `{granted}` rather than failing, so a client can fall back
+    /// gracefully (a second `gmux` in the same window tells the user
+    /// there's already one, instead of dying on a wire error).
+    fn handleRequestRole(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const parsed = try std.json.parseFromValue(RequestRoleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        if (!std.mem.eql(u8, parsed.value.role, "window_manager")) return DispatchError.UnknownRole;
+        // An in-process caller already has every privilege and needs no
+        // registration; report success without taking the slot away from a
+        // real client.
+        const cid = self.conn_id orelse
+            return try rpc.response(alloc, id, RequestRoleResult{ .granted = true });
+        const granted = session.claimManager(cid);
+        return try rpc.response(alloc, id, RequestRoleResult{ .granted = granted });
+    }
+
+    /// `attach_pane`: binds this connection to a pane, and to whatever
+    /// context is on screen there. What a program spawned into a pane
+    /// sends first, from `GLYPHWIRE_PANE` (see `Dispatcher.active_pane`).
+    /// Needs no role: declaring where you live is not a privilege, and a
+    /// program can only ever be pointed at its own pane by the manager
+    /// that spawned it.
+    fn handleAttachPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const parsed = try std.json.parseFromValue(AttachPaneParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const target = parsed.value.pane;
+        const pane = session.panePtr(target) orelse return DispatchError.UnknownPane;
+        self.active_pane = target;
+        self.active_ctx = pane.top();
+        self.ctx = session.contextPtr(self.active_ctx) orelse return DispatchError.UnknownContext;
+    }
+
+    /// `create_pane`: a pane and the base context it shows. The pane is
+    /// not on screen yet -- the manager places it by editing the tree,
+    /// which is one `set_pane_split_children` away and keeps creation and
+    /// placement separately undoable.
+    fn handleCreatePane(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(CreatePaneParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        const made = try session.createPane(self.conn_id orelse 0, parsed.value.scrollback_rows);
+        return .{
+            .response = try rpc.response(alloc, id, CreatePaneResult{
+                .pane = made.pane,
+                .context = made.context,
+            }),
+            .panes_changed = true,
+        };
+    }
+
+    /// `destroy_pane`: stops whatever is running in the pane, then frees
+    /// the pane and every context in it. The program is killed first, so
+    /// it never gets a chance to draw onto a context that is about to be
+    /// freed underneath it.
+    fn handleDestroyPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(PaneHandleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const target = parsed.value.pane;
+
+        if (self.spawner) |sp| sp.kill(target);
+        session.destroyPane(target) catch |err| return switch (err) {
+            error.RootPaneImmutable => DispatchError.RootPaneImmutable,
+            error.UnknownPane => DispatchError.UnknownPane,
+            error.NotWindowManager => DispatchError.NotWindowManager,
+        };
+        self.syncActiveContext();
+        return .{ .panes_changed = true };
+    }
+
+    /// `focus_pane`: which pane raw input goes to. An unmapped pane (one
+    /// not currently placed in the tree) reports `UnknownPane` rather than
+    /// swallowing every subsequent keystroke into something invisible.
+    fn handleFocusPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(PaneHandleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        session.focusPane(parsed.value.pane) catch return DispatchError.UnknownPane;
+        return try self.contextBroadcast(alloc);
+    }
+
+    fn handleCreatePaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(CreatePaneSplitParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const axis = std.meta.stringToEnum(core.SplitAxis, parsed.value.axis) orelse
+            return DispatchError.InvalidSplitAxis;
+        const split_handle = try session.createPaneSplit(axis, parsed.value.resizable);
+        return try rpc.response(alloc, id, CreatePaneSplitResult{ .split = split_handle });
+    }
+
+    fn handleDestroyPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(PaneSplitHandleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        session.destroyPaneSplit(parsed.value.split) catch return DispatchError.UnknownPaneSplit;
+        return .{ .panes_changed = true };
+    }
+
+    fn handleSetPaneSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(SetPaneSplitChildrenParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const children = try alloc.alloc(core.PaneSplitChild, p.children.len);
+        defer alloc.free(children);
+        for (p.children, 0..) |c, i| {
+            // Exactly one target, same contract as `set_split_children`.
+            const target: core.PaneSplitChild.Target = if (c.pane) |h| blk: {
+                if (c.split != null) return DispatchError.InvalidPaneSplitChild;
+                break :blk .{ .pane = h };
+            } else if (c.split) |h|
+                .{ .split = h }
+            else
+                return DispatchError.InvalidPaneSplitChild;
+
+            const size: core.PaneSplitChild.Size = if (c.fixed) |f|
+                .{ .fixed = f }
+            else if (c.weight) |w|
+                .{ .weight = w }
+            else
+                .{ .weight = 1 };
+
+            children[i] = .{ .target = target, .size = size };
+        }
+
+        session.setPaneSplitChildren(p.split, children) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => DispatchError.UnknownPaneSplit,
+        };
+        return .{ .panes_changed = true };
+    }
+
+    fn handleSetRootPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(SetRootPaneSplitParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        session.setRootPaneSplit(parsed.value.split) catch return DispatchError.UnknownPaneSplit;
+        return .{ .panes_changed = true };
+    }
+
+    fn handleMovePaneDivider(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try std.json.parseFromValue(MovePaneDividerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        session.movePaneDivider(p.split, p.index, p.delta) catch return DispatchError.UnknownPaneSplit;
+        return .{ .panes_changed = true };
+    }
+
+    /// `spawn_in_pane`: starts a program seated in a pane, through the
+    /// host's registered `PaneSpawner`.
+    ///
+    /// This is a server-side operation rather than something the manager
+    /// does itself because a pane is meant to be a sequestered host: the
+    /// thing that owns the window is the thing that knows what env a child
+    /// needs to find it (`GLYPHWIRE_SOCK`, `GLYPHWIRE_PANE`,
+    /// `GLYPHWIRE_CTX`), how to size its PTY, and where its plain-terminal
+    /// output should land. A manager that forked children itself would
+    /// have to reconstruct all of that, and would be the only thing able
+    /// to reap them -- which is what makes detach/reattach impossible.
+    fn handleSpawnInPane(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const session = try self.requireManager();
+        const spawner = self.spawner orelse return DispatchError.SpawnUnsupported;
+        const parsed = try std.json.parseFromValue(SpawnInPaneParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        if (p.argv.len == 0) return DispatchError.SpawnFailed;
+
+        const pane = session.panePtr(p.pane) orelse return DispatchError.UnknownPane;
+        const cols = p.cols orelse @max(pane.rect.cols, 1);
+        const rows = p.rows orelse @max(pane.rect.rows, 1);
+        const base = pane.base;
+
+        const pid = spawner.spawn(p.pane, base, p.argv, cols, rows) catch
+            return DispatchError.SpawnFailed;
+        return try rpc.response(alloc, id, SpawnInPaneResult{ .pid = pid });
     }
 
     /// `set_window_scrollbar`: toggles glyphwire-host's always-on

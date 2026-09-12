@@ -122,9 +122,27 @@ pub fn terminalReplyNotification(alloc: std.mem.Allocator, bytes: []const u8) ![
     return notification(alloc, "terminal_reply", protocol.TerminalReplyParams{ .bytes = bytes });
 }
 
-/// `resize` -- the host window is now `cols` x `rows` cells.
+/// `resize` -- the receiving connection's own context is now `cols` x
+/// `rows` cells. Window-sized for a client that has the window to itself;
+/// pane-sized for one running inside a pane, which is why
+/// `Server.reportContextSizes` builds this per connection rather than
+/// broadcasting one body.
 pub fn resizeNotification(alloc: std.mem.Allocator, cols: usize, rows: usize) ![]u8 {
     return notification(alloc, "resize", protocol.ResizeParams{ .cols = cols, .rows = rows });
+}
+
+/// `pane_layout` -- the panes whose window rects changed. The only
+/// message that exposes where panes sit; only a window manager
+/// subscribes to it (see core.zig's Panes section).
+pub fn paneLayoutNotification(alloc: std.mem.Allocator, panes: []const protocol.PaneBounds) ![]u8 {
+    return notification(alloc, "pane_layout", protocol.PaneLayoutParams{ .panes = panes });
+}
+
+/// `pane_exit` -- the program `spawn_in_pane` started in `pane` has
+/// finished, with wait status `status`. The pane itself is untouched: it
+/// belongs to the manager, which decides whether to respawn or tear down.
+pub fn paneExitNotification(alloc: std.mem.Allocator, pane: core.PaneHandle, status: i64) ![]u8 {
+    return notification(alloc, "pane_exit", protocol.PaneExitParams{ .pane = pane, .status = status });
 }
 
 /// `shutdown` -- the host window is closing; flush and exit within

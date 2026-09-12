@@ -3169,8 +3169,8 @@ pub fn sessionStartsWithOnlyTheRootContextVisibleTest(io: std.Io, alloc: std.mem
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    try testz.expectEqual(session.visibleStackTop(), glyphwire.root_context_handle);
-    try testz.expectEqual(session.visibleContext(), &root);
+    try testz.expectEqual(session.focusedContextHandle(), glyphwire.root_context_handle);
+    try testz.expectEqual(session.focusedContext(), &root);
     try testz.expectEqual(session.rootContext(), &root);
 }
 
@@ -3182,9 +3182,9 @@ pub fn sessionCreateContextShowsItAndDefaultsToRootSizeTest(io: std.Io, alloc: s
     defer session.deinit();
 
     const before_gen = session.visible_gen.load(.monotonic);
-    const h = try session.createContext(null, null, 0);
+    const h = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
     try testz.expectTrue(h != glyphwire.root_context_handle);
-    try testz.expectEqual(session.visibleStackTop(), h);
+    try testz.expectEqual(session.focusedContextHandle(), h);
     try testz.expectTrue(session.visible_gen.load(.monotonic) != before_gen);
 
     const ctx = session.contextPtr(h).?;
@@ -3202,7 +3202,7 @@ pub fn sessionCreatedContextInheritsRootIconCatalogViaFallbackTest(io: std.Io, a
 
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    const h = try session.createContext(null, null, 0);
+    const h = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
     const ctx = session.contextPtr(h).?;
 
     try testz.expectEqual(ctx.iconHandle("folder").?, @as(glyphwire.ImageHandle, 7));
@@ -3217,16 +3217,16 @@ pub fn sessionActivateMovesAnExistingContextToTheTopTest(io: std.Io, alloc: std.
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    const a = try session.createContext(null, null, 0);
-    const b = try session.createContext(null, null, 0);
-    try testz.expectEqual(session.visibleStackTop(), b);
+    const a = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    const b = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    try testz.expectEqual(session.focusedContextHandle(), b);
 
     try session.activateContext(a);
-    try testz.expectEqual(session.visibleStackTop(), a);
+    try testz.expectEqual(session.focusedContextHandle(), a);
     try testz.expectTrue(session.contextPtr(b) != null);
 
     try session.activateContext(a); // already visible: no-op, not an error
-    try testz.expectEqual(session.visibleStackTop(), a);
+    try testz.expectEqual(session.focusedContextHandle(), a);
 
     try testz.expectError(session.activateContext(999), glyphwire.ContextError.UnknownContext);
 }
@@ -3238,16 +3238,16 @@ pub fn sessionDestroyVisibleContextFallsBackToWhatWasUnderItTest(io: std.Io, all
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    const a = try session.createContext(null, null, 0);
-    const b = try session.createContext(null, null, 0);
-    try testz.expectEqual(session.visibleStackTop(), b);
+    const a = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    const b = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    try testz.expectEqual(session.focusedContextHandle(), b);
 
     try session.destroyContext(b);
-    try testz.expectEqual(session.visibleStackTop(), a);
+    try testz.expectEqual(session.focusedContextHandle(), a);
     try testz.expectTrue(session.contextPtr(b) == null);
 
     try session.destroyContext(a);
-    try testz.expectEqual(session.visibleStackTop(), glyphwire.root_context_handle);
+    try testz.expectEqual(session.focusedContextHandle(), glyphwire.root_context_handle);
 }
 
 pub fn sessionDestroyRootContextIsRefusedTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3268,27 +3268,29 @@ pub fn sessionReapConnectionCullsContextsThatConnectionSolelyOwnedTest(io: std.I
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    const a = try session.createContext(null, null, 0);
+    const a = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
     try session.addContextOwner(a, 1);
-    const b = try session.createContext(null, null, 0);
+    const b = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
     try session.addContextOwner(b, 1);
     try session.addContextOwner(b, 2);
 
     var culled: std.ArrayList(glyphwire.ContextHandle) = .empty;
     defer culled.deinit(alloc);
+    var culled_panes: std.ArrayList(glyphwire.PaneHandle) = .empty;
+    defer culled_panes.deinit(alloc);
 
-    try session.reapConnection(1, &culled);
+    try session.reapConnection(1, &culled, &culled_panes);
     try testz.expectEqual(culled.items.len, 1);
     try testz.expectEqual(culled.items[0], a);
     try testz.expectTrue(session.contextPtr(a) == null);
     try testz.expectTrue(session.contextPtr(b) != null);
-    try testz.expectEqual(session.visibleStackTop(), b);
+    try testz.expectEqual(session.focusedContextHandle(), b);
 
     culled.clearRetainingCapacity();
-    try session.reapConnection(2, &culled);
+    try session.reapConnection(2, &culled, &culled_panes);
     try testz.expectEqual(culled.items.len, 1);
     try testz.expectTrue(session.contextPtr(b) == null);
-    try testz.expectEqual(session.visibleStackTop(), glyphwire.root_context_handle);
+    try testz.expectEqual(session.focusedContextHandle(), glyphwire.root_context_handle);
 }
 
 pub fn sessionReapConnectionLeavesTheRootContextAloneTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3300,23 +3302,25 @@ pub fn sessionReapConnectionLeavesTheRootContextAloneTest(io: std.Io, alloc: std
 
     var culled: std.ArrayList(glyphwire.ContextHandle) = .empty;
     defer culled.deinit(alloc);
-    try session.reapConnection(1, &culled);
-    try session.reapConnection(2, &culled);
+    var culled_panes: std.ArrayList(glyphwire.PaneHandle) = .empty;
+    defer culled_panes.deinit(alloc);
+    try session.reapConnection(1, &culled, &culled_panes);
+    try session.reapConnection(2, &culled, &culled_panes);
     try testz.expectEqual(culled.items.len, 0);
-    try testz.expectEqual(session.visibleStackTop(), glyphwire.root_context_handle);
+    try testz.expectEqual(session.focusedContextHandle(), glyphwire.root_context_handle);
 }
 
-pub fn sessionResizeAllCatchesUpEveryContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn sessionResizeWindowCatchesUpEveryContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    const bg = try session.createContext(null, null, 0);
-    _ = try session.createContext(null, null, 0); // the visible one
+    const bg = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    _ = try session.createContext(glyphwire.root_pane_handle, null, null, 0); // the visible one
 
-    try session.resizeAll(30, 8);
+    try session.resizeWindow(30, 8);
     try testz.expectEqual(root.root.width, @as(usize, 30));
     try testz.expectEqual(root.root.height, @as(usize, 8));
     try testz.expectEqual(session.contextPtr(bg).?.root.width, @as(usize, 30));
