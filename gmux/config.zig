@@ -42,10 +42,12 @@ pub const Config = struct {
 /// defaults, no error, nothing logged. Any parse problem is logged and
 /// whatever parsed before it is kept.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ.Map) Config {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    var cfg = Config{ .arena = arena };
+    // Allocate through `cfg.arena`, never through a separate local: an
+    // `ArenaAllocator` holds its block list by value, so allocating via one
+    // copy and calling `deinit` on another frees nothing.
+    var cfg = Config{ .arena = std.heap.ArenaAllocator.init(gpa) };
 
-    const src = readConf(&arena, io, environ) orelse return cfg;
+    const src = readConf(&cfg.arena, io, environ) orelse return cfg;
 
     const lua = Lua.init(gpa) catch {
         std.log.warn("gmux: could not create Lua interpreter for {s}; using defaults", .{conf_name});
@@ -69,7 +71,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Envi
     }
 
     cfg.prefix_key = readPrefixKey(lua, cfg.prefix_key);
-    cfg.shell = readShell(lua, arena.allocator());
+    cfg.shell = readShell(lua, cfg.arena.allocator());
     cfg.scrollback_rows = readScrollbackRows(lua, cfg.scrollback_rows);
     return cfg;
 }
