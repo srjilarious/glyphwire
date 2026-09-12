@@ -135,8 +135,29 @@ end
 push_config_if_missing("shell/shell.conf.template", "~/.config/glyphwire/shell.conf", "shell.conf")
 push_config_if_missing("zoe/zoe.conf.template", "~/.config/glyphwire/zoe.conf", "zoe.conf")
 
-print("provision_remote: done. Try:")
-print("  glyphwire --ssh " .. dest .. " --remote-command ~/.local/share/glyphwire/bin/gw-agent"
-  .. (ssh_opts_str ~= "" and (" -- " .. ssh_opts_str) or ""))
+-- Both forms need the `--remote-command`: the binaries land in
+-- ~/.local/share/glyphwire/bin, which is not on the minimal PATH a
+-- non-login `ssh -T` session gets, so a bare `gw-agent` is not findable
+-- over there.
+--
+-- The remote `$HOME` is asked for rather than assumed, so the printed
+-- commands are absolute and can be pasted anywhere. `~` would survive
+-- into `--remote-command` (nothing in the builtin dispatch path expands
+-- it) but *not* into `export GLYPHWIRE_REMOTE_COMMAND=~/...`, which the
+-- shell expands against the *local* home -- silently wrong whenever the
+-- two accounts differ.
+local agent = "~/.local/share/glyphwire/bin/gw-agent"
+local home = remote_run("printf %s \"$HOME\"")
+if home.ok and home.out ~= "" then
+  agent = home.out:gsub("%s+$", "") .. "/.local/share/glyphwire/bin/gw-agent"
+end
+
+local ssh_tail = ssh_opts_str ~= "" and (" -- " .. ssh_opts_str) or ""
+print("provision_remote: done. For a whole window:")
+print("  glyphwire --ssh " .. dest .. " --remote-command " .. agent .. ssh_tail)
+print("From a shell in any pane, for just that pane:")
+print("  gwssh --remote-command " .. agent .. " " .. dest .. ssh_tail)
+print("Or set it once, so plain `gwssh " .. dest .. "` works:")
+print("  export GLYPHWIRE_REMOTE_COMMAND=" .. agent)
 
 return 0

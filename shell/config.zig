@@ -95,6 +95,9 @@ pub const PromptConfig = struct {
     right: ?[]const u8 = null,
     exit: ?[]const u8 = null,
     dur: ?[]const u8 = null,
+    /// Sub-template `{remote}` expands to, in a shell reached over `gwssh`
+    /// / `glyphwire --ssh`. `null` -> `{remote}` renders nothing.
+    remote: ?[]const u8 = null,
     /// Minimum last-command run time, in milliseconds, before `{dur}`
     /// (and a `when = "slow"` segment) renders anything. `null` -> the
     /// prompt's default (2000).
@@ -336,7 +339,7 @@ fn luaPrompt(lua: *Lua) !i32 {
         .{ "sep", &cfg.prompt.sep },         .{ "sep_right", &cfg.prompt.sep_right },
         .{ "head", &cfg.prompt.head },       .{ "tail", &cfg.prompt.tail },
         .{ "right_head", &cfg.prompt.right_head }, .{ "input", &cfg.prompt.input },
-        .{ "time_format", &cfg.prompt.time_format },
+        .{ "time_format", &cfg.prompt.time_format }, .{ "remote", &cfg.prompt.remote },
     }) |pair| {
         try promptStrField(lua, cfg, pair[1], pair[0]);
     }

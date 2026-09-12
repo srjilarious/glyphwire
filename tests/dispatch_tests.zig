@@ -2380,7 +2380,7 @@ pub fn createLayerOverConnectionRecordsOwnerTest(io: std.Io, alloc: std.mem.Allo
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
@@ -2400,14 +2400,14 @@ pub fn destroyLayerFromNonOwnerConnectionIsRejectedTest(io: std.Io, alloc: std.m
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
 
-    var owner = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var owner = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
     ;
     const created = try owner.handle(alloc, create);
     if (created.response) |r| alloc.free(r);
 
-    var other = dispatch.Dispatcher.initForConnection(&session, 8, null);
+    var other = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
     const destroy =
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
@@ -2421,7 +2421,7 @@ pub fn destroyLayerFromOwnerConnectionSucceedsTest(io: std.Io, alloc: std.mem.Al
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
@@ -2443,14 +2443,14 @@ pub fn adoptLayerLetsSecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Al
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
 
-    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
     ;
     const created = try creator.handle(alloc, create);
     if (created.response) |r| alloc.free(r);
 
-    var adopter = dispatch.Dispatcher.initForConnection(&session, 8, null);
+    var adopter = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
     const adopt =
         \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":1}}
     ;
@@ -2471,7 +2471,7 @@ pub fn adoptLayerUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 8, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
 
     const adopt =
         \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":999}}
@@ -2496,7 +2496,7 @@ pub fn inProcessDispatcherBypassesLayerOwnershipTest(io: std.Io, alloc: std.mem.
 
     // The in-process layer has no owners, so a real connection can't
     // destroy it...
-    var conn = dispatch.Dispatcher.initForConnection(&session, 9, null);
+    var conn = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
     const destroy =
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
@@ -2650,7 +2650,7 @@ pub fn createContextRetargetsTheConnectionAndBroadcastsTest(io: std.Io, alloc: s
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     const result = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
@@ -2675,7 +2675,7 @@ pub fn createContextAndSetWindowScrollbarToggleTheFlagTest(io: std.Io, alloc: st
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     // A pure-TUI client creates its context with the window bar off.
     const created = try d.handle(alloc,
@@ -2700,7 +2700,7 @@ pub fn writeTextAfterCreateContextLandsOnTheNewContextNotRootTest(io: std.Io, al
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     const created = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
@@ -2724,14 +2724,14 @@ pub fn destroyContextFromNonOwnerIsRejectedTest(io: std.Io, alloc: std.mem.Alloc
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var owner = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var owner = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
     const created = try owner.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
     );
     if (created.response) |r| alloc.free(r);
     if (created.broadcast) |b| alloc.free(b.body);
 
-    var other = dispatch.Dispatcher.initForConnection(&session, 8, null);
+    var other = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
     try testz.expectError(other.handle(alloc,
         \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
     ), dispatch.DispatchError.ContextPermissionDenied);
@@ -2744,7 +2744,7 @@ pub fn destroyContextFromOwnerRestoresThePreviousVisibleTest(io: std.Io, alloc: 
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     const created = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
@@ -2773,7 +2773,7 @@ pub fn activateContextChangesVisibilityNotWhichContextTheConnectionDrawsOnTest(i
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     const created = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
@@ -2810,7 +2810,7 @@ pub fn attachContextRetargetsWithoutOwningTest(io: std.Io, alloc: std.mem.Alloca
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
     const created = try creator.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
     );
@@ -2819,7 +2819,7 @@ pub fn attachContextRetargetsWithoutOwningTest(io: std.Io, alloc: std.mem.Alloca
 
     // A second connection (a paired listener) attaches -- retargeted, but
     // not an owner, so it can't destroy it.
-    var listener = dispatch.Dispatcher.initForConnection(&session, 8, null);
+    var listener = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
     _ = try listener.handle(alloc,
         \\{"jsonrpc":"2.0","method":"attach_context","params":{"context":1}}
     );
@@ -2842,14 +2842,14 @@ pub fn adoptContextLetsASecondConnectionDestroyItTest(io: std.Io, alloc: std.mem
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
     const created = try creator.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
     );
     if (created.response) |r| alloc.free(r);
     if (created.broadcast) |b| alloc.free(b.body);
 
-    var adopter = dispatch.Dispatcher.initForConnection(&session, 8, null);
+    var adopter = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
     _ = try adopter.handle(alloc,
         \\{"jsonrpc":"2.0","method":"adopt_context","params":{"context":1}}
     );
@@ -2888,7 +2888,7 @@ pub fn paneTreeOpsRequireTheWindowManagerRoleTest(io: std.Io, alloc: std.mem.All
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     // A program that merely runs inside a pane must not be able to reshape
     // the window around itself.
@@ -2922,8 +2922,8 @@ pub fn requestRoleIsRefusedWhenAnotherConnectionHoldsItTest(io: std.Io, alloc: s
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var first = dispatch.Dispatcher.initForConnection(&session, 1, null);
-    var second = dispatch.Dispatcher.initForConnection(&session, 2, null);
+    var first = dispatch.Dispatcher.initForConnection(&session, 1, null, null);
+    var second = dispatch.Dispatcher.initForConnection(&session, 2, null, null);
 
     const a = try first.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"request_role","params":{"role":"window_manager"}}
@@ -2951,7 +2951,7 @@ pub fn subscribeWithAPaneBindsTheConnectionAtomicallyTest(io: std.Io, alloc: std
     // What a program spawned into a pane sends: the pane rides inside
     // `subscribe`, so there is no window in which it is subscribed but
     // still bound to the wrong pane.
-    var d = dispatch.Dispatcher.initForConnection(&session, 9, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
     try testz.expectEqual(d.active_pane, glyphwire.root_pane_handle);
 
     const resp = try d.handle(alloc,
@@ -2970,7 +2970,7 @@ pub fn subscribeWithAnUnknownPaneStillSubscribesTest(io: std.Io, alloc: std.mem.
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 9, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
 
     // The pane was destroyed between the spawn and the connect. Leaving the
     // connection in the focused pane beats refusing to subscribe at all.
@@ -2990,7 +2990,7 @@ pub fn attachPaneRetargetsAConnectionOntoItsPaneTest(io: std.Io, alloc: std.mem.
     defer session.deinit();
 
     const made = try session.createPane(1, 0);
-    var d = dispatch.Dispatcher.initForConnection(&session, 9, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
 
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"attach_pane","params":{"pane":1}}
@@ -3010,7 +3010,7 @@ pub fn createContextLandsInTheConnectionsOwnPaneTest(io: std.Io, alloc: std.mem.
     defer session.deinit();
 
     const made = try session.createPane(1, 0);
-    var d = dispatch.Dispatcher.initForConnection(&session, 9, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"attach_pane","params":{"pane":1}}
     );
@@ -3037,7 +3037,7 @@ pub fn setWindowPrefixRequiresTheRoleAndRegistersTheChordTest(io: std.Io, alloc:
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
 
     try testz.expectError(d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":"b"}}
@@ -3066,7 +3066,7 @@ pub fn spawnInPaneWithoutASpawnerIsUnsupportedTest(io: std.Io, alloc: std.mem.Al
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
     try testz.expectTrue(session.claimManager(4, 0) != null);
     _ = try session.createPane(4, 0);
 
@@ -3077,13 +3077,209 @@ pub fn spawnInPaneWithoutASpawnerIsUnsupportedTest(io: std.Io, alloc: std.mem.Al
     ), error.SpawnUnsupported);
 }
 
+// ─── start_remote / stop_remote ──────────────────────────────────────
+
+/// A `RemoteStarter` that spawns nothing and just records what it was
+/// asked for -- enough to check the wiring without an `ssh` anywhere.
+const FakeRemotes = struct {
+    started: usize = 0,
+    stopped: ?u64 = null,
+    stopped_pane: ?glyphwire.PaneHandle = null,
+    last_dest: [64]u8 = undefined,
+    last_dest_len: usize = 0,
+    last_pane: glyphwire.PaneHandle = 0,
+    last_ctx: glyphwire.ContextHandle = 0,
+    last_ssh_args: usize = 0,
+    last_remote_command_given: bool = false,
+    fail: bool = false,
+
+    fn starter(self: *FakeRemotes) dispatch.RemoteStarter {
+        return .{
+            .ctx = self,
+            .start_fn = startFn,
+            .stop_fn = stopFn,
+            .stop_for_pane_fn = stopForPaneFn,
+        };
+    }
+
+    fn dest(self: *const FakeRemotes) []const u8 {
+        return self.last_dest[0..self.last_dest_len];
+    }
+
+    fn startFn(
+        ctx: ?*anyopaque,
+        d: []const u8,
+        ssh_args: []const []const u8,
+        remote_command: ?[]const u8,
+        pane: glyphwire.PaneHandle,
+        context: glyphwire.ContextHandle,
+    ) anyerror!u64 {
+        const self: *FakeRemotes = @ptrCast(@alignCast(ctx.?));
+        if (self.fail) return error.RemoteStartFailed;
+        self.started += 1;
+        self.last_dest_len = @min(d.len, self.last_dest.len);
+        @memcpy(self.last_dest[0..self.last_dest_len], d[0..self.last_dest_len]);
+        self.last_ssh_args = ssh_args.len;
+        self.last_remote_command_given = remote_command != null;
+        self.last_pane = pane;
+        self.last_ctx = context;
+        return 42;
+    }
+
+    fn stopFn(ctx: ?*anyopaque, session: u64) void {
+        const self: *FakeRemotes = @ptrCast(@alignCast(ctx.?));
+        self.stopped = session;
+    }
+
+    fn stopForPaneFn(ctx: ?*anyopaque, pane: glyphwire.PaneHandle) void {
+        const self: *FakeRemotes = @ptrCast(@alignCast(ctx.?));
+        self.stopped_pane = pane;
+    }
+};
+
+/// `start_remote` seats the session in the *caller's own* pane, with no
+/// pane parameter to name someone else's and no manager role to claim.
+pub fn startRemoteUsesTheCallersOwnPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var fake: FakeRemotes = .{};
+    const starter = fake.starter();
+
+    // A second pane exists, and the shell connection is seated in it.
+    try testz.expectTrue(session.claimManager(4, 0) != null);
+    const pane = (try session.createPane(4, 0)).pane;
+
+    var shell = dispatch.Dispatcher.initForConnection(&session, 5, null, &starter);
+    const attach = try std.fmt.allocPrint(
+        alloc,
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"attach_pane\",\"params\":{{\"pane\":{d}}}}}",
+        .{pane},
+    );
+    defer alloc.free(attach);
+    _ = try shell.handle(alloc, attach);
+
+    const res = try shell.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"start_remote","params":{"dest":"build-box"}}
+    );
+    defer if (res.response) |r| alloc.free(r);
+
+    try testz.expectEqual(fake.started, 1);
+    try testz.expectEqualStr("build-box", fake.dest());
+    try testz.expectEqual(fake.last_pane, pane);
+    try testz.expectTrue(!fake.last_remote_command_given);
+    try testz.expectTrue(res.response != null);
+    try testz.expectTrue(std.mem.indexOf(u8, res.response.?, "\"session\":42") != null);
+}
+
+pub fn startRemoteCarriesSshArgsAndRemoteCommandTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var fake: FakeRemotes = .{};
+    const starter = fake.starter();
+    var d = dispatch.Dispatcher.initForConnection(&session, 5, null, &starter);
+
+    const res = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"start_remote","params":{"dest":"box","ssh_args":["-p","2222"],"remote_command":"/opt/gw-agent"}}
+    );
+    defer if (res.response) |r| alloc.free(r);
+
+    try testz.expectEqual(fake.last_ssh_args, 2);
+    try testz.expectTrue(fake.last_remote_command_given);
+}
+
+pub fn startRemoteWithAnEmptyDestFailsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var fake: FakeRemotes = .{};
+    const starter = fake.starter();
+    var d = dispatch.Dispatcher.initForConnection(&session, 5, null, &starter);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"start_remote","params":{"dest":""}}
+    ), error.RemoteStartFailed);
+    try testz.expectEqual(fake.started, 0);
+}
+
+/// The headless server has no window for a remote session to draw into
+/// and no business spawning `ssh` -- same stance as `spawn_in_pane`.
+pub fn startRemoteWithoutAStarterIsUnsupportedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 5, null, null);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"start_remote","params":{"dest":"box"}}
+    ), error.RemoteUnsupported);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"stop_remote","params":{"session":1}}
+    ), error.RemoteUnsupported);
+}
+
+pub fn stopRemoteNamesTheSessionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var fake: FakeRemotes = .{};
+    const starter = fake.starter();
+    var d = dispatch.Dispatcher.initForConnection(&session, 5, null, &starter);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"stop_remote","params":{"session":7}}
+    );
+    try testz.expectEqual(fake.stopped.?, 7);
+}
+
+/// A remote session outlives the pane's own program, so destroying the
+/// pane has to end the `ssh` too -- otherwise the trunk stays up feeding
+/// clients with nowhere left to draw.
+pub fn destroyPaneEndsItsRemoteSessionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var fake: FakeRemotes = .{};
+    const starter = fake.starter();
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, &starter);
+    try testz.expectTrue(session.claimManager(4, 0) != null);
+    const pane = (try session.createPane(4, 0)).pane;
+
+    const destroy = try std.fmt.allocPrint(
+        alloc,
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"destroy_pane\",\"params\":{{\"pane\":{d}}}}}",
+        .{pane},
+    );
+    defer alloc.free(destroy);
+    _ = try d.handle(alloc, destroy);
+    try testz.expectEqual(fake.stopped_pane.?, pane);
+}
+
 pub fn paneSplitChildNamingBothTargetsIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
     try testz.expectTrue(session.claimManager(4, 0) != null);
 
     const created = try d.handle(alloc,
@@ -3105,7 +3301,7 @@ pub fn createPaneSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) 
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null);
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
     try testz.expectTrue(session.claimManager(4, 0) != null);
 
     try testz.expectError(d.handle(alloc,

@@ -853,6 +853,40 @@ pub const Client = struct {
         return parsed.value.result.pid;
     }
 
+    /// `start_remote`: brings up an `ssh` session to `dest` whose remote
+    /// clients draw into *this connection's own* pane, and returns the
+    /// session id. The caller is not replaced -- it stays bound to the
+    /// pane and is back the moment the session ends, the way a shell is
+    /// back when `ssh` exits.
+    ///
+    /// The caller learns about that end from a `remote_exit` notification
+    /// carrying this id, which means waiting on an `InputListener`
+    /// subscribed to `"remote"`, not on this connection.
+    ///
+    /// `ssh_args` are inserted before `dest` on the `ssh` command line;
+    /// `remote_command` overrides the far-side agent (`gw-agent`).
+    pub fn startRemote(
+        self: *Client,
+        dest: []const u8,
+        ssh_args: []const []const u8,
+        remote_command: ?[]const u8,
+    ) !u64 {
+        var parsed = try self.request(
+            struct { session: u64 },
+            "start_remote",
+            .{ .dest = dest, .ssh_args = ssh_args, .remote_command = remote_command },
+        );
+        defer parsed.deinit();
+        return parsed.value.result.session;
+    }
+
+    /// `stop_remote`: ends a session `startRemote` returned. Safe to send
+    /// for one that has already ended -- the caller racing `remote_exit`
+    /// is the normal case, not an error.
+    pub fn stopRemote(self: *Client, session: u64) !void {
+        try self.notify("stop_remote", .{ .session = session });
+    }
+
     /// `set_property(layer, "cursor", {row, col})` on a non-root layer --
     /// see `setCursor` for the root-layer version. `write_text` is always
     /// cursor-implicit (no `row`/`col` params of its own), so placing text
@@ -2270,6 +2304,18 @@ pub const PaneExitEvent = struct {
     status: i64,
 };
 
+/// A queued `remote_exit` notification: the remote session `session`
+/// (`Client.startRemote`) has ended, with `ssh`'s wait status. Broadcast
+/// to every `remote` subscriber, so a consumer waiting on one particular
+/// session must check the id.
+pub const RemoteExitEvent = struct {
+    session: u64,
+    status: i64,
+    /// False when the session never came up at all -- see
+    /// `protocol.RemoteExitParams.started`.
+    started: bool,
+};
+
 pub const LayoutEvent = struct {
     layers: []LayoutBounds,
 
@@ -2371,6 +2417,10 @@ pub const InputListener = struct {
     pane_layout_sem: std.Io.Semaphore = .{},
     pane_exit_events: std.ArrayList(PaneExitEvent) = .empty,
     pane_exit_sem: std.Io.Semaphore = .{},
+    /// Queued `remote_exit` notifications, same drain-on-poll shape.
+    /// Empty unless this connection subscribed to `"remote"`, which only a
+    /// program waiting out a `start_remote` session does.
+    remote_exit_events: std.ArrayList(RemoteExitEvent) = .empty,
     /// Queued `context` notifications (see `ContextEvent`), same
     /// drain-on-poll shape as `resize_events`. `last_context` caches the
     /// most recent for `visibleContext()`'s instant read; null until the
@@ -2392,6 +2442,25 @@ pub const InputListener = struct {
         socket_path: []const u8,
         events: []const []const u8,
     ) !*InputListener {
+        return connectInPane(io, alloc, socket_path, events, paneFromEnv());
+    }
+
+    /// `connect`, but for a listener whose pane isn't the process's own
+    /// `GLYPHWIRE_PANE` -- glyphwire-host opening a connection on behalf of
+    /// one particular pane (`host/remote.zig`'s `ssh` auth prompt), where
+    /// the host process is seated in no pane at all.
+    ///
+    /// A parameter rather than a call after connecting, for the reason
+    /// `sendSubscribeAndWaitForAck` spells out: the pane has to ride inside
+    /// `subscribe`, or the connection is briefly subscribed while gated
+    /// against the wrong pane.
+    pub fn connectInPane(
+        io: std.Io,
+        alloc: std.mem.Allocator,
+        socket_path: []const u8,
+        events: []const []const u8,
+        pane: ?core.PaneHandle,
+    ) !*InputListener {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
         const stream = try addr.connect(io);
 
@@ -2400,7 +2469,7 @@ pub const InputListener = struct {
         self.* = .{ .io = io, .alloc = alloc, .stream = stream, .listen_thread = undefined, .state = core.InputState.init(alloc) };
         errdefer self.state.deinit();
 
-        try self.sendSubscribeAndWaitForAck(events);
+        try self.sendSubscribeAndWaitForAck(events, pane);
 
         // Joined by deinit, unlike most background threads in this
         // codebase: `state`/`mutex` must outlive the last access this
@@ -2447,6 +2516,7 @@ pub const InputListener = struct {
         for (self.pane_layout_events.items) |ev| ev.deinit(self.alloc);
         self.pane_layout_events.deinit(self.alloc);
         self.pane_exit_events.deinit(self.alloc);
+        self.remote_exit_events.deinit(self.alloc);
         self.scroll_events.deinit(self.alloc);
         self.context_events.deinit(self.alloc);
         self.alloc.destroy(self);
@@ -2574,6 +2644,14 @@ pub const InputListener = struct {
         defer self.mutex.unlock(self.io);
         if (self.pane_exit_events.items.len == 0) return null;
         return self.pane_exit_events.orderedRemove(0);
+    }
+
+    /// The next queued `remote_exit`, or null. Nothing to free.
+    pub fn pollRemoteExitEvent(self: *InputListener) ?RemoteExitEvent {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.remote_exit_events.items.len == 0) return null;
+        return self.remote_exit_events.orderedRemove(0);
     }
 
     pub fn pollResizeEvent(self: *InputListener) ?ResizeEvent {
@@ -2729,7 +2807,7 @@ pub const InputListener = struct {
     /// could receive keystrokes meant for another program. Folding the two
     /// into one message makes that window impossible rather than merely
     /// small.
-    fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8) !void {
+    fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8, pane: ?core.PaneHandle) !void {
         const Msg = struct {
             jsonrpc: []const u8 = "2.0",
             id: i64 = 1,
@@ -2740,7 +2818,7 @@ pub const InputListener = struct {
             },
         };
         const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{
-            .params = .{ .events = events, .pane = paneFromEnv() },
+            .params = .{ .events = events, .pane = pane },
         }, .{});
         defer self.alloc.free(body);
 
@@ -2999,6 +3077,24 @@ pub const InputListener = struct {
             defer self.mutex.unlock(self.io);
             try self.pane_exit_events.append(self.alloc, .{ .pane = p.value.pane, .status = p.value.status });
             self.pane_exit_sem.post(self.io);
+            self.input_sem.post(self.io);
+        } else if (std.mem.eql(u8, parsed.value.method, "remote_exit")) {
+            const p = try std.json.parseFromValue(protocol.RemoteExitParams, self.alloc, parsed.value.params, .{
+                .ignore_unknown_fields = true,
+            });
+            defer p.deinit();
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.remote_exit_events.append(self.alloc, .{
+                .session = p.value.session,
+                .status = p.value.status,
+                .started = p.value.started,
+            });
+            // Wake a waiter parked in `waitInputEvent`: the whole point of
+            // this event is that the program blocked behind the remote
+            // session gets its terminal back at once, not at the next
+            // fallback timeout.
             self.input_sem.post(self.io);
         } else if (std.mem.eql(u8, parsed.value.method, "resize")) {
             const P = protocol.ResizeParams;

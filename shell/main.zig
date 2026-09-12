@@ -18,6 +18,7 @@ const prompt_template = @import("shell_support").prompt_template;
 const browsescroll = @import("shell_support").browsescroll;
 const openaction = @import("shell_support").openaction;
 const logicalpath = @import("shell_support").logicalpath;
+const remotecmd = @import("shell_support").remotecmd;
 const Pty = glyphwire.Pty;
 const ModeTracker = glyphwire.ModeTracker;
 
@@ -426,7 +427,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     // backlog. `layout` is only consumed when `client.default_layer` is
     // set (see `drainResizes`) -- subscribing unconditionally is free for
     // a session with no split tree, since nothing broadcasts it then.
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "layout", "shutdown", "clipboard", "terminal" }) catch |err| {
+    // `remote` is what `gwssh` waits on: the session's end arrives here,
+    // not on the `Client` that asked for it. Free to subscribe to always --
+    // nothing broadcasts it in a session with no remote panes.
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "layout", "shutdown", "clipboard", "terminal", "remote" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -484,6 +488,10 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         prompt.initScriptEngine(config_dir) catch |err| {
             std.log.warn("prompt: couldn't start the script engine: {t}", .{err});
         };
+        // Before `shell.conf` runs, so it can branch on `sh.remote`.
+        if (prompt.script_engine) |eng| {
+            eng.setIdentity(environ_map.get("USER") orelse "", prompt.host, prompt.remoteDest());
+        }
         try prompt.loadStartupConfig(config_dir);
         try prompt.loadHistory(config_dir);
         try prompt.loadZjump(config_dir);
@@ -877,7 +885,18 @@ const CompletionCandidate = struct { name: []const u8, is_dir: bool };
 /// precedence comment there). Offered by Tab completion in command
 /// position alongside aliases and script builtins. `alias` is handled a
 /// step earlier than the rest but is still a name worth completing.
-const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "unalias", "unset", "zj" };
+const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "gwssh", "unalias", "unset", "zj" };
+
+/// Where `assets/scripts/provision_remote.lua` puts the remote-side
+/// binaries. Deliberately *not* on the remote `PATH` -- the minimal one a
+/// non-login `ssh -T` session gets has no user prefix on it -- so `gwssh`
+/// names this path when the agent turns up missing, rather than leaving
+/// the user to go and read the provisioning script.
+///
+/// Passed through to the remote shell unexpanded: nothing in the builtin
+/// dispatch path expands `~`, so the far side resolves it against the
+/// remote home, which is the one that matters.
+const provisioned_agent_path = "~/.local/share/glyphwire/bin/gw-agent";
 
 /// Alias store backing the prompt's `alias`/`unalias` builtins. Seeded at
 /// startup from `~/.config/glyphwire/shell.conf`'s `alias(name, value)`
@@ -1319,6 +1338,14 @@ const Prompt = struct {
         self.host = self.host_buf[0..trimmed.len];
     }
 
+    /// The `ssh` destination this shell was reached through, or empty when
+    /// it is local. Set by `gw-agent` when it spawns the remote shell, so
+    /// it is inherited by everything the shell launches too -- a remote
+    /// `zoe` can tell where it is by the same variable.
+    fn remoteDest(self: *Prompt) []const u8 {
+        return self.env.get("GLYPHWIRE_REMOTE") orelse "";
+    }
+
     /// The bundled prompt icons (`assets/icons/...`) are 32x32.
     const icon_native_px: u32 = 32;
 
@@ -1436,6 +1463,7 @@ const Prompt = struct {
             .cwd_full = cwd_full,
             .user = self.environ_map.get("USER") orelse "",
             .host = self.host,
+            .remote = self.remoteDest(),
             .time = self.formatTime(&b.time, p.time_format orelse "%H:%M"),
             .environ = &self.env,
             .last_status = self.last_status,
@@ -1444,6 +1472,7 @@ const Prompt = struct {
             .dur_min_ms = self.durMinMs(),
             .exit_section = p.exit,
             .dur_section = p.dur,
+            .remote_section = p.remote,
             .vars = self.cmdVarResolver(),
         };
     }
@@ -2943,6 +2972,11 @@ const Prompt = struct {
 
         // Precedence: core builtins > aliases (already expanded above) >
         // script builtins > $PATH. A `cd.lua` can't shadow the real `cd`.
+        //
+        // This chain is the bare-command mirror of `runBuiltin`, and the
+        // set of names has to match `isBuiltinName` -- a builtin added to
+        // one and not the other works in an `&&` chain and falls through
+        // to `$PATH` when typed on its own.
         if (std.mem.eql(u8, argv[0], "exit")) {
             self.should_exit = true;
         } else if (std.mem.eql(u8, argv[0], "unalias")) {
@@ -2955,6 +2989,10 @@ const Prompt = struct {
             _ = try self.doUnset(argv[1..]);
         } else if (std.mem.eql(u8, argv[0], "zj")) {
             try self.doZj(argv[1..]);
+        } else if (std.mem.eql(u8, argv[0], "gwssh")) {
+            // Records its own `last_status` (it has a remote session's
+            // exit to report), like `runCommand` does.
+            _ = try self.doGwssh(argv[1..]);
         } else if (self.runScriptBuiltin(argv)) {
             // handled by the persistent Lua engine
         } else {
@@ -3064,7 +3102,7 @@ const Prompt = struct {
         if (std.mem.eql(u8, name, "exit") or std.mem.eql(u8, name, "unalias") or
             std.mem.eql(u8, name, "cd") or std.mem.eql(u8, name, "alias") or
             std.mem.eql(u8, name, "export") or std.mem.eql(u8, name, "unset") or
-            std.mem.eql(u8, name, "zj")) return true;
+            std.mem.eql(u8, name, "zj") or std.mem.eql(u8, name, "gwssh")) return true;
         if (self.script_engine) |eng| return eng.hasCommand(name);
         return false;
     }
@@ -3095,6 +3133,9 @@ const Prompt = struct {
         if (std.mem.eql(u8, argv[0], "zj")) {
             try self.doZj(argv[1..]);
             return 0;
+        }
+        if (std.mem.eql(u8, argv[0], "gwssh")) {
+            return self.doGwssh(argv[1..]);
         }
         if (std.mem.eql(u8, argv[0], "alias")) {
             try self.client.writeText("alias: only supported as a standalone command", err_color, null);
@@ -3941,6 +3982,159 @@ const Prompt = struct {
         self.zdb.?.record(cwd, self.nowSecs()) catch return;
         self.zdb_dirty = true;
         self.persist_gate.note();
+    }
+
+    /// `gwssh <dest>` -- drop this pane into a remote session.
+    ///
+    /// The host does the work (`start_remote`): it spawns `ssh`, surfaces
+    /// its auth prompts on the grid, and turns the trunk's channels back
+    /// into connections, so the remote `gw-shell` draws into this pane
+    /// exactly as this one does. What is left here is the waiting, and the
+    /// waiting is the point -- this shell is not replaced. It sits behind
+    /// the session and has the pane back the moment it ends, the way it
+    /// sits behind `ssh` in an ordinary terminal.
+    ///
+    /// A builtin rather than a program because the thing that has to be
+    /// seated in the pane is *this process's* connection: a child would
+    /// hand over its own pane binding, not ours.
+    fn doGwssh(self: *Prompt, args: []const []const u8) !u8 {
+        const spec = remotecmd.parse(args) catch |err| {
+            try self.client.writeText(remotecmd.errorText(err), err_color, null);
+            return 2;
+        };
+
+        const listener = self.listener orelse {
+            try self.client.writeText("gwssh: no interactive session", err_color, null);
+            return 1;
+        };
+
+        const session = self.client.startRemote(spec.dest, spec.ssh_args, self.remoteAgentCommand(spec)) catch |err| {
+            var buf: [160]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "gwssh: {s}: {t}", .{ spec.dest, err }) catch "gwssh: could not start remote session";
+            try self.client.writeText(msg, err_color, null);
+            return 1;
+        };
+
+        const outcome = self.waitOutRemote(listener, session);
+
+        // The remote shell left its own output on this pane's grid, and
+        // may have resized it; the caller's prompt redraw picks up from
+        // wherever that ended, like returning from any foreground program.
+        drainResizes(listener, self);
+        if (!outcome.started) try self.reportRemoteFailure(spec, outcome.status);
+        self.last_status = outcome.status;
+        self.have_status = true;
+        return outcome.status;
+    }
+
+    /// The far-side agent command: `--remote-command` if given, else
+    /// `$GLYPHWIRE_REMOTE_COMMAND`, else null (the host's own `gw-agent`
+    /// default).
+    ///
+    /// The variable exists because the default only works when `gw-agent`
+    /// is on the remote box's `PATH` -- and a non-login `ssh -T` session
+    /// has a minimal one, which misses a work tree's `zig-out/bin`
+    /// entirely. Setting it once beats retyping `--remote-command` on
+    /// every connection.
+    fn remoteAgentCommand(self: *Prompt, spec: remotecmd.Spec) ?[]const u8 {
+        if (spec.remote_command) |cmd| return cmd;
+        const from_env = self.env.get("GLYPHWIRE_REMOTE_COMMAND") orelse return null;
+        return if (from_env.len == 0) null else from_env;
+    }
+
+    /// Says why a session that never connected didn't, in the pane.
+    /// Without this the only evidence is a line `ssh` wrote to the
+    /// *host's* stderr, which is not where anyone running `gwssh` is
+    /// looking.
+    ///
+    /// Only for a session that never came up. A remote shell that ran and
+    /// exited non-zero is left to speak for itself, exactly as `ssh`
+    /// leaves it: the status is in `$?` and `{exit}` already.
+    ///
+    /// 127 is singled out because it is both the likeliest failure and the
+    /// least self-explanatory -- `ssh` passes the remote command's status
+    /// through, so "no `gw-agent` on that box's PATH" arrives as a bare
+    /// 127.
+    fn reportRemoteFailure(self: *Prompt, spec: remotecmd.Spec, status: u8) !void {
+        var buf: [512]u8 = undefined;
+        const msg = if (status == 127)
+            std.fmt.bufPrint(
+                &buf,
+                "gwssh: {s}: no '{s}' there. provision_remote installs it at {s}; pass that with --remote-command, or set GLYPHWIRE_REMOTE_COMMAND.",
+                .{ spec.dest, self.remoteAgentCommand(spec) orelse "gw-agent", provisioned_agent_path },
+            ) catch "gwssh: the remote agent was not found"
+        else
+            std.fmt.bufPrint(&buf, "gwssh: {s}: could not connect (ssh exited {d})", .{ spec.dest, status }) catch
+                "gwssh: could not connect";
+        try self.client.writeText(msg, err_color, null);
+    }
+
+    /// Parks until the remote session `session` ends, keeping this
+    /// connection quiet while it runs.
+    ///
+    /// Quiet is the whole job. Both shells are attached to the same pane,
+    /// so both are handed every keystroke while it has focus (see
+    /// `Server.broadcast`) -- exactly the situation the pty foreground
+    /// loop is already in with a glyphwire-aware child. Draining and
+    /// dropping is what keeps this shell from echoing over the remote
+    /// one's screen, and keeps `InputListener`'s queues from filling.
+    ///
+    /// Ctrl-C asks the host to tear the session down rather than returning
+    /// here, so the pane is never left with an orphaned `ssh` drawing into
+    /// it; the loop still exits on the `remote_exit` that follows.
+    const RemoteOutcome = struct {
+        status: u8,
+        /// False when the session never connected at all -- the only
+        /// thing that distinguishes that from a remote shell exiting with
+        /// the same status. See `protocol.RemoteExitParams.started`.
+        started: bool,
+    };
+
+    fn waitOutRemote(self: *Prompt, listener: *glyphwire.InputListener, session: u64) RemoteOutcome {
+        const alloc = self.client.alloc;
+        while (true) {
+            while (listener.pollRemoteExitEvent()) |ev| {
+                if (ev.session != session) continue;
+                return .{
+                    .status = std.math.cast(u8, ev.status) orelse 1,
+                    .started = ev.started,
+                };
+            }
+
+            // The wait is woken by `remote_exit` itself; the timeout is
+            // only a floor on how long a missed wake-up could cost.
+            const ev = (listener.waitInputEvent(.{
+                .duration = .{ .raw = .fromMilliseconds(200), .clock = .awake },
+            }) catch null) orelse continue;
+
+            switch (ev) {
+                .key => |kev| {
+                    defer alloc.free(kev.key);
+                    if (kev.pressed and std.mem.eql(u8, kev.key, "c") and
+                        (listener.isKeyDown("left_control") or listener.isKeyDown("right_control")))
+                    {
+                        self.client.stopRemote(session) catch {};
+                    }
+                },
+                .text => |tev| alloc.free(tev.text),
+                .paste => |tev| alloc.free(tev.text),
+                .copy_request => {},
+                // Host window closing: end the session and let the caller
+                // flush and exit, the same as a foregrounded child.
+                .shutdown => {
+                    self.should_exit = true;
+                    self.client.stopRemote(session) catch {};
+                    // `started: true` -- the window closing is not a
+                    // connection failure, and there is nothing to report
+                    // into a pane that is going away.
+                    return .{ .status = 1, .started = true };
+                },
+                // A window manager's own commands (see
+                // `InputEvent.window_key`). Never delivered here.
+                .window_key => |kev| alloc.free(kev.key),
+                .window_text => |tev| alloc.free(tev.text),
+            }
+        }
     }
 
     /// `zj [QUERY...]` -- the directory-jump builtin. Bare `zj` goes to

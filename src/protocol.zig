@@ -287,6 +287,22 @@ pub const PaneLayoutParams = struct { panes: []const PaneBounds };
 /// `status`.
 pub const PaneExitParams = struct { pane: core.PaneHandle, status: i64 };
 
+/// `remote_exit` params: the remote session `session` (started by
+/// `start_remote`) has ended. `status` is the `ssh` process's wait status,
+/// so a non-zero value distinguishes "the remote shell exited" from "the
+/// connection failed".
+pub const RemoteExitParams = struct {
+    session: u64,
+    status: i64,
+    /// Whether the session ever came up -- the agent's `hello` arrived and
+    /// remote clients could connect. False means the connection failed
+    /// (no such host, auth refused, no `gw-agent` on the far side), which
+    /// `status` alone cannot say: `ssh` passes the remote command's exit
+    /// code through, so a failure and a remote shell exiting with the same
+    /// number are indistinguishable from the status.
+    started: bool = true,
+};
+
 /// `shutdown` params: the host window is closing and this connection
 /// should flush any persistent state and exit. `grace_ms` is roughly how
 /// long the host will wait for that before it exits anyway -- advisory,

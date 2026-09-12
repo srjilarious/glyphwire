@@ -88,6 +88,14 @@ pub const DispatchError = error{
     SpawnUnsupported,
     /// `spawn_in_pane`'s `argv` was empty, or the fork/exec failed.
     SpawnFailed,
+    /// `start_remote` / `stop_remote` reached a server with no remote
+    /// starter registered -- the headless `server/main.zig`, which has no
+    /// window for a remote session to draw into and no business spawning
+    /// `ssh`.
+    RemoteUnsupported,
+    /// `start_remote`'s `dest` was empty, or `ssh` never came up (the
+    /// agent's `hello` frame never arrived).
+    RemoteStartFailed,
 };
 
 const Envelope = struct {
@@ -317,6 +325,25 @@ const SpawnInPaneParams = struct {
     rows: ?usize = null,
 };
 const SpawnInPaneResult = struct { pid: i64 };
+
+/// `start_remote`: brings up an `ssh` trunk to `dest` whose remote clients
+/// draw into *this connection's* pane. Unlike `spawn_in_pane` there is no
+/// pane parameter and no window-manager role: the caller is a program
+/// already seated in the pane it wants to hand over, and naming someone
+/// else's pane is exactly what it must not be able to do.
+const StartRemoteParams = struct {
+    dest: []const u8,
+    /// Extra arguments inserted before `dest` on the `ssh` command line.
+    ssh_args: []const []const u8 = &.{},
+    /// The agent command run on the far side; null means `gw-agent`.
+    remote_command: ?[]const u8 = null,
+};
+const StartRemoteResult = struct { session: u64 };
+
+/// `stop_remote`: tears down a session `start_remote` returned. Idempotent
+/// -- a session that already ended is not an error, because the caller
+/// races the `remote_exit` notification by nature.
+const StopRemoteParams = struct { session: u64 };
 
 /// `set_window_prefix`: the chord after which one keystroke is delivered to
 /// the window manager instead of to the focused pane. Null `key` clears it.
@@ -751,6 +778,12 @@ pub const Subscriptions = struct {
     /// `core.WindowPrefix` for why the session decides this rather than the
     /// manager.
     window_keys: bool = false,
+    /// `remote_exit` server->client notifications -- a `start_remote`
+    /// session ended. Its own flag because only the program that asked for
+    /// a remote session is waiting on one, and it waits on its
+    /// `InputListener` connection rather than the `Client` that made the
+    /// request.
+    remote: bool = false,
 
     pub fn has(self: Subscriptions, event: []const u8) bool {
         if (std.mem.eql(u8, event, "key")) return self.key;
@@ -773,6 +806,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "window_key_down")) return self.window_keys;
         if (std.mem.eql(u8, event, "window_key_up")) return self.window_keys;
         if (std.mem.eql(u8, event, "window_text")) return self.window_keys;
+        if (std.mem.eql(u8, event, "remote_exit")) return self.remote;
         return false;
     }
 
@@ -801,6 +835,8 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "window_keys")) s.window_keys = true;
             if (std.mem.eql(u8, e, "window_key")) s.window_keys = true;
             if (std.mem.eql(u8, e, "window_text")) s.window_keys = true;
+            if (std.mem.eql(u8, e, "remote")) s.remote = true;
+            if (std.mem.eql(u8, e, "remote_exit")) s.remote = true;
         }
         return s;
     }
@@ -873,6 +909,54 @@ pub const PaneSpawner = struct {
 
     pub fn kill(self: *const PaneSpawner, pane: core.PaneHandle) void {
         self.kill_fn(self.ctx, pane);
+    }
+};
+
+/// How a `start_remote` request actually brings up a remote session.
+/// Registered by whatever owns processes and a window (glyphwire-host, via
+/// `Server.setRemoteStarter`); left null by the headless server, which
+/// rejects `start_remote` with `RemoteUnsupported`.
+///
+/// Injected for the same reason as `PaneSpawner`: `src/` stays free of
+/// fork/exec policy. Spawning `ssh`, relaying its auth prompts onto the
+/// grid, and turning the trunk's channels back into server connections are
+/// all host concerns. See `host/remote.zig`.
+pub const RemoteStarter = struct {
+    ctx: ?*anyopaque,
+    /// Starts a session to `dest` whose remote clients land in `pane`, on
+    /// its base context `context`. Returns the session id `stop_remote`
+    /// and the `remote_exit` notification use.
+    start_fn: *const fn (
+        ctx: ?*anyopaque,
+        dest: []const u8,
+        ssh_args: []const []const u8,
+        remote_command: ?[]const u8,
+        pane: core.PaneHandle,
+        context: core.ContextHandle,
+    ) anyerror!u64,
+    /// Tears a session down. A no-op for one that has already ended.
+    stop_fn: *const fn (ctx: ?*anyopaque, session: u64) void,
+    /// Tears down every session seated in `pane` -- what `destroy_pane`
+    /// needs, since a remote session outlives the pane's own program.
+    stop_for_pane_fn: *const fn (ctx: ?*anyopaque, pane: core.PaneHandle) void,
+
+    pub fn start(
+        self: *const RemoteStarter,
+        dest: []const u8,
+        ssh_args: []const []const u8,
+        remote_command: ?[]const u8,
+        pane: core.PaneHandle,
+        context: core.ContextHandle,
+    ) anyerror!u64 {
+        return self.start_fn(self.ctx, dest, ssh_args, remote_command, pane, context);
+    }
+
+    pub fn stop(self: *const RemoteStarter, session: u64) void {
+        self.stop_fn(self.ctx, session);
+    }
+
+    pub fn stopForPane(self: *const RemoteStarter, pane: core.PaneHandle) void {
+        self.stop_for_pane_fn(self.ctx, pane);
     }
 };
 
@@ -1025,6 +1109,9 @@ pub const Dispatcher = struct {
     /// How `spawn_in_pane` starts a program, or null on a server that
     /// can't (see `PaneSpawner`). Injected by `Server`.
     spawner: ?*const PaneSpawner = null,
+    /// How `start_remote` brings up a remote session, or null on a server
+    /// that can't (see `RemoteStarter`). Injected by `Server`.
+    remote_starter: ?*const RemoteStarter = null,
 
     pub fn init(ctx: *core.Context) Dispatcher {
         return .{ .ctx = ctx };
@@ -1039,6 +1126,7 @@ pub const Dispatcher = struct {
         session: *core.Session,
         conn_id: core.ConnId,
         spawner: ?*const PaneSpawner,
+        remote_starter: ?*const RemoteStarter,
     ) Dispatcher {
         return .{
             .ctx = session.focusedContext(),
@@ -1047,6 +1135,7 @@ pub const Dispatcher = struct {
             .active_pane = session.focusedPaneHandle(),
             .conn_id = conn_id,
             .spawner = spawner,
+            .remote_starter = remote_starter,
         };
     }
 
@@ -1236,6 +1325,8 @@ pub const Dispatcher = struct {
         .{ "set_root_pane_split", catResult(handleSetRootPaneSplit) },
         .{ "move_pane_divider", catResult(handleMovePaneDivider) },
         .{ "spawn_in_pane", catBytesId(handleSpawnInPane) },
+        .{ "start_remote", catBytesId(handleStartRemote) },
+        .{ "stop_remote", catVoid(handleStopRemote) },
         .{ "set_window_prefix", catVoid(handleSetWindowPrefix) },
         .{ "create_split", catBytesId(handleCreateSplit) },
         .{ "destroy_split", catResult(handleDestroySplit) },
@@ -1942,6 +2033,11 @@ pub const Dispatcher = struct {
         const target = parsed.value.pane;
 
         if (self.spawner) |sp| sp.kill(target);
+        // A remote session seated here outlives the pane's own program
+        // (the shell that ran `gwssh` is only the thing waiting behind it),
+        // so killing the pane has to end the `ssh` too -- otherwise the
+        // trunk stays up feeding clients that have nowhere left to draw.
+        if (self.remote_starter) |rs| rs.stopForPane(target);
         session.destroyPane(target) catch |err| return switch (err) {
             error.RootPaneImmutable => DispatchError.RootPaneImmutable,
             error.UnknownPane => DispatchError.UnknownPane,
@@ -2073,6 +2169,48 @@ pub const Dispatcher = struct {
         const pid = spawner.spawn(p.pane, base, p.argv, cols, rows) catch
             return DispatchError.SpawnFailed;
         return try rpc.response(alloc, id, SpawnInPaneResult{ .pid = pid });
+    }
+
+    /// `start_remote`: brings up an `ssh` trunk whose remote clients draw
+    /// into this connection's own pane, through the host's registered
+    /// `RemoteStarter`.
+    ///
+    /// Server-side for the same reason `spawn_in_pane` is: the thing that
+    /// owns the window is the thing that can spawn `ssh`, put its auth
+    /// prompts on the grid, and hand each trunk channel back to itself as
+    /// a connection. But unlike `spawn_in_pane` this needs no
+    /// window-manager role and takes no pane: the caller is a program
+    /// already seated in the pane it is handing over, and the pane it may
+    /// hand over is exactly the one it is already in.
+    ///
+    /// The caller is *not* replaced. Its own connection stays bound to the
+    /// pane and comes back the moment the session ends -- the shell that
+    /// ran `gwssh` is still sitting there, the way it sits behind `ssh` in
+    /// an ordinary terminal.
+    fn handleStartRemote(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const starter = self.remote_starter orelse return DispatchError.RemoteUnsupported;
+        const parsed = try std.json.parseFromValue(StartRemoteParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        if (p.dest.len == 0) return DispatchError.RemoteStartFailed;
+
+        const session = starter.start(p.dest, p.ssh_args, p.remote_command, self.active_pane, self.active_ctx) catch
+            return DispatchError.RemoteStartFailed;
+        return try rpc.response(alloc, id, StartRemoteResult{ .session = session });
+    }
+
+    /// `stop_remote`: ends a session `start_remote` returned. Deliberately
+    /// forgiving about an unknown id -- the caller is racing the
+    /// `remote_exit` notification every time it cancels one.
+    fn handleStopRemote(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const starter = self.remote_starter orelse return DispatchError.RemoteUnsupported;
+        const parsed = try std.json.parseFromValue(StopRemoteParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        starter.stop(parsed.value.session);
     }
 
     /// `set_window_prefix`: registers the chord after which one keystroke

@@ -98,6 +98,10 @@ pub const Server = struct {
     /// whatever owns the window; stored by value so the pointer handed to
     /// each `Dispatcher` stays stable.
     pane_spawner: ?dispatch.PaneSpawner = null,
+    /// How `start_remote` brings up a remote session, or null on a server
+    /// that can't (see `dispatch.RemoteStarter`). Stored by value for the
+    /// same reason as `pane_spawner`.
+    remote_starter: ?dispatch.RemoteStarter = null,
     listener: std.Io.net.Server,
     /// Guards every `Dispatcher.handle` call: concurrent connections all
     /// dispatch against the same `Context`.
@@ -243,7 +247,8 @@ pub const Server = struct {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             const sp: ?*const dispatch.PaneSpawner = if (self.pane_spawner) |*s| s else null;
-            break :blk dispatch.Dispatcher.initForConnection(&self.session, conn.id, sp);
+            const rs: ?*const dispatch.RemoteStarter = if (self.remote_starter) |*s| s else null;
+            break :blk dispatch.Dispatcher.initForConnection(&self.session, conn.id, sp, rs);
         };
         var decoder: wire.FrameDecoder = .{};
         defer decoder.deinit(alloc);
@@ -538,6 +543,12 @@ pub const Server = struct {
         self.pane_spawner = spawner;
     }
 
+    /// Registers the `start_remote` implementation (see
+    /// `dispatch.RemoteStarter`). Call once at startup, before serving.
+    pub fn setRemoteStarter(self: *Server, starter: dispatch.RemoteStarter) void {
+        self.remote_starter = starter;
+    }
+
     /// The pane-tree layout change-counter -- glyphwire-host caches pane
     /// divider geometry against this exactly as it does
     /// `Context.layout_gen` for layer dividers.
@@ -698,6 +709,17 @@ pub const Server = struct {
         const body = try rpc.paneExitNotification(alloc, pane, status);
         defer alloc.free(body);
         self.broadcast(null, "pane_exit", body);
+    }
+
+    /// Tells every `remote`-subscribed connection that the remote session
+    /// `session` has ended. Broadcast rather than addressed: the waiter is
+    /// the requesting program's `InputListener`, a different connection
+    /// from the `Client` that sent `start_remote`, so the session id in the
+    /// body is what pairs the two up.
+    pub fn reportRemoteExit(self: *Server, alloc: std.mem.Allocator, session: u64, status: i64, started: bool) !void {
+        const body = try rpc.remoteExitNotification(alloc, session, status, started);
+        defer alloc.free(body);
+        self.broadcast(null, "remote_exit", body);
     }
 
     /// In-process equivalent of a connected client's `report_key` request

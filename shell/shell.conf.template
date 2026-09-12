@@ -179,6 +179,8 @@
 --   {exit}       expands to the `exit` sub-template, only on a non-zero exit
 --   {dur}        expands to the `dur` sub-template, only when the last
 --                command ran for at least `dur_min_ms`
+--   {remote}     expands to the `remote` sub-template, only in a shell
+--                reached over `gwssh <dest>` (or `glyphwire --ssh`)
 --   {NAME}       a command var declared in `commands = { ... }` (below) --
 --                expands to that command's trimmed stdout, run on demand
 --   {{  }}       literal braces;  \n \t \\  are unescaped
@@ -186,6 +188,23 @@
 -- Inside the `exit` sub-template: {exit_code} is the number.
 -- Inside the `dur` sub-template:  {duration} is the humanized time
 --                                 (e.g. 450ms, 1.5s, 2m5s).
+-- Inside the `remote` sub-template: {remote_dest} is the ssh destination
+--                                 as it was typed.
+--
+-- {user} and {host} need no remote counterpart: a remote shell runs on
+-- the remote box, so it reads them there already. What it cannot
+-- otherwise tell you is that it *is* remote -- that is {remote}:
+--
+--     prompt{ remote = "{icon:status/error} {remote_dest} ", left = "{remote}{cwd} > " }
+--
+-- The same three are readable from Lua as `sh.user`, `sh.host` and
+-- `sh.remote` (nil when local), for branching at config-load time:
+--
+--     if sh.remote then prompt{ left = "{remote_dest} {cwd}> " } end
+--
+-- To gate a powerline *segment* on being remote, neither of those works
+-- -- a `when` clause sees only the command vars and {env:NAME}. Use
+-- when = "{env:GLYPHWIRE_REMOTE}"; see the segments section below.
 
 
 ---- Command vars: prompt{ commands = { ... } } ----------------------
@@ -235,6 +254,8 @@
 --     exit = " [{exit_code}]",
 --     -- What {dur} expands to when the last command was slow.
 --     dur = "  {duration}",
+--     -- What {remote} expands to in a shell reached over `gwssh`.
+--     remote = "{remote_dest} ",
 --     -- Minimum last-command run time, in ms, before {dur} (and a
 --     -- when = "slow" segment) renders anything.
 --     dur_min_ms = 2000,
@@ -247,7 +268,19 @@
 -- only after a non-zero exit), "slow" (only when the last command took
 -- >= dur_min_ms), or a `{var}` expression (shown only when it renders
 -- truthy against the command vars -- e.g. when = "{is_repo}", or
--- "!{is_repo}").  Segments are joined with `sep` (fg = the left
+-- "!{is_repo}").
+--
+-- A `when` expression sees the command vars and {env:NAME} -- NOT the
+-- prompt fields.  {cwd}, {host}, {remote} and friends all render empty
+-- there, so a segment gated on one of them silently never appears.  To
+-- show a segment only in a remote shell, test the variable gw-agent sets:
+--
+--     { " {host} ", fg = "#fff", bg = "#8a2a6a", when = "{env:GLYPHWIRE_REMOTE}" },
+--
+-- ({remote} is a *display* sub-template, expanding to prompt.remote --
+-- not a condition.  It is empty unless you set prompt{ remote = "..." }.)
+--
+-- Segments are joined with `sep` (fg = the left
 -- segment's bg, bg = the right segment's bg -- the powerline trick) and
 -- capped with head / tail / right_head.  The \u{E0Bx} glyphs need a Nerd
 -- Font; glyphwire bundles a Powerline-range fallback face.

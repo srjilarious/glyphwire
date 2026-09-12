@@ -46,6 +46,7 @@ pub const PaneSplitChildInput = client.PaneSplitChildInput;
 pub const PaneCreated = client.PaneCreated;
 pub const PaneLayoutEvent = client.PaneLayoutEvent;
 pub const PaneExitEvent = client.PaneExitEvent;
+pub const RemoteExitEvent = client.RemoteExitEvent;
 pub const notePaneFromEnviron = client.notePaneFromEnviron;
 pub const processPane = client.processPane;
 
@@ -124,6 +125,7 @@ pub const PaneSplitError = core.PaneSplitError;
 pub const PaneBounds = core.PaneBounds;
 pub const PaneDividerRect = core.PaneDividerRect;
 pub const PaneSpawner = dispatch.PaneSpawner;
+pub const RemoteStarter = dispatch.RemoteStarter;
 pub const WindowPrefix = core.WindowPrefix;
 pub const ProfileSnapshot = core.ProfileSnapshot;
 pub const ProfilePhase = core.ProfilePhase;

@@ -212,6 +212,35 @@ pub const ScriptEngine = struct {
         self.lua.setTop(0);
     }
 
+    /// Fills in `sh.user` / `sh.host` / `sh.remote` -- who and where this
+    /// shell is. Fields rather than functions because none of them changes
+    /// over a session, and because what `shell.conf` wants them for is
+    /// branching at load time:
+    ///
+    ///     if sh.remote then prompt{ left = "{remote_dest} {cwd}> " } end
+    ///
+    /// `sh.remote` is nil in a local shell rather than an empty string, so
+    /// that reads as a plain truth test. Call once, before `runConf`.
+    pub fn setIdentity(self: *ScriptEngine, user: []const u8, host: []const u8, remote: []const u8) void {
+        const lua = self.lua;
+        const base = lua.getTop();
+        defer lua.setTop(base);
+
+        _ = lua.getGlobal("sh") catch return;
+        if (lua.isNil(-1)) return;
+
+        _ = lua.pushString(user);
+        lua.setField(-2, "user");
+        _ = lua.pushString(host);
+        lua.setField(-2, "host");
+        if (remote.len == 0) {
+            lua.pushNil();
+        } else {
+            _ = lua.pushString(remote);
+        }
+        lua.setField(-2, "remote");
+    }
+
     /// Whether `name` names a script builtin -- a `defcmd` registration
     /// or a readable `<scripts_dir>/<name>.lua`. Cheap: an in-memory
     /// table lookup, then at most one `access()` before dispatch falls

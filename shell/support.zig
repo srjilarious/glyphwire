@@ -31,3 +31,4 @@ pub const prompt_template = @import("prompt_template.zig");
 pub const browsescroll = @import("browsescroll.zig");
 pub const openaction = @import("openaction.zig");
 pub const logicalpath = @import("logicalpath.zig");
+pub const remotecmd = @import("remotecmd.zig");

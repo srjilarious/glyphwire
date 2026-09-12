@@ -32,6 +32,11 @@
 //!                   the `exit` sub-template
 //!   - `{duration}`  the humanized last-command wall time -- meant for use
 //!                   inside the `dur` sub-template
+//!   - `{remote}`    expands to the `remote` sub-template, but only in a
+//!                   shell reached over `gwssh` / `glyphwire --ssh`; empty
+//!                   in a local one
+//!   - `{remote_dest}` the ssh destination this shell was reached through
+//!                   -- meant for use inside the `remote` sub-template
 
 const std = @import("std");
 
@@ -67,6 +72,15 @@ pub const Data = struct {
     cwd_full: []const u8 = "",
     user: []const u8 = "",
     host: []const u8 = "",
+    /// The `ssh` destination this shell was reached through
+    /// (`$GLYPHWIRE_REMOTE`, set by `gw-agent`), or empty in a local shell.
+    /// Both the `{remote_dest}` value and the test `{remote}` applies.
+    ///
+    /// `{user}` / `{host}` need no remote counterpart: a remote shell reads
+    /// them on the box it is actually running on, so they are already the
+    /// remote ones. What a prompt cannot otherwise tell is that it *is*
+    /// remote, which is what this answers.
+    remote: []const u8 = "",
     /// Preformatted local time for `{time}` (the caller runs `strftime`).
     time: []const u8 = "",
     /// Backing map for `{env:NAME}`. `null` -> `{env:...}` renders empty.
@@ -88,6 +102,9 @@ pub const Data = struct {
     /// Sub-template `{dur}` expands to, rendered only past the threshold.
     /// `null` means `{dur}` is always empty.
     dur_section: ?[]const u8 = null,
+    /// Sub-template `{remote}` expands to, rendered only in a remote
+    /// shell. `null` means `{remote}` is always empty.
+    remote_section: ?[]const u8 = null,
 
     /// Optional resolver for non-built-in `{name}` tokens -- the shell's
     /// on-demand command vars (see `VarResolver`). `null` -> an unknown
@@ -255,6 +272,14 @@ fn expandToken(
     } else if (std.mem.eql(u8, token, "dur")) {
         if (data.dur_min_ms > 0 and data.last_dur_ms >= data.dur_min_ms) {
             if (data.dur_section) |section| {
+                try renderInto(a, ops, pending, section, data, depth + 1);
+            }
+        }
+    } else if (std.mem.eql(u8, token, "remote_dest")) {
+        try pending.appendSlice(a, data.remote);
+    } else if (std.mem.eql(u8, token, "remote")) {
+        if (data.remote.len != 0) {
+            if (data.remote_section) |section| {
                 try renderInto(a, ops, pending, section, data, depth + 1);
             }
         }

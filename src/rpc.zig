@@ -165,6 +165,19 @@ pub fn paneExitNotification(alloc: std.mem.Allocator, pane: core.PaneHandle, sta
     return notification(alloc, "pane_exit", protocol.PaneExitParams{ .pane = pane, .status = status });
 }
 
+/// `remote_exit` -- the remote session `session` has ended (its `ssh`
+/// exited, or the trunk failed), with wait status `status`. Broadcast on
+/// the `remote` stream rather than addressed to the connection that asked
+/// for it: a program's drawing `Client` and its `InputListener` are two
+/// separate connections, and it is the listener that waits for this.
+pub fn remoteExitNotification(alloc: std.mem.Allocator, session: u64, status: i64, started: bool) ![]u8 {
+    return notification(alloc, "remote_exit", protocol.RemoteExitParams{
+        .session = session,
+        .status = status,
+        .started = started,
+    });
+}
+
 /// `shutdown` -- the host window is closing; flush and exit within
 /// roughly `grace_ms`.
 pub fn shutdownNotification(alloc: std.mem.Allocator, grace_ms: u32) ![]u8 {

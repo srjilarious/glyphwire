@@ -3819,11 +3819,10 @@ resize, and should not be able to.
 
 **Deferred, tracked for later:** detach/reattach (the server still runs
 in-process inside `glyphwire-host`, so there is nothing to reattach *to*
-— but `spawn_in_pane` is the piece that makes it possible); per-trunk
-remote panes, so `glyphwire --ssh` can put a remote session in a pane
-rather than owning the window (`docs/ideas.md` already wants this, and
-the pane is the missing object it needed); pane titles and a status line;
-mouse-reporting forwarded into a PTY-drawn pane.
+— but `spawn_in_pane` is the piece that makes it possible); pane titles
+and a status line; mouse-reporting forwarded into a PTY-drawn pane.
+(Per-trunk remote panes were the other item here; they landed — see
+"Remote sessions in a pane" below.)
 
 ### gmux
 
@@ -3862,3 +3861,114 @@ moment a second pane makes the tree's own root a real split.
 fork failure, a wire hiccup) is caught at the dispatch site: crashing the
 multiplexer over one failed operation would take every *other* pane's
 program down with it, which defeats the point of a multiplexer.
+
+### Remote sessions in a pane (`gwssh`)
+
+The pane model is what `glyphwire --ssh` was missing. Phase 1 bound a
+trunk to the window's one context because there was nothing smaller to
+bind it to; a pane is a sequestered host with its own context stack, so
+"a remote session, over there" is now an object the session already has.
+
+**`gwssh <dest>` is a `gw-shell` builtin, and the host does the work.**
+The shell sends `start_remote`; glyphwire-host spawns the `ssh`, draws
+its auth prompts, and hands each trunk channel back to its own `Server`
+as a connection. Exactly the `spawn_in_pane` argument, for exactly the
+same reason: only the thing that owns the window can do any of that, and
+a client that forked its own `ssh` would be the only thing able to reap
+it, which is what makes detach/reattach impossible later.
+
+It is a *builtin* rather than a program because the pane being handed
+over is this process's own. A child would hand over its own binding, not
+the shell's — and `attach_pane`, correctly, has no way to name someone
+else's pane. That is also why `start_remote` needs no window-manager
+role and takes no `pane` parameter: the caller is already seated in the
+only pane it is allowed to affect.
+
+**The shell is not replaced; it waits.** `gwssh` is `ssh`: the local
+shell stays bound to the pane, parks until `remote_exit` names its
+session, and is back with its scrollback intact. Both shells are attached
+to the same pane, so the server hands both every keystroke while it has
+focus (`broadcast`'s focus gate is per-context, not per-connection) — the
+local one drains and drops them, which is precisely what the pty
+foreground loop already does for a glyphwire-aware child. Without that
+drain the local shell would echo over the remote one's screen.
+
+**`start_remote` must not block, and that is load-bearing.** Bringing a
+session up takes as long as a human takes to type a passphrase, and the
+prompt is drawn by a client of this very server — while `handleStartRemote`
+runs under the server's `ctx_mutex`. Waiting for `ssh` there would wedge
+the window the prompt has to appear in. So the request returns a session
+id the moment the session is on its thread, and a session that never comes
+up reports itself the same way one that ends does: `remote_exit`, non-zero
+status. One code path for both, and no special "it failed to start" wire
+surface.
+
+**`remote_exit` is broadcast, not addressed.** The waiter is the shell's
+`InputListener` — a different connection from the `Client` that sent
+`start_remote`. Addressing the reply to the requesting connection would
+send it to the half that isn't listening. The session id in the body is
+what pairs the two up, the same shape `pane_exit` already has.
+
+**One trunk per remote pane.** Two panes on the same box are two `ssh`
+processes. Sharing a trunk per destination would need ref counts, an owner
+for teardown, and an answer for what a dropped trunk does to N panes —
+and buys nothing that `ssh`'s own `ControlMaster` / `ControlPersist` does
+not already buy at the layer that is designed for it. A pane's session
+dies with the pane (`destroy_pane` calls `stopForPane`), which it must:
+the session outlives the pane's own program, so killing the pane without
+it would leave a trunk feeding clients with nowhere left to draw.
+
+**The agent learns the seat as three plain arguments.** `gw-agent --stdio
+--pane N --ctx N --name <dest>` copies all three into the remote shell's
+environment and interprets none of them — a pane handle is the host's
+number, not the remote box's. The remote shell then binds itself with the
+same `attach_pane` a locally spawned child sends, so the agent still
+parses no protocol and nothing new had to be invented to seat a remote
+client. An unrecognised flag stops parsing rather than being guessed at,
+so a newer host talking to an older agent gets a working session that is
+merely unseated.
+
+**The reaper is joined, not detached, and `remote_exit` carries
+`started`.** Two findings from the first real run against a box with no
+`gw-agent` on it. The reaper is the only thing that knows what `ssh`
+exited with, so leaving it detached meant `finish` reported the "didn't
+work" default even when the remote shell had exited cleanly — a clean
+`exit` came back as status 1. Joining it after `stop()` is bounded, since
+`ssh` has already been asked to go.
+
+And a status on its own cannot say whether the session ever *worked*:
+`ssh` passes the remote command's exit code straight through, so "no
+`gw-agent` over there" (127) is shaped exactly like a remote shell that
+exited 127. The host knows — the agent's `hello` either arrived or it
+did not — so it says so, rather than leaving the shell to guess from a
+number. `gwssh` speaks up only when `started` is false; a remote shell
+that ran and exited non-zero is left to speak for itself in `$?` and
+`{exit}`, exactly as `ssh` leaves it.
+
+`$GLYPHWIRE_REMOTE_COMMAND` is the standing form of `--remote-command`,
+because the default only works when `gw-agent` is on the remote `PATH`
+and a non-login `ssh -T` session has a minimal one — which is precisely
+the case when the thing being tested is a work tree.
+
+**`ssh` is asked to stop, never reaped, by `stop_remote`.** The reaper
+thread owns `wait`; `stop` only signals, and only while an atomic flag
+says the pid is still ours. Two threads racing to reap one child is the
+bug `Pty.reaped`'s `exited` guard exists for, and there was no reason to
+reintroduce it here.
+
+**`{remote}` says *that* you are remote; `{user}` and `{host}` already
+said *where*.** A remote `gw-shell` runs on the remote box, so it reads
+`$USER` and the hostname there and its prompt has been right all along —
+which is exactly why it could not tell you it was remote. So the new
+things are `{remote_dest}` (the destination as typed, from
+`GLYPHWIRE_REMOTE`) and `{remote}`, a conditional sub-template in the
+shape `{exit}` and `{dur}` already established, so a whole powerline
+segment can appear only when remote. The same three are readable from Lua
+as `sh.user` / `sh.host` / `sh.remote`, set before `shell.conf` runs;
+`sh.remote` is nil rather than `""` locally so it reads as a plain truth
+test.
+
+**Deferred:** reconnect after a dropped trunk, a remote session surviving
+its pane, and `host.conf` named remotes (`gwssh work` rather than the
+full destination) — all of which want the same thing first, which is a
+session that outlives the process that asked for it.

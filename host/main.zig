@@ -40,24 +40,6 @@ fn reapChild(io: std.Io, child_in: std.process.Child, shell_exited: *std.atomic.
     shell_exited.store(true, .monotonic);
 }
 
-/// Thread body for `--ssh`: brings up the remote session (see
-/// `host/remote.zig`). `Remote.start` blocks through the ssh auth
-/// handshake and, on any failure, has already flagged `session_exited`
-/// (aliased to the window loop's quit flag), so this just logs.
-fn startRemote(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    srv: *glyphwire.server.Server,
-    session_exited: *std.atomic.Value(bool),
-    environ_map: *const std.process.Environ.Map,
-    opts: remote_mod.Options,
-) void {
-    _ = remote_mod.Remote.start(alloc, io, srv, session_exited, environ_map, opts) catch |err| {
-        std.log.err("glyphwire: remote session failed to start: {t}", .{err});
-        session_exited.store(true, .monotonic);
-    };
-}
-
 /// Runs `Server.serveForever` for the lifetime of the process, on its own
 /// thread -- not joined, same as the reaped child processes below: it
 /// keeps serving gw-shell (and any other socket client) for as long
@@ -346,22 +328,34 @@ pub fn main(init: std.process.Init) !void {
     // fallback keybinding for.
     var shell_exited: std.atomic.Value(bool) = .init(false);
 
+    // `start_remote`: a shell in any pane asks the *host* to drop that pane
+    // into a remote session, for the same reason `spawn_in_pane` is the
+    // host's job -- only the host can spawn `ssh`, put its auth prompts on
+    // the grid, and hand the trunk's channels back to itself as
+    // connections. See `host/remote.zig`.
+    const agent_path = try resolveSibling(arena, io, init.environ_map, "gw-agent");
+    var remotes = remote_mod.Remotes.init(alloc, io, &srv, socket_path, agent_path, init.environ_map);
+    defer remotes.deinit();
+    srv.setRemoteStarter(remotes.starter());
+
     if (ssh_dest) |dest| {
         // `--ssh`: no local gw-shell. The remote agent's clients drive
-        // this same `Context` over an ssh trunk instead. `Remote.start`
-        // blocks through the ssh auth handshake, so it runs on its own
-        // thread while the window loop below comes up to render the
-        // auth-prompt UI. `shell_exited` doubles as the "ssh exited" flag.
-        const agent_path = try resolveSibling(arena, io, init.environ_map, "gw-agent");
-        const remote_opts = remote_mod.Options{
+        // this same `Context` over an ssh trunk instead. The session runs
+        // on its own thread (it has to -- bringing it up waits on a human
+        // typing a passphrase into a prompt this very process draws) while
+        // the window loop below comes up to render the auth-prompt UI.
+        // `shell_exited` doubles as the "ssh exited" flag: this session
+        // *is* the window, so its ending ends the window.
+        const remote = try remote_mod.Remote.create(alloc, io, &srv, &shell_exited, init.environ_map, .{
             .dest = dest,
             .remote_command = remote_command,
             .ssh_args = ssh_extra.items,
             .agent_path = agent_path,
             .host_sock = socket_path,
-            .ctx_id = glyphwire.default_context_id,
-        };
-        _ = try std.Thread.spawn(.{}, startRemote, .{ alloc, io, &srv, &shell_exited, init.environ_map, remote_opts });
+            .pane = glyphwire.root_pane_handle,
+            .ctx = glyphwire.root_context_handle,
+        }, null, 0);
+        try remote.launch();
     } else {
         var shell_env = try init.environ_map.clone(arena);
         try shell_env.put("GLYPHWIRE_SOCK", socket_path);

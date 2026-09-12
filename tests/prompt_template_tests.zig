@@ -220,6 +220,55 @@ pub fn durWithNoSectionIsEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqualStr("ab", s);
 }
 
+// ─── {remote} / {remote_dest} ────────────────────────────────────────
+
+pub fn remoteIsEmptyInALocalShellTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "a{remote}b", .{ .remote_section = " [{remote_dest}]" });
+    defer alloc.free(s);
+    try testz.expectEqualStr("ab", s);
+}
+
+pub fn remoteRendersSectionWhenRemoteTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "a{remote}b", .{
+        .remote = "build-box",
+        .remote_section = " [{remote_dest}]",
+    });
+    defer alloc.free(s);
+    try testz.expectEqualStr("a [build-box]b", s);
+}
+
+pub fn remoteWithNoSectionIsEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "a{remote}b", .{ .remote = "build-box" });
+    defer alloc.free(s);
+    try testz.expectEqualStr("ab", s);
+}
+
+/// `{remote_dest}` is usable outside the section too -- it is just a
+/// value, and renders empty rather than literally when there is none.
+pub fn remoteDestRendersOutsideTheSectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const on = try flatten(alloc, "[{remote_dest}]", .{ .remote = "user@host" });
+    defer alloc.free(on);
+    try testz.expectEqualStr("[user@host]", on);
+
+    const off = try flatten(alloc, "[{remote_dest}]", .{});
+    defer alloc.free(off);
+    try testz.expectEqualStr("[]", off);
+}
+
+/// `{user}` / `{host}` are the box the shell actually runs on, so a remote
+/// shell's are already the remote ones -- `{remote}` adds the fact that it
+/// is remote, and changes nothing else.
+pub fn remoteDoesNotDisturbUserAndHostTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const s = try flatten(alloc, "{user}@{host}{remote}", .{
+        .user = "jeff",
+        .host = "build-box",
+        .remote = "build-box",
+        .remote_section = " (ssh)",
+    });
+    defer alloc.free(s);
+    try testz.expectEqualStr("jeff@build-box (ssh)", s);
+}
+
 // ─── formatDuration ──────────────────────────────────────────────────
 
 pub fn formatDurationCoversEachRangeTest(_: std.Io, _: std.mem.Allocator) !void {

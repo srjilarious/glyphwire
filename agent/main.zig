@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--stdio")) {
-        return runStdio(init);
+        return runStdio(init, Seat.parse(args[2..]));
     }
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--askpass")) {
         return runAskpass(init, if (args.len >= 3) args[2] else "");
@@ -43,7 +43,8 @@ pub fn main(init: std.process.Init) !void {
     var buf: [256]u8 = undefined;
     var w = std.Io.File.stderr().writer(init.io, &buf);
     try w.interface.print(
-        "usage: {s} --stdio            (trunk endpoint, run over ssh)\n" ++
+        "usage: {s} --stdio [--pane N] [--ctx N] [--name <dest>]\n" ++
+        "                              (trunk endpoint, run over ssh)\n" ++
         "       {s} --askpass <text>   (SSH_ASKPASS helper)\n",
         .{ args[0], args[0] },
     );
@@ -52,6 +53,45 @@ pub fn main(init: std.process.Init) !void {
 }
 
 // ─── --stdio: the trunk endpoint ────────────────────────────────────────
+
+/// Where on the host's window this session's clients belong, and what to
+/// call the box they are running on. All three are handed straight to the
+/// remote shell's environment and never interpreted here -- the agent does
+/// not speak the protocol, and a pane handle is the host's number, not
+/// ours.
+///
+/// Absent (a plain `--stdio`, which is what `glyphwire --ssh` sends) means
+/// the window's own root pane and default context: the session owns the
+/// whole window, so there is nothing to seat it in.
+const Seat = struct {
+    pane: ?[]const u8 = null,
+    ctx: ?[]const u8 = null,
+    /// The `ssh` destination as the user typed it, exported as
+    /// `GLYPHWIRE_REMOTE` so the remote shell's prompt can say where it is.
+    name: ?[]const u8 = null,
+
+    fn parse(args: []const []const u8) Seat {
+        var seat: Seat = .{};
+        var i: usize = 0;
+        while (i + 1 < args.len) : (i += 2) {
+            const value = args[i + 1];
+            if (std.mem.eql(u8, args[i], "--pane")) {
+                seat.pane = value;
+            } else if (std.mem.eql(u8, args[i], "--ctx")) {
+                seat.ctx = value;
+            } else if (std.mem.eql(u8, args[i], "--name")) {
+                seat.name = value;
+            } else {
+                // An unknown flag makes the rest unparseable (we can't
+                // know whether it took a value), so stop rather than
+                // guess. A future host sending a flag this agent doesn't
+                // know still gets a working session, just an unseated one.
+                break;
+            }
+        }
+        return seat;
+    }
+};
 
 const Channel = struct {
     id: u32,
@@ -95,7 +135,7 @@ const Agent = struct {
     }
 };
 
-fn runStdio(init: std.process.Init) !void {
+fn runStdio(init: std.process.Init, seat: Seat) !void {
     const io = init.io;
     const alloc = init.gpa;
     const arena = init.arena.allocator();
@@ -112,7 +152,15 @@ fn runStdio(init: std.process.Init) !void {
     // way a local `gw-shell` finds the host.
     var shell_env = try init.environ_map.clone(arena);
     try shell_env.put("GLYPHWIRE_SOCK", sock_path);
-    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    try shell_env.put("GLYPHWIRE_CTX", seat.ctx orelse glyphwire.default_context_id);
+    // `GLYPHWIRE_PANE` is the whole seating handshake: the remote shell's
+    // `Client` and `InputListener` read it and bind themselves to that
+    // pane on the *host*, exactly as a `spawn_in_pane` child does locally.
+    // Nothing here has to understand it.
+    if (seat.pane) |pane| try shell_env.put("GLYPHWIRE_PANE", pane);
+    // What the remote shell's prompt shows as `{remote_dest}`, and how it
+    // knows it is remote at all (see shell/prompt_template.zig).
+    if (seat.name) |name| try shell_env.put("GLYPHWIRE_REMOTE", name);
 
     // Prefer a `gw-shell` sitting next to this binary; fall back to PATH
     // (a non-login `ssh -T` session may have a minimal PATH that misses

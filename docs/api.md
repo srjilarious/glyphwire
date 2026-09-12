@@ -188,6 +188,27 @@ around itself.
 
 `pane_layout` (see Input) is the only message that reveals pane geometry.
 
+### Remote sessions in a pane
+
+`start_remote` is the one pane-related message that needs **no**
+window-manager role, and the one that takes no `pane` parameter. Both for
+the same reason: the caller is a program already seated in the pane it
+wants to hand over, so the pane it may hand over is exactly the one it is
+already in, and naming someone else's is what it must not be able to do.
+
+The caller is **not replaced**. Its connection stays bound to the pane and
+it has the pane back the moment the session ends — `gw-shell`'s `gwssh`
+builtin sits behind the session the way it sits behind `ssh` in an
+ordinary terminal. Both shells are attached to the same pane, so both are
+handed every keystroke while it has focus; the local one drains and drops
+them, exactly as it does for a glyphwire-aware pty child.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `start_remote` | request | `dest`, `ssh_args?`, `remote_command?` | `{session}` | ✅ brings up an `ssh` trunk to `dest` whose remote clients draw into **this connection's own** pane. The **host** spawns `ssh`, surfaces its auth prompts on the grid, and turns the trunk's channels back into server connections, for the same reason `spawn_in_pane` is the host's job. Returns as soon as the session is on its thread — it does **not** wait for `ssh` to come up, because that waits on a human typing a passphrase into a prompt this very server has to keep dispatching for. A session that fails to start reports itself through `remote_exit` with a non-zero status. `ssh_args` are inserted before `dest` on the `ssh` command line; `remote_command` overrides the far-side agent (`gw-agent`). Reports `RemoteUnsupported` on a server with no window (the headless one), `RemoteStartFailed` on an empty `dest` |
+| `stop_remote` | notification | `session` | — | ✅ ends a session `start_remote` returned. An unknown id is **not** an error: a caller cancelling one races the `remote_exit` notification by nature. `destroy_pane` ends every session seated in that pane too, since a remote session outlives the pane's own program |
+| `remote_exit` | notification, server→client | `{session, status, started}` | — | ✅ the session ended, with `ssh`'s wait status (`128 + signal` for a signalled death). `started` is false when it never came up at all — no such host, auth refused, no `gw-agent` on the far side — which `status` alone cannot say, because `ssh` passes the remote command's exit code through and a failure is indistinguishable from a remote shell exiting with the same number. Subscribe with `"remote"`; `InputListener.pollRemoteExitEvent` is the consumer. **Broadcast**, not addressed to the connection that asked: a program's drawing `Client` and its `InputListener` are two different connections, and it is the listener that waits, so the session id is what pairs them up |
+
 ## Pane errors
 
 | Error | Meaning |
@@ -200,6 +221,8 @@ around itself.
 | `InvalidPaneSplitChild` | a child naming both a pane and a split, or neither |
 | `SpawnUnsupported` | `spawn_in_pane` on a server with no spawner registered |
 | `SpawnFailed` | empty `argv`, or the fork/exec failed |
+| `RemoteUnsupported` | `start_remote` / `stop_remote` on a server with no remote starter registered |
+| `RemoteStartFailed` | empty `dest`, or the session could not be put on its thread |
 
 ## Text & Styling
 
@@ -471,13 +494,13 @@ point of the "no negotiation for the common case" decision.
 | `initialize` | request | client capabilities (subscriptions wanted) | server capabilities (max layers, image formats, easings, color depth) | 🔶 |
 | `initialized` | notification | — | — | 🔶 |
 
-## Remote transport (`glyphwire --ssh`)
+## Remote transport (`glyphwire --ssh`, `gwssh`)
 
 Not a message catalog change — the client-facing wire is identical. When
-the host runs `--ssh <dest>`, a `gw-agent` on the far side carries every
-remote client's socket bytes over one `ssh` trunk, tagged by channel.
-The trunk framing (its own layer, below the `Content-Length` frames it
-carries) is:
+the host runs `--ssh <dest>`, or a shell in a pane asks for `start_remote`,
+a `gw-agent` on the far side carries every remote client's socket bytes
+over one `ssh` trunk, tagged by channel. The trunk framing (its own layer,
+below the `Content-Length` frames it carries) is:
 
 ```
 GW-Mux: <kind> <channel> <len>\r\n\r\n<payload>
@@ -494,6 +517,25 @@ Each channel's payload is one client connection's ordinary byte stream
 (`Content-Length` frames + the `load_image` side-channel), spoken
 verbatim end to end. See `src/mux.zig` and decisions.md's "Remote
 sessions" section.
+
+The agent is invoked as `gw-agent --stdio [--pane N] [--ctx N]
+[--name <dest>]`. All three are copied straight into the remote shell's
+environment (`GLYPHWIRE_PANE`, `GLYPHWIRE_CTX`, `GLYPHWIRE_REMOTE`) and
+never interpreted there — a pane handle is the *host's* number. That is
+the whole seating handshake: the remote shell binds itself to the right
+rectangle through exactly the `attach_pane` a locally spawned child
+sends, and the agent still parses no protocol. Omitting them (what
+`glyphwire --ssh` sends) means the window's own root pane and default
+context. `GLYPHWIRE_REMOTE` is also what a remote shell's prompt reads for
+`{remote}` / `{remote_dest}`.
+
+The agent has to be findable **on the remote box's `PATH`**, and a
+non-login `ssh -T` session has a minimal one — a work tree's
+`zig-out/bin` is not on it. Override the command per connection with
+`gwssh --remote-command <path>`, or once with `$GLYPHWIRE_REMOTE_COMMAND`
+in the shell that runs `gwssh`. When it is missing, `ssh` passes the
+remote shell's 127 through and `gw-shell` says so in the pane rather than
+leaving it in the host's log.
 
 ## Not planned for v1
 
