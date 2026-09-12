@@ -149,6 +149,58 @@ after its own `resize` notification.
 `divider_cells` (the gap between two children, 1 by default) is a
 `Context` field the host owns; there is no message for it yet.
 
+## Panes
+
+A **pane** is a rectangle of the window with its own stack of contexts.
+Where a split tree arranges *layers* inside one program's context, the
+pane tree arranges whole programs: each pane holds a context stack of its
+own, so a full-screen program inside a pane covers the pane rather than
+the window.
+
+**From the program inside it, a pane is indistinguishable from the whole
+host.** `get_property "size"` returns the pane's cells. `resize` reports
+the pane's cells. `create_context` covers the pane and pops back to what
+was underneath when dismissed. Input arrives only while the pane is
+focused. Mouse coordinates are relative to the pane. Nothing in this
+section is visible to a program that isn't a window manager, and nothing
+a program can ask reveals where its pane sits or that other panes exist —
+which is why every existing client runs inside a pane unmodified.
+
+Everything below `request_role` requires the **window-manager role**, so a
+program that merely runs inside a pane can never reshape the window
+around itself.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `request_role` | request | `role` (`"window_manager"`), `token?` | `{granted, token?}` | ✅ answers `granted: false` rather than failing when another program holds it, so a second multiplexer can say so cleanly instead of dying on a wire error. An unknown role reports `UnknownRole`. The returned `token` is what this program's *other* connection presents to `join_role` — a manager is two connections (a `Client` that issues these calls and an `InputListener` that receives window commands) and both need the role |
+| `join_role` | notification | `role`, `token` | — | ✅ joins a role this program's other connection already holds. A notification because the joining connection is a subscribed listener with a reader thread running, so it has nowhere to read a response — the same reason `attach_context` is one. A wrong token simply grants nothing |
+| `attach_pane` | notification | `pane` | — | ✅ binds this connection to a pane, and to whatever context is on screen there. Needs **no** role: declaring where you live is not a privilege. Sent automatically at connect time from `GLYPHWIRE_PANE`, so a program seated in a pane needs no pane-aware code of its own. A subscribing connection folds this into `subscribe`'s `pane` instead (see Input) |
+| `create_pane` | request | `scrollback_rows?` | `{pane, context}` | ✅ a pane plus the base context it displays. The pane is **not on screen** until it is placed in the tree, which keeps creation and placement separately undoable. Its base context can never be destroyed while the pane lives |
+| `destroy_pane` | notification | `pane` | — | ✅ stops the program in the pane, then frees the pane and every context in it. The program is stopped first, so it can't draw onto a context about to be freed under it. The root pane reports `RootPaneImmutable` |
+| `focus_pane` | notification | `pane` | — | ✅ which pane raw input goes to. An unmapped pane (one not currently placed in the tree) reports `UnknownPane` rather than swallowing every keystroke into something invisible |
+| `create_pane_split` | request | `axis`, `resizable?` | split handle | ✅ the window-level mirror of `create_split`, same semantics |
+| `destroy_pane_split` | notification | `split` | — | ✅ frees the container; its children are not touched |
+| `set_pane_split_children` | notification | `split, children: [{pane? \| split?, weight? \| fixed?}]` | — | ✅ same contract as `set_split_children`, with panes as the leaf kind. Naming both or neither reports `InvalidPaneSplitChild` |
+| `set_root_pane_split` | notification | `split?` | — | ✅ which split fills the window; null tears the layout down, leaving the root pane as the whole window again. A pane the tree no longer reaches goes **unmapped**: it keeps its contexts and its programs alive but is not composited and takes no input, which is what makes zoom a consequence of the layout rather than a special case |
+| `move_pane_divider` | notification | `split, index, delta` | — | ✅ the window-level `move_divider`, same sizing-mode rules |
+| `spawn_in_pane` | request | `pane, argv, cols?, rows?` | `{pid}` | ✅ starts a program seated in the pane. The **host** does the fork, the PTY, the environment that lets the child find its pane, and the reaping — a manager that forked its own children would have to reconstruct all of that and would be the only thing able to reap them. `argv[0]`, when a bare name, prefers this build's own sibling binary over `PATH`. `cols`/`rows` default to the pane's size. Reports `SpawnUnsupported` on a server with no window (the headless one), `SpawnFailed` on an empty argv or a failed exec |
+| `set_window_prefix` | notification | `key?`, `ctrl?`, `alt?`, `shift?` | — | ✅ the chord after which **one** keystroke is delivered to the manager instead of to the focused pane. Null `key` clears it. Enforced by the session, not by the manager: a manager that had to observe every keystroke to recognise its own prefix would, by construction, already have let the program have it. The prefix and the key after it never reach any program, and a key release is withheld alongside the press it belongs to |
+
+`pane_layout` (see Input) is the only message that reveals pane geometry.
+
+## Pane errors
+
+| Error | Meaning |
+|---|---|
+| `NotWindowManager` | a pane-tree message from a connection without the role |
+| `UnknownRole` | `request_role` named a role this server doesn't have |
+| `UnknownPane` | an unknown pane, or one not currently placed in the tree |
+| `RootPaneImmutable` | `destroy_pane` named the root pane, which has no lifecycle |
+| `UnknownPaneSplit` | an unknown pane-split handle |
+| `InvalidPaneSplitChild` | a child naming both a pane and a split, or neither |
+| `SpawnUnsupported` | `spawn_in_pane` on a server with no spawner registered |
+| `SpawnFailed` | empty `argv`, or the fork/exec failed |
+
 ## Text & Styling
 
 | Message | Kind | Params | Result | Status |
@@ -372,7 +424,7 @@ wheel-delta scroll, gamepad, IME, and action maps are all still open.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `subscribe` | request | `events: []str` (e.g. `["key", "text", "mouse_button", "scroll"]`) | acked subscription list | ✅ |
+| `subscribe` | request | `events: []str` (e.g. `["key", "text", "mouse_button", "scroll"]`), `pane?` | acked subscription list | ✅ `pane` binds this connection to a pane at the same time, exactly as `attach_pane` would. Folded in rather than sent separately because `subscribe` is what arms the broadcast fan-out: a connection subscribed but not yet bound would, until the binding landed, be gated against the wrong pane and could receive another program's keystrokes. One message makes that window impossible rather than merely small. An unknown pane is ignored rather than failing the subscribe |
 | `report_key` | notification, client→server | `key, pressed` | — | ✅ from whatever process captures input (`glyphwire-host`); see also `Server.reportKey`/`reportKeyRepeat` for a caller reporting in-process rather than over the wire |
 | `report_text` | notification, client→server | `text` (UTF-8 string, ≥1 codepoint) | — | ✅ committed text input, already resolved through the OS keyboard layout / dead keys / IME — the only correct source for a non-US layout, an AltGr combo or CJK. Fanned straight out as `text`; touches no down-set. In-process path: `Server.reportText`. Empty string is dropped |
 | `report_mouse_button` | notification, client→server | `button, pressed, px, cell, view_offset?` | — | ✅ `view_offset` (default 0) is the root layer's scrollback view offset at click time, carried into the `mouse_button` broadcast so a subscriber can resolve `cell` against the right scrolled-back row (see `get_metadata`) |
@@ -389,6 +441,10 @@ wheel-delta scroll, gamepad, IME, and action maps are all still open.
 | `scroll` | notification, server→client | `{layer?, offset, max}` | — | ✅ sent whenever a layer's scrollback view offset moves. `layer` omitted (or `null`) is the root layer — the host's mouse wheel / scrollbar (`Server.reportScroll`) or another client's `scroll_view` with no `layer` (e.g. glyphwire-shell's browse cursor); a handle is a non-root layer's own ring — a `scroll_view` naming a layer, or the host's mouse wheel over a `gmux`-style pane that has `scrollback_rows` but no `scroll_offset` slack (`Server.reportLayerScroll`). Subscribe with `"scroll"`; `InputListener` (`pollScrollEvent`/`waitScrollEvent`/`scroll`, `ScrollEvent.layer`) is the client-side consumer — a root-only subscriber filters on `layer == null`. See Property names' `scroll` above |
 | `scroll_offset` | notification, server→client | `{layer, row, col, max_row, max_col}` | — | ✅ a **layer's** viewport moved over its content grid — the host's wheel over that pane or a drag on its scrollbar. On a self-scrolling pane (one with a `content_extent`) this is the host asking the client to move: the virtual offset advanced and the client should redraw its visible rows against the new position. Carries the handle, unlike `scroll`, which is always the root layer's scrollback; carries the maxima so a subscriber can redraw without a follow-up request. Sent only when the offset actually moved, so a wheel spun against the end of the content is silent. Rides the `"scroll"` subscription (a client that wants to know the view moved wants both kinds); `InputListener.pollScrollOffsetEvent` is the client-side consumer |
 | `layout` | notification, server→client | `{layers: [{layer, row, col, cols, rows}]}` | — | ✅ every pane whose bounds changed after the split tree was re-laid-out — a window resize, a divider drag, or any of the Splits messages above. One notification for the whole tree rather than one per pane, so a client redraws once against a consistent set of bounds instead of N times against partially-updated ones. Subscribe with `"layout"` — its own flag rather than folding into `resize`, since a client with no panes shouldn't have to parse per-layer bounds. `InputListener.pollLayoutEvent` is the consumer, and **the caller owns the returned event** (it carries a slice) |
+| `pane_layout` | notification, server→client | `{panes: [{pane, row, col, cols, rows}]}` | — | ✅ every **pane** whose window rect changed. The window-level counterpart of `layout`, and the only message in the protocol that reveals pane geometry — a window manager subscribes to it and nothing else has a reason to. Subscribe with `"panes"`. `InputListener.pollPaneLayoutEvent` is the consumer, and the caller owns the returned event |
+| `pane_exit` | notification, server→client | `{pane, status}` | — | ✅ the program `spawn_in_pane` started in `pane` has finished. The pane itself is untouched: it belongs to the manager, not to the program, so closing it is the manager's decision. Subscribe with `"panes"`; `InputListener.pollPaneExitEvent` is the consumer |
+| `window_key_down` / `window_key_up` | notification, server→client | `{key}` | — | ✅ a named key that followed the registered window prefix, so it is a window command rather than input for any program. **Addressed to the manager, never broadcast** — a window command has exactly one recipient by definition. Subscribe with `"window_keys"`. Delivered as `InputEvent.window_key`, a variant distinct from `key` so a manager cannot confuse a command for its own with input meant for a pane |
+| `window_text` | notification, server→client | `{text}` | — | ✅ committed text that followed the window prefix. How **most** prefix commands arrive, since a plain printable key with no modifiers is delivered as text rather than as a key. Delivered as `InputEvent.window_text` |
 | `context` | notification, server→client | `{context, cols, rows}` | — | ✅ the visible context changed — `create_context` / `activate_context` / `destroy_context`, or the disconnect-cull auto-restore. `context` is the now-visible context's handle, `cols`/`rows` its root layer's size. A client that manages its own context compares `context` against its own handle to tell "I'm on screen" from "I've been backgrounded (or culled)". Subscribe with `"context"`; `InputListener` (`pollContextEvent`/`waitContextEvent`/`visibleContext`) is the client-side consumer |
 | `selection` | notification, server→client | `{active, anchor?: {above, col}, active_end?: {above, col}}` | — | ✅ sent whenever a layer's selection changes (any of `set_selection`/`update_selection`/`clear_selection`, or glyphwire-host's in-process path). Subscribe with `"selection"`. See the Selection & Clipboard section |
 | `copy_request` | notification, server→client | *(none)* | — | ✅ the copy shortcut (Ctrl+Shift+C) was pressed with nothing selected — a subscriber that owns editable text (glyphwire-shell) answers with `set_clipboard`. Subscribe with `"clipboard"` |

@@ -2718,6 +2718,80 @@ context property, useful to any client.
   indirectly by the existing shell e2e suite) -- the property's own
   behaviour is covered by `core_tests.zig`.
 
+## Panes: a window split tree whose leaves hold whole contexts
+
+The multiplexer rebuild. An architectural review
+(`docs/investigations/context-panes.md`) found that the layer-per-pane
+`gmux` could not be finished as designed, so the model moved up a level:
+a **pane** is a rectangle of the window with its own stack of contexts,
+and from the program inside it a pane is indistinguishable from the whole
+host. See decisions.md's Panes section for the full rationale; this is the
+implementation log.
+
+- **`core.zig`: `Pane`, `PaneSplit`, and a `Session`-level layout walk**
+  mirroring `Context`'s. Per-pane context visibility stacks replace the
+  single session-wide one; `Context` gains `pane` / `origin_row` /
+  `origin_col`; `visibleContext` becomes `focusedContext`, because "on
+  screen" and "receiving input" stopped being the same question. Tests:
+  `core_tests.zig` +12.
+- **`core.WindowPrefix` + `Session.routeKey`/`routeText`** — the
+  multiplexer prefix chord, enforced by the session rather than by the
+  multiplexer. The fix for the failure mode the old design could not
+  escape: a manager not in the delivery path has already delivered a
+  keystroke by the time it decides to swallow it. Tests: `core_tests.zig`
+  +5.
+- **The window-manager role**, held by both of a manager's connections
+  (its `Client` and its `InputListener`), the second joining with a token
+  the first was issued — the `attach_context` pattern applied to a role.
+- **Protocol** (`dispatch.zig`, `docs/api.md`): `request_role`,
+  `join_role`, `attach_pane`, `create_pane`, `destroy_pane`, `focus_pane`,
+  `create_pane_split`, `destroy_pane_split`, `set_pane_split_children`,
+  `set_root_pane_split`, `move_pane_divider`, `spawn_in_pane`,
+  `set_window_prefix`; events `pane_layout`, `pane_exit`,
+  `window_key_down`/`window_key_up`, `window_text`; `subscribe` gains an
+  optional `pane`. Tests: `dispatch_tests.zig` +10.
+- **`server.zig`**: the raw-input gate keys on the focused pane's
+  on-screen context, which answers "who gets this keystroke" from session
+  state instead of needing a multiplexer to relay every keystroke onward.
+  `resize` is built per connection, since after panes exist "the size" is
+  a different number for each one. Tests: `server_tests.zig` +3.
+- **`glyphwire-host`**: composites every mapped pane's context at its own
+  origin; batch caches keyed by context *and* layer (several contexts on
+  screen at once each allocate layer handles from 1); click-to-focus;
+  mouse coordinates translated into the focused context's frame inbound;
+  one divider hit-test across both tree levels; the wheel follows the
+  pointer's pane rather than focus.
+- **`host/pane_proc.zig`**: the `spawn_in_pane` implementation. One
+  PTY-backed child per pane, handed `GLYPHWIRE_SOCK` / `GLYPHWIRE_PANE` /
+  `GLYPHWIRE_CTX`. An aware child draws through the protocol and leaves
+  its PTY quiet; a plain child's PTY output goes onto the pane's base
+  context root layer. Exactly one writer per surface either way.
+- **Clients bind themselves**: `connectFromEnv` records `GLYPHWIRE_PANE`
+  process-wide, and both a `Client` and its paired `InputListener` pick it
+  up from there — so `gw-shell`, `zoe` and `gw-ls` run inside a pane
+  unmodified. For the listener the pane rides inside `subscribe`, since
+  `subscribe` is what arms the fan-out.
+- **`gmux` rewritten as a pure window manager** — no context, no layer, no
+  PTY, no VT state, no prefix state machine. `gmux/layout.zig` survived
+  untouched (it was always pure structure over `u32`), `gmux/pane.zig` is
+  gone.
+- **Verified against the real host** with glyphwire-host's own
+  back-buffer capture: two panes side by side each running its own
+  `gw-shell` with its own prompt, a real divider, text typed into one pane
+  appearing only there, `Ctrl-B left` moving focus, and no part of the
+  prefix sequence reaching either shell.
+- **Three gaps only the real run exposed**, all fixed: `spawn_in_pane`
+  resolved `argv[0]` through `PATH` (so a work-tree `gmux` ran the
+  system-wide `gw-shell`); the wire `report_key`/`report_text` path
+  bypassed the prefix routing the in-process path does; and the manager
+  role sat on the connection that wasn't listening for window commands.
+- **Kept from the abandoned branch** (independently correct, unrelated to
+  what was wrong with it): the `pty_mode` layer property, `set_caret_layer`,
+  per-layer scrollback wheel routing, the `Pty.reaped`/`wait` ECHILD fix
+  and `Pty.spawn`'s optional `envp`.
+
+905 tests passing.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

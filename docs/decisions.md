@@ -388,15 +388,22 @@ surface.
   owns a tree of layers (one of which is its root layer) and has its own
   base width/height in cells, matching the shell window size. A layer
   created without explicit dimensions defaults to the context's base size.
-- The server can hold multiple contexts at once; only one is
-  visible/rendered at a time. This generalizes the classic terminal
-  alt-screen buffer (`smcup`/`rmcup`) from a single alternate buffer to N
-  independent, persistent contexts — switching away doesn't destroy a
-  context. A shell's prompt and scrollback are still there, untouched,
-  when a fullscreen program's context is dismissed and the shell's
-  context becomes visible again.
+- The server can hold multiple contexts at once. Each belongs to a
+  **pane** (see the Panes section) and each pane shows one of its own at a
+  time. This generalizes the classic terminal alt-screen buffer
+  (`smcup`/`rmcup`) from a single alternate buffer to N independent,
+  persistent contexts — switching away doesn't destroy a context. A
+  shell's prompt and scrollback are still there, untouched, when a
+  fullscreen program's context is dismissed and the shell's context
+  becomes visible again.
+- **Superseded:** this originally said "only one is visible/rendered at a
+  time", and the visibility stack was session-wide. It is now per pane, so
+  a full-screen program covers its pane rather than the window — which is
+  what makes a pane able to hold a whole other program. A session with one
+  pane behaves exactly as before.
 - A connecting program gets a context one of two ways: **inherit**
-  (default — it acts on whichever context is visible when it connects) or
+  (default — it acts on whatever is on screen in its pane, which for a
+  program not seated in one is the focused pane) or
   **create_context** (explicit request, for something like a fullscreen
   editor that wants its own). `attach_context` retargets a connection
   onto an existing context after the fact — a program's second
@@ -3608,3 +3615,195 @@ look at, and the extent alone is enough for the host to route a
 shift+wheel or a drag over it back as a `scroll_offset`. No wire change
 was needed for any of this — the strip is layers, splits, `content_extent`
 and `write_text`, all of which already existed.
+
+### Panes
+
+**A pane is a rectangle of the window with its own stack of contexts.**
+The split tree inside a context arranges *layers*, which is exactly right
+for one program's own sidebar and statusline. A multiplexer needs
+something else: a rectangle that can hold a whole other program,
+including one that opens its own full-screen context. That is a pane, and
+it sits one level above a context rather than one level below.
+
+**From the program inside it, a pane is indistinguishable from the whole
+host.** `get_property "size"` returns the pane's cells. `resize` reports
+the pane's cells. `create_context` covers the pane and pops back to what
+was underneath when it is dismissed, which is alt-screen semantics at
+pane scope instead of window scope. Input arrives only while the pane is
+focused. Mouse coordinates arrive relative to the pane. Nothing a program
+can ask reveals where its pane sits, or that other panes exist.
+
+That sequestering is the whole design, not a nicety. It is what lets an
+unmodified `gw-shell`, `zoe` or `gw-ls` run inside a pane: a program
+needs no awareness of being multiplexed, so there is no per-program work
+to do and no way for a program to get it wrong.
+
+**Why not layers.** The first version of `gmux` made panes out of layers
+in a single context it owned. That design could not be finished, for
+reasons documented in full in `docs/investigations/context-panes.md`. The
+two that decided it:
+
+- **A layer-pane cannot host a full-screen program.** `create_context`
+  pushed onto one session-wide visibility stack, so a `zoe` launched
+  inside a pane replaced the *window* and the multiplexer vanished
+  underneath it. There was no pane-scoped alt-screen, because alt-screen
+  was a session-level concept and a layer-pane was not a session-level
+  object.
+- **One layer, two writers.** A layer-pane was written by the
+  multiplexer draining a PTY *and* by the embedded shell drawing through
+  the protocol, both live at once with nothing arbitrating. That is
+  precisely the overlapping-text symptom that made the design's failure
+  visible.
+
+A pane fixes both by construction rather than by care: it holds a context
+stack, so alt-screen has somewhere to go, and it has exactly one writer
+because the surface belongs to one program.
+
+**Two split trees, deliberately not one generic one.** `PaneSplit`
+mirrors `Split` exactly — same axis, same weight/fixed sizing, same
+divider bands, same minimally-edited contract — but is a separate type
+with its own layout walk. They carry different child kinds and are walked
+by different owners (a `Context` lays out its layers; the `Session` lays
+out panes). Two short concrete walks read better than one parameterised
+one, and the duplication is about eighty lines that will not drift,
+because a change to either level's semantics is a change to that level's
+semantics.
+
+**Context coordinates stay context-relative; only the host adds the
+origin.** `Context.origin_row`/`origin_col` are mirrored from the pane's
+rect, and they are added in exactly two places: the renderer, on the way
+out, and `Server.focusedCell`, on the way in for a mouse event. Layer
+positions, split rects, `get_cells` coordinates and everything a client
+sees are untouched. A single-pane session has both at zero, which is why
+panes existing changes nothing for every client that came before them.
+
+**A pane that leaves the tree goes unmapped rather than being destroyed.**
+It keeps its contexts and its programs alive, but is not composited and
+takes no input. This is what makes zoom a consequence of the layout
+rather than a special case: pointing the wire root at a one-child wrapper
+leaves every other pane unreached by the walk, and there is no per-pane
+visibility to toggle and untoggle. `layoutPanes` also moves focus off a
+pane it just unmapped, so a manager cannot strand input somewhere
+invisible by forgetting to call `focus_pane` at exactly the right moment.
+
+**Input routing is one test, in the session.** A raw key reaches the
+connection whose context is on screen *in the focused pane*, which
+excludes both a backgrounded program (its context is not on screen in its
+own pane) and every program in an unfocused pane (its context is visible
+but the keystrokes are not for it). Because a pane is a real addressable
+object with its own visibility, "who gets this keystroke" is answerable
+from state the session already maintains. The layer design had no such
+object, and so needed the multiplexer to relay every keystroke onward —
+which it could not do correctly (see the prefix note below).
+
+**The window-manager role, and why it is a role.** `request_role` grants
+at most one program the right to reshape the window. Beyond the obvious
+safety argument — a program that merely runs inside a pane must not be
+able to rearrange the window around itself — it makes "who owns the
+window layout" a question with a runtime answer, and gives a natural
+place to hang cleanup when the manager dies: its panes are culled, the
+tree is dropped back to the root pane, and the prefix chord is cleared.
+
+The role is held by *two* connections, because a program is two: a
+`Client` that issues the pane calls and an `InputListener` that receives
+the window commands. The second joins by presenting a token the first was
+given (`join_role`) — the same shape `attach_context` uses to let a
+paired listener join the context its client created, and for the same
+reason. The two connections share knowledge in-process, so a token passed
+between them is proof of association the server can check without
+inventing a notion of process identity.
+
+**The prefix key lives in the session, not in the multiplexer.** This is
+the sharpest lesson of the abandoned design. A multiplexer that has to
+observe every keystroke in order to recognise its own prefix has, by
+construction, already let the program have that keystroke by the time it
+decides to swallow it. No amount of care in the multiplexer can close
+that, because the multiplexer is not in the delivery path.
+
+So `set_window_prefix` registers the chord with the session, and the
+session withholds the prefix from the focused pane and delivers the key
+after it to the manager as `window_key_*` / `window_text`. The decision
+happens before delivery, once, in the one place that knows what has
+focus. Two consequences fall out: a manager receives *only* its own
+commands and never a program's keystrokes at all, and the whole prefix
+sequence — including the key release paired with the withheld press — is
+invisible to every program. `window_key` and `window_text` are separate
+`InputEvent` variants rather than reusing `key`/`text`, so a manager
+cannot confuse the two even by accident.
+
+**`spawn_in_pane` is a server-side operation.** A pane is meant to be a
+sequestered host, and the thing that *is* the host is the only thing that
+knows what a child needs in order to find it: the socket path, the pane it
+has been seated in, its base context, and how big its terminal is. A
+manager that forked its own children would have to reconstruct all of
+that, and would be the only process able to reap them — which is exactly
+what makes detach/reattach impossible later.
+
+The implementation is injected rather than built in (`dispatch.PaneSpawner`,
+registered by `host/pane_proc.zig`), so `src/` never grows fork/exec
+policy and the headless server rejects the call rather than pretending to
+support it. `argv[0]`, when it is a bare name, prefers the running build's
+sibling binary over `PATH` — the same rule the host already uses to find
+its own `gw-shell`. Without that, a `gmux` run from a work tree silently
+runs whichever `gw-shell` is installed system-wide, and the symptom is a
+pane drawing in the wrong place, which nobody would trace back to `PATH`.
+
+**A pane is either program-drawn or PTY-drawn, decided at spawn, never
+both.** A glyphwire-aware child connects back, binds itself to the pane,
+and draws through the protocol; its PTY stays quiet. A plain child knows
+none of that and writes bytes to its terminal, which the host writes onto
+the pane's base context root layer. One writer per surface either way —
+the rule the layer design had no way even to state.
+
+**`resize` became per-connection.** Once panes exist, "the size" is a
+different number for every client, so it cannot be one broadcast body.
+`Server.reportContextSizes` walks the connection registry and sends each
+one its own context's cells. The message shape is unchanged, and
+deliberately so: a program cannot tell a pane resize from a window
+resize, and should not be able to.
+
+**Deferred, tracked for later:** detach/reattach (the server still runs
+in-process inside `glyphwire-host`, so there is nothing to reattach *to*
+— but `spawn_in_pane` is the piece that makes it possible); per-trunk
+remote panes, so `glyphwire --ssh` can put a remote session in a pane
+rather than owning the window (`docs/ideas.md` already wants this, and
+the pane is the missing object it needed); pane titles and a status line;
+mouse-reporting forwarded into a PTY-drawn pane.
+
+### gmux
+
+**gmux is a pure window manager.** It owns no context, no layer, no PTY
+and no VT state. It never sees a keystroke meant for a program and never
+relays one. What is left is exactly what a multiplexer is for: deciding
+what panes exist, where they sit, and which one has focus.
+
+Everything that used to make it complicated belonged to the wrong design
+and is now gone: the per-pane PTY and reader thread, the output drain and
+`write_text` pump, `pty_mode` wiring, caret management, the prefix-key
+state machine, and the input-forwarding handshake. `gmux/pane.zig` no
+longer exists.
+
+**`gmux/layout.zig` survived the rewrite untouched.** It was always a
+pure binary tree over opaque `u32` ids with no glyphwire import, which is
+what let it be unit-tested without a server — and what meant the move
+from layer-panes to context-panes did not touch it at all. The ids are
+now pane handles and the `wire_id`s are pane-split handles, and the file
+does not know or care.
+
+**The wire tree is edited minimally, never rebuilt.** glyphwire has no
+way to read a split's current (possibly mouse-dragged) child weights
+back, so blindly re-issuing `set_pane_split_children` for the whole tree
+on every split/kill would reset every *other* divider in the window to
+its 1:1 default the moment any one pane changed. A structural edit
+touches only the nodes on the path between the edit and its nearest
+surviving ancestor.
+
+**A lone pane needs a synthetic wrapper split**, because
+`set_root_pane_split` requires an actual split handle while the tree's own
+structure for one pane is a bare leaf. Created on demand and destroyed the
+moment a second pane makes the tree's own root a real split.
+
+**Command errors are logged, not propagated.** A failed split (a transient
+fork failure, a wire hiccup) is caught at the dispatch site: crashing the
+multiplexer over one failed operation would take every *other* pane's
+program down with it, which defeats the point of a multiplexer.

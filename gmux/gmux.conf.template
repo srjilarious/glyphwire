@@ -35,14 +35,15 @@
 --     -- The command run in a fresh pane, overriding the default
 --     -- gw-shell. No arguments -- just the program itself, same as
 --     -- opening a new terminal window. Any ordinary shell (bash, fish,
---     -- ...) works fine here too: gmux drives it as a plain pty child
---     -- either way, gw-shell's only difference is being glyphwire-aware
---     -- itself (it's handed GLYPHWIRE_LAYER, see gmux/pane.zig, so it can
---     -- draw straight onto its pane's layer instead of through the pty).
+--     -- ...) works fine here: a pane is a sequestered host, so a plain
+--     -- program gets a real pty and a terminal of exactly the pane's
+--     -- size. gw-shell is the better default only because a
+--     -- glyphwire-aware program draws on the pane's own context rather
+--     -- than through VT emulation.
 --     shell = "/bin/bash",
 --
---     -- How many rows of scrollback each pane's layer keeps -- its own
---     -- ring, scrolled with the mouse wheel over that pane, independent
---     -- of every other pane's.
+--     -- How many rows of scrollback a fresh pane keeps -- its own ring,
+--     -- scrolled with the mouse wheel over that pane, independent of
+--     -- every other pane's.
 --     scrollback_rows = 2000,
 -- }
