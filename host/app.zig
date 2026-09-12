@@ -13,6 +13,7 @@ const window_sizing_mod = @import("window_sizing.zig");
 const preedit_mod = @import("preedit.zig");
 const render_mod = @import("render.zig");
 const panes_mod = @import("panes.zig");
+const pane_proc_mod = @import("pane_proc.zig");
 const redraw_mod = @import("redraw.zig");
 const profiler_mod = @import("profiler.zig");
 
@@ -163,6 +164,10 @@ pub const App = struct {
     scroll: scroll_mod.Scroll,
     table_sort: table_sort_mod.TableSort,
     panes: panes_mod.Panes,
+    /// The programs `spawn_in_pane` started, one per pane. Null when
+    /// nothing has ever asked for a pane, which is every session without a
+    /// window manager -- so the common case pays nothing for this.
+    pane_procs: ?*pane_proc_mod.PaneProcs = null,
     window_sizing: window_sizing_mod.WindowSizing,
     renderer: render_mod.Renderer,
 
@@ -249,6 +254,11 @@ pub const App = struct {
         // the capture, so an automated run terminates on its own.
         if (self.screenshot.done) return false;
         if (self.screenshot.path != null) self.screenshot.elapsed_ms += deltaTimeMs;
+
+        // Plain (non-glyphwire) programs' PTY output reaches the grid
+        // here, on the main loop -- never from a reader thread. See
+        // `pane_proc.PaneProcs.pump`.
+        if (self.pane_procs) |pp| pp.pump(self.alloc);
 
         self.window_sizing.syncWindowSize(eng, deltaTimeMs);
         // After syncWindowSize so a font change (which alters cell_w/cell_h

@@ -169,26 +169,54 @@ pub const PaneScrollbars = struct {
     horizontal: ?PaneScrollbarGeom = null,
 };
 
-/// The window-pixel rect a layer's *viewport* occupies -- its position
-/// plus the content margin, sized by the viewport rather than the content
-/// grid behind it.
-pub fn layerRect(pos: glyphwire.PxPos, view_cols: usize, view_rows: usize) RectPx {
+/// The window-pixel offset a context's contents composite at: its pane's
+/// top-left cell, plus the left content margin.
+///
+/// Everything inside a context is context-relative (see
+/// `core.Context.origin_row`), so this is the single place the pane offset
+/// enters the renderer. For a session with one pane it is exactly
+/// `content_pad_px, 0` -- the values that used to be hard-coded at every
+/// composite site.
+pub const Origin = struct { x: i32 = content_pad_px, y: i32 = 0 };
+
+pub fn contextOrigin(ctx: *const glyphwire.Context) Origin {
     return .{
-        .x = @round(pos.x) + @as(f32, @floatFromInt(content_pad_px)),
-        .y = @round(pos.y),
+        .x = @as(i32, @intCast(ctx.origin_col)) * cell_w + content_pad_px,
+        .y = @as(i32, @intCast(ctx.origin_row)) * cell_h,
+    };
+}
+
+/// The window-pixel rect a layer's *viewport* occupies -- its
+/// context-relative position shifted by its context's origin, sized by the
+/// viewport rather than the content grid behind it.
+pub fn layerRectIn(origin: Origin, pos: glyphwire.PxPos, view_cols: usize, view_rows: usize) RectPx {
+    return .{
+        .x = @round(pos.x) + @as(f32, @floatFromInt(origin.x)),
+        .y = @round(pos.y) + @as(f32, @floatFromInt(origin.y)),
         .w = @floatFromInt(@as(i32, @intCast(view_cols)) * cell_w),
         .h = @floatFromInt(@as(i32, @intCast(view_rows)) * cell_h),
     };
 }
 
-/// A cell rectangle (a divider band, a pane) in window pixels.
-pub fn cellRectPx(rect: glyphwire.CellRect) RectPx {
+/// `layerRectIn` for a context at the window origin -- the single-pane
+/// case, and what a caller with no context to hand uses.
+pub fn layerRect(pos: glyphwire.PxPos, view_cols: usize, view_rows: usize) RectPx {
+    return layerRectIn(.{}, pos, view_cols, view_rows);
+}
+
+/// A context-relative cell rectangle (a layer divider band, a pane inside
+/// a context) in window pixels.
+pub fn cellRectPxIn(origin: Origin, rect: glyphwire.CellRect) RectPx {
     return .{
-        .x = @as(f32, @floatFromInt(@as(i32, @intCast(rect.col)) * cell_w + content_pad_px)),
-        .y = @floatFromInt(@as(i32, @intCast(rect.row)) * cell_h),
+        .x = @floatFromInt(@as(i32, @intCast(rect.col)) * cell_w + origin.x),
+        .y = @floatFromInt(@as(i32, @intCast(rect.row)) * cell_h + origin.y),
         .w = @floatFromInt(@as(i32, @intCast(rect.cols)) * cell_w),
         .h = @floatFromInt(@as(i32, @intCast(rect.rows)) * cell_h),
     };
+}
+
+pub fn cellRectPx(rect: glyphwire.CellRect) RectPx {
+    return cellRectPxIn(.{}, rect);
 }
 
 /// Thumb extent and start along a track of `track_len` pixels: the thumb

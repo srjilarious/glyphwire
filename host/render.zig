@@ -60,6 +60,14 @@ const TexBatch = struct {
     batch: SpriteBatch,
 };
 
+/// Identifies one cached layer batch. Layer handles are per-context, so
+/// the context handle is part of the identity -- see
+/// `Renderer.layer_batches`.
+pub const BatchKey = struct {
+    context: glyphwire.ContextHandle,
+    layer: glyphwire.LayerHandle,
+};
+
 /// The cached quad batches for one layer, plus the state its last build
 /// was keyed on. `syncOneLayer` rebuilds when any of the keyed values
 /// differ from the layer's current ones.
@@ -78,6 +86,10 @@ pub const LayerBatches = struct {
     /// `Renderer.text_epoch` at the last build -- a glyph-atlas grow moves
     /// every glyph UV, so a mismatch forces a text rebuild.
     built_text_epoch: u64 = 0,
+    /// The pane origin this batch's quads were emitted at. Every vertex is
+    /// in absolute window pixels, so a pane that moved invalidates the
+    /// batch even though the layer's own content is untouched.
+    built_origin: geometry.Origin = .{ .x = std.math.minInt(i32), .y = std.math.minInt(i32) },
 
     color_bg: ShapeBatch,
     icon_bg: SpriteBatch,
@@ -153,6 +165,12 @@ pub const DeferredIcon = struct {
 /// not as chrome hanging off the edge of the window.
 const divider_color = host_eng.Color.from(58, 58, 66, 255);
 
+/// The band between two whole *panes* -- one program's surface against
+/// another's. Brighter than `divider_color`, which separates two parts of
+/// a single program's own layout: the seam between programs is the more
+/// significant boundary and should read that way.
+const pane_divider_color = host_eng.Color.from(84, 84, 96, 255);
+
 /// The ghost band shown while a divider is being dragged, before the
 /// drag ends and the layout actually moves (see `panes.Panes`).
 const divider_preview_color = host_eng.Color.from(120, 120, 140, 255);
@@ -195,11 +213,15 @@ pub const Renderer = struct {
     /// start of each rebuild and reused across rebuilds/layers.
     deferred_icons: std.ArrayList(DeferredIcon) = .empty,
 
-    /// One `LayerBatches` per live layer, keyed by handle
-    /// (`glyphwire.root_layer_handle` for the root). Created on first
-    /// sight, rebuilt on change, freed when the layer is destroyed (see
-    /// `syncBatches`) or in `deinit`.
-    layer_batches: std.AutoHashMapUnmanaged(glyphwire.LayerHandle, *LayerBatches) = .empty,
+    /// One `LayerBatches` per live layer, keyed by **context and** layer
+    /// handle. The context half is load-bearing: layer handles are
+    /// allocated per context and start at 1 in each, so with more than one
+    /// pane on screen at once several contexts have a layer 1, and a
+    /// handle-only key would composite one pane's batch into another's
+    /// rectangle. Created on first sight, rebuilt on change, freed when
+    /// the layer or its context goes away (see `syncBatches`) or in
+    /// `deinit`.
+    layer_batches: std.AutoHashMapUnmanaged(BatchKey, *LayerBatches) = .empty,
     /// The three `ManagedShader`s the batches bind, fetched once on the
     /// first `syncBatches` (the window / GL context is up by then).
     shape_shader: ?*host_eng.ManagedShader = null,
@@ -210,11 +232,17 @@ pub const Renderer = struct {
     /// mismatch forces a rebuild of that layer's text.
     text_epoch: u64 = 0,
     /// The session's visibility change-counter (`Server.visibleContextGen`)
-    /// as of the last `syncBatches`. When it moves, a different context
-    /// is on screen -- its layers reuse handle numbers the old one's
-    /// cached batches are keyed by, so every batch is dropped and rebuilt
-    /// against the new context.
+    /// as of the last `syncBatches`. When it moves, what's on screen
+    /// changed; stale batches are reaped against the live context set
+    /// rather than dropping the whole cache, since with panes a visibility
+    /// change in one pane leaves every other pane's batches perfectly
+    /// good.
     last_visible_gen: u64 = 0,
+    /// The pane-tree layout counter (`Server.paneLayoutGen`) as of the last
+    /// `syncBatches`. A pane that moved needs its layers' quads re-emitted
+    /// at the new origin even though nothing about the layers themselves
+    /// changed, so this forces a rebuild of the affected contexts.
+    last_pane_layout_gen: u64 = 0,
 
     pub fn deinit(self: *Renderer) void {
         const alloc = self.app.alloc;
@@ -419,59 +447,88 @@ pub const Renderer = struct {
         const server = self.app.server;
         const fa = eng.defaultFontAtlas();
 
-        // A context switch invalidates the whole cache: the newly-visible
-        // context's layers reuse the same handle numbers, so a batch left
-        // over from the old context would be composited for an unrelated
-        // layer.
+        // Reap batches whose layer -- or whose whole context -- no longer
+        // exists. Keying by context means a visibility change in one pane
+        // no longer invalidates anything in another, so this is a reap
+        // rather than the blanket cache drop it used to be.
         const vgen = server.visibleContextGen();
-        if (vgen != self.last_visible_gen) {
+        const pgen = server.paneLayoutGen();
+        if (vgen != self.last_visible_gen or pgen != self.last_pane_layout_gen) {
             self.last_visible_gen = vgen;
-            var it = self.layer_batches.valueIterator();
-            while (it.next()) |lb| {
-                lb.*.deinit(self.app.alloc);
-                self.app.alloc.destroy(lb.*);
-            }
-            self.layer_batches.clearRetainingCapacity();
-        }
-
-        // Reap batches whose layer no longer exists.
-        {
-            var stale: [16]glyphwire.LayerHandle = undefined;
-            var n: usize = 0;
-            var it = self.layer_batches.keyIterator();
-            while (it.next()) |k| {
-                if (k.* == glyphwire.root_layer_handle) continue;
-                if (server.ctx.layers.get(k.*) == null and n < stale.len) {
-                    stale[n] = k.*;
-                    n += 1;
-                }
-            }
-            for (stale[0..n]) |h| {
-                if (self.layer_batches.fetchRemove(h)) |kv| {
-                    kv.value.deinit(self.app.alloc);
-                    self.app.alloc.destroy(kv.value);
-                }
-            }
+            self.last_pane_layout_gen = pgen;
+            self.reapStaleBatches();
         }
 
         var pass: usize = 0;
         while (pass < 6) : (pass += 1) {
             const epoch_before = self.text_epoch;
 
-            const root_view: usize = if (scroll.rootOwned(&server.ctx.root)) 0 else server.ctx.root.view_scroll;
-            self.syncOneLayer(eng, fa, glyphwire.root_layer_handle, &server.ctx.root, geometry.content_pad_px, 0, root_view);
-
-            for (server.ctx.layer_order.items) |handle| {
-                const layer = server.ctx.layers.getPtr(handle) orelse continue;
-                // A hidden layer keeps its cached batch (it is not stale,
-                // just unseen), so showing it again costs no rebuild.
-                if (!layer.visible) continue;
-                const ox = @as(i32, @intFromFloat(@round(layer.pos.x))) + geometry.content_pad_px;
-                const oy: i32 = @intFromFloat(@round(layer.pos.y));
-                self.syncOneLayer(eng, fa, handle, layer, ox, oy, 0);
+            var it = server.session.panes.valueIterator();
+            while (it.next()) |pane| {
+                if (!pane.mapped) continue;
+                const ctx_handle = pane.top();
+                const ctx = server.session.contextPtr(ctx_handle) orelse continue;
+                self.syncOneContext(eng, fa, ctx_handle, ctx);
             }
 
             if (self.text_epoch == epoch_before) break;
+        }
+    }
+
+    /// Builds every batch for one pane's on-screen context: its root layer
+    /// first, then each `create_layer` layer at its context-relative
+    /// position shifted by the pane's origin.
+    fn syncOneContext(
+        self: *Renderer,
+        eng: *Engine,
+        fa: ?*host_eng.renderer.FontAtlas,
+        ctx_handle: glyphwire.ContextHandle,
+        ctx: *glyphwire.Context,
+    ) void {
+        const origin = geometry.contextOrigin(ctx);
+        const root_view: usize = if (scroll.rootOwned(&ctx.root)) 0 else ctx.root.view_scroll;
+        self.syncOneLayer(eng, fa, .{ .context = ctx_handle, .layer = glyphwire.root_layer_handle }, &ctx.root, origin, root_view);
+
+        for (ctx.layer_order.items) |handle| {
+            const layer = ctx.layers.getPtr(handle) orelse continue;
+            // A hidden layer keeps its cached batch (it is not stale, just
+            // unseen), so showing it again costs no rebuild.
+            if (!layer.visible) continue;
+            const layer_origin: geometry.Origin = .{
+                .x = @as(i32, @intFromFloat(@round(layer.pos.x))) + origin.x,
+                .y = @as(i32, @intFromFloat(@round(layer.pos.y))) + origin.y,
+            };
+            self.syncOneLayer(eng, fa, .{ .context = ctx_handle, .layer = handle }, layer, layer_origin, 0);
+        }
+    }
+
+    /// Frees cached batches whose context or layer is gone. Bounded per
+    /// call: whatever it misses is caught next time the generation moves,
+    /// and a leaked batch costs memory, never a wrong pixel (a batch is
+    /// only ever drawn from a live walk of live contexts).
+    fn reapStaleBatches(self: *Renderer) void {
+        const server = self.app.server;
+        var stale: [32]BatchKey = undefined;
+        var n: usize = 0;
+        var it = self.layer_batches.keyIterator();
+        while (it.next()) |k| {
+            if (n >= stale.len) break;
+            const ctx = server.session.contextPtr(k.context) orelse {
+                stale[n] = k.*;
+                n += 1;
+                continue;
+            };
+            if (k.layer == glyphwire.root_layer_handle) continue;
+            if (ctx.layers.get(k.layer) == null) {
+                stale[n] = k.*;
+                n += 1;
+            }
+        }
+        for (stale[0..n]) |k| {
+            if (self.layer_batches.fetchRemove(k)) |kv| {
+                kv.value.deinit(self.app.alloc);
+                self.app.alloc.destroy(kv.value);
+            }
         }
     }
 
@@ -479,22 +536,21 @@ pub const Renderer = struct {
         self: *Renderer,
         eng: *Engine,
         fa: ?*host_eng.renderer.FontAtlas,
-        handle: glyphwire.LayerHandle,
+        key: BatchKey,
         layer: *const glyphwire.Layer,
-        origin_x: i32,
-        origin_y: i32,
+        origin: geometry.Origin,
         view_offset: usize,
     ) void {
         const alloc = self.app.alloc;
-        const gop = self.layer_batches.getOrPut(alloc, handle) catch return;
+        const gop = self.layer_batches.getOrPut(alloc, key) catch return;
         if (!gop.found_existing) {
             const lb = alloc.create(LayerBatches) catch {
-                _ = self.layer_batches.remove(handle);
+                _ = self.layer_batches.remove(key);
                 return;
             };
             lb.* = LayerBatches.init(alloc, self.shape_shader.?, self.sprite_shader.?, self.glyph_shader.?) catch {
                 alloc.destroy(lb);
-                _ = self.layer_batches.remove(handle);
+                _ = self.layer_batches.remove(key);
                 return;
             };
             gop.value_ptr.* = lb;
@@ -507,17 +563,20 @@ pub const Renderer = struct {
             lb.built_view_offset != view_offset or
             lb.built_cell_w != geometry.cell_w or
             lb.built_cell_h != geometry.cell_h or
-            lb.built_text_epoch != self.text_epoch;
+            lb.built_text_epoch != self.text_epoch or
+            lb.built_origin.x != origin.x or
+            lb.built_origin.y != origin.y;
         if (!need) return;
 
         self.app.profiler.add(.layers_rebuilt, 1);
-        self.rebuildLayer(eng, fa, lb, layer, origin_x, origin_y, view_offset);
+        self.rebuildLayer(eng, fa, lb, layer, origin.x, origin.y, view_offset);
         lb.built = true;
         lb.built_gen = gen;
         lb.built_view_offset = view_offset;
         lb.built_cell_w = geometry.cell_w;
         lb.built_cell_h = geometry.cell_h;
         lb.built_text_epoch = self.text_epoch;
+        lb.built_origin = origin;
     }
 
     fn rebuildLayer(
@@ -834,8 +893,8 @@ pub const Renderer = struct {
         }
     }
 
-    fn drawLayerBatches(self: *Renderer, eng: *Engine, handle: glyphwire.LayerHandle) void {
-        const lb = self.layer_batches.get(handle) orelse return;
+    fn drawLayerBatches(self: *Renderer, eng: *Engine, key: BatchKey) void {
+        const lb = self.layer_batches.get(key) orelse return;
         if (!lb.built) return;
         const mvp = eng.projMat;
         // Back to front: colour fills + tints, image cells, icon
@@ -877,34 +936,16 @@ pub const Renderer = struct {
             self.syncBatches(eng);
             if (sb_t0) |s| self.app.profiler.recordSince(.sync_batches, s);
 
-            // Pin the root view to the live tail while a full-screen
-            // program owns the screen (`rootOwned`).
-            const root_view: usize = if (scroll.rootOwned(&server.ctx.root)) 0 else server.ctx.root.view_scroll;
-
-            self.drawLayerBatches(eng, glyphwire.root_layer_handle);
-
-            // The caret follows `ctx.caret_layer` when a multi-pane client
-            // set one (`gmux`'s focused pane) -- otherwise the root
-            // cursor. Drawn here, on top of root's content and below any
-            // popup layer, matching the old per-layer caret draw order;
-            // the pane version is drawn again after its own layer batches
-            // below so it sits over the pane's own content.
-            const focus_caret: ?*const glyphwire.Layer = blk: {
-                const h = server.ctx.caret_layer orelse break :blk null;
-                const l = server.ctx.layers.getPtr(h) orelse break :blk null;
-                break :blk if (l.visible) l else null;
-            };
-            if (focus_caret == null)
-                self.drawRootCaret(eng, &server.ctx.root, geometry.content_pad_px, 0, root_view);
-            // IME composition, over both: it covers the cells the caret is
-            // about to write into, so it has to sit above the caret too.
-            self.drawPreedit(eng, &server.ctx.root, geometry.content_pad_px, 0, root_view);
-
-            for (server.ctx.layer_order.items) |handle| {
-                const layer = server.ctx.layers.getPtr(handle) orelse continue;
-                if (!layer.visible) continue;
-                self.drawLayerBatches(eng, handle);
-                if (focus_caret == layer) self.drawFocusedCaret(eng, layer);
+            // One pass per mapped pane. Panes never overlap, so the order
+            // between them doesn't matter; the order *within* a pane does,
+            // and is unchanged (root layer, caret, then `layer_order`).
+            const focused_ctx = server.session.focused_context.load(.monotonic);
+            var it = server.session.panes.valueIterator();
+            while (it.next()) |pane| {
+                if (!pane.mapped) continue;
+                const ctx_handle = pane.top();
+                const ctx = server.session.contextPtr(ctx_handle) orelse continue;
+                self.drawOneContext(eng, ctx_handle, ctx, ctx_handle == focused_ctx);
             }
         }
 
@@ -930,6 +971,46 @@ pub const Renderer = struct {
         }
 
         self.drawProfilerHud(eng);
+    }
+
+    /// Composites one pane's on-screen context. `focused` gates the caret:
+    /// only the pane taking input shows one, which is also how the user can
+    /// see which pane that is.
+    fn drawOneContext(
+        self: *Renderer,
+        eng: *Engine,
+        ctx_handle: glyphwire.ContextHandle,
+        ctx: *glyphwire.Context,
+        focused: bool,
+    ) void {
+        const origin = geometry.contextOrigin(ctx);
+        // Pin the root view to the live tail while a full-screen program
+        // owns the screen (`rootOwned`).
+        const root_view: usize = if (scroll.rootOwned(&ctx.root)) 0 else ctx.root.view_scroll;
+
+        self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = glyphwire.root_layer_handle });
+
+        // The caret follows `ctx.caret_layer` when a client set one --
+        // otherwise the root cursor. Drawn here, on top of root's content
+        // and below any popup layer; the pane version is drawn again after
+        // its own layer batches below so it sits over that pane's content.
+        const focus_caret: ?*const glyphwire.Layer = blk: {
+            const h = ctx.caret_layer orelse break :blk null;
+            const l = ctx.layers.getPtr(h) orelse break :blk null;
+            break :blk if (l.visible) l else null;
+        };
+        if (focused and focus_caret == null)
+            self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view);
+        // IME composition, over both: it covers the cells the caret is
+        // about to write into, so it has to sit above the caret too.
+        if (focused) self.drawPreedit(eng, &ctx.root, origin.x, origin.y, root_view);
+
+        for (ctx.layer_order.items) |handle| {
+            const layer = ctx.layers.getPtr(handle) orelse continue;
+            if (!layer.visible) continue;
+            self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = handle });
+            if (focused and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin);
+        }
     }
 
     /// Paints the profiler overlay in the top-right corner while the HUD
@@ -1023,7 +1104,7 @@ pub const Renderer = struct {
     /// it is scrolled back into its own history (`view_scroll != 0`), or
     /// while the cursor sits outside the visible viewport. Shares the
     /// blink clock with the root caret.
-    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer) void {
+    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin) void {
         if (!layer.cursor_visible) return;
         if (!self.app.caret.blinkOn()) return;
         if (layer.view_scroll != 0) return;
@@ -1034,8 +1115,8 @@ pub const Renderer = struct {
         const ccol = layer.cursor.col - off.col;
         if (crow >= layer.viewportRows() or ccol >= layer.viewportCols()) return;
 
-        const ox = @as(i32, @intFromFloat(@round(layer.pos.x))) + geometry.content_pad_px;
-        const oy: i32 = @intFromFloat(@round(layer.pos.y));
+        const ox = @as(i32, @intFromFloat(@round(layer.pos.x))) + origin.x;
+        const oy = @as(i32, @intFromFloat(@round(layer.pos.y))) + origin.y;
 
         eng.renderer.begin(eng.projMat);
         self.drawCaret(eng, layer, ox, oy, crow, ccol, 0);
@@ -1243,11 +1324,16 @@ pub const Renderer = struct {
             defer server.ctx_mutex.unlock(server.io);
             self.app.panes.syncLocked();
         }
-        for (self.app.panes.dividers.items) |d| {
+        for (self.app.panes.bands.items) |d| {
             const r = geometry.cellRectPx(d.rect);
             eng.renderer.drawFilledRect(
                 host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                divider_color,
+                // Pane bands separate whole programs, so they read a shade
+                // brighter than the bands inside one program's own layout.
+                switch (d.level) {
+                    .pane => pane_divider_color,
+                    .layer => divider_color,
+                },
             );
         }
         // The drag ghost, over the top: the real dividers above are still
@@ -1271,21 +1357,27 @@ pub const Renderer = struct {
         server.ctx_mutex.lockUncancelable(server.io);
         defer server.ctx_mutex.unlock(server.io);
 
-        for (server.ctx.layer_order.items) |handle| {
-            const layer = server.ctx.layers.getPtr(handle) orelse continue;
-            if (!layer.visible) continue;
-            const state = layer.scrollbarState();
-            if (!state.vertical and !state.horizontal) continue;
+        var pane_it = server.session.panes.valueIterator();
+        while (pane_it.next()) |pane| {
+            if (!pane.mapped) continue;
+            const ctx = server.session.contextPtr(pane.top()) orelse continue;
+            const origin = geometry.contextOrigin(ctx);
+            for (ctx.layer_order.items) |handle| {
+                const layer = ctx.layers.getPtr(handle) orelse continue;
+                if (!layer.visible) continue;
+                const state = layer.scrollbarState();
+                if (!state.vertical and !state.horizontal) continue;
 
-            const rect = geometry.layerRect(layer.pos, layer.viewportCols(), layer.viewportRows());
-            const bars = geometry.paneScrollbars(
-                rect,
-                state,
-                layer.viewportCols(),
-                layer.viewportRows(),
-            );
-            if (bars.vertical) |v| drawBar(eng, v);
-            if (bars.horizontal) |h| drawBar(eng, h);
+                const rect = geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows());
+                const bars = geometry.paneScrollbars(
+                    rect,
+                    state,
+                    layer.viewportCols(),
+                    layer.viewportRows(),
+                );
+                if (bars.vertical) |v| drawBar(eng, v);
+                if (bars.horizontal) |h| drawBar(eng, h);
+            }
         }
     }
 

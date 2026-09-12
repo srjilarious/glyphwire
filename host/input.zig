@@ -161,8 +161,28 @@ pub const KeyInput = struct {
     /// the row actually under the pointer (see `Client.getMetadata`).
     pub fn reportMouseEvents(self: *KeyInput, eng: *Engine, skip_left: bool) void {
         if (!eng.inputs.mouse_enabled) return;
+        const server = self.app.server;
         const pos = eng.inputs.mouse.pos();
-        const cell = geometry.cellFromPixel(pos.x, pos.y);
+        const window_cell = geometry.cellFromPixel(pos.x, pos.y);
+
+        // Click-to-focus, before the event itself is delivered: a press in
+        // an unfocused pane moves focus there first, so the click lands in
+        // the pane the user just picked rather than the one they left. The
+        // host owns this rather than the window manager, because the
+        // manager doesn't see mouse events for panes it isn't focused on
+        // -- and requiring it to would mean giving it every raw event.
+        if (eng.inputs.mouse.pressed(.left) or eng.inputs.mouse.pressed(.right) or eng.inputs.mouse.pressed(.middle)) {
+            _ = server.focusPaneAt(self.app.alloc, window_cell) catch |err| {
+                std.log.err("focusPaneAt failed: {t}", .{err});
+            };
+        }
+
+        // Everything below is reported in the focused context's own frame.
+        // A pointer outside the focused pane (over a neighbour, or in a
+        // divider band) reports nothing: those events are not that
+        // client's business, and a window-cell coordinate would be outside
+        // its grid entirely.
+        const cell = server.focusedCell(window_cell) orelse return;
 
         if (pos.x != self.last_mouse_px.x or pos.y != self.last_mouse_px.y) {
             self.last_mouse_px = pos;
@@ -171,7 +191,6 @@ pub const KeyInput = struct {
             };
         }
 
-        const server = self.app.server;
         const view_offset = blk: {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);

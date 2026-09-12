@@ -3,6 +3,7 @@ const glyphwire = @import("glyphwire");
 const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
+const pane_proc_mod = @import("pane_proc.zig");
 const config = @import("config.zig");
 const config_load = @import("config_load.zig");
 const geometry = @import("geometry.zig");
@@ -415,6 +416,14 @@ pub fn main(init: std.process.Init) !void {
         .face_index = font_face_index,
         .size = font_cfg.size,
     }, host_cfg.cursor, host_cfg.profile);
+
+    // `spawn_in_pane`: a window manager asks the *host* to start programs,
+    // because only the host knows what env a child needs in order to find
+    // the pane it has been seated in. See `host/pane_proc.zig`.
+    var pane_procs = pane_proc_mod.PaneProcs.init(alloc, io, &srv, socket_path, init.environ_map);
+    defer pane_procs.deinit();
+    app.pane_procs = &pane_procs;
+    srv.setPaneSpawner(pane_procs.spawner());
 
     // The render loop only repaints on demand (`EngOptions.redrawOnDemand`)
     // and parks in `SDL_WaitEvent` when idle; this lets the server's

@@ -525,6 +525,85 @@ pub const Server = struct {
         return self.session.pane_layout_gen.load(.monotonic);
     }
 
+    /// Resolves an optional context handle: the named context, or the
+    /// focused one when null. Null out only for a handle that named a
+    /// context which no longer exists. Call under `ctx_mutex`.
+    fn contextOrFocused(self: *Server, context: ?core.ContextHandle) ?*core.Context {
+        const h = context orelse return self.session.focusedContext();
+        return self.session.contextPtr(h);
+    }
+
+    /// The pane under a window cell, and the context on screen there --
+    /// how the host resolves a mouse position to "whose surface is this".
+    /// Null in a divider band between panes. Call under `ctx_mutex`.
+    pub const PaneAtCell = struct {
+        pane: core.PaneHandle,
+        context: core.ContextHandle,
+        ctx: *core.Context,
+        rect: core.CellRect,
+    };
+
+    pub fn paneAtCell(self: *Server, row: usize, col: usize) ?PaneAtCell {
+        const handle = self.session.paneAt(row, col) orelse return null;
+        const pane = self.session.panePtr(handle) orelse return null;
+        const ctx_handle = pane.top();
+        return .{
+            .pane = handle,
+            .context = ctx_handle,
+            .ctx = self.session.contextPtr(ctx_handle) orelse return null,
+            .rect = pane.rect,
+        };
+    }
+
+    /// Translates a window cell into the focused context's own coordinate
+    /// frame, or null when the pointer isn't inside the focused pane.
+    ///
+    /// Raw mouse events only ever reach the focused pane's client (see
+    /// `broadcast`), and that client's coordinates are context-relative, so
+    /// this is the inbound counterpart of the origin the renderer adds on
+    /// the way out. Null means "not this client's business": a pointer over
+    /// another pane, or in a divider band, reports nothing rather than a
+    /// cell outside the client's own grid.
+    pub fn focusedCell(self: *Server, cell: core.CellPos) ?core.CellPos {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        const pane = self.session.panePtr(self.session.focusedPaneHandle()) orelse return null;
+        if (!pane.rect.contains(cell.row, cell.col)) return null;
+        return .{ .row = cell.row - pane.rect.row, .col = cell.col - pane.rect.col };
+    }
+
+    /// Click-to-focus: moves focus to whichever pane contains a window
+    /// cell. A no-op in a divider band, or when that pane already has
+    /// focus. Returns true when focus actually moved.
+    pub fn focusPaneAt(self: *Server, alloc: std.mem.Allocator, cell: core.CellPos) !bool {
+        const target = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const at = self.paneAtCell(cell.row, cell.col) orelse break :blk null;
+            if (at.pane == self.session.focusedPaneHandle()) break :blk null;
+            break :blk at.pane;
+        };
+        const pane = target orelse return false;
+        try self.focusPane(alloc, pane);
+        return true;
+    }
+
+    /// Moves input focus to `pane` (the host's own click-to-focus path --
+    /// the in-process counterpart of the `focus_pane` message). A no-op for
+    /// an unknown or unmapped pane, or one that already has focus.
+    pub fn focusPane(self: *Server, alloc: std.mem.Allocator, pane: core.PaneHandle) !void {
+        const changed = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            if (self.session.focusedPaneHandle() == pane) break :blk false;
+            self.session.focusPane(pane) catch break :blk false;
+            self.ctx = self.session.focusedContext();
+            break :blk true;
+        };
+        if (!changed) return;
+        try self.reportContext(alloc);
+    }
+
     /// Re-lays-out the pane tree and tells everyone what moved. Called
     /// after any pane-tree edit (`HandleResult.panes_changed`), after the
     /// window resizes, and after a pane cull.
@@ -681,12 +760,27 @@ pub const Server = struct {
     /// (e.g. to snap back to the live tail when the user starts typing).
     /// Cheap to call every frame.
     pub fn reportScroll(self: *Server, alloc: std.mem.Allocator, offset: ?usize, delta: ?i64) !void {
+        return self.reportScrollIn(alloc, null, offset, delta);
+    }
+
+    /// `reportScroll` against a named context rather than the focused one.
+    /// A wheel tick belongs to the pane under the pointer, which is not
+    /// necessarily the pane that has focus -- pointing at a pane and
+    /// scrolling it should not first require clicking it.
+    pub fn reportScrollIn(
+        self: *Server,
+        alloc: std.mem.Allocator,
+        context: ?core.ContextHandle,
+        offset: ?usize,
+        delta: ?i64,
+    ) !void {
         const result = blk: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            const before = self.ctx.root.view_scroll;
-            const after = self.ctx.root.scrollView(offset, delta);
-            break :blk .{ .changed = before != after, .offset = after, .max = self.ctx.root.history_len };
+            const ctx = self.contextOrFocused(context) orelse return;
+            const before = ctx.root.view_scroll;
+            const after = ctx.root.scrollView(offset, delta);
+            break :blk .{ .changed = before != after, .offset = after, .max = ctx.root.history_len };
         };
         if (!result.changed) return;
 
@@ -704,10 +798,23 @@ pub const Server = struct {
     /// notification carrying the layer handle, only on an actual change.
     /// A no-op (not an error) for an unknown handle.
     pub fn reportLayerScroll(self: *Server, alloc: std.mem.Allocator, layer: core.LayerHandle, offset: ?usize, delta: ?i64) !void {
+        return self.reportLayerScrollIn(alloc, null, layer, offset, delta);
+    }
+
+    /// `reportLayerScroll` against a named context -- see `reportScrollIn`.
+    pub fn reportLayerScrollIn(
+        self: *Server,
+        alloc: std.mem.Allocator,
+        context: ?core.ContextHandle,
+        layer: core.LayerHandle,
+        offset: ?usize,
+        delta: ?i64,
+    ) !void {
         const result = blk: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            const l = self.ctx.layers.getPtr(layer) orelse break :blk null;
+            const ctx = self.contextOrFocused(context) orelse break :blk null;
+            const l = ctx.layers.getPtr(layer) orelse break :blk null;
             const before = l.view_scroll;
             const after = l.scrollView(offset, delta);
             break :blk .{ .changed = before != after, .offset = after, .max = l.history_len };
@@ -831,10 +938,24 @@ pub const Server = struct {
         offset: ?core.CellPos,
         delta: ?core.CellPos.Delta,
     ) !void {
+        return self.reportScrollOffsetIn(alloc, null, layer_handle, offset, delta);
+    }
+
+    /// `reportScrollOffset` against a named context -- see
+    /// `reportScrollIn` for why the pointer's pane, not the focused one.
+    pub fn reportScrollOffsetIn(
+        self: *Server,
+        alloc: std.mem.Allocator,
+        context: ?core.ContextHandle,
+        layer_handle: core.LayerHandle,
+        offset: ?core.CellPos,
+        delta: ?core.CellPos.Delta,
+    ) !void {
         const result = blk: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            const layer = self.ctx.layerPtr(layer_handle) orelse return;
+            const ctx = self.contextOrFocused(context) orelse return;
+            const layer = ctx.layerPtr(layer_handle) orelse return;
             const before = layer.effectiveScrollOffset();
             var after = before;
             if (offset) |o| after = layer.setScrollOffset(o);
