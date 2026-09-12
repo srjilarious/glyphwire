@@ -2454,15 +2454,12 @@ pub const Dispatcher = struct {
         // The same routing the in-process path does (`Server.reportKey`):
         // a window manager's prefix has to work regardless of who injected
         // the keystroke, or a client-driven session behaves differently
-        // from a real keyboard.
+        // from a real keyboard. Note the modifiers come from the session,
+        // not from `self.ctx.input` -- an injecting connection's own
+        // context is not necessarily the focused one, and a per-context
+        // down-set is the wrong place to ask anyway (see `Session.mods`).
         if (self.session) |session| {
-            const route = session.routeKey(
-                p.key,
-                p.pressed,
-                self.ctx.input.isKeyDown("left_control") or self.ctx.input.isKeyDown("right_control"),
-                self.ctx.input.isKeyDown("left_alt") or self.ctx.input.isKeyDown("right_alt"),
-                self.ctx.input.isKeyDown("left_shift") or self.ctx.input.isKeyDown("right_shift"),
-            );
+            const route = session.routeKey(p.key, p.pressed);
             switch (route) {
                 .swallow => return .{},
                 .manager => {

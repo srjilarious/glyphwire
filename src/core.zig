@@ -1,5 +1,9 @@
 const std = @import("std");
 
+/// Only for `Session.routeKey`'s printable-key test: whether a key name is
+/// a key that also produces committed text. Pure, same module.
+const key_encode = @import("key_encode.zig");
+
 /// Truecolor RGBA. The "use theme default" sentinel from decisions.md's
 /// color model isn't needed until a real theme system exists; add it when
 /// that lands.
@@ -5405,6 +5409,22 @@ pub const Session = struct {
     /// release with no press, which a VT-aware one can act on.
     swallowed_key: [WindowPrefix.max_key_name]u8 = @splat(0),
     swallowed_key_len: u8 = 0,
+    /// The window-global modifier state `routeKey` matches the prefix
+    /// against, folded left/right and maintained from the modifier key
+    /// events `routeKey` itself sees.
+    ///
+    /// Tracked *here* rather than read off the focused context's input
+    /// down-set, which is what this used to do and which broke the moment
+    /// focus moved. `Context.input` is per *context*, `Server.ctx` follows
+    /// the focused pane, and glyphwire-host edge-detects each modifier
+    /// (`input.KeyInput.reportModifier`) -- so a modifier still held across
+    /// a focus change is never re-reported, and the pane just focused has
+    /// no idea it is down. `Ctrl-B <arrow>` therefore worked exactly once:
+    /// the next `Ctrl-B` read `ctrl = false` from the pane it had just
+    /// moved to, failed to match, and went to that pane's program.
+    ///
+    /// A keyboard is one keyboard. Its state belongs to the window.
+    mods: struct { ctrl: bool = false, alt: bool = false, shift: bool = false } = .{},
 
     /// Denormalised copies of "which context is on screen in the focused
     /// pane" and a change-counter, kept so lock-free readers
@@ -5623,8 +5643,18 @@ pub const Session = struct {
     };
 
     /// Routes one key press or release. Call under the server's
-    /// `ctx_mutex`; mutates the one-shot prefix state.
-    pub fn routeKey(self: *Session, key_name: []const u8, pressed: bool, ctrl: bool, alt: bool, shift: bool) KeyRoute {
+    /// `ctx_mutex`; mutates the one-shot prefix state and the modifier
+    /// state it matches against.
+    ///
+    /// Takes no modifier arguments: it derives them from the key events it
+    /// is already being handed, which is the only view of the keyboard that
+    /// stays correct across a focus change -- see `Session.mods`.
+    pub fn routeKey(self: *Session, key_name: []const u8, pressed: bool) KeyRoute {
+        // Folded in before the early return below: a manager can register
+        // a prefix while a modifier is already held, and the next
+        // keystroke has to match against the real keyboard.
+        const is_mod = self.noteModifier(key_name, pressed);
+
         const prefix = self.window_prefix orelse return .pass;
 
         if (!pressed) {
@@ -5640,11 +5670,38 @@ pub const Session = struct {
         }
 
         if (self.prefix_armed) {
+            // A modifier's own press is not the command. It arrives as a
+            // key event of its own, ahead of the key it modifies, so
+            // treating it as the command swallowed the prefix and left the
+            // real keystroke to fall through to the program. Passed on
+            // rather than withheld, so the program's modifier state stays
+            // accurate either way.
+            if (is_mod) return .pass;
+
+            // A printable key is about to arrive a *second* time as
+            // committed text: an input-capturing host reports both streams
+            // for one keystroke (glyphwire-host's `reportKeyEvents` then
+            // `reportTextInput`). The text is the form a window command is
+            // actually written in -- `"` and `%`, not `shift` plus
+            // `apostrophe`/`five` -- and it is layout- and IME-correct
+            // besides. So withhold the key event, stay armed, and let
+            // `routeText` deliver the command.
+            //
+            // With Ctrl or Alt held there is no text event coming (a real
+            // terminal sends a control byte, and SDL commits no text), so
+            // the key event is the only chance to deliver the command.
+            if (!self.mods.ctrl and !self.mods.alt and
+                key_encode.charFromKeyName(key_name, self.mods.shift) != null)
+            {
+                self.noteSwallowed(key_name);
+                return .swallow;
+            }
+
             self.prefix_armed = false;
             self.noteSwallowed(key_name);
             return .manager;
         }
-        if (prefix.matches(key_name, ctrl, alt, shift)) {
+        if (prefix.matches(key_name, self.mods.ctrl, self.mods.alt, self.mods.shift)) {
             self.prefix_armed = true;
             self.noteSwallowed(key_name);
             return .swallow;
@@ -5653,15 +5710,57 @@ pub const Session = struct {
     }
 
     /// Routes committed text. Only ever a window command or normal input:
-    /// text has no press/release to pair up. Most prefix commands arrive
-    /// here rather than through `routeKey`, since a plain printable key
-    /// with no modifiers is delivered as text (see
-    /// `key_encode.toPtyBytes`).
+    /// text has no press/release to pair up. Every printable prefix
+    /// command arrives here rather than through `routeKey`, which
+    /// deliberately keeps the prefix armed across a printable key's press
+    /// and waits for this -- see the armed branch there.
     pub fn routeText(self: *Session) KeyRoute {
         if (self.window_prefix == null) return .pass;
         if (!self.prefix_armed) return .pass;
         self.prefix_armed = false;
         return .manager;
+    }
+
+    /// Whether `key_name` is the key whose press was withheld and whose
+    /// release is still owed -- i.e. a key the user is holding down as part
+    /// of a prefix sequence. A typematic repeat for it must be dropped, the
+    /// same as its press was, or holding a command key (`Ctrl-B` then a
+    /// held arrow) starts leaking repeats into the program.
+    pub fn isSwallowedKey(self: *const Session, key_name: []const u8) bool {
+        if (self.swallowed_key_len == 0) return false;
+        return std.mem.eql(u8, key_name, self.swallowed_key[0..self.swallowed_key_len]);
+    }
+
+    /// Folds one modifier key event into `mods`, and reports whether
+    /// `key_name` was a modifier at all -- which is also how `routeKey`
+    /// knows not to let one consume the armed prefix.
+    ///
+    /// Left and right fold together, because nothing in glyphwire
+    /// distinguishes them: glyphwire-host forwards each modifier's
+    /// *logical* state under its `left_*` name (see
+    /// `input.KeyInput.reportKeyEvents`), which is also what picks up an
+    /// OS-level remap like CapsLock acting as Control. A wire client that
+    /// reports both physical sides and releases one will read as released
+    /// here; the host never produces that.
+    fn noteModifier(self: *Session, key_name: []const u8, pressed: bool) bool {
+        const eql = std.mem.eql;
+        if (eql(u8, key_name, "left_control") or eql(u8, key_name, "right_control")) {
+            self.mods.ctrl = pressed;
+            return true;
+        }
+        if (eql(u8, key_name, "left_alt") or eql(u8, key_name, "right_alt")) {
+            self.mods.alt = pressed;
+            return true;
+        }
+        if (eql(u8, key_name, "left_shift") or eql(u8, key_name, "right_shift")) {
+            self.mods.shift = pressed;
+            return true;
+        }
+        // Recognised but not stored: `WindowPrefix` has no Super, so there
+        // is nothing to match against. Still a modifier, and so still must
+        // not be taken for a command.
+        if (eql(u8, key_name, "left_super") or eql(u8, key_name, "right_super")) return true;
+        return false;
     }
 
     fn noteSwallowed(self: *Session, key_name: []const u8) void {

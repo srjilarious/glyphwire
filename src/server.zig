@@ -712,16 +712,12 @@ pub const Server = struct {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             // The down-set is updated either way: a program asking
-            // `get_input_state` should see the real keyboard, and the
-            // manager's own modifier checks read the same set.
+            // `get_input_state` should see the real keyboard. It is
+            // deliberately *not* what the prefix matches against -- that
+            // set belongs to whichever context is focused right now, and
+            // goes stale the instant focus moves. See `Session.mods`.
             const changed = try self.ctx.input.setKey(key, pressed);
-            const route = self.session.routeKey(
-                key,
-                pressed,
-                self.ctx.input.isKeyDown("left_control") or self.ctx.input.isKeyDown("right_control"),
-                self.ctx.input.isKeyDown("left_alt") or self.ctx.input.isKeyDown("right_alt"),
-                self.ctx.input.isKeyDown("left_shift") or self.ctx.input.isKeyDown("right_shift"),
-            );
+            const route = self.session.routeKey(key, pressed);
             break :decision .{ .changed = changed, .route = route };
         };
 
@@ -784,11 +780,14 @@ pub const Server = struct {
         // A held key while the prefix is armed must not repeat-fire a
         // window command, and must not reach the program either. Dropping
         // the repeat is the whole handling needed: prefix commands are
-        // one-shot, so a repeat has nothing to mean.
+        // one-shot, so a repeat has nothing to mean. The same goes once the
+        // command has fired, while the key is still held: its press was
+        // withheld, so its repeats are too (`Session.isSwallowedKey`).
         {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             if (self.session.prefix_armed) return;
+            if (self.session.isSwallowedKey(key)) return;
         }
         const body = try rpc.keyRepeatNotification(alloc, key);
         defer alloc.free(body);

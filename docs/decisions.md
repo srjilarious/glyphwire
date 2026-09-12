@@ -3731,6 +3731,61 @@ invisible to every program. `window_key` and `window_text` are separate
 `InputEvent` variants rather than reusing `key`/`text`, so a manager
 cannot confuse the two even by accident.
 
+**The armed prefix survives a modifier press, and survives a printable
+key's press to wait for its text.** Found running gmux against the real
+host, where `Ctrl-B "` and `Ctrl-B %` did nothing and the character
+landed in the shell. Both halves come from the same mistake: assuming a
+keystroke arrives once. An input-capturing host reports each keystroke on
+*two* streams (`input.KeyInput.reportKeyEvents` then `reportTextInput`),
+and reports each modifier as a key event of its own *ahead* of the key it
+modifies. Against a one-shot arm that consumed whatever came next, the
+`left_shift` press ate the arm, and for an unshifted command (`x`, `z`,
+`q`) the key press ate it before the text could be the command — so only
+the arrow keys, which produce no text, ever worked.
+
+`Session.routeKey` therefore treats three cases separately while armed: a
+modifier press passes through and leaves the arm alone; a printable key
+with neither Ctrl nor Alt held is *withheld* and leaves the arm alone,
+because the command is the text that follows (`"`, not `shift` plus
+`apostrophe` — and layout- and IME-correct besides); anything else is the
+command and disarms. `key_encode.charFromKeyName` is the printable test,
+which is what it already existed to answer. A printable key with Ctrl or
+Alt held has no text event coming, so there the key event is the command.
+
+The release of a withheld press is withheld with it (`swallowed_key`),
+and `Server.reportKeyRepeat` now drops repeats for that key too — without
+that, `Ctrl-B` and a *held* arrow moved focus once and then leaked arrow
+repeats into the program.
+
+**The keyboard's modifier state belongs to the session, not to a
+context.** The second bug found running gmux, and the reason pane
+navigation worked exactly once. `routeKey` used to match the prefix
+against `Server.ctx.input`, the focused pane's own down-set — but
+`Server.ctx` follows focus, so the moment a command *moved* focus the
+routing started reading a different keyboard. glyphwire-host edge-detects
+each modifier (`input.KeyInput.reportModifier` forwards a transition, not
+a per-frame state), so neither context is ever corrected:
+
+- a modifier still held across the focus change is never re-reported, so
+  the newly focused context has it *missing* — `Ctrl-B ←` with Ctrl held
+  worked, and the next `Ctrl-B` read `ctrl = false` and typed a `b` into
+  the pane it had just moved to;
+- the *release* lands on the newly focused context, so the one left behind
+  has it *stuck* — after `Ctrl-B %` (Shift held over a focus-changing
+  split), pane A's context had `left_shift` down forever, and navigating
+  back there made every `Ctrl-B` read as Ctrl-Shift-B, matching no chord.
+  The prefix was dead in that pane for the rest of the session.
+
+So `Session.mods` tracks ctrl/alt/shift from the modifier key events
+`routeKey` is already handed, and `routeKey` takes no modifier arguments
+at all — deriving them is the only view of the keyboard that survives a
+focus change. Left and right fold together, matching what the host sends.
+`Context.input` keeps its own down-set for `get_input_state`, which is a
+program asking about its own keyboard; it is no longer load-bearing for
+routing. (It is still per-context and still goes stale across a focus
+change with a key held — a separate wart, and only a program polling
+`get_input_state` can see it.)
+
 **`spawn_in_pane` is a server-side operation.** A pane is meant to be a
 sequestered host, and the thing that *is* the host is the only thing that
 knows what a child needs in order to find it: the socket path, the pane it

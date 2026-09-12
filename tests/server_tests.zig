@@ -688,3 +688,184 @@ pub fn thePrefixSequenceNeverReachesTheProgramTest(io: std.Io, alloc: std.mem.Al
     try testz.expectTrue(std.mem.indexOf(u8, body, "\"q\"") == null);
     try testz.expectTrue(std.mem.indexOf(u8, body, "\"b\"") == null);
 }
+
+/// The prefix command actually *reaches* the manager when the keystrokes
+/// arrive the way glyphwire-host sends them: the modifier as a key event of
+/// its own first, then the keystroke as both a key event and committed
+/// text. `thePrefixSequenceNeverReachesTheProgramTest` above only checked
+/// the program's side and fed the text with no key event before it, which
+/// is why `Ctrl-B "` looked fine in tests and did nothing in the real
+/// window -- the shift press, and then the `apostrophe` press, each ate the
+/// one-shot arm before the `"` text could be the command.
+pub fn aShiftedPrefixCommandReachesTheManagerInHostOrderTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-wmcmd-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer accept_thread.join();
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+
+    // One connection playing both halves of gmux: the manager role plus the
+    // `window_keys` stream the commands are addressed to.
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"request_role","params":{"role":"window_manager"}}
+    );
+    try w.interface.flush();
+    const granted = try readOneFrame(io, alloc, &stream, &decoder);
+    defer alloc.free(granted);
+    try testz.expectTrue(std.mem.indexOf(u8, granted, "\"granted\":true") != null);
+
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":2,"method":"subscribe","params":{"events":["window_keys"]}}
+    );
+    try w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &stream, &decoder));
+
+    srv.session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+
+    // Ctrl-B, released, exactly as the host reports it.
+    try srv.reportKey(alloc, "left_control", true);
+    try srv.reportKey(alloc, "b", true);
+    try srv.reportKey(alloc, "b", false);
+    try srv.reportKey(alloc, "left_control", false);
+
+    // Then Shift + apostrophe: a modifier press, a key press, and the text.
+    try srv.reportKey(alloc, "left_shift", true);
+    try srv.reportKey(alloc, "apostrophe", true);
+    try srv.reportText(alloc, "\"");
+    try srv.reportKey(alloc, "apostrophe", false);
+    try srv.reportKey(alloc, "left_shift", false);
+
+    // The one thing this connection is subscribed to is `window_keys`, so
+    // the next frame is the command -- and it is the text, not the key.
+    const body = try readOneFrame(io, alloc, &stream, &decoder);
+    defer alloc.free(body);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"window_text\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\\\"") != null);
+}
+
+/// `Ctrl-B <arrow>` twice in a row, with Ctrl held down throughout -- the
+/// sequence that worked exactly once in the real window.
+///
+/// Moving focus repoints `Server.ctx` at the newly focused pane's context,
+/// and the modifier down-set used to be read from *there*. glyphwire-host
+/// edge-detects each modifier (`input.KeyInput.reportModifier`), so a Ctrl
+/// still held across the focus change is never re-reported and the pane
+/// just focused has no idea it is down: the second `Ctrl-B` matched no
+/// chord, never armed the prefix, and both it and the arrow went to that
+/// pane's program. The session owns the modifier state now -- a keyboard is
+/// one keyboard.
+pub fn thePrefixSurvivesAFocusChangeWithAModifierHeldTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-prefix-focus-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // Two panes side by side, both mapped, root focused.
+    const made = try srv.session.createPane(0, 0);
+    const split = try srv.session.createPaneSplit(.row, true);
+    try srv.session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try srv.session.setRootPaneSplit(split);
+    try srv.session.layoutPanes(null, null);
+
+    srv.session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+
+    // Ctrl-B, Ctrl *not* released.
+    try srv.reportKey(alloc, "left_control", true);
+    try srv.reportKey(alloc, "b", true);
+    try testz.expectTrue(srv.session.prefix_armed);
+    try srv.reportKey(alloc, "b", false);
+
+    // The arrow is the command; the manager answers it by moving focus,
+    // which is what repoints `srv.ctx` at the other pane's context.
+    try srv.reportKey(alloc, "left", true);
+    try testz.expectTrue(!srv.session.prefix_armed);
+    try srv.focusPane(alloc, made.pane);
+    try testz.expectEqual(srv.session.focusedPaneHandle(), made.pane);
+    try srv.reportKey(alloc, "left", false);
+
+    // Ctrl-B again, still without ever having released Ctrl. This is the
+    // one that used to fall through to the program.
+    try srv.reportKey(alloc, "b", true);
+    try testz.expectTrue(srv.session.prefix_armed);
+    try testz.expectTrue(srv.session.mods.ctrl);
+}
+
+/// The same root cause from the other direction, and the likelier way to
+/// hit it: a *stale* modifier rather than a missing one.
+///
+/// `Ctrl-B %` holds Shift while pane A is focused, so A's context records
+/// `left_shift` down. The split then focuses the new pane, and the Shift
+/// release lands on *that* context -- leaving A's stuck down for good. Back
+/// in pane A, `Ctrl-B` used to be read as Ctrl-Shift-B, which matches no
+/// chord, so the prefix was permanently dead in the pane the user had just
+/// navigated into.
+pub fn aStaleModifierInAPanesContextDoesNotKillThePrefixTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-prefix-stale-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const made = try srv.session.createPane(0, 0);
+    const split = try srv.session.createPaneSplit(.row, true);
+    try srv.session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try srv.session.setRootPaneSplit(split);
+    try srv.session.layoutPanes(null, null);
+
+    srv.session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+
+    // `Ctrl-B %` in the root pane: Ctrl-B, Ctrl up, then Shift plus the
+    // key, and the split's own focus change lands between the Shift press
+    // and its release.
+    try srv.reportKey(alloc, "left_control", true);
+    try srv.reportKey(alloc, "b", true);
+    try srv.reportKey(alloc, "b", false);
+    try srv.reportKey(alloc, "left_control", false);
+
+    try srv.reportKey(alloc, "left_shift", true);
+    try srv.reportKey(alloc, "five", true);
+    try srv.reportText(alloc, "%");
+    try srv.focusPane(alloc, made.pane);
+    try srv.reportKey(alloc, "five", false);
+    try srv.reportKey(alloc, "left_shift", false);
+    try testz.expectTrue(!srv.session.mods.shift);
+
+    // Back to the pane whose context still has Shift stuck down, and the
+    // prefix has to work there.
+    try srv.focusPane(alloc, glyphwire.root_pane_handle);
+    try srv.reportKey(alloc, "left_control", true);
+    try srv.reportKey(alloc, "b", true);
+    try testz.expectTrue(srv.session.prefix_armed);
+    try srv.reportKey(alloc, "left", true);
+    try testz.expectTrue(!srv.session.prefix_armed);
+}
