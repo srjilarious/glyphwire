@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Glyphwire terminal icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#020a07"/>
+      <stop offset="1" stop-color="#001b10"/>
+    </linearGradient>
+    <linearGradient id="panelFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00ff9c" stop-opacity="0.025"/>
+      <stop offset="1" stop-color="#00ff9c" stop-opacity="0.10"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#77ffd0"/>
+      <stop offset="0.55" stop-color="#19f5a0"/>
+      <stop offset="1" stop-color="#00b86f"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="10" result="b1"/>
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="b2"/>
+      <feMerge><feMergeNode in="b1"/><feMergeNode in="b2"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="innerClip">
+      <rect x="84" y="84" width="856" height="856" rx="164"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1024" height="1024" rx="190" fill="url(#bg)"/>
+
+  <g clip-path="url(#innerClip)" opacity="0.45">
+    <g stroke="#00f090" stroke-width="2" opacity="0.18">
+      <path d="M160 80v864M260 80v864M360 80v864M460 80v864M560 80v864M660 80v864M760 80v864M860 80v864"/>
+      <path d="M80 160h864M80 260h864M80 360h864M80 460h864M80 560h864M80 660h864M80 760h864M80 860h864"/>
+    </g>
+    <g stroke="#35ffaf" stroke-width="4" opacity="0.85">
+      <path d="M150 160h20M160 150v20 M250 160h20M260 150v20 M350 160h20M360 150v20 M450 160h20M460 150v20 M550 160h20M560 150v20 M650 160h20M660 150v20 M750 160h20M760 150v20 M850 160h20M860 150v20"/>
+      <path d="M150 260h20M160 250v20 M750 260h20M760 250v20 M850 260h20M860 250v20"/>
+      <path d="M150 360h20M160 350v20 M850 360h20M860 350v20"/>
+      <path d="M150 460h20M160 450v20 M850 460h20M860 450v20"/>
+      <path d="M150 560h20M160 550v20 M850 560h20M860 550v20"/>
+      <path d="M150 660h20M160 650v20 M850 660h20M860 650v20"/>
+      <path d="M150 760h20M160 750v20 M250 760h20M260 750v20 M350 760h20M360 750v20 M450 760h20M460 750v20 M550 760h20M560 750v20 M650 760h20M660 750v20 M750 760h20M760 750v20 M850 760h20M860 750v20"/>
+      <path d="M150 860h20M160 850v20 M250 860h20M260 850v20 M350 860h20M360 850v20 M450 860h20M460 850v20 M550 860h20M560 850v20 M650 860h20M660 850v20 M750 860h20M760 850v20 M850 860h20M860 850v20"/>
+    </g>
+  </g>
+
+  <g fill="url(#panelFill)" stroke="url(#edge)" stroke-width="3">
+    <rect x="360" y="360" width="500" height="420" rx="8" opacity="0.55"/>
+    <rect x="260" y="290" width="500" height="420" rx="8" opacity="0.75"/>
+    <rect x="170" y="220" width="500" height="420" rx="8" fill="#00140c" fill-opacity="0.92"/>
+  </g>
+
+  <g filter="url(#softGlow)" fill="#39f5a6">
+    <!-- pixelated > -->
+    <rect x="248" y="292" width="38" height="38"/>
+    <rect x="276" y="320" width="38" height="38"/>
+    <rect x="304" y="348" width="38" height="38"/>
+    <rect x="332" y="376" width="38" height="38"/>
+    <rect x="360" y="404" width="38" height="38"/>
+    <rect x="332" y="432" width="38" height="38"/>
+    <rect x="304" y="460" width="38" height="38"/>
+    <rect x="276" y="488" width="38" height="38"/>
+    <rect x="248" y="516" width="38" height="38"/>
+    <!-- underscore -->
+    <rect x="414" y="510" width="168" height="34"/>
+    <!-- metadata/layer node -->
+    <rect x="708" y="545" width="62" height="62"/>
+  </g>
+
+  <rect x="48" y="48" width="928" height="928" rx="190" fill="none" stroke="#0aff9a" stroke-opacity="0.18" stroke-width="28" filter="url(#glow)"/>
+  <rect x="58" y="58" width="908" height="908" rx="182" fill="none" stroke="url(#edge)" stroke-width="10" filter="url(#softGlow)"/>
+</svg>

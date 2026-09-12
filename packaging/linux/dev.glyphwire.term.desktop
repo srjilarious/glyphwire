@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Glyphwire
+Comment=Glyphwire terminal host
+Exec=glyphwire
+Icon=glyphwire
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupNotify=true

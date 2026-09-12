@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const app_id = "dev.glyphwire.term";
 
     const glyphwire_mod = b.addModule("glyphwire", .{
         .root_source_file = b.path("src/glyphwire.zig"),
@@ -14,6 +15,22 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "assets",
     });
     b.getInstallStep().dependOn(&installed_assets_step.step);
+
+    const installed_desktop_entry = b.addInstallFileWithDir(
+        b.path(b.fmt("packaging/linux/{s}.desktop", .{app_id})),
+        .{ .custom = "share/applications" },
+        b.fmt("{s}.desktop", .{app_id}),
+    );
+    const installed_desktop_icon_svg = b.addInstallFileWithDir(
+        b.path("assets/glyphwire_icon.svg"),
+        .{ .custom = "share/icons/hicolor/scalable/apps" },
+        "glyphwire.svg",
+    );
+    const installed_desktop_icon_png = b.addInstallFileWithDir(
+        b.path("assets/glyphwire_icon.png"),
+        .{ .custom = "share/icons/hicolor/256x256/apps" },
+        "glyphwire.png",
+    );
 
     // Pure prompt helpers shared by gw-shell and its test runner
     // (a Zig module can't be reached across directories via relative
@@ -468,6 +485,9 @@ pub fn build(b: *std.Build) void {
         package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     package_step.dependOn(&installed_assets_step.step);
+    package_step.dependOn(&installed_desktop_entry.step);
+    package_step.dependOn(&installed_desktop_icon_svg.step);
+    package_step.dependOn(&installed_desktop_icon_png.step);
     // zoe dlopens its syntax grammars from share/glyphwire/grammars at
     // runtime, so the packaged tree has to carry them alongside the binary.
     package_step.dependOn(grammars_step);
@@ -477,6 +497,9 @@ pub fn build(b: *std.Build) void {
         install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     install_local_step.dependOn(&installed_assets_step.step);
+    install_local_step.dependOn(&installed_desktop_entry.step);
+    install_local_step.dependOn(&installed_desktop_icon_svg.step);
+    install_local_step.dependOn(&installed_desktop_icon_png.step);
     install_local_step.dependOn(grammars_step);
 }
 

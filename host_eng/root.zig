@@ -29,6 +29,7 @@ pub const Color8 = core.Color8;
 pub const Viewport = core.Viewport;
 pub const ScalePolicy = core.ScalePolicy;
 pub const WindowState = window_mod.WindowState;
+pub const AppMetadata = core.AppMetadata;
 pub const InputOptions = core.InputOptions;
 pub const EngineOptions = core.EngineOptions;
 pub const EngineInitOptions = core.EngineInitOptions;
@@ -203,6 +204,12 @@ pub fn EngineType(comptime engOpts: EngineOptions) type {
             if (comptime engOpts.manifestOpts != null) @compileError("host_eng does not carry an asset manifest");
             if (comptime engOpts.inputOpts.numGamepads > 0) @compileError("host_eng does not carry gamepad support");
 
+            if (options.appMetadata) |meta| {
+                if (!sdl.SDL_SetAppMetadata(meta.name.ptr, meta.version.ptr, meta.identifier.ptr)) {
+                    std.log.warn("SDL_SetAppMetadata failed: {s}", .{sdl.SDL_GetError()});
+                }
+            }
+
             if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO | sdl.SDL_INIT_EVENTS)) return platform_mod.sdlError(error.SdlInitFailed);
             errdefer sdl.SDL_Quit();
 
@@ -279,6 +286,11 @@ pub fn EngineType(comptime engOpts: EngineOptions) type {
 
             eng.renderer = try Renderer.init(allocator, &eng.resources, options.renderInitOpts);
             errdefer eng.renderer.deinit();
+            if (options.windowIconPath) |icon_path| {
+                eng.setIconFile(icon_path) catch |err| {
+                    std.log.warn("could not set window icon '{s}': {t}", .{ icon_path, err });
+                };
+            }
             eng.enableVSync(engOpts.vsyncEnabled);
             eng.inputs.seedMousePos();
 
@@ -352,6 +364,22 @@ pub fn EngineType(comptime engOpts: EngineOptions) type {
             const encoded = try icon_data.readAlloc(self.allocator, icon_data.end);
             defer self.allocator.free(encoded);
 
+            try self.setIconBytes(encoded);
+        }
+
+        pub fn setIconFile(self: *Self, icon_path: []const u8) !void {
+            const encoded = try std.Io.Dir.cwd().readFileAlloc(
+                std.Io.Threaded.global_single_threaded.io(),
+                icon_path,
+                self.allocator,
+                .limited(16 * 1024 * 1024),
+            );
+            defer self.allocator.free(encoded);
+
+            try self.setIconBytes(encoded);
+        }
+
+        fn setIconBytes(self: *Self, encoded: []const u8) !void {
             var image = try stbi.Image.loadFromMemory(encoded, 4);
             defer image.deinit();
 

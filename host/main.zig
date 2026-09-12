@@ -14,6 +14,11 @@ const remote_mod = @import("remote.zig");
 pub const panic = host_eng.system.panic;
 pub const std_options = host_eng.system.std_options;
 
+const app_name: [:0]const u8 = "Glyphwire";
+const app_version: [:0]const u8 = "0.1.0";
+const app_id: [:0]const u8 = "dev.glyphwire.term";
+const app_icon_asset = "glyphwire_icon.png";
+
 /// glyphwire entry point. This file is deliberately thin: startup
 /// wiring (config, fonts, icons, the in-process `Server` + its thread, the
 /// gw-shell child) and then handing off to the engine's app runner.
@@ -373,7 +378,14 @@ pub fn main(init: std.process.Init) !void {
 
     // Font atlas packing (unlike the metrics measured above) does need a GL
     // context, so it still happens here, after the window is created.
+    const app_icon_path = try bundledAssetPath(arena, asset_dir, app_icon_asset);
     const appRunner = try app_mod.AppRunner.init("glyphwire", alloc, .{
+        .appMetadata = .{
+            .name = app_name,
+            .version = app_version,
+            .identifier = app_id,
+        },
+        .windowIconPath = app_icon_path,
         .windowSize = .{
             // Open wide enough for all `grid_cols` cells *plus* the
             // always-on scrollbar and a `content_pad_px` margin on each

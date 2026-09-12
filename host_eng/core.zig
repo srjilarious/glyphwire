@@ -66,7 +66,15 @@ pub const EngineOptions = struct {
     redrawOnDemand: bool = false,
 };
 
+pub const AppMetadata = struct {
+    name: [:0]const u8,
+    version: [:0]const u8 = "",
+    identifier: [:0]const u8,
+};
+
 pub const EngineInitOptions = struct {
+    appMetadata: ?AppMetadata = null,
+    windowIconPath: ?[:0]const u8 = null,
     fullscreen: bool = false,
     windowSize: Vec2I = .{ .x = 800, .y = 480 },
     resizable: bool = true,
