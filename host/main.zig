@@ -348,6 +348,18 @@ pub const App = struct {
     mouse_moved: bool = false,
     mouse_anchor: glyphwire.SelectionPoint = .{ .above = 0, .col = 0 },
     mouse_last_cell: glyphwire.CellPos = .{},
+    /// Hold timers for the keyboard-selection-mode arrow keys, so a held
+    /// arrow keeps extending the selection at the same typematic cadence
+    /// (`key_repeat_delay_ms` / `key_repeat_interval_ms`) the shell's own
+    /// keys repeat at. Separate from `key_repeat` (which drives the
+    /// shell-bound repeats `handleRepeatKeys` skips entirely while
+    /// `select_mode` is set).
+    select_repeat: struct {
+        left: KeyRepeatState = .{},
+        right: KeyRepeatState = .{},
+        up: KeyRepeatState = .{},
+        down: KeyRepeatState = .{},
+    } = .{},
 
     /// Font file/size passed to `App.init` -- what `applyFontSize` needs to
     /// repeat the startup `measureFontFileIndexed` at a new size.
@@ -735,7 +747,7 @@ pub const App = struct {
         // arrow/Home/End/Escape/Enter motions. Runs before
         // `reportKeyEvents`, which swallows the same keys so the shell
         // never sees them (see `selectionSwallows`).
-        self.handleSelectionKeys(eng);
+        self.handleSelectionKeys(eng, deltaTimeMs);
         // Push the session clipboard buffer to the OS clipboard if it
         // changed (a client's `set_clipboard`, or a selection copy just
         // above). Main-thread GLFW call.
@@ -1119,7 +1131,7 @@ pub const App = struct {
     /// Ctrl+Shift+C / +V / +Space, plus the keyboard-selection-mode
     /// motion keys. Runs before `reportKeyEvents` (which swallows the
     /// same keys).
-    fn handleSelectionKeys(self: *App, eng: *AppRunner.Engine) void {
+    fn handleSelectionKeys(self: *App, eng: *AppRunner.Engine, delta_ms: f64) void {
         const kb = &eng.inputs.keyboard;
         const cs = kb.ctrl() and kb.shift();
 
@@ -1146,25 +1158,47 @@ pub const App = struct {
             return;
         }
 
-        var dcol: i64 = 0;
-        var drow: i64 = 0;
-        var to_edge: i8 = 0;
-        if (kb.pressed(.left)) {
-            dcol = -1;
-        } else if (kb.pressed(.right)) {
-            dcol = 1;
-        } else if (kb.pressed(.up)) {
-            drow = -1;
-        } else if (kb.pressed(.down)) {
-            drow = 1;
-        } else if (kb.pressed(.home)) {
-            to_edge = -1;
-        } else if (kb.pressed(.end)) {
-            to_edge = 1;
-        } else {
+        // Home / End jump to the line edge -- edge-triggered, no repeat
+        // (holding them past the edge does nothing anyway).
+        if (kb.pressed(.home)) {
+            self.moveSelectionActive(0, 0, -1);
             return;
         }
-        self.moveSelectionActive(dcol, drow, to_edge);
+        if (kb.pressed(.end)) {
+            self.moveSelectionActive(0, 0, 1);
+            return;
+        }
+
+        // Arrows extend on the initial press and then repeat while held,
+        // at the same cadence the shell's own keys repeat at.
+        self.selectArrowRepeat(eng, .left, &self.select_repeat.left, -1, 0, delta_ms);
+        self.selectArrowRepeat(eng, .right, &self.select_repeat.right, 1, 0, delta_ms);
+        self.selectArrowRepeat(eng, .up, &self.select_repeat.up, 0, -1, delta_ms);
+        self.selectArrowRepeat(eng, .down, &self.select_repeat.down, 0, 1, delta_ms);
+    }
+
+    /// One selection-mode arrow: move the active end once on the press
+    /// edge, then again each time its hold timer crosses a repeat
+    /// threshold (mirrors `handleArrowRepeat`, but drives the selection
+    /// instead of the root cursor / a shell key broadcast).
+    fn selectArrowRepeat(
+        self: *App,
+        eng: *AppRunner.Engine,
+        key: pixzig.glfw.Key,
+        state: *KeyRepeatState,
+        dcol: i64,
+        drow: i64,
+        delta_ms: f64,
+    ) void {
+        const kb = &eng.inputs.keyboard;
+        if (kb.pressed(key)) {
+            state.reset();
+            self.moveSelectionActive(dcol, drow, 0);
+        } else if (kb.down(key)) {
+            if (state.tick(delta_ms)) self.moveSelectionActive(dcol, drow, 0);
+        } else {
+            state.reset();
+        }
     }
 
     /// Enters keyboard selection mode with a zero-width selection at the
@@ -1199,6 +1233,10 @@ pub const App = struct {
 
     fn endSelectMode(self: *App, clear: bool) void {
         self.select_mode = false;
+        self.select_repeat.left.reset();
+        self.select_repeat.right.reset();
+        self.select_repeat.up.reset();
+        self.select_repeat.down.reset();
         if (clear) self.server.clearSelection(self.alloc, null) catch |err| {
             std.log.err("glyphwire-host: clearSelection failed: {t}", .{err});
         };
