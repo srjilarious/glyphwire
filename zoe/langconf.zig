@@ -27,12 +27,30 @@ const Color = glyphwire.Color;
 
 const conf_name = "zoe.conf.lua";
 
-// zoe's own typematic repeat cadence, asked for with `set_key_repeat`
-// once the editor's context exists (see `ui.Ui.applyKeyRepeat`). Equal
-// values mean no initial hold: a held key starts moving the cursor on
-// the next tick instead of after a shell-length pause.
+/// One typematic repeat cadence, as asked of glyphwire-host with
+/// `set_key_repeat`: the hold before a key starts repeating, then the
+/// gap between repeats.
+pub const KeyRepeat = struct {
+    delay_ms: f64,
+    interval_ms: f64,
+};
+
+// zoe asks for two cadences and switches between them by mode (see
+// `ui.Ui.syncKeyRepeat`), because the same key means different things in
+// each and glyphwire-host repeats *typed* characters on this clock too.
+//
+// Normal / visual: no initial hold at all. Every repeat there is a
+// motion -- `j`, an arrow, PageDown -- and waiting out a shell-length
+// pause before a held key starts moving is exactly wrong.
 pub const key_repeat_delay_ms_default: f64 = 30;
 pub const key_repeat_interval_ms_default: f64 = 30;
+// Insert / command: a hold long enough that ordinary typing can't
+// trigger it. A keystroke is held for ~100ms in normal typing, so the
+// motion cadence above would turn every one of them into three or four
+// characters. This is the OS-typical behaviour, and the one thing a
+// text field must get right.
+pub const key_repeat_insert_delay_ms_default: f64 = 400;
+pub const key_repeat_insert_interval_ms_default: f64 = 40;
 
 /// The parsed config. Everything it points at is owned by `arena`.
 pub const Config = struct {
@@ -54,15 +72,22 @@ pub const Config = struct {
     /// non-number value is ignored.
     page_lines: usize = 10,
     /// `config.key_repeat_delay_ms` / `config.key_repeat_interval_ms` --
-    /// the typematic repeat cadence zoe asks glyphwire-host for while it
-    /// is focused (`Client.setKeyRepeat`). The defaults are equal, which
-    /// means no initial hold at all: a held arrow or PageDown starts
-    /// moving on the very next tick, where a shell deliberately waits
-    /// half a second before repeating a key that might be a command.
-    /// A negative delay, a non-positive interval, or a non-number is
-    /// ignored; the host clamps whatever does get through.
+    /// the typematic repeat cadence zoe asks glyphwire-host for in
+    /// normal and visual mode (`Client.setKeyRepeat`). The defaults are
+    /// equal, which means no initial hold at all: a held `j`, arrow or
+    /// PageDown starts moving on the very next tick, where a shell
+    /// deliberately waits half a second before repeating a key that
+    /// might be a command. A negative delay, a non-positive interval, or
+    /// a non-number is ignored; the host clamps whatever gets through.
     key_repeat_delay_ms: f64 = key_repeat_delay_ms_default,
     key_repeat_interval_ms: f64 = key_repeat_interval_ms_default,
+    /// `config.key_repeat_insert_delay_ms` /
+    /// `config.key_repeat_insert_interval_ms` -- the same, for insert and
+    /// command mode, where a held letter types rather than moves. Kept
+    /// separate because the motion cadence would turn one ordinary
+    /// keystroke into several characters; see the defaults above.
+    key_repeat_insert_delay_ms: f64 = key_repeat_insert_delay_ms_default,
+    key_repeat_insert_interval_ms: f64 = key_repeat_insert_interval_ms_default,
     /// `config.line_numbers` -- the buffer-pane line-number gutter.
     /// Absent or `true` means `.absolute` (the gutter is on); `false`
     /// turns it off; `"absolute"` / `"relative"` pick the style, where
@@ -138,6 +163,8 @@ pub fn load(
     cfg.page_lines = readPageLines(lua, cfg.page_lines);
     cfg.key_repeat_delay_ms = readMs(lua, "key_repeat_delay_ms", 0, cfg.key_repeat_delay_ms);
     cfg.key_repeat_interval_ms = readMs(lua, "key_repeat_interval_ms", 1, cfg.key_repeat_interval_ms);
+    cfg.key_repeat_insert_delay_ms = readMs(lua, "key_repeat_insert_delay_ms", 0, cfg.key_repeat_insert_delay_ms);
+    cfg.key_repeat_insert_interval_ms = readMs(lua, "key_repeat_insert_interval_ms", 1, cfg.key_repeat_insert_interval_ms);
     cfg.line_numbers = readLineNumbers(lua, cfg.line_numbers);
     cfg.tab_width = readTabWidth(lua, cfg.tab_width);
     cfg.expand_tab = readFlag(lua, "expand_tab", cfg.expand_tab);

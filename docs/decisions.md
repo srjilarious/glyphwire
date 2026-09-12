@@ -979,6 +979,47 @@ surface.
   A retime applies from the next press, never mid-hold, so it can't
   fire a burst of catch-up repeats. No wire change to the repeat
   itself — it is still just another `key_down`.
+- **Held printable keys repeat on that same clock, not the desktop's.**
+  Left alone, they wouldn't: a held letter repeats because the OS
+  generates fresh `SDL_EVENT_TEXT_INPUT` events for it, timed by the
+  desktop's own keyboard settings, which SDL offers no way to turn off.
+  So the moment a program picks its own cadence, one held key runs at
+  two rates at once — in zoe, `j` at the desktop's ~500ms/30ms and Down
+  at zoe's 30/30 — which is worse than either rate alone.
+  The fix has two halves, both in `Keyboard`. Committed text that
+  arrived on a **fresh press of a key that is still down** is
+  remembered against that key (`noteCommittedText`); when that key's
+  repeat fires, the same text is re-sent (`textRepeated`). And an
+  incoming text event that is the OS auto-repeating a key already
+  repeating here is swallowed (`absorbRepeatedText`) — but *used*, to
+  refresh what that key types, so a Shift pressed mid-hold still turns
+  `a` into `A` once the OS's stream reports it.
+  Everything that can't be attributed to a held key is deliberately
+  left alone: an IME commit belongs to a finished composition, not to a
+  key being held, and re-sending it on a hold would type characters
+  nobody asked for. Such text is delivered normally and its OS repeats
+  are passed through rather than dropped — the rule is never to swallow
+  input this can't reproduce itself, so the worst case degrades to the
+  old OS-timed behaviour instead of losing keystrokes.
+  Consequence worth stating: a held letter at the shell prompt now
+  repeats at `host.conf`'s cadence rather than the user's desktop
+  setting. That is the point — one session, one cadence — and it is
+  configurable in the same place as everything else.
+- **A client with modes re-sends `set_key_repeat` when the mode
+  changes.** Unifying text onto the program's cadence makes the delay
+  do double duty, and the two duties conflict: zoe wants *no* hold in
+  normal mode, where a held `j` is a motion, and a real one in insert
+  mode, where the same key types — an ordinary keystroke is held for
+  ~100ms, so a 30ms hold would turn each into three or four characters.
+  No host-side rule can separate those: it is the same key, the same
+  keyboard, and only the client knows which meaning is in force.
+  Splitting the wire message into "text timing" and "key timing"
+  doesn't work either, for exactly that reason — normal-mode `j` is a
+  text key that wants the motion cadence. So the split lives where the
+  knowledge is: zoe keeps two cadences in `zoe.conf` and switches
+  between them on the mode change (`Ui.syncKeyRepeat`, re-sent only
+  when the value actually differs). Which is what a per-program
+  override was for — the protocol needed nothing new.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline

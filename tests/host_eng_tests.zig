@@ -291,6 +291,127 @@ pub fn keyRepeatDueMsIsNullWhenDisabledTest(_: std.Io, _: std.mem.Allocator) !vo
     try testz.expectEqual(kb.repeatDueMs(.down), null);
 }
 
+// ─── text repeat ──────────────────────────────────────────────────────
+
+/// A freshly typed character as the event stream delivers it: the key
+/// goes down, then the text it committed arrives.
+fn typeKey(kb: *host_eng.input.Keyboard, key: host_eng.input.Key, text: []const u8) void {
+    kb.set(key, true);
+    kb.noteKeyDown(key, false);
+    kb.pushText(text);
+    kb.noteCommittedText(text);
+}
+
+pub fn textRepeatFollowsTheSameClockTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A held printable key repeats its text on this clock, not the
+    // desktop's -- the whole point of the unification.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 100, .interval_ms = 20 };
+
+    typeKey(&kb, .j, "j");
+    // The press tick itself types once and repeats nothing.
+    try testz.expectEqualStr(kb.textRepeated(), "");
+    repeatTick(&kb, 16);
+
+    repeatTick(&kb, 80);
+    try testz.expectEqualStr(kb.textRepeated(), "");
+
+    kb.tickRepeats(20);
+    try testz.expectEqualStr(kb.textRepeated(), "j");
+}
+
+pub fn textRepeatStopsOnReleaseTest(_: std.Io, _: std.mem.Allocator) !void {
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 10, .interval_ms = 10 };
+
+    typeKey(&kb, .j, "j");
+    repeatTick(&kb, 16);
+    kb.tickRepeats(20);
+    try testz.expectEqualStr(kb.textRepeated(), "j");
+
+    kb.set(.j, false);
+    kb.noteKeyUp(.j);
+    kb.tickRepeats(20);
+    try testz.expectEqualStr(kb.textRepeated(), "");
+}
+
+pub fn osTextRepeatIsSwallowedTest(_: std.Io, _: std.mem.Allocator) !void {
+    // The desktop's own auto-repeat of a key already repeating here is
+    // absorbed rather than delivered -- otherwise one held key would run
+    // at two cadences at once.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 10, .interval_ms = 10 };
+
+    typeKey(&kb, .j, "j");
+    repeatTick(&kb, 16);
+
+    kb.noteKeyDown(.j, true); // SDL key-down carrying `repeat`
+    try testz.expectTrue(kb.absorbRepeatedText("j"));
+
+    // Absorbed means not typed: nothing new landed in this tick's text.
+    var buf: [8]u8 = undefined;
+    try testz.expectEqual(kb.text(&buf), 0);
+}
+
+pub fn osTextRepeatRefreshesWhatRepeatsTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Shift pressed part-way through a hold: the OS's repeat stream is
+    // what reports the change, so the absorbed text updates what this
+    // key repeats from here on.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 10, .interval_ms = 10 };
+
+    typeKey(&kb, .a, "a");
+    repeatTick(&kb, 16);
+    kb.tickRepeats(20);
+    try testz.expectEqualStr(kb.textRepeated(), "a");
+    kb.finishTick();
+
+    kb.noteKeyDown(.a, true);
+    try testz.expectTrue(kb.absorbRepeatedText("A"));
+    kb.tickRepeats(20);
+    try testz.expectEqualStr(kb.textRepeated(), "A");
+}
+
+pub fn imeCommitNeverRepeatsTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Text committed out of an IME composition belongs to the
+    // composition, not to a held key -- re-sending it on a hold would
+    // type characters the user never asked for.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 10, .interval_ms = 10 };
+
+    kb.set(.a, true);
+    kb.noteKeyDown(.a, false);
+    kb.setPreedit("にほん", 3);
+    kb.pushText("日本");
+    kb.noteCommittedText("日本");
+    kb.clearPreedit();
+    repeatTick(&kb, 16);
+
+    kb.tickRepeats(100);
+    try testz.expectEqualStr(kb.textRepeated(), "");
+}
+
+pub fn unattributedTextIsNotSwallowedTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Nothing is repeating here, so an OS-repeated text event has to be
+    // delivered normally: never drop input this can't reproduce itself.
+    var kb = host_eng.input.Keyboard{};
+    kb.noteKeyDown(.j, true);
+    try testz.expectFalse(kb.absorbRepeatedText("j"));
+}
+
+pub fn textRepeatClearedOnFocusLossTest(_: std.Io, _: std.mem.Allocator) !void {
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 10, .interval_ms = 10 };
+
+    typeKey(&kb, .j, "j");
+    repeatTick(&kb, 16);
+    kb.tickRepeats(20);
+    try testz.expectEqualStr(kb.textRepeated(), "j");
+
+    kb.clear();
+    try testz.expectEqualStr(kb.textRepeated(), "");
+}
+
 pub fn keyRepeatClearDropsPendingRepeatTest(_: std.Io, _: std.mem.Allocator) !void {
     // Focus loss drops the hold along with the key itself, so a key held
     // as the window went away can't keep repeating into the next focus.

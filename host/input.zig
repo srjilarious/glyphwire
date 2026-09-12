@@ -143,14 +143,30 @@ pub const KeyInput = struct {
     /// from `text` events and ignores the key event for plain typing, so
     /// there's no double-insertion.
     ///
+    /// A held printable key repeats through here too, on the same clock
+    /// as every other key (`Keyboard.textRepeated`): the engine swallows
+    /// the OS's own text auto-repeat and re-emits the same committed text
+    /// at the focused program's cadence, so a held `j` and a held Down
+    /// arrow move at one rate rather than two. Fresh text and a repeat
+    /// can't collide in the same tick -- a press restarts the hold
+    /// schedule, so nothing is due on the tick the press lands.
+    ///
     /// The 256-byte buffer bounds one frame's worth of committed text;
     /// `Keyboard`'s own per-frame text buffer is capped well below that.
     pub fn reportTextInput(self: *KeyInput, eng: *Engine) bool {
         var buf: [256]u8 = undefined;
         const n = eng.inputs.keyboard.text(&buf);
-        if (n == 0) return false;
-        self.app.server.reportText(self.app.alloc, buf[0..n]) catch |err| {
-            std.log.err("reportText failed: {t}", .{err});
+        if (n > 0) {
+            self.app.server.reportText(self.app.alloc, buf[0..n]) catch |err| {
+                std.log.err("reportText failed: {t}", .{err});
+            };
+            return true;
+        }
+
+        const repeated = eng.inputs.keyboard.textRepeated();
+        if (repeated.len == 0) return false;
+        self.app.server.reportText(self.app.alloc, repeated) catch |err| {
+            std.log.err("reportText (repeat) failed: {t}", .{err});
         };
         return true;
     }
@@ -338,6 +354,15 @@ pub fn repeatTimeoutMs(eng: *Engine) ?f64 {
             if (kb.repeatDueMs(key)) |due| {
                 soonest = if (soonest) |s| @min(s, due) else due;
             }
+        }
+    }
+    // A held printable key repeats its text rather than its key name, so
+    // it isn't in the loop above -- but the loop still has to wake for
+    // it, or a held `j` sleeps through the same schedule a held arrow
+    // now doesn't (see `Keyboard.textRepeated`).
+    if (kb.text_repeat_key) |key| {
+        if (kb.repeatDueMs(key)) |due| {
+            soonest = if (soonest) |s| @min(s, due) else due;
         }
     }
     const due = soonest orelse return null;

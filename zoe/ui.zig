@@ -310,6 +310,9 @@ pub const Ui = struct {
     hl_config: ?langconf.Config = null,
     grammars: ?syntax.Registry = null,
     hl_search_dirs: []const []const u8 = &.{},
+    /// The key-repeat cadence last asked of glyphwire-host, so
+    /// `syncKeyRepeat` only sends when the mode actually changes it.
+    key_repeat_sent: ?langconf.KeyRepeat = null,
     /// Reused span buffer for `renderRowSpans`.
     hl_scratch: std.ArrayList(syntax.Span) = .empty,
     /// Buffer lines an incremental reparse says need repainting for a
@@ -403,7 +406,7 @@ pub const Ui = struct {
         // to fail bringing the editor up. Done before the first buffer,
         // which builds its own highlighter against what this leaves.
         self.loadConfig(environ);
-        self.applyKeyRepeat();
+
 
         const first = try self.newSlot(initial_path);
         errdefer first.deinit(alloc);
@@ -450,26 +453,54 @@ pub const Ui = struct {
         self.hl_config = cfg;
     }
 
-    /// Asks glyphwire-host to repeat held keys at zoe's own cadence while
-    /// this context is focused (`zoe.conf`'s `key_repeat_delay_ms` /
-    /// `key_repeat_interval_ms`, equal by default). In an editor every
-    /// repeat is a cursor motion, so waiting out a shell-length initial
-    /// hold before a held arrow or PageDown starts moving is exactly
-    /// wrong; at a shell prompt, where a repeat may re-run a command, it
-    /// is exactly right. Best-effort: a failure here just leaves the
-    /// session on the host's default cadence.
-    fn applyKeyRepeat(self: *Ui) void {
-        // `hl_config` is null when the config load failed outright, which
-        // is not a reason to give up the cadence -- fall back to the same
-        // defaults `zoe.conf` would have left in place.
-        var delay = langconf.key_repeat_delay_ms_default;
-        var interval = langconf.key_repeat_interval_ms_default;
-        if (self.hl_config) |cfg| {
-            delay = cfg.key_repeat_delay_ms;
-            interval = cfg.key_repeat_interval_ms;
+    /// Keeps glyphwire-host's typematic repeat on the cadence the current
+    /// mode wants, re-sending only when it actually changes.
+    ///
+    /// Two cadences, because the host repeats *typed* characters on this
+    /// clock too (`Keyboard.textRepeated`) and a held letter means
+    /// opposite things either side of `i`. In normal and visual mode
+    /// every repeat is a motion -- `j`, an arrow, PageDown -- and any
+    /// initial hold before it starts moving is exactly wrong. In insert
+    /// and command mode the same key types, and a motion-fast repeat
+    /// would turn one ordinary ~100ms keystroke into three or four
+    /// characters, so the hold has to be long enough that only a
+    /// deliberate one crosses it.
+    ///
+    /// Best-effort: a failure leaves the host on whatever cadence it was
+    /// already using, and the next mode change tries again.
+    fn syncKeyRepeat(self: *Ui) void {
+        const want = self.keyRepeatForMode();
+        if (self.key_repeat_sent) |sent| {
+            if (sent.delay_ms == want.delay_ms and sent.interval_ms == want.interval_ms) return;
         }
-        self.client.setKeyRepeat(delay, interval) catch |err| {
-            std.log.warn("zoe: set_key_repeat failed ({t}); keeping the host default", .{err});
+        self.client.setKeyRepeat(want.delay_ms, want.interval_ms) catch |err| {
+            std.log.warn("zoe: set_key_repeat failed ({t}); keeping the host's cadence", .{err});
+            return;
+        };
+        self.key_repeat_sent = want;
+    }
+
+    /// The cadence the editor's current mode wants, from `zoe.conf` --
+    /// or from the same defaults `zoe.conf` would have left in place, if
+    /// the config failed to load at all.
+    fn keyRepeatForMode(self: *Ui) langconf.KeyRepeat {
+        const typing = switch (self.buf.ed.mode) {
+            .insert, .command => true,
+            .normal, .visual, .visual_line => false,
+        };
+        const cfg = self.hl_config orelse return if (typing) .{
+            .delay_ms = langconf.key_repeat_insert_delay_ms_default,
+            .interval_ms = langconf.key_repeat_insert_interval_ms_default,
+        } else .{
+            .delay_ms = langconf.key_repeat_delay_ms_default,
+            .interval_ms = langconf.key_repeat_interval_ms_default,
+        };
+        return if (typing) .{
+            .delay_ms = cfg.key_repeat_insert_delay_ms,
+            .interval_ms = cfg.key_repeat_insert_interval_ms,
+        } else .{
+            .delay_ms = cfg.key_repeat_delay_ms,
+            .interval_ms = cfg.key_repeat_interval_ms,
         };
     }
 
@@ -682,6 +713,10 @@ pub const Ui = struct {
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
             try self.drainEvents();
+            // After the events, before the frame they produced: a mode
+            // change in that batch retimes the host's key repeat before
+            // the user can hold anything down in the new mode.
+            self.syncKeyRepeat();
             if (self.buffer_dirty or self.tree_dirty or self.tabs_dirty or self.status_dirty)
                 try self.render();
             if (self.quit) break;

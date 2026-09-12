@@ -394,6 +394,27 @@ pub const Keyboard = struct {
     /// at the start of each tick, like `pressed`/`released`'s edges.
     repeat_bits: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
 
+    /// Committed text that a held key is repeating, and the key it came
+    /// from -- what `textRepeated` re-emits on each of that key's
+    /// repeats. Set by `noteCommittedText` only for text that arrived on
+    /// a fresh press (see there), cleared when that key comes up.
+    /// Persists across ticks for as long as the key is held, unlike
+    /// `text_buf`.
+    text_repeat_key: ?Key = null,
+    text_repeat_buf: FixedBuffer(64) = .{},
+    /// The most recent fresh (non-OS-repeat) key press, so a
+    /// `SDL_EVENT_TEXT_INPUT` that follows it can be attributed to the
+    /// key that produced it. Held until that key comes up (rather than
+    /// cleared each tick) because the text event doesn't have to land in
+    /// the same event batch as its press.
+    pending_press: ?Key = null,
+    /// The last key-down seen, and whether it was one of the OS's own
+    /// auto-repeats. A text event following an OS-repeated key-down is
+    /// the desktop repeating a held printable key at *its* rate; see
+    /// `absorbRepeatedText` for why that one is swallowed.
+    last_down_key: ?Key = null,
+    last_down_was_os_repeat: bool = false,
+
     pub fn set(self: *Keyboard, key: Key, down_value: bool) void {
         if (down_value) {
             self.curr.set(keyIndex(key));
@@ -527,6 +548,95 @@ pub const Keyboard = struct {
         self.text_buf.appendSlice(utf8);
     }
 
+    /// Records a key-down, so a text event that follows can be attributed
+    /// to the key that produced it, and so the text event following one
+    /// of the OS's own auto-repeats can be told apart from a freshly
+    /// typed one. `os_repeat` is SDL's `event.key.repeat`.
+    pub fn noteKeyDown(self: *Keyboard, key: Key, os_repeat: bool) void {
+        self.last_down_key = key;
+        self.last_down_was_os_repeat = os_repeat;
+        if (!os_repeat) self.pending_press = key;
+    }
+
+    /// Records a key-up: a released key can no longer be repeating its
+    /// text, and the next text event must not be attributed to it.
+    pub fn noteKeyUp(self: *Keyboard, key: Key) void {
+        self.last_down_was_os_repeat = false;
+        if (self.last_down_key == key) self.last_down_key = null;
+        if (self.pending_press == key) self.pending_press = null;
+        if (self.text_repeat_key == key) self.clearTextRepeat();
+    }
+
+    /// Remembers `utf8` as the text a held key repeats, when it can be
+    /// attributed to a press of a key that is still down -- which is what
+    /// makes it safe to re-send later.
+    ///
+    /// Text that fails that test is deliberately *not* remembered: an IME
+    /// commit (which lands while a composition is in flight, often with
+    /// no key event of its own since the IME consumed the keys) belongs
+    /// to a finished composition rather than to a key being held, and
+    /// re-sending it on a hold would type characters nobody asked for.
+    /// Such text still reaches the application normally -- it just never
+    /// repeats on this clock, and its OS repeats (if any) are left alone.
+    pub fn noteCommittedText(self: *Keyboard, utf8: []const u8) void {
+        // Called before `clearPreedit`, so a composition still in flight
+        // here means this commit came from the IME.
+        if (self.preedit_buf.len != 0) {
+            self.clearTextRepeat();
+            return;
+        }
+        const key = self.pending_press orelse {
+            self.clearTextRepeat();
+            return;
+        };
+        if (!self.down(key)) {
+            self.clearTextRepeat();
+            return;
+        }
+        self.text_repeat_key = key;
+        self.text_repeat_buf.clear();
+        self.text_repeat_buf.appendSlice(utf8);
+    }
+
+    /// Swallows a text event that is the OS auto-repeating a key this
+    /// keyboard is already repeating on its own clock, returning whether
+    /// it did. Two cadences for one held key -- the desktop's for the
+    /// letter it types, ours for everything else -- is the thing this
+    /// whole mechanism exists to avoid, so the OS's copy is dropped and
+    /// `textRepeated` emits on schedule instead.
+    ///
+    /// The swallowed text isn't wasted: it refreshes what that key
+    /// repeats, so a Shift pressed part-way through a hold switches the
+    /// repeat from `a` to `A` once the OS's own repeat stream reports it.
+    /// Text that can't be matched to a key being repeated here is left
+    /// alone and delivered normally -- never drop input this can't
+    /// reproduce itself.
+    pub fn absorbRepeatedText(self: *Keyboard, utf8: []const u8) bool {
+        if (!self.last_down_was_os_repeat) return false;
+        const key = self.text_repeat_key orelse return false;
+        if (self.last_down_key != key or !self.down(key)) return false;
+        self.text_repeat_buf.clear();
+        self.text_repeat_buf.appendSlice(utf8);
+        return true;
+    }
+
+    /// The text to re-send this tick because the key that typed it is
+    /// held and its repeat just fired, or an empty slice. The text half
+    /// of `repeated`: a held printable key repeats through here, at the
+    /// same cadence as a held arrow, rather than at whatever rate the
+    /// desktop's own auto-repeat runs at.
+    pub fn textRepeated(self: *const Keyboard) []const u8 {
+        const key = self.text_repeat_key orelse return "";
+        if (!self.repeated(key)) return "";
+        return self.text_repeat_buf.slice();
+    }
+
+    /// Forgets what a held key was repeating.
+    pub fn clearTextRepeat(self: *Keyboard) void {
+        self.text_repeat_key = null;
+        self.text_repeat_buf.clear();
+    }
+
     /// Replaces the IME composition and its caret. See `pushText` for why
     /// this is public.
     pub fn setPreedit(self: *Keyboard, composing: []const u8, cursor: i32) void {
@@ -564,6 +674,10 @@ pub const Keyboard = struct {
         self.repeat_bits = std.StaticBitSet(NumKeys).empty;
         self.held_ms = @splat(0);
         self.next_repeat_ms = @splat(0);
+        self.clearTextRepeat();
+        self.pending_press = null;
+        self.last_down_key = null;
+        self.last_down_was_os_repeat = false;
     }
 };
 
@@ -662,9 +776,27 @@ pub const InputManager = struct {
                 const key = mapKey(event.key.key);
                 if (key != .unknown) self.keyboard.set(key, event.key.down);
                 self.keyboard.mods = event.key.mod;
+                // The down/up bitset alone can't say which key typed the
+                // text event that follows, nor whether this key-down was
+                // the OS auto-repeating a held key -- both of which the
+                // text-repeat path needs.
+                if (key != .unknown) {
+                    if (event.key.down) {
+                        self.keyboard.noteKeyDown(key, event.key.repeat);
+                    } else {
+                        self.keyboard.noteKeyUp(key);
+                    }
+                }
             },
             sdl.SDL_EVENT_TEXT_INPUT => {
-                self.keyboard.pushText(std.mem.span(event.text.text));
+                const typed = std.mem.span(event.text.text);
+                // An OS auto-repeat of a key already repeating on this
+                // keyboard's own clock is swallowed (and used to refresh
+                // what that repeat types); anything else is fresh input.
+                if (!self.keyboard.absorbRepeatedText(typed)) {
+                    self.keyboard.pushText(typed);
+                    self.keyboard.noteCommittedText(typed);
+                }
                 // A commit ends the composition. SDL doesn't always follow
                 // it with an empty editing event, so drop the preedit here
                 // or the committed text would stay ghosted at the caret.
