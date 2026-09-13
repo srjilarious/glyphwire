@@ -532,27 +532,47 @@ pub const Ui = struct {
         return buf[0 .. n * s.len];
     }
 
-    /// A solid background color plus a drawn character border, not the
-    /// bundled "dialog" 9-patch: at the couple-hundred-pixel scale this
-    /// popup renders at, the gradient image tiled/stretched badly and its
-    /// per-cell background didn't reliably survive the text drawn over
-    /// it. Plain characters and one flat color have neither problem.
-    fn renderHelp(self: *Ui) !void {
-        const c = self.client;
-        try c.setLayerCellPosition(
-            self.help_layer,
-            (self.win.rows -| help_rows) / 2,
-            (self.win.cols -| help_cols) / 2,
-        );
-        try c.clearOn(self.help_layer, 0, 0, null, null);
+    /// `set_property(help_layer, "cursor", ...)` queued on `b` -- the
+    /// `Batch` type has no non-default-layer convenience for this (its
+    /// typed methods are all root-implicit, see `Client.Batch`'s doc
+    /// comment), so this goes through `notify`, the same escape hatch
+    /// `Client.setCursorOn` itself is built on.
+    fn cursorOn(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, col: usize) !void {
+        try b.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
+    }
+
+    /// `write_text(help_layer, ...)` queued on `b` -- see `cursorOn`.
+    /// `fg`/`bg` serialize the same whether passed as `core.Color` or
+    /// the wire's own `protocol.Color` (identical field shape), so this
+    /// skips the private `colorToJson` conversion `Client.writeTextOn`
+    /// uses internally.
+    fn textOn(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
+        try b.notify("write_text", .{ .layer = layer, .text = text, .fg = fg, .bg = bg });
+    }
+
+    /// Queues the dialog's full redraw (border + every line) onto `b`
+    /// rather than sending each piece as its own notification: a
+    /// half-drawn dialog would otherwise be visible for a frame between
+    /// round trips, which is what caused the flicker the character
+    /// border replaced the 9-patch with -- see `setHelp`, which folds
+    /// the `visibility` flip into the same batch on open so the layer's
+    /// very first visible frame is already the finished dialog.
+    fn buildHelp(self: *Ui, b: *glyphwire.Client.Batch) !void {
+        try b.notify("set_property", .{
+            .layer = self.help_layer,
+            .property = "cell_position",
+            .row = (self.win.rows -| help_rows) / 2,
+            .col = (self.win.cols -| help_cols) / 2,
+        });
+        try b.notify("clear", .{ .layer = self.help_layer, .row = 0, .col = 0, .rows = @as(?usize, null), .cols = @as(?usize, null) });
 
         var h_buf: [help_interior * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, help_interior);
 
-        try c.setCursorOn(self.help_layer, 0, 0);
-        try c.writeTextOn(self.help_layer, box_tl, fg_status, bg_status);
-        try c.writeTextOn(self.help_layer, h_line, fg_status, bg_status);
-        try c.writeTextOn(self.help_layer, box_tr, fg_status, bg_status);
+        try cursorOn(b, self.help_layer, 0, 0);
+        try textOn(b, self.help_layer, box_tl, fg_status, bg_status);
+        try textOn(b, self.help_layer, h_line, fg_status, bg_status);
+        try textOn(b, self.help_layer, box_tr, fg_status, bg_status);
 
         var line_buf: [help_interior]u8 = undefined;
         for (help_lines, 0..) |line, i| {
@@ -560,16 +580,27 @@ pub const Ui = struct {
             @memcpy(line_buf[0..keep], line[0..keep]);
             @memset(line_buf[keep..], ' ');
 
-            try c.setCursorOn(self.help_layer, i + 1, 0);
-            try c.writeTextOn(self.help_layer, box_v, fg_status, bg_status);
-            try c.writeTextOn(self.help_layer, &line_buf, fg_status, bg_status);
-            try c.writeTextOn(self.help_layer, box_v, fg_status, bg_status);
+            try cursorOn(b, self.help_layer, i + 1, 0);
+            try textOn(b, self.help_layer, box_v, fg_status, bg_status);
+            try textOn(b, self.help_layer, &line_buf, fg_status, bg_status);
+            try textOn(b, self.help_layer, box_v, fg_status, bg_status);
         }
 
-        try c.setCursorOn(self.help_layer, help_rows - 1, 0);
-        try c.writeTextOn(self.help_layer, box_bl, fg_status, bg_status);
-        try c.writeTextOn(self.help_layer, h_line, fg_status, bg_status);
-        try c.writeTextOn(self.help_layer, box_br, fg_status, bg_status);
+        try cursorOn(b, self.help_layer, help_rows - 1, 0);
+        try textOn(b, self.help_layer, box_bl, fg_status, bg_status);
+        try textOn(b, self.help_layer, h_line, fg_status, bg_status);
+        try textOn(b, self.help_layer, box_br, fg_status, bg_status);
+    }
+
+    /// Redraws the dialog in place -- e.g. `render()` keeping it current
+    /// across a resize while it's already showing. `setHelp` handles the
+    /// open/close transition itself rather than calling this.
+    fn renderHelp(self: *Ui) !void {
+        var b = self.client.batch();
+        defer b.deinit();
+        try self.buildHelp(&b);
+        var results = try b.send();
+        results.deinit();
     }
 
     fn clampPan(self: *Ui) void {
@@ -776,10 +807,22 @@ pub const Ui = struct {
         self.status_dirty = true;
     }
 
+    /// Showing the dialog flips `visibility` and redraws it in the same
+    /// batch, so the layer never turns visible with last render's stale
+    /// content (or nothing at all) for a frame before the real content
+    /// lands -- see `buildHelp`. Hiding it is just the one flip.
     fn setHelp(self: *Ui, visible: bool) !void {
         self.help_visible = visible;
-        try self.client.setLayerVisible(self.help_layer, visible);
-        if (visible) try self.renderHelp();
+        if (visible) {
+            var b = self.client.batch();
+            defer b.deinit();
+            try b.notify("set_property", .{ .layer = self.help_layer, .property = "visibility", .visible = true });
+            try self.buildHelp(&b);
+            var results = try b.send();
+            results.deinit();
+        } else {
+            try self.client.setLayerVisible(self.help_layer, false);
+        }
         self.status_dirty = true;
     }
 
