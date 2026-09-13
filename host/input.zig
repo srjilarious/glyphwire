@@ -22,7 +22,7 @@ pub const KeyInput = struct {
 
     last_mouse_px: host_eng.Vec2F = .{ .x = -1, .y = -1 },
 
-    /// Session-wide repeat timing from `host.conf`, used for every
+    /// Session-wide repeat timing from `host.conf.lua`, used for every
     /// context that hasn't asked for its own with `set_key_repeat`. See
     /// `syncRepeatTiming`.
     repeat_default: key_repeat.Timing = .{},
@@ -302,7 +302,7 @@ pub const KeyInput = struct {
     }
 
     /// Hands the engine the repeat timing the focused program asked for
-    /// with `set_key_repeat`, or the `host.conf` default when it asked
+    /// with `set_key_repeat`, or the `host.conf.lua` default when it asked
     /// for nothing (see `key_repeat.resolve`). Run once per tick, before
     /// the repeats themselves: a pane switch between the shell and zoe
     /// changes the cadence with it, and the change takes effect from the

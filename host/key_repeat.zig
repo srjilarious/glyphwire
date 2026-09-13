@@ -16,7 +16,7 @@ const glyphwire = @import("glyphwire");
 
 const Key = host_eng.input.Key;
 
-// Session-wide default timing, overridable from `host.conf`
+// Session-wide default timing, overridable from `host.conf.lua`
 // (`key_repeat_delay_ms` / `key_repeat_interval_ms`) and, per program,
 // by the `set_key_repeat` notification. Taken from the protocol's own
 // defaults rather than restated, so the value a partial `set_key_repeat`
@@ -34,7 +34,7 @@ pub const delay_ms_max: f64 = 5000;
 pub const interval_ms_min: f64 = 10;
 pub const interval_ms_max: f64 = 2000;
 
-/// Resolved repeat timing: the `host.conf` default, or what a program
+/// Resolved repeat timing: the `host.conf.lua` default, or what a program
 /// asked for with `set_key_repeat`. Both fields are already clamped.
 pub const Timing = struct {
     delay_ms: f64 = delay_ms_default,
@@ -53,7 +53,7 @@ pub fn clampIntervalMs(ms: f64) f64 {
 
 /// The engine timing to run with: the focused context's `set_key_repeat`
 /// override when it has one, otherwise the session default from
-/// `host.conf`. An override's fields are clamped here rather than at the
+/// `host.conf.lua`. An override's fields are clamped here rather than at the
 /// wire edge, so a client can't hand the engine a nonsense cadence.
 pub fn resolve(default: Timing, override: ?glyphwire.KeyRepeat) host_eng.input.KeyRepeat {
     const t: Timing = if (override) |o| .{

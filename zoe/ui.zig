@@ -489,8 +489,8 @@ pub const Ui = struct {
         self.key_repeat_mode_sent = mode;
     }
 
-    /// The cadence the editor's current mode wants, from `zoe.conf` --
-    /// or from the same defaults `zoe.conf` would have left in place, if
+    /// The cadence the editor's current mode wants, from `zoe.conf.lua` --
+    /// or from the same defaults `zoe.conf.lua` would have left in place, if
     /// the config failed to load at all.
     fn keyRepeatForMode(self: *Ui) langconf.KeyRepeat {
         const typing = switch (self.buf.ed.mode) {

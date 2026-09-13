@@ -311,7 +311,7 @@ pub const App = struct {
         self.keys.handleRepeatKeys(eng);
         // Last of the key handling: the timing the *next* tick's repeats
         // run at, from the focused program's `set_key_repeat` (or the
-        // `host.conf` default). Cheap -- one short locked read.
+        // `host.conf.lua` default). Cheap -- one short locked read.
         self.keys.syncRepeatTiming(eng);
         self.scroll.handleScroll(eng);
         // When a full-screen program takes the screen, drop any scrollback

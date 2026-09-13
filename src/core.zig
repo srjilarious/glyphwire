@@ -4304,10 +4304,10 @@ pub const KeyRepeat = struct {
     interval_ms: f64 = default_interval_ms,
 
     /// The timing a session runs at when nobody has asked for anything
-    /// else -- typical OS keyboard-repeat values. `host.conf` can move
+    /// else -- typical OS keyboard-repeat values. `host.conf.lua` can move
     /// the host's own default off these, but a `set_key_repeat` that
     /// names only one of the two fields fills the other from here, not
-    /// from the user's `host.conf`: the protocol's default is the one
+    /// from the user's `host.conf.lua`: the protocol's default is the one
     /// both ends can agree on without asking.
     pub const default_delay_ms: f64 = 500;
     pub const default_interval_ms: f64 = 40;
@@ -4365,7 +4365,7 @@ pub const Context = struct {
     caret_layer: ?LayerHandle = null,
     /// The typematic key-repeat timing this context's program asked for
     /// with `set_key_repeat`, or null to run at the host's own default
-    /// (`host.conf`'s `key_repeat_delay_ms` / `key_repeat_interval_ms`).
+    /// (`host.conf.lua`'s `key_repeat_delay_ms` / `key_repeat_interval_ms`).
     /// Only the *focused* context's value is in effect -- the host reads
     /// it each tick and retimes the engine's repeat clock, so switching
     /// panes between the shell and zoe switches cadence with it.

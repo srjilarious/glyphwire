@@ -970,7 +970,7 @@ surface.
   thing that stopped the list going stale in the first place.
   Timing is a context property (`core.Context.key_repeat`,
   `set_key_repeat`): the host runs the **focused** context's cadence,
-  falling back to `host.conf`'s `key_repeat_delay_ms` /
+  falling back to `host.conf.lua`'s `key_repeat_delay_ms` /
   `key_repeat_interval_ms`. A shell wants the OS-typical long hold —
   a repeat there may re-run a command. zoe wants none at all (it asks
   for `delay == interval`), because every repeat there is a cursor
@@ -1002,7 +1002,7 @@ surface.
   input this can't reproduce itself, so the worst case degrades to the
   old OS-timed behaviour instead of losing keystrokes.
   Consequence worth stating: a held letter at the shell prompt now
-  repeats at `host.conf`'s cadence rather than the user's desktop
+  repeats at `host.conf.lua`'s cadence rather than the user's desktop
   setting. That is the point — one session, one cadence — and it is
   configurable in the same place as everything else.
 - **A client with modes re-sends `set_key_repeat` when the mode
@@ -1015,7 +1015,7 @@ surface.
   knows which meaning is in force. Splitting the wire message into "text
   timing" and "key timing" fails for exactly that reason: normal-mode
   `j` is a text key that wants the motion cadence. So the split lives
-  where the knowledge is, as two cadences in `zoe.conf` switched on the
+  where the knowledge is, as two cadences in `zoe.conf.lua` switched on the
   mode change (`Ui.syncKeyRepeat`). In practice both settled on 300/30 —
   short enough to navigate on, long enough to type on — but they stay
   separate settings.

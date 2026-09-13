@@ -180,13 +180,13 @@ pub fn loadConfig(
     if (luaNumField(lua, "key_repeat_delay_ms")) |v| {
         const c = key_repeat.clampDelayMs(@as(f64, v));
         if (c != @as(f64, v))
-            std.log.warn("glyphwire-host: host.conf key_repeat_delay_ms {d} out of range; clamped to {d}", .{ v, c });
+            std.log.warn("glyphwire-host: host.conf.lua key_repeat_delay_ms {d} out of range; clamped to {d}", .{ v, c });
         cfg.key_repeat.delay_ms = c;
     }
     if (luaNumField(lua, "key_repeat_interval_ms")) |v| {
         const c = key_repeat.clampIntervalMs(@as(f64, v));
         if (c != @as(f64, v))
-            std.log.warn("glyphwire-host: host.conf key_repeat_interval_ms {d} out of range; clamped to {d}", .{ v, c });
+            std.log.warn("glyphwire-host: host.conf.lua key_repeat_interval_ms {d} out of range; clamped to {d}", .{ v, c });
         cfg.key_repeat.interval_ms = c;
     }
 
