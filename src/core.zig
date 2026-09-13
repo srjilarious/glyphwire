@@ -760,10 +760,23 @@ pub fn stringWidth(text: []const u8) usize {
 /// on either half resolves the same). See decisions.md, Cell content.
 pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 
+/// A per-cell hint that the cell's glyph should be drawn larger than one
+/// cell's normal pixel size -- `write_text`'s optional `scale` (`x1_5` is
+/// "1.5x", `x2` is "2x"; wire strings match the tag names exactly, see
+/// `write_text` in docs/api.md). Like `draw_icon`'s `.natural` overflow,
+/// this is a rendering-only effect: the enlarged glyph visually spills
+/// into neighbouring cells, but only the cell holding the grapheme carries
+/// `text_scale` -- no reserved footprint, no spacer cells, unlike the
+/// East Asian wide-character model. See decisions.md's Text scale section
+/// for why. A caller wanting the overflow cells to hit-test as part of the
+/// run still needs `tag_metadata`, same as icon overflow.
+pub const TextScale = enum { x1, x1_5, x2 };
+
 pub const Cell = struct {
     grapheme_bytes: [grapheme_inline_len]u8 = @splat(0),
     grapheme_len: u8 = 0,
     wide: CellWidth = .narrow,
+    text_scale: TextScale = .x1,
     style: Style = default_style,
     /// Sibling of `style.bg`, not part of it -- a cell can be tagged
     /// regardless of whether its background is a color/image/icon. Set (or
@@ -2007,6 +2020,16 @@ pub const Layer = struct {
     /// codebase's existing convention for additive options (`drawIcon`'s
     /// `IconDrawOpts`).
     pub fn writeTextTagged(self: *Layer, text: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) !void {
+        return self.writeTextTaggedScaled(text, fg, bg, metadata_id, .x1);
+    }
+
+    /// Same as `writeTextTagged`, but every cell a grapheme lands in also
+    /// carries `scale` (`Cell.text_scale`) -- see `TextScale`'s doc
+    /// comment for what that does and doesn't reserve. A separate method
+    /// rather than a new required param on `writeTextTagged` itself, same
+    /// "Zig has no default parameter values" reason `writeTextTagged`
+    /// itself got split out from `writeText`.
+    pub fn writeTextTaggedScaled(self: *Layer, text: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale) !void {
         // The SGR pen is call-local: an `ESC [ ... m` colour is honoured
         // only for the rest of *this* `write_text`, never carried into
         // the next call. Cross-call persistence was tried and reverted --
@@ -2031,11 +2054,11 @@ pub const Layer = struct {
             if (line_drawing and cp_bytes.len == 1 and cp_bytes[0] >= '`' and cp_bytes[0] <= '~') {
                 var buf: [4]u8 = undefined;
                 const n = std.unicode.utf8Encode(acsGraphic(cp_bytes[0]), &buf) catch unreachable;
-                self.putAtCursor(buf[0..n], 1, eff.fg, eff.bg, metadata_id);
+                self.putAtCursor(buf[0..n], 1, eff.fg, eff.bg, metadata_id, scale);
                 continue;
             }
             const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
-            self.putAtCursor(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, metadata_id);
+            self.putAtCursor(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, metadata_id, scale);
         }
         // Don't carry a half-consumed `ESC ...` sequence into the next
         // call: a lone trailing `ESC`, a truncated `ESC [ ...`, or an
@@ -2525,7 +2548,7 @@ pub const Layer = struct {
     /// resolves the same. A width-2 cluster that would straddle the right
     /// edge wraps to the next row first. Overwriting either half of an
     /// existing wide pair blanks its orphaned partner.
-    fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {
+    fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale) void {
         if (self.cursor.col + w > self.width) {
             self.cursor.col = 0;
             self.cursor.row += 1;
@@ -2551,6 +2574,7 @@ pub const Layer = struct {
         c.meta_focus = false;
         c.fg_icon = null;
         c.wide = if (w == 2) .wide_lead else .narrow;
+        c.text_scale = scale;
 
         if (w == 2) {
             // The spacer renders nothing of its own; give it the lead's

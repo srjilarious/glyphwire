@@ -134,22 +134,26 @@ const Ocr = struct {
 
 /// A dictionary lookup result shown in `Ui.dict_layer`. `dict_mod.lookup`
 /// now queries a SQLite file rather than holding the whole dictionary in
-/// memory, so its `Entry` results are heap-allocated per call -- `term`,
-/// `reading` and `glossary` here are owned (by `Ui.alloc`) and must be
-/// freed, which `Ui.clearLookup` does before every replacement and on
-/// shutdown. `reason` is never owned: it's one of `dict_mod.deinflect_rules`'s
-/// static strings.
+/// memory, so its `Entry` results are heap-allocated per call. `entries`
+/// is every homograph the search matched (owned by `Ui.alloc`, freed via
+/// `dict_mod.freeEntries`) -- `hit` picks which one is currently shown,
+/// cycled with `]`/`[` while the panel is up (`Ui.cycleLookupHit`) instead
+/// of the older "keep the first, drop the rest" behavior. `reason` is
+/// heap-allocated too (`dict_mod.Match.reason`'s chained-deinflection
+/// join, e.g. "causative, negative"), null for a direct dictionary-form
+/// match -- `Ui.clearLookup` frees both before every replacement and on
+/// shutdown.
 const Lookup = struct {
-    term: []const u8,
-    reading: []const u8,
-    glossary: []const []const u8,
+    entries: []const dict_mod.Entry,
+    hit: usize = 0,
     /// The deinflection reason, or null for a direct dictionary-form
     /// match.
     reason: ?[]const u8,
-    /// How many other entries also matched this term and aren't shown --
-    /// homographs the dialog picks the first of rather than listing.
-    extra: usize,
     rect: struct { row: usize = 0, col: usize = 0, rows: usize = 0, cols: usize = 0 } = .{},
+
+    fn current(self: Lookup) dict_mod.Entry {
+        return self.entries[self.hit];
+    }
 };
 
 pub const Ui = struct {
@@ -241,6 +245,10 @@ pub const Ui = struct {
     /// The last word looked up, shown in `dict_layer`. See `Lookup`.
     lookup: ?Lookup = null,
     lookup_dirty: bool = false,
+    /// The lookup panel's title size -- `conf.dictionary_title_scale` at
+    /// startup, cycled 1x -> 1.5x -> 2x -> 1x by `s` for the rest of the
+    /// session (`Ui.cycleDictTitleScale`).
+    dict_title_scale: glyphwire.TextScale = .x1,
 
     /// Set for as long as `conf.dictionary` is being indexed for the
     /// first time -- `run` steps it one `term_bank_*.json` file per tick
@@ -333,6 +341,7 @@ pub const Ui = struct {
             .dialog_layer = dialog_layer,
             .dict_layer = dict_layer,
             .dict_build_layer = dict_build_layer,
+            .dict_title_scale = conf.dictionary_title_scale,
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .page = @min(start.page, book.count() -| 1),
@@ -1248,23 +1257,39 @@ pub const Ui = struct {
             try c.setLayerVisible(self.dict_layer, false);
             return;
         };
+        const entry = lk.current();
+        if (entry.term.len == 0) {
+            try c.setLayerVisible(self.dict_layer, false);
+            return;
+        }
 
-        // Header: term, plus its reading when that differs from the term
-        // itself (kana-only entries have the same string in both), plus
-        // the deinflection reason when this wasn't the dictionary form.
-        var header_buf: std.ArrayList(u8) = .empty;
-        defer header_buf.deinit(self.alloc);
-        try header_buf.appendSlice(self.alloc, lk.term);
-        if (lk.reading.len > 0 and !std.mem.eql(u8, lk.reading, lk.term)) {
-            try header_buf.appendSlice(self.alloc, " \u{3010}");
-            try header_buf.appendSlice(self.alloc, lk.reading);
-            try header_buf.appendSlice(self.alloc, "\u{3011}");
+        // Subheader: the reading when that differs from the term itself
+        // (kana-only entries have the same string in both), the
+        // deinflection reason when this wasn't the dictionary form, and
+        // -- when more than one homograph matched -- a "[hit/total]"
+        // position, cycled with `]`/`[` (`Ui.cycleLookupHit`). The term
+        // itself is drawn separately, at `dict_title_scale`, by
+        // `writeScaledTermRow` below -- see decisions.md's Text scale
+        // section for why it needs its own row(s) rather than sharing
+        // this wrapped block the way it used to.
+        var sub_buf: std.ArrayList(u8) = .empty;
+        defer sub_buf.deinit(self.alloc);
+        if (entry.reading.len > 0 and !std.mem.eql(u8, entry.reading, entry.term)) {
+            try sub_buf.appendSlice(self.alloc, "\u{3010}");
+            try sub_buf.appendSlice(self.alloc, entry.reading);
+            try sub_buf.appendSlice(self.alloc, "\u{3011}");
         }
         if (lk.reason) |r| {
-            try header_buf.append(self.alloc, ' ');
-            try header_buf.append(self.alloc, '(');
-            try header_buf.appendSlice(self.alloc, r);
-            try header_buf.append(self.alloc, ')');
+            if (sub_buf.items.len > 0) try sub_buf.append(self.alloc, ' ');
+            try sub_buf.append(self.alloc, '(');
+            try sub_buf.appendSlice(self.alloc, r);
+            try sub_buf.append(self.alloc, ')');
+        }
+        if (lk.entries.len > 1) {
+            if (sub_buf.items.len > 0) try sub_buf.append(self.alloc, ' ');
+            const pos = try std.fmt.allocPrint(self.alloc, "[{d}/{d}]", .{ lk.hit + 1, lk.entries.len });
+            defer self.alloc.free(pos);
+            try sub_buf.appendSlice(self.alloc, pos);
         }
 
         // Body: every sense joined onto one ribbon before wrapping, not
@@ -1273,36 +1298,40 @@ pub const Ui = struct {
         // replace the dictionary.
         var body_buf: std.ArrayList(u8) = .empty;
         defer body_buf.deinit(self.alloc);
-        for (lk.glossary, 0..) |g, i| {
+        for (entry.glossary, 0..) |g, i| {
             if (i > 0) try body_buf.appendSlice(self.alloc, "; ");
             try body_buf.appendSlice(self.alloc, g);
         }
-        if (lk.extra > 0) {
-            const extra_str = try std.fmt.allocPrint(self.alloc, " (+{d} more)", .{lk.extra});
-            defer self.alloc.free(extra_str);
-            try body_buf.appendSlice(self.alloc, extra_str);
-        }
 
         const inner_max = self.conf.ocr_dialog_cols -| 4;
-        const header_rows = try mokuro.wrap(self.alloc, header_buf.items, inner_max);
-        defer self.alloc.free(header_rows);
+        const sub_rows = try mokuro.wrap(self.alloc, sub_buf.items, inner_max);
+        defer self.alloc.free(sub_rows);
         const body_rows = try mokuro.wrap(self.alloc, body_buf.items, inner_max);
         defer self.alloc.free(body_rows);
-        if (header_rows.len == 0 and body_rows.len == 0) {
-            try c.setLayerVisible(self.dict_layer, false);
-            return;
-        }
 
-        var inner: usize = 1;
-        for (header_rows) |r| inner = @max(inner, mokuro.displayWidth(r));
+        // The term's own row(s): `scale_cells` rows tall (2 for
+        // `.x1_5`/`.x2`, reserving room below for the vertical overflow
+        // a scaled glyph draws past its own cell) and `term_cols` wide
+        // (its normal display width times that same multiplier, since
+        // `writeScaledTermRow` spaces characters `scale_cells` cells
+        // apart so neighbouring enlarged glyphs don't collide) -- see
+        // decisions.md's Text scale section.
+        const scale = self.dict_title_scale;
+        const scale_cells: usize = if (scale == .x1) 1 else 2;
+        const term_cols = mokuro.displayWidth(entry.term) * scale_cells;
+        const term_rows = scale_cells;
+
+        var inner: usize = term_cols;
+        for (sub_rows) |r| inner = @max(inner, mokuro.displayWidth(r));
         for (body_rows) |r| inner = @max(inner, mokuro.displayWidth(r));
+        inner = @max(inner, 1);
         inner = @min(inner, inner_max);
         const interior = inner + 2;
         const box_cols = interior + 2;
-        // A blank separator row between header and body, but only when
-        // both are present.
-        const sep_rows: usize = if (header_rows.len > 0 and body_rows.len > 0) 1 else 0;
-        const box_rows = header_rows.len + sep_rows + body_rows.len + 2;
+        // A blank separator row before the body, but only when there is
+        // one -- the term (plus its subheader) is always shown.
+        const sep_rows: usize = if (body_rows.len > 0) 1 else 0;
+        const box_rows = term_rows + sub_rows.len + sep_rows + body_rows.len + 2;
 
         const at = self.placeLookup(box_rows, box_cols);
         if (self.lookup) |*ptr| ptr.rect = .{ .row = at.row, .col = at.col, .rows = box_rows, .cols = box_cols };
@@ -1325,8 +1354,14 @@ pub const Ui = struct {
         var pad_buf: [config_mod.ocr_dialog_cols_max]u8 = undefined;
         @memset(&pad_buf, ' ');
         var row_i: usize = 1;
-        for (header_rows) |line| {
-            try writeLookupRow(&b, self.dict_layer, row_i, line, inner, &pad_buf, fg_lookup_term);
+        try writeScaledTermRow(&b, self.dict_layer, row_i, entry.term, scale, term_cols, inner, &pad_buf, fg_lookup_term);
+        row_i += 1;
+        if (scale_cells > 1) {
+            try writeLookupRow(&b, self.dict_layer, row_i, "", inner, &pad_buf, fg_lookup_term);
+            row_i += 1;
+        }
+        for (sub_rows) |line| {
+            try writeLookupRow(&b, self.dict_layer, row_i, line, inner, &pad_buf, fg_dialog);
             row_i += 1;
         }
         if (sep_rows > 0) {
@@ -1603,6 +1638,50 @@ pub const Ui = struct {
         try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
     }
 
+    /// The lookup panel's title row: `term` drawn via `write_text`'s
+    /// `scale` when `scale != .x1` -- see decisions.md's Text scale
+    /// section. Unlike `writeLookupRow`, this writes one character at a
+    /// time, each at `codepointWidth * scale_cells` cells of pitch from
+    /// the last (`scale_cells` is 2 for `.x1_5`/`.x2`, matching
+    /// `renderLookup`'s `term_cols`) -- a scaled glyph overflows past its
+    /// own cell, so back-to-back characters at the normal 1-cell pitch
+    /// would draw right on top of each other. `term_cols` is that
+    /// reserved footprint, used here only to place the right-hand pad.
+    fn writeScaledTermRow(
+        b: *glyphwire.Client.Batch,
+        layer: glyphwire.LayerHandle,
+        row: usize,
+        term: []const u8,
+        scale: glyphwire.TextScale,
+        term_cols: usize,
+        inner: usize,
+        pad_buf: []u8,
+        fg: glyphwire.Color,
+    ) !void {
+        try cursorOn(b, layer, row, 0);
+        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
+        try textOn(b, layer, pad_buf[0..1], fg, bg_dialog);
+
+        const pitch: usize = if (scale == .x1) 1 else 2;
+        var col: usize = 2;
+        var it = (try std.unicode.Utf8View.init(term)).iterator();
+        while (it.nextCodepointSlice()) |cp_bytes| {
+            try cursorOn(b, layer, row, col);
+            if (scale == .x1) {
+                try textOn(b, layer, cp_bytes, fg, bg_dialog);
+            } else {
+                try b.notify("write_text", .{ .layer = layer, .text = cp_bytes, .fg = fg, .bg = bg_dialog, .scale = @tagName(scale) });
+            }
+            const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
+            col += @as(usize, glyphwire.codepointWidth(cp)) * pitch;
+        }
+
+        const used = @min(term_cols, inner);
+        try cursorOn(b, layer, row, 2 + used);
+        try textOn(b, layer, pad_buf[0 .. inner - used + 1], fg, bg_dialog);
+        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
+    }
+
     /// Queues the dialog's full redraw (border + every line) onto `b`
     /// rather than sending each piece as its own notification: a
     /// half-drawn dialog would otherwise be visible for a frame between
@@ -1790,6 +1869,7 @@ pub const Ui = struct {
         if (eq(u8, key, "w")) return self.setMode(.fit_width);
         if (eq(u8, key, "t")) return self.setMode(.fit_height);
         if (eq(u8, key, "one")) return self.setMode(.natural);
+        if (eq(u8, key, "s")) return self.cycleDictTitleScale();
 
         // ── direction ──
         if (eq(u8, key, "d")) return self.flipDirection();
@@ -1873,6 +1953,14 @@ pub const Ui = struct {
         if (eq(u8, text, "+") or eq(u8, text, "=")) return self.zoomBy(.in);
         if (eq(u8, text, "-")) return self.zoomBy(.out);
         if (eq(u8, text, "\\")) return self.toggleDialogHidden();
+        // While the lookup panel is showing more than one homograph,
+        // `]`/`[` cycle through them instead of jumping pages -- the
+        // panel "captures" the keys for as long as there's something to
+        // cycle, same as `goto_prompt` captures every key above.
+        if (self.lookup) |lk| if (lk.entries.len > 1) {
+            if (eq(u8, text, "]")) return self.cycleLookupHit(1);
+            if (eq(u8, text, "[")) return self.cycleLookupHit(-1);
+        };
         if (eq(u8, text, "]")) return self.stepPage(@intCast(self.conf.jump_pages));
         if (eq(u8, text, "[")) return self.stepPage(-@as(i64, @intCast(self.conf.jump_pages)));
     }
@@ -2177,10 +2265,11 @@ pub const Ui = struct {
     }
 
     /// Common tail of `wordLookupAt` and `lookupSelection`: takes a
-    /// `dict_mod.lookup` result and keeps its first entry as
-    /// `self.lookup`, dropping every other homograph here with its count
-    /// carried as `extra` rather than shown in full. A no-op (clearing
-    /// any open lookup) on no match, same as before this was shared.
+    /// `dict_mod.lookup` result and keeps every homograph as
+    /// `self.lookup.entries`, shown one at a time via `hit` -- `]`/`[`
+    /// cycle through them (`cycleLookupHit`) instead of the older
+    /// "keep the first, drop the rest" behavior. A no-op (clearing any
+    /// open lookup) on no match, same as before this was shared.
     fn setLookupFromMatch(self: *Ui, m: ?dict_mod.Match) void {
         const match = m orelse return self.clearLookup();
         if (match.entries.len == 0) {
@@ -2188,33 +2277,41 @@ pub const Ui = struct {
             return self.clearLookup();
         }
 
-        // Keep the first entry (its strings become `self.lookup`'s, so
-        // it's not `deinit`'d).
-        for (match.entries[1..]) |e| e.deinit(self.alloc);
-        const kept = match.entries[0];
-        const extra = match.entries.len - 1;
-        self.alloc.free(match.entries);
-        self.alloc.free(kept.rules);
-
         self.clearLookup();
-        self.lookup = .{
-            .term = kept.term,
-            .reading = kept.reading,
-            .glossary = kept.glossary,
-            .reason = match.reason,
-            .extra = extra,
-        };
+        self.lookup = .{ .entries = match.entries, .reason = match.reason };
         self.lookup_dirty = true;
     }
 
     fn clearLookup(self: *Ui) void {
         const lk = self.lookup orelse return;
-        self.alloc.free(lk.term);
-        self.alloc.free(lk.reading);
-        for (lk.glossary) |g| self.alloc.free(g);
-        self.alloc.free(lk.glossary);
+        dict_mod.freeEntries(self.alloc, lk.entries);
+        if (lk.reason) |r| self.alloc.free(r);
         self.lookup = null;
         self.lookup_dirty = true;
+    }
+
+    /// `]`/`[` while the lookup panel is showing more than one homograph
+    /// -- see `Ui.handleText`, which only routes here instead of its own
+    /// page-jump binding when that condition holds. Wraps at both ends.
+    fn cycleLookupHit(self: *Ui, delta: i64) void {
+        if (self.lookup == null) return;
+        const n: i64 = @intCast(self.lookup.?.entries.len);
+        if (n <= 1) return;
+        const idx = @mod(@as(i64, @intCast(self.lookup.?.hit)) + delta, n);
+        self.lookup.?.hit = @intCast(idx);
+        self.lookup_dirty = true;
+    }
+
+    /// `s` -- cycles the lookup panel's title size for the rest of the
+    /// session (`conf.dictionary_title_scale` is only the starting
+    /// value). Redraws immediately if a lookup is already showing.
+    fn cycleDictTitleScale(self: *Ui) void {
+        self.dict_title_scale = switch (self.dict_title_scale) {
+            .x1 => .x1_5,
+            .x1_5 => .x2,
+            .x2 => .x1,
+        };
+        if (self.lookup != null) self.lookup_dirty = true;
     }
 
     fn handleMouseMove(self: *Ui, ev: glyphwire.MouseMoveEvent) !void {

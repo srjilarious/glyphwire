@@ -207,6 +207,28 @@ pub const DeferredIcon = struct {
     foreground: bool,
 };
 
+/// One `Cell.text_scale != .x1` glyph, deferred past the rest of the grid
+/// for the same reason `DeferredIcon` is: the enlarged glyph overflows
+/// past its own cell, and that overflow should paint over already-emitted
+/// neighbours rather than under them. See `TextScale`'s doc comment --
+/// this is a pure rendering effect, the cells it overflows into are
+/// otherwise ordinary. `grapheme_bytes`/`grapheme_len` copy the cell's
+/// inline grapheme storage since the source `Cell` isn't guaranteed to
+/// outlive the deferred pass (a scrolled/rewritten layer between the main
+/// loop and the deferred one, in principle -- matching `DeferredIcon`
+/// copying its `IconBg` by value rather than holding a `*Cell`).
+pub const DeferredScaledGlyph = struct {
+    grapheme_bytes: [glyphwire.grapheme_inline_len]u8,
+    grapheme_len: u8,
+    pos: host_eng.Vec2I,
+    color: host_eng.Color,
+    scale: f32,
+
+    fn grapheme(self: *const DeferredScaledGlyph) []const u8 {
+        return self.grapheme_bytes[0..self.grapheme_len];
+    }
+};
+
 /// The divider band between two split children. Deliberately lighter than
 /// the window scrollbar's track: a divider reads as a seam between panes,
 /// not as chrome hanging off the edge of the window.
@@ -266,6 +288,9 @@ pub const Renderer = struct {
     /// `rebuildLayer` -- see `DeferredIcon`. Cleared (not freed) at the
     /// start of each rebuild and reused across rebuilds/layers.
     deferred_icons: std.ArrayList(DeferredIcon) = .empty,
+    /// Scratch for `.text_scale != .x1` glyphs, same reuse/clearing
+    /// convention as `deferred_icons`.
+    deferred_scaled_text: std.ArrayList(DeferredScaledGlyph) = .empty,
 
     /// One `LayerBatches` per live layer, keyed by **context and** layer
     /// handle. The context half is load-bearing: layer handles are
@@ -307,6 +332,7 @@ pub const Renderer = struct {
     pub fn deinit(self: *Renderer) void {
         const alloc = self.app.alloc;
         self.deferred_icons.deinit(alloc);
+        self.deferred_scaled_text.deinit(alloc);
         self.image_textures.deinit();
         self.icon_uv.deinit();
         var it = self.layer_batches.valueIterator();
@@ -819,6 +845,7 @@ pub const Renderer = struct {
         }
 
         self.deferred_icons.clearRetainingCapacity();
+        self.deferred_scaled_text.clearRetainingCapacity();
         const any_highlight = layer.highlighted_ids.items.len > 0;
 
         var row: usize = 0;
@@ -863,7 +890,20 @@ pub const Renderer = struct {
                 if (fa) |f| {
                     const g = c.grapheme();
                     if (g.len > 0) {
-                        emitGlyphs(&lb.text, f, g, px, py, fade(host_eng.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a), alpha));
+                        const color = fade(host_eng.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a), alpha);
+                        if (c.text_scale == .x1) {
+                            emitGlyphs(&lb.text, f, g, px, py, color, 1.0);
+                        } else {
+                            var dg: DeferredScaledGlyph = .{
+                                .grapheme_bytes = undefined,
+                                .grapheme_len = @intCast(g.len),
+                                .pos = .{ .x = px, .y = py },
+                                .color = color,
+                                .scale = textScaleFactor(c.text_scale),
+                            };
+                            @memcpy(dg.grapheme_bytes[0..g.len], g);
+                            self.deferred_scaled_text.append(self.app.alloc, dg) catch {};
+                        }
                     }
                 }
             }
@@ -874,6 +914,15 @@ pub const Renderer = struct {
         // neighbours regardless of order.
         for (self.deferred_icons.items) |d| {
             self.emitIconCell(eng, lb, d.icon, d.pos.x, d.pos.y, d.foreground, has_icon_atlas);
+        }
+
+        // `text_scale != .x1` glyphs overflow past their own cell the same
+        // way -- deferred so that overflow paints over already-emitted
+        // neighbours regardless of grid order. See `DeferredScaledGlyph`.
+        if (fa) |f| {
+            for (self.deferred_scaled_text.items) |d| {
+                emitGlyphs(&lb.text, f, d.grapheme(), d.pos.x, d.pos.y, d.color, d.scale);
+            }
         }
 
         // Selection tint: one rect per selected row span
@@ -1100,19 +1149,41 @@ pub const Renderer = struct {
     /// Emits `text`'s glyph quads starting at cell top-left `(px, py)`,
     /// mirroring `host_eng.renderer.TextRenderer.drawStringColored`: baseline
     /// at `py + atlas.ascent`, each glyph placed by its bearing and
-    /// advanced by its `advance`, UVs straight from the atlas.
-    fn emitGlyphs(batch: *GlyphBatch, fa: *host_eng.renderer.FontAtlas, text: []const u8, px: i32, py: i32, color: host_eng.Color) void {
-        const pos_y = py + fa.ascent;
-        var curr_x = px;
+    /// advanced by its `advance`, UVs straight from the atlas. `scale`
+    /// multiplies bearing/size/advance uniformly around the `(px, py)`
+    /// anchor -- `1.0` is the original 1:1 behavior; `> 1.0` (a
+    /// `text_scale`d cell) draws the same atlas glyph larger, overflowing
+    /// past the cell it was anchored in. See `TextScale`'s doc comment.
+    fn emitGlyphs(batch: *GlyphBatch, fa: *host_eng.renderer.FontAtlas, text: []const u8, px: i32, py: i32, color: host_eng.Color, scale: f32) void {
+        const pos_y_f: f32 = @as(f32, @floatFromInt(py)) + @as(f32, @floatFromInt(fa.ascent)) * scale;
+        var curr_x: f32 = @floatFromInt(px);
         var it = (std.unicode.Utf8View.initUnchecked(text)).iterator();
         while (it.nextCodepoint()) |cp| {
             const cd = fa.getChar(@intCast(cp)) orelse continue;
             if (cd.size.x > 0 and cd.size.y > 0) {
-                const dest = host_eng.RectF.fromPosSize(curr_x + cd.bearing.x, pos_y - cd.bearing.y, cd.size.x, cd.size.y);
+                const l = curr_x + @as(f32, @floatFromInt(cd.bearing.x)) * scale;
+                const t = pos_y_f - @as(f32, @floatFromInt(cd.bearing.y)) * scale;
+                const dest = host_eng.RectF{
+                    .l = l,
+                    .t = t,
+                    .r = l + @as(f32, @floatFromInt(cd.size.x)) * scale,
+                    .b = t + @as(f32, @floatFromInt(cd.size.y)) * scale,
+                };
                 addGlyph(batch, dest, cd.coords, color);
             }
-            curr_x += cd.advance;
+            curr_x += @as(f32, @floatFromInt(cd.advance)) * scale;
         }
+    }
+
+    /// `Cell.text_scale`'s pixel multiplier -- `1.5`/`2.0` for `.x1_5`/
+    /// `.x2`, matching the "1.5x"/"2x" naming exactly (see `TextScale`'s
+    /// doc comment).
+    fn textScaleFactor(scale: glyphwire.TextScale) f32 {
+        return switch (scale) {
+            .x1 => 1.0,
+            .x1_5 => 1.5,
+            .x2 => 2.0,
+        };
     }
 
     fn drawLayerBatches(self: *Renderer, eng: *Engine, key: BatchKey) void {

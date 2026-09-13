@@ -1010,6 +1010,35 @@ pub fn writeTextTaggedThenGetMetadataRoundTripsTest(io: std.Io, alloc: std.mem.A
     try testz.expectTrue(std.mem.indexOf(u8, get_result.response.?, "\\\"path\\\":\\\"/tmp/a\\\"") != null);
 }
 
+/// `write_text`'s `scale` field ("x1"/"x1_5"/"x2") is threaded through to
+/// `Cell.text_scale` -- see `core.TextScale`.
+pub fn writeTextScaleSetsCellTextScaleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const write_message =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"a","scale":"x1_5"}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, write_message)).response == null);
+    try testz.expectEqual(ctx.root.cell(0, 0).text_scale, glyphwire.TextScale.x1_5);
+}
+
+/// An unrecognized `scale` value is rejected rather than silently falling
+/// back to `.x1` -- same convention `draw_icon`'s `scale` already follows.
+pub fn writeTextBadScaleIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const write_message =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"a","scale":"huge"}}
+    ;
+    try testz.expectError(d.handle(alloc, write_message), dispatch.DispatchError.InvalidTextScale);
+}
+
 pub fn getMetadataUntaggedCellReturnsNullTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

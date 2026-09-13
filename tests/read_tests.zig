@@ -453,6 +453,22 @@ pub fn parseModeAcceptsBothSpellingsTest(_: std.Io, _: std.mem.Allocator) !void 
     try testz.expectTrue(rconfig.parseMode("upside-down") == null);
 }
 
+pub fn parseTitleScaleAcceptsItsThreeValuesTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(rconfig.parseTitleScale("1x").? == .x1);
+    try testz.expectTrue(rconfig.parseTitleScale("1.5x").? == .x1_5);
+    try testz.expectTrue(rconfig.parseTitleScale("2x").? == .x2);
+    try testz.expectTrue(rconfig.parseTitleScale("huge") == null);
+}
+
+pub fn configReadsDictionaryTitleScaleTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc,
+        \\config = { dictionary_title_scale = "2x" }
+    );
+    defer result.deinit(alloc);
+    try testz.expectTrue(result.err == null);
+    try testz.expectTrue(result.config.dictionary_title_scale == .x2);
+}
+
 pub fn directionParsesAndRoundTripsThroughItsNameTest(_: std.Io, _: std.mem.Allocator) !void {
     // state.zig stores the name, so the pair has to be inverse.
     try testz.expectTrue(rconfig.Direction.parse(rconfig.Direction.rtl.name()).? == .rtl);
@@ -858,6 +874,7 @@ pub fn dictLookupDeinflectsIchidanTeFormTest(_: std.Io, alloc: std.mem.Allocator
     defer d.deinit();
     const m = (try dict.lookup(alloc, &d, "食べてすぐ")).?;
     defer dict.freeEntries(alloc, m.entries);
+    defer alloc.free(m.reason.?);
     try testz.expectEqualStr(m.reason.?, "te-form");
     try testz.expectEqualStr("食べてすぐ"[0..m.len], "食べて");
     try testz.expectEqual(m.entries.len, 1);
@@ -868,12 +885,104 @@ pub fn dictLookupDeinflectsGodanRuVerbPastTest(_: std.Io, alloc: std.mem.Allocat
     var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
     defer d.deinit();
     // 分かった -- past of 分かる (godan, not ichidan -- the ambiguous
-    // -る class `valid_rules` filtering exists to resolve).
+    // -る class `rules_out` filtering exists to resolve).
     const m = (try dict.lookup(alloc, &d, "分かった")).?;
     defer dict.freeEntries(alloc, m.entries);
+    defer alloc.free(m.reason.?);
     try testz.expectEqualStr(m.reason.?, "past");
     try testz.expectEqual(m.entries.len, 1);
     try testz.expectEqualStr(m.entries[0].term, "分かる");
+}
+
+// ─── dict: chained deinflection ─────────────────────────────────────────
+//
+// These exercise `tryDeinflectAtDepth`'s multi-step search -- forms the
+// old single-step `lookup` could never reach no matter how the rule
+// table was widened, since it only ever tried one rule per candidate.
+
+pub fn dictLookupChainsProgressiveThroughTeFormTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // 食べている ("is eating") -- the progressive rule strips "ている"
+    // down to the te-form "食べて", which isn't itself a headword
+    // (`rules_out = &.{}`); the existing te-form rule then reduces that
+    // to "食べる". Two chained rule applications, neither of which
+    // resolves anything alone.
+    const m = (try dict.lookup(alloc, &d, "食べている")).?;
+    defer dict.freeEntries(alloc, m.entries);
+    defer alloc.free(m.reason.?);
+    try testz.expectEqualStr("食べている"[0..m.len], "食べている");
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(m.entries[0].term, "食べる");
+    try testz.expectEqualStr(m.reason.?, "te-form, progressive");
+}
+
+pub fn dictLookupChainsNegativePastThroughNegativeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // 分からなかった -- negative-past of 分かる (godan). The dedicated
+    // negative-past rule (`なかった` -> `ない`, non-terminal) collapses
+    // this to the plain negative "分からない" one layer in; the existing
+    // godan negative rule then reduces that to "分かる", correctly
+    // validated against its "v5" tag (not the ichidan "v1" negative rule,
+    // which would also match "ない" as a bare suffix but is rejected
+    // since 分かる isn't tagged v1). Two chained rule applications.
+    const m = (try dict.lookup(alloc, &d, "分からなかった")).?;
+    defer dict.freeEntries(alloc, m.entries);
+    defer alloc.free(m.reason.?);
+    try testz.expectEqualStr("分からなかった"[0..m.len], "分からなかった");
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(m.entries[0].term, "分かる");
+}
+
+pub fn dictLookupChainsCausativeThroughNegativeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // 食べさせない ("doesn't make [someone] eat") -- the outer negative
+    // rule strips "ない" down to the causative form "食べさせる", which
+    // isn't itself a headword; the causative rule then reduces that to
+    // "食べる", validated against its "v1" tag. Unlike the progressive/
+    // negative-past chains above, causative's own `rules_out` is
+    // terminal (the real headword's class), not `&.{}` -- it only ever
+    // needs an *outer* layer (negative/past/te-form) to strip first
+    // because a bare causative form is rarely written alone, not because
+    // stripping causative itself leaves something non-terminal.
+    const m = (try dict.lookup(alloc, &d, "食べさせない")).?;
+    defer dict.freeEntries(alloc, m.entries);
+    defer alloc.free(m.reason.?);
+    try testz.expectEqualStr("食べさせない"[0..m.len], "食べさせない");
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(m.entries[0].term, "食べる");
+    try testz.expectEqualStr(m.reason.?, "causative, negative");
+}
+
+pub fn dictLookupResolvesBareCausativeInOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // 食べさせる alone (no outer negative/past layer) -- causative is
+    // terminal, so this resolves in exactly one rule application, same
+    // shape as the polite-past test below.
+    const m = (try dict.lookup(alloc, &d, "食べさせる")).?;
+    defer dict.freeEntries(alloc, m.entries);
+    defer alloc.free(m.reason.?);
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(m.entries[0].term, "食べる");
+    try testz.expectEqualStr(m.reason.?, "causative");
+}
+
+pub fn dictLookupResolvesPolitePastInOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // 食べました -- polite past. Unlike the chains above, this is a
+    // single terminal rule application: the conjunctive stem directly
+    // matches the "v1" headword's rules, with nothing further to unwind.
+    const m = (try dict.lookup(alloc, &d, "食べました")).?;
+    defer dict.freeEntries(alloc, m.entries);
+    defer alloc.free(m.reason.?);
+    try testz.expectEqualStr("食べました"[0..m.len], "食べました");
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(m.entries[0].term, "食べる");
+    try testz.expectEqualStr(m.reason.?, "polite past");
 }
 
 pub fn dictLookupRejectsADeinflectionWhoseTargetHasTheWrongRuleTest(_: std.Io, alloc: std.mem.Allocator) !void {

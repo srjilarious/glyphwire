@@ -2266,6 +2266,20 @@ pub fn writeTextWideCharTakesTwoCellsTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqual(layer.cursor.col, @as(usize, 4));
 }
 
+pub fn writeTextTaggedScaledSetsCellTextScaleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    try layer.writeTextTaggedScaled("A", glyphwire.default_style.fg, glyphwire.default_style.bg, null, .x2);
+    try testz.expectEqual(layer.cell(0, 0).text_scale, glyphwire.TextScale.x2);
+
+    // Plain writeText (via writeTextTagged's .x1 default) leaves later
+    // cells at the default scale -- scale doesn't leak across calls.
+    try layer.writeText("B", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 1).text_scale, glyphwire.TextScale.x1);
+}
+
 pub fn writeTextWideCharWrapsWhenItWontFitTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 2, 2, 0);

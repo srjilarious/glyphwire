@@ -1480,6 +1480,69 @@ surface.
   on the plain sprite batch: it replaces the background outright, so
   nothing is fill-drawn for that cell to cover it.
 
+**Text scale**
+- `write_text`'s optional `scale` (`"x1"` default, `"x1_5"`, `"x2"`) draws
+  the touched cells' glyphs at 1.5x/2x their normal pixel size, for a
+  dialog title or a markdown heading that needs to visually read as
+  bigger than body text — the first consumer is gw-read's dictionary
+  lookup panel (see that section below).
+- **Modeled on icon `.natural` overflow, not on the East Asian
+  wide-character pair.** The wide-character model (`CellWidth.wide_lead`
+  + `.wide_spacer`, see Cell content below) was the more obvious
+  precedent — it already reserves extra cell footprint for a glyph — but
+  it only ever spans *columns*, on the *same row*, and its spacer cells
+  exist so hit-testing/backgrounds/scrolling treat the pair as one
+  selectable unit. A scaled title needs to grow in *both* dimensions and
+  is decorative chrome, not selectable running text, so reserving a real
+  N-column-by-M-row footprint (spacer cells in every direction, taught to
+  `clearWidePartner`-style orphan cleanup, `insert_cells`/`delete_cells`,
+  scrolling, and selection) would be substantial new bookkeeping for a
+  capability nothing here actually needs hit-tested. `draw_icon`'s
+  `"natural"` overflow already solved the simpler version of this
+  problem: `Cell.text_scale` lives only on the cell holding the grapheme,
+  the enlarged glyph spills into whichever neighbor cells it happens to
+  reach, and nothing about those neighbor cells' own data changes — same
+  "rendering effect, zero data-model footprint" tradeoff as icon overflow,
+  including the same caveat (a caller wanting the overflow to hit-test as
+  part of a span still needs `tag_metadata`, and clearing/redrawing a
+  covered neighbor cell doesn't erase what was painted over it — only
+  touching the scaled cell itself does).
+- **The caller plans the gap, same as an icon's `h_align`/`v_align`
+  caller does.** `write_text` doesn't reserve blank cells after a scaled
+  run — a title using `scale: "x2"` needs to leave enough real blank
+  cells (or trailing padding) after it for the overflow not to clash with
+  whatever comes next, exactly like a `draw_icon` caller sizing its own
+  layout around a `"natural"` icon's known overflow. gw-read's dictionary
+  panel does this by reserving the title row's full padded width up
+  front, independent of the glyph count `scale` will stretch it to.
+  Anchored top-left at the cell origin (not centered/end-aligned like
+  icon's `h_align`/`v_align`) since a title is always read left-to-right
+  from a fixed left margin — alignment options were left out as
+  unneeded generality for that one use.
+- **Host rendering: deferred, same reason and same shape as
+  `DeferredIcon`.** `text_scale != .x1` cells are skipped in the normal
+  per-cell glyph pass and collected into `Renderer.deferred_scaled_text`,
+  drawn in a second pass after the whole grid so an oversized glyph always
+  paints over already-emitted neighbors regardless of row/col order (see
+  `host/render.zig`'s `DeferredScaledGlyph`/`emitGlyphs`'s `scale` param).
+  `1.5`/`2.0` multiply bearing, glyph size, and advance uniformly around
+  the cell's unscaled top-left anchor — the same atlas glyph the engine
+  already rasterized at one fixed pixel size, just enlarged at draw time
+  rather than re-rasterized, so "1.5x" and "2x" differ visually (unlike a
+  design that rounded both up to the same 2-cell reserved footprint and
+  lost the distinction between them).
+- **Not exposed on `get_cells`.** Every other cell field consumers can
+  reasonably act on (`wide`, `fg_icon`, `metadata_id`, `focus`) is
+  readable back; `text_scale` isn't, deliberately deferred rather than
+  wired — no current client reads a title's cell data back to learn its
+  own scale (gw-read tracks the size it asked for itself), and the writer
+  is always the one who set it. Add it if a real consumer needs it.
+- **Wire strings match the enum's tag names exactly** (`"x1"`/`"x1_5"`/
+  `"x2"`) — same `std.meta.stringToEnum`/`@tagName` round trip
+  `draw_icon`'s `scale` already uses, chosen over the more readable
+  `"1x"`/`"1.5x"`/`"2x"` specifically to avoid a second, hand-written
+  string mapping in both directions for one enum.
+
 **Box**
 - `draw_box` shares `Background.icon` with `draw_icon` (each of the 9
   tiles is an `IconBg`, stamped into its cell), not `draw_image`'s
@@ -4822,20 +4885,32 @@ itself uses client-side; there is no cheaper correct answer to "where
 does this word end" without a real segmenter, and a real segmenter is a
 dependency this reader doesn't otherwise need.
 
-**Deinflection is deliberately a small table, not a ported deinflect.json.**
-Yomitan's own rule table runs to several hundred entries covering every
-conjugation, every politeness register, and multi-step chains (a
-passive-causative needs two rule applications, not one). `read/dict.zig`
-ships roughly thirty rules — plain-form negative/past/te-form for every
-godan sound group and for ichidan verbs, and the same three for
-i-adjectives — single-step only. That covers most of what manga dialogue
-actually is (casual speech, not the polite `-masu` register), and it
-proves the click → substring → deinflect → dictionary-entry pipeline
-against a real volume before spending the effort a complete table and
-rule-chaining would take. Widening the table is the natural next step,
-not a redesign: `deinflect_rules` is a flat data array, and chaining
-would mean trying each rule's output as a fresh candidate rather than
-stopping at one step.
+**Superseded: deinflection now chains, and the table is wider — still
+not a ported deinflect.json.** Yomitan's own rule table runs to several
+hundred entries covering every conjugation, every politeness register,
+and multi-step chains (a passive-causative needs two rule applications,
+not one). `read/dict.zig` originally shipped roughly thirty single-step
+rules — plain-form negative/past/te-form for every godan sound group and
+for ichidan verbs, plus the same three for i-adjectives — proving the
+click → substring → deinflect → dictionary-entry pipeline against a real
+volume before spending the effort a wider table and chaining would take.
+That proof held up, so `lookup` now searches by iterative deepening
+(`tryDeinflectAtDepth`, up to `max_deinflect_depth` rule applications per
+candidate, shallowest successful depth wins) and the table adds
+negative-past, causative, passive/potential, polite non-past/past/
+negative (`-masu`/`-mashita`/`-masen`), progressive (`-teiru`/`-teru`/
+`-deiru`/`-deru`), and volitional. `DeinflectRule.rules_out` doubles as
+the chaining mechanism: an empty `rules_out` (e.g. the negative-past
+rule's) means the form it produces is never itself a dictionary
+headword, forcing at least one more rule application, while a non-empty
+one (every other rule, causative/passive/potential included — see
+`read/dict.zig`'s doc comment on why those two are terminal despite
+looking like they should chain) validates the final stem against a
+real dictionary row's own `rules` column exactly as the original
+single-step version did. Still not a redesign: `deinflect_rules` stayed
+a flat data array throughout. Still missing: polite negative-past
+(`-masendeshita`), imperative, conditional/provisional (`-eba`/`-tara`),
+and keigo.
 
 **Ambiguous endings are resolved by the dictionary, not avoided.** A
 verb ending in `-る` reads identically whether it's ichidan (`食べる`,
@@ -4924,12 +4999,36 @@ the handful of C calls `dict.zig` needs (open/close, exec, one prepared
 statement's bind/step/column/reset/finalize) rather than pulling in a
 full binding.
 
-**One panel, one word, no multi-select.** A term can have several
-entries — homographs, or a verb and a noun sharing kana — and `lookup`
-returns all of them, but the panel shows only the first and a
-"`(+N more)`" count rather than listing every sense of every entry. The
-panel already competes for screen space with the OCR dialog it sits
-below; picking one deferred showing all of them rather than the reverse.
+**Superseded: cycling through homographs, not "one panel, one word."**
+A term can have several entries — homographs, or a verb and a noun
+sharing kana — and `lookup` returns all of them. This used to mean
+picking the first and showing a "`(+N more)`" count instead of the rest,
+reasoning that the panel already competes for screen space with the OCR
+dialog it sits below. In practice that just hid real answers behind a
+count with no way to see them. `Ui.Lookup` now keeps every entry
+(`entries`) and a `hit` index into it; `]`/`[` cycle `hit` while the
+panel is showing more than one (`Ui.cycleLookupHit`), overriding their
+usual page-jump binding for exactly as long as there's something to
+cycle — the same "capture while relevant" pattern `goto_prompt` already
+uses for its own keys. The panel shows the current position as
+`[hit/total]` next to the reading/reason instead of the old count, so
+cycling past the end is discoverable without documentation.
+
+**The lookup panel's title is the first consumer of `write_text`'s
+`scale`.** `conf.dictionary_title_scale` (`"1x"`/`"1.5x"`/`"2x"`, default
+`"1x"`) picks the term's starting size; `s` cycles it live for the
+session (`Ui.cycleDictTitleScale`). The term gets its own row(s),
+separate from the reading/reason/position line the old single wrapped
+header block used to hold all three in — a scaled glyph's overflow (see
+the Text scale section above) would otherwise collide with whatever text
+followed it on the same wrapped line. `writeScaledTermRow` spaces each
+character `scale_cells` cells apart (2 for `.x1_5`/`.x2`, matching the
+box's reserved `term_cols` width) rather than the normal 1-cell pitch, so
+neighbouring enlarged glyphs don't draw on top of each other, and an
+extra blank row is reserved below the title when `scale_cells > 1` for
+the vertical half of the same overflow. This is the gw-read-side half of
+"the caller plans the gap" the Text scale section describes; the wire
+protocol itself reserves nothing.
 
 **Building the index shows progress by file, not by term.** The first
 time a dictionary directory is opened, indexing tens of thousands of

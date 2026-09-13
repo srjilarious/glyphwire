@@ -16,6 +16,7 @@ const ziglua = @import("ziglua");
 const Lua = ziglua.Lua;
 const zoom = @import("zoom.zig");
 const cache = @import("cache.zig");
+const glyphwire = @import("glyphwire");
 
 const conf_name = "read.conf.lua";
 
@@ -100,6 +101,12 @@ pub const ReadConfig = struct {
     /// default -- leaves the feature off entirely: no load at startup,
     /// no click handling in the dialog.
     dictionary: []const u8 = "",
+    /// Default size of the lookup panel's title (the looked-up term) --
+    /// `"1x"` (normal), `"1.5x"`, or `"2x"`, drawn via `write_text`'s
+    /// `scale` (see `core.TextScale`'s doc comment). `+`/`-` cycle it at
+    /// runtime for the session; this is only the size a freshly opened
+    /// book's lookup panel starts at.
+    dictionary_title_scale: glyphwire.TextScale = .x1,
 
     /// The zoom limits this config implies, handed to every `zoom.layout`
     /// call.
@@ -195,6 +202,12 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     // result points into Lua's own string and doesn't outlive `load`.
     if (stringField(lua, "dictionary")) |v|
         result.config.dictionary = alloc.dupe(u8, v) catch "";
+    if (stringField(lua, "dictionary_title_scale")) |v| {
+        if (parseTitleScale(v)) |s| result.config.dictionary_title_scale = s else std.log.warn(
+            "gw-read: {s} `dictionary_title_scale` = '{s}' is not '1x'/'1.5x'/'2x'; ignored",
+            .{ conf_name, v },
+        );
+    }
 
     // A `cache_pages` smaller than what the prefetch wants resident means
     // every prefetched page evicts the one being read. Nudge rather than
@@ -221,6 +234,16 @@ pub fn parseMode(name: []const u8) ?zoom.Mode {
     if (std.mem.eql(u8, name, "fit-height") or std.mem.eql(u8, name, "fit_height")) return .fit_height;
     if (std.mem.eql(u8, name, "natural") or std.mem.eql(u8, name, "1:1")) return .natural;
     if (std.mem.eql(u8, name, "free") or std.mem.eql(u8, name, "zoom")) return .free;
+    return null;
+}
+
+/// The `dictionary_title_scale` key's accepted spellings -- config-file
+/// friendly ("1x"/"1.5x"/"2x"), not necessarily `core.TextScale`'s wire
+/// tag names (`x1`/`x1_5`/`x2`).
+pub fn parseTitleScale(text: []const u8) ?glyphwire.TextScale {
+    if (std.mem.eql(u8, text, "1x")) return .x1;
+    if (std.mem.eql(u8, text, "1.5x")) return .x1_5;
+    if (std.mem.eql(u8, text, "2x")) return .x2;
     return null;
 }
 

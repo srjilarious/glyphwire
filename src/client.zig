@@ -219,6 +219,23 @@ pub const Client = struct {
         });
     }
 
+    /// Same as `writeTextTagged`, but every cell the text touches also
+    /// carries `scale` (`core.Cell.text_scale`) for larger titles/headings
+    /// -- see `core.TextScale`'s doc comment for what that does and
+    /// doesn't reserve. A separate method rather than a new required param
+    /// on `writeText`/`writeTextTagged` since Zig has no default parameter
+    /// values.
+    pub fn writeTextScaled(self: *Client, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: ?core.MetadataHandle, scale: core.TextScale) !void {
+        try self.notify("write_text", .{
+            .layer = self.default_layer,
+            .text = text,
+            .fg = colorToJson(fg),
+            .bg = colorToJson(bg),
+            .metadata_id = metadata_id,
+            .scale = @tagName(scale),
+        });
+    }
+
     /// `write_text(text, fg?, transparent_bg: true)` -- like `writeText`,
     /// but leaves whatever background is already on each cell touched
     /// untouched instead of resetting it to `core.default_style.bg` -- for
@@ -1861,6 +1878,12 @@ pub const Client = struct {
         /// `Client.writeTextTagged`.
         pub fn writeTextTagged(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: core.MetadataHandle) !void {
             try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg), .metadata_id = metadata_id });
+        }
+
+        /// Batched `write_text` with a metadata tag and a `scale` -- see
+        /// `Client.writeTextScaled`.
+        pub fn writeTextScaled(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: ?core.MetadataHandle, scale: core.TextScale) !void {
+            try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg), .metadata_id = metadata_id, .scale = @tagName(scale) });
         }
 
         /// Batched `write_text(text, fg?, transparent_bg: true)` -- see

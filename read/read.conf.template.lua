@@ -122,4 +122,11 @@
 --     -- the default -- leaves the feature off, the same as having no
 --     -- mokuro sidecar.
 --     dictionary = "",
+--
+--     -- Starting size of the lookup panel's title (the looked-up term)
+--     -- -- "1x" (normal, the default), "1.5x", or "2x", drawn larger via
+--     -- the wire protocol's text-scale support. `s` cycles it for the
+--     -- rest of the session once a book is open; this only picks where
+--     -- a freshly opened book starts.
+--     dictionary_title_scale = "1x",
 -- }

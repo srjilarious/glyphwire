@@ -38,6 +38,8 @@ pub const DispatchError = error{
     /// need the still-unbuilt error-response path (roadmap Milestone 0).
     LayerPermissionDenied,
     InvalidIconOption,
+    /// `write_text`'s `scale` wasn't `"x1"`, `"x1_5"`, or `"x2"`.
+    InvalidTextScale,
     /// `move_content`'s `direction` wasn't `"up"` or `"down"`.
     InvalidMoveDirection,
     /// `find_metadata`'s `direction` wasn't `"next"` or `"prev"`.
@@ -130,6 +132,10 @@ const WriteTextParams = struct {
     /// fill -- that needs to stay visible through it rather than being
     /// approximated with a matching flat color.
     transparent_bg: bool = false,
+    /// `"x1"` (default), `"x1_5"`, or `"x2"` -- see `core.TextScale`'s
+    /// doc comment. Wire strings match the enum's tag names exactly, the
+    /// same convention `draw_icon`'s `scale` already uses.
+    scale: ?[]const u8 = null,
 };
 
 /// Params shared by `insert_cells`/`delete_cells` -- also cursor-implicit
@@ -613,6 +619,14 @@ const DrawIconParams = struct {
 fn parseIconOption(comptime E: type, value: ?[]const u8, default: E) !E {
     const s = value orelse return default;
     return std.meta.stringToEnum(E, s) orelse DispatchError.InvalidIconOption;
+}
+
+/// `write_text`'s `scale` -- same shape as `parseIconOption`, but with its
+/// own error so a bad value is reported as `InvalidTextScale` rather than
+/// `InvalidIconOption`.
+fn parseTextScale(value: ?[]const u8) !core.TextScale {
+    const s = value orelse return .x1;
+    return std.meta.stringToEnum(core.TextScale, s) orelse DispatchError.InvalidTextScale;
 }
 
 const DrawBoxParams = struct {
@@ -1652,7 +1666,8 @@ pub const Dispatcher = struct {
         else
             core.default_style.bg;
         const metadata_id = try self.resolveMetadata(p.metadata_id);
-        try layer.writeTextTagged(p.text, fg, bg, metadata_id);
+        const scale = try parseTextScale(p.scale);
+        try layer.writeTextTaggedScaled(p.text, fg, bg, metadata_id, scale);
 
         // A terminal query the text carried (`CSI 6n` / DA / DECRQM):
         // hand the reply bytes to `"terminal"` subscribers -- glyphwire-

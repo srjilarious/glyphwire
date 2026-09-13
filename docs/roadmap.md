@@ -2990,14 +2990,17 @@ whole build.
 
 **Deliberately incomplete, next up for this feature specifically:**
 
-- **Wider deinflection.** `deinflect_rules` covers roughly thirty
-  single-step forms (plain negative/past/te-form for godan, ichidan,
-  i-adjectives) out of the several hundred Yomitan's own table has. No
-  `-masu` register, no potential/passive/causative/volitional/imperative,
-  no rule chaining (a passive-causative needs two steps). Widening the
-  table is additive — `DeinflectRule` entries, no shape change — and
-  chaining means trying each rule's output as a fresh candidate rather
-  than stopping after one substitution.
+- **Wider deinflection — done for the common cases, chaining shipped.**
+  `lookup` now searches by iterative deepening (`tryDeinflectAtDepth`),
+  and `deinflect_rules` covers negative/past/te-form/negative-past for
+  godan, ichidan and i-adjectives, plus causative, passive/potential,
+  polite non-past/past/negative (`-masu`/`-mashita`/`-masen`),
+  progressive, and volitional. Still missing: polite negative-past
+  (`-masendeshita`), imperative, conditional/provisional (`-eba`/
+  `-tara`), keigo, and a dedicated godan す-row causative row (させる
+  is currently only wired to its ichidan target, so causative 話す ->
+  話させる doesn't resolve) — see `read/dict.zig`'s module doc comment
+  and decisions.md's dictionary lookup section.
 - **Multiple dictionaries.** Today `dictionary` is one path, loaded once
   at startup. Selecting among several (a Japanese dictionary and a
   kanji dictionary, say) and configuring which one(s) a lookup checks
