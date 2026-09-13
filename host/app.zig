@@ -222,7 +222,7 @@ pub const App = struct {
             },
             .renderer = .{
                 .app = undefined,
-                .image_textures = std.AutoHashMap(glyphwire.ImageHandle, render_mod.CachedImage).init(alloc),
+                .image_textures = std.AutoHashMap(render_mod.ImageKey, render_mod.CachedImage).init(alloc),
                 .icon_uv = std.AutoHashMap(glyphwire.ImageHandle, host_eng.RectF).init(alloc),
             },
         };

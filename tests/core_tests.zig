@@ -1166,6 +1166,60 @@ pub fn contextRegisterIconTwiceUnderSameNameOverwritesTest(io: std.Io, alloc: st
     try testz.expectEqual(ctx.iconHandle("icon").?, handle_b);
 }
 
+pub fn imageHandlesRestartAtOneInEachContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // Load-bearing for glyphwire-host: `next_image_handle` is per
+    // `Context`, so two contexts each call their first image 1, and a
+    // freshly loaded image is always `generation` 0. Anything caching by
+    // image handle has to key by **context and** handle or it will serve
+    // one context's picture for another's -- which is exactly what made a
+    // second `gw-read` show the first comic's pages
+    // (`Renderer.image_textures` / `ImageKey`).
+    var a = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer a.deinit();
+    var b = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer b.deinit();
+
+    const wide = fakePngBytes(64, 16);
+    const tall = fakePngBytes(16, 64);
+    const in_a = try a.loadImage(.png, &wide);
+    const in_b = try b.loadImage(.png, &tall);
+
+    try testz.expectEqual(in_a, in_b);
+    try testz.expectEqual(in_a, @as(glyphwire.ImageHandle, 1));
+
+    // Same handle, same generation, different pictures: the two are
+    // indistinguishable to a cache that only remembers the handle.
+    const entry_a = a.imageEntry(in_a).?;
+    const entry_b = b.imageEntry(in_b).?;
+    try testz.expectEqual(entry_a.generation, entry_b.generation);
+    try testz.expectEqual(entry_a.width, 64);
+    try testz.expectEqual(entry_b.width, 16);
+
+    // And a context only answers for its own: the lookup the host does
+    // per (context, handle) can't stray into a neighbour.
+    try testz.expectEqual(a.imageEntry(in_a).?.height, 16);
+    try testz.expectEqual(b.imageEntry(in_b).?.height, 64);
+}
+
+pub fn destroyedImageLeavesTheHandleUnreusedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // The other half of the host's cache-invalidation contract: within
+    // one context a destroyed handle is never handed out again, so a
+    // stale texture can only ever be resolved as "gone", never as a
+    // different picture. Across contexts that guarantee does not hold,
+    // which is what the test above is about.
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const first = try ctx.loadImage(.png, &fakePngBytes(32, 32));
+    try ctx.destroyImage(first);
+    try testz.expectTrue(ctx.imageEntry(first) == null);
+
+    const second = try ctx.loadImage(.png, &fakePngBytes(48, 48));
+    try testz.expectTrue(second != first);
+}
+
 pub fn contextCreateMetadataThenLookUpByIdTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

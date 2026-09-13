@@ -72,6 +72,15 @@ pub const CachedImage = struct {
     generation: u32,
 };
 
+/// Identifies one cached image texture. Image handles are allocated per
+/// context and start at 1 in each, exactly like layer handles, so the
+/// context handle is part of the identity for exactly the reason
+/// `BatchKey` carries one -- see `Renderer.image_textures`.
+pub const ImageKey = struct {
+    context: glyphwire.ContextHandle,
+    handle: glyphwire.ImageHandle,
+};
+
 /// Identifies one cached layer batch. Layer handles are per-context, so
 /// the context handle is part of the identity -- see
 /// `Renderer.layer_batches`.
@@ -84,6 +93,11 @@ pub const BatchKey = struct {
 /// was keyed on. `syncOneLayer` rebuilds when any of the keyed values
 /// differ from the layer's current ones.
 pub const LayerBatches = struct {
+    /// The context this layer belongs to -- the `BatchKey.context` half of
+    /// the key it is stored under. Kept on the struct because the emit
+    /// helpers already take a `*LayerBatches` and need the context to
+    /// resolve image/icon handles in the right place (`ImageKey`).
+    context: glyphwire.ContextHandle = 0,
     /// False until the first successful `rebuildLayer`.
     built: bool = false,
     /// `Layer.renderGeneration()` at the last build.
@@ -206,11 +220,18 @@ pub const Renderer = struct {
     /// raw bytes `load_image` received (`Context.images`) plus IHDR-parsed
     /// dimensions.
     ///
+    /// Keyed by **context and** handle (`ImageKey`). Image handles are
+    /// per-context and start at 1 in each, so a handle-only key serves one
+    /// context's texture to another's identically-numbered image -- which
+    /// is what made a second `gw-read` show the first one's pages, since a
+    /// freshly loaded image is always `generation` 0 and the staleness
+    /// check below could not tell the two apart.
+    ///
     /// Stores the `*ManagedTexture` pool, not a `Texture` value:
     /// `ManagedTexture`'s heap-allocated `Handle` stays at a stable
     /// address for its full lifetime, so `&managed.get().?.val` stays
     /// valid across the frames a `StaticQuadBatch` holds it.
-    image_textures: std.AutoHashMap(glyphwire.ImageHandle, CachedImage),
+    image_textures: std.AutoHashMap(ImageKey, CachedImage),
     /// Every bundled icon (`Context.icons`, seeded from the `assets/icons/`
     /// scan -- see `icons.loadIconsFromDir`) decoded once at startup and
     /// packed into a single texture, so a screen full of icons draws from
@@ -255,11 +276,11 @@ pub const Renderer = struct {
     /// at the new origin even though nothing about the layers themselves
     /// changed, so this forces a rebuild of the affected contexts.
     last_pane_layout_gen: u64 = 0,
-    /// The root context's `image_gen` as of the last `syncBatches`. Moves
-    /// when a `destroy_image` / `update_image` / scrollback sweep changed
-    /// what an image handle resolves to -- neither of which touches a
-    /// single cell, so no layer's `render_gen` would report it. See
-    /// `reconcileImageTextures`.
+    /// `imageGenSum()` as of the last `syncBatches`. Moves when a
+    /// `destroy_image` / `update_image` / scrollback sweep changed what an
+    /// image handle resolves to -- none of which touches a single cell, so
+    /// no layer's `render_gen` would report it -- or when a context came
+    /// or went. See `reconcileImageTextures`.
     last_image_gen: u64 = 0,
 
     pub fn deinit(self: *Renderer) void {
@@ -413,26 +434,33 @@ pub const Renderer = struct {
         std.log.info("glyphwire-host: packed {d} icons into a {d}x{d} atlas", .{ packed_items.len, icon_atlas_width, atlas_h });
     }
 
-    /// Returns a stable pointer to the uploaded texture for `handle`,
-    /// decoding and uploading it first if this is the first time this App
-    /// has seen it -- see `image_textures`'s doc comment.
-    fn textureForImage(self: *Renderer, eng: *Engine, handle: glyphwire.ImageHandle) ?*host_eng.Texture {
-        const cached = self.image_textures.get(handle) orelse blk: {
-            const entry = self.app.server.ctx.imageEntry(handle) orelse return null;
+    /// Returns a stable pointer to the uploaded texture for `handle` in
+    /// `context`, decoding and uploading it first if this is the first
+    /// time this App has seen it -- see `image_textures`'s doc comment.
+    ///
+    /// The entry is resolved against the *owning* context rather than the
+    /// focused one: a layer being rebuilt is not necessarily in the pane
+    /// that has focus, and asking the focused context for another
+    /// context's handle either misses or -- worse -- hits a different
+    /// image that happens to share the number.
+    fn textureForImage(self: *Renderer, eng: *Engine, context: glyphwire.ContextHandle, handle: glyphwire.ImageHandle) ?*host_eng.Texture {
+        const key: ImageKey = .{ .context = context, .handle = handle };
+        const cached = self.image_textures.get(key) orelse blk: {
+            const entry = self.imageEntryIn(context, handle) orelse return null;
             var image = host_eng.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
                 std.log.err("glyphwire-host: failed to decode image handle {d}: {t}", .{ handle, err });
                 return null;
             };
             defer image.deinit();
 
-            var name_buf: [32]u8 = undefined;
-            const name = std.fmt.bufPrint(&name_buf, imageTextureNameFmt, .{handle}) catch unreachable;
+            var name_buf: [48]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buf, imageTextureNameFmt, .{ context, handle }) catch unreachable;
             const managed = eng.resources.loadTextureFromBuffer(name, image.width, image.height, image.data) catch |err| {
                 std.log.err("glyphwire-host: failed to upload image handle {d}: {t}", .{ handle, err });
                 return null;
             };
             const cached: CachedImage = .{ .managed = managed, .generation = entry.generation };
-            self.image_textures.put(handle, cached) catch {};
+            self.image_textures.put(key, cached) catch {};
             break :blk cached;
         };
 
@@ -443,15 +471,39 @@ pub const Renderer = struct {
         return &live.val;
     }
 
-    /// The `eng.resources` name an image handle's texture is registered
-    /// under -- shared by the upload above and the eviction below, which
-    /// have to agree on it.
-    const imageTextureNameFmt = "glyphwire-image-{d}";
+    /// The `eng.resources` name an image texture is registered under --
+    /// shared by the upload above and the eviction below, which have to
+    /// agree on it. Carries the context for the same reason `ImageKey`
+    /// does: two contexts both have an image 1.
+    const imageTextureNameFmt = "glyphwire-image-{d}-{d}";
 
-    /// Drops cached GPU textures for image handles that were destroyed,
-    /// swept, or replaced (`update_image`) since the last frame. Runs only
-    /// when the root context's `image_gen` has moved -- see
-    /// `last_image_gen`.
+    /// A single number that moves whenever any context's image table
+    /// could have changed: the wrapping sum of every live context's
+    /// `image_gen`, plus how many contexts there are.
+    ///
+    /// Watching only the *root* context (which is what this used to do)
+    /// misses every image lifecycle event in a pane -- an `update_image`
+    /// in a non-root context would leave the old texture on screen
+    /// forever, and a `destroy_image` there would never free it. The
+    /// context count is in the sum because destroying a context whose
+    /// `image_gen` is still 0 -- one that loaded pages and never replaced
+    /// or destroyed any, i.e. the common case for a reader that just
+    /// exited -- would otherwise leave the total unchanged and leak every
+    /// texture it had uploaded.
+    ///
+    /// Contexts are few, so this is a handful of adds per frame; the
+    /// reconcile it gates is the part worth avoiding.
+    fn imageGenSum(self: *Renderer) u64 {
+        var sum: u64 = self.app.server.session.contexts.count();
+        var it = self.app.server.session.contexts.valueIterator();
+        while (it.next()) |ctx| sum +%= ctx.*.image_gen;
+        return sum;
+    }
+
+    /// Drops cached GPU textures for images that were destroyed, swept,
+    /// or replaced (`update_image`) since the last frame, and for every
+    /// image belonging to a context that has gone away. Runs only when
+    /// `imageGenSum` has moved -- see `last_image_gen`.
     ///
     /// **Every layer batch is dropped first.** A built batch holds a
     /// `*Texture` pointing into a `ManagedTexture`'s current generation,
@@ -465,40 +517,44 @@ pub const Renderer = struct {
 
         // Collected before removal: a hash map can't be mutated through a
         // live iterator.
-        var stale: std.ArrayList(glyphwire.ImageHandle) = .empty;
+        var stale: std.ArrayList(ImageKey) = .empty;
         defer stale.deinit(alloc);
 
         var it = self.image_textures.iterator();
         while (it.next()) |entry| {
-            const handle = entry.key_ptr.*;
-            const live = self.lookupImage(handle);
-            // Gone entirely, or the same handle now holds different bytes.
+            const key = entry.key_ptr.*;
+            const live = self.imageEntryIn(key.context, key.handle);
+            // The context is gone, the image is gone from it, or the same
+            // handle now holds different bytes (`update_image`).
             const is_stale = if (live) |e| e.generation != entry.value_ptr.generation else true;
-            if (is_stale) stale.append(alloc, handle) catch {};
+            if (is_stale) stale.append(alloc, key) catch {};
         }
         if (stale.items.len == 0) return;
 
         self.dropAllBatches();
 
-        for (stale.items) |handle| {
-            _ = self.image_textures.remove(handle);
-            var name_buf: [32]u8 = undefined;
-            const name = std.fmt.bufPrint(&name_buf, imageTextureNameFmt, .{handle}) catch unreachable;
+        for (stale.items) |key| {
+            _ = self.image_textures.remove(key);
+            var name_buf: [48]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buf, imageTextureNameFmt, .{ key.context, key.handle }) catch unreachable;
             _ = eng.resources.releaseTexture(name);
         }
     }
 
-    /// Resolves an image handle against **every** context, not just the
-    /// focused one. The texture cache is keyed by handle alone and spans
-    /// whatever contexts have drawn images, so asking only the focused
-    /// context would report another pane's perfectly live image as gone
-    /// and evict it, to be re-uploaded on its next frame.
-    fn lookupImage(self: *Renderer, handle: glyphwire.ImageHandle) ?glyphwire.ImageEntry {
-        var it = self.app.server.session.contexts.valueIterator();
-        while (it.next()) |ctx| {
-            if (ctx.*.images.get(handle)) |e| return e;
-        }
-        return null;
+    /// Resolves an image handle inside one named context, following that
+    /// context's `asset_fallback` so an icon handle from the session-wide
+    /// catalog still resolves.
+    ///
+    /// Deliberately scoped to the one context: an earlier version scanned
+    /// *every* context and took the first hit, which it had to, because
+    /// the texture cache was keyed by handle alone. That is exactly what
+    /// let a destroyed context's image 1 answer for a live context's
+    /// image 1. Now that the cache key carries the context, the lookup
+    /// can be precise -- and a context that has gone away correctly
+    /// reports "gone" instead of matching a stranger.
+    fn imageEntryIn(self: *Renderer, context: glyphwire.ContextHandle, handle: glyphwire.ImageHandle) ?glyphwire.ImageEntry {
+        const ctx = self.app.server.session.contexts.get(context) orelse return null;
+        return ctx.imageEntry(handle);
     }
 
     /// Frees every cached layer batch. The blanket version of
@@ -551,7 +607,7 @@ pub const Renderer = struct {
 
         // Before any batch is (re)built, so a rebuilt batch never picks up
         // a texture this pass is about to evict.
-        const igen = server.session.rootContext().image_gen;
+        const igen = self.imageGenSum();
         if (igen != self.last_image_gen) {
             self.last_image_gen = igen;
             self.reconcileImageTextures(eng);
@@ -651,6 +707,7 @@ pub const Renderer = struct {
                 _ = self.layer_batches.remove(key);
                 return;
             };
+            lb.context = key.context;
             gop.value_ptr.* = lb;
         }
         const lb = gop.value_ptr.*;
@@ -862,10 +919,10 @@ pub const Renderer = struct {
     /// interior cell still fills exactly `cell_px` on screen and the
     /// image's right/bottom edge cell is the only partial one.
     fn emitImageCell(self: *Renderer, eng: *Engine, lb: *LayerBatches, img: glyphwire.ImageBg, px: i32, py: i32) void {
-        const entry = self.app.server.ctx.imageEntry(img.handle) orelse return;
+        const entry = self.imageEntryIn(lb.context, img.handle) orelse return;
         if (img.offset_x >= entry.width or img.offset_y >= entry.height) return;
 
-        const tex = self.textureForImage(eng, img.handle) orelse return;
+        const tex = self.textureForImage(eng, lb.context, img.handle) orelse return;
 
         const s: f32 = if (img.scale > 0) img.scale else 1.0;
         const cell_w_f: f32 = @floatFromInt(geometry.cell_w);
@@ -967,7 +1024,7 @@ pub const Renderer = struct {
             };
             addSprite(if (foreground) &lb.icon_fg else &lb.icon_bg, dest, src);
         } else {
-            const tex = self.textureForImage(eng, icon.handle) orelse return;
+            const tex = self.textureForImage(eng, lb.context, icon.handle) orelse return;
             const batch = self.texBatchFor(&lb.icon_fallback, icon.handle, tex) orelse return;
             addSprite(batch, dest, host_eng.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b });
         }

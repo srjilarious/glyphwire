@@ -4448,3 +4448,45 @@ drawing a picture into one of its own layers had no way to say which.
 Added `drawImageOn` / `clearOn` alongside them, matching the
 `writeTextOn` / `drawBoxOn` / `drawIconOn` pattern; the old spellings now
 delegate, so nothing else changed.
+
+#### The image texture cache is keyed by context *and* handle
+
+Found by reading a second comic: it showed the first one's pages.
+
+`Context.next_image_handle` is per-context and starts at 1 in each, and a
+freshly loaded image is always `generation` 0. glyphwire-host's
+`Renderer.image_textures` was keyed by the bare handle, so the first
+reader's context-A-image-1 texture was still in the cache, still looked
+current (same handle, same generation), and got served to the second
+reader's context-B-image-1. `reconcileImageTextures` could not tell them
+apart, and `lookupImage` actively made it worse: it scanned *every*
+context for the handle and took the first hit, so a destroyed context's
+image could be answered for by a live one and vice versa.
+
+`Renderer.layer_batches` already had exactly this problem and already
+solved it -- `BatchKey` carries the context because "layer handles are
+allocated per context and start at 1 in each". Image handles are
+allocated the same way; the cache now has an `ImageKey` for the same
+reason, `imageEntryIn` resolves against the one named context (following
+its `asset_fallback`, so icon handles still resolve), and the texture's
+`eng.resources` name carries the context too.
+
+Two things fell out of the same read:
+
+- **`emitImageCell` resolved its `ImageEntry` against the focused
+  context** (`app.server.ctx`) while drawing a layer that may belong to
+  any pane. It now resolves against the layer's own context, which
+  `LayerBatches` records from its `BatchKey`.
+- **Reconciliation was gated on the *root* context's `image_gen`.** No
+  pane's image lifecycle event moves that, so an `update_image` in a
+  non-root context would leave the old texture on screen indefinitely and
+  a `destroy_image` there would never free it. The gate is now
+  `imageGenSum()` -- every live context's `image_gen`, wrapping-summed,
+  plus the context count. The count is in the sum because a context that
+  loaded pages and never destroyed any still has `image_gen` 0, so
+  destroying it would otherwise leave the total unchanged and leak every
+  texture it had uploaded -- which is precisely the reader-exits case.
+
+`tests/core_tests.zig` pins the invariant the whole thing rests on: two
+contexts both call their first image 1, with equal generations and
+different pixels.
