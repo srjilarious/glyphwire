@@ -396,11 +396,19 @@ pub const Ui = struct {
 
         const c = self.client;
         try c.setLayerSize(self.page_layer, self.layout.cols, self.layout.rows);
-        // The window is the layer's window onto itself; `content_extent`
-        // is what tells the host there is slack to scroll and how much,
-        // which is what turns on the scrollbars and the wheel.
+        // The window is the layer's window onto its own, larger grid --
+        // the host-scrolled model, the one zoe's *tree* pane uses.
+        //
+        // Deliberately **no `content_extent`**. That property switches a
+        // layer into the client-scrolled model zoe's *buffer* pane uses:
+        // the host then moves a virtual `content_off` and broadcasts a
+        // `scroll_offset` for the client to repaint against, and the real
+        // `scroll_off` the renderer reads never moves -- the scrollbar
+        // slides and the picture sits still. It isn't needed for the
+        // scrollbars either: `maxScroll` falls back to the real grid, so
+        // a grid bigger than the viewport already reports slack, which is
+        // what turns the bars and the wheel on.
         try c.setLayerViewport(self.page_layer, @min(self.layout.cols, view.cols), @min(self.layout.rows, view.rows));
-        try c.setLayerContentExtent(self.page_layer, self.layout.cols, self.layout.rows);
         try c.setLayerScrollbars(self.page_layer, self.layout.max_pan_row > 0, self.layout.max_pan_col > 0);
         try c.setLayerCellPosition(self.page_layer, self.layout.row, self.layout.col);
 

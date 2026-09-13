@@ -2769,6 +2769,42 @@ pub fn shrinkingContentReclampsScrollTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqual(layer.scroll_off.row, 5);
 }
 
+pub fn viewportOverABiggerGridScrollsTheRealOffsetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // The *other* scroll model, and the one a client wants when the whole
+    // of its content genuinely is in the layer's grid: a viewport smaller
+    // than the real grid, and **no** `content_extent`. Here the host does
+    // the scrolling -- `scroll_off` moves and the renderer draws a
+    // different window of the same cells.
+    //
+    // Setting `content_extent` as well switches this into the virtual
+    // model above, where `scroll_off` never moves and the client is
+    // expected to repaint its own content against the broadcast offset.
+    // Doing that to a layer whose grid already holds everything is a
+    // silent no-op on screen -- the scrollbar slides and the picture sits
+    // still -- which is exactly how gw-read's pan first shipped.
+    var layer = try glyphwire.Layer.init(alloc, 40, 100, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .viewport = .{ .cols = 40, .rows = 25 } });
+
+    try testz.expectTrue(layer.scrollsAnywhere());
+    try testz.expectEqual(layer.maxScroll().row, 75);
+
+    const landed = layer.setScrollOffset(.{ .row = 30, .col = 0 });
+    try testz.expectEqual(landed.row, 30);
+    // The real offset moved -- this is the field the renderer reads.
+    try testz.expectEqual(layer.scroll_off.row, 30);
+    try testz.expectEqual(layer.content_off.row, 0);
+    try testz.expectEqual(layer.scrollbarState().row, 30);
+
+    // And the getters can't tell the two models apart, which is why the
+    // distinction has to be understood rather than probed: `scroll_offset`
+    // reports whichever offset is live, and `content_extent` falls back to
+    // the real grid when it isn't set.
+    try testz.expectEqual(layer.getProperty(.scroll_offset).scroll_offset.row, 30);
+    try testz.expectEqual(layer.getProperty(.content_extent).content_extent.rows, 100);
+}
+
 pub fn contentExtentDrivesAVirtualScrollbarTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     // A self-scrolling pane: the real grid is only the viewport size, but

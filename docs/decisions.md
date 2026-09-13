@@ -4490,3 +4490,35 @@ Two things fell out of the same read:
 `tests/core_tests.zig` pins the invariant the whole thing rests on: two
 contexts both call their first image 1, with equal generations and
 different pixels.
+
+#### `content_extent` is the wrong half of the scroll contract for a page
+
+gw-read's pan first shipped broken in a way worth writing down: the
+scrollbar moved and the page sat still.
+
+A layer scrolls in one of two models, and `Layer.setScrollOffset` picks
+between them on whether `content_extent` is set:
+
+- **Host-scrolled** (no `content_extent`): the real grid is bigger than
+  the viewport, `scroll_off` moves, and the renderer draws a different
+  window of the same cells. zoe's *tree* pane.
+- **Client-scrolled** (`content_extent` set): the grid is only viewport
+  sized and stands in for something larger, so the host moves a *virtual*
+  `content_off`, broadcasts `scroll_offset`, and the client repaints its
+  own content against it. The real `scroll_off` never moves. zoe's
+  *buffer* pane.
+
+The page layer holds the whole scaled page, so it is the first kind. It
+was being given a `content_extent` as well, on the mistaken belief that
+that is what turns the scrollbars on -- it isn't; `maxScroll` falls back
+to the real grid, so a grid bigger than its viewport already reports
+slack. The extra property silently switched the layer into the second
+model, where nothing gw-read does repaints anything, so the offset moved
+and no pixel did.
+
+Nothing on the wire distinguishes the two after the fact:
+`get_property(scroll_offset)` reports whichever offset is live and
+`get_property(content_extent)` falls back to the grid size when unset, so
+both read identically in either model. That is why this is a test
+(`viewportOverABiggerGridScrollsTheRealOffsetTest`) and a comment at the
+call site rather than something to probe for.
