@@ -2977,7 +2977,12 @@ building the index, the no-tokenizer substring-scan lookup approach,
 the ambiguous `-る` verb resolution). `read/dict.zig` is the new pure(-ish)
 module: term bank parsing, structured-content glossary flattening, and
 `lookup`; `read/sqlite.zig` is a minimal wrapper over the vendored
-SQLite amalgamation (`read/libs/sqlite/`) it queries through.
+SQLite amalgamation (`read/libs/sqlite/`) it queries through. Indexing a
+fresh dictionary directory shows a centered "building dictionary index,
+file N of M -- K terms indexed" panel rather than freezing the reader:
+`dict_mod.Builder` parses and inserts one term bank per `step`, and
+`ui.zig`'s run loop calls that once a tick instead of blocking on the
+whole build.
 
 **Deliberately incomplete, next up for this feature specifically:**
 
@@ -3017,7 +3022,7 @@ SQLite amalgamation (`read/libs/sqlite/`) it queries through.
    "hand bytes to stb_image", which is why `archive.Archive` is an
    interface rather than a zip reader with a nicer name.
 
-1089 tests passing.
+1090 tests passing.
 
 ## Open questions to settle before writing code
 

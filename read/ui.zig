@@ -178,6 +178,11 @@ pub const Ui = struct {
     /// The dictionary lookup panel. Same story as `dialog_layer`: created
     /// unconditionally, only ever shown when `conf.dictionary` loaded.
     dict_layer: glyphwire.LayerHandle,
+    /// The "building dictionary index..." progress panel, shown only
+    /// while `dict_build` is set -- i.e. only the first time a given
+    /// dictionary directory is opened. Same "created unconditionally,
+    /// costs nothing hidden" story as the other overlay layers.
+    dict_build_layer: glyphwire.LayerHandle,
 
     /// Window size in cells, from `resize`, and the session's cell
     /// metrics. Both are re-read on every resize: a Ctrl+`+` font step
@@ -234,6 +239,15 @@ pub const Ui = struct {
     lookup: ?Lookup = null,
     lookup_dirty: bool = false,
 
+    /// Set for as long as `conf.dictionary` is being indexed for the
+    /// first time -- `run` steps it one `term_bank_*.json` file per tick
+    /// rather than blocking on `dict_mod.loadFromDir` up front, so the
+    /// reader stays responsive and `dict_build_layer` can show progress.
+    /// Null once the build finishes (or never started, because the
+    /// directory was already indexed).
+    dict_build: ?dict_mod.Builder = null,
+    dict_build_dirty: bool = false,
+
     /// The `g` prefix (as in `gg`) and the `:` goto-page prompt. Only one
     /// can be pending at a time, which is why they share a field.
     pending: union(enum) { none, goto_prefix, goto_prompt: std.ArrayList(u8) } = .none,
@@ -289,10 +303,16 @@ pub const Ui = struct {
         // Created after the dialog, so a lookup panel composites above it
         // -- it's answering a click made *on* the dialog.
         const dict_layer = try client.createLayer(conf.ocr_dialog_cols, 3, 0);
+        // Created last: whenever it's up, nothing else should be able to
+        // cover it. 1x1 until `renderDictBuild` sizes it, same as
+        // `hint_layer` -- most sessions never touch a dictionary at all,
+        // let alone one that still needs building.
+        const dict_build_layer = try client.createLayer(1, 1, 0);
 
         try client.setLayerVisible(help_layer, false);
         try client.setLayerVisible(dialog_layer, false);
         try client.setLayerVisible(dict_layer, false);
+        try client.setLayerVisible(dict_build_layer, false);
         try client.setLayerVisible(hint_layer, false);
 
         self.* = .{
@@ -309,6 +329,7 @@ pub const Ui = struct {
             .help_layer = help_layer,
             .dialog_layer = dialog_layer,
             .dict_layer = dict_layer,
+            .dict_build_layer = dict_build_layer,
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .page = @min(start.page, book.count() -| 1),
@@ -326,17 +347,37 @@ pub const Ui = struct {
         return self;
     }
 
-    /// Reads and parses `conf.dictionary`, if one is set. Best effort,
-    /// the same policy `loadOcr` follows: a missing file, an unreadable
-    /// zip, or a bank that parses to nothing just leaves `dict` null and
-    /// word lookup off, because a book you can still read without a
-    /// dictionary is not a book that should refuse to open.
+    /// Opens `conf.dictionary`, if one is set. Best effort, the same
+    /// policy `loadOcr` follows: a missing directory or a bank that
+    /// parses to nothing just leaves `dict` null and word lookup off,
+    /// because a book you can still read without a dictionary is not a
+    /// book that should refuse to open.
+    ///
+    /// If the directory hasn't been indexed yet, this does *not* block
+    /// on the build -- it starts `self.dict_build` and returns, so `run`
+    /// can step it one file at a time behind a progress panel instead of
+    /// freezing the reader for however long indexing a real dictionary
+    /// takes.
     fn loadDict(self: *Ui) void {
         if (self.conf.dictionary.len == 0) return;
-        var d = dict_mod.loadFromDir(self.alloc, self.client.io, self.conf.dictionary) catch |err| {
+        const load = dict_mod.openOrBeginBuild(self.alloc, self.client.io, self.conf.dictionary) catch |err| {
             std.log.warn("gw-read: couldn't load dictionary '{s}' ({t}); lookup off", .{ self.conf.dictionary, err });
             return;
         };
+        switch (load) {
+            .ready => |d| self.finishDictLoad(d),
+            .building => |b| {
+                self.dict_build = b;
+                self.dict_build_dirty = true;
+            },
+        }
+    }
+
+    /// Common tail of `loadDict`'s fast path and `run`'s "a build just
+    /// finished" path: an empty dictionary (nothing parsed to anything)
+    /// is treated the same as no dictionary at all.
+    fn finishDictLoad(self: *Ui, dict_in: dict_mod.Dict) void {
+        var d = dict_in;
         if (dict_mod.isEmpty(&d)) {
             d.deinit();
             std.log.warn("gw-read: dictionary '{s}' has no term bank entries; lookup off", .{self.conf.dictionary});
@@ -409,6 +450,9 @@ pub const Ui = struct {
         if (self.ocr) |*o| o.deinit(alloc);
         self.clearLookup();
         if (self.dict) |*d| d.deinit();
+        // A quit mid-build: abandon it rather than let it finish
+        // unobserved -- there is no reader left to hand the result to.
+        if (self.dict_build) |*b| b.deinit();
         if (self.message) |m| alloc.free(m);
         switch (self.pending) {
             .goto_prompt => |*buf| buf.deinit(alloc),
@@ -432,6 +476,27 @@ pub const Ui = struct {
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
             try self.drainEvents();
+            // One term bank file per tick rather than looping to
+            // completion here: `waitInputEvent`'s 20ms timeout below
+            // keeps ticks coming even with no input, so this still
+            // finishes promptly, but the reader stays responsive (and
+            // `renderDictBuild` gets to actually show a frame) the whole
+            // time a real dictionary is being indexed.
+            if (self.dict_build) |*b| {
+                self.dict_build_dirty = true;
+                if (b.isDone()) {
+                    if (b.finish()) |d| {
+                        self.finishDictLoad(d);
+                    } else |err| {
+                        std.log.warn("gw-read: building dictionary '{s}' failed ({t}); lookup off", .{ self.conf.dictionary, err });
+                    }
+                    self.dict_build = null;
+                } else if (b.step()) |_| {} else |err| {
+                    std.log.warn("gw-read: building dictionary '{s}' failed ({t}); lookup off", .{ self.conf.dictionary, err });
+                    b.deinit();
+                    self.dict_build = null;
+                }
+            }
             if (self.backdrop_dirty) {
                 self.backdrop_dirty = false;
                 try self.renderBackdrop();
@@ -443,6 +508,7 @@ pub const Ui = struct {
             if (self.hints_dirty) try self.renderHints();
             if (self.dialog_dirty) try self.renderDialog();
             if (self.lookup_dirty) try self.renderLookup();
+            if (self.dict_build_dirty) try self.renderDictBuild();
             if (self.status_dirty) try self.renderStatus();
             if (self.quit) break;
 
@@ -1292,6 +1358,70 @@ pub const Ui = struct {
             .row = @intCast(std.math.clamp(row, 0, @max(max_row, 0))),
             .col = @intCast(std.math.clamp(@as(i64, @intCast(anchor_col)), 0, @max(max_col, 0))),
         };
+    }
+
+    /// Draws (or hides) the "building dictionary index" panel for
+    /// `self.dict_build`. Unlike `renderDialog` / `renderLookup`, which
+    /// anchor to something already on screen, this has nothing to anchor
+    /// to -- a build can start before the reader has ever shown an OCR
+    /// dialog -- so it's centered on the window instead, the same
+    /// placement `buildHelp` uses for the same reason.
+    fn renderDictBuild(self: *Ui) !void {
+        self.dict_build_dirty = false;
+        const c = self.client;
+        const b = self.dict_build orelse {
+            try c.setLayerVisible(self.dict_build_layer, false);
+            return;
+        };
+
+        const line1 = "Building dictionary index...";
+        const line2 = try std.fmt.allocPrint(
+            self.alloc,
+            "file {d} / {d} -- {d} terms indexed",
+            .{ b.file_idx, b.totalFiles(), b.terms_indexed },
+        );
+        defer self.alloc.free(line2);
+
+        var inner: usize = @max(mokuro.displayWidth(line1), mokuro.displayWidth(line2));
+        inner = std.math.clamp(inner, 1, config_mod.ocr_dialog_cols_max);
+        const interior = inner + 2;
+        const box_cols = interior + 2;
+        const box_rows: usize = 4; // top border, two text rows, bottom border
+
+        var batch = c.batch();
+        defer batch.deinit();
+
+        try batch.notify("set_property", .{ .layer = self.dict_build_layer, .property = "size", .cols = box_cols, .rows = box_rows });
+        try batch.notify("set_property", .{
+            .layer = self.dict_build_layer,
+            .property = "cell_position",
+            .row = (self.win.rows -| box_rows) / 2,
+            .col = (self.win.cols -| box_cols) / 2,
+        });
+        try batch.notify("clear", .{ .layer = self.dict_build_layer, .row = 0, .col = 0, .rows = @as(?usize, null), .cols = @as(?usize, null) });
+
+        var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
+        const h_line = repeatInto(&h_buf, box_h, interior);
+
+        try cursorOn(&batch, self.dict_build_layer, 0, 0);
+        try textOn(&batch, self.dict_build_layer, box_tl, fg_dialog_border, bg_dialog);
+        try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
+        try textOn(&batch, self.dict_build_layer, box_tr, fg_dialog_border, bg_dialog);
+
+        var pad_buf: [config_mod.ocr_dialog_cols_max]u8 = undefined;
+        @memset(&pad_buf, ' ');
+        try writeLookupRow(&batch, self.dict_build_layer, 1, line1, inner, &pad_buf, fg_dialog);
+        try writeLookupRow(&batch, self.dict_build_layer, 2, line2, inner, &pad_buf, fg_dialog);
+
+        try cursorOn(&batch, self.dict_build_layer, box_rows - 1, 0);
+        try textOn(&batch, self.dict_build_layer, box_bl, fg_dialog_border, bg_dialog);
+        try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
+        try textOn(&batch, self.dict_build_layer, box_br, fg_dialog_border, bg_dialog);
+
+        try batch.notify("set_property", .{ .layer = self.dict_build_layer, .property = "visibility", .visible = true });
+
+        var results = try batch.send();
+        results.deinit();
     }
 
     fn renderStatus(self: *Ui) !void {

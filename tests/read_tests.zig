@@ -938,3 +938,67 @@ pub fn dictLoadFromDirBuildsThenReusesTheSqliteIndexTest(io: std.Io, alloc: std.
     defer dict.freeEntries(alloc, m2.entries);
     try testz.expectEqualStr(m2.entries[0].term, "猫");
 }
+
+// ─── dict: incremental Builder (progress panel's backing state) ─────────
+
+pub fn dictBuilderStepsOneFileAtATimeThenOpensReadyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const dir_path = "zig-cache/tmp/dict_builder_step_test";
+    std.Io.Dir.cwd().deleteTree(io, dir_path) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io, dir_path) catch {};
+
+    // Split across two term bank files -- the whole point of `Builder`
+    // is that `ui.zig` can watch progress land one file at a time.
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = dir_path ++ "/term_bank_1.json",
+        .data =
+        \\[["食べる","たべる","","v1",0,["to eat"],1,""]]
+        ,
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = dir_path ++ "/term_bank_2.json",
+        .data =
+        \\[["猫","ねこ","","n",0,["cat"],2,""]]
+        ,
+    });
+
+    var load = try dict.openOrBeginBuild(alloc, io, dir_path);
+    var b = switch (load) {
+        .building => |built| built,
+        .ready => return error.TestExpectedABuildToStart,
+    };
+    errdefer b.deinit();
+
+    try testz.expectEqual(b.totalFiles(), 2);
+    try testz.expectFalse(b.isDone());
+    try testz.expectEqual(b.terms_indexed, 0);
+
+    try b.step();
+    try testz.expectEqual(b.file_idx, 1);
+    try testz.expectEqual(b.terms_indexed, 1);
+    try testz.expectFalse(b.isDone());
+
+    try b.step();
+    try testz.expectEqual(b.file_idx, 2);
+    try testz.expectEqual(b.terms_indexed, 2);
+    try testz.expectTrue(b.isDone());
+
+    var d = try b.finish();
+    defer d.deinit();
+
+    const m1 = (try dict.lookup(alloc, &d, "食べる")).?;
+    dict.freeEntries(alloc, m1.entries);
+    const m2 = (try dict.lookup(alloc, &d, "猫")).?;
+    dict.freeEntries(alloc, m2.entries);
+
+    // A dictionary `finish`'d once is a dictionary `isBuilt` from here
+    // on -- a second open must not start another build.
+    load = try dict.openOrBeginBuild(alloc, io, dir_path);
+    switch (load) {
+        .ready => |ready| {
+            var r = ready;
+            r.deinit();
+        },
+        .building => return error.TestExpectedTheIndexToAlreadyBeBuilt,
+    }
+}

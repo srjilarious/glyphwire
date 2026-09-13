@@ -57,8 +57,17 @@
 //! machine out of memory before the book it was opened for ever got to
 //! render a page).
 //!
-//! Everything here except `loadFromDir` and the `sqlite` calls it makes
-//! is pure -- JSON and text in, plain Zig values out -- so
+//! **Building the index is one file at a time, not one call.** A real
+//! Jitendex download is tens of thousands of rows across dozens of term
+//! banks -- long enough that `ui.zig` doesn't want to block the reader
+//! on it. `Builder` (via `openOrBeginBuild`) exposes the same work
+//! `loadFromDir` does as `step`-once-per-file plus `finish`, so the run
+//! loop can call `step` once a tick and show a "file N of M" panel in
+//! the meantime; `loadFromDir` itself just drives a `Builder` to
+//! completion in a loop for callers that don't care about progress.
+//!
+//! Everything here except `loadFromDir`/`Builder` and the `sqlite` calls
+//! they make is pure -- JSON and text in, plain Zig values out -- so
 //! `tests/read_tests.zig` can pin the parse and the lookup against an
 //! in-memory (`:memory:`) database without a dictionary directory on
 //! disk.
@@ -323,9 +332,11 @@ fn splitGlossary(a: std.mem.Allocator, blob: []const u8) std.mem.Allocator.Error
 /// Parses one `term_bank_N.json`'s rows and inserts each into `entries`
 /// via `insert_stmt` (`INSERT INTO entries (term, reading, rules,
 /// glossary, sequence) VALUES (?, ?, ?, ?, ?)`, already prepared by the
-/// caller). Same drop-don't-fail error policy as the parse this replaced:
-/// a row that doesn't fit the shape, or that SQLite itself rejects, is
-/// dropped, never a reason to fail the whole file.
+/// caller). Returns how many rows were actually inserted -- `Builder`
+/// uses it to run a "N terms indexed" counter while building. Same
+/// drop-don't-fail error policy as the parse this replaced: a row that
+/// doesn't fit the shape, or that SQLite itself rejects, is dropped,
+/// never a reason to fail the whole file.
 ///
 /// `scratch_backing` backs a fresh arena that holds the `std.json.Value`
 /// parse tree and nothing else; it's destroyed before this returns. See
@@ -334,16 +345,17 @@ fn insertTermBank(
     insert_stmt: sqlite.Stmt,
     scratch_backing: std.mem.Allocator,
     json: []const u8,
-) std.mem.Allocator.Error!void {
+) std.mem.Allocator.Error!usize {
     var scratch: std.heap.ArenaAllocator = .init(scratch_backing);
     defer scratch.deinit();
     const sa = scratch.allocator();
 
-    const parsed = std.json.parseFromSlice(std.json.Value, sa, json, .{}) catch return;
+    const parsed = std.json.parseFromSlice(std.json.Value, sa, json, .{}) catch return 0;
     const rows = switch (parsed.value) {
         .array => |arr| arr,
-        else => return,
+        else => return 0,
     };
+    var inserted: usize = 0;
     for (rows.items) |row_val| {
         const row = switch (row_val) {
             .array => |r| r,
@@ -362,9 +374,14 @@ fn insertTermBank(
             jsonString(row.items[3]) orelse "",
             joined,
             jsonInt(row.items[6]) orelse 0,
-        ) catch {};
+        ) catch {
+            insert_stmt.reset();
+            continue;
+        };
         insert_stmt.reset();
+        inserted += 1;
     }
+    return inserted;
 }
 
 fn insertRow(
@@ -499,21 +516,125 @@ fn isBuilt(db: *sqlite.Db) bool {
     return stmt.step() catch false;
 }
 
-/// Populates `db` from every `term_bank_*.json` (and `index.json`, for
-/// the title) directly inside `dir`. Drops and recreates `entries` /
-/// `meta` first, so retrying a build that was interrupted before the
-/// `complete` marker landed never leaves duplicate rows behind.
-fn build(alloc: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, db: *sqlite.Db) !void {
+/// An in-progress build, one `term_bank_*.json` file at a time --
+/// `ui.zig` drives this one `step` per run-loop tick instead of calling
+/// `loadFromDir` and blocking the reader for however long a real
+/// Jitendex-sized dictionary takes to index, so it can show a "building
+/// dictionary, file N of M" panel the reader stays responsive behind.
+/// `loadFromDir` itself just drives one to completion in a loop, for
+/// callers (tests, anything not interactive) that don't need that.
+pub const Builder = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    db: sqlite.Db,
+    insert_stmt: sqlite.Stmt,
+    /// Every `term_bank_*.json` name found in the directory, resolved up
+    /// front (during `beginBuild`) so `total_files` is known from the
+    /// very first `step`.
+    files: std.ArrayList([]u8) = .empty,
+    file_idx: usize = 0,
+    terms_indexed: usize = 0,
+    title_buf: std.ArrayList(u8) = .empty,
+
+    pub fn totalFiles(self: *const Builder) usize {
+        return self.files.items.len;
+    }
+
+    /// True once every file has been `step`'d -- the caller should call
+    /// `finish` next rather than `step` again.
+    pub fn isDone(self: *const Builder) bool {
+        return self.file_idx >= self.files.items.len;
+    }
+
+    /// Parses and inserts exactly one term bank file -- one unit of
+    /// visible progress. Undefined to call once `isDone`.
+    pub fn step(self: *Builder) !void {
+        const name = self.files.items[self.file_idx];
+        self.file_idx += 1;
+        const bytes = self.dir.readFileAlloc(self.io, name, self.alloc, .limited(max_term_bank_bytes)) catch return;
+        defer self.alloc.free(bytes);
+        // `self.alloc`, not a per-dictionary arena: the scratch arena
+        // backing this file's parse tree has nothing to do with anything
+        // kept afterward -- every row is inserted straight into `db`.
+        self.terms_indexed += try insertTermBank(self.insert_stmt, self.alloc, bytes);
+    }
+
+    /// Commits, builds the index, writes `meta`, and returns the now-open
+    /// `Dict` -- call once `isDone`. Consumes `self`; do not call
+    /// `deinit` afterward.
+    pub fn finish(self: *Builder) !Dict {
+        self.insert_stmt.finalize();
+        try self.db.exec("COMMIT");
+        try self.db.exec("CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term)");
+
+        var meta_stmt = try self.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+        defer meta_stmt.finalize();
+        try meta_stmt.bindText(1, "title");
+        try meta_stmt.bindText(2, self.title_buf.items);
+        _ = try meta_stmt.step();
+        meta_stmt.reset();
+        // Written last, on purpose -- see `isBuilt`.
+        try meta_stmt.bindText(1, "complete");
+        try meta_stmt.bindText(2, "1");
+        _ = try meta_stmt.step();
+
+        self.dir.close(self.io);
+        for (self.files.items) |f| self.alloc.free(f);
+        self.files.deinit(self.alloc);
+        self.title_buf.deinit(self.alloc);
+
+        const lookup_stmt = try self.db.prepare(
+            "SELECT term, reading, rules, glossary, sequence FROM entries WHERE term = ?",
+        );
+        var title_arena: std.heap.ArenaAllocator = .init(self.alloc);
+        const title = readTitle(title_arena.allocator(), &self.db) catch "";
+        return .{ .db = self.db, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
+    }
+
+    /// Releases everything without finishing -- e.g. the reader quit, or
+    /// a `step` failed, partway through a build. Do not call after
+    /// `finish`.
+    pub fn deinit(self: *Builder) void {
+        self.insert_stmt.finalize();
+        self.db.exec("ROLLBACK") catch {};
+        self.db.close();
+        self.dir.close(self.io);
+        for (self.files.items) |f| self.alloc.free(f);
+        self.files.deinit(self.alloc);
+        self.title_buf.deinit(self.alloc);
+    }
+};
+
+/// Opens `<path>/index.sqlite3` (creating it if missing), drops and
+/// recreates `entries`/`meta`, and resolves the directory's
+/// `term_bank_*.json` names up front -- everything a `Builder` needs
+/// before its first `step`. See `isBuilt` for why a fresh rebuild always
+/// starts by dropping the tables: it's what makes retrying an
+/// interrupted build safe.
+fn beginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Builder {
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    errdefer dir.close(io);
+
+    const db_path = try std.mem.concatWithSentinel(alloc, u8, &.{ path, "/", db_file_name }, 0);
+    defer alloc.free(db_path);
+    var db = try sqlite.Db.open(db_path, sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE);
+    errdefer db.close();
+
     try db.exec(schema_sql);
     try db.exec("BEGIN");
-
     const insert_stmt = try db.prepare(
         "INSERT INTO entries (term, reading, rules, glossary, sequence) VALUES (?, ?, ?, ?, ?)",
     );
-    defer insert_stmt.finalize();
+    errdefer insert_stmt.finalize();
 
+    var files: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (files.items) |f| alloc.free(f);
+        files.deinit(alloc);
+    }
     var title_buf: std.ArrayList(u8) = .empty;
-    defer title_buf.deinit(alloc);
+    errdefer title_buf.deinit(alloc);
 
     var it = dir.iterate();
     while (it.next(io) catch null) |raw| {
@@ -527,28 +648,18 @@ fn build(alloc: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, db: *sqlite.Db)
             continue;
         }
         if (!isTermBankName(raw.name)) continue;
-
-        const bytes = dir.readFileAlloc(io, raw.name, alloc, .limited(max_term_bank_bytes)) catch continue;
-        defer alloc.free(bytes);
-        // `alloc`, not a per-dictionary arena: the scratch arena backing
-        // this file's parse tree has nothing to do with anything kept
-        // afterward -- every row is inserted straight into `db`.
-        try insertTermBank(insert_stmt, alloc, bytes);
+        try files.append(alloc, try alloc.dupe(u8, raw.name));
     }
 
-    try db.exec("COMMIT");
-    try db.exec("CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term)");
-
-    var meta_stmt = try db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
-    defer meta_stmt.finalize();
-    try meta_stmt.bindText(1, "title");
-    try meta_stmt.bindText(2, title_buf.items);
-    _ = try meta_stmt.step();
-    meta_stmt.reset();
-    // Written last, on purpose -- see `isBuilt`.
-    try meta_stmt.bindText(1, "complete");
-    try meta_stmt.bindText(2, "1");
-    _ = try meta_stmt.step();
+    return .{
+        .alloc = alloc,
+        .io = io,
+        .dir = dir,
+        .db = db,
+        .insert_stmt = insert_stmt,
+        .files = files,
+        .title_buf = title_buf,
+    };
 }
 
 fn readTitle(alloc: std.mem.Allocator, db: *sqlite.Db) ![]const u8 {
@@ -568,30 +679,62 @@ pub fn isEmpty(dict: *Dict) bool {
     return !has_row;
 }
 
-/// Opens the dictionary directory at `path` -- an already *unzipped*
-/// Yomitan dictionary, not the zip itself. Builds `<path>/index.sqlite3`
-/// on the first call for a given directory; every call after that just
-/// opens it. See the module doc comment.
-pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict {
-    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
-    defer dir.close(io);
-
-    const db_path = try std.mem.concatWithSentinel(alloc, u8, &.{ path, "/", db_file_name }, 0);
-    defer alloc.free(db_path);
-
-    var db = try sqlite.Db.open(db_path, sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE);
-    errdefer db.close();
-
-    if (!isBuilt(&db)) try build(alloc, io, &dir, &db);
-
-    const lookup_stmt = try db.prepare("SELECT term, reading, rules, glossary, sequence FROM entries WHERE term = ?");
+fn openExisting(alloc: std.mem.Allocator, db: sqlite.Db) !Dict {
+    var d = db;
+    errdefer d.close();
+    const lookup_stmt = try d.prepare("SELECT term, reading, rules, glossary, sequence FROM entries WHERE term = ?");
     errdefer lookup_stmt.finalize();
 
     var title_arena: std.heap.ArenaAllocator = .init(alloc);
     errdefer title_arena.deinit();
-    const title = readTitle(title_arena.allocator(), &db) catch "";
+    const title = readTitle(title_arena.allocator(), &d) catch "";
 
-    return .{ .db = db, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
+    return .{ .db = d, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
+}
+
+/// Either the dictionary directory at `path` was already built and is
+/// now open, or it wasn't and a `Builder` is ready to start on it --
+/// `ui.zig`'s `loadDict` uses this to decide whether to show a
+/// build-progress panel at all.
+pub const Load = union(enum) {
+    ready: Dict,
+    building: Builder,
+};
+
+/// Opens `<path>/index.sqlite3` (an already *unzipped* Yomitan
+/// dictionary directory, not the zip itself -- see the module doc
+/// comment) and checks whether it already holds a finished build.
+pub fn openOrBeginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Load {
+    const db_path = try std.mem.concatWithSentinel(alloc, u8, &.{ path, "/", db_file_name }, 0);
+    defer alloc.free(db_path);
+    var db = try sqlite.Db.open(db_path, sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE);
+
+    if (isBuilt(&db)) return .{ .ready = try openExisting(alloc, db) };
+
+    // Not built (or built by a version whose `complete` marker never
+    // landed): this connection isn't needed any more -- `beginBuild`
+    // reopens its own, alongside the directory handle a `Builder` also
+    // needs and this check never touched.
+    db.close();
+    return .{ .building = try beginBuild(alloc, io, path) };
+}
+
+/// Opens the dictionary directory at `path`, building `index.sqlite3`
+/// first if it isn't there yet -- blocking until that finishes. Callers
+/// that want to show progress while a build runs (`ui.zig`) use
+/// `openOrBeginBuild` and `Builder.step` directly instead; this is the
+/// synchronous all-at-once version for everything else (tests, in
+/// particular).
+pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict {
+    switch (try openOrBeginBuild(alloc, io, path)) {
+        .ready => |d| return d,
+        .building => |built| {
+            var b = built;
+            errdefer b.deinit();
+            while (!b.isDone()) try b.step();
+            return b.finish();
+        },
+    }
 }
 
 /// Opens an in-memory dictionary built from `term_bank_jsons` (and
@@ -607,7 +750,7 @@ pub fn openMemory(alloc: std.mem.Allocator, term_bank_jsons: []const []const u8,
     const insert_stmt = try db.prepare(
         "INSERT INTO entries (term, reading, rules, glossary, sequence) VALUES (?, ?, ?, ?, ?)",
     );
-    for (term_bank_jsons) |j| try insertTermBank(insert_stmt, alloc, j);
+    for (term_bank_jsons) |j| _ = try insertTermBank(insert_stmt, alloc, j);
     insert_stmt.finalize();
     try db.exec("COMMIT");
     try db.exec("CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term)");

@@ -4798,6 +4798,23 @@ returns all of them, but the panel shows only the first and a
 panel already competes for screen space with the OCR dialog it sits
 below; picking one deferred showing all of them rather than the reverse.
 
+**Building the index shows progress by file, not by term.** The first
+time a dictionary directory is opened, indexing tens of thousands of
+rows takes long enough to be worth telling the reader about rather than
+just freezing behind it. An exact "12,345 / 87,654 terms" count needs
+knowing the total row count up front, which means a full pass over
+every term bank counting rows *before* the real parse -- extra work on
+top of the parse that already happens, cutting into the very build
+speed this design was for. `dict_mod.Builder` instead reports "file N of
+M" (M known instantly from the directory listing, no extra pass) plus a
+running "K terms indexed" count that only grows. `ui.zig`'s `run` calls
+`Builder.step` once per tick -- one term bank file parsed and inserted
+-- rather than looping it to completion, so the reader's 20ms input-poll
+timeout keeps frames coming and `renderDictBuild`'s centered panel (`buildHelp`'s
+placement, since a build can start before any OCR dialog exists to
+anchor to) actually gets to show each step rather than the whole build
+completing between one render and the next.
+
 ### Layer opacity
 
 `set_property(opacity, {value})`, `0.0`..`1.0`, non-root only.
