@@ -222,8 +222,11 @@ pub const Ui = struct {
 
     /// A left-button drag *inside the OCR dialog*, which selects its text
     /// rather than panning the page. Held separately from `drag` because
-    /// the two are decided at press time and never both live.
-    text_drag: ?struct { anchor: glyphwire.SelectionPoint, moved: bool } = null,
+    /// the two are decided at press time and never both live. `active` is
+    /// wherever the drag currently is -- kept so mouse-up can hand the
+    /// whole span to `lookupSelection` without the host round-tripping it
+    /// back first.
+    text_drag: ?struct { anchor: glyphwire.SelectionPoint, active: glyphwire.SelectionPoint, moved: bool } = null,
 
     /// The book's mokuro OCR, when it has any. See `Ocr`.
     ocr: ?Ocr = null,
@@ -1228,9 +1231,18 @@ pub const Ui = struct {
     /// `renderDialog`, anchored below (or above) the OCR dialog rather
     /// than a page bubble -- it's answering a click made *on* that
     /// dialog, not on the artwork.
+    ///
+    /// Follows the OCR dialog's own peek/hide state (`o.peeking`,
+    /// `o.hidden`): the panel is answering something *on* the dialog, so
+    /// it has no business staying on screen, full-opacity, after the
+    /// thing it's annotating has faded or gone.
     fn renderLookup(self: *Ui) !void {
         self.lookup_dirty = false;
         const c = self.client;
+        if (self.ocr) |o| if (o.hidden) {
+            try c.setLayerVisible(self.dict_layer, false);
+            return;
+        };
         const lk = self.lookup orelse {
             try c.setLayerVisible(self.dict_layer, false);
             return;
@@ -1330,6 +1342,11 @@ pub const Ui = struct {
         try textOn(&b, self.dict_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dict_layer, box_br, fg_dialog_border, bg_dialog);
 
+        try b.notify("set_property", .{
+            .layer = self.dict_layer,
+            .property = "opacity",
+            .value = if (self.ocr) |o| (if (o.peeking) self.conf.ocr_peek else @as(f32, 1.0)) else @as(f32, 1.0),
+        });
         try b.notify("set_property", .{ .layer = self.dict_layer, .property = "visibility", .visible = true });
 
         var results = try b.send();
@@ -1783,28 +1800,33 @@ pub const Ui = struct {
         if (std.mem.eql(u8, key, "z")) self.setPeek(false);
     }
 
-    /// `z` down / up: fade the dialog to `ocr_peek` and back. A held key
-    /// repeats, so the redundant set is filtered here rather than sent
-    /// down the wire dozens of times a second.
+    /// `z` down / up: fade the dialog -- and the lookup panel, when one is
+    /// open -- to `ocr_peek` and back. A held key repeats, so the
+    /// redundant set is filtered here rather than sent down the wire
+    /// dozens of times a second.
     fn setPeek(self: *Ui, on: bool) void {
         const o = &(self.ocr orelse return);
         if (o.at == null or o.peeking == on) return;
         o.peeking = on;
-        // Straight to the wire rather than through `dialog_dirty`: the
-        // panel's contents haven't changed, only how it composites, and
-        // a full redraw per keypress would be a lot of writes for a fade.
-        self.client.setLayerOpacity(self.dialog_layer, if (on) self.conf.ocr_peek else 1.0) catch {};
+        // Straight to the wire rather than through `dialog_dirty` /
+        // `lookup_dirty`: the panels' contents haven't changed, only how
+        // they composite, and a full redraw per keypress would be a lot
+        // of writes for a fade.
+        const opacity: f32 = if (on) self.conf.ocr_peek else 1.0;
+        self.client.setLayerOpacity(self.dialog_layer, opacity) catch {};
+        if (self.lookup != null) self.client.setLayerOpacity(self.dict_layer, opacity) catch {};
     }
 
-    /// `\`: hide the dialog outright, for when even a faded panel is in
-    /// the way. A no-op with no dialog open -- there is nothing to hide,
-    /// and silently arming the flag would make the *next* `Tab` open
-    /// nothing.
+    /// `\`: hide the dialog -- and the lookup panel, when one is open --
+    /// outright, for when even a faded panel is in the way. A no-op with
+    /// no dialog open -- there is nothing to hide, and silently arming
+    /// the flag would make the *next* `Tab` open nothing.
     fn toggleDialogHidden(self: *Ui) void {
         const o = &(self.ocr orelse return);
         if (o.at == null) return;
         o.hidden = !o.hidden;
         self.dialog_dirty = true;
+        if (self.lookup != null) self.lookup_dirty = true;
     }
 
     /// `o`: outline every OCR region on the page.
@@ -1976,7 +1998,7 @@ pub const Ui = struct {
             // half of the same gesture. The selection lands on the dialog
             // layer, where the host's Ctrl+Shift+C finds it.
             if (self.dialogPoint(ev.cell)) |p| {
-                self.text_drag = .{ .anchor = p, .moved = false };
+                self.text_drag = .{ .anchor = p, .active = p, .moved = false };
                 self.client.setSelection(self.dialog_layer, p, p) catch {};
                 return;
             }
@@ -1991,10 +2013,16 @@ pub const Ui = struct {
 
         if (self.text_drag) |td| {
             self.text_drag = null;
-            // A click inside the dialog that never moved isn't a
-            // selection; drop the zero-width one so it doesn't sit there
-            // tinting a cell -- and try it as a word lookup instead.
-            if (!td.moved) {
+            if (td.moved) {
+                // A real selection: look up exactly what was dragged over
+                // rather than guessing a word boundary, and leave the
+                // selection as drawn so Ctrl+Shift+C still copies it.
+                self.lookupSelection(td.anchor, td.active);
+            } else {
+                // A click inside the dialog that never moved isn't a
+                // selection; drop the zero-width one so it doesn't sit
+                // there tinting a cell -- and try it as a word lookup
+                // instead.
                 self.client.clearSelection(self.dialog_layer) catch {};
                 self.wordLookupAt(td.anchor);
             }
@@ -2062,7 +2090,10 @@ pub const Ui = struct {
     /// No tokenizing happens here: `dict.lookup` is handed everything
     /// from the click point to the end of the row and tries decreasing
     /// substrings itself, the same trick Yomitan uses since Japanese has
-    /// no spaces to split words on.
+    /// no spaces to split words on. On a match, the span it settled on
+    /// (`Match.len`) is selected on the dialog layer -- same as dragging
+    /// it by hand -- so it's visible which word the panel is answering
+    /// for, and Ctrl+Shift+C copies exactly that without a separate drag.
     fn wordLookupAt(self: *Ui, p: glyphwire.SelectionPoint) void {
         const d = &(self.dict orelse return);
         const o = &(self.ocr orelse return);
@@ -2081,19 +2112,87 @@ pub const Ui = struct {
         const byte_off = mokuro.columnToByte(row, text_col);
         if (byte_off >= row.len) return self.clearLookup();
 
-        const m = (dict_mod.lookup(self.alloc, d, row[byte_off..]) catch null) orelse return self.clearLookup();
-        if (m.entries.len == 0) {
-            dict_mod.freeEntries(self.alloc, m.entries);
+        const m = dict_mod.lookup(self.alloc, d, row[byte_off..]) catch null;
+        self.setLookupFromMatch(m);
+        if (self.lookup != null) {
+            const end_col = p.col + mokuro.displayWidth(row[byte_off .. byte_off + m.?.len]);
+            self.client.setSelection(self.dialog_layer, p, .{ .above = p.above, .col = end_col }) catch {};
+        }
+    }
+
+    /// Resolves a completed drag inside the dialog (`a`/`b`, the anchor
+    /// and release point, in either order) to source text and looks it
+    /// up -- the same substring-and-deinflect search `wordLookupAt` uses,
+    /// but bounded to exactly what was dragged over instead of "click to
+    /// end of row". The selection itself is left alone: it already shows
+    /// what was dragged, so there's nothing to add the way `wordLookupAt`
+    /// adds one for a plain click.
+    ///
+    /// `a` and `b` are clamped into the text region rather than rejected
+    /// outright (`clampToText`) -- a drag that overshoots the border or
+    /// pad, easy to do this close to a panel edge, still resolves to the
+    /// nearest text instead of finding nothing.
+    ///
+    /// `Ocr.text.rows` are slices *into* `Ocr.text.joined` (see
+    /// `mokuro.wrap`), so the span between two rows -- even across a
+    /// multi-row selection -- is read straight out of `joined` by byte
+    /// offset rather than reassembled row by row, which would either drop
+    /// or duplicate whatever wrap folded into the seam between them.
+    fn lookupSelection(self: *Ui, a: glyphwire.SelectionPoint, b: glyphwire.SelectionPoint) void {
+        const d = &(self.dict orelse return);
+        const o = &(self.ocr orelse return);
+        if (o.text.rows.len == 0) return self.clearLookup();
+
+        const pa = clampToText(o, a);
+        const pb = clampToText(o, b);
+        const a_first = pa.row_idx < pb.row_idx or (pa.row_idx == pb.row_idx and pa.byte_off <= pb.byte_off);
+        const first = if (a_first) pa else pb;
+        const second = if (a_first) pb else pa;
+
+        const joined = o.text.joined;
+        const row_first = o.text.rows[first.row_idx];
+        const row_second = o.text.rows[second.row_idx];
+        const abs_start = (@intFromPtr(row_first.ptr) - @intFromPtr(joined.ptr)) + first.byte_off;
+        const abs_end = (@intFromPtr(row_second.ptr) - @intFromPtr(joined.ptr)) + second.byte_off;
+        if (abs_end <= abs_start) return self.clearLookup();
+
+        const m = dict_mod.lookup(self.alloc, d, joined[abs_start..abs_end]) catch null;
+        self.setLookupFromMatch(m);
+    }
+
+    /// Clamps dialog-local point `p` to the nearest text cell: rows above
+    /// the first text row (or below the last) clamp to that row, and
+    /// `mokuro.columnToByte` already clamps a column past a row's own
+    /// width to its end. Used for selection endpoints, which -- unlike a
+    /// plain click's exact point -- can legitimately land on the border
+    /// or the pad when a drag overshoots the panel.
+    fn clampToText(o: *const Ocr, p: glyphwire.SelectionPoint) struct { row_idx: usize, byte_off: usize } {
+        const panel_row = -p.above;
+        const max_idx: i64 = @intCast(o.text.rows.len - 1);
+        const row_idx: usize = @intCast(std.math.clamp(panel_row - 1, 0, max_idx));
+        const row = o.text.rows[row_idx];
+        const text_col: usize = if (p.col < 2) 0 else p.col - 2;
+        return .{ .row_idx = row_idx, .byte_off = mokuro.columnToByte(row, text_col) };
+    }
+
+    /// Common tail of `wordLookupAt` and `lookupSelection`: takes a
+    /// `dict_mod.lookup` result and keeps its first entry as
+    /// `self.lookup`, dropping every other homograph here with its count
+    /// carried as `extra` rather than shown in full. A no-op (clearing
+    /// any open lookup) on no match, same as before this was shared.
+    fn setLookupFromMatch(self: *Ui, m: ?dict_mod.Match) void {
+        const match = m orelse return self.clearLookup();
+        if (match.entries.len == 0) {
+            dict_mod.freeEntries(self.alloc, match.entries);
             return self.clearLookup();
         }
 
         // Keep the first entry (its strings become `self.lookup`'s, so
-        // it's not `deinit`'d); every other homograph is dropped here,
-        // its count carried as `extra` rather than shown in full.
-        for (m.entries[1..]) |e| e.deinit(self.alloc);
-        const kept = m.entries[0];
-        const extra = m.entries.len - 1;
-        self.alloc.free(m.entries);
+        // it's not `deinit`'d).
+        for (match.entries[1..]) |e| e.deinit(self.alloc);
+        const kept = match.entries[0];
+        const extra = match.entries.len - 1;
+        self.alloc.free(match.entries);
         self.alloc.free(kept.rules);
 
         self.clearLookup();
@@ -2101,7 +2200,7 @@ pub const Ui = struct {
             .term = kept.term,
             .reading = kept.reading,
             .glossary = kept.glossary,
-            .reason = m.reason,
+            .reason = match.reason,
             .extra = extra,
         };
         self.lookup_dirty = true;
@@ -2127,6 +2226,7 @@ pub const Ui = struct {
             const row = std.math.clamp(ev.cell.row, r.row, r.row + r.rows - 1) - r.row;
             const col = std.math.clamp(ev.cell.col, r.col, r.col + r.cols - 1) - r.col;
             const active: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(row)), .col = col };
+            td.active = active;
             if (active.above == td.anchor.above and active.col == td.anchor.col and !td.moved) return;
             td.moved = true;
             self.client.updateSelection(self.dialog_layer, active) catch {};
