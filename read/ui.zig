@@ -494,6 +494,10 @@ pub const Ui = struct {
     const help_cols: usize = 52;
     const help_rows: usize = help_lines.len + 2;
 
+    /// Cells between the two border columns -- where the border corners
+    /// and the padded interior line share the row.
+    const help_interior: usize = help_cols - 2;
+
     const help_lines = [_][]const u8{
         "  gw-read",
         "",
@@ -512,6 +516,27 @@ pub const Ui = struct {
         "  ? toggle this   q quit",
     };
 
+    const box_tl = "\u{250c}";
+    const box_tr = "\u{2510}";
+    const box_bl = "\u{2514}";
+    const box_br = "\u{2518}";
+    const box_h = "\u{2500}";
+    const box_v = "\u{2502}";
+
+    /// `s` repeated `n` times into `buf` (sized by the caller for exactly
+    /// that many copies) -- used to draw a solid horizontal border run
+    /// without a `zig 0.17` `**` repeat operator, which no longer exists.
+    fn repeatInto(buf: []u8, s: []const u8, n: usize) []const u8 {
+        var i: usize = 0;
+        while (i < n) : (i += 1) @memcpy(buf[i * s.len ..][0 .. s.len], s);
+        return buf[0 .. n * s.len];
+    }
+
+    /// A solid background color plus a drawn character border, not the
+    /// bundled "dialog" 9-patch: at the couple-hundred-pixel scale this
+    /// popup renders at, the gradient image tiled/stretched badly and its
+    /// per-cell background didn't reliably survive the text drawn over
+    /// it. Plain characters and one flat color have neither problem.
     fn renderHelp(self: *Ui) !void {
         const c = self.client;
         try c.setLayerCellPosition(
@@ -520,11 +545,31 @@ pub const Ui = struct {
             (self.win.cols -| help_cols) / 2,
         );
         try c.clearOn(self.help_layer, 0, 0, null, null);
-        try c.drawBoxOn(self.help_layer, 0, 0, help_rows, help_cols, "dialog");
+
+        var h_buf: [help_interior * box_h.len]u8 = undefined;
+        const h_line = repeatInto(&h_buf, box_h, help_interior);
+
+        try c.setCursorOn(self.help_layer, 0, 0);
+        try c.writeTextOn(self.help_layer, box_tl, fg_status, bg_status);
+        try c.writeTextOn(self.help_layer, h_line, fg_status, bg_status);
+        try c.writeTextOn(self.help_layer, box_tr, fg_status, bg_status);
+
+        var line_buf: [help_interior]u8 = undefined;
         for (help_lines, 0..) |line, i| {
-            try c.setCursorOn(self.help_layer, i + 1, 1);
-            try c.writeTextOn(self.help_layer, line, fg_status, null);
+            const keep = @min(line.len, help_interior);
+            @memcpy(line_buf[0..keep], line[0..keep]);
+            @memset(line_buf[keep..], ' ');
+
+            try c.setCursorOn(self.help_layer, i + 1, 0);
+            try c.writeTextOn(self.help_layer, box_v, fg_status, bg_status);
+            try c.writeTextOn(self.help_layer, &line_buf, fg_status, bg_status);
+            try c.writeTextOn(self.help_layer, box_v, fg_status, bg_status);
         }
+
+        try c.setCursorOn(self.help_layer, help_rows - 1, 0);
+        try c.writeTextOn(self.help_layer, box_bl, fg_status, bg_status);
+        try c.writeTextOn(self.help_layer, h_line, fg_status, bg_status);
+        try c.writeTextOn(self.help_layer, box_br, fg_status, bg_status);
     }
 
     fn clampPan(self: *Ui) void {
