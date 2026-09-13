@@ -2019,6 +2019,34 @@ pub fn setKeyRepeatSetsAndClearsOverrideTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(ctx.key_repeat, null);
 }
 
+pub fn setKeyRepeatBumpsGenerationEveryTimeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    // The host cancels whatever is held on each arrival, so an arrival
+    // has to be observable even when it sets the same numbers again --
+    // zoe retimes on every mode change, and both modes may be
+    // configured identically.
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try testz.expectEqual(ctx.key_repeat_gen, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_key_repeat","params":{"delay_ms":300,"interval_ms":30}}
+    );
+    try testz.expectEqual(ctx.key_repeat_gen, 1);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_key_repeat","params":{"delay_ms":300,"interval_ms":30}}
+    );
+    try testz.expectEqual(ctx.key_repeat_gen, 2);
+
+    // Clearing the override counts too.
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_key_repeat","params":{}}
+    );
+    try testz.expectEqual(ctx.key_repeat_gen, 3);
+}
+
 pub fn setKeyRepeatPartialParamsKeepTheOtherFieldTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

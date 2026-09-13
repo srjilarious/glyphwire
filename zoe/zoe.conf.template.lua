@@ -90,19 +90,18 @@
 --     -- clamps the delay to 0..5000 and the interval to 10..2000.
 --     --
 --     -- Normal and visual mode, where every repeat is a motion (`j`, an
---     -- arrow, PageDown). Equal values -- the default -- mean no initial
---     -- hold at all: a held key starts moving on the next tick. Raise
---     -- the delay for a more terminal-like feel.
---     key_repeat_delay_ms = 30,
+--     -- arrow, PageDown). Much shorter than a terminal's hold, so a held
+--     -- key starts moving quickly.
+--     key_repeat_delay_ms = 300,
 --     key_repeat_interval_ms = 30,
 --
---     -- Insert and command mode, where a held key *types*. Kept
---     -- separate on purpose: an ordinary keystroke is held for ~100ms,
---     -- so the motion cadence above would turn each one into three or
---     -- four characters. The hold wants to be long enough that only a
---     -- deliberate one crosses it.
---     key_repeat_insert_delay_ms = 400,
---     key_repeat_insert_interval_ms = 40,
+--     -- Insert and command mode, where a held key *types*. Same numbers
+--     -- by default, and a separate setting so they can be pulled apart.
+--     -- Careful dropping either delay much below this: an ordinary
+--     -- keystroke is held for ~100ms, and a hold shorter than that turns
+--     -- each one into several characters.
+--     key_repeat_insert_delay_ms = 300,
+--     key_repeat_insert_interval_ms = 30,
 --
 --     -- The buffer-pane line-number gutter:
 --     --   false        -- no gutter

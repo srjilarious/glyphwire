@@ -4370,6 +4370,13 @@ pub const Context = struct {
     /// it each tick and retimes the engine's repeat clock, so switching
     /// panes between the shell and zoe switches cadence with it.
     key_repeat: ?KeyRepeat = null,
+    /// Bumped by every `set_key_repeat`, including one that sets the
+    /// same numbers again. A program retimes when the meaning of its
+    /// keys has changed, so the host treats each arrival as a boundary
+    /// and stops whatever is held from repeating across it (see
+    /// `host/input.zig`'s `syncRepeatTiming`) -- which is a thing that
+    /// has to happen even when the cadence itself is unchanged.
+    key_repeat_gen: u64 = 0,
     /// Bumped whenever the split tree or the context size changes, i.e.
     /// whenever a previously computed layout (and its divider rects) went
     /// stale. glyphwire-host caches the divider geometry it hit-tests

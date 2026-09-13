@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 const std = @import("std");
+const glyphwire = @import("glyphwire");
 const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
@@ -25,6 +26,12 @@ pub const KeyInput = struct {
     /// context that hasn't asked for its own with `set_key_repeat`. See
     /// `syncRepeatTiming`.
     repeat_default: key_repeat.Timing = .{},
+
+    /// Last `core.Context.key_repeat_gen` and focused context acted on,
+    /// so each arriving `set_key_repeat` -- and each focus change --
+    /// cancels the in-flight repeat exactly once. See `syncRepeatTiming`.
+    repeat_gen_seen: u64 = 0,
+    repeat_ctx_seen: glyphwire.ContextHandle = glyphwire.root_context_handle,
 
     /// Last-forwarded down/up state of each modifier, indexed
     /// `[ctrl, alt, shift, super]` -- see `reportModifier`. glyphwire-host
@@ -302,11 +309,33 @@ pub const KeyInput = struct {
     /// next press -- a key already held keeps the schedule it started on.
     pub fn syncRepeatTiming(self: *KeyInput, eng: *Engine) void {
         const server = self.app.server;
-        const override = blk: {
+        const override, const gen, const ctx_handle = blk: {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
-            break :blk server.session.focusedContext().key_repeat;
+            const handle = server.session.focusedContextHandle();
+            const ctx = server.session.focusedContext();
+            break :blk .{ ctx.key_repeat, ctx.key_repeat_gen, handle };
         };
+        // Two boundaries where whatever is held was pressed under rules
+        // that no longer apply, and so must stop repeating until it is
+        // pressed again.
+        //
+        // A retime: a program only sends one when the meaning of its
+        // keys has changed. zoe pressing `i` is the case that needs it --
+        // `i` types, so without the cancel the keystroke that switched
+        // to insert mode goes on typing itself into the buffer it just
+        // opened. The cadence may well be unchanged (zoe retimes on
+        // every mode change), which is why this tracks the generation
+        // rather than the numbers.
+        //
+        // A focus change: the key that moved focus is usually still
+        // down, and its repeats belong to neither the pane it left nor
+        // the one it just arrived in.
+        if (gen != self.repeat_gen_seen or ctx_handle != self.repeat_ctx_seen) {
+            self.repeat_gen_seen = gen;
+            self.repeat_ctx_seen = ctx_handle;
+            eng.inputs.keyboard.cancelRepeats();
+        }
         eng.inputs.keyboard.repeat = key_repeat.resolve(self.repeat_default, override);
     }
 

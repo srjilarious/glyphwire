@@ -393,6 +393,11 @@ pub const Keyboard = struct {
     /// Keys whose repeat fired during this tick's `tickRepeats`. Cleared
     /// at the start of each tick, like `pressed`/`released`'s edges.
     repeat_bits: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
+    /// Keys held across a `cancelRepeats`, which stay quiet until they
+    /// are pressed again. Distinct from simply pushing their next repeat
+    /// far out: a suppressed key has no schedule at all, so nothing --
+    /// including the idle-wait deadline -- treats it as pending.
+    repeat_suppressed: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
 
     /// Committed text that a held key is repeating, and the key it came
     /// from -- what `textRepeated` re-emits on each of that key's
@@ -458,7 +463,25 @@ pub const Keyboard = struct {
         if (!self.repeat.enabled) return null;
         const idx = keyIndex(key);
         if (!self.curr.isSet(idx)) return null;
+        if (self.repeat_suppressed.isSet(idx)) return null;
         return @max(0, self.next_repeat_ms[idx] - self.held_ms[idx]);
+    }
+
+    /// Stops everything currently held from repeating until it is
+    /// pressed again, and forgets what a held key was typing.
+    ///
+    /// The boundary this exists for is a program changing what its keys
+    /// *mean* mid-hold. zoe pressing `i` is the case that matters: `i`
+    /// types, so it forms a text repeat, and the keystroke that switched
+    /// the editor into insert mode would then go on repeating itself
+    /// into the buffer it just opened. Nothing downstream can catch
+    /// that -- a repeat is deliberately indistinguishable from a fresh
+    /// press on the wire -- so the program says so instead, by retiming
+    /// its repeat (see `host/input.zig`'s `syncRepeatTiming`).
+    pub fn cancelRepeats(self: *Keyboard) void {
+        self.repeat_suppressed = self.curr;
+        self.repeat_bits = std.StaticBitSet(NumKeys).empty;
+        self.clearTextRepeat();
     }
 
     /// Advances every held key's hold timer by `delta_ms` and republishes
@@ -476,14 +499,19 @@ pub const Keyboard = struct {
             if (!self.curr.isSet(idx)) {
                 self.held_ms[idx] = 0;
                 self.next_repeat_ms[idx] = 0;
+                self.repeat_suppressed.unset(idx);
                 continue;
             }
             if (!self.prev.isSet(idx)) {
-                // The press edge itself -- start the hold schedule.
+                // The press edge itself -- start the hold schedule, and
+                // lift any suppression: a fresh press is exactly what
+                // `cancelRepeats` was waiting for.
                 self.held_ms[idx] = 0;
                 self.next_repeat_ms[idx] = self.repeat.delay_ms;
+                self.repeat_suppressed.unset(idx);
                 continue;
             }
+            if (self.repeat_suppressed.isSet(idx)) continue;
             if (!self.repeat.enabled) continue;
             self.held_ms[idx] += delta_ms;
             if (self.held_ms[idx] < self.next_repeat_ms[idx]) continue;
@@ -672,6 +700,7 @@ pub const Keyboard = struct {
         self.text_buf.clear();
         self.clearPreedit();
         self.repeat_bits = std.StaticBitSet(NumKeys).empty;
+        self.repeat_suppressed = std.StaticBitSet(NumKeys).empty;
         self.held_ms = @splat(0);
         self.next_repeat_ms = @splat(0);
         self.clearTextRepeat();

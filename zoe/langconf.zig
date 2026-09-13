@@ -35,22 +35,23 @@ pub const KeyRepeat = struct {
     interval_ms: f64,
 };
 
-// zoe asks for two cadences and switches between them by mode (see
-// `ui.Ui.syncKeyRepeat`), because the same key means different things in
-// each and glyphwire-host repeats *typed* characters on this clock too.
+// zoe asks for a cadence per mode and switches between them on the mode
+// change (see `ui.Ui.syncKeyRepeat`), because the same key means
+// different things in each and glyphwire-host repeats *typed* characters
+// on this clock too.
 //
-// Normal / visual: no initial hold at all. Every repeat there is a
-// motion -- `j`, an arrow, PageDown -- and waiting out a shell-length
-// pause before a held key starts moving is exactly wrong.
-pub const key_repeat_delay_ms_default: f64 = 30;
+// Both default to the same 300/30, which is what the two modes turned
+// out to want in practice. The hold is well short of a terminal's, so a
+// held `j` or arrow starts moving quickly, but still long enough that an
+// ordinary keystroke -- held for ~100ms while typing -- can't cross it
+// and repeat itself. Going much below that made insert mode double
+// characters. They stay two settings because a config can pull them
+// apart, and because sending on the mode change is also what stops a key
+// held across it from repeating.
+pub const key_repeat_delay_ms_default: f64 = 300;
 pub const key_repeat_interval_ms_default: f64 = 30;
-// Insert / command: a hold long enough that ordinary typing can't
-// trigger it. A keystroke is held for ~100ms in normal typing, so the
-// motion cadence above would turn every one of them into three or four
-// characters. This is the OS-typical behaviour, and the one thing a
-// text field must get right.
-pub const key_repeat_insert_delay_ms_default: f64 = 400;
-pub const key_repeat_insert_interval_ms_default: f64 = 40;
+pub const key_repeat_insert_delay_ms_default: f64 = 300;
+pub const key_repeat_insert_interval_ms_default: f64 = 30;
 
 /// The parsed config. Everything it points at is owned by `arena`.
 pub const Config = struct {
@@ -73,19 +74,19 @@ pub const Config = struct {
     page_lines: usize = 10,
     /// `config.key_repeat_delay_ms` / `config.key_repeat_interval_ms` --
     /// the typematic repeat cadence zoe asks glyphwire-host for in
-    /// normal and visual mode (`Client.setKeyRepeat`). The defaults are
-    /// equal, which means no initial hold at all: a held `j`, arrow or
-    /// PageDown starts moving on the very next tick, where a shell
-    /// deliberately waits half a second before repeating a key that
-    /// might be a command. A negative delay, a non-positive interval, or
-    /// a non-number is ignored; the host clamps whatever gets through.
+    /// normal and visual mode (`Client.setKeyRepeat`), where a repeat is
+    /// a motion: `j`, an arrow, PageDown. Shorter than a shell's, which
+    /// waits half a second before repeating a key that might be a
+    /// command. A negative delay, a non-positive interval, or a
+    /// non-number is ignored; the host clamps whatever gets through.
     key_repeat_delay_ms: f64 = key_repeat_delay_ms_default,
     key_repeat_interval_ms: f64 = key_repeat_interval_ms_default,
     /// `config.key_repeat_insert_delay_ms` /
     /// `config.key_repeat_insert_interval_ms` -- the same, for insert and
     /// command mode, where a held letter types rather than moves. Kept
-    /// separate because the motion cadence would turn one ordinary
-    /// keystroke into several characters; see the defaults above.
+    /// separate so the two can be pulled apart: drop the motion delay far
+    /// enough and ordinary typing starts repeating characters, which is
+    /// only ever wrong. See the defaults above.
     key_repeat_insert_delay_ms: f64 = key_repeat_insert_delay_ms_default,
     key_repeat_insert_interval_ms: f64 = key_repeat_insert_interval_ms_default,
     /// `config.line_numbers` -- the buffer-pane line-number gutter.

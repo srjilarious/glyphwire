@@ -310,9 +310,12 @@ pub const Ui = struct {
     hl_config: ?langconf.Config = null,
     grammars: ?syntax.Registry = null,
     hl_search_dirs: []const []const u8 = &.{},
-    /// The key-repeat cadence last asked of glyphwire-host, so
-    /// `syncKeyRepeat` only sends when the mode actually changes it.
-    key_repeat_sent: ?langconf.KeyRepeat = null,
+    /// The mode the key-repeat cadence was last sent for, so
+    /// `syncKeyRepeat` sends once per mode change. Tracks the *mode*
+    /// rather than the cadence because the send is also what stops a
+    /// held key repeating across the change -- which matters even when
+    /// both modes are configured to the same numbers.
+    key_repeat_mode_sent: ?editor.Mode = null,
     /// Reused span buffer for `renderRowSpans`.
     hl_scratch: std.ArrayList(syntax.Span) = .empty,
     /// Buffer lines an incremental reparse says need repainting for a
@@ -453,31 +456,37 @@ pub const Ui = struct {
         self.hl_config = cfg;
     }
 
-    /// Keeps glyphwire-host's typematic repeat on the cadence the current
-    /// mode wants, re-sending only when it actually changes.
+    /// Tells glyphwire-host, once per mode change, what cadence to repeat
+    /// held keys at.
     ///
     /// Two cadences, because the host repeats *typed* characters on this
     /// clock too (`Keyboard.textRepeated`) and a held letter means
-    /// opposite things either side of `i`. In normal and visual mode
-    /// every repeat is a motion -- `j`, an arrow, PageDown -- and any
-    /// initial hold before it starts moving is exactly wrong. In insert
-    /// and command mode the same key types, and a motion-fast repeat
-    /// would turn one ordinary ~100ms keystroke into three or four
-    /// characters, so the hold has to be long enough that only a
-    /// deliberate one crosses it.
+    /// opposite things either side of `i`. In normal and visual mode a
+    /// repeat is a motion -- `j`, an arrow, PageDown. In insert and
+    /// command mode the same key types, and a hold short enough to feel
+    /// instant while navigating would turn one ordinary ~100ms keystroke
+    /// into several characters.
+    ///
+    /// Sent on every mode change, not only when the numbers differ: the
+    /// message is also what stops a key held across the change from
+    /// repeating (`Keyboard.cancelRepeats`), and the key that needs that
+    /// most is `i` itself -- it types, so it would otherwise go on
+    /// typing `i` into the buffer it just opened. That holds even when
+    /// both modes are configured to the same cadence.
     ///
     /// Best-effort: a failure leaves the host on whatever cadence it was
     /// already using, and the next mode change tries again.
     fn syncKeyRepeat(self: *Ui) void {
-        const want = self.keyRepeatForMode();
-        if (self.key_repeat_sent) |sent| {
-            if (sent.delay_ms == want.delay_ms and sent.interval_ms == want.interval_ms) return;
+        const mode = self.buf.ed.mode;
+        if (self.key_repeat_mode_sent) |sent| {
+            if (sent == mode) return;
         }
+        const want = self.keyRepeatForMode();
         self.client.setKeyRepeat(want.delay_ms, want.interval_ms) catch |err| {
             std.log.warn("zoe: set_key_repeat failed ({t}); keeping the host's cadence", .{err});
             return;
         };
-        self.key_repeat_sent = want;
+        self.key_repeat_mode_sent = mode;
     }
 
     /// The cadence the editor's current mode wants, from `zoe.conf` --

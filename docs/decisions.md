@@ -1006,20 +1006,33 @@ surface.
   setting. That is the point — one session, one cadence — and it is
   configurable in the same place as everything else.
 - **A client with modes re-sends `set_key_repeat` when the mode
-  changes.** Unifying text onto the program's cadence makes the delay
-  do double duty, and the two duties conflict: zoe wants *no* hold in
-  normal mode, where a held `j` is a motion, and a real one in insert
-  mode, where the same key types — an ordinary keystroke is held for
-  ~100ms, so a 30ms hold would turn each into three or four characters.
-  No host-side rule can separate those: it is the same key, the same
-  keyboard, and only the client knows which meaning is in force.
-  Splitting the wire message into "text timing" and "key timing"
-  doesn't work either, for exactly that reason — normal-mode `j` is a
-  text key that wants the motion cadence. So the split lives where the
-  knowledge is: zoe keeps two cadences in `zoe.conf` and switches
-  between them on the mode change (`Ui.syncKeyRepeat`, re-sent only
-  when the value actually differs). Which is what a per-program
-  override was for — the protocol needed nothing new.
+  changes, and each arrival cancels whatever is held.** Unifying text
+  onto the program's cadence makes the delay do double duty, and the two
+  duties pull apart: in normal mode a held `j` is a motion and wants a
+  short hold, in insert mode the same key types and wants one long
+  enough that an ordinary ~100ms keystroke can't cross it. No host-side
+  rule can separate them — same key, same keyboard, and only the client
+  knows which meaning is in force. Splitting the wire message into "text
+  timing" and "key timing" fails for exactly that reason: normal-mode
+  `j` is a text key that wants the motion cadence. So the split lives
+  where the knowledge is, as two cadences in `zoe.conf` switched on the
+  mode change (`Ui.syncKeyRepeat`). In practice both settled on 300/30 —
+  short enough to navigate on, long enough to type on — but they stay
+  separate settings.
+  The arrival matters as much as the numbers. Pressing `i` *types*, so
+  it forms a text repeat, and the keystroke that switched zoe into
+  insert mode would then go on typing itself into the buffer it just
+  opened — `iii` in a fresh file, which is exactly what happened before
+  this. Nothing downstream can catch it: a repeat is deliberately
+  indistinguishable from a fresh press on the wire, so zoe can't filter
+  it, and no timing value fixes it either (hold `i` past the delay and
+  it comes back). So `set_key_repeat` is treated as a *boundary*: every
+  arrival stops everything currently held from repeating until it is
+  pressed again (`Keyboard.cancelRepeats`), which is why the context
+  carries a `key_repeat_gen` counter and zoe sends on every mode change
+  rather than only when the numbers differ. A focus change is the same
+  kind of boundary and cancels too — the key that moved focus is usually
+  still down, and its repeats belong to neither pane.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline

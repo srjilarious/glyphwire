@@ -399,6 +399,58 @@ pub fn unattributedTextIsNotSwallowedTest(_: std.Io, _: std.mem.Allocator) !void
     try testz.expectFalse(kb.absorbRepeatedText("j"));
 }
 
+pub fn cancelRepeatsStopsHeldTextTest(_: std.Io, _: std.mem.Allocator) !void {
+    // zoe pressing `i`: the key types, switching the editor to insert
+    // mode, and the retime that follows must stop it typing itself into
+    // the buffer it just opened -- no matter how long it stays held.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 30, .interval_ms = 30 };
+
+    typeKey(&kb, .i, "i");
+    repeatTick(&kb, 16);
+
+    kb.cancelRepeats();
+    kb.tickRepeats(1000);
+    try testz.expectEqualStr(kb.textRepeated(), "");
+    try testz.expectFalse(kb.repeated(.i));
+}
+
+pub fn cancelRepeatsStopsHeldKeysTest(_: std.Io, _: std.mem.Allocator) !void {
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 30, .interval_ms = 30 };
+
+    kb.set(.down, true);
+    kb.noteKeyDown(.down, false);
+    repeatTick(&kb, 16);
+
+    kb.cancelRepeats();
+    kb.tickRepeats(1000);
+    try testz.expectFalse(kb.repeated(.down));
+    // Nothing pending means nothing for the idle loop to wake for.
+    try testz.expectEqual(kb.repeatDueMs(.down), null);
+}
+
+pub fn cancelRepeatsLiftsOnRepressTest(_: std.Io, _: std.mem.Allocator) !void {
+    // The suppression is until the key is *pressed again*, not forever:
+    // release and re-press and it repeats normally.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 30, .interval_ms = 30 };
+
+    typeKey(&kb, .i, "i");
+    repeatTick(&kb, 16);
+    kb.cancelRepeats();
+    repeatTick(&kb, 100);
+    try testz.expectEqualStr(kb.textRepeated(), "");
+
+    kb.set(.i, false);
+    kb.noteKeyUp(.i);
+    repeatTick(&kb, 16);
+    typeKey(&kb, .i, "i");
+    repeatTick(&kb, 16);
+    kb.tickRepeats(40);
+    try testz.expectEqualStr(kb.textRepeated(), "i");
+}
+
 pub fn textRepeatClearedOnFocusLossTest(_: std.Io, _: std.mem.Allocator) !void {
     var kb = host_eng.input.Keyboard{};
     kb.repeat = .{ .delay_ms = 10, .interval_ms = 10 };

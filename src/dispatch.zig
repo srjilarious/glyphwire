@@ -2358,6 +2358,10 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const p = parsed.value;
 
+        // Every arrival is a boundary, even one that sets the same
+        // numbers again -- see `core.Context.key_repeat_gen`.
+        self.ctx.key_repeat_gen +%= 1;
+
         if (p.delay_ms == null and p.interval_ms == null) {
             self.ctx.key_repeat = null;
             return;
