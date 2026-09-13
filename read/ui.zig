@@ -66,6 +66,9 @@ const fg_warn = glyphwire.Color{ .r = 230, .g = 170, .b = 90 };
 /// reads as "this is not part of the page".
 const bg_dialog = glyphwire.Color{ .r = 20, .g = 20, .b = 26 };
 const fg_dialog = glyphwire.Color{ .r = 232, .g = 232, .b = 238 };
+/// The panel's drawn border. Dimmer than its text so the frame reads as
+/// chrome rather than competing with the Japanese inside it.
+const fg_dialog_border = glyphwire.Color{ .r = 150, .g = 150, .b = 165 };
 /// The region hints drawn over the page (`o`). Written with a transparent
 /// background so the artwork still shows around the box glyphs.
 const fg_hint = glyphwire.Color{ .r = 120, .g = 200, .b = 235 };
@@ -494,7 +497,19 @@ pub const Ui = struct {
     fn showBlock(self: *Ui, at: usize) void {
         const o = &(self.ocr orelse return);
         if (o.order.items.len == 0) return;
-        o.at = @min(at, o.order.items.len - 1);
+        const next = @min(at, o.order.items.len - 1);
+
+        // A selection belongs to the text that was on the panel, and
+        // `clear` doesn't drop one -- `core.Layer.clear` resets cells and
+        // leaves `Layer.selection` alone, so without this the old tint
+        // would sit over the *new* bubble's text at the old coordinates,
+        // and the copy shortcut would copy whatever now lies under it.
+        if (o.at != next) {
+            self.text_drag = null;
+            self.client.clearSelection(self.dialog_layer) catch {};
+        }
+
+        o.at = next;
         o.hidden = false;
         self.dialog_dirty = true;
         // The current block is marked whether the hints are on or not, so
@@ -773,16 +788,43 @@ pub const Ui = struct {
 
     // -- OCR rendering ----------------------------------------------------
 
+    /// The marks are the **heavy** box-drawing set, not the light one the
+    /// dialog's own border uses. A light vertical is a one-pixel stroke in
+    /// the middle of a cell, and over busy artwork at a small font size it
+    /// disappears -- the heavy set is the only "thicker" a character grid
+    /// offers. See the note on `renderHints` for why this is characters at
+    /// all, and what it costs.
+    const mark_tl = "\u{250f}";
+    const mark_tr = "\u{2513}";
+    const mark_bl = "\u{2517}";
+    const mark_br = "\u{251b}";
+    const mark_h = "\u{2501}";
+    const mark_v = "\u{2503}";
+
+    /// Widest and tallest mark drawn, in cells. A bubble bigger than this
+    /// is drawn clipped rather than skipped: at 4x zoom a mark can be
+    /// hundreds of cells across, and the cap bounds both the scratch
+    /// buffer and the per-render message count without ever making a
+    /// bubble unmarked.
+    const mark_max_cols: usize = 400;
+    const mark_max_rows: usize = 400;
+
     /// Marks every OCR region on the page (when hints are on) plus the one
     /// the dialog is showing (always).
     ///
-    /// **Top and bottom edges only, no sides.** A full rectangle would
-    /// cost one write per row of the box, and on a page zoomed to 4x a
-    /// bubble is hundreds of rows tall -- a per-row loop per bubble, on
-    /// every page render. Two horizontal rules bracket a speech bubble
-    /// perfectly well, cost two writes whatever the zoom, and cover less
-    /// of the artwork, which for a hint drawn *over* the art is the point.
-    /// The background stays transparent for the same reason.
+    /// **A full rectangle, drawn as one `write_text` per row.** The sides
+    /// matter: two horizontal rules alone read as two unrelated lines
+    /// rather than as a box around a bubble. Each row of the box is a
+    /// single run -- `┃`, interior spaces, `┃` -- written with
+    /// `transparent_bg`, so it costs one cursor move and one write per row
+    /// regardless of width, and the interior spaces are *not* a fill: on
+    /// this layer every cell starts transparent and a space glyph draws
+    /// nothing, so the artwork on the page layer below shows straight
+    /// through the middle of every mark.
+    ///
+    /// That is the cheap version of a shape the cell grid is not really
+    /// the right tool for -- see docs/decisions.md on why a pixel-space
+    /// `draw_rect` would suit OCR boxes better than characters do.
     fn renderHints(self: *Ui) !void {
         self.hints_dirty = false;
         const o = &(self.ocr orelse return);
@@ -801,14 +843,12 @@ pub const Ui = struct {
 
         try self.client.clearOn(self.hint_layer, 0, 0, null, null);
 
-        // One rule's worth of box-drawing glyphs, built once and sliced.
-        // `?`-wide bubbles are rare; anything past the buffer is drawn as
-        // far as it reaches, which is still an unambiguous mark.
-        var rule: [3 * 256]u8 = undefined;
-        var rule_cells: usize = 0;
-        while (rule_cells < 256) : (rule_cells += 1) {
-            @memcpy(rule[rule_cells * 3 ..][0..3], "\u{2500}");
-        }
+        // Three scratch runs, each built once per render and sliced per
+        // block: the top edge, the bottom edge, and a middle row. Sized
+        // for `mark_max_cols` cells of 3-byte box glyphs.
+        var top_buf: [mark_max_cols * 3]u8 = undefined;
+        var bot_buf: [mark_max_cols * 3]u8 = undefined;
+        var mid_buf: [mark_max_cols * 3]u8 = undefined;
 
         var b = self.client.batch();
         defer b.deinit();
@@ -817,19 +857,37 @@ pub const Ui = struct {
         for (page.blocks, 0..) |blk, i| {
             const is_current = current != null and current.? == i;
             if (!o.hints and !is_current) continue;
+
             const r = self.blockLayerRect(page, blk.box);
             if (r.row < 0 or r.col < 0) continue;
             const row0: usize = @intCast(r.row);
             const col0: usize = @intCast(r.col);
             if (row0 >= self.layout.rows or col0 >= self.layout.cols) continue;
 
-            const cols = @min(@as(usize, @intCast(r.cols)), self.layout.cols - col0);
-            const row1 = @min(row0 + @as(usize, @intCast(r.rows)), self.layout.rows) - 1;
-            const fg = if (is_current) fg_hint_current else fg_hint;
-            const text = rule[0 .. @min(cols, rule_cells) * 3];
+            // Clipped to the layer and to the mark caps, so a box running
+            // off the page draws the part that is on it.
+            const cols = @min(@min(@as(usize, @intCast(r.cols)), self.layout.cols - col0), mark_max_cols);
+            const rows = @min(@min(@as(usize, @intCast(r.rows)), self.layout.rows - row0), mark_max_rows);
+            if (cols < 2 or rows < 1) continue;
 
-            try self.emitRule(&b, row0, col0, text, fg);
-            if (row1 != row0) try self.emitRule(&b, row1, col0, text, fg);
+            const fg = if (is_current) fg_hint_current else fg_hint;
+            const interior = cols - 2;
+
+            const top = markRow(&top_buf, mark_tl, mark_h, mark_tr, interior);
+            try self.emitMarkRow(&b, row0, col0, top, fg);
+
+            // A one-row box is just its top edge; a two-row box has no
+            // interior. Both are common for a small sound-effect bubble.
+            if (rows >= 3) {
+                const mid = markRow(&mid_buf, mark_v, " ", mark_v, interior);
+                for (row0 + 1..row0 + rows - 1) |row| {
+                    try self.emitMarkRow(&b, row, col0, mid, fg);
+                }
+            }
+            if (rows >= 2) {
+                const bot = markRow(&bot_buf, mark_bl, mark_h, mark_br, interior);
+                try self.emitMarkRow(&b, row0 + rows - 1, col0, bot, fg);
+            }
             any = true;
         }
         if (!any) return self.hideHints();
@@ -839,14 +897,29 @@ pub const Ui = struct {
         try self.client.setLayerVisible(self.hint_layer, true);
     }
 
+    /// `left` + `interior` copies of `mid` + `right`, into `buf`. The
+    /// caller sizes `buf` for the widest run it will ask for.
+    fn markRow(buf: []u8, left: []const u8, mid: []const u8, right: []const u8, interior: usize) []const u8 {
+        var n: usize = 0;
+        @memcpy(buf[n..][0..left.len], left);
+        n += left.len;
+        for (0..interior) |_| {
+            @memcpy(buf[n..][0..mid.len], mid);
+            n += mid.len;
+        }
+        @memcpy(buf[n..][0..right.len], right);
+        n += right.len;
+        return buf[0..n];
+    }
+
     fn hideHints(self: *Ui) void {
         self.client.setLayerVisible(self.hint_layer, false) catch {};
     }
 
-    /// One horizontal rule on the marks layer. Transparent-backgrounded,
-    /// and the layer's other cells are never written, so everywhere but
-    /// the two rules the page shows straight through.
-    fn emitRule(self: *Ui, b: anytype, row: usize, col: usize, text: []const u8, fg: glyphwire.Color) !void {
+    /// One row of a mark on the marks layer. Transparent-backgrounded, and
+    /// the layer's cells start blank, so the page shows through both the
+    /// box's interior and the gaps around the glyphs themselves.
+    fn emitMarkRow(self: *Ui, b: anytype, row: usize, col: usize, text: []const u8, fg: glyphwire.Color) !void {
         try b.notify("set_property", .{ .layer = self.hint_layer, .property = "cursor", .row = row, .col = col });
         try b.notify("write_text", .{
             .layer = self.hint_layer,
@@ -862,6 +935,19 @@ pub const Ui = struct {
     /// The panel is sized to its text rather than to `ocr_dialog_cols`:
     /// that config value is the *cap* on the wrap, and a two-word bubble
     /// in a 40-column box would cover artwork for nothing.
+    ///
+    /// Border and fill are drawn the same way `buildHelp` draws the help
+    /// popup: a flat background colour and box-drawing characters, not the
+    /// bundled "dialog" 9-patch, whose gradient tiled badly at this scale
+    /// and whose per-cell background didn't survive text drawn over it.
+    /// Every cell -- border, pad and text alike -- is written with an
+    /// explicit `bg`, so there is no transparent gap for the page to show
+    /// through and nothing depends on a *previous* write's background
+    /// still being there.
+    ///
+    /// The whole panel goes out as one `Batch`, again like the help popup:
+    /// sent piecemeal, a half-drawn dialog is visible for a frame between
+    /// round trips, which reads as a flicker every time you press `Tab`.
     fn renderDialog(self: *Ui) !void {
         self.dialog_dirty = false;
         const c = self.client;
@@ -890,42 +976,69 @@ pub const Ui = struct {
             return;
         }
 
+        // The widest row decides the panel's width, capped at the wrap
+        // width it was produced against.
         var inner: usize = 1;
         for (rows) |r| inner = @max(inner, mokuro.displayWidth(r));
         inner = @min(inner, inner_max);
-        const box_cols = inner + 4;
+        // One pad column each side of the text, plus the two border cells.
+        const interior = inner + 2;
+        const box_cols = interior + 2;
         const box_rows = rows.len + 2;
 
         const at = self.placeDialog(page, block.box, box_rows, box_cols);
         o.rect = .{ .row = at.row, .col = at.col, .rows = box_rows, .cols = box_cols };
 
-        try c.setLayerSize(self.dialog_layer, box_cols, box_rows);
-        try c.setLayerCellPosition(self.dialog_layer, at.row, at.col);
-        try c.clearOn(self.dialog_layer, 0, 0, null, null);
+        var b = c.batch();
+        defer b.deinit();
 
-        // The panel's own fill first: `draw_box` paints the frame, but the
-        // interior would otherwise be transparent and the page would show
-        // through behind the text -- the same trap the statusline's band
-        // and zoe's sidebar both hit.
-        var blanks: [512]u8 = undefined;
-        const fill_len = @min(box_cols, blanks.len);
-        @memset(blanks[0..fill_len], ' ');
-        for (0..box_rows) |r| {
-            try c.setCursorOn(self.dialog_layer, r, 0);
-            try c.writeTextOn(self.dialog_layer, blanks[0..fill_len], fg_dialog, bg_dialog);
-        }
-        try c.drawBoxOn(self.dialog_layer, 0, 0, box_rows, box_cols, "dialog");
+        try b.notify("set_property", .{ .layer = self.dialog_layer, .property = "size", .cols = box_cols, .rows = box_rows });
+        try b.notify("set_property", .{ .layer = self.dialog_layer, .property = "cell_position", .row = at.row, .col = at.col });
+        try b.notify("clear", .{ .layer = self.dialog_layer, .row = 0, .col = 0, .rows = @as(?usize, null), .cols = @as(?usize, null) });
 
+        // Sized for the widest panel `ocr_dialog_cols` can be clamped to,
+        // so the runtime width never overruns it.
+        var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
+        const h_line = repeatInto(&h_buf, box_h, interior);
+
+        try cursorOn(&b, self.dialog_layer, 0, 0);
+        try textOn(&b, self.dialog_layer, box_tl, fg_dialog_border, bg_dialog);
+        try textOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
+        try textOn(&b, self.dialog_layer, box_tr, fg_dialog_border, bg_dialog);
+
+        // Each text row is written as border, pad, text, pad-to-width,
+        // border -- one run per piece, all with the panel's background, so
+        // the row is opaque from edge to edge however short the text is.
+        // The pad is measured in *display* columns because Japanese sets
+        // two cells per character (`mokuro.displayWidth`).
+        var pad_buf: [config_mod.ocr_dialog_cols_max]u8 = undefined;
+        @memset(&pad_buf, ' ');
         for (rows, 0..) |line, i| {
-            try c.setCursorOn(self.dialog_layer, i + 1, 2);
-            // Transparent so the fill above stays the background -- a
-            // plain `write_text` would reset these cells to the default
-            // style and punch holes in the panel.
-            try c.writeTextOnTransparent(self.dialog_layer, line, fg_dialog);
+            const used = @min(mokuro.displayWidth(line), inner);
+            try cursorOn(&b, self.dialog_layer, i + 1, 0);
+            try textOn(&b, self.dialog_layer, box_v, fg_dialog_border, bg_dialog);
+            try textOn(&b, self.dialog_layer, pad_buf[0..1], fg_dialog, bg_dialog);
+            try textOn(&b, self.dialog_layer, line, fg_dialog, bg_dialog);
+            try textOn(&b, self.dialog_layer, pad_buf[0 .. inner - used + 1], fg_dialog, bg_dialog);
+            try textOn(&b, self.dialog_layer, box_v, fg_dialog_border, bg_dialog);
         }
 
-        try c.setLayerOpacity(self.dialog_layer, if (o.peeking) self.conf.ocr_peek else 1.0);
-        try c.setLayerVisible(self.dialog_layer, true);
+        try cursorOn(&b, self.dialog_layer, box_rows - 1, 0);
+        try textOn(&b, self.dialog_layer, box_bl, fg_dialog_border, bg_dialog);
+        try textOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
+        try textOn(&b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
+
+        // Both in the same batch, so the layer's first visible frame is
+        // already the finished panel -- see `setHelp` for the same trick.
+        try b.notify("set_property", .{
+            .layer = self.dialog_layer,
+            .property = "opacity",
+            .value = if (o.peeking) self.conf.ocr_peek else @as(f32, 1.0),
+        });
+        try b.notify("set_property", .{ .layer = self.dialog_layer, .property = "visibility", .visible = true });
+
+        var results = try b.send();
+        results.deinit();
     }
 
     /// Where the dialog goes: below the bubble it came from when there is

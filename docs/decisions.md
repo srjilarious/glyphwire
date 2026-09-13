@@ -4600,16 +4600,56 @@ comparator itself would not be transitive, which `std.mem.sort` requires.
 a small bubble inside the bounds of a big one is common — so first-match
 or topmost-match would make the inner bubble unclickable.
 
-**Region marks are two rules, not a rectangle.** The `o` toggle outlines
-every text region on the page, and the block being read is always
-outlined. Drawing a full rectangle costs one write per row of the box,
-and on a page zoomed to 4x a bubble is hundreds of rows tall — a per-row
-loop per bubble on every page render. A top and a bottom rule bracket a
-speech bubble perfectly well, cost two writes whatever the zoom, and
-cover less of the artwork, which for a mark drawn *over* the art is the
-point. They go on the page layer itself (so they pan with the artwork for
-free) with a transparent background, so the art still shows around the
-glyphs.
+**Region marks are heavy box characters on their own layer.** The `o`
+toggle outlines every text region on the page, and the block being read
+is always outlined. Each row of a mark is one `write_text` — `┃`,
+interior spaces, `┃` — with `transparent_bg`, so a box costs one cursor
+move and one write *per row* regardless of how wide it is, and the
+interior spaces are not a fill: the marks layer's cells all start
+transparent and a space glyph draws nothing, so the artwork on the page
+layer below shows straight through the middle of every mark.
+
+They shipped first as a top and a bottom rule with no sides, to avoid the
+per-row loop. That was wrong in practice: two horizontal lines read as
+two unrelated lines, not as a box around a bubble, and the first thing
+the user asked was where the verticals had gone. The per-row cost is
+real but small — a bubble is tens of rows even at `max_zoom`, and this
+only runs on a page change, a `Tab`, or the `o` toggle.
+
+The marks use the **heavy** box set (`┏━┓┃┗┛`), not the light one the
+text panel's own border uses. A light vertical is a one-pixel stroke in
+the middle of a cell and it vanishes over busy artwork at a small font
+size; heavy is the only "thicker" a character grid has to offer.
+
+**Their own layer, mirroring the page layer's geometry** — same size,
+viewport, placement and scroll offset. Drawing them into the page layer
+was the first shape and it panned for free, but moving one mark then
+meant redrawing the whole scaled page: `draw_image` has no source offset,
+so there is no way to repaint just the cells a mark covered, and every
+`Tab` cost a few hundred thousand server-side cells at 4x. A second layer
+costs one extra `set_property` per axis per page render and makes `Tab`
+and `o` cheap. The cost of *that* is that the marks layer covers the page
+exactly, so while visible it is the topmost thing `scrollablePaneAt`
+finds — the wheel lands on it and the reader has to mirror the offset
+back onto the page layer.
+
+**What this actually wants is a pixel-space rectangle, and the protocol
+has no such thing.** Everything above is a character grid pretending to
+be a shape, and it pays for it three ways: a mark can only land on a cell
+boundary, so it is up to a cell (~10x20px) off the bubble it is marking
+and never quite fits; its thickness is whatever the font's box glyph
+happens to be, tunable only in the one step from light to heavy; and it
+costs O(rows) wire messages per box where a rectangle is one. A
+`draw_rect(layer, x, y, w, h, color, line_width?, filled?)` in **pixels**
+would fix all three at once, and the host is already most of the way
+there — `Renderer.rebuildLayer` composites a `ShapeBatch` (`color_bg`)
+of plain coloured quads, which is exactly what a rect is; the missing
+parts are the wire message, a per-layer list of overlay rects on
+`core.Layer`, and a pass that emits them. It would suit any client
+annotating an image rather than a grid, which is the general case
+`gw-read` is the first instance of. Deliberately **not** built as part of
+the mokuro work: it is a protocol primitive in its own right, and the
+character version is good enough to read manga with today.
 
 **A click that misses every bubble while the dialog is open closes it and
 stops there.** Everywhere else a click turns the page, and it still does

@@ -2924,10 +2924,21 @@ reads it and shows the current bubble's text in a floating panel.
 - **`Tab` order comes from a top-down sweep**, not a quantised grid: the
   grid put bubbles 50px apart into different bands whenever a boundary
   fell between them. See decisions.md; the tests caught it.
-- **Two rules, not a rectangle.** Region marks are a top and a bottom
-  edge on the page layer, transparent-backgrounded so the art shows
-  through, two writes per bubble whatever the zoom. A full outline would
-  be a per-row loop per bubble on a 4x-zoomed page.
+- **Region marks are heavy box characters on their own layer.** One
+  `write_text` per row (`┃`, spaces, `┃`) with `transparent_bg`, so the
+  art shows through the interior; the heavy set because a light vertical
+  is a one-pixel stroke that vanishes over artwork. Their own layer,
+  mirroring the page layer's geometry, so a `Tab` doesn't redraw the
+  whole scaled page to move one outline — the cost is that the marks
+  layer takes the wheel while visible, so the reader mirrors the scroll
+  offset back onto the page layer.
+- **The marks really want a pixel-space rect, which the protocol lacks.**
+  Characters can only land on cell boundaries (so a mark is up to a cell
+  off the bubble), their thickness is whatever the font's box glyph is,
+  and a box costs O(rows) messages instead of one. `draw_rect` in pixels
+  would fix all three, and the host already composites a `ShapeBatch` of
+  plain coloured quads — see decisions.md. Not built here: it is a
+  protocol primitive in its own right.
 - **Selectable, and it gets out of the way.** A drag inside the panel
   sets a selection on the dialog layer, which the host's Ctrl+Shift+C
   now finds (see below); hold `z` to fade it to `ocr_peek`, `\` to hide
@@ -2960,11 +2971,15 @@ reads it and shows the current bubble's text in a floating panel.
 3. **Yomitan-style lookup.** The selection half is done; what is left is
    a dictionary and somewhere to show the entry. A second panel is the
    obvious shape, and `opacity` already exists to keep it out of the way.
-4. **`.epub` and `.pdf`.** Both need a real content pipeline rather than
+4. **A pixel-space `draw_rect`.** The OCR region marks are the first
+   thing in the tree that wants to annotate an *image* rather than a
+   grid, and box-drawing characters are a poor fit for it (see above).
+   One message per rect, exact placement, real line widths.
+5. **`.epub` and `.pdf`.** Both need a real content pipeline rather than
    "hand bytes to stb_image", which is why `archive.Archive` is an
    interface rather than a zip reader with a nicer name.
 
-1074 tests passing.
+1076 tests passing.
 
 ## Open questions to settle before writing code
 
