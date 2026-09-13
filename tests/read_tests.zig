@@ -14,6 +14,7 @@ const state = @import("read_support").state;
 const rconfig = @import("read_support").config;
 const mokuro = @import("read_support").mokuro;
 const archive = @import("read_support").archive;
+const dict = @import("read_support").dict;
 
 // ─── pages.isPage ───────────────────────────────────────────────────────
 
@@ -750,6 +751,23 @@ pub fn mokuroWrapNeverSplitsACodepointTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqual(rows.len, 5);
 }
 
+pub fn mokuroColumnToByteLandsOnCjkCharacterStartsTest(_: std.Io, _: std.mem.Allocator) !void {
+    // "食べる" -- each character is 2 display columns.
+    const text = "食べる";
+    try testz.expectEqual(mokuro.columnToByte(text, 0), 0);
+    // Column 1 is still inside "食" (columns 0-1); it resolves to the
+    // character's start, not into the middle of its bytes.
+    try testz.expectEqual(mokuro.columnToByte(text, 1), 0);
+    try testz.expectEqual(mokuro.columnToByte(text, 2), "食".len);
+    try testz.expectEqual(mokuro.columnToByte(text, 4), "食べ".len);
+}
+
+pub fn mokuroColumnToByteClampsPastTheEndTest(_: std.Io, _: std.mem.Allocator) !void {
+    const text = "猫";
+    try testz.expectEqual(mokuro.columnToByte(text, 100), text.len);
+    try testz.expectEqual(mokuro.columnToByte("", 0), 0);
+}
+
 // ─── archive: recognising the sidecar's name ────────────────────────────
 
 pub fn mokuroSidecarNameIsRecognisedCaseInsensitivelyTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -758,4 +776,117 @@ pub fn mokuroSidecarNameIsRecognisedCaseInsensitivelyTest(_: std.Io, _: std.mem.
     try testz.expectFalse(archive.isMokuroName("Vol1.mokuro.bak"));
     try testz.expectFalse(archive.isMokuroName("mokuro"));
     try testz.expectFalse(archive.isMokuroName(""));
+}
+
+// ─── dict: term bank parsing ────────────────────────────────────────────
+
+fn buildTestDict(alloc: std.mem.Allocator, jsons: []const []const u8) !dict.Dict {
+    var d: dict.Dict = .{ .arena = .init(alloc) };
+    const a = d.arena.allocator();
+    var entries: std.ArrayList(dict.Entry) = .empty;
+    for (jsons) |j| try dict.parseTermBank(a, &entries, j);
+    d.entries = try entries.toOwnedSlice(a);
+    try dict.buildIndex(a, &d);
+    return d;
+}
+
+pub fn dictParsesTermBankRowsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try buildTestDict(alloc, &.{
+        \\[["食べる","たべる","","v1",0,["to eat"],1,""]]
+    });
+    defer d.deinit();
+    try testz.expectEqual(d.entries.len, 1);
+    try testz.expectEqualStr(d.entries[0].term, "食べる");
+    try testz.expectEqualStr(d.entries[0].reading, "たべる");
+    try testz.expectEqualStr(d.entries[0].rules, "v1");
+    try testz.expectEqual(d.entries[0].glossary.len, 1);
+    try testz.expectEqualStr(d.entries[0].glossary[0], "to eat");
+    try testz.expectEqual(d.entries[0].sequence, 1);
+}
+
+pub fn dictDropsRowsShorterThanEightFieldsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try buildTestDict(alloc, &.{
+        \\[["short","","","",0]]
+    });
+    defer d.deinit();
+    try testz.expectEqual(d.entries.len, 0);
+}
+
+pub fn dictFlattensStructuredContentGlossaryTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Jitendex-style structured content: a tagged object wrapping the
+    // real text rather than a plain string.
+    var d = try buildTestDict(alloc, &.{
+        \\[["優しい","やさしい","","adj-i",0,[{"content":"kind, gentle"}],5,""]]
+    });
+    defer d.deinit();
+    try testz.expectEqual(d.entries[0].glossary.len, 1);
+    try testz.expectEqualStr(d.entries[0].glossary[0], "kind, gentle");
+}
+
+pub fn dictTreatsGarbageAsAnEmptyBankTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try buildTestDict(alloc, &.{ "", "not json", "{}", "[1,2,3]" });
+    defer d.deinit();
+    try testz.expectEqual(d.entries.len, 0);
+}
+
+// ─── dict: lookup ───────────────────────────────────────────────────────
+
+const lookup_dict_json =
+    \\[
+    \\  ["食べる","たべる","","v1",0,["to eat"],1,""],
+    \\  ["分かる","わかる","","v5",0,["to understand"],2,""],
+    \\  ["ある","ある","","exp",0,["there is (inanimate)"],3,""],
+    \\  ["猫","ねこ","","n",0,["cat"],4,""]
+    \\]
+;
+
+pub fn dictLookupFindsExactDictionaryFormTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "猫が好き")).?;
+    defer alloc.free(m.entries);
+    try testz.expectTrue(m.reason == null);
+    try testz.expectEqualStr("猫が好き"[0..m.len], "猫");
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(d.entries[m.entries[0]].term, "猫");
+}
+
+pub fn dictLookupDeinflectsIchidanTeFormTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "食べてすぐ")).?;
+    defer alloc.free(m.entries);
+    try testz.expectEqualStr(m.reason.?, "te-form");
+    try testz.expectEqualStr("食べてすぐ"[0..m.len], "食べて");
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(d.entries[m.entries[0]].term, "食べる");
+}
+
+pub fn dictLookupDeinflectsGodanRuVerbPastTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    defer d.deinit();
+    // 分かった -- past of 分かる (godan, not ichidan -- the ambiguous
+    // -る class `valid_rules` filtering exists to resolve).
+    const m = (try dict.lookup(alloc, &d, "分かった")).?;
+    defer alloc.free(m.entries);
+    try testz.expectEqualStr(m.reason.?, "past");
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(d.entries[m.entries[0]].term, "分かる");
+}
+
+pub fn dictLookupRejectsADeinflectionWhoseTargetHasTheWrongRuleTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    defer d.deinit();
+    // "あった" strips to "ある" via the godan -た rule, but the only
+    // "ある" entry in this dict is tagged "exp", not "v5" -- so the
+    // guess must be rejected rather than treated as a hit.
+    const m = try dict.lookup(alloc, &d, "あった");
+    try testz.expectTrue(m == null);
+}
+
+pub fn dictLookupReturnsNullWhenNothingMatchesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    defer d.deinit();
+    const m = try dict.lookup(alloc, &d, "xyz123");
+    try testz.expectTrue(m == null);
 }

@@ -20,6 +20,7 @@ pub const state = @import("state.zig");
 pub const config = @import("config.zig");
 pub const archive = @import("archive.zig");
 pub const mokuro = @import("mokuro.zig");
+pub const dict = @import("dict.zig");
 pub const ui = @import("ui.zig");
 
 pub const Archive = archive.Archive;

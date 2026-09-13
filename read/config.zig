@@ -92,6 +92,12 @@ pub const ReadConfig = struct {
     /// naturally rather than as one long ribbon.
     ocr_dialog_cols: usize = 40,
 
+    /// Path to a Yomitan-format dictionary zip (e.g. a Jitendex download,
+    /// https://jitendex.org) for word lookup out of the OCR dialog.
+    /// Empty -- the default -- leaves the feature off entirely: no load
+    /// at startup, no click handling in the dialog.
+    dictionary: []const u8 = "",
+
     /// The zoom limits this config implies, handed to every `zoom.layout`
     /// call.
     pub fn limits(self: ReadConfig) zoom.Limits {
@@ -182,6 +188,10 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     if (numberField(lua, "ocr_peek")) |v| result.config.ocr_peek = clampPeek(v);
     if (uintField(lua, "ocr_dialog_cols")) |v|
         result.config.ocr_dialog_cols = clampUint("ocr_dialog_cols", v, ocr_dialog_cols_min, ocr_dialog_cols_max);
+    // Duped immediately, unlike `mode`/`direction`: `stringField`'s
+    // result points into Lua's own string and doesn't outlive `load`.
+    if (stringField(lua, "dictionary")) |v|
+        result.config.dictionary = alloc.dupe(u8, v) catch "";
 
     // A `cache_pages` smaller than what the prefetch wants resident means
     // every prefetched page evicts the one being read. Nudge rather than

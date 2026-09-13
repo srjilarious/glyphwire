@@ -106,4 +106,11 @@
 --     -- sized to its text, so this is a cap, not a fixed width.
 --     -- Range 12..200.
 --     ocr_dialog_cols = 40,
+--
+--     -- Path to a Yomitan-format dictionary zip (e.g. a Jitendex
+--     -- download, https://jitendex.org/pages/downloads.html) for word
+--     -- lookup out of the OCR dialog: click a word in the open dialog to
+--     -- see its entry. Empty -- the default -- leaves the feature off,
+--     -- the same as having no mokuro sidecar.
+--     dictionary = "",
 -- }

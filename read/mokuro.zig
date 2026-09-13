@@ -468,6 +468,37 @@ pub fn displayWidth(text: []const u8) usize {
     return w;
 }
 
+/// The byte offset of the codepoint occupying display column `col` of
+/// `text` (`displayWidth`'s column space) -- for turning a dialog click's
+/// window column back into a byte offset in the wrapped row it landed
+/// on, which is what a dictionary lookup starts from. Clamped to
+/// `text.len` when `col` is past the text's own width, e.g. a click in a
+/// row's trailing pad; the caller treats that the same as no word there.
+pub fn columnToByte(text: []const u8, col: usize) usize {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch return i;
+        const end = @min(i + len, text.len);
+        const cp = std.unicode.utf8Decode(text[i..end]) catch {
+            // An invalid byte counts as one column-wide -- same fallback
+            // `displayWidth` uses.
+            if (col < w + 1) return i;
+            w += 1;
+            i += 1;
+            continue;
+        };
+        const cw = glyphwire.codepointWidth(cp);
+        // `col` falls inside *this* codepoint's span -- return its
+        // start, not the next codepoint's, so any column over a
+        // 2-cell character resolves to the character it's part of.
+        if (col < w + cw) return i;
+        w += cw;
+        i = end;
+    }
+    return text.len;
+}
+
 /// Wraps `text` to `cols` display columns, returning the rows. The rows
 /// are slices *into* `text`, so they live exactly as long as it does; the
 /// slice holding them is the caller's to free.

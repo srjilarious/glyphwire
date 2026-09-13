@@ -2958,6 +2958,37 @@ reads it and shows the current bubble's text in a floating panel.
   bare root; the copy shortcut copies whichever layer holds a selection,
   including one a client set. Keyboard selection mode stays root-only.
 
+**Dictionary lookup landed** (`worktree-dict-lookup`, dev). Clicking a
+word in the open mokuro dialog looks it up in a Yomitan-format
+dictionary (e.g. [Jitendex](https://jitendex.org)) and shows the entry
+in a second floating panel below the OCR dialog — `read.conf.lua`'s
+`dictionary` key points at the zip; empty leaves the feature off. See
+"gw-read: dictionary lookup" in `docs/decisions.md` for the full
+reasoning (why Yomitan format over MDict, the no-tokenizer substring-scan
+approach, the ambiguous `-る` verb resolution). `read/dict.zig` is the
+new pure module: term bank parsing, structured-content glossary
+flattening, and `lookup`.
+
+**Deliberately incomplete, next up for this feature specifically:**
+
+- **Wider deinflection.** `deinflect_rules` covers roughly thirty
+  single-step forms (plain negative/past/te-form for godan, ichidan,
+  i-adjectives) out of the several hundred Yomitan's own table has. No
+  `-masu` register, no potential/passive/causative/volitional/imperative,
+  no rule chaining (a passive-causative needs two steps). Widening the
+  table is additive — `DeinflectRule` entries, no shape change — and
+  chaining means trying each rule's output as a fresh candidate rather
+  than stopping after one substitution.
+- **Multiple dictionaries.** Today `dictionary` is one path, loaded once
+  at startup. Selecting among several (a Japanese dictionary and a
+  kanji dictionary, say) and configuring which one(s) a lookup checks
+  is unbuilt — `Ui.dict` would become a list, and `wordLookupAt` would
+  need to decide how conflicting hits across dictionaries are shown.
+- **Frequency/pitch accent data.** Yomitan `term_meta_bank_*.json` files
+  (word frequency, pitch accent shape) aren't read yet; `dict.zig` only
+  reads `term_bank_*.json`. Useful for ranking multiple matches, not
+  needed for a single dictionary with `lookup`'s longest-match-wins rule.
+
 **Next for the reader**, in the order they want doing:
 
 1. **A `draw_image` source offset** (`src_row`/`src_col`, or a pixel
@@ -2968,18 +2999,15 @@ reads it and shows the current bubble's text in a floating panel.
 2. **Two-page spreads.** Pair facing pages, treat a wide page as a
    single, handle the cover alone. Mostly layout plus an LRU that warms
    two pages instead of one.
-3. **Yomitan-style lookup.** The selection half is done; what is left is
-   a dictionary and somewhere to show the entry. A second panel is the
-   obvious shape, and `opacity` already exists to keep it out of the way.
-4. **A pixel-space `draw_rect`.** The OCR region marks are the first
+3. **A pixel-space `draw_rect`.** The OCR region marks are the first
    thing in the tree that wants to annotate an *image* rather than a
    grid, and box-drawing characters are a poor fit for it (see above).
    One message per rect, exact placement, real line widths.
-5. **`.epub` and `.pdf`.** Both need a real content pipeline rather than
+4. **`.epub` and `.pdf`.** Both need a real content pipeline rather than
    "hand bytes to stb_image", which is why `archive.Archive` is an
    interface rather than a zip reader with a nicer name.
 
-1076 tests passing.
+1087 tests passing.
 
 ## Open questions to settle before writing code
 

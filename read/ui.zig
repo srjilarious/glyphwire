@@ -45,6 +45,7 @@ const archive_mod = @import("archive.zig");
 const cache_mod = @import("cache.zig");
 const config_mod = @import("config.zig");
 const mokuro = @import("mokuro.zig");
+const dict_mod = @import("dict.zig");
 const state_mod = @import("state.zig");
 const zoom = @import("zoom.zig");
 
@@ -69,6 +70,9 @@ const fg_dialog = glyphwire.Color{ .r = 232, .g = 232, .b = 238 };
 /// The panel's drawn border. Dimmer than its text so the frame reads as
 /// chrome rather than competing with the Japanese inside it.
 const fg_dialog_border = glyphwire.Color{ .r = 150, .g = 150, .b = 165 };
+/// The lookup panel's term/reading line -- same warm highlight as the
+/// current OCR block's outline, so the two feel like one interaction.
+const fg_lookup_term = glyphwire.Color{ .r = 250, .g = 205, .b = 90 };
 /// The region hints drawn over the page (`o`). Written with a transparent
 /// background so the artwork still shows around the box glyphs.
 const fg_hint = glyphwire.Color{ .r = 120, .g = 200, .b = 235 };
@@ -100,6 +104,12 @@ const Ocr = struct {
     /// The dialog's on-screen rect in window cells, from the last render.
     /// A press inside it starts a text selection instead of a page pan.
     rect: struct { row: usize = 0, col: usize = 0, rows: usize = 0, cols: usize = 0 } = .{},
+    /// The text the last `renderDialog` drew: the joined-and-rewrapped
+    /// source and the rows it wrapped to. `rows` are slices *into*
+    /// `joined`. Kept so a stationary click on the panel (`Ui.wordLookupAt`)
+    /// can turn its row/column back into source text without redoing the
+    /// join/wrap `renderDialog` already did.
+    text: struct { joined: []u8 = &.{}, rows: []const []const u8 = &.{} } = .{},
 
     /// The block the dialog is showing, or null.
     fn current(self: *const Ocr) ?*const mokuro.Block {
@@ -109,10 +119,34 @@ const Ocr = struct {
         return &page.blocks[self.order.items[at]];
     }
 
+    fn freeText(self: *Ocr, alloc: std.mem.Allocator) void {
+        if (self.text.joined.len > 0) alloc.free(self.text.joined);
+        if (self.text.rows.len > 0) alloc.free(self.text.rows);
+        self.text = .{};
+    }
+
     fn deinit(self: *Ocr, alloc: std.mem.Allocator) void {
+        self.freeText(alloc);
         self.order.deinit(alloc);
         self.volume.deinit();
     }
+};
+
+/// A dictionary lookup result shown in `Ui.dict_layer`. Strings point
+/// into `Ui.dict`'s arena, which outlives the session, so nothing here
+/// is owned -- only the `Match.entries` indices `wordLookupAt` resolved
+/// them from needed freeing, and that happens before this is built.
+const Lookup = struct {
+    term: []const u8,
+    reading: []const u8,
+    glossary: []const []const u8,
+    /// The deinflection reason, or null for a direct dictionary-form
+    /// match.
+    reason: ?[]const u8,
+    /// How many other entries also matched this term and aren't shown --
+    /// homographs the dialog picks the first of rather than listing.
+    extra: usize,
+    rect: struct { row: usize = 0, col: usize = 0, rows: usize = 0, cols: usize = 0 } = .{},
 };
 
 pub const Ui = struct {
@@ -138,6 +172,9 @@ pub const Ui = struct {
     /// The mokuro text panel. Created for every session (a layer costs
     /// nothing while hidden) but only ever shown when `ocr` is set.
     dialog_layer: glyphwire.LayerHandle,
+    /// The dictionary lookup panel. Same story as `dialog_layer`: created
+    /// unconditionally, only ever shown when `conf.dictionary` loaded.
+    dict_layer: glyphwire.LayerHandle,
 
     /// Window size in cells, from `resize`, and the session's cell
     /// metrics. Both are re-read on every resize: a Ctrl+`+` font step
@@ -184,6 +221,15 @@ pub const Ui = struct {
     ocr: ?Ocr = null,
     dialog_dirty: bool = false,
     hints_dirty: bool = false,
+
+    /// The loaded dictionary, when `conf.dictionary` named one and it
+    /// parsed. Null -- the common case for now -- leaves a click on the
+    /// OCR dialog doing nothing but clearing its selection, same as
+    /// before this feature existed.
+    dict: ?dict_mod.Dict = null,
+    /// The last word looked up, shown in `dict_layer`. See `Lookup`.
+    lookup: ?Lookup = null,
+    lookup_dirty: bool = false,
 
     /// The `g` prefix (as in `gg`) and the `:` goto-page prompt. Only one
     /// can be pending at a time, which is why they share a field.
@@ -237,9 +283,13 @@ pub const Ui = struct {
         // `layer_order` is creation order and the dialog is the topmost
         // thing on screen when it is up.
         const dialog_layer = try client.createLayer(conf.ocr_dialog_cols, 3, 0);
+        // Created after the dialog, so a lookup panel composites above it
+        // -- it's answering a click made *on* the dialog.
+        const dict_layer = try client.createLayer(conf.ocr_dialog_cols, 3, 0);
 
         try client.setLayerVisible(help_layer, false);
         try client.setLayerVisible(dialog_layer, false);
+        try client.setLayerVisible(dict_layer, false);
         try client.setLayerVisible(hint_layer, false);
 
         self.* = .{
@@ -255,6 +305,7 @@ pub const Ui = struct {
             .status_layer = status_layer,
             .help_layer = help_layer,
             .dialog_layer = dialog_layer,
+            .dict_layer = dict_layer,
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .page = @min(start.page, book.count() -| 1),
@@ -267,8 +318,28 @@ pub const Ui = struct {
         // sidecar that won't parse, just leaves `ocr` null -- the reader
         // opens exactly as it did before this feature existed.
         if (conf.ocr) self.loadOcr();
+        self.loadDict();
 
         return self;
+    }
+
+    /// Reads and parses `conf.dictionary`, if one is set. Best effort,
+    /// the same policy `loadOcr` follows: a missing file, an unreadable
+    /// zip, or a bank that parses to nothing just leaves `dict` null and
+    /// word lookup off, because a book you can still read without a
+    /// dictionary is not a book that should refuse to open.
+    fn loadDict(self: *Ui) void {
+        if (self.conf.dictionary.len == 0) return;
+        var d = dict_mod.loadFromZip(self.alloc, self.client.io, self.conf.dictionary) catch |err| {
+            std.log.warn("gw-read: couldn't load dictionary '{s}' ({t}); lookup off", .{ self.conf.dictionary, err });
+            return;
+        };
+        if (d.entries.len == 0) {
+            d.deinit();
+            std.log.warn("gw-read: dictionary '{s}' has no term bank entries; lookup off", .{self.conf.dictionary});
+            return;
+        }
+        self.dict = d;
     }
 
     /// Reads and parses the book's mokuro sidecar, if it has one. Best
@@ -333,6 +404,7 @@ pub const Ui = struct {
         self.cache.deinit(alloc);
 
         if (self.ocr) |*o| o.deinit(alloc);
+        if (self.dict) |*d| d.deinit();
         if (self.message) |m| alloc.free(m);
         switch (self.pending) {
             .goto_prompt => |*buf| buf.deinit(alloc),
@@ -366,6 +438,7 @@ pub const Ui = struct {
             // dirty when it does.
             if (self.hints_dirty) try self.renderHints();
             if (self.dialog_dirty) try self.renderDialog();
+            if (self.lookup_dirty) try self.renderLookup();
             if (self.status_dirty) try self.renderStatus();
             if (self.quit) break;
 
@@ -507,6 +580,9 @@ pub const Ui = struct {
         if (o.at != next) {
             self.text_drag = null;
             self.client.clearSelection(self.dialog_layer) catch {};
+            // A lookup belongs to the bubble it was clicked in; stepping
+            // to a different one leaves it looking like the wrong word.
+            self.clearLookup();
         }
 
         o.at = next;
@@ -551,6 +627,7 @@ pub const Ui = struct {
         self.client.clearSelection(self.dialog_layer) catch {};
         self.client.setLayerVisible(self.dialog_layer, false) catch {};
         self.client.setLayerOpacity(self.dialog_layer, 1.0) catch {};
+        self.clearLookup();
         self.hints_dirty = true;
         self.status_dirty = true;
     }
@@ -966,15 +1043,23 @@ pub const Ui = struct {
         // Joined and re-wrapped: mokuro's lines follow the bubble's
         // columns, not the sentence. See `mokuro.joinLines`.
         const joined = try mokuro.joinLines(self.alloc, block.lines);
-        defer self.alloc.free(joined);
+        errdefer self.alloc.free(joined);
         // Two border columns and a one-column pad inside each of them.
         const inner_max = self.conf.ocr_dialog_cols -| 4;
         const rows = try mokuro.wrap(self.alloc, joined, inner_max);
-        defer self.alloc.free(rows);
+        errdefer self.alloc.free(rows);
         if (rows.len == 0) {
+            self.alloc.free(joined);
+            self.alloc.free(rows);
             try c.setLayerVisible(self.dialog_layer, false);
             return;
         }
+
+        // Replace what a click on the panel resolves against. Freed
+        // *after* the new join/wrap succeeds, not before, so a failed
+        // render above never leaves `o.text` pointing at freed memory.
+        o.freeText(self.alloc);
+        o.text = .{ .joined = joined, .rows = rows };
 
         // The widest row decides the panel's width, capped at the wrap
         // width it was produced against.
@@ -1065,6 +1150,143 @@ pub const Ui = struct {
         return .{
             .row = @intCast(std.math.clamp(row, 0, @max(max_row, 0))),
             .col = @intCast(std.math.clamp(r.col, 0, @max(max_col, 0))),
+        };
+    }
+
+    /// Draws the dictionary lookup panel for `self.lookup`, or hides it
+    /// when there's nothing to show. Same box-drawing shape as
+    /// `renderDialog`, anchored below (or above) the OCR dialog rather
+    /// than a page bubble -- it's answering a click made *on* that
+    /// dialog, not on the artwork.
+    fn renderLookup(self: *Ui) !void {
+        self.lookup_dirty = false;
+        const c = self.client;
+        const lk = self.lookup orelse {
+            try c.setLayerVisible(self.dict_layer, false);
+            return;
+        };
+
+        // Header: term, plus its reading when that differs from the term
+        // itself (kana-only entries have the same string in both), plus
+        // the deinflection reason when this wasn't the dictionary form.
+        var header_buf: std.ArrayList(u8) = .empty;
+        defer header_buf.deinit(self.alloc);
+        try header_buf.appendSlice(self.alloc, lk.term);
+        if (lk.reading.len > 0 and !std.mem.eql(u8, lk.reading, lk.term)) {
+            try header_buf.appendSlice(self.alloc, " \u{3010}");
+            try header_buf.appendSlice(self.alloc, lk.reading);
+            try header_buf.appendSlice(self.alloc, "\u{3011}");
+        }
+        if (lk.reason) |r| {
+            try header_buf.append(self.alloc, ' ');
+            try header_buf.append(self.alloc, '(');
+            try header_buf.appendSlice(self.alloc, r);
+            try header_buf.append(self.alloc, ')');
+        }
+
+        // Body: every sense joined onto one ribbon before wrapping, not
+        // one row per sense -- a homograph can carry a dozen, and this
+        // panel is meant to answer "what does this word mean", not
+        // replace the dictionary.
+        var body_buf: std.ArrayList(u8) = .empty;
+        defer body_buf.deinit(self.alloc);
+        for (lk.glossary, 0..) |g, i| {
+            if (i > 0) try body_buf.appendSlice(self.alloc, "; ");
+            try body_buf.appendSlice(self.alloc, g);
+        }
+        if (lk.extra > 0) {
+            const extra_str = try std.fmt.allocPrint(self.alloc, " (+{d} more)", .{lk.extra});
+            defer self.alloc.free(extra_str);
+            try body_buf.appendSlice(self.alloc, extra_str);
+        }
+
+        const inner_max = self.conf.ocr_dialog_cols -| 4;
+        const header_rows = try mokuro.wrap(self.alloc, header_buf.items, inner_max);
+        defer self.alloc.free(header_rows);
+        const body_rows = try mokuro.wrap(self.alloc, body_buf.items, inner_max);
+        defer self.alloc.free(body_rows);
+        if (header_rows.len == 0 and body_rows.len == 0) {
+            try c.setLayerVisible(self.dict_layer, false);
+            return;
+        }
+
+        var inner: usize = 1;
+        for (header_rows) |r| inner = @max(inner, mokuro.displayWidth(r));
+        for (body_rows) |r| inner = @max(inner, mokuro.displayWidth(r));
+        inner = @min(inner, inner_max);
+        const interior = inner + 2;
+        const box_cols = interior + 2;
+        // A blank separator row between header and body, but only when
+        // both are present.
+        const sep_rows: usize = if (header_rows.len > 0 and body_rows.len > 0) 1 else 0;
+        const box_rows = header_rows.len + sep_rows + body_rows.len + 2;
+
+        const at = self.placeLookup(box_rows, box_cols);
+        if (self.lookup) |*ptr| ptr.rect = .{ .row = at.row, .col = at.col, .rows = box_rows, .cols = box_cols };
+
+        var b = c.batch();
+        defer b.deinit();
+
+        try b.notify("set_property", .{ .layer = self.dict_layer, .property = "size", .cols = box_cols, .rows = box_rows });
+        try b.notify("set_property", .{ .layer = self.dict_layer, .property = "cell_position", .row = at.row, .col = at.col });
+        try b.notify("clear", .{ .layer = self.dict_layer, .row = 0, .col = 0, .rows = @as(?usize, null), .cols = @as(?usize, null) });
+
+        var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
+        const h_line = repeatInto(&h_buf, box_h, interior);
+
+        try cursorOn(&b, self.dict_layer, 0, 0);
+        try textOn(&b, self.dict_layer, box_tl, fg_dialog_border, bg_dialog);
+        try textOn(&b, self.dict_layer, h_line, fg_dialog_border, bg_dialog);
+        try textOn(&b, self.dict_layer, box_tr, fg_dialog_border, bg_dialog);
+
+        var pad_buf: [config_mod.ocr_dialog_cols_max]u8 = undefined;
+        @memset(&pad_buf, ' ');
+        var row_i: usize = 1;
+        for (header_rows) |line| {
+            try writeLookupRow(&b, self.dict_layer, row_i, line, inner, &pad_buf, fg_lookup_term);
+            row_i += 1;
+        }
+        if (sep_rows > 0) {
+            try writeLookupRow(&b, self.dict_layer, row_i, "", inner, &pad_buf, fg_dialog);
+            row_i += 1;
+        }
+        for (body_rows) |line| {
+            try writeLookupRow(&b, self.dict_layer, row_i, line, inner, &pad_buf, fg_dialog);
+            row_i += 1;
+        }
+
+        try cursorOn(&b, self.dict_layer, box_rows - 1, 0);
+        try textOn(&b, self.dict_layer, box_bl, fg_dialog_border, bg_dialog);
+        try textOn(&b, self.dict_layer, h_line, fg_dialog_border, bg_dialog);
+        try textOn(&b, self.dict_layer, box_br, fg_dialog_border, bg_dialog);
+
+        try b.notify("set_property", .{ .layer = self.dict_layer, .property = "visibility", .visible = true });
+
+        var results = try b.send();
+        results.deinit();
+    }
+
+    /// Below the OCR dialog when that fits, above it when it doesn't,
+    /// left-aligned with it and always wholly on screen -- the same
+    /// placement rule `placeDialog` applies to the dialog itself, just
+    /// anchored to `ocr.rect` instead of a page bubble's box.
+    fn placeLookup(self: *const Ui, rows: usize, cols: usize) glyphwire.CellPos {
+        const view = self.pageView();
+        const max_row: i64 = @as(i64, @intCast(view.rows)) - @as(i64, @intCast(rows));
+        const max_col: i64 = @as(i64, @intCast(view.cols)) - @as(i64, @intCast(cols));
+
+        const anchor_row: usize = if (self.ocr) |o| o.rect.row else 0;
+        const anchor_col: usize = if (self.ocr) |o| o.rect.col else 0;
+        const anchor_rows: usize = if (self.ocr) |o| o.rect.rows else 0;
+
+        var row: i64 = @as(i64, @intCast(anchor_row)) + @as(i64, @intCast(anchor_rows));
+        if (row > max_row) {
+            const above = @as(i64, @intCast(anchor_row)) - @as(i64, @intCast(rows));
+            if (above >= 0) row = above;
+        }
+        return .{
+            .row = @intCast(std.math.clamp(row, 0, @max(max_row, 0))),
+            .col = @intCast(std.math.clamp(@as(i64, @intCast(anchor_col)), 0, @max(max_col, 0))),
         };
     }
 
@@ -1205,6 +1427,28 @@ pub const Ui = struct {
     /// uses internally.
     fn textOn(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
         try b.notify("write_text", .{ .layer = layer, .text = text, .fg = fg, .bg = bg });
+    }
+
+    /// One panel row -- border, pad, text, pad-to-width, border -- the
+    /// piece `renderDialog` and `renderLookup` both repeat once per line.
+    /// `pad_buf` is scratch, spaces already `@memset`, at least `inner`
+    /// long.
+    fn writeLookupRow(
+        b: *glyphwire.Client.Batch,
+        layer: glyphwire.LayerHandle,
+        row: usize,
+        text: []const u8,
+        inner: usize,
+        pad_buf: []u8,
+        fg: glyphwire.Color,
+    ) !void {
+        const used = @min(mokuro.displayWidth(text), inner);
+        try cursorOn(b, layer, row, 0);
+        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
+        try textOn(b, layer, pad_buf[0..1], fg, bg_dialog);
+        try textOn(b, layer, text, fg, bg_dialog);
+        try textOn(b, layer, pad_buf[0 .. inner - used + 1], fg, bg_dialog);
+        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
     }
 
     /// Queues the dialog's full redraw (border + every line) onto `b`
@@ -1615,8 +1859,11 @@ pub const Ui = struct {
             self.text_drag = null;
             // A click inside the dialog that never moved isn't a
             // selection; drop the zero-width one so it doesn't sit there
-            // tinting a cell.
-            if (!td.moved) self.client.clearSelection(self.dialog_layer) catch {};
+            // tinting a cell -- and try it as a word lookup instead.
+            if (!td.moved) {
+                self.client.clearSelection(self.dialog_layer) catch {};
+                self.wordLookupAt(td.anchor);
+            }
             return;
         }
 
@@ -1669,6 +1916,56 @@ pub const Ui = struct {
         if (cell.row < r.row or cell.row >= r.row + r.rows) return null;
         if (cell.col < r.col or cell.col >= r.col + r.cols) return null;
         return .{ .above = -@as(i64, @intCast(cell.row - r.row)), .col = cell.col - r.col };
+    }
+
+    /// Resolves a stationary click at dialog-local point `p` (see
+    /// `dialogPoint`) to a word and looks it up, replacing -- or, on no
+    /// match, clearing -- `self.lookup`. A no-op with no dictionary
+    /// loaded; also a no-op (clearing any open lookup) when the click
+    /// landed on the border/pad rather than on text, since that's not a
+    /// word either.
+    ///
+    /// No tokenizing happens here: `dict.lookup` is handed everything
+    /// from the click point to the end of the row and tries decreasing
+    /// substrings itself, the same trick Yomitan uses since Japanese has
+    /// no spaces to split words on.
+    fn wordLookupAt(self: *Ui, p: glyphwire.SelectionPoint) void {
+        const d = &(self.dict orelse return);
+        const o = &(self.ocr orelse return);
+
+        // `above` is `-(panel row)`, and row 0 is the border -- text rows
+        // are 1-based, matching how `renderDialog` writes them.
+        const panel_row = -p.above;
+        if (panel_row < 1) return self.clearLookup();
+        const row_idx: usize = @intCast(panel_row - 1);
+        if (row_idx >= o.text.rows.len) return self.clearLookup();
+        // Column 0 is the border, column 1 the pad -- text starts at 2.
+        if (p.col < 2) return self.clearLookup();
+        const text_col = p.col - 2;
+
+        const row = o.text.rows[row_idx];
+        const byte_off = mokuro.columnToByte(row, text_col);
+        if (byte_off >= row.len) return self.clearLookup();
+
+        const m = (dict_mod.lookup(self.alloc, d, row[byte_off..]) catch null) orelse return self.clearLookup();
+        defer self.alloc.free(m.entries);
+        if (m.entries.len == 0) return self.clearLookup();
+
+        const e = d.entries[m.entries[0]];
+        self.lookup = .{
+            .term = e.term,
+            .reading = e.reading,
+            .glossary = e.glossary,
+            .reason = m.reason,
+            .extra = m.entries.len - 1,
+        };
+        self.lookup_dirty = true;
+    }
+
+    fn clearLookup(self: *Ui) void {
+        if (self.lookup == null) return;
+        self.lookup = null;
+        self.lookup_dirty = true;
     }
 
     fn handleMouseMove(self: *Ui, ev: glyphwire.MouseMoveEvent) !void {

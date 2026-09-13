@@ -4359,8 +4359,8 @@ right-to-left by default, with zoom and pan. `.cbz` / `.cbr` / `.cb7` and
 plain directories of images today; `.epub` and `.pdf` are the remaining
 reasons the page source sits behind an `archive.Archive` interface rather
 than being inlined. mokuro OCR overlays landed on top of that interface —
-see "gw-read: mokuro OCR overlays" below; yomitan-style lookup is still
-ahead, and the selectable text panel is the groundwork for it.
+see "gw-read: mokuro OCR overlays" below — and yomitan-style dictionary
+lookup landed on top of *that*; see "gw-read: dictionary lookup" below.
 
 **Right-to-left is the default, not a mode you have to find.** The reader
 was built for manga, and a manga reader whose Left arrow goes *backwards*
@@ -4656,6 +4656,90 @@ stops there.** Everywhere else a click turns the page, and it still does
 when no dialog is up. But having just been reading a bubble, "get this
 out of the way" is far likelier to be what was meant than "and also turn
 the page", and a page turn you didn't want costs you your place.
+
+### gw-read: dictionary lookup
+
+Clicking a word in the open mokuro dialog looks it up in a
+[Yomitan](https://github.com/yomitan/yomitan)-format dictionary — e.g.
+[Jitendex](https://jitendex.org), a JMdict-based dictionary built and
+distributed specifically for Yomitan — and shows the entry in a second
+floating panel below (or above, same clamping `placeDialog` already
+does) the OCR dialog. `read.conf.lua`'s `dictionary` key points at the
+zip; empty (the default) leaves the feature off exactly like a missing
+mokuro sidecar leaves OCR off.
+
+**Yomitan format over MDict.** Both are plausible dictionary containers;
+Yomitan won on three independent grounds rather than one deciding factor.
+It is Jitendex's *canonical* distribution — the zip on jitendex.org is
+built for Yomitan directly, and an MDict version is a community
+conversion once removed from the source. It is JSON in a zip
+(`index.json`, `term_bank_N.json`, ...), which `std.zip` and `std.json`
+already read and parse with nothing new to write, where MDict is a
+compressed, sometimes-encrypted binary key-block format with no official
+spec. And the shape matches what `gw-read` is doing: term/reading rows
+with a `rules` tag for deinflection, no rendering model to reproduce.
+
+**No tokenizer.** Japanese has no spaces, so there is no way to find
+"the word under the cursor" by splitting the line first. Instead a click
+resolves to a byte offset in the wrapped dialog text, and `dict.lookup`
+tries decreasing-length substrings from there — a direct dictionary-form
+match, then every deinflection rule whose ending matches — stopping at
+the first (longest) length with any hit. This is the same trick Yomitan
+itself uses client-side; there is no cheaper correct answer to "where
+does this word end" without a real segmenter, and a real segmenter is a
+dependency this reader doesn't otherwise need.
+
+**Deinflection is deliberately a small table, not a ported deinflect.json.**
+Yomitan's own rule table runs to several hundred entries covering every
+conjugation, every politeness register, and multi-step chains (a
+passive-causative needs two rule applications, not one). `read/dict.zig`
+ships roughly thirty rules — plain-form negative/past/te-form for every
+godan sound group and for ichidan verbs, and the same three for
+i-adjectives — single-step only. That covers most of what manga dialogue
+actually is (casual speech, not the polite `-masu` register), and it
+proves the click → substring → deinflect → dictionary-entry pipeline
+against a real volume before spending the effort a complete table and
+rule-chaining would take. Widening the table is the natural next step,
+not a redesign: `deinflect_rules` is a flat data array, and chaining
+would mean trying each rule's output as a fresh candidate rather than
+stopping at one step.
+
+**Ambiguous endings are resolved by the dictionary, not avoided.** A
+verb ending in `-る` reads identically whether it's ichidan (`食べる`,
+stem drops the `-る` cleanly) or a godan verb that happens to end in
+`-る` (`分かる`, whose negative is `分から` + `ない`, not `分か` +
+`らない`). Both get their own rule in the table, tagged for the
+`rules` value (`v1` vs `v5`) the *result* has to carry — so both rules
+fire on a form like `分かった`, and only the one whose guessed dictionary
+form is actually in the dictionary with the matching tag survives. This
+is also what stops false positives generally: stripping `-ない` off
+arbitrary text and checking the guess against the dictionary, tag and
+all, is what a real deinflection needs to not "deinflect" unrelated
+words that merely happen to end the right way.
+
+**Structured content is flattened, not rendered.** Jitendex's glossary
+entries are Yomitan's "structured content" — nested tagged objects for
+headings, emphasis, part-of-speech badges — rather than plain strings. A
+terminal panel has no layout engine to give that formatting to, so
+`dict.parseGlossary` walks the tree and concatenates every string leaf in
+document order. It reads a little flatter than the browser extension's
+rendering, but every dictionary stays readable rather than only the ones
+whose glossary happens to be plain strings.
+
+**The dictionary zip is read directly, never unpacked to disk.**
+`dict.loadFromZip` is `archive.zig`'s `indexZip`/`extractTo` pattern
+applied to a second, unrelated zip file — one pass over the central
+directory, `term_bank_*.json` entries parsed as they're found, nothing
+written to a temp directory. A multi-hundred-thousand-entry dictionary
+is exactly the case where "unzip it first" would cost real time and disk
+on every book that uses it, for no benefit over reading it in place.
+
+**One panel, one word, no multi-select.** A term can have several
+entries — homographs, or a verb and a noun sharing kana — and `lookup`
+returns all of them, but the panel shows only the first and a
+"`(+N more)`" count rather than listing every sense of every entry. The
+panel already competes for screen space with the OCR dialog it sits
+below; picking one deferred showing all of them rather than the reverse.
 
 ### Layer opacity
 
