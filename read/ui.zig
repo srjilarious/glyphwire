@@ -132,10 +132,13 @@ const Ocr = struct {
     }
 };
 
-/// A dictionary lookup result shown in `Ui.dict_layer`. Strings point
-/// into `Ui.dict`'s arena, which outlives the session, so nothing here
-/// is owned -- only the `Match.entries` indices `wordLookupAt` resolved
-/// them from needed freeing, and that happens before this is built.
+/// A dictionary lookup result shown in `Ui.dict_layer`. `dict_mod.lookup`
+/// now queries a SQLite file rather than holding the whole dictionary in
+/// memory, so its `Entry` results are heap-allocated per call -- `term`,
+/// `reading` and `glossary` here are owned (by `Ui.alloc`) and must be
+/// freed, which `Ui.clearLookup` does before every replacement and on
+/// shutdown. `reason` is never owned: it's one of `dict_mod.deinflect_rules`'s
+/// static strings.
 const Lookup = struct {
     term: []const u8,
     reading: []const u8,
@@ -334,7 +337,7 @@ pub const Ui = struct {
             std.log.warn("gw-read: couldn't load dictionary '{s}' ({t}); lookup off", .{ self.conf.dictionary, err });
             return;
         };
-        if (d.entries.len == 0) {
+        if (dict_mod.isEmpty(&d)) {
             d.deinit();
             std.log.warn("gw-read: dictionary '{s}' has no term bank entries; lookup off", .{self.conf.dictionary});
             return;
@@ -404,6 +407,7 @@ pub const Ui = struct {
         self.cache.deinit(alloc);
 
         if (self.ocr) |*o| o.deinit(alloc);
+        self.clearLookup();
         if (self.dict) |*d| d.deinit();
         if (self.message) |m| alloc.free(m);
         switch (self.pending) {
@@ -1948,22 +1952,37 @@ pub const Ui = struct {
         if (byte_off >= row.len) return self.clearLookup();
 
         const m = (dict_mod.lookup(self.alloc, d, row[byte_off..]) catch null) orelse return self.clearLookup();
-        defer self.alloc.free(m.entries);
-        if (m.entries.len == 0) return self.clearLookup();
+        if (m.entries.len == 0) {
+            dict_mod.freeEntries(self.alloc, m.entries);
+            return self.clearLookup();
+        }
 
-        const e = d.entries[m.entries[0]];
+        // Keep the first entry (its strings become `self.lookup`'s, so
+        // it's not `deinit`'d); every other homograph is dropped here,
+        // its count carried as `extra` rather than shown in full.
+        for (m.entries[1..]) |e| e.deinit(self.alloc);
+        const kept = m.entries[0];
+        const extra = m.entries.len - 1;
+        self.alloc.free(m.entries);
+        self.alloc.free(kept.rules);
+
+        self.clearLookup();
         self.lookup = .{
-            .term = e.term,
-            .reading = e.reading,
-            .glossary = e.glossary,
+            .term = kept.term,
+            .reading = kept.reading,
+            .glossary = kept.glossary,
             .reason = m.reason,
-            .extra = m.entries.len - 1,
+            .extra = extra,
         };
         self.lookup_dirty = true;
     }
 
     fn clearLookup(self: *Ui) void {
-        if (self.lookup == null) return;
+        const lk = self.lookup orelse return;
+        self.alloc.free(lk.term);
+        self.alloc.free(lk.reading);
+        for (lk.glossary) |g| self.alloc.free(g);
+        self.alloc.free(lk.glossary);
         self.lookup = null;
         self.lookup_dirty = true;
     }

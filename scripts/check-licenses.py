@@ -44,7 +44,7 @@ ZONES = {
 
 # Third-party trees, including ones nested inside our own directories.
 # Never headed, never checked.
-THIRD_PARTY = ("host_eng/libs/", "libs/", "vendor/", "zig-pkg/",
+THIRD_PARTY = ("host_eng/libs/", "read/libs/", "libs/", "vendor/", "zig-pkg/",
                ".zig-cache/", "zig-out/", ".provision-dist/", ".git/")
 
 # Build files live with the MPL plumbing.

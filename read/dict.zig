@@ -16,37 +16,52 @@
 //!
 //! `loadFromDir` reads an already-*unzipped* dictionary directory, not
 //! the zip itself -- `read.conf.lua`'s `dictionary` key names the
-//! directory a Jitendex download was extracted to once, by hand. Two
-//! things pushed that way rather than reading the zip in place: a real
-//! dictionary is large enough (Jitendex's term banks run to a few
-//! hundred MB of JSON total) that decompressing it is real time to pay
-//! on every book opened, not just the first; and see the next paragraph.
+//! directory a Jitendex download was extracted to once, by hand.
+//! Decompressing a several-hundred-MB dictionary on every book opened
+//! would be real time to pay more than once.
+//!
+//! **Term data lives in a SQLite file next to the term banks, not in
+//! memory.** The first time a dictionary directory is opened, every
+//! `term_bank_*.json` is parsed once and its rows inserted into
+//! `<dictionary>/index.sqlite3`, indexed by `term`; every load after that
+//! just opens the existing file and queries it. This replaced an
+//! in-memory `StringHashMap` of every entry (see git history for that
+//! version): the JSON parse itself was slow enough on a real Jitendex
+//! download to be noticeable every single time gw-read opened a book,
+//! since nothing about the parse was ever kept between runs -- an
+//! on-disk index means that cost is paid once, not once per session.
+//! SQLite is vendored as the public-domain amalgamation under
+//! `read/libs/sqlite/` (see `build.zig`'s `read_support_mod` wiring) and
+//! wrapped minimally in `sqlite.zig`; a heavier embedded database was
+//! briefly considered and set aside as far more machinery than "look up
+//! a term by exact string" needs -- see `docs/decisions.md`.
 //!
 //! Lookup does not tokenize the page's text up front. Japanese has no
 //! spaces, so -- the same trick Yomitan itself uses -- a click just picks
 //! a starting byte offset, and `lookup` tries decreasing-length candidate
 //! substrings from there, deinflecting each one against a small rule
 //! table before giving up on it. The longest substring with any match,
-//! inflected or not, wins.
+//! inflected or not, wins. Each candidate is one indexed `SELECT ... WHERE
+//! term = ?`, so the scan costs at most `max_scan_codepoints` queries,
+//! not a walk over every entry.
 //!
-//! **Parsing keeps the JSON tree off the dictionary's own arena.**
+//! **Parsing keeps the JSON tree off the entries it extracts.**
 //! `std.json.Value` is a generic tree -- a hashmap per object, an
 //! `ArrayList` per array, a tagged union per scalar -- and for a
 //! multi-hundred-MB term bank that tree can outweigh the source JSON
-//! several times over. `parseTermBank` parses each file into its own
-//! short-lived scratch arena, copies out only the handful of fields an
-//! `Entry` keeps, and frees the tree before the next file -- so peak
-//! memory is bounded by one term bank file's tree plus however many
-//! `Entry`s have been extracted so far, not by every file's tree held
-//! at once. The first version of this shared one arena for both and
-//! reliably ran a real machine out of memory before the book it was
-//! opened for ever got to render a page.
+//! several times over. `insertTermBank` parses each file into its own
+//! short-lived scratch arena and frees it before the next file, so peak
+//! memory while building the index is bounded by one term bank file's
+//! tree, not by every file's tree held at once (an earlier version that
+//! kept the whole tree alive in a long-lived arena reliably ran a real
+//! machine out of memory before the book it was opened for ever got to
+//! render a page).
 //!
-//! Everything here except `loadFromDir` is pure -- JSON and text in,
-//! structs out -- so `tests/read_tests.zig` can pin the parse and the
-//! lookup without a dictionary file on disk. `loadFromDir` is the one
-//! piece that touches the filesystem, mirroring how `archive.zig` is the
-//! only place that reads a `.mokuro` sidecar's bytes.
+//! Everything here except `loadFromDir` and the `sqlite` calls it makes
+//! is pure -- JSON and text in, plain Zig values out -- so
+//! `tests/read_tests.zig` can pin the parse and the lookup against an
+//! in-memory (`:memory:`) database without a dictionary directory on
+//! disk.
 //!
 //! **What this deliberately does not do yet.** The deinflection table
 //! below is a small slice of Yomitan's own (on the order of 30 rules
@@ -59,8 +74,13 @@
 //! see `docs/roadmap.md`.
 
 const std = @import("std");
+const sqlite = @import("sqlite.zig");
 
-/// One term bank row. `rules` is Yomitan's space-separated deinflection
+/// One dictionary row, always fully owned by whatever allocator produced
+/// it (`lookup`'s caller-supplied `alloc`, or a test's) -- unlike the
+/// in-memory version this replaced, nothing here points into a
+/// long-lived arena, since there is no long-lived in-memory copy of the
+/// dictionary any more. `rules` is Yomitan's space-separated deinflection
 /// tags (`v1`, `v5`, `vk`, `vs`, `adj-i`, ...) -- empty for anything that
 /// doesn't conjugate. `glossary` is one flattened string per sense.
 pub const Entry = struct {
@@ -69,21 +89,42 @@ pub const Entry = struct {
     rules: []const u8 = "",
     glossary: []const []const u8 = &.{},
     sequence: i64 = 0,
+
+    pub fn deinit(self: Entry, alloc: std.mem.Allocator) void {
+        alloc.free(self.term);
+        alloc.free(self.reading);
+        alloc.free(self.rules);
+        for (self.glossary) |g| alloc.free(g);
+        alloc.free(self.glossary);
+    }
 };
 
-/// A parsed dictionary. Arena-backed: every string and slice below
-/// points into it, and `deinit` frees the lot in one go -- same shape as
-/// `mokuro.Volume`.
+/// Frees every entry in `entries` and the slice itself -- the whole
+/// result of one `lookup` call or `queryTerm`, not a sub-slice of one
+/// (freeing part of a slice that wasn't its own allocation is undefined
+/// behavior; see `ui.zig`'s `wordLookupAt` for the "keep one, drop the
+/// rest" case, which frees each dropped `Entry` individually instead).
+pub fn freeEntries(alloc: std.mem.Allocator, entries: []const Entry) void {
+    for (entries) |e| e.deinit(alloc);
+    alloc.free(entries);
+}
+
+/// An open dictionary: a SQLite connection onto `<dir>/index.sqlite3`
+/// (built on first open -- see `loadFromDir`) plus the one prepared
+/// statement `lookup` reuses for every candidate substring.
 pub const Dict = struct {
-    arena: std.heap.ArenaAllocator,
-    /// `index.json`'s title, when the zip had one. Empty otherwise.
+    db: sqlite.Db,
+    lookup_stmt: sqlite.Stmt,
+    /// Backs `title` only -- everything else this module hands out is
+    /// owned by whichever allocator the caller passed in.
+    title_arena: std.heap.ArenaAllocator,
+    /// `index.json`'s title, when the dictionary had one. Empty otherwise.
     title: []const u8 = "",
-    entries: []const Entry = &.{},
-    /// Exact term -> indices into `entries`. Built once by `buildIndex`.
-    by_term: std.StringHashMapUnmanaged([]const u32) = .empty,
 
     pub fn deinit(self: *Dict) void {
-        self.arena.deinit();
+        self.lookup_stmt.finalize();
+        self.db.close();
+        self.title_arena.deinit();
     }
 };
 
@@ -157,13 +198,14 @@ pub const deinflect_rules = [_]DeinflectRule{
 };
 
 /// A successful lookup: how many bytes of the source text it covers, the
-/// deinflection reason (null for a direct dictionary-form hit), and the
-/// matching entries by index into `Dict.entries`. `entries` is owned by
-/// the caller's allocator.
+/// deinflection reason (null for a direct dictionary-form hit), and every
+/// matching entry. `entries` (and each entry within it) is owned by the
+/// caller's allocator -- free it with `freeEntries`, or see `ui.zig`'s
+/// `wordLookupAt` for keeping just one entry and dropping the rest.
 pub const Match = struct {
     len: usize,
     reason: ?[]const u8 = null,
-    entries: []const u32,
+    entries: []const Entry,
 };
 
 /// How many codepoints of `text` a click may resolve to. 16 covers every
@@ -175,8 +217,9 @@ pub const max_scan_codepoints: usize = 16;
 /// dictionary-form match, then every deinflection rule whose `kana_in`
 /// is `text[0..L]`'s suffix. Returns the first (longest) length with any
 /// hit, or null if nothing in `text`'s first `max_scan_codepoints`
-/// codepoints matches at all.
-pub fn lookup(alloc: std.mem.Allocator, dict: *const Dict, text: []const u8) std.mem.Allocator.Error!?Match {
+/// codepoints matches at all. Each candidate costs one indexed SQLite
+/// query against `dict.lookup_stmt`.
+pub fn lookup(alloc: std.mem.Allocator, dict: *Dict, text: []const u8) !?Match {
     var bounds: [max_scan_codepoints + 1]usize = undefined;
     var n_bounds: usize = 0;
     var i: usize = 0;
@@ -194,8 +237,8 @@ pub fn lookup(alloc: std.mem.Allocator, dict: *const Dict, text: []const u8) std
         const L = bounds[li];
         const candidate = text[0..L];
 
-        if (dict.by_term.get(candidate)) |idx| {
-            return .{ .len = L, .entries = try alloc.dupe(u32, idx) };
+        if (try queryTerm(alloc, dict, candidate)) |entries| {
+            return .{ .len = L, .entries = entries };
         }
 
         for (deinflect_rules) |rule| {
@@ -203,21 +246,50 @@ pub fn lookup(alloc: std.mem.Allocator, dict: *const Dict, text: []const u8) std
             var buf: [128]u8 = undefined;
             const stem = candidate[0 .. candidate.len - rule.kana_in.len];
             const form = std.fmt.bufPrint(&buf, "{s}{s}", .{ stem, rule.kana_out }) catch continue;
-            const idx = dict.by_term.get(form) orelse continue;
 
-            var out: std.ArrayList(u32) = .empty;
-            errdefer out.deinit(alloc);
-            for (idx) |ei| {
-                if (hasAnyRule(dict.entries[ei].rules, rule.valid_rules)) try out.append(alloc, ei);
+            const all = (try queryTerm(alloc, dict, form)) orelse continue;
+            var kept: std.ArrayList(Entry) = .empty;
+            errdefer freeEntries(alloc, kept.items);
+            for (all) |e| {
+                if (hasAnyRule(e.rules, rule.valid_rules)) {
+                    try kept.append(alloc, e);
+                } else {
+                    e.deinit(alloc);
+                }
             }
-            if (out.items.len == 0) {
-                out.deinit(alloc);
+            alloc.free(all);
+            if (kept.items.len == 0) {
+                kept.deinit(alloc);
                 continue;
             }
-            return .{ .len = L, .reason = rule.reason, .entries = try out.toOwnedSlice(alloc) };
+            return .{ .len = L, .reason = rule.reason, .entries = try kept.toOwnedSlice(alloc) };
         }
     }
     return null;
+}
+
+/// Every entry whose `term` is exactly `term`, or null when there are
+/// none. Reuses (and always resets) `dict.lookup_stmt`.
+fn queryTerm(alloc: std.mem.Allocator, dict: *Dict, term: []const u8) !?[]Entry {
+    dict.lookup_stmt.reset();
+    try dict.lookup_stmt.bindText(1, term);
+
+    var out: std.ArrayList(Entry) = .empty;
+    errdefer freeEntries(alloc, out.items);
+    while (try dict.lookup_stmt.step()) {
+        try out.append(alloc, .{
+            .term = try alloc.dupe(u8, dict.lookup_stmt.columnText(0)),
+            .reading = try alloc.dupe(u8, dict.lookup_stmt.columnText(1)),
+            .rules = try alloc.dupe(u8, dict.lookup_stmt.columnText(2)),
+            .glossary = try splitGlossary(alloc, dict.lookup_stmt.columnText(3)),
+            .sequence = dict.lookup_stmt.columnInt64(4),
+        });
+    }
+    if (out.items.len == 0) {
+        out.deinit(alloc);
+        return null;
+    }
+    return try out.toOwnedSlice(alloc);
 }
 
 fn hasAnyRule(rules: []const u8, valid: []const []const u8) bool {
@@ -230,21 +302,37 @@ fn hasAnyRule(rules: []const u8, valid: []const []const u8) bool {
     return false;
 }
 
-/// Parses one `term_bank_N.json`'s rows into `entries`, appended with
-/// `dict_a` -- the dictionary's own long-lived arena, the only allocator
-/// this function's *results* ever end up on. Same drop-don't-fail error
-/// policy as `mokuro.parse`: a row that doesn't fit the shape is
+/// The delimiter joining a row's flattened glossary strings into the
+/// `entries.glossary` column -- ASCII unit separator, which no flattened
+/// English/Japanese definition text will ever contain.
+const glossary_sep: u8 = 0x1F;
+
+fn joinGlossary(a: std.mem.Allocator, items: []const []const u8) std.mem.Allocator.Error![]const u8 {
+    var buf: [1]u8 = .{glossary_sep};
+    return std.mem.join(a, buf[0..], items);
+}
+
+fn splitGlossary(a: std.mem.Allocator, blob: []const u8) std.mem.Allocator.Error![]const []const u8 {
+    if (blob.len == 0) return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, blob, glossary_sep);
+    while (it.next()) |part| try out.append(a, try a.dupe(u8, part));
+    return out.toOwnedSlice(a);
+}
+
+/// Parses one `term_bank_N.json`'s rows and inserts each into `entries`
+/// via `insert_stmt` (`INSERT INTO entries (term, reading, rules,
+/// glossary, sequence) VALUES (?, ?, ?, ?, ?)`, already prepared by the
+/// caller). Same drop-don't-fail error policy as the parse this replaced:
+/// a row that doesn't fit the shape, or that SQLite itself rejects, is
 /// dropped, never a reason to fail the whole file.
 ///
 /// `scratch_backing` backs a fresh arena that holds the `std.json.Value`
-/// parse tree and nothing else; it's destroyed before this returns, so
-/// nothing in `entries` may point into it -- every field kept is
-/// explicitly `dict_a.dupe`'d off the tree first. See the module doc
-/// comment for why that split exists.
-pub fn parseTermBank(
-    dict_a: std.mem.Allocator,
+/// parse tree and nothing else; it's destroyed before this returns. See
+/// the module doc comment for why that split exists.
+fn insertTermBank(
+    insert_stmt: sqlite.Stmt,
     scratch_backing: std.mem.Allocator,
-    entries: *std.ArrayList(Entry),
     json: []const u8,
 ) std.mem.Allocator.Error!void {
     var scratch: std.heap.ArenaAllocator = .init(scratch_backing);
@@ -265,31 +353,54 @@ pub fn parseTermBank(
         if (row.items.len < 8) continue;
         const term = jsonString(row.items[0]) orelse continue;
         const glossary = try parseGlossary(sa, row.items[5]);
-        try entries.append(dict_a, .{
-            .term = try dict_a.dupe(u8, term),
-            .reading = try dict_a.dupe(u8, jsonString(row.items[1]) orelse ""),
-            .rules = try dict_a.dupe(u8, jsonString(row.items[3]) orelse ""),
-            .glossary = try dupeStrings(dict_a, glossary),
-            .sequence = jsonInt(row.items[6]) orelse 0,
-        });
+        const joined = try joinGlossary(sa, glossary);
+
+        insertRow(
+            insert_stmt,
+            term,
+            jsonString(row.items[1]) orelse "",
+            jsonString(row.items[3]) orelse "",
+            joined,
+            jsonInt(row.items[6]) orelse 0,
+        ) catch {};
+        insert_stmt.reset();
     }
 }
 
-fn dupeStrings(a: std.mem.Allocator, strs: []const []const u8) std.mem.Allocator.Error![]const []const u8 {
-    const out = try a.alloc([]const u8, strs.len);
-    for (strs, 0..) |s, i| out[i] = try a.dupe(u8, s);
-    return out;
+fn insertRow(
+    stmt: sqlite.Stmt,
+    term: []const u8,
+    reading: []const u8,
+    rules: []const u8,
+    glossary: []const u8,
+    sequence: i64,
+) sqlite.Error!void {
+    try stmt.bindText(1, term);
+    try stmt.bindText(2, reading);
+    try stmt.bindText(3, rules);
+    try stmt.bindText(4, glossary);
+    try stmt.bindInt64(5, sequence);
+    _ = try stmt.step();
 }
 
-/// `index.json`'s `title`, if the object parses and has one. Anything
-/// else leaves `dict.title` as it was.
-pub fn parseIndex(a: std.mem.Allocator, dict: *Dict, json: []const u8) void {
-    const parsed = std.json.parseFromSlice(std.json.Value, a, json, .{}) catch return;
+/// Reads `index.json`'s `title` into `out`, replacing whatever was there.
+/// Leaves `out` untouched if the JSON doesn't parse or has no title.
+fn readTitleInto(
+    scratch_backing: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    out_alloc: std.mem.Allocator,
+    json: []const u8,
+) std.mem.Allocator.Error!void {
+    var scratch: std.heap.ArenaAllocator = .init(scratch_backing);
+    defer scratch.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, scratch.allocator(), json, .{}) catch return;
     const obj = switch (parsed.value) {
         .object => |o| o,
         else => return,
     };
-    if (jsonString(obj.get("title") orelse return)) |t| dict.title = t;
+    const t = jsonString(obj.get("title") orelse return) orelse return;
+    out.clearRetainingCapacity();
+    try out.appendSlice(out_alloc, t);
 }
 
 fn jsonString(v: std.json.Value) ?[]const u8 {
@@ -344,23 +455,6 @@ fn flattenText(a: std.mem.Allocator, v: std.json.Value, out: *std.ArrayList(u8))
     }
 }
 
-/// Fills `dict.by_term` from `dict.entries`. Must run once, after every
-/// term bank has been parsed into `entries`.
-pub fn buildIndex(a: std.mem.Allocator, dict: *Dict) std.mem.Allocator.Error!void {
-    var builder: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(u32)) = .empty;
-    for (dict.entries, 0..) |e, i| {
-        const gop = try builder.getOrPut(a, e.term);
-        if (!gop.found_existing) gop.value_ptr.* = .empty;
-        try gop.value_ptr.append(a, @intCast(i));
-    }
-    var final: std.StringHashMapUnmanaged([]const u32) = .empty;
-    var it = builder.iterator();
-    while (it.next()) |kv| {
-        try final.put(a, kv.key_ptr.*, try kv.value_ptr.toOwnedSlice(a));
-    }
-    dict.by_term = final;
-}
-
 /// True for a file name that is a term bank -- `term_bank_1.json` and
 /// friends, but not `term_meta_bank_*` (frequency/pitch data) or
 /// `kanji_bank_*`/`tag_bank_*`, neither of which this module reads yet.
@@ -376,22 +470,51 @@ pub const max_term_bank_bytes: usize = 256 * 1024 * 1024;
 /// `index.json` is a few hundred bytes in practice.
 pub const max_index_bytes: usize = 1024 * 1024;
 
-/// Reads and parses every `term_bank_*.json` (and, if present,
-/// `index.json`) directly inside the directory at `path` -- an already
-/// *unzipped* Yomitan dictionary, not the zip itself. See the module
-/// doc comment for why: decompressing a several-hundred-MB dictionary on
-/// every book opened is real time to spend more than once, and the
-/// per-file scratch arena below is what keeps the parse itself from
-/// blowing past available memory on a dictionary this size.
-pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict {
-    var dict: Dict = .{ .arena = .init(alloc) };
-    errdefer dict.arena.deinit();
-    const a = dict.arena.allocator();
+/// The SQLite file `loadFromDir` builds and queries, sitting alongside
+/// the term banks it was built from.
+pub const db_file_name = "index.sqlite3";
 
-    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
-    defer dir.close(io);
+const schema_sql =
+    \\DROP TABLE IF EXISTS entries;
+    \\DROP TABLE IF EXISTS meta;
+    \\CREATE TABLE entries (
+    \\  id INTEGER PRIMARY KEY,
+    \\  term TEXT NOT NULL,
+    \\  reading TEXT NOT NULL,
+    \\  rules TEXT NOT NULL,
+    \\  glossary TEXT NOT NULL,
+    \\  sequence INTEGER NOT NULL
+    \\);
+    \\CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+;
 
-    var entries: std.ArrayList(Entry) = .empty;
+/// True once `build` has committed a full index -- the `meta` row it
+/// writes last, after the data and the index both exist, so a build
+/// interrupted partway through (crash, killed process) is never mistaken
+/// for a finished one. `prepare` itself fails on a brand new database
+/// (no `meta` table yet), which this treats the same as "not built".
+fn isBuilt(db: *sqlite.Db) bool {
+    var stmt = db.prepare("SELECT value FROM meta WHERE key = 'complete'") catch return false;
+    defer stmt.finalize();
+    return stmt.step() catch false;
+}
+
+/// Populates `db` from every `term_bank_*.json` (and `index.json`, for
+/// the title) directly inside `dir`. Drops and recreates `entries` /
+/// `meta` first, so retrying a build that was interrupted before the
+/// `complete` marker landed never leaves duplicate rows behind.
+fn build(alloc: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, db: *sqlite.Db) !void {
+    try db.exec(schema_sql);
+    try db.exec("BEGIN");
+
+    const insert_stmt = try db.prepare(
+        "INSERT INTO entries (term, reading, rules, glossary, sequence) VALUES (?, ?, ?, ?, ?)",
+    );
+    defer insert_stmt.finalize();
+
+    var title_buf: std.ArrayList(u8) = .empty;
+    defer title_buf.deinit(alloc);
+
     var it = dir.iterate();
     while (it.next(io) catch null) |raw| {
         if (raw.kind != .file) continue;
@@ -399,7 +522,7 @@ pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict
         if (std.ascii.eqlIgnoreCase(raw.name, "index.json")) {
             if (dir.readFileAlloc(io, raw.name, alloc, .limited(max_index_bytes))) |bytes| {
                 defer alloc.free(bytes);
-                parseIndex(a, &dict, bytes);
+                try readTitleInto(alloc, &title_buf, alloc, bytes);
             } else |_| {}
             continue;
         }
@@ -407,12 +530,105 @@ pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict
 
         const bytes = dir.readFileAlloc(io, raw.name, alloc, .limited(max_term_bank_bytes)) catch continue;
         defer alloc.free(bytes);
-        // `alloc`, not `a`: the scratch arena backing this file's parse
-        // tree is unrelated to the dictionary's own long-lived one.
-        try parseTermBank(a, alloc, &entries, bytes);
+        // `alloc`, not a per-dictionary arena: the scratch arena backing
+        // this file's parse tree has nothing to do with anything kept
+        // afterward -- every row is inserted straight into `db`.
+        try insertTermBank(insert_stmt, alloc, bytes);
     }
 
-    dict.entries = try entries.toOwnedSlice(a);
-    try buildIndex(a, &dict);
-    return dict;
+    try db.exec("COMMIT");
+    try db.exec("CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term)");
+
+    var meta_stmt = try db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+    defer meta_stmt.finalize();
+    try meta_stmt.bindText(1, "title");
+    try meta_stmt.bindText(2, title_buf.items);
+    _ = try meta_stmt.step();
+    meta_stmt.reset();
+    // Written last, on purpose -- see `isBuilt`.
+    try meta_stmt.bindText(1, "complete");
+    try meta_stmt.bindText(2, "1");
+    _ = try meta_stmt.step();
+}
+
+fn readTitle(alloc: std.mem.Allocator, db: *sqlite.Db) ![]const u8 {
+    var stmt = db.prepare("SELECT value FROM meta WHERE key = 'title'") catch return "";
+    defer stmt.finalize();
+    if (!(stmt.step() catch return "")) return "";
+    return alloc.dupe(u8, stmt.columnText(0));
+}
+
+/// True if the dictionary has no entries at all -- an empty or
+/// unparseable set of term banks. `ui.zig`'s `loadDict` treats that the
+/// same as a missing dictionary.
+pub fn isEmpty(dict: *Dict) bool {
+    var stmt = dict.db.prepare("SELECT 1 FROM entries LIMIT 1") catch return true;
+    defer stmt.finalize();
+    const has_row = stmt.step() catch return true;
+    return !has_row;
+}
+
+/// Opens the dictionary directory at `path` -- an already *unzipped*
+/// Yomitan dictionary, not the zip itself. Builds `<path>/index.sqlite3`
+/// on the first call for a given directory; every call after that just
+/// opens it. See the module doc comment.
+pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict {
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+
+    const db_path = try std.mem.concatWithSentinel(alloc, u8, &.{ path, "/", db_file_name }, 0);
+    defer alloc.free(db_path);
+
+    var db = try sqlite.Db.open(db_path, sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE);
+    errdefer db.close();
+
+    if (!isBuilt(&db)) try build(alloc, io, &dir, &db);
+
+    const lookup_stmt = try db.prepare("SELECT term, reading, rules, glossary, sequence FROM entries WHERE term = ?");
+    errdefer lookup_stmt.finalize();
+
+    var title_arena: std.heap.ArenaAllocator = .init(alloc);
+    errdefer title_arena.deinit();
+    const title = readTitle(title_arena.allocator(), &db) catch "";
+
+    return .{ .db = db, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
+}
+
+/// Opens an in-memory dictionary built from `term_bank_jsons` (and
+/// `index_json`, for the title) -- `tests/read_tests.zig`'s way of
+/// exercising `insertTermBank` / `lookup` / the whole build-then-query
+/// path without touching disk. Not used by `gw-read` itself.
+pub fn openMemory(alloc: std.mem.Allocator, term_bank_jsons: []const []const u8, index_json: ?[]const u8) !Dict {
+    var db = try sqlite.Db.open(":memory:", sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE);
+    errdefer db.close();
+
+    try db.exec(schema_sql);
+    try db.exec("BEGIN");
+    const insert_stmt = try db.prepare(
+        "INSERT INTO entries (term, reading, rules, glossary, sequence) VALUES (?, ?, ?, ?, ?)",
+    );
+    for (term_bank_jsons) |j| try insertTermBank(insert_stmt, alloc, j);
+    insert_stmt.finalize();
+    try db.exec("COMMIT");
+    try db.exec("CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term)");
+
+    var title_buf: std.ArrayList(u8) = .empty;
+    defer title_buf.deinit(alloc);
+    if (index_json) |j| try readTitleInto(alloc, &title_buf, alloc, j);
+
+    var meta_stmt = try db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+    try meta_stmt.bindText(1, "title");
+    try meta_stmt.bindText(2, title_buf.items);
+    _ = try meta_stmt.step();
+    meta_stmt.reset();
+    try meta_stmt.bindText(1, "complete");
+    try meta_stmt.bindText(2, "1");
+    _ = try meta_stmt.step();
+    meta_stmt.finalize();
+
+    const lookup_stmt = try db.prepare("SELECT term, reading, rules, glossary, sequence FROM entries WHERE term = ?");
+    var title_arena: std.heap.ArenaAllocator = .init(alloc);
+    const title = readTitle(title_arena.allocator(), &db) catch "";
+
+    return .{ .db = db, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
 }

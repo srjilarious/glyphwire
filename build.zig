@@ -102,6 +102,26 @@ pub fn build(b: *std.Build) void {
     // `cache` stay pure.
     read_support_mod.addImport("glyphwire", glyphwire_mod);
 
+    // SQLite, vendored as the public-domain amalgamation (`read/libs/
+    // sqlite/`) rather than pulled in as a package dependency -- it's a
+    // single C file + header, so there's no build.zig to be broken by the
+    // pin the way third-party Zig bindings have been (see the port
+    // cheat-sheet in memory). `read/dict.zig` builds a persistent on-disk
+    // term index from a Yomitan dictionary directory the first time it's
+    // opened, then queries it directly instead of re-parsing every term
+    // bank's JSON into memory on every load.
+    const sqlite_translate = b.addTranslateC(.{
+        .root_source_file = b.path("read/libs/sqlite/sqlite3.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    read_support_mod.addImport("sqlite_c", sqlite_translate.createModule());
+    read_support_mod.addCSourceFile(.{
+        .file = b.path("read/libs/sqlite/sqlite3.c"),
+        .flags = &.{"-fno-sanitize=undefined"},
+    });
+    read_support_mod.addIncludePath(b.path("read/libs/sqlite"));
+
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const zopengl = b.dependency("zopengl", .{ .target = target });
     const zmath = b.dependency("zmath", .{ .target = target });

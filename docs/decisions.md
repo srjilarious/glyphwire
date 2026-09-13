@@ -4664,9 +4664,9 @@ Clicking a word in the open mokuro dialog looks it up in a
 [Jitendex](https://jitendex.org), a JMdict-based dictionary built and
 distributed specifically for Yomitan — and shows the entry in a second
 floating panel below (or above, same clamping `placeDialog` already
-does) the OCR dialog. `read.conf.lua`'s `dictionary` key points at the
-zip; empty (the default) leaves the feature off exactly like a missing
-mokuro sidecar leaves OCR off.
+does) the OCR dialog. `read.conf.lua`'s `dictionary` key points at an
+already-unzipped dictionary directory; empty (the default) leaves the
+feature off exactly like a missing mokuro sidecar leaves OCR off.
 
 **Yomitan format over MDict.** Both are plausible dictionary containers;
 Yomitan won on three independent grounds rather than one deciding factor.
@@ -4738,25 +4738,58 @@ each file was already being decompressed fresh. `dict.loadFromDir` reads
 directory walk, `archive.zig`'s `findDirectoryMokuro` pattern minus the
 "stop at the first match" part.
 
-**Parsing keeps the JSON tree off the dictionary's own arena.** The
-first version parsed every term bank straight into the `Dict`'s
-long-lived arena — the same arena `Entry.term`/`.glossary`/etc. end up
-in — and pointing straight into `std.json.parseFromSlice`'s output is
-the codebase's usual pattern (`mokuro.parse` does exactly this). It
-reliably ran a real machine out of memory on a real Jitendex download,
-crashing before the book it was opened for ever rendered a page. The
-reason: `std.json.Value` is a fully generic tree — a hashmap per object,
-an `ArrayList` per array, a tagged union per scalar — and for a
-multi-hundred-MB term bank that tree outweighs the source JSON several
-times over, and an arena never frees anything before the whole dictionary
-is torn down. `mokuro.parse` gets away with the same pattern because a
-`.mokuro` sidecar is a few MB at most; a real dictionary is not, and
-this is the one place in the codebase JSON is parsed at that scale.
-Fixed by giving `parseTermBank` its own scratch arena per file — the
-parse tree lives and dies with one `term_bank_N.json`, and only the
-handful of fields an `Entry` actually keeps get `dupe`'d onto the
-dictionary's real arena — so peak memory is one file's tree plus
-whatever has been extracted so far, not every file's tree held at once.
+**Parsing keeps the JSON tree off whatever it parses into, at every
+stage this went through.** The first version parsed every term bank
+straight into the `Dict`'s long-lived arena — the same arena
+`Entry.term`/`.glossary`/etc. ended up in — and pointing straight into
+`std.json.parseFromSlice`'s output is the codebase's usual pattern
+(`mokuro.parse` does exactly this). It reliably ran a real machine out
+of memory on a real Jitendex download, crashing before the book it was
+opened for ever rendered a page. The reason: `std.json.Value` is a fully
+generic tree — a hashmap per object, an `ArrayList` per array, a tagged
+union per scalar — and for a multi-hundred-MB term bank that tree
+outweighs the source JSON several times over, and an arena never frees
+anything before the whole dictionary is torn down. `mokuro.parse` gets
+away with the same pattern because a `.mokuro` sidecar is a few MB at
+most; a real dictionary is not, and this is the one place in the
+codebase JSON is parsed at that scale. The fix that landed first gave
+`parseTermBank` its own scratch arena per file, freed before the next
+one — peak memory during a parse became one file's tree plus whatever
+had been extracted so far, not every file's tree held at once. That
+scratch-arena discipline survived into the design below; only where the
+extracted rows end up changed.
+
+**Term data lives in a SQLite index next to the term banks, not in
+memory at all.** Even with the memory bug fixed, every entry still had
+to be parsed back out of JSON and rebuilt into a `StringHashMap` on
+*every* `gw-read` launch — a real Jitendex download is tens of
+thousands of rows, and that parse was slow enough to notice on every
+single book opened, for a cost that was identical every time. The
+scratch-arena fix bounded peak memory; it did nothing about paying that
+cost repeatedly. `read/dict.zig` now parses each term bank exactly
+once, the first time a given dictionary directory is opened, and writes
+the rows into `<dictionary>/index.sqlite3` instead of an in-memory
+structure; every load after that just opens the existing file and runs
+one indexed `SELECT ... WHERE term = ?` per lookup candidate — no parse
+at all. A `meta` row written only after the data and its index both
+commit (`dict.zig`'s `isBuilt`) means a build interrupted partway
+through is retried rather than served as if it had finished.
+
+**SQLite over DuckDB.** DuckDB was the first thing tried here — it does
+the same "durable on-disk index, fast queries" job — and was abandoned
+once its actual footprint became concrete: `libduckdb.so` alone is
+~70MB per platform (a ~40MB compressed download), because it's a full
+OLAP columnar engine built for analytical queries over large datasets,
+not the "look up rows by exact string, occasionally" this needs. SQLite
+does the same job at a small fraction of the size: its amalgamation
+(`read/libs/sqlite/sqlite3.{c,h}`) is a single public-domain C file
+under 10MB, compiled straight into `read_support` the same way
+`stb_truetype` already is — no prebuilt binary, no per-platform
+artifact, no new package dependency (see `build.zig`'s `sqlite_c`
+`addTranslateC` + `addCSourceFile` wiring). `read/sqlite.zig` wraps only
+the handful of C calls `dict.zig` needs (open/close, exec, one prepared
+statement's bind/step/column/reset/finalize) rather than pulling in a
+full binding.
 
 **One panel, one word, no multi-select.** A term can have several
 entries — homographs, or a verb and a noun sharing kana — and `lookup`

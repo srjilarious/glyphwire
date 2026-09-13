@@ -779,54 +779,56 @@ pub fn mokuroSidecarNameIsRecognisedCaseInsensitivelyTest(_: std.Io, _: std.mem.
 }
 
 // ─── dict: term bank parsing ────────────────────────────────────────────
-
-fn buildTestDict(alloc: std.mem.Allocator, jsons: []const []const u8) !dict.Dict {
-    var d: dict.Dict = .{ .arena = .init(alloc) };
-    const a = d.arena.allocator();
-    var entries: std.ArrayList(dict.Entry) = .empty;
-    for (jsons) |j| try dict.parseTermBank(a, alloc, &entries, j);
-    d.entries = try entries.toOwnedSlice(a);
-    try dict.buildIndex(a, &d);
-    return d;
-}
+//
+// `dict.openMemory` builds an in-memory (`:memory:`) SQLite database the
+// same way `loadFromDir` builds a real one on disk -- see `dict.zig`'s
+// module doc comment -- so these pin the parse by querying it straight
+// back out with `dict.lookup` rather than reading an in-memory entries
+// array (there is no longer one to read).
 
 pub fn dictParsesTermBankRowsTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var d = try buildTestDict(alloc, &.{
+    var d = try dict.openMemory(alloc, &.{
         \\[["食べる","たべる","","v1",0,["to eat"],1,""]]
-    });
+    }, null);
     defer d.deinit();
-    try testz.expectEqual(d.entries.len, 1);
-    try testz.expectEqualStr(d.entries[0].term, "食べる");
-    try testz.expectEqualStr(d.entries[0].reading, "たべる");
-    try testz.expectEqualStr(d.entries[0].rules, "v1");
-    try testz.expectEqual(d.entries[0].glossary.len, 1);
-    try testz.expectEqualStr(d.entries[0].glossary[0], "to eat");
-    try testz.expectEqual(d.entries[0].sequence, 1);
+    const m = (try dict.lookup(alloc, &d, "食べる")).?;
+    defer dict.freeEntries(alloc, m.entries);
+    try testz.expectEqual(m.entries.len, 1);
+    try testz.expectEqualStr(m.entries[0].term, "食べる");
+    try testz.expectEqualStr(m.entries[0].reading, "たべる");
+    try testz.expectEqualStr(m.entries[0].rules, "v1");
+    try testz.expectEqual(m.entries[0].glossary.len, 1);
+    try testz.expectEqualStr(m.entries[0].glossary[0], "to eat");
+    try testz.expectEqual(m.entries[0].sequence, 1);
 }
 
 pub fn dictDropsRowsShorterThanEightFieldsTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var d = try buildTestDict(alloc, &.{
+    var d = try dict.openMemory(alloc, &.{
         \\[["short","","","",0]]
-    });
+    }, null);
     defer d.deinit();
-    try testz.expectEqual(d.entries.len, 0);
+    const m = try dict.lookup(alloc, &d, "short");
+    try testz.expectTrue(m == null);
 }
 
 pub fn dictFlattensStructuredContentGlossaryTest(_: std.Io, alloc: std.mem.Allocator) !void {
     // Jitendex-style structured content: a tagged object wrapping the
     // real text rather than a plain string.
-    var d = try buildTestDict(alloc, &.{
+    var d = try dict.openMemory(alloc, &.{
         \\[["優しい","やさしい","","adj-i",0,[{"content":"kind, gentle"}],5,""]]
-    });
+    }, null);
     defer d.deinit();
-    try testz.expectEqual(d.entries[0].glossary.len, 1);
-    try testz.expectEqualStr(d.entries[0].glossary[0], "kind, gentle");
+    const m = (try dict.lookup(alloc, &d, "優しい")).?;
+    defer dict.freeEntries(alloc, m.entries);
+    try testz.expectEqual(m.entries[0].glossary.len, 1);
+    try testz.expectEqualStr(m.entries[0].glossary[0], "kind, gentle");
 }
 
 pub fn dictTreatsGarbageAsAnEmptyBankTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var d = try buildTestDict(alloc, &.{ "", "not json", "{}", "[1,2,3]" });
+    var d = try dict.openMemory(alloc, &.{ "", "not json", "{}", "[1,2,3]" }, null);
     defer d.deinit();
-    try testz.expectEqual(d.entries.len, 0);
+    const m = try dict.lookup(alloc, &d, "食べる");
+    try testz.expectTrue(m == null);
 }
 
 // ─── dict: lookup ───────────────────────────────────────────────────────
@@ -841,41 +843,41 @@ const lookup_dict_json =
 ;
 
 pub fn dictLookupFindsExactDictionaryFormTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
     defer d.deinit();
     const m = (try dict.lookup(alloc, &d, "猫が好き")).?;
-    defer alloc.free(m.entries);
+    defer dict.freeEntries(alloc, m.entries);
     try testz.expectTrue(m.reason == null);
     try testz.expectEqualStr("猫が好き"[0..m.len], "猫");
     try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(d.entries[m.entries[0]].term, "猫");
+    try testz.expectEqualStr(m.entries[0].term, "猫");
 }
 
 pub fn dictLookupDeinflectsIchidanTeFormTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
     defer d.deinit();
     const m = (try dict.lookup(alloc, &d, "食べてすぐ")).?;
-    defer alloc.free(m.entries);
+    defer dict.freeEntries(alloc, m.entries);
     try testz.expectEqualStr(m.reason.?, "te-form");
     try testz.expectEqualStr("食べてすぐ"[0..m.len], "食べて");
     try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(d.entries[m.entries[0]].term, "食べる");
+    try testz.expectEqualStr(m.entries[0].term, "食べる");
 }
 
 pub fn dictLookupDeinflectsGodanRuVerbPastTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
     defer d.deinit();
     // 分かった -- past of 分かる (godan, not ichidan -- the ambiguous
     // -る class `valid_rules` filtering exists to resolve).
     const m = (try dict.lookup(alloc, &d, "分かった")).?;
-    defer alloc.free(m.entries);
+    defer dict.freeEntries(alloc, m.entries);
     try testz.expectEqualStr(m.reason.?, "past");
     try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(d.entries[m.entries[0]].term, "分かる");
+    try testz.expectEqualStr(m.entries[0].term, "分かる");
 }
 
 pub fn dictLookupRejectsADeinflectionWhoseTargetHasTheWrongRuleTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
     defer d.deinit();
     // "あった" strips to "ある" via the godan -た rule, but the only
     // "ある" entry in this dict is tagged "exp", not "v5" -- so the
@@ -885,8 +887,54 @@ pub fn dictLookupRejectsADeinflectionWhoseTargetHasTheWrongRuleTest(_: std.Io, a
 }
 
 pub fn dictLookupReturnsNullWhenNothingMatchesTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var d = try buildTestDict(alloc, &.{lookup_dict_json});
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
     defer d.deinit();
     const m = try dict.lookup(alloc, &d, "xyz123");
     try testz.expectTrue(m == null);
+}
+
+pub fn dictOpenMemoryReadsTitleFromIndexJsonTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json},
+        \\{"title":"Test Dict","format":3,"revision":"1"}
+    );
+    defer d.deinit();
+    try testz.expectEqualStr(d.title, "Test Dict");
+}
+
+// ─── dict: loadFromDir builds then reuses index.sqlite3 ─────────────────
+
+pub fn dictLoadFromDirBuildsThenReusesTheSqliteIndexTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const dir_path = "zig-cache/tmp/dict_load_from_dir_test";
+    std.Io.Dir.cwd().deleteTree(io, dir_path) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io, dir_path) catch {};
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = dir_path ++ "/term_bank_1.json",
+        .data = lookup_dict_json,
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = dir_path ++ "/index.json",
+        .data =
+        \\{"title":"Test Dict","format":3,"revision":"1"}
+        ,
+    });
+
+    var d = try dict.loadFromDir(alloc, io, dir_path);
+    try testz.expectEqualStr(d.title, "Test Dict");
+    const m = (try dict.lookup(alloc, &d, "猫")).?;
+    try testz.expectEqualStr(m.entries[0].term, "猫");
+    dict.freeEntries(alloc, m.entries);
+    d.deinit();
+
+    // A second open must find `index.sqlite3` already built and reuse it
+    // rather than re-parsing the term bank -- deleting the term bank
+    // first means a spurious rebuild would find nothing and this lookup
+    // would fail.
+    try std.Io.Dir.cwd().deleteFile(io, dir_path ++ "/term_bank_1.json");
+    var d2 = try dict.loadFromDir(alloc, io, dir_path);
+    defer d2.deinit();
+    const m2 = (try dict.lookup(alloc, &d2, "猫")).?;
+    defer dict.freeEntries(alloc, m2.entries);
+    try testz.expectEqualStr(m2.entries[0].term, "猫");
 }

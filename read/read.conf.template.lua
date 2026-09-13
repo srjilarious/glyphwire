@@ -114,8 +114,12 @@
 --     -- the open dialog to see its entry. Point this at the directory
 --     -- containing index.json / term_bank_*.json, not at the .zip
 --     -- itself; unzipping it on every book opened would be real time to
---     -- pay more than once for a dictionary this size. Empty -- the
---     -- default -- leaves the feature off, the same as having no mokuro
---     -- sidecar.
+--     -- pay more than once for a dictionary this size. The first time
+--     -- gw-read opens this directory it builds `index.sqlite3` inside
+--     -- it from the term banks, a one-time cost; every book after that
+--     -- just queries the file directly. Delete `index.sqlite3` to force
+--     -- a rebuild after replacing the dictionary's contents. Empty --
+--     -- the default -- leaves the feature off, the same as having no
+--     -- mokuro sidecar.
 --     dictionary = "",
 -- }
