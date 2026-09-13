@@ -92,10 +92,11 @@ pub const ReadConfig = struct {
     /// naturally rather than as one long ribbon.
     ocr_dialog_cols: usize = 40,
 
-    /// Path to a Yomitan-format dictionary zip (e.g. a Jitendex download,
-    /// https://jitendex.org) for word lookup out of the OCR dialog.
-    /// Empty -- the default -- leaves the feature off entirely: no load
-    /// at startup, no click handling in the dialog.
+    /// Path to an already-*unzipped* Yomitan-format dictionary directory
+    /// (e.g. a Jitendex download, https://jitendex.org, extracted once
+    /// by hand) for word lookup out of the OCR dialog. Empty -- the
+    /// default -- leaves the feature off entirely: no load at startup,
+    /// no click handling in the dialog.
     dictionary: []const u8 = "",
 
     /// The zoom limits this config implies, handed to every `zoom.layout`

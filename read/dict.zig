@@ -14,6 +14,14 @@
 //! rather than rendering it, which loses styling but keeps every
 //! dictionary readable in the box-drawing panels `ui.zig` already draws.
 //!
+//! `loadFromDir` reads an already-*unzipped* dictionary directory, not
+//! the zip itself -- `read.conf.lua`'s `dictionary` key names the
+//! directory a Jitendex download was extracted to once, by hand. Two
+//! things pushed that way rather than reading the zip in place: a real
+//! dictionary is large enough (Jitendex's term banks run to a few
+//! hundred MB of JSON total) that decompressing it is real time to pay
+//! on every book opened, not just the first; and see the next paragraph.
+//!
 //! Lookup does not tokenize the page's text up front. Japanese has no
 //! spaces, so -- the same trick Yomitan itself uses -- a click just picks
 //! a starting byte offset, and `lookup` tries decreasing-length candidate
@@ -21,9 +29,22 @@
 //! table before giving up on it. The longest substring with any match,
 //! inflected or not, wins.
 //!
-//! Everything here except `loadFromZip` is pure -- JSON and text in,
+//! **Parsing keeps the JSON tree off the dictionary's own arena.**
+//! `std.json.Value` is a generic tree -- a hashmap per object, an
+//! `ArrayList` per array, a tagged union per scalar -- and for a
+//! multi-hundred-MB term bank that tree can outweigh the source JSON
+//! several times over. `parseTermBank` parses each file into its own
+//! short-lived scratch arena, copies out only the handful of fields an
+//! `Entry` keeps, and frees the tree before the next file -- so peak
+//! memory is bounded by one term bank file's tree plus however many
+//! `Entry`s have been extracted so far, not by every file's tree held
+//! at once. The first version of this shared one arena for both and
+//! reliably ran a real machine out of memory before the book it was
+//! opened for ever got to render a page.
+//!
+//! Everything here except `loadFromDir` is pure -- JSON and text in,
 //! structs out -- so `tests/read_tests.zig` can pin the parse and the
-//! lookup without a dictionary file on disk. `loadFromZip` is the one
+//! lookup without a dictionary file on disk. `loadFromDir` is the one
 //! piece that touches the filesystem, mirroring how `archive.zig` is the
 //! only place that reads a `.mokuro` sidecar's bytes.
 //!
@@ -209,13 +230,28 @@ fn hasAnyRule(rules: []const u8, valid: []const []const u8) bool {
     return false;
 }
 
-/// Parses one `term_bank_N.json`'s rows into `entries`. Same error
+/// Parses one `term_bank_N.json`'s rows into `entries`, appended with
+/// `dict_a` -- the dictionary's own long-lived arena, the only allocator
+/// this function's *results* ever end up on. Same drop-don't-fail error
 /// policy as `mokuro.parse`: a row that doesn't fit the shape is
-/// dropped, never a reason to fail the whole file. `a` must be an arena
-/// (or otherwise long-lived) allocator -- every `Entry` string returned
-/// points into the parse tree, which is never freed separately.
-pub fn parseTermBank(a: std.mem.Allocator, entries: *std.ArrayList(Entry), json: []const u8) std.mem.Allocator.Error!void {
-    const parsed = std.json.parseFromSlice(std.json.Value, a, json, .{}) catch return;
+/// dropped, never a reason to fail the whole file.
+///
+/// `scratch_backing` backs a fresh arena that holds the `std.json.Value`
+/// parse tree and nothing else; it's destroyed before this returns, so
+/// nothing in `entries` may point into it -- every field kept is
+/// explicitly `dict_a.dupe`'d off the tree first. See the module doc
+/// comment for why that split exists.
+pub fn parseTermBank(
+    dict_a: std.mem.Allocator,
+    scratch_backing: std.mem.Allocator,
+    entries: *std.ArrayList(Entry),
+    json: []const u8,
+) std.mem.Allocator.Error!void {
+    var scratch: std.heap.ArenaAllocator = .init(scratch_backing);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+
+    const parsed = std.json.parseFromSlice(std.json.Value, sa, json, .{}) catch return;
     const rows = switch (parsed.value) {
         .array => |arr| arr,
         else => return,
@@ -228,14 +264,21 @@ pub fn parseTermBank(a: std.mem.Allocator, entries: *std.ArrayList(Entry), json:
         // `[term, reading, definitionTags, rules, score, glossary, sequence, termTags]`.
         if (row.items.len < 8) continue;
         const term = jsonString(row.items[0]) orelse continue;
-        try entries.append(a, .{
-            .term = term,
-            .reading = jsonString(row.items[1]) orelse "",
-            .rules = jsonString(row.items[3]) orelse "",
-            .glossary = try parseGlossary(a, row.items[5]),
+        const glossary = try parseGlossary(sa, row.items[5]);
+        try entries.append(dict_a, .{
+            .term = try dict_a.dupe(u8, term),
+            .reading = try dict_a.dupe(u8, jsonString(row.items[1]) orelse ""),
+            .rules = try dict_a.dupe(u8, jsonString(row.items[3]) orelse ""),
+            .glossary = try dupeStrings(dict_a, glossary),
             .sequence = jsonInt(row.items[6]) orelse 0,
         });
     }
+}
+
+fn dupeStrings(a: std.mem.Allocator, strs: []const []const u8) std.mem.Allocator.Error![]const []const u8 {
+    const out = try a.alloc([]const u8, strs.len);
+    for (strs, 0..) |s, i| out[i] = try a.dupe(u8, s);
+    return out;
 }
 
 /// `index.json`'s `title`, if the object parses and has one. Anything
@@ -318,63 +361,58 @@ pub fn buildIndex(a: std.mem.Allocator, dict: *Dict) std.mem.Allocator.Error!voi
     dict.by_term = final;
 }
 
-/// True for a zip entry name that is a term bank -- `term_bank_1.json`
-/// and friends, but not `term_meta_bank_*` (frequency/pitch data) or
+/// True for a file name that is a term bank -- `term_bank_1.json` and
+/// friends, but not `term_meta_bank_*` (frequency/pitch data) or
 /// `kanji_bank_*`/`tag_bank_*`, neither of which this module reads yet.
 fn isTermBankName(name: []const u8) bool {
-    const base = basename(name);
-    return std.mem.startsWith(u8, base, "term_bank_") and std.ascii.endsWithIgnoreCase(base, ".json");
+    return std.mem.startsWith(u8, name, "term_bank_") and std.ascii.endsWithIgnoreCase(name, ".json");
 }
 
-fn basename(path: []const u8) []const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
-    return path[slash + 1 ..];
-}
+/// Ceiling on one term bank file's raw JSON size. Jitendex's largest
+/// files run to tens of MB; 256 MiB is the "obviously wrong" line for a
+/// single file the same way `archive.max_page_bytes` draws one for a
+/// page image, not a realistic size.
+pub const max_term_bank_bytes: usize = 256 * 1024 * 1024;
+/// `index.json` is a few hundred bytes in practice.
+pub const max_index_bytes: usize = 1024 * 1024;
 
 /// Reads and parses every `term_bank_*.json` (and, if present,
-/// `index.json`) out of the Yomitan dictionary zip at `path`. One pass
-/// over the central directory, the same shape `archive.zig`'s `indexZip`
-/// walks a `.cbz` with.
-pub fn loadFromZip(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict {
+/// `index.json`) directly inside the directory at `path` -- an already
+/// *unzipped* Yomitan dictionary, not the zip itself. See the module
+/// doc comment for why: decompressing a several-hundred-MB dictionary on
+/// every book opened is real time to spend more than once, and the
+/// per-file scratch arena below is what keeps the parse itself from
+/// blowing past available memory on a dictionary this size.
+pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict {
     var dict: Dict = .{ .arena = .init(alloc) };
     errdefer dict.arena.deinit();
     const a = dict.arena.allocator();
 
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
-    defer file.close(io);
-    const read_buf = try alloc.alloc(u8, 64 * 1024);
-    defer alloc.free(read_buf);
-    var reader = file.reader(io, read_buf);
-
-    var it = std.zip.Iterator.init(&reader) catch return error.UnknownArchiveFormat;
-    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
 
     var entries: std.ArrayList(Entry) = .empty;
-    while (it.next() catch return error.UnknownArchiveFormat) |entry| {
-        const name = entry.getFilename(&reader, &name_buf, .{}) catch continue;
+    var it = dir.iterate();
+    while (it.next(io) catch null) |raw| {
+        if (raw.kind != .file) continue;
 
-        if (std.ascii.eqlIgnoreCase(basename(name), "index.json")) {
-            if (extractEntry(alloc, &reader, entry)) |bytes| {
+        if (std.ascii.eqlIgnoreCase(raw.name, "index.json")) {
+            if (dir.readFileAlloc(io, raw.name, alloc, .limited(max_index_bytes))) |bytes| {
                 defer alloc.free(bytes);
                 parseIndex(a, &dict, bytes);
             } else |_| {}
             continue;
         }
-        if (!isTermBankName(name)) continue;
+        if (!isTermBankName(raw.name)) continue;
 
-        const bytes = extractEntry(alloc, &reader, entry) catch continue;
+        const bytes = dir.readFileAlloc(io, raw.name, alloc, .limited(max_term_bank_bytes)) catch continue;
         defer alloc.free(bytes);
-        try parseTermBank(a, &entries, bytes);
+        // `alloc`, not `a`: the scratch arena backing this file's parse
+        // tree is unrelated to the dictionary's own long-lived one.
+        try parseTermBank(a, alloc, &entries, bytes);
     }
 
     dict.entries = try entries.toOwnedSlice(a);
     try buildIndex(a, &dict);
     return dict;
-}
-
-fn extractEntry(alloc: std.mem.Allocator, reader: *std.Io.File.Reader, entry: std.zip.Iterator.Entry) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    try entry.extractTo(reader, &out.writer);
-    return out.toOwnedSlice();
 }

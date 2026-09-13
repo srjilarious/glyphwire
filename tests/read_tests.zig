@@ -784,7 +784,7 @@ fn buildTestDict(alloc: std.mem.Allocator, jsons: []const []const u8) !dict.Dict
     var d: dict.Dict = .{ .arena = .init(alloc) };
     const a = d.arena.allocator();
     var entries: std.ArrayList(dict.Entry) = .empty;
-    for (jsons) |j| try dict.parseTermBank(a, &entries, j);
+    for (jsons) |j| try dict.parseTermBank(a, alloc, &entries, j);
     d.entries = try entries.toOwnedSlice(a);
     try dict.buildIndex(a, &d);
     return d;

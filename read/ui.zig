@@ -330,7 +330,7 @@ pub const Ui = struct {
     /// dictionary is not a book that should refuse to open.
     fn loadDict(self: *Ui) void {
         if (self.conf.dictionary.len == 0) return;
-        var d = dict_mod.loadFromZip(self.alloc, self.client.io, self.conf.dictionary) catch |err| {
+        var d = dict_mod.loadFromDir(self.alloc, self.client.io, self.conf.dictionary) catch |err| {
             std.log.warn("gw-read: couldn't load dictionary '{s}' ({t}); lookup off", .{ self.conf.dictionary, err });
             return;
         };

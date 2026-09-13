@@ -2962,10 +2962,14 @@ reads it and shows the current bubble's text in a floating panel.
 word in the open mokuro dialog looks it up in a Yomitan-format
 dictionary (e.g. [Jitendex](https://jitendex.org)) and shows the entry
 in a second floating panel below the OCR dialog — `read.conf.lua`'s
-`dictionary` key points at the zip; empty leaves the feature off. See
-"gw-read: dictionary lookup" in `docs/decisions.md` for the full
-reasoning (why Yomitan format over MDict, the no-tokenizer substring-scan
-approach, the ambiguous `-る` verb resolution). `read/dict.zig` is the
+`dictionary` key points at an already-unzipped dictionary directory
+(unzip the download once by hand, not the .zip itself); empty leaves
+the feature off. See "gw-read: dictionary lookup" in `docs/decisions.md`
+for the full reasoning (why Yomitan format over MDict, why a directory
+rather than reading the zip in place, the per-file scratch-arena parse
+that keeps a real dictionary's `std.json.Value` tree from blowing past
+available memory, the no-tokenizer substring-scan lookup approach, the
+ambiguous `-る` verb resolution). `read/dict.zig` is the
 new pure module: term bank parsing, structured-content glossary
 flattening, and `lookup`.
 

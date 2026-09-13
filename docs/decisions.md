@@ -4726,13 +4726,37 @@ document order. It reads a little flatter than the browser extension's
 rendering, but every dictionary stays readable rather than only the ones
 whose glossary happens to be plain strings.
 
-**The dictionary zip is read directly, never unpacked to disk.**
-`dict.loadFromZip` is `archive.zig`'s `indexZip`/`extractTo` pattern
-applied to a second, unrelated zip file — one pass over the central
-directory, `term_bank_*.json` entries parsed as they're found, nothing
-written to a temp directory. A multi-hundred-thousand-entry dictionary
-is exactly the case where "unzip it first" would cost real time and disk
-on every book that uses it, for no benefit over reading it in place.
+**`dictionary` names an already-unzipped directory, not the zip.** The
+first version read the zip directly, `archive.zig`'s `indexZip`/`extractTo`
+pattern applied to a second, unrelated zip file. Two things killed that:
+Jitendex's term banks run to a few hundred MB of JSON total, so
+decompressing it on *every* book opened is real time paid more than
+once for no benefit over unzipping it once by hand; and it made the
+memory bug below easy to hit without ever reading anything twice, since
+each file was already being decompressed fresh. `dict.loadFromDir` reads
+`index.json` / `term_bank_*.json` straight off disk instead — a plain
+directory walk, `archive.zig`'s `findDirectoryMokuro` pattern minus the
+"stop at the first match" part.
+
+**Parsing keeps the JSON tree off the dictionary's own arena.** The
+first version parsed every term bank straight into the `Dict`'s
+long-lived arena — the same arena `Entry.term`/`.glossary`/etc. end up
+in — and pointing straight into `std.json.parseFromSlice`'s output is
+the codebase's usual pattern (`mokuro.parse` does exactly this). It
+reliably ran a real machine out of memory on a real Jitendex download,
+crashing before the book it was opened for ever rendered a page. The
+reason: `std.json.Value` is a fully generic tree — a hashmap per object,
+an `ArrayList` per array, a tagged union per scalar — and for a
+multi-hundred-MB term bank that tree outweighs the source JSON several
+times over, and an arena never frees anything before the whole dictionary
+is torn down. `mokuro.parse` gets away with the same pattern because a
+`.mokuro` sidecar is a few MB at most; a real dictionary is not, and
+this is the one place in the codebase JSON is parsed at that scale.
+Fixed by giving `parseTermBank` its own scratch arena per file — the
+parse tree lives and dies with one `term_bank_N.json`, and only the
+handful of fields an `Entry` actually keeps get `dupe`'d onto the
+dictionary's real arena — so peak memory is one file's tree plus
+whatever has been extracted so far, not every file's tree held at once.
 
 **One panel, one word, no multi-select.** A term can have several
 entries — homographs, or a verb and a noun sharing kana — and `lookup`
