@@ -10,7 +10,7 @@ stay free, and the *protocol* stays open for anyone to implement.
 |---|---|---|
 | The wire protocol specification | Creative Commons Attribution 4.0 International | `CC-BY-4.0` |
 | Protocol core, host, engine backend, server, client library, tooling | Mozilla Public License 2.0 | `MPL-2.0` |
-| The end-user applications (`gw-shell`, `gmux`, `gw-ls`, `gw-view`, `zoe`) | GNU General Public License v3.0 or later | `GPL-3.0-or-later` |
+| The end-user applications (`gw-shell`, `gmux`, `gw-ls`, `gw-view`, `gw-read`, `zoe`) | GNU General Public License v3.0 or later | `GPL-3.0-or-later` |
 
 Full texts live in [`LICENSES/`](LICENSES/). Every source file carries an
 `SPDX-License-Identifier` line, so a single directory can be vendored
@@ -67,6 +67,7 @@ people embed. They are GPL-3.0-or-later.
 | `gmux/` | `gmux` — the window multiplexer |
 | `ls/` | `gw-ls` — the directory lister |
 | `view/` | `gw-view` — the file viewer |
+| `read/` | `gw-read` — the comic/manga reader |
 | `zoe/` | `zoe` — the modal editor |
 | `tests/` | the test runner, which links all of the above |
 
@@ -82,8 +83,8 @@ glyphwire SPDX header.
 
 ## Notes for people combining these
 
-**MPL and GPL mix here on purpose.** `zoe`, `gw-ls`, `gw-view`, `gw-shell`
-and `gmux` are GPL programs that link the MPL `src/` module. That is
+**MPL and GPL mix here on purpose.** `zoe`, `gw-ls`, `gw-view`, `gw-read`,
+`gw-shell` and `gmux` are GPL programs that link the MPL `src/` module. That is
 explicitly permitted: MPL-2.0 §3.3 allows an MPL file to be distributed as
 part of a Larger Work under the GPL, because none of glyphwire's MPL files
 carry the Exhibit B "Incompatible With Secondary Licenses" notice, and none
@@ -93,7 +94,7 @@ repo.
 **The dependency graph only runs one way.** No MPL directory imports a GPL
 one. `zoe/` reuses `ls/`'s icon mapping, which is GPL importing GPL. If you
 add a dependency, keep that direction: an MPL file may never import from
-`shell/`, `gmux/`, `ls/`, `view/`, or `zoe/`. `zig build check-licenses`
+`shell/`, `gmux/`, `ls/`, `view/`, `read/`, or `zoe/`. `zig build check-licenses`
 enforces this, along with every file's SPDX header; CI runs it on every
 push. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the procedure when code
 moves between zones.

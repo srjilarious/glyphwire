@@ -1,0 +1,76 @@
+-- gw-read configuration template.
+--
+-- This is the full reference for `read.conf.lua`, the file gw-read runs
+-- once at startup (see read/config.zig `load`). Copy it to one of:
+--
+--   $GLYPHWIRE_CONFIG_DIR/read.conf.lua
+--   $XDG_CONFIG_HOME/glyphwire/read.conf.lua
+--   ~/.config/glyphwire/read.conf.lua                  (the usual location)
+--
+-- Every key is listed below at its built-in default, with every line
+-- commented out -- so copying this file verbatim changes nothing.
+-- Uncomment and edit only the keys you want to override.
+--
+-- Syntax: a plain Lua script (standard libraries open). Assign a single
+-- global table named `config`. Unknown keys are ignored; a key of the
+-- wrong type is logged and the default stands. Any parse error is logged
+-- and whatever parsed before it is kept.
+--
+-- Note that a per-book reading position, sizing mode and direction are
+-- remembered separately in `read.state.json` next to this file, and take
+-- precedence over `mode` / `direction` here for a book you have opened
+-- before. `--mode` / `--direction` on the command line beat both.
+
+-- config = {
+--
+--     ---- Reading ---------------------------------------------------
+--
+--     -- Which way a page turn goes for a book you haven't opened
+--     -- before. "rtl" is manga order: Left is *forward*, and a fresh
+--     -- page starts at its right edge. "ltr" is western comic order.
+--     -- `d` flips it at runtime.
+--     direction = "rtl",
+--
+--     -- How the page is sized against the window on open:
+--     --   "fit"         whole page visible          (`f`)
+--     --   "fit-width"   page width fills the window (`w`)
+--     --   "fit-height"  page height fills it        (`t`)
+--     --   "natural"     one image pixel per screen pixel (`1`)
+--     mode = "fit",
+--
+--     -- Whether a fit mode may scale a page *up* past its natural size.
+--     -- Off leaves a small scan small in a large window.
+--     upscale = true,
+--
+--     -- How many pages `]` and `[` jump by.
+--     jump_pages = 5,
+--
+--     -- Remember where you left off in each book. Off opens everything
+--     -- at page 1 and stops writing `read.state.json` entirely.
+--     remember_position = true,
+--
+--     ---- Memory ----------------------------------------------------
+--
+--     -- How many pages of decoded image stay resident, so paging back
+--     -- is instant. Each costs the page's own decoded size on the
+--     -- glyphwire-host side; 8 is a few tens of MB for typical scans.
+--     -- Range 1..64.
+--     cache_pages = 8,
+--
+--     -- How many pages ahead (in reading order) to load before they are
+--     -- asked for, hiding the read behind the page turn. Range 0..8;
+--     -- `cache_pages` is raised to `prefetch + 2` if it is below it.
+--     prefetch = 1,
+--
+--     ---- Zoom and pan ----------------------------------------------
+--
+--     -- Ceiling on the zoom factor, fit modes included. Raising this
+--     -- costs glyphwire-host memory *quadratically*: a zoomed page is
+--     -- drawn onto a layer the size of the whole scaled image, so 8x
+--     -- covers four times as many cells as 4x. Range 1..16.
+--     max_zoom = 4.0,
+--
+--     -- Cells panned per arrow key / `hjkl` press when the page is
+--     -- bigger than the window. Range 1..64.
+--     pan_step = 3,
+-- }

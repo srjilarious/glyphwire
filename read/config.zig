@@ -1,0 +1,268 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Loads gw-read's startup config, `~/.config/glyphwire/read.conf.lua` --
+//! a Lua script that assigns a global `config` table, the same shape and
+//! the same loader skeleton `ls.conf.lua` and `zoe.conf.lua` use.
+//!
+//! Split into the `read_support` module (like `read/pages.zig` and
+//! `read/zoom.zig`) so `tests/read_tests.zig` can exercise the parse
+//! without a running client.
+//!
+//! See `read/read.conf.template.lua` for the annotated reference copy.
+
+const std = @import("std");
+const ziglua = @import("ziglua");
+const Lua = ziglua.Lua;
+const zoom = @import("zoom.zig");
+const cache = @import("cache.zig");
+
+const conf_name = "read.conf.lua";
+
+/// Which way a page turn goes. Manga reads right-to-left, which is the
+/// default because that's what this reader was built for; western comics
+/// and scanned books want `ltr`. Toggled at runtime with `d`, and the
+/// toggle is what gets remembered per book (see state.zig).
+pub const Direction = enum {
+    rtl,
+    ltr,
+
+    pub fn parse(text: []const u8) ?Direction {
+        if (std.mem.eql(u8, text, "rtl")) return .rtl;
+        if (std.mem.eql(u8, text, "ltr")) return .ltr;
+        return null;
+    }
+
+    pub fn name(self: Direction) []const u8 {
+        return @tagName(self);
+    }
+
+    /// The label the statusline shows -- an arrow reads faster than the
+    /// three letters do when you're checking you're paging the right way.
+    pub fn label(self: Direction) []const u8 {
+        return switch (self) {
+            .rtl => "←",
+            .ltr => "→",
+        };
+    }
+};
+
+pub const ReadConfig = struct {
+    /// Sizing mode a freshly opened book starts in.
+    mode: zoom.Mode = .fit_screen,
+    /// Page-turn direction for a book with no remembered one.
+    direction: Direction = .rtl,
+    /// How many pages of decoded image the session keeps resident (see
+    /// cache.zig). 8 covers "flip back a few panels to re-read a line"
+    /// without holding a whole volume.
+    cache_pages: usize = 8,
+    /// How many pages ahead, in reading order, to load before they're
+    /// asked for. 1 hides the load behind the page turn; higher values
+    /// help on a slow disk at the cost of cache slots.
+    prefetch: usize = 1,
+    /// What `]` / `[` jump by.
+    jump_pages: usize = 5,
+    /// Ceiling on the zoom factor. Raising it costs server-side memory
+    /// quadratically -- see zoom.zig's module comment.
+    max_zoom: f32 = 4.0,
+    /// Whether a fit mode may scale a page up past its natural size.
+    upscale: bool = true,
+    /// Cells panned per arrow key / `hjkl` press when the page overflows.
+    pan_step: usize = 3,
+    /// Resume where you left off. `false` opens every book at page 1 and
+    /// stops writing the state file entirely.
+    remember_position: bool = true,
+
+    /// The zoom limits this config implies, handed to every `zoom.layout`
+    /// call.
+    pub fn limits(self: ReadConfig) zoom.Limits {
+        var l: zoom.Limits = .{};
+        l.max_scale = self.max_zoom;
+        l.upscale = self.upscale;
+        return l;
+    }
+};
+
+pub const zoom_max_ceiling: f32 = 16.0;
+pub const pan_step_max: usize = 64;
+pub const jump_pages_max: usize = 1000;
+pub const prefetch_max: usize = 8;
+
+/// Outcome of `load`: the parsed config plus, on a Lua load/run failure,
+/// an owned diagnostic string. `config` still holds whatever ran before
+/// the error (Lua stops at the failing line), so a caller can use the
+/// partial result and surface `err`.
+pub const LoadResult = struct {
+    config: ReadConfig = .{},
+    err: ?[]const u8 = null,
+
+    pub fn deinit(self: *LoadResult, alloc: std.mem.Allocator) void {
+        if (self.err) |e| alloc.free(e);
+    }
+};
+
+/// Parses `source` (the contents of `read.conf.lua`, null-terminated).
+/// Unknown keys are ignored; a key of the wrong type or out of range is
+/// clamped or dropped with a warning on stderr. Only a genuine Lua-init
+/// failure or a syntax/runtime error populates `LoadResult.err`.
+pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
+    var result: LoadResult = .{};
+
+    const lua = Lua.init(alloc) catch {
+        result.err = alloc.dupe(u8, conf_name ++ ": could not create Lua interpreter") catch null;
+        return result;
+    };
+    defer lua.deinit();
+    lua.openLibs();
+
+    lua.doString(source) catch {
+        const msg = lua.toString(-1) catch conf_name ++ ": unknown Lua error";
+        result.err = alloc.dupe(u8, msg) catch null;
+        return result;
+    };
+
+    _ = lua.getGlobal("config") catch return result;
+    defer lua.pop(1);
+    if (!lua.isTable(-1)) {
+        if (!lua.isNil(-1))
+            std.log.warn("gw-read: {s} `config` is not a table; using defaults", .{conf_name});
+        return result;
+    }
+
+    if (stringField(lua, "mode")) |v| {
+        if (parseMode(v)) |m| result.config.mode = m else std.log.warn(
+            "gw-read: {s} `mode` = '{s}' is not a sizing mode; ignored",
+            .{ conf_name, v },
+        );
+    }
+    if (stringField(lua, "direction")) |v| {
+        if (Direction.parse(v)) |d| result.config.direction = d else std.log.warn(
+            "gw-read: {s} `direction` = '{s}' is not 'rtl' or 'ltr'; ignored",
+            .{ conf_name, v },
+        );
+    }
+    if (uintField(lua, "cache_pages")) |v|
+        result.config.cache_pages = clampUint("cache_pages", v, 1, cache.max_capacity);
+    if (uintField(lua, "prefetch")) |v|
+        result.config.prefetch = clampUint("prefetch", v, 0, prefetch_max);
+    if (uintField(lua, "jump_pages")) |v|
+        result.config.jump_pages = clampUint("jump_pages", v, 1, jump_pages_max);
+    if (uintField(lua, "pan_step")) |v|
+        result.config.pan_step = clampUint("pan_step", v, 1, pan_step_max);
+    if (numberField(lua, "max_zoom")) |v|
+        result.config.max_zoom = clampZoom(v);
+    if (boolField(lua, "upscale")) |v| result.config.upscale = v;
+    if (boolField(lua, "remember_position")) |v| result.config.remember_position = v;
+
+    // A `cache_pages` smaller than what the prefetch wants resident means
+    // every prefetched page evicts the one being read. Nudge rather than
+    // reject: the intent ("keep a small cache") is still honoured.
+    const needed = result.config.prefetch + 2;
+    if (result.config.cache_pages < needed) {
+        std.log.warn(
+            "gw-read: {s} `cache_pages` {d} is below prefetch + 2; raised to {d}",
+            .{ conf_name, result.config.cache_pages, needed },
+        );
+        result.config.cache_pages = needed;
+    }
+
+    return result;
+}
+
+/// The `mode` key's accepted spellings. Hyphenated because that's how the
+/// keys read in a config file; `zoom.Mode`'s own tag names use
+/// underscores.
+pub fn parseMode(name: []const u8) ?zoom.Mode {
+    if (std.mem.eql(u8, name, "fit") or std.mem.eql(u8, name, "fit-screen") or std.mem.eql(u8, name, "fit_screen"))
+        return .fit_screen;
+    if (std.mem.eql(u8, name, "fit-width") or std.mem.eql(u8, name, "fit_width")) return .fit_width;
+    if (std.mem.eql(u8, name, "fit-height") or std.mem.eql(u8, name, "fit_height")) return .fit_height;
+    if (std.mem.eql(u8, name, "natural") or std.mem.eql(u8, name, "1:1")) return .natural;
+    if (std.mem.eql(u8, name, "free") or std.mem.eql(u8, name, "zoom")) return .free;
+    return null;
+}
+
+/// `load`, but reading the file from glyphwire's config directory
+/// (`glyphwire.configDirPath`). A missing file / missing config home is
+/// the normal case: all defaults, no error, nothing logged.
+pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, config_dir: []const u8) ReadConfig {
+    const path = std.fs.path.join(alloc, &.{ config_dir, conf_name }) catch return .{};
+    defer alloc.free(path);
+
+    const src = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024)) catch |err| {
+        if (err != error.FileNotFound)
+            std.log.warn("gw-read: couldn't read {s} ({t}); using defaults", .{ path, err });
+        return .{};
+    };
+    defer alloc.free(src);
+    const src_z = std.mem.concatWithSentinel(alloc, u8, &.{src}, 0) catch return .{};
+    defer alloc.free(src_z);
+
+    var result = load(alloc, src_z);
+    defer result.deinit(alloc);
+    if (result.err) |e|
+        std.log.warn("gw-read: {s}: {s}; using what parsed", .{ conf_name, e });
+    return result.config;
+}
+
+/// Reads `config.<key>` as a non-negative whole number. Assumes the
+/// `config` table is on top of the stack, same as `ls/config.zig`.
+fn uintField(lua: *Lua, key: [:0]const u8) ?usize {
+    const n = numberField(lua, key) orelse return null;
+    if (n < 0 or n != @floor(n) or n > @as(f64, std.math.maxInt(u32))) {
+        std.log.warn("gw-read: {s} `{s}` = {d} is not a whole count; ignored", .{ conf_name, key, n });
+        return null;
+    }
+    return @intFromFloat(n);
+}
+
+fn numberField(lua: *Lua, key: [:0]const u8) ?f64 {
+    _ = lua.getField(-1, key);
+    defer lua.pop(1);
+    if (!lua.isNumber(-1)) {
+        if (!lua.isNil(-1))
+            std.log.warn("gw-read: {s} `{s}` is not a number; ignored", .{ conf_name, key });
+        return null;
+    }
+    return lua.toNumber(-1) catch null;
+}
+
+fn boolField(lua: *Lua, key: [:0]const u8) ?bool {
+    _ = lua.getField(-1, key);
+    defer lua.pop(1);
+    if (!lua.isBoolean(-1)) {
+        if (!lua.isNil(-1))
+            std.log.warn("gw-read: {s} `{s}` is not a boolean; ignored", .{ conf_name, key });
+        return null;
+    }
+    return lua.toBoolean(-1);
+}
+
+/// The returned slice points into the Lua string on the stack, which is
+/// popped before this returns -- Lua 5.3 keeps the string alive as long
+/// as it's reachable from the table it came from, which `config` is for
+/// the rest of `load`. Only used inside `load`, never handed out.
+fn stringField(lua: *Lua, key: [:0]const u8) ?[]const u8 {
+    _ = lua.getField(-1, key);
+    defer lua.pop(1);
+    if (!lua.isString(-1)) {
+        if (!lua.isNil(-1))
+            std.log.warn("gw-read: {s} `{s}` is not a string; ignored", .{ conf_name, key });
+        return null;
+    }
+    return lua.toString(-1) catch null;
+}
+
+fn clampUint(key: []const u8, v: usize, lo: usize, hi: usize) usize {
+    const c = std.math.clamp(v, lo, hi);
+    if (c != v)
+        std.log.warn("gw-read: {s} `{s}` {d} out of range {d}..{d}; clamped to {d}", .{ conf_name, key, v, lo, hi, c });
+    return c;
+}
+
+fn clampZoom(v: f64) f32 {
+    const c = std.math.clamp(v, 1.0, zoom_max_ceiling);
+    if (c != v)
+        std.log.warn("gw-read: {s} `max_zoom` {d} out of range 1..{d}; clamped to {d}", .{ conf_name, v, zoom_max_ceiling, c });
+    return @floatCast(c);
+}

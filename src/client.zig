@@ -518,7 +518,26 @@ pub const Client = struct {
     /// plus `getCellMetrics` and `getSize` give it what it needs to compute
     /// that.
     pub fn drawImage(self: *Client, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize, scale: f32) !void {
+        try self.drawImageOn(self.default_layer, handle, row, col, row_span, col_span, scale);
+    }
+
+    /// `draw_image(layer, ...)` -- the explicitly-targeted form of
+    /// `drawImage`, matching `writeTextOn` / `drawBoxOn` / `drawIconOn`.
+    /// The wire message has always carried `layer?`; only the Zig helper
+    /// was missing it, so a TUI drawing a picture into one of its own
+    /// layers (gw-read's page layer) had no way to say which.
+    pub fn drawImageOn(
+        self: *Client,
+        layer: ?core.LayerHandle,
+        handle: core.ImageHandle,
+        row: ?usize,
+        col: ?usize,
+        row_span: usize,
+        col_span: usize,
+        scale: f32,
+    ) !void {
         try self.notify("draw_image", .{
+            .layer = layer,
             .handle = handle,
             .row = row,
             .col = col,
@@ -664,7 +683,14 @@ pub const Client = struct {
     /// "the rest of the layer from `row`/`col`", so `clear(0, 0, null,
     /// null)` wipes the whole layer.
     pub fn clear(self: *Client, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-        try self.notify("clear", .{ .layer = self.default_layer, .row = row, .col = col, .rows = rows, .cols = cols });
+        try self.clearOn(self.default_layer, row, col, rows, cols);
+    }
+
+    /// `clear(layer, ...)` -- the explicitly-targeted form of `clear`,
+    /// matching `writeTextOn` / `drawImageOn`. A TUI that keeps its
+    /// `default_layer` on the root still has to wipe its own layers.
+    pub fn clearOn(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+        try self.notify("clear", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols });
     }
 
     /// `create_layer(width?, height?, scrollback_rows)` -- a request.

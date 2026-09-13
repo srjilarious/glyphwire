@@ -159,25 +159,27 @@ zig build package         # build just the shipped programs, zoe's
                           #   grammars, and assets into zig-out/bin +
                           #   zig-out/share/glyphwire/
 zig build install-local --prefix /usr/local
-                          # install glyphwire, gw-shell, gw-view, gw-ls,
-                          #   zoe, the grammars, and assets under the prefix
+                          # install glyphwire, gw-shell, gw-view, gw-read,
+                          #   gw-ls, zoe, the grammars, and assets under
+                          #   the prefix
 ```
 
 Individual run steps: `zig build gw-shell`, `zig build gw-ls`, `zig build demo`,
-`zig build table_demo`, `zig build gw-view`, `zig build notify`,
-`zig build server`, `zig build client`, `zig build zoe`.
+`zig build table_demo`, `zig build gw-view`, `zig build gw-read`,
+`zig build notify`, `zig build server`, `zig build client`,
+`zig build zoe`.
 
 The `.github/workflows/linux-package.yml` workflow runs `zig build package`
 in ReleaseSafe on every push and pull request, uploading a
-`glyphwire-linux-x86_64.tar.gz` (the seven binaries — `glyphwire`,
-`gw-shell`, `gw-ls`, `gw-view`, `glyphwire-demo`, `glyphwire-notify`,
-`zoe` — plus `assets/` and zoe's `grammars/`) as a run artifact; on a
+`glyphwire-linux-x86_64.tar.gz` (the binaries — `glyphwire`, `gw-shell`,
+`gw-ls`, `gw-view`, `gw-read`, `glyphwire-demo`, `glyphwire-notify`,
+`zoe`, `gmux` — plus `assets/` and zoe's `grammars/`) as a run artifact; on a
 `vX.Y.Z` tag push it also attaches that tarball to the GitHub Release.
 Windows packaging is not wired up yet.
 
 Once `glyphwire` is running, its shell prompt launches the client
 programs (`gw-ls`, `glyphwire-demo`, `gw-view <img.png>`,
-`glyphwire-notify <msg>`) with discovery already set up, so they draw onto
+`gw-read <book.cbz>`, `glyphwire-notify <msg>`) with discovery already set up, so they draw onto
 the grid.
 
 ### Host options (screenshots / smoke runs)
@@ -219,7 +221,10 @@ behind the `file/*` file-type icons; see the template.) Every field is
 optional and any omitted one keeps its default; a missing file (or no
 config directory at all) uses all defaults. `gw-ls` has its own
 optional `~/.config/glyphwire/ls.conf.lua` (`large_icon_px` / `small_icon_px`;
-see `ls/ls.conf.template.lua`), and `zoe` reads an optional
+see `ls/ls.conf.template.lua`), `gw-read` an optional
+`~/.config/glyphwire/read.conf.lua` (reading direction, sizing mode,
+page cache, zoom limits — see `read/read.conf.template.lua`), and `zoe`
+reads an optional
 `~/.config/glyphwire/zoe.conf.lua` (syntax-highlight languages, grammar
 search path, capture-group colours, `page_lines`, `line_numbers`; see
 `zoe/zoe.conf.template.lua`). At runtime **`Ctrl+-`** / **`Ctrl++`** step the
@@ -274,9 +279,10 @@ name and its shell command there to capture a new one.
 | `host_eng/` | The SDL3 + OpenGL engine backend the host is built on. |
 | `shell/` | `gw-shell` — line editor, command launcher, PTY, Lua startup config, history. |
 | `ls/`, `view/`, `notify/`, `demo/`, `table-demo/`, `client/` | Client programs. |
+| `read/` | `gw-read` — a comic/manga reader: `.cbz`/`.cbr`/`.cb7` or a directory of images, full-screen, right-to-left by default, with an image-handle LRU, zoom modes and pan. See `docs/decisions.md`'s `gw-read` section. |
 | `zoe/` | `zoe` — a vim-like modal editor, glyphwire's first multi-layer TUI: split panes, a file tree, tree-sitter syntax highlighting, its own context. See `docs/investigations/zoe-editor.md`. |
 | `server/` | Standalone socket server (host embeds its own; this is for testing). |
-| `tests/` | testz suite — `core`, `wire`, `dispatch`, `table`, `server`, `client`, `shell`, `ls`, `zoe`, `e2e`, ... |
+| `tests/` | testz suite — `core`, `wire`, `dispatch`, `table`, `server`, `client`, `shell`, `ls`, `read`, `zoe`, `e2e`, ... |
 | `docs/` | `protocol.md` (the specification), `decisions.md`, `api.md`, `roadmap.md`, `investigations/`. |
 
 ## License
@@ -288,7 +294,7 @@ bundled third-party code and assets in [`THIRD-PARTY.md`](THIRD-PARTY.md).
 |---|---|---|
 | **The protocol** — [`docs/protocol.md`](docs/protocol.md) and the rest of `docs/` | `CC-BY-4.0` | Implement it in any language, under any license. Attribution is the only obligation, and it does not reach your code. |
 | **The plumbing** — `src/`, `host/`, `host_eng/`, `server/`, `client/`, `agent/`, and the demo and debug tools | `MPL-2.0` | File-level copyleft: embed and ship these unmodified in anything, and owe source only for MPL files you change. |
-| **The applications** — `gw-shell`, `gmux`, `gw-ls`, `gw-view`, `zoe` | `GPL-3.0-or-later` | Programs people run, not components people embed. |
+| **The applications** — `gw-shell`, `gmux`, `gw-ls`, `gw-view`, `gw-read`, `zoe` | `GPL-3.0-or-later` | Programs people run, not components people embed. |
 
 Every source file carries an `SPDX-License-Identifier`, so a single
 directory can be vendored without consulting the table. The GPL programs

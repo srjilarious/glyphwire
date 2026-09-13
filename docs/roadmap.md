@@ -2861,6 +2861,67 @@ Three unrelated papercuts, landed together.
 
 974 tests passing.
 
+## gw-read: a comic/manga reader
+
+`gw-read` opens a full-screen context and shows one page of a comic
+archive at a time, paged right-to-left by default. `.cbz` / `.cbr` /
+`.cb7` and plain directories of images; `--list` (or launching with no
+`GLYPHWIRE_SOCK`) prints the pages it found and exits, which is the
+headless path zoe's `--keys` driver is for it. See decisions.md's
+`gw-read` section for the reasoning behind each choice below.
+
+- **`read/` layout.** `pages.zig` (which entries are pages, natural
+  order), `zoom.zig` (fit maths, pan bounds), `cache.zig` (the
+  image-handle LRU) are pure and carry the 32 new tests. `archive.zig`
+  reads books, `state.zig` the resume file, `config.zig` parses
+  `read.conf.lua`, `ui.zig` is the client. Gathered as the
+  `read_support` module, same reason as `ls_support` / `zoe_support`.
+- **`.cbz` in process, `.cbr` / `.cb7` shelled out.** `std.zip`'s
+  iterator is walked once at open and each page's central-directory
+  record kept, so a page read is a seek and an inflate. RAR and 7z go to
+  whichever of `bsdtar` / `unrar` / `7z` is on `PATH`, unpacked whole
+  into a temp directory that `deinit` removes. Format from magic bytes,
+  never the extension.
+- **Natural page order.** `page2.jpg` before `page10.jpg`, digit runs
+  compared as numbers without parsing them (a 40-digit frame counter
+  can't overflow the sort), case folded so a mixed-case archive
+  interleaves, padding as the tie-break. `__MACOSX/`, `._` sidecars and
+  dotfiles are dropped; a `.webp` page is counted as skipped and
+  reported, since stb_image has no decoder for it.
+- **An LRU of image handles, not `update_image`.** api.md's advice suits
+  a forward-only reader; this one has a back button, so it loads a
+  handle per page and `destroy_image`s what falls out of a fixed cache
+  (8 pages by default). The last several pages are then a keystroke
+  away with no re-upload.
+- **Zoom and pan ride an oversized layer.** The page layer's grid is the
+  *scaled page's* cell span, its viewport is the window, and panning is
+  `scroll_offset` — which is also what makes the host drive the wheel
+  and draw the scrollbars for free. The cost is quadratic in the zoom
+  factor, which is why `max_zoom` defaults to 4.0.
+- **Client: `drawImageOn` / `clearOn`.** Both messages always carried
+  `layer?` on the wire and the server always honoured it; only the Zig
+  helpers hardcoded `default_layer`. The old spellings delegate.
+
+**Next for the reader**, in the order they want doing:
+
+1. **A `draw_image` source offset** (`src_row`/`src_col`, or a pixel
+   origin). Today a zoomed page is drawn in full onto a layer bigger
+   than the window, so cell cost grows with the square of the zoom and
+   `max_zoom` has to exist. A source offset makes a pan cost
+   viewport-many cells instead of image-many and removes the cap.
+2. **Two-page spreads.** Pair facing pages, treat a wide page as a
+   single, handle the cover alone. Mostly layout plus an LRU that warms
+   two pages instead of one.
+3. **mokuro overlays and yomitan-style lookup.** The OCR boxes are
+   per-page rectangles with text; `create_metadata` + `tag_metadata`
+   over the page layer is the obvious carrier, and `find_metadata`
+   already resolves a click to a span.
+4. **`.epub` and `.pdf`.** Both need a real content pipeline rather than
+   "hand bytes to stb_image", which is why `archive.Archive` is an
+   interface rather than a zip reader with a nicer name.
+
+1021 tests passing.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

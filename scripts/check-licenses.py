@@ -39,7 +39,7 @@ CCBY = "CC-BY-4.0"
 ZONES = {
     MPL: ["src", "host", "host_eng", "server", "client", "agent",
           "notify", "debug", "demo", "table-demo"],
-    GPL: ["shell", "gmux", "ls", "view", "zoe", "tests"],
+    GPL: ["shell", "gmux", "ls", "view", "read", "zoe", "tests"],
 }
 
 # Third-party trees, including ones nested inside our own directories.

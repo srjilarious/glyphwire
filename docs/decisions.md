@@ -4351,3 +4351,100 @@ test.
 its pane, and `host.conf.lua` named remotes (`gwssh work` rather than the
 full destination) — all of which want the same thing first, which is a
 session that outlives the process that asked for it.
+
+### gw-read
+
+`gw-read` is a comic/manga reader: one page filling the window, paged
+right-to-left by default, with zoom and pan. `.cbz` / `.cbr` / `.cb7` and
+plain directories of images today; `.epub` and `.pdf`, plus mokuro OCR
+overlays with yomitan-style lookup, are the reasons the page source sits
+behind an `archive.Archive` interface rather than being inlined.
+
+**Right-to-left is the default, not a mode you have to find.** The reader
+was built for manga, and a manga reader whose Left arrow goes *backwards*
+is wrong for the material it exists to show. `d` flips it, `read.conf.lua`
+sets the default, and the choice is remembered per book — the same
+per-book state as the page number, because a library is usually mixed.
+
+**RAR is unpacked by somebody else's program.** Zig's std has zip
+(`std.zip`, so `.cbz` is read in process, seeking to a page's central
+directory record with no rescan) and nothing for RAR, and vendoring a RAR
+decoder would put a licence in the tree that neither the MPL nor the GPL
+zone wants. So `.cbr` / `.cb7` are handed to whichever of `bsdtar`,
+`unrar` or `7z` is on `PATH`, unpacked *whole* into a temp directory, and
+read back as a directory — the directory reader was needed anyway, and
+per-page extraction would cost a process spawn and a full archive scan on
+every page turn. None installed is a specific error naming the three, not
+a generic failure.
+
+**The format is sniffed, never inferred from the extension.** `.cbz`
+files that are really RAR inside are common enough that trusting the name
+gets books wrong. Same reasoning, and the same place in the code, as
+`gw-view`'s `detectImageFormat`.
+
+#### Paging and the image-handle LRU
+
+api.md points a `.cbz` reader at `update_image`: reuse one handle rather
+than leaving a dead image behind per page. That is right for a reader
+that only ever moves forward and wrong for one with a back button — the
+previous page's bytes are gone the moment the next is drawn, so every
+`backspace` is a re-upload and a re-decode.
+
+gw-read instead **loads a handle per page and `destroy_image`s whatever
+falls out of a fixed-capacity LRU** (`read/cache.zig`, 8 pages by
+default). Same bounded footprint, but the last several pages are a
+keystroke away. The LRU is pure — `put` hands the evicted entry back and
+the UI is what calls `destroy_image` — which is what makes the eviction
+order testable without a server. `contains` deliberately does *not* touch
+recency, so a prefetch probe can't promote a page the reader never looked
+at over one they did.
+
+#### Zoom, pan and the oversized page layer
+
+`draw_image` samples from the image's top-left corner outward and has no
+source offset. So the only way to show the *middle* of a zoomed page is
+to draw the whole scaled page onto a layer bigger than the window and
+move the window over it — the page layer's grid is the scaled page's cell
+span, its viewport is the window, and panning is
+`set_property(scroll_offset)`.
+
+That choice pays for itself immediately: `scrollablePaneAt` matches any
+layer with slack, so the host drives the wheel and draws the scrollbars
+with no work from the reader, and a pan reported back as a
+`scroll_offset` notification is the same code path whether it came from a
+key, the wheel or a dragged thumb.
+
+Its cost is one server-side cell per covered cell, which grows with the
+**square** of the zoom factor. That is the only reason `max_zoom` exists
+(4.0 by default, `read.conf.lua` raises it): at 4x a 1600x2400 scan
+covers roughly 300k cells, and each further doubling quadruples it. The
+follow-up that removes the cap is a source-offset (`src_row`/`src_col`,
+or a pixel origin) on `draw_image`, which would make a pan cost
+viewport-many cells instead of image-many — see roadmap.md.
+
+**Layers are placed, not tiled.** zoe uses a split tree because its panes
+tile; gw-read doesn't, because a fitted page has to be *centred* in
+whatever is left over and a split tree only knows how to fill. So the
+page, the statusline and the help overlay are free-floating layers moved
+with `set_property(cell_position)`, and `resize` rather than `layout` is
+what drives a reflow. `get_cell_metrics` is re-read on every resize, not
+just at startup: a Ctrl+`+` font step changes the metrics *and* reflows
+the grid, and arrives as one `resize`.
+
+**The arrow keys do two jobs, and it isn't ambiguous.** When the page
+overflows an axis they pan it; when it doesn't there is nothing to pan,
+so the horizontal pair turns the page. "Does this axis overflow" is
+exactly what the layout already computed (`Layout.max_pan_*`), so the
+rule is a field read rather than a guess. `hjkl` always pans and
+`space` / `backspace` always turn, for anyone who wants the unambiguous
+form. A left-click on the near/far half of the window turns the page the
+same direction-aware way; a click that moved first is a pan drag instead.
+
+#### Two client helpers that were missing
+
+`draw_image` and `clear` have always carried `layer?` on the wire, but
+`Client.drawImage` / `Client.clear` hardcoded `default_layer`, so a TUI
+drawing a picture into one of its own layers had no way to say which.
+Added `drawImageOn` / `clearOn` alongside them, matching the
+`writeTextOn` / `drawBoxOn` / `drawIconOn` pattern; the old spellings now
+delegate, so nothing else changed.
