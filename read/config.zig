@@ -63,8 +63,10 @@ pub const ReadConfig = struct {
     /// What `]` / `[` jump by.
     jump_pages: usize = 5,
     /// Ceiling on the zoom factor. Raising it costs server-side memory
-    /// quadratically -- see zoom.zig's module comment.
-    max_zoom: f32 = 4.0,
+    /// quadratically -- see zoom.zig's module comment. Raised from the
+    /// original 4.0 default (2026-09); `zoom_max_ceiling` below is the
+    /// hard cap on what a `read.conf.lua` override can push it to.
+    max_zoom: f32 = 8.0,
     /// Whether a fit mode may scale a page up past its natural size.
     upscale: bool = true,
     /// Cells panned per arrow key / `hjkl` press when the page overflows.

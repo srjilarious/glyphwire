@@ -380,7 +380,7 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(info.width, 24);
     try testz.expectEqual(info.height, 12);
 
-    try client.drawImage(handle, 0, 0, 1, 2, 1.0);
+    try client.drawImage(handle, 0, 0, 1, 2, 1.0, .{});
 
     var snapshot = try client.getCells();
     defer snapshot.deinit();
@@ -401,6 +401,48 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     try client.writeText("z", null, null);
     const cursor = try client.getCursor();
     try testz.expectEqual(cursor.col, 1);
+}
+
+/// `create_rect`/`update_rect`/`destroy_rect` over a real socket: a
+/// rect has no cell representation (`get_cells` can't see it), so this
+/// round-trips through the server and back only to confirm the wire
+/// shapes actually connect end to end -- the field-level behavior is
+/// covered in-process by dispatch_tests.zig.
+pub fn clientCreateUpdateDestroyRectRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const handle = try client.createRect(null, .{
+        .x = 5,
+        .y = 5,
+        .w = 20,
+        .h = 10,
+        .color = .{ .r = 255, .g = 0, .b = 0, .a = 255 },
+        .line_width = 2,
+        .filled = false,
+    });
+    try testz.expectEqual(handle, 1);
+
+    try client.updateRect(null, handle, .{ .x = 15 });
+    try client.destroyRect(null, handle);
+
+    // Nothing above should have severed the connection -- a plain
+    // notification still lands afterward.
+    try client.writeText("ok", null, null);
+    const cursor = try client.getCursor();
+    try testz.expectEqual(cursor.col, 2);
 }
 
 /// A request-form `Client.Batch` (it used a request adder) sends one

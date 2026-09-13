@@ -45,6 +45,9 @@ pub const DispatchError = error{
     UnknownMetadata,
     UnknownTable,
     InvalidTableOption,
+    /// `update_rect`/`destroy_rect` named a rect that doesn't exist (or
+    /// already existed and was destroyed).
+    UnknownRect,
     TableRowShapeMismatch,
     UnsupportedImageFormat,
     UnknownSplit,
@@ -556,6 +559,13 @@ const DrawImageParams = struct {
     /// match the scaled size -- aspect-ratio-aware placement stays its job
     /// per decisions.md. A non-positive value is treated as `1.0`.
     scale: f32 = 1.0,
+    /// Optional source sub-rectangle (`core.ImageSrcRect`) -- sprite-sheet
+    /// support. All default to `0`, which is the whole image from `(0,0)`
+    /// -- byte-identical to the pre-source-rect behavior.
+    src_x: u32 = 0,
+    src_y: u32 = 0,
+    src_w: u32 = 0,
+    src_h: u32 = 0,
 };
 
 const TagMetadataParams = struct {
@@ -682,6 +692,44 @@ const TableSetStyleParams = struct {
 const TableGetStateParams = struct {
     layer: ?core.LayerHandle = null,
     table: core.TableHandle,
+};
+
+// ─── Rect ────────────────────────────────────────────────────────────────
+//
+// See core.zig's Rect section for the object model. `create_rect` returns
+// a handle; `update_rect`/`destroy_rect` take a required `rect` handle
+// alongside the usual optional `layer`, same shape the Table messages use.
+
+const CreateRectParams = struct {
+    layer: ?core.LayerHandle = null,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    color: protocol.Color,
+    line_width: u32 = 1,
+    filled: bool = false,
+};
+
+const CreateRectResult = struct { handle: core.RectHandle };
+
+/// Every field but `rect` is optional and `null` (not a default value)
+/// means "leave unchanged" -- see `core.RectUpdate`'s doc comment.
+const UpdateRectParams = struct {
+    layer: ?core.LayerHandle = null,
+    rect: core.RectHandle,
+    x: ?u32 = null,
+    y: ?u32 = null,
+    w: ?u32 = null,
+    h: ?u32 = null,
+    color: ?protocol.Color = null,
+    line_width: ?u32 = null,
+    filled: ?bool = null,
+};
+
+const DestroyRectParams = struct {
+    layer: ?core.LayerHandle = null,
+    rect: core.RectHandle,
 };
 
 /// `rows`/`cols` are optional: omitted means "the rest of the layer from
@@ -1399,6 +1447,9 @@ pub const Dispatcher = struct {
         .{ "table_set_sort", catVoid(handleTableSetSort) },
         .{ "table_set_style", catVoid(handleTableSetStyle) },
         .{ "table_get_state", catBytesId(handleTableGetState) },
+        .{ "create_rect", catResultId(handleCreateRect) },
+        .{ "update_rect", catVoid(handleUpdateRect) },
+        .{ "destroy_rect", catVoid(handleDestroyRect) },
         .{ "set_selection", catResult(handleSetSelection) },
         .{ "update_selection", catResult(handleUpdateSelection) },
         .{ "clear_selection", catResult(handleClearSelection) },
@@ -2613,7 +2664,14 @@ pub const Dispatcher = struct {
                     .image, .icon => null,
                 };
                 const bg_image: ?protocol.ImageBg = switch (cell.style.bg) {
-                    .image => |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y, .scale = img.scale },
+                    .image => |img| .{
+                        .handle = img.handle,
+                        .offset_x = img.offset_x,
+                        .offset_y = img.offset_y,
+                        .scale = img.scale,
+                        .src_right = img.src_right,
+                        .src_bottom = img.src_bottom,
+                    },
                     .color, .icon => null,
                 };
                 const bg_icon: ?protocol.IconBg = switch (cell.style.bg) {
@@ -2880,6 +2938,7 @@ pub const Dispatcher = struct {
             self.ctx.cell_px_w,
             self.ctx.cell_px_h,
             p.scale,
+            .{ .x = p.src_x, .y = p.src_y, .w = p.src_w, .h = p.src_h },
         );
     }
 
@@ -3075,6 +3134,59 @@ pub const Dispatcher = struct {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             error.UnknownTable => return DispatchError.UnknownTable,
             else => return err,
+        };
+    }
+
+    fn handleCreateRect(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(CreateRectParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const rect_handle = self.ctx.createRect(p.layer, .{
+            .x = p.x,
+            .y = p.y,
+            .w = p.w,
+            .h = p.h,
+            .color = colorFromJson(p.color),
+            .line_width = p.line_width,
+            .filled = p.filled,
+        }) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
+            else => |e| return e,
+        };
+        return .{ .response = try rpc.response(alloc, id, CreateRectResult{ .handle = rect_handle }) };
+    }
+
+    fn handleUpdateRect(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(UpdateRectParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        self.ctx.updateRect(p.layer, p.rect, .{
+            .x = p.x,
+            .y = p.y,
+            .w = p.w,
+            .h = p.h,
+            .color = if (p.color) |c| colorFromJson(c) else null,
+            .line_width = p.line_width,
+            .filled = p.filled,
+        }) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
+            error.UnknownRect => return DispatchError.UnknownRect,
+        };
+    }
+
+    fn handleDestroyRect(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DestroyRectParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        self.ctx.destroyRect(p.layer, p.rect) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
+            error.UnknownRect => return DispatchError.UnknownRect,
         };
     }
 

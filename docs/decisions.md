@@ -1256,6 +1256,53 @@ surface.
   process); glyphwire-host does, because its texture count grows with what
   the user does rather than with a fixed asset set.
 
+**`draw_image` source rect: sprite-sheet sampling**
+- Driven by gw-read wanting a cheaper way to zoom (see the gw-read section
+  below) plus the general observation that `draw_image` had no way to show
+  only *part* of an image — every draw sampled from `(0, 0)`. Landed as a
+  general-purpose primitive, not a gw-read-specific one: `draw_image`
+  gained optional `src_x`/`src_y`/`src_w`/`src_h` (all pixels, all default
+  `0`), which restrict sampling to a sub-rectangle of the source image
+  instead of the whole thing — a sprite sheet, an icon atlas, one frame of
+  a strip. `.{}` (the Zig client helper's `core.ImageSrcRect` default)
+  reproduces the pre-source-rect behavior exactly.
+- **Decided against changing gw-read's own zoom/pan model to use it.** The
+  obvious use for a source rect is letting a zoomed page's layer stay
+  window-sized (sample a moving sub-rect of the zoomed image instead of
+  materializing the whole scaled page as cells — see gw-read's "zoomed pan
+  costs cells quadratically" trap). The user's call: keep the existing
+  full-page-layer model, because it lets glyphwire-host's own scrollbars/
+  wheel scroll the page for free, and moving to a per-pan `draw_image`
+  re-issue would push that back into the client. `max_zoom` was raised
+  instead (see gw-read's config section) as the practical answer to "zoom
+  too limited," accepting the existing quadratic cost at higher zoom
+  levels. The source rect stays in the protocol for whoever needs true
+  sprite-sheet sampling (a game built on glyphwire, an icon strip); nothing
+  in this repo consumes it yet.
+- **Clips at the source rect's own edge, not just the image's.** A naive
+  implementation would still only clamp each covered cell's sample window
+  to the image's real dimensions (what `draw_image` already did), which
+  bleeds into a neighbouring sprite whenever the source rect's own
+  right/bottom edge falls short of the image's. Fixed by carrying the
+  resolved clip bound (`src_x + effective_w`, `src_y + effective_h`) on
+  every covered cell's `ImageBg` (`src_right`/`src_bottom`, both default
+  `maxInt` — "no bound beyond the image's own edge," byte-identical to the
+  old behavior), and having `host/render.zig`'s `emitImageCell` intersect
+  that bound with the texture's real size before computing how many source
+  pixels a partial edge cell may still sample. Two extra `u32`s per image
+  cell, same trade `scale` already made (constant-per-draw data duplicated
+  onto every covered cell, because per-cell is the only granularity the
+  wire already has).
+- Rejected: extracting/caching the sub-rect as its own resource (a "sprite"
+  object distinct from the loaded image). Matches the existing decision
+  that `draw_image` never extracts or caches a per-cell tile — the source
+  rect is just another input to the same per-cell offset computation
+  `Layer.drawImage` already does, not a new kind of stored thing.
+- A rect that starts at or past the image's own edge (or is otherwise
+  empty after clamping to it) draws nothing, the same "cell past the
+  image's edge is left untouched" contract an oversized `row_span`/
+  `col_span` already has.
+
 **Icon**
 - A named reference to an image, resolved server-side rather than by raw
   handle — `draw_icon(row, col, name)` looks the name up against
@@ -1884,6 +1931,76 @@ surface.
   table paints into ordinary cells, per above). For a future client that
   needs to know e.g. which columns are sortable before deciding what a
   header click should do.
+
+### Rect
+
+A first-class overlay primitive: a plain coloured box (filled or outlined)
+positioned in pixel space on a layer, rather than approximated out of
+character cells. Driven directly by gw-read's mokuro OCR bubble
+highlights, which were drawing full-cell boxes on a dedicated layer —
+functional, but coarse (boxes can only land on cell boundaries), and every
+redraw touched a cell range instead of just moving a handful of shapes.
+Flagged as a wanted primitive in gw-read's own notes before this feature
+started ("the marks really want a pixel-space `draw_rect`, which does not
+exist").
+
+- **Handle-based CRUD (`create_rect`/`update_rect`/`destroy_rect`), not a
+  stateless immediate draw (asked).** Matches gw-read's actual use: a
+  bubble highlight gets created once and then moved/recoloured/removed
+  individually as the reader steps between bubbles, without redrawing
+  anything else on the layer. The alternative — a `draw_rect` that just
+  paints, with no server-side identity — would push per-rect bookkeeping
+  (which screen region to clear before redrawing) onto every client,
+  exactly the coarseness this feature exists to remove.
+- **A rect is a component of the layer it's drawn on (`Layer.rects`), the
+  same relationship a `Table` has to its layer** — not a parallel object
+  tree the way `Layer` itself is under `Context`. Handles are allocated
+  from `Context.next_rect_handle`, a single counter shared across every
+  layer, mirroring `next_table_handle`/`next_image_handle`. Falls out of
+  the destroy-with-the-owning-layer lifecycle for free: nothing separate
+  needed to track when a layer holding rects gets torn down.
+- **Position in the layer's own content pixel space (asked), not
+  screen/viewport space.** `x`/`y`/`w`/`h` are pixels measured from the
+  layer's row-0/col-0 corner — the same frame `ImageBg.offset_x/offset_y`
+  already sample within one cell, generalized to the whole layer — so a
+  rect pans for free exactly like image cells and text do when the
+  layer's `scroll_offset` moves. The alternative (screen-space, fixed
+  regardless of scroll) would have meant gw-read recomputing and
+  resending every mark's position on every pan tick, the same class of
+  per-pan-frame client work the image source-rect decision above
+  deliberately avoided pushing back onto clients.
+- **`update_rect`'s fields are a merge, not a replace** (`core.RectUpdate`,
+  every field `?T = null` meaning "leave unchanged") — distinct from
+  `Rect` itself, whose fields are always fully specified at `create_rect`
+  time. Moving a bubble's highlight box on `Tab` only needs `x`/`y`; a
+  replace-shaped `update_rect` would force resending color/size/line
+  width on every step just to avoid resetting them.
+- **No ownership check on `create_rect`/`update_rect`/`destroy_rect`,
+  matching `destroy_table`.** A rect is layer-scoped passive presentation
+  data, not a resource with its own lifecycle concerns the way an image's
+  bytes are — the layer it lives on is what has (or doesn't have)
+  ownership tracking.
+- **Outline strips don't overlap at the corners.** `line_width` (only
+  meaningful when `filled` is false) is drawn as four non-overlapping
+  quads — full-width top/bottom strips, then left/right strips filling
+  exactly the band between them — rather than four full-height/width
+  bars. A naive four-bar approach double-covers each corner, which is
+  invisible at full opacity but visibly darker at the corners for a
+  translucent `color` (exactly gw-read's highlight-box use case).
+- **Composited as its own quad batch, drawn last.** `host/render.zig`'s
+  `rebuildLayer` already had the `ShapeBatch`-of-plain-coloured-quads
+  machinery from the selection/highlight tints (both of which are drawn
+  *under* text, into `color_bg`, so the text pass paints over them and
+  stays readable). Rects are the opposite case — an overlay is supposed
+  to sit visibly on top, so they get their own `rects` batch and
+  `drawLayerBatches` draws it last, after text, rather than folding into
+  `color_bg`.
+- Rejected: extending `ImageBg`/cell-anchored spans to cover rects too. A
+  rect isn't associated with any particular cell or image — pixel
+  position and size are its only geometry — so forcing it through the
+  cell-marking machinery `draw_image`/`draw_box` use would need a
+  fictional anchor cell and column/row span for no benefit; a flat
+  per-layer map keyed by handle is the whole model.
 
 ### Selection & clipboard
 - **Selection is real server-side state on a `Layer`, not a client-side
@@ -4418,11 +4535,19 @@ key, the wheel or a dragged thumb.
 
 Its cost is one server-side cell per covered cell, which grows with the
 **square** of the zoom factor. That is the only reason `max_zoom` exists
-(4.0 by default, `read.conf.lua` raises it): at 4x a 1600x2400 scan
-covers roughly 300k cells, and each further doubling quadruples it. The
-follow-up that removes the cap is a source-offset (`src_row`/`src_col`,
-or a pixel origin) on `draw_image`, which would make a pan cost
-viewport-many cells instead of image-many — see roadmap.md.
+(8.0 by default as of the `draw_image` source-rect feature below, up from
+the original 4.0; `read.conf.lua` can still raise it, up to
+`zoom_max_ceiling`): at 8x a 1600x2400 scan covers roughly 1.2M cells, and
+each further doubling quadruples it.
+
+`draw_image` gained exactly the source-offset primitive that would remove
+this cap (`src_x`/`src_y`/`src_w`/`src_h`, a pixel sub-rectangle of the
+source image — see "`draw_image` source rect" under Object Model) but
+**gw-read's own layout stayed on the oversized-layer model** (asked): the
+user's call was that the free host-driven scrolling this section opens
+with is worth more than the cell-count saving, so `max_zoom` was simply
+raised instead of gw-read switching to a viewport-sized page layer plus a
+per-pan re-draw. The primitive is there if that trade is revisited later.
 
 **Layers are placed, not tiled.** zoe uses a split tree because its panes
 tile; gw-read doesn't, because a fitted page has to be *centred* in
@@ -4650,6 +4775,14 @@ annotating an image rather than a grid, which is the general case
 `gw-read` is the first instance of. Deliberately **not** built as part of
 the mokuro work: it is a protocol primitive in its own right, and the
 character version is good enough to read manga with today.
+
+**Landed separately as `create_rect`/`update_rect`/`destroy_rect`** (see
+"### Rect" under Object Model) — handle-based rather than the
+one-shot `draw_rect` sketched above, once gw-read's own use case (move/
+recolor/remove one highlight box at a time as `Tab` steps between
+bubbles) made a server-side identity worth having. gw-read itself has not
+yet been ported off the character-grid marks layer onto real rects —
+that's a follow-up, not part of this entry.
 
 **A click that misses every bubble while the dialog is open closes it and
 stops there.** Everywhere else a click turns the page, and it still does

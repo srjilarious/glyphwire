@@ -127,6 +127,10 @@ pub const LayerBatches = struct {
     icon_bg: SpriteBatch,
     icon_fg: SpriteBatch,
     text: GlyphBatch,
+    /// `Layer.rects`' quads -- drawn last (see `drawLayerBatches`) so an
+    /// overlay rect sits on top of everything else the layer paints,
+    /// text included.
+    rects: ShapeBatch,
     images: std.ArrayList(TexBatch) = .empty,
     icon_fallback: std.ArrayList(TexBatch) = .empty,
 
@@ -142,8 +146,10 @@ pub const LayerBatches = struct {
         errdefer icon_bg.deinit();
         var icon_fg = try SpriteBatch.init(alloc, sprite_shader);
         errdefer icon_fg.deinit();
-        const text = try GlyphBatch.init(alloc, glyph_shader);
-        return .{ .color_bg = color_bg, .icon_bg = icon_bg, .icon_fg = icon_fg, .text = text };
+        var text = try GlyphBatch.init(alloc, glyph_shader);
+        errdefer text.deinit();
+        const rects = try ShapeBatch.init(alloc, shape_shader);
+        return .{ .color_bg = color_bg, .icon_bg = icon_bg, .icon_fg = icon_fg, .text = text, .rects = rects };
     }
 
     fn deinit(self: *LayerBatches, alloc: std.mem.Allocator) void {
@@ -151,6 +157,7 @@ pub const LayerBatches = struct {
         self.icon_bg.deinit();
         self.icon_fg.deinit();
         self.text.deinit();
+        self.rects.deinit();
         for (self.images.items) |*t| t.batch.deinit();
         self.images.deinit(alloc);
         for (self.icon_fallback.items) |*t| t.batch.deinit();
@@ -771,6 +778,7 @@ pub const Renderer = struct {
         lb.icon_fallback.clearRetainingCapacity();
 
         lb.color_bg.beginBuild({});
+        lb.rects.beginBuild({});
 
         const atlas_tex: ?*const host_eng.Texture = if (self.icon_atlas) |a|
             (if (a.get()) |live| &live.val else null)
@@ -894,7 +902,41 @@ pub const Renderer = struct {
             }
         }
 
+        // Overlay rects (`create_rect`): pixel-space boxes in the layer's
+        // own content coordinate frame, translated to screen pixels by
+        // subtracting the same cell-based scroll offset every other pass
+        // above reads off `off`. Built into their own `rects` batch,
+        // composited last (see `drawLayerBatches`) so a rect sits on top
+        // of everything else the layer paints, text included.
+        if (layer.rects.count() > 0) {
+            const scroll_px_x = @as(i32, @intCast(off.col)) * geometry.cell_w;
+            const scroll_px_y = @as(i32, @intCast(off.row)) * geometry.cell_h;
+            var rect_it = layer.rects.valueIterator();
+            while (rect_it.next()) |r| {
+                const rx = origin_x + @as(i32, @intCast(r.x)) - scroll_px_x;
+                const ry = origin_y + @as(i32, @intCast(r.y)) - scroll_px_y;
+                const rw: i32 = @intCast(r.w);
+                const rh: i32 = @intCast(r.h);
+                const col = fade(host_eng.Color.from(r.color.r, r.color.g, r.color.b, r.color.a), alpha);
+                if (r.filled) {
+                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry, rw, rh), col);
+                } else {
+                    // Four non-overlapping strips (top, bottom, then the
+                    // left/right strips filling exactly the band between
+                    // them) rather than four full-height/width bars, so a
+                    // translucent `color` doesn't double up at the corners.
+                    const lw_u32: u32 = @min(r.line_width, @max(@min(r.w, r.h) / 2, 1));
+                    const lw: i32 = @intCast(lw_u32);
+                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry, rw, lw), col);
+                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry + rh - lw, rw, lw), col);
+                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry + lw, lw, rh - 2 * lw), col);
+                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx + rw - lw, ry + lw, lw, rh - 2 * lw), col);
+                }
+            }
+        }
+
         lb.color_bg.endBuild();
+        lb.rects.endBuild();
         if (has_icon_atlas) {
             lb.icon_bg.endBuild();
             lb.icon_fg.endBuild();
@@ -936,17 +978,24 @@ pub const Renderer = struct {
     /// smaller -- and draws that slice back down at `scale`, so an
     /// interior cell still fills exactly `cell_px` on screen and the
     /// image's right/bottom edge cell is the only partial one.
+    ///
+    /// `img.src_right`/`src_bottom` clip that "remaining pixels" bound to
+    /// `draw_image`'s optional source rect on top of the image's own real
+    /// edge, so a sprite drawn from the middle of a sheet clips cleanly at
+    /// its own edge instead of bleeding into a neighbouring sprite.
     fn emitImageCell(self: *Renderer, eng: *Engine, lb: *LayerBatches, img: glyphwire.ImageBg, px: i32, py: i32) void {
         const entry = self.imageEntryIn(lb.context, img.handle) orelse return;
-        if (img.offset_x >= entry.width or img.offset_y >= entry.height) return;
+        const eff_right = @min(entry.width, img.src_right);
+        const eff_bottom = @min(entry.height, img.src_bottom);
+        if (img.offset_x >= eff_right or img.offset_y >= eff_bottom) return;
 
         const tex = self.textureForImage(eng, lb.context, img.handle) orelse return;
 
         const s: f32 = if (img.scale > 0) img.scale else 1.0;
         const cell_w_f: f32 = @floatFromInt(geometry.cell_w);
         const cell_h_f: f32 = @floatFromInt(geometry.cell_h);
-        const rem_w_f: f32 = @floatFromInt(entry.width - img.offset_x);
-        const rem_h_f: f32 = @floatFromInt(entry.height - img.offset_y);
+        const rem_w_f: f32 = @floatFromInt(eff_right - img.offset_x);
+        const rem_h_f: f32 = @floatFromInt(eff_bottom - img.offset_y);
 
         // Source pixels this cell reaches into, capped at the image's edge.
         const src_w_px: f32 = @min(cell_w_f / s, rem_w_f);
@@ -1075,13 +1124,16 @@ pub const Renderer = struct {
         // no colour channel, so the shader's `tint` uniform carries it.
         const a = lb.built_opacity;
         // Back to front: colour fills + tints, image cells, icon
-        // backgrounds, foreground/overlay icons, non-atlas icons, text.
+        // backgrounds, foreground/overlay icons, non-atlas icons, text,
+        // overlay rects (`create_rect`) last so they sit on top of
+        // everything else the layer paints.
         self.drawBatch(&lb.color_bg, mvp);
         for (lb.images.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatchTinted(&lb.icon_bg, mvp, a);
         self.drawBatchTinted(&lb.icon_fg, mvp, a);
         for (lb.icon_fallback.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatch(&lb.text, mvp);
+        self.drawBatch(&lb.rects, mvp);
     }
 
     /// Draws one static batch, skipping it when empty, and -- while

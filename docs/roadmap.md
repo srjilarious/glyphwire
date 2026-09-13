@@ -2938,7 +2938,11 @@ reads it and shows the current bubble's text in a floating panel.
   and a box costs O(rows) messages instead of one. `draw_rect` in pixels
   would fix all three, and the host already composites a `ShapeBatch` of
   plain coloured quads — see decisions.md. Not built here: it is a
-  protocol primitive in its own right.
+  protocol primitive in its own right. **Landed as `create_rect`/
+  `update_rect`/`destroy_rect`** (see decisions.md's "### Rect") —
+  gw-read itself is not yet ported off this character-grid marks layer
+  onto real rects, so this specific box-drawing implementation is still
+  what runs today; that's the remaining follow-up.
 - **Selectable, and it gets out of the way.** A drag inside the panel
   sets a selection on the dialog layer, which the host's Ctrl+Shift+C
   now finds (see below); hold `z` to fade it to `ocr_peek`, `\` to hide
@@ -3006,23 +3010,26 @@ whole build.
 
 **Next for the reader**, in the order they want doing:
 
-1. **A `draw_image` source offset** (`src_row`/`src_col`, or a pixel
-   origin). Today a zoomed page is drawn in full onto a layer bigger
-   than the window, so cell cost grows with the square of the zoom and
-   `max_zoom` has to exist. A source offset makes a pan cost
-   viewport-many cells instead of image-many and removes the cap.
+1. ~~A `draw_image` source offset~~ **Landed** as `src_x`/`src_y`/
+   `src_w`/`src_h` on `draw_image` (see decisions.md's "`draw_image`
+   source rect" entry) — but gw-read's own page layer was deliberately
+   *not* switched to use it (asked): the user kept the existing
+   full-page-layer model for the free host-driven scrolling it gives up
+   otherwise, and raised `max_zoom` (8.0 default now, was 4.0) instead.
+   The primitive is there if a viewport-sized page layer is revisited.
 2. **Two-page spreads.** Pair facing pages, treat a wide page as a
    single, handle the cover alone. Mostly layout plus an LRU that warms
    two pages instead of one.
-3. **A pixel-space `draw_rect`.** The OCR region marks are the first
-   thing in the tree that wants to annotate an *image* rather than a
-   grid, and box-drawing characters are a poor fit for it (see above).
-   One message per rect, exact placement, real line widths.
+3. ~~A pixel-space `draw_rect`~~ **Landed** as `create_rect`/
+   `update_rect`/`destroy_rect` (see decisions.md's "### Rect") — the
+   protocol side is done; gw-read's mokuro region marks are not yet
+   ported off the character-grid marks layer onto real rects, which is
+   the part still open.
 4. **`.epub` and `.pdf`.** Both need a real content pipeline rather than
    "hand bytes to stb_image", which is why `archive.Archive` is an
    interface rather than a zip reader with a nicer name.
 
-1090 tests passing.
+1101 tests passing.
 
 ## Open questions to settle before writing code
 

@@ -741,6 +741,122 @@ pub fn drawImageOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqual(ctx.root.cell(4, 5).style.bg.image.handle, 1);
 }
 
+/// `draw_image`'s optional source rect (sprite-sheet support): sampling
+/// starts at `(src_x, src_y)` instead of the image's own origin, and
+/// clips at the sprite's own edge (`src_x + src_w`), not the sheet's.
+pub fn drawImageSourceRectSamplesSubRegionOfSheetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // A 48x24px sheet: two 24x24px sprites side by side. Ask for the
+    // second one only.
+    const png = fakePngBytes(48, 24);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
+    alloc.free(load_resp);
+
+    const draw_message =
+        \\{"jsonrpc":"2.0","method":"draw_image","params":{"handle":1,"row":0,"col":0,"row_span":2,"col_span":2,"src_x":24,"src_y":0,"src_w":24,"src_h":24}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, draw_message)).response == null);
+
+    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.offset_x, 24);
+    try testz.expectEqual(ctx.root.cell(0, 1).style.bg.image.offset_x, 36);
+    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.src_right, 48);
+}
+
+/// `create_rect` allocates a fresh handle and stores every field exactly
+/// as given -- see core.zig's Rect section.
+pub fn createRectReturnsHandleAndStoresItTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_rect","params":{"x":10,"y":20,"w":30,"h":15,"color":{"r":200,"g":50,"b":50,"a":255},"line_width":2,"filled":true}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(result.response != null);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"handle\":1") != null);
+
+    const r = ctx.root.rects.get(1) orelse return error.TestUnexpectedResult;
+    try testz.expectEqual(r.x, 10);
+    try testz.expectEqual(r.y, 20);
+    try testz.expectEqual(r.w, 30);
+    try testz.expectEqual(r.h, 15);
+    try testz.expectEqual(r.color.r, 200);
+    try testz.expectEqual(r.line_width, 2);
+    try testz.expectTrue(r.filled);
+}
+
+/// `update_rect` merges only the fields the caller actually sent -- see
+/// `core.RectUpdate`'s doc comment for why this is a merge and not a
+/// replace.
+pub fn updateRectMergesOnlyProvidedFieldsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const create_message =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_rect","params":{"x":0,"y":0,"w":10,"h":10,"color":{"r":1,"g":2,"b":3,"a":255},"filled":false}}
+    ;
+    const create_result = try d.handle(alloc, create_message);
+    if (create_result.response) |r| alloc.free(r);
+
+    // Move it (x/y only) -- everything else must survive untouched.
+    const update_message =
+        \\{"jsonrpc":"2.0","method":"update_rect","params":{"rect":1,"x":40,"y":50}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, update_message)).response == null);
+
+    const r = ctx.root.rects.get(1) orelse return error.TestUnexpectedResult;
+    try testz.expectEqual(r.x, 40);
+    try testz.expectEqual(r.y, 50);
+    try testz.expectEqual(r.w, 10);
+    try testz.expectEqual(r.color.r, 1);
+    try testz.expectTrue(!r.filled);
+}
+
+/// `destroy_rect` removes the rect immediately, and a second destroy (or
+/// any `update_rect`) against the now-unknown handle errors rather than
+/// silently no-op-ing.
+pub fn destroyRectRemovesItAndDoubleDestroyErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const create_message =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_rect","params":{"x":0,"y":0,"w":5,"h":5,"color":{"r":1,"g":1,"b":1,"a":255}}}
+    ;
+    const create_result = try d.handle(alloc, create_message);
+    if (create_result.response) |r| alloc.free(r);
+
+    const destroy_message =
+        \\{"jsonrpc":"2.0","method":"destroy_rect","params":{"rect":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, destroy_message)).response == null);
+    try testz.expectTrue(ctx.root.rects.get(1) == null);
+
+    try testz.expectError(d.handle(alloc, destroy_message), dispatch.DispatchError.UnknownRect);
+}
+
+pub fn updateRectUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"update_rect","params":{"rect":99,"x":1}}
+    ;
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownRect);
+}
+
 /// Regression test for the "extra blank space before the prompt" bug:
 /// glyphwire-view (view/main.zig) issues `draw_image` then a
 /// `set_property` cursor move to just past the image's bottom edge,

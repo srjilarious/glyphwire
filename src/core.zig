@@ -56,11 +56,38 @@ pub const Metadata = struct {
 /// that slice scaled back down into the cell -- see `Layer.drawImage` and
 /// host/render.zig's `emitImageCell`. Upscaling (`scale > 1`) is never
 /// requested by a client but the math doesn't forbid it.
+///
+/// `src_right`/`src_bottom` are the exclusive source-pixel bound this
+/// covered cell must not sample past, on top of the image's own real
+/// edge -- how `draw_image`'s optional source rect (`ImageSrcRect`, a
+/// sprite-sheet-style sub-region of the image) clips at *its own* edge
+/// instead of the whole image's, so a sprite drawn from the middle of a
+/// sheet doesn't bleed into its neighbours at its partial edge cell. Both
+/// default to `maxInt`, i.e. "no bound beyond the image's own edge" --
+/// byte-identical to the pre-source-rect behavior when no source rect was
+/// requested.
 pub const ImageBg = struct {
     handle: ImageHandle,
     offset_x: u32,
     offset_y: u32,
     scale: f32 = 1.0,
+    src_right: u32 = std.math.maxInt(u32),
+    src_bottom: u32 = std.math.maxInt(u32),
+};
+
+/// A sub-rectangle of an image's source pixels to sample from --
+/// general-purpose sprite-sheet / sub-image support for `draw_image`, not
+/// specific to any one client. `w`/`h` of `0` (the default) mean "to the
+/// image's own right/bottom edge from `(x, y)`", so `.{}` reproduces the
+/// old whole-image behavior exactly. A rect that starts at or past the
+/// image's own edge, or is otherwise empty after clamping to it, simply
+/// draws nothing -- same treatment `drawImage` already gives an image
+/// smaller than the requested span.
+pub const ImageSrcRect = struct {
+    x: u32 = 0,
+    y: u32 = 0,
+    w: u32 = 0,
+    h: u32 = 0,
 };
 
 /// How an icon's source image is sized against its anchor cell:
@@ -1308,6 +1335,14 @@ pub const Layer = struct {
     /// at mutation time, not per frame -- see `Table.render`), but kept
     /// for a future "which table's border wins where two overlap" rule.
     table_order: std.ArrayList(TableHandle) = .empty,
+    /// Overlay rects painted onto this layer (`create_rect`), keyed by
+    /// handle -- a component of the layer exactly like `tables`, and
+    /// allocated from the same kind of shared counter
+    /// (`Context.next_rect_handle`). No ordering list: unlike tables,
+    /// rects never repaint cells they might overlap (they're not part of
+    /// the cell grid at all), so there's no "which one wins" question to
+    /// answer.
+    rects: std.AutoHashMap(RectHandle, Rect),
     /// Whether this layer's size should follow the context's base size on
     /// a window resize -- true for the root layer and for any
     /// `create_layer` layer made without an explicit `width`/`height` (so
@@ -1369,6 +1404,7 @@ pub const Layer = struct {
             .width = width,
             .height = height,
             .tables = std.AutoHashMap(TableHandle, Table).init(alloc),
+            .rects = std.AutoHashMap(RectHandle, Rect).init(alloc),
             .owners = std.AutoHashMap(ConnId, void).init(alloc),
             .scrollback_rows = scrollback_rows,
             .buf = buf,
@@ -1383,6 +1419,7 @@ pub const Layer = struct {
         while (table_it.next()) |t| t.deinit();
         self.tables.deinit();
         self.table_order.deinit(self.alloc);
+        self.rects.deinit();
         self.highlighted_ids.deinit(self.alloc);
         self.owners.deinit();
     }
@@ -2646,6 +2683,14 @@ pub const Layer = struct {
     /// when it was drawn, instead of interleaving into the flowing output
     /// the way multi-line text does). Only the column span still clips at
     /// `self.width` -- columns never scroll.
+    ///
+    /// `src` picks a sub-rectangle of the source image to sample from
+    /// instead of the whole thing (`ImageSrcRect`, general-purpose
+    /// sprite-sheet support) -- `.{}` reproduces the pre-source-rect
+    /// behavior exactly. Clamped to the image's own bounds first, so a
+    /// rect that starts past the image's edge (or is empty after
+    /// clamping) draws nothing, same treatment an oversized `row_span`/
+    /// `col_span` already gets.
     pub fn drawImage(
         self: *Layer,
         handle: ImageHandle,
@@ -2658,6 +2703,7 @@ pub const Layer = struct {
         cell_px_w: u32,
         cell_px_h: u32,
         scale: f32,
+        src: ImageSrcRect,
     ) void {
         const s: f32 = if (scale > 0) scale else 1.0;
         // Source pixels each cell samples along each axis. At `s == 1` this
@@ -2666,6 +2712,17 @@ pub const Layer = struct {
         // natural-size draw is unchanged.
         const src_step_x: f32 = @as(f32, @floatFromInt(cell_px_w)) / s;
         const src_step_y: f32 = @as(f32, @floatFromInt(cell_px_h)) / s;
+
+        // The sub-rect's own bounds, clamped to the image's real edge --
+        // `avail_*` saturates at 0 rather than underflowing when `src.x`/
+        // `src.y` is already past the image, which then makes `eff_*` 0
+        // and every cell below fails its `>= src_right`/`src_bottom` test.
+        const avail_w: u32 = if (src.x >= img_w) 0 else img_w - src.x;
+        const avail_h: u32 = if (src.y >= img_h) 0 else img_h - src.y;
+        const eff_w: u32 = if (src.w > 0) @min(src.w, avail_w) else avail_w;
+        const eff_h: u32 = if (src.h > 0) @min(src.h, avail_h) else avail_h;
+        const src_right = src.x + eff_w;
+        const src_bottom = src.y + eff_h;
 
         const col_end = @min(col + col_span, self.width);
         var display_row = self.resolveRow(row);
@@ -2680,23 +2737,23 @@ pub const Layer = struct {
                 }
             }
 
-            const offset_y: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(img_row)) * src_step_y));
-            if (offset_y >= img_h) break;
+            const offset_y: u32 = src.y + @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(img_row)) * src_step_y)));
+            if (offset_y >= src_bottom) break;
 
             var c = col;
             while (c < col_end) : (c += 1) {
-                const offset_x: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(c - col)) * src_step_x));
-                if (offset_x >= img_w) continue;
+                const offset_x: u32 = src.x + @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(c - col)) * src_step_x)));
+                if (offset_x >= src_right) continue;
 
-                self.setCellImage(display_row, c, handle, offset_x, offset_y, s);
+                self.setCellImage(display_row, c, handle, offset_x, offset_y, s, src_right, src_bottom);
             }
         }
         self.revision += 1;
         self.render_gen +%= 1;
     }
 
-    fn setCellImage(self: *Layer, row: usize, col: usize, handle: ImageHandle, offset_x: u32, offset_y: u32, scale: f32) void {
-        self.cell(row, col).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y, .scale = scale } };
+    fn setCellImage(self: *Layer, row: usize, col: usize, handle: ImageHandle, offset_x: u32, offset_y: u32, scale: f32, src_right: u32, src_bottom: u32) void {
+        self.cell(row, col).style.bg = .{ .image = .{ .handle = handle, .offset_x = offset_x, .offset_y = offset_y, .scale = scale, .src_right = src_right, .src_bottom = src_bottom } };
     }
 
     /// `scale`/`h_align`/`v_align` default to the original fit-and-center
@@ -3148,6 +3205,55 @@ pub const Layer = struct {
 
         return try out.toOwnedSlice(alloc);
     }
+};
+
+// ─── Rect ────────────────────────────────────────────────────────────────
+//
+// A first-class overlay primitive: a plain coloured box (filled or
+// outlined) positioned in a layer's own *content pixel space* rather than
+// on the cell grid -- `x`/`y`/`w`/`h` are pixels measured from the
+// layer's row-0/col-0 corner (the same frame `ImageBg.offset_x/offset_y`
+// sample within one cell, generalized to the whole layer), scaled by the
+// session's fixed cell pixel metrics but not otherwise tied to any cell
+// boundary. Exists so a client drawing an overlay (gw-read's mokuro
+// bubble highlight boxes) doesn't have to approximate a box out of
+// character cells -- see decisions.md's Rect section for the rejected
+// alternatives (box-drawing characters, a cell-anchored span like
+// `ImageBg`). A rect is a component of the layer it's drawn on
+// (`Layer.rects`), exactly like a `Table`, and is composited by
+// glyphwire-host as its own quad batch drawn on top of everything else
+// the layer paints (see `host/render.zig`'s `rects` batch).
+pub const RectHandle = u32;
+
+pub const RectError = error{UnknownRect};
+
+/// One overlay rectangle. `line_width` only matters when `filled` is
+/// false -- an outline's stroke thickness in pixels, drawn as four
+/// non-overlapping strips so a translucent `color` doesn't double up at
+/// the corners.
+pub const Rect = struct {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    color: Color,
+    line_width: u32 = 1,
+    filled: bool = false,
+};
+
+/// `update_rect`'s partial patch: each `null` field leaves that property
+/// of the existing rect unchanged, unlike `Rect`'s own fields (which are
+/// always fully specified at `create_rect` time). Distinct from `Rect`
+/// rather than `?Rect`-of-everything so a caller moving a rect doesn't
+/// have to re-send its color/size just to avoid resetting them.
+pub const RectUpdate = struct {
+    x: ?u32 = null,
+    y: ?u32 = null,
+    w: ?u32 = null,
+    h: ?u32 = null,
+    color: ?Color = null,
+    line_width: ?u32 = null,
+    filled: ?bool = null,
 };
 
 // ─── Table ───────────────────────────────────────────────────────────────
@@ -4442,6 +4548,9 @@ pub const Context = struct {
     /// Shared across every layer's `tables` map -- see `TableHandle`'s
     /// doc comment.
     next_table_handle: TableHandle = 1,
+    /// Shared across every layer's `rects` map, same reasoning as
+    /// `next_table_handle`.
+    next_rect_handle: RectHandle = 1,
     /// Session clipboard buffer. The wire's `set_clipboard` /
     /// `get_clipboard` read and write this directly; the headless case
     /// (`server/main.zig`, tests) has nothing else behind it. glyphwire-
@@ -5167,6 +5276,47 @@ pub const Context = struct {
                 break;
             }
         }
+    }
+
+    /// `create_rect`: adds a new pixel-space overlay rect to the resolved
+    /// layer, allocating a fresh handle from `next_rect_handle` (a single
+    /// counter shared across every layer, exactly like
+    /// `next_table_handle`). Renders immediately -- unlike a freshly
+    /// created table (which has no rows yet), a rect is fully specified
+    /// up front and has nothing further to configure before it paints.
+    pub fn createRect(self: *Context, layer_handle: ?LayerHandle, rect: Rect) !RectHandle {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+
+        const handle = self.next_rect_handle;
+        try layer.rects.put(handle, rect);
+        self.next_rect_handle += 1;
+        layer.touchRender();
+        return handle;
+    }
+
+    /// `update_rect`: merges `patch`'s non-null fields into the existing
+    /// rect -- see `RectUpdate`'s doc comment for why this is a merge
+    /// rather than a replace.
+    pub fn updateRect(self: *Context, layer_handle: ?LayerHandle, handle: RectHandle, patch: RectUpdate) !void {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+        const r = layer.rects.getPtr(handle) orelse return RectError.UnknownRect;
+        if (patch.x) |v| r.x = v;
+        if (patch.y) |v| r.y = v;
+        if (patch.w) |v| r.w = v;
+        if (patch.h) |v| r.h = v;
+        if (patch.color) |v| r.color = v;
+        if (patch.line_width) |v| r.line_width = v;
+        if (patch.filled) |v| r.filled = v;
+        layer.touchRender();
+    }
+
+    /// `destroy_rect`: removes the rect and stops it from painting. Errors
+    /// on an unknown layer or rect handle, same treatment `destroyTable`
+    /// gives an unknown table handle.
+    pub fn destroyRect(self: *Context, layer_handle: ?LayerHandle, handle: RectHandle) !void {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+        _ = layer.rects.fetchRemove(handle) orelse return RectError.UnknownRect;
+        layer.touchRender();
     }
 
     /// Registers `handle` under `name` in the icon catalog, for `draw_icon`

@@ -147,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
     // image instead of overlapping it. Same get-cursor/draw/set-cursor
     // shape glyphwire-ls uses per entry -- see its writeGrid doc comment.
     const cur = try client.getCursor();
-    try client.drawImage(handle, null, null, rows, cols, scale);
+    try client.drawImage(handle, null, null, rows, cols, scale, .{});
 
     // `cur.row + rows` is the target row *before* `drawImage` ran, but an
     // image tall enough to reach the layer's bottom edge already scrolled

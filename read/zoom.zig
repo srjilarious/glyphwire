@@ -59,8 +59,11 @@ pub const Limits = struct {
     min_scale: f32 = 0.05,
     /// The cap on *every* mode, fit modes included. At 4x a 1600x2400
     /// scan covers roughly 300k cells on an 10x20px grid; each doubling
-    /// past that quadruples the server-side cell count.
-    max_scale: f32 = 4.0,
+    /// past that quadruples the server-side cell count -- raised from the
+    /// original 4.0 default (2026-09) once that turned out to be too
+    /// conservative for real manga scans; `read.conf.lua`'s `max_zoom` can
+    /// still push it up to `config.zoom_max_ceiling`.
+    max_scale: f32 = 8.0,
     /// Multiplicative step for one `+` / `-` press. 1.25 gives ~3 presses
     /// per doubling, which feels like a zoom rather than a jump.
     step: f32 = 1.25,

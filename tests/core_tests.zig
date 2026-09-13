@@ -821,7 +821,7 @@ pub fn layerDrawImageMarksCoveredCellsWithOffsetsTest(io: std.Io, alloc: std.mem
     defer layer.deinit();
 
     // A 2x2-cell span at 12px cells covers a 24x24px image exactly.
-    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12, 1.0);
+    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12, 1.0, .{});
 
     const c00 = layer.cell(1, 1).style.bg;
     const c01 = layer.cell(1, 2).style.bg;
@@ -857,7 +857,7 @@ pub fn layerDrawImageLeavesCellsBeyondImageBoundsUntouchedTest(io: std.Io, alloc
     // A 12x12px image (one cell) drawn into a 2x2-cell span: only the
     // top-left cell is actually covered -- the other three cells the
     // image doesn't reach should be left as they were.
-    layer.drawImage(1, 0, 2, 2, 2, 12, 12, 12, 12, 1.0);
+    layer.drawImage(1, 0, 2, 2, 2, 12, 12, 12, 12, 1.0, .{});
 
     try testz.expectEqual(layer.cell(0, 2).style.bg.image.handle, 1);
     switch (layer.cell(0, 3).style.bg) {
@@ -885,7 +885,7 @@ pub fn layerDrawImageScrollsInsteadOfClippingRowSpanPastBottomTest(io: std.Io, a
     // place (which would mean nothing actually scrolled).
     layer.cell(0, 0).style.bg = .{ .color = .{ .r = 9, .g = 9, .b = 9 } };
 
-    layer.drawImage(1, 1, 0, 3, 1, 10, 30, 10, 10, 1.0);
+    layer.drawImage(1, 1, 0, 3, 1, 10, 30, 10, 10, 1.0, .{});
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_y, 0);
     try testz.expectEqual(layer.cell(1, 0).style.bg.image.offset_y, 10);
@@ -907,7 +907,7 @@ pub fn layerDrawImageScaledStepsSourceOffsetsByCellOverScaleTest(io: std.Io, all
     // Each cell samples cell_px / scale = 24 source pixels, so the stored
     // per-cell offsets step by 24, not 12, and every cell records the
     // scale for the renderer.
-    layer.drawImage(1, 0, 0, 2, 4, 96, 48, 12, 12, 0.5);
+    layer.drawImage(1, 0, 0, 2, 4, 96, 48, 12, 12, 0.5, .{});
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_x, 0);
     try testz.expectEqual(layer.cell(0, 1).style.bg.image.offset_x, 24);
@@ -929,7 +929,7 @@ pub fn layerDrawImageScaledStopsAtImageEdgeInSourceSpaceTest(io: std.Io, alloc: 
     // col_span of 5 leaves cells 3 and 4 (offset 96, past width 60)
     // untouched -- the same "cell past the image's edge is left as it was"
     // contract the unscaled path has.
-    layer.drawImage(1, 0, 0, 1, 5, 60, 12, 12, 12, 0.5);
+    layer.drawImage(1, 0, 0, 1, 5, 60, 12, 12, 12, 0.5, .{});
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_x, 0);
     try testz.expectEqual(layer.cell(0, 1).style.bg.image.offset_x, 24);
@@ -951,12 +951,96 @@ pub fn layerDrawImageScaleOfOneMatchesUnscaledOffsetsTest(io: std.Io, alloc: std
 
     // scale 1.0 must be byte-identical to the pre-scale behavior: a 2x2
     // span over a 24x24px image at 12px cells still steps offsets by 12.
-    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12, 1.0);
+    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12, 1.0, .{});
 
     try testz.expectEqual(layer.cell(1, 1).style.bg.image.offset_x, 0);
     try testz.expectEqual(layer.cell(1, 2).style.bg.image.offset_x, 12);
     try testz.expectEqual(layer.cell(2, 1).style.bg.image.offset_y, 12);
     try testz.expectEqual(layer.cell(1, 1).style.bg.image.scale, 1.0);
+}
+
+pub fn layerDrawImageSourceRectOffsetsSamplingIntoTheSheetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // A 48x48px sheet, sampling the 24x24px sprite starting at (24, 24) --
+    // the bottom-right quadrant. Every stored offset should be shifted by
+    // the source rect's own origin, not measured from the sheet's (0, 0).
+    layer.drawImage(1, 0, 0, 2, 2, 48, 48, 12, 12, 1.0, .{ .x = 24, .y = 24, .w = 24, .h = 24 });
+
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_x, 24);
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_y, 24);
+    try testz.expectEqual(layer.cell(0, 1).style.bg.image.offset_x, 36);
+    try testz.expectEqual(layer.cell(1, 0).style.bg.image.offset_y, 36);
+}
+
+pub fn layerDrawImageSourceRectClipsAtItsOwnEdgeNotTheImagesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // A 12px-per-cell sprite at (0,0) sized 24x24 inside a much bigger
+    // 96x96 sheet, drawn into a 3x3-cell span: the third row/column of
+    // cells is past the *sprite's* edge even though the *sheet* still has
+    // plenty of room there, so those cells must be left untouched rather
+    // than sampling into the neighbouring sprite.
+    layer.drawImage(1, 0, 0, 3, 3, 96, 96, 12, 12, 1.0, .{ .x = 0, .y = 0, .w = 24, .h = 24 });
+
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.handle, 1);
+    try testz.expectEqual(layer.cell(1, 1).style.bg.image.handle, 1);
+    switch (layer.cell(0, 2).style.bg) {
+        .color => {},
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+    switch (layer.cell(2, 0).style.bg) {
+        .color => {},
+        .image, .icon => return error.TestUnexpectedResult,
+    }
+}
+
+pub fn layerDrawImageSourceRectRecordsClipBoundsOnEveryCoveredCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // The stored `src_right`/`src_bottom` are what host/render.zig clips
+    // sampling to at the sprite's own partial edge cell -- confirm they
+    // land on the sprite's bound (48), not the sheet's (96).
+    layer.drawImage(1, 0, 0, 2, 2, 96, 96, 12, 12, 1.0, .{ .x = 12, .y = 12, .w = 36, .h = 36 });
+
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.src_right, 48);
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.src_bottom, 48);
+}
+
+pub fn layerDrawImageDefaultSourceRectMatchesWholeImageBoundsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    // `.{}` (no source rect) must be byte-identical to the pre-source-rect
+    // behavior -- `src_right`/`src_bottom` land on the image's own edge.
+    layer.drawImage(1, 0, 0, 2, 2, 24, 24, 12, 12, 1.0, .{});
+
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.src_right, 24);
+    try testz.expectEqual(layer.cell(0, 0).style.bg.image.src_bottom, 24);
+}
+
+pub fn layerDrawImageSourceRectPastImageEdgeDrawsNothingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
+    defer layer.deinit();
+
+    layer.cell(0, 0).style.bg = .{ .color = .{ .r = 9, .g = 9, .b = 9 } };
+
+    // A source rect starting at or past the image's own edge is empty
+    // after clamping, so it must draw nothing rather than underflowing.
+    layer.drawImage(1, 0, 0, 1, 1, 24, 24, 12, 12, 1.0, .{ .x = 24, .y = 0, .w = 12, .h = 12 });
+
+    switch (layer.cell(0, 0).style.bg) {
+        .color => |c| try testz.expectEqual(c.r, 9),
+        .image, .icon => return error.TestUnexpectedResult,
+    }
 }
 
 pub fn layerDrawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4092,7 +4176,7 @@ pub fn contextDestroyImageLeavesCellsDanglingTest(io: std.Io, alloc: std.mem.All
 
     const bytes = fakePngBytes(48, 24);
     const handle = try ctx.loadImage(.png, &bytes);
-    ctx.root.drawImage(handle, 0, 0, 2, 2, 48, 24, 12, 12, 1.0);
+    ctx.root.drawImage(handle, 0, 0, 2, 2, 48, 24, 12, 12, 1.0, .{});
     try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.handle, handle);
 
     try ctx.destroyImage(handle);
@@ -4206,7 +4290,7 @@ pub fn sessionSweepReclaimsScrolledOffImageTest(io: std.Io, alloc: std.mem.Alloc
 
     const bytes = fakePngBytes(48, 24);
     const handle = try root.loadImageFrom(.png, &bytes, 7);
-    root.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0);
+    root.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0, .{});
 
     // Still on screen, and its loader has gone: pinned no longer, but
     // referenced, so the sweep must leave it.
@@ -4233,7 +4317,7 @@ pub fn sessionSweepKeepsImageInRetainedScrollbackTest(io: std.Io, alloc: std.mem
 
     const bytes = fakePngBytes(48, 24);
     const handle = try root.loadImageFrom(.png, &bytes, 7);
-    root.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0);
+    root.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0, .{});
     session.releaseImages(7);
 
     // Off the viewport, but well inside the 20 retained rows.
@@ -4259,7 +4343,7 @@ pub fn sessionSweepKeepsImageReferencedFromAnotherContextTest(io: std.Io, alloc:
 
     const other = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
     const other_ctx = session.contextPtr(other).?;
-    other_ctx.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0);
+    other_ctx.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0, .{});
 
     try testz.expectEqual(try session.sweepImages(), 0);
     try testz.expectTrue(root.imageInfo(handle) != null);

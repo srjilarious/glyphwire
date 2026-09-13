@@ -505,20 +505,23 @@ pub const Client = struct {
         return .{ .width = parsed.value.result.width, .height = parsed.value.result.height };
     }
 
-    /// `draw_image(handle, row?, col?, row_span, col_span, scale)` -- a
-    /// notification. Places the image anchored at `(row, col)` (defaulting
-    /// to the layer's cursor when either is omitted, same as `write_text`'s
-    /// documented convention), clipped to the given span rather than
-    /// stretched to fill it — see decisions.md's Image section. `scale` is
-    /// the uniform factor the image is drawn at: `1.0` is its natural pixel
-    /// size (the original behavior); `< 1.0` shrinks it (glyphwire-view
-    /// passes `target_width_px / image_width_px` for `--size fit-width`).
-    /// Aspect-ratio-aware placement (choosing `row_span`/`col_span` to
-    /// match the image's *scaled* shape) is the caller's job; `getImageInfo`
-    /// plus `getCellMetrics` and `getSize` give it what it needs to compute
+    /// `draw_image(handle, row?, col?, row_span, col_span, scale, src)` --
+    /// a notification. Places the image anchored at `(row, col)`
+    /// (defaulting to the layer's cursor when either is omitted, same as
+    /// `write_text`'s documented convention), clipped to the given span
+    /// rather than stretched to fill it — see decisions.md's Image
+    /// section. `scale` is the uniform factor the image is drawn at:
+    /// `1.0` is its natural pixel size (the original behavior); `< 1.0`
+    /// shrinks it (glyphwire-view passes `target_width_px / image_width_px`
+    /// for `--size fit-width`). `src` optionally restricts sampling to a
+    /// sub-rectangle of the image (sprite-sheet support) -- `.{}` draws
+    /// from the whole image, the original behavior. Aspect-ratio-aware
+    /// placement (choosing `row_span`/`col_span` to match the image's
+    /// *scaled* shape) is the caller's job; `getImageInfo` plus
+    /// `getCellMetrics` and `getSize` give it what it needs to compute
     /// that.
-    pub fn drawImage(self: *Client, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize, scale: f32) !void {
-        try self.drawImageOn(self.default_layer, handle, row, col, row_span, col_span, scale);
+    pub fn drawImage(self: *Client, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize, scale: f32, src: core.ImageSrcRect) !void {
+        try self.drawImageOn(self.default_layer, handle, row, col, row_span, col_span, scale, src);
     }
 
     /// `draw_image(layer, ...)` -- the explicitly-targeted form of
@@ -535,6 +538,7 @@ pub const Client = struct {
         row_span: usize,
         col_span: usize,
         scale: f32,
+        src: core.ImageSrcRect,
     ) !void {
         try self.notify("draw_image", .{
             .layer = layer,
@@ -544,6 +548,10 @@ pub const Client = struct {
             .row_span = row_span,
             .col_span = col_span,
             .scale = scale,
+            .src_x = src.x,
+            .src_y = src.y,
+            .src_w = src.w,
+            .src_h = src.h,
         });
     }
 
@@ -1470,6 +1478,49 @@ pub const Client = struct {
         };
     }
 
+    /// `create_rect(layer?, x, y, w, h, color, line_width?, filled?)` --
+    /// a request. Adds a first-class pixel-space overlay rectangle to
+    /// `layer` (defaulting to `default_layer`) and returns a fresh
+    /// handle for `updateRect`/`destroyRect`. Position/size are in the
+    /// layer's own content pixel space -- see `core.Rect`'s doc comment.
+    pub fn createRect(self: *Client, layer: ?core.LayerHandle, rect: core.Rect) !core.RectHandle {
+        var parsed = try self.request(struct { handle: core.RectHandle }, "create_rect", .{
+            .layer = layer,
+            .x = rect.x,
+            .y = rect.y,
+            .w = rect.w,
+            .h = rect.h,
+            .color = protocol.Color{ .r = rect.color.r, .g = rect.color.g, .b = rect.color.b, .a = rect.color.a },
+            .line_width = rect.line_width,
+            .filled = rect.filled,
+        });
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    /// `update_rect(layer?, rect, ...)` -- a notification. Merges `patch`'s
+    /// non-null fields into the existing rect; a field left `null` keeps
+    /// its current value -- see `core.RectUpdate`'s doc comment.
+    pub fn updateRect(self: *Client, layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) !void {
+        try self.notify("update_rect", .{
+            .layer = layer,
+            .rect = handle,
+            .x = patch.x,
+            .y = patch.y,
+            .w = patch.w,
+            .h = patch.h,
+            .color = Client.colorToJson(patch.color),
+            .line_width = patch.line_width,
+            .filled = patch.filled,
+        });
+    }
+
+    /// `destroy_rect(layer?, rect)` -- a notification. Removes the rect;
+    /// it stops painting immediately.
+    pub fn destroyRect(self: *Client, layer: ?core.LayerHandle, handle: core.RectHandle) !void {
+        try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
+    }
+
     /// `create_metadata(json)` -- a request. Stores `json` verbatim (the
     /// server never parses it, only stores/returns it -- see decisions.md's
     /// Metadata section) and returns a fresh handle that
@@ -2068,7 +2119,14 @@ pub const CellsSnapshot = struct {
             .grapheme = c.g,
             .fg = .{ .r = c.fg.r, .g = c.fg.g, .b = c.fg.b, .a = c.fg.a },
             .bg = if (c.bg) |bg| .{ .r = bg.r, .g = bg.g, .b = bg.b, .a = bg.a } else null,
-            .bg_image = if (c.bg_image) |img| .{ .handle = img.handle, .offset_x = img.offset_x, .offset_y = img.offset_y } else null,
+            .bg_image = if (c.bg_image) |img| .{
+                .handle = img.handle,
+                .offset_x = img.offset_x,
+                .offset_y = img.offset_y,
+                .scale = img.scale,
+                .src_right = img.src_right,
+                .src_bottom = img.src_bottom,
+            } else null,
             .bg_icon = if (c.bg_icon) |icon| .{
                 .handle = icon.handle,
                 .scale = std.meta.stringToEnum(core.IconScale, icon.scale) orelse .fit,
