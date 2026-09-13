@@ -921,6 +921,23 @@ pub const PropertyName = enum {
     /// `destroy_layer` refuses it, so root reports
     /// `PropertyError.ReadOnlyProperty`.
     visibility,
+    /// How opaque glyphwire-host composites this layer, 0.0..1.0
+    /// (`{value: f32}`, default 1.0). The factor multiplies the alpha of
+    /// every quad the layer contributes -- background fills, text, icons
+    /// and image cells alike -- so the whole layer fades as one and
+    /// whatever is behind it shows through.
+    ///
+    /// Distinct from `visibility`, which is the all-or-nothing form: a
+    /// hidden layer contributes no quads at all, while a layer at 0.5
+    /// still occupies its bounds and still takes the mouse. That's the
+    /// difference `gw-read` wants between "get this dialog out of the
+    /// way" and "let me see the artwork through it".
+    ///
+    /// Root reports `PropertyError.ReadOnlyProperty`, the same reason
+    /// `visibility` does: fading the root layer to 0 would blank the
+    /// session with no wire path back. Out-of-range values are clamped
+    /// rather than rejected -- see `Layer.opacity`.
+    opacity,
     /// The window of this layer's **content grid** that glyphwire-host
     /// draws, in cells (`{cols, rows}`). Zero on an axis means the whole
     /// content grid on that axis -- the default, and what every layer did
@@ -990,6 +1007,7 @@ pub const PropertyValue = union(PropertyName) {
     size: LayerSize,
     scroll: LayerScroll,
     visibility: bool,
+    opacity: f32,
     viewport: Viewport,
     scroll_offset: CellPos,
     scrollbars: ScrollbarState,
@@ -1000,8 +1018,9 @@ pub const PropertyValue = union(PropertyName) {
 pub const PropertyError = error{
     UnknownProperty,
     /// The property exists but this layer won't accept a write to it --
-    /// `size` and `visibility` on the root layer, whose geometry and
-    /// visibility the host owns. See each one's doc comment above.
+    /// `size`, `visibility` and `opacity` on the root layer, whose
+    /// geometry and compositing the host owns. See each one's doc
+    /// comment above.
     ReadOnlyProperty,
 };
 
@@ -1299,6 +1318,11 @@ pub const Layer = struct {
     /// See `PropertyName.visibility`. Always true for the root layer --
     /// nothing can set it there.
     visible: bool = true,
+    /// See `PropertyName.opacity`. Always 1.0 for the root layer.
+    /// Clamped to 0.0..1.0 on write, and a NaN is taken as 1.0: a
+    /// client that computes a fade factor and divides by zero should
+    /// get a visible layer back, not one that vanishes.
+    opacity: f32 = 1.0,
     /// See `PropertyName.viewport`. 0 on an axis means the whole content
     /// grid on that axis; read them through `viewportCols`/`viewportRows`,
     /// which resolve the default and clamp to the content.
@@ -2926,6 +2950,7 @@ pub const Layer = struct {
             .size => .{ .size = .{ .cols = self.width, .rows = self.height } },
             .scroll => .{ .scroll = .{ .offset = self.view_scroll, .max = self.history_len } },
             .visibility => .{ .visibility = self.visible },
+            .opacity => .{ .opacity = self.opacity },
             .viewport => .{ .viewport = .{ .cols = self.viewportCols(), .rows = self.viewportRows() } },
             .scroll_offset => .{ .scroll_offset = self.effectiveScrollOffset() },
             .scrollbars => .{ .scrollbars = self.scrollbarState() },
@@ -2950,6 +2975,7 @@ pub const Layer = struct {
             .size => unreachable, // reallocates and is root-guarded; see Context.setLayerProperty
             .scroll => unreachable, // get-only; move it with scrollView, see PropertyName.scroll
             .visibility => |v| self.visible = v,
+            .opacity => |v| self.opacity = if (std.math.isNan(v)) 1.0 else std.math.clamp(v, 0.0, 1.0),
             .viewport => |v| {
                 self.viewport_cols = v.cols;
                 self.viewport_rows = v.rows;
@@ -4722,7 +4748,7 @@ pub const Context = struct {
     /// `set_property` with the context in scope -- the single entry point
     /// the dispatcher uses. Owns the three things a `Layer` can't decide
     /// alone: which properties the root layer refuses (`size`,
-    /// `visibility`), the cell-metric resolution `cell_position` needs,
+    /// `visibility`, `opacity`), the cell-metric resolution `cell_position` needs,
     /// and the reallocation `size` performs. Everything else is forwarded
     /// to `Layer.setProperty`.
     pub fn setLayerProperty(self: *Context, handle: ?LayerHandle, value: PropertyValue) SetPropertyError!void {
@@ -4747,6 +4773,10 @@ pub const Context = struct {
             .visibility => |v| {
                 if (is_root) return PropertyError.ReadOnlyProperty;
                 layer.setProperty(.{ .visibility = v });
+            },
+            .opacity => |v| {
+                if (is_root) return PropertyError.ReadOnlyProperty;
+                layer.setProperty(.{ .opacity = v });
             },
             .cell_position => |cell| {
                 layer.pos = self.pixelPosForCell(cell);

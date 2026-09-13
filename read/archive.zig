@@ -17,6 +17,9 @@
 //!   path needs it anyway, and it's how a `mokuro`-processed volume
 //!   already sits on disk.
 //!
+//! Whichever source it is, the archive also knows how to hand back the
+//! volume's **mokuro sidecar** if there is one -- see `readMokuro`.
+//!
 //! The format is decided by the file's own magic bytes, not its
 //! extension: `.cbz` files that are actually RAR are common enough that
 //! trusting the name gets books wrong (`gw-view` sniffs image containers
@@ -99,6 +102,11 @@ pub const Archive = struct {
     /// `deinit` then removes. Owned.
     temp_dir: ?[]u8 = null,
 
+    /// Where this book's mokuro OCR sidecar lives, if one was found while
+    /// indexing (see `findMokuro`). Null means the book has no OCR and
+    /// `gw-read` runs with the feature off.
+    mokuro: ?MokuroRef = null,
+
     /// Buffer for the zip reader. 64 KiB is a compromise: big enough that
     /// inflating a multi-megabyte page isn't a syscall per few KB, small
     /// enough to be unremarkable for a process that holds one book.
@@ -116,6 +124,10 @@ pub const Archive = struct {
         self.pages.deinit(alloc);
         if (self.file) |f| f.close(self.io);
         if (self.read_buf.len > 0) alloc.free(self.read_buf);
+        if (self.mokuro) |m| switch (m) {
+            .file => |f| alloc.free(f),
+            .zip => {},
+        };
         if (self.temp_dir) |d| {
             // Best effort: a temp tree left behind is untidy, not a
             // reason to fail on the way out.
@@ -151,7 +163,58 @@ pub const Archive = struct {
             },
         }
     }
+
+    /// Whether this book came with mokuro OCR. Cheap -- the lookup
+    /// happened at open time.
+    pub fn hasMokuro(self: *const Archive) bool {
+        return self.mokuro != null;
+    }
+
+    /// The bytes of the mokuro sidecar, freshly allocated, or null when
+    /// the book has none. Read on demand rather than at open time: a
+    /// volume's OCR is megabytes of JSON, and `--list` and the headless
+    /// path never need it.
+    pub fn readMokuro(self: *Archive, alloc: std.mem.Allocator) !?[]u8 {
+        const ref = self.mokuro orelse return null;
+        switch (ref) {
+            .file => |path| return try std.Io.Dir.cwd().readFileAlloc(
+                self.io,
+                path,
+                alloc,
+                .limited(max_mokuro_bytes),
+            ),
+            .zip => |entry| {
+                var out: std.Io.Writer.Allocating = .init(alloc);
+                errdefer out.deinit();
+                try entry.extractTo(&self.reader, &out.writer);
+                return try out.toOwnedSlice();
+            },
+        }
+    }
 };
+
+/// True for a name that is a mokuro sidecar. Extension only -- mokuro
+/// names the file after the volume, and there is no magic to sniff.
+pub fn isMokuroName(name: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(name, ".mokuro");
+}
+
+/// Where a book's mokuro sidecar was found. The two cases mirror
+/// `Page.Ref` and are read back the same way.
+pub const MokuroRef = union(enum) {
+    /// A central-directory record: the `.mokuro` was packed at the top
+    /// level of the `.cbz` itself.
+    zip: std.zip.Iterator.Entry,
+    /// An owned path on disk -- a sidecar next to the book, a file inside
+    /// the directory being read, or one that came out of the temp tree a
+    /// RAR/7z book was unpacked into.
+    file: []u8,
+};
+
+/// Ceiling on a `.mokuro` file's size. A 2000-page volume's OCR runs to a
+/// few megabytes; 64 MiB is the same "obviously wrong" line
+/// `max_page_bytes` draws, for the same reason.
+pub const max_mokuro_bytes: usize = 64 * 1024 * 1024;
 
 /// Ceiling on one page's decompressed size. A 64 MiB page is already a
 /// wildly oversized scan; the limit is here so a zip bomb reports an
@@ -175,6 +238,11 @@ pub fn open(alloc: std.mem.Allocator, io: std.Io, path: []const u8) OpenError!*A
         error.IsDir => {
             try indexDirectory(self, path, path);
             if (self.pages.items.len == 0) return error.NoPages;
+            // Inside the folder first, then beside it. Beside is mokuro's
+            // own default output layout (`Vol1/` next to `Vol1.mokuro`),
+            // so the fallback is the common case, not the exotic one.
+            try findDirectoryMokuro(self, path);
+            if (self.mokuro == null) try findSiblingMokuro(self, path);
             return self;
         },
         else => return err,
@@ -182,22 +250,93 @@ pub fn open(alloc: std.mem.Allocator, io: std.Io, path: []const u8) OpenError!*A
     if (stat.kind == .directory) {
         try indexDirectory(self, path, path);
         if (self.pages.items.len == 0) return error.NoPages;
+        // Inside the folder first, then beside it -- see the `IsDir`
+        // branch above, which this one duplicates because `statFile`
+        // reports a directory either way depending on the platform.
+        try findDirectoryMokuro(self, path);
+        if (self.mokuro == null) try findSiblingMokuro(self, path);
         return self;
     }
 
     self.format = try sniff(io, path);
     switch (self.format) {
+        // `indexZip` picks up a packed top-level `.mokuro` as it walks
+        // the central directory -- one pass, no second scan.
         .zip => try indexZip(self, path),
         .rar, .sevenzip => {
             const dir = try extractExternally(self, path);
             try indexDirectory(self, dir, dir);
+            // The whole book was unpacked, so a packed sidecar is now a
+            // file in the temp tree; look there before the real sibling.
+            try findDirectoryMokuro(self, dir);
         },
         // `sniff` never reports `.directory` for a regular file.
         .directory => unreachable,
     }
 
     if (self.pages.items.len == 0) return error.NoPages;
+    // The sibling `<book>.mokuro` is the fallback for every archive kind:
+    // a packed one already claimed the slot if there was one.
+    if (self.mokuro == null) try findSiblingMokuro(self, path);
     return self;
+}
+
+/// Looks for `<path-without-extension>.mokuro` next to the book. Works
+/// for a directory too (`Vol1/` -> `Vol1.mokuro`), which is mokuro's own
+/// default output layout: the file lands beside the folder of images it
+/// was run over.
+fn findSiblingMokuro(self: *Archive, path: []const u8) OpenError!void {
+    const alloc = self.alloc;
+    // A trailing separator on a directory argument would otherwise make
+    // the stem empty and the candidate `.mokuro`.
+    const trimmed = std.mem.trimEnd(u8, path, "/");
+    if (trimmed.len == 0) return;
+
+    const dot = std.mem.lastIndexOfScalar(u8, trimmed, '.');
+    const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/');
+    // Only an extension in the *last* component counts -- `a.b/Vol1` has
+    // a dot, but not one that belongs to the book's name.
+    const stem = if (dot) |d|
+        (if (slash == null or d > slash.?) trimmed[0..d] else trimmed)
+    else
+        trimmed;
+
+    const candidate = try std.fmt.allocPrint(alloc, "{s}.mokuro", .{stem});
+    errdefer alloc.free(candidate);
+    const stat = std.Io.Dir.cwd().statFile(self.io, candidate, .{}) catch {
+        alloc.free(candidate);
+        return;
+    };
+    if (stat.kind == .directory) {
+        alloc.free(candidate);
+        return;
+    }
+    self.mokuro = .{ .file = candidate };
+}
+
+/// Looks for any `*.mokuro` sitting **directly** inside `dir` -- the
+/// "packed at the top level" case, once a RAR/7z book has been unpacked
+/// into a temp tree, and equally a directory book that keeps its OCR
+/// inside itself rather than beside itself.
+///
+/// Top level only, and the first match wins in directory-iteration order:
+/// a volume has exactly one sidecar, and recursing would find the OCR of
+/// a nested volume that isn't the one being read.
+fn findDirectoryMokuro(self: *Archive, dir: []const u8) OpenError!void {
+    if (self.mokuro != null) return;
+    const alloc = self.alloc;
+
+    var handle = std.Io.Dir.cwd().openDir(self.io, dir, .{ .iterate = true }) catch return;
+    defer handle.close(self.io);
+
+    var it = handle.iterate();
+    while (it.next(self.io) catch null) |raw| {
+        if (raw.kind == .directory) continue;
+        if (!isMokuroName(raw.name)) continue;
+        const full = try std.fs.path.join(alloc, &.{ dir, raw.name });
+        self.mokuro = .{ .file = full };
+        return;
+    }
 }
 
 /// Reads the first few bytes and matches them against the container
@@ -239,6 +378,16 @@ fn indexZip(self: *Archive, path: []const u8) OpenError!void {
     while (it.next() catch return error.UnknownArchiveFormat) |entry| {
         const name = entry.getFilename(&self.reader, &name_buf, .{}) catch continue;
         if (name.len == 0 or name[name.len - 1] == '/') continue;
+        // The OCR sidecar, if the book was packed with one. Top level
+        // only (no `/` in the name) -- the same "one volume, one sidecar"
+        // rule `findDirectoryMokuro` applies, and it keeps a nested
+        // volume's file from being picked up as this one's.
+        if (self.mokuro == null and isMokuroName(name) and
+            std.mem.indexOfScalar(u8, name, '/') == null)
+        {
+            self.mokuro = .{ .zip = entry };
+            continue;
+        }
         if (!pages.isPage(name)) {
             if (looksLikeImage(name)) self.skipped += 1;
             continue;
@@ -282,7 +431,15 @@ fn indexDirectory(self: *Archive, root: []const u8, dir: []const u8) OpenError!v
         // `full` starts with `root` by construction; +1 drops the
         // separator. A `root` that is itself the whole path (a single
         // file) can't reach here, so the slice is always in range.
-        const rel = if (full.len > root.len + 1) full[root.len + 1 ..] else full;
+        //
+        // `root` is trimmed first because `std.fs.path.join` collapses
+        // separators but the *argument* need not have: opened as `Vol1/`
+        // rather than `Vol1`, the untrimmed length is one too long and
+        // every page came out named `01.png` instead of `001.png`. That
+        // was cosmetic until the mokuro sidecar started matching on these
+        // names, at which point it silently matched nothing.
+        const base_len = std.mem.trimEnd(u8, root, "/").len;
+        const rel = if (full.len > base_len + 1) full[base_len + 1 ..] else full;
         const name = try alloc.dupe(u8, rel);
         errdefer alloc.free(name);
         try self.pages.append(alloc, .{ .name = name, .ref = .{ .file = full } });

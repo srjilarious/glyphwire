@@ -7,7 +7,9 @@ const zmath = @import("zmath");
 
 const textures = @import("./textures.zig");
 const resources = @import("../resources.zig");
+const common = @import("../common.zig");
 
+const Color = common.Color;
 const Texture = textures.Texture;
 const ManagedShader = resources.ManagedShader;
 const ShaderHandle = resources.ShaderHandle;
@@ -70,6 +72,7 @@ pub fn QuadBatch(comptime layout: BatchLayout) type {
         attrTexCoord: c_uint = 0,
         attrColor: c_uint = 0,
         uniformMVP: c_int = 0,
+        uniformTint: c_int = -1,
 
         currVert: usize = 0,
         currTex: usize = 0,
@@ -166,6 +169,9 @@ pub fn QuadBatch(comptime layout: BatchLayout) type {
             if (comptime hasTex) self.attrTexCoord = @intCast(gl.getAttribLocation(self.shader.val.program, "texcoord"));
             if (comptime hasColor) self.attrColor = @intCast(gl.getAttribLocation(self.shader.val.program, "color"));
             self.uniformMVP = @intCast(gl.getUniformLocation(self.shader.val.program, "projectionMatrix"));
+            // -1 when the shader has no such uniform, which every `gl.uniform*`
+            // call then silently ignores -- so an untinted shader costs nothing.
+            self.uniformTint = @intCast(gl.getUniformLocation(self.shader.val.program, "tint"));
         }
 
         fn refreshShader(self: *Self) void {
@@ -282,6 +288,10 @@ pub fn QuadBatch(comptime layout: BatchLayout) type {
 
             gl.useProgram(self.shader.val.program);
             gl.uniformMatrix4fv(self.uniformMVP, 1, gl.FALSE, @ptrCast(&self.mvpArr[0]));
+            // Untinted: this queue has no per-draw fade, but the uniform is
+            // program state and another batch sharing the shader may have
+            // left one set -- see `shaders.TexPixelShader`.
+            gl.uniform4f(self.uniformTint, 1.0, 1.0, 1.0, 1.0);
 
             if (comptime hasTex) {
                 gl.activeTexture(gl.TEXTURE0);
@@ -363,6 +373,7 @@ pub fn StaticQuadBatch(comptime layout: BatchLayout) type {
         attrTexCoord: c_uint = 0,
         attrColor: c_uint = 0,
         uniformMVP: c_int = 0,
+        uniformTint: c_int = -1,
 
         // CPU-side scratch, only populated between beginBuild() and endBuild().
         vertices: std.ArrayList(f32) = .empty,
@@ -429,6 +440,9 @@ pub fn StaticQuadBatch(comptime layout: BatchLayout) type {
             if (comptime hasTex) self.attrTexCoord = @intCast(gl.getAttribLocation(self.shader.val.program, "texcoord"));
             if (comptime hasColor) self.attrColor = @intCast(gl.getAttribLocation(self.shader.val.program, "color"));
             self.uniformMVP = @intCast(gl.getUniformLocation(self.shader.val.program, "projectionMatrix"));
+            // -1 when the shader has no such uniform, which every `gl.uniform*`
+            // call then silently ignores -- so an untinted shader costs nothing.
+            self.uniformTint = @intCast(gl.getUniformLocation(self.shader.val.program, "tint"));
         }
 
         /// Re-points the already-uploaded VBOs at the current shader's
@@ -585,6 +599,16 @@ pub fn StaticQuadBatch(comptime layout: BatchLayout) type {
         /// when it needs to skip renderer-specific state (e.g. depth-test
         /// toggling) around an empty draw.
         pub fn draw(self: *Self, mvp: zmath.Mat) void {
+            self.drawTinted(mvp, .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 });
+        }
+
+        /// `draw`, with every fragment modulated by `tint`. Only shaders
+        /// carrying a `tint` uniform honour it (`shaders.TexPixelShader`);
+        /// for the rest the uniform location is -1 and the call is a no-op,
+        /// so a caller fading a textured batch bakes the same factor into
+        /// its vertex colours for the coloured ones. glyphwire-host's
+        /// per-layer opacity is the caller.
+        pub fn drawTinted(self: *Self, mvp: zmath.Mat, tint: Color) void {
             self.refreshShader();
             if (self.numIndices == 0) return;
 
@@ -592,6 +616,7 @@ pub fn StaticQuadBatch(comptime layout: BatchLayout) type {
 
             gl.useProgram(self.shader.val.program);
             gl.uniformMatrix4fv(self.uniformMVP, 1, gl.FALSE, @ptrCast(&mvpArr[0]));
+            gl.uniform4f(self.uniformTint, tint.r, tint.g, tint.b, tint.a);
 
             if (comptime hasTex) {
                 gl.activeTexture(gl.TEXTURE0);

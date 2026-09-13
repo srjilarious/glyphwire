@@ -872,3 +872,62 @@ pub fn aStaleModifierInAPanesContextDoesNotKillThePrefixTest(io: std.Io, alloc: 
     try srv.reportKey(alloc, "left", true);
     try testz.expectTrue(!srv.session.prefix_armed);
 }
+
+/// glyphwire-host's copy shortcut asks the server which layer actually
+/// holds the selection rather than assuming root, because a client can
+/// set one on a layer of its own (`gw-read`'s OCR dialog does exactly
+/// that, and its context is client-owned so the host never runs the
+/// drag). Root reports as `null`, the handle every selection call takes
+/// for it.
+pub fn selectedLayerFindsANonRootSelectionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-selected-layer-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const panel = try ctx.createLayer(20, 5, 0);
+    const layer = ctx.layerPtr(panel).?;
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Nothing selected anywhere.
+    try testz.expectTrue(srv.selectedLayer() == null);
+
+    try srv.setSelection(alloc, panel, .{ .above = 0, .col = 0 }, .{ .above = 0, .col = 5 });
+    try testz.expectTrue(srv.selectedLayer().? == panel);
+
+    // ...and the text comes back off that layer, which is what the copy
+    // shortcut actually puts on the clipboard.
+    const text = (try srv.selectionText(alloc, srv.selectedLayer())).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr(text, "hello");
+
+    try srv.clearSelection(alloc, panel);
+    try testz.expectTrue(srv.selectedLayer() == null);
+}
+
+/// A root selection still reports as `null` -- the same handle root is
+/// named by everywhere else -- so the copy path is unchanged for the
+/// ordinary case.
+pub fn selectedLayerReportsRootAsNullTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-selected-root-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    _ = try ctx.createLayer(20, 5, 0);
+    try ctx.root.writeText("root text", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try srv.setSelection(alloc, null, .{ .above = 0, .col = 0 }, .{ .above = 0, .col = 4 });
+
+    try testz.expectTrue(srv.selectedLayer() == null);
+    const text = (try srv.selectionText(alloc, null)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr(text, "root");
+}

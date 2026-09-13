@@ -4356,9 +4356,11 @@ session that outlives the process that asked for it.
 
 `gw-read` is a comic/manga reader: one page filling the window, paged
 right-to-left by default, with zoom and pan. `.cbz` / `.cbr` / `.cb7` and
-plain directories of images today; `.epub` and `.pdf`, plus mokuro OCR
-overlays with yomitan-style lookup, are the reasons the page source sits
-behind an `archive.Archive` interface rather than being inlined.
+plain directories of images today; `.epub` and `.pdf` are the remaining
+reasons the page source sits behind an `archive.Archive` interface rather
+than being inlined. mokuro OCR overlays landed on top of that interface —
+see "gw-read: mokuro OCR overlays" below; yomitan-style lookup is still
+ahead, and the selectable text panel is the groundwork for it.
 
 **Right-to-left is the default, not a mode you have to find.** The reader
 was built for manga, and a manga reader whose Left arrow goes *backwards*
@@ -4522,3 +4524,127 @@ Nothing on the wire distinguishes the two after the fact:
 both read identically in either model. That is why this is a test
 (`viewportOverABiggerGridScrollsTheRealOffsetTest`) and a comment at the
 call site rather than something to probe for.
+
+### gw-read: mokuro OCR overlays
+
+A manga volume run through [mokuro](https://github.com/kha-white/mokuro)
+gains a `<volume>.mokuro` sidecar: one JSON object with a `pages` array,
+each page carrying the image's pixel dimensions and a list of `blocks`
+— one per speech bubble, with a `[x1, y1, x2, y2]` box in image pixels
+and the OCR'd `lines`. `gw-read` reads it and puts the current bubble's
+text in a floating panel, opened by clicking the bubble or walked with
+`Tab`.
+
+**Why a panel next to the page rather than text drawn into the bubble.**
+The obvious rendering is to overlay the recognised text onto the artwork,
+which is what mokuro's own HTML viewer does. A terminal grid can't: it
+has no vertical writing mode, no sub-cell positioning, and one font size
+per session, so the text would neither fit the bubble nor read as
+Japanese. A panel also gets two things the overlay can't — it can be
+*selected* (the groundwork for yomitan-style lookup, which needs a
+selection to look a word up from) and it can be moved out of the way,
+which matters because mokuro drops furigana routinely and checking the
+artwork is a normal part of reading with this on.
+
+**Two ways out of the way, because they answer different questions.**
+Hold `z` and the dialog drops to `ocr_peek` (0.5 by default) — enough to
+read the line under it while the text stays where your eye is. `\` hides
+it outright, for when even a faded panel is in the way. That is what
+motivated the `opacity` layer property; see its own note below.
+
+**The sidecar is found, never configured.** Two places, in order: a
+`*.mokuro` packed at the top level of the `.cbz` (noticed while
+`indexZip` walks the central directory, so it costs no second scan), else
+`<book>.mokuro` beside the book. A directory book gets the same pair the
+other way round — a `*.mokuro` directly inside it, else one beside it,
+which is mokuro's own default output layout. A RAR/7z book is already
+unpacked whole into a temp tree, so a packed sidecar is just a file in
+that tree. Top level only in every case: a volume has one sidecar, and
+recursing would find a *nested* volume's OCR and put the wrong text on
+the screen. The file is read lazily rather than at open time — a volume's
+OCR is megabytes of JSON and `--list` never needs it.
+
+**Pages are matched three ways, all exact.** mokuro's `img_path` is
+usually a bare `003.jpg` while the archive entry is
+`Vol1/images/003.jpg`, and a volume re-encoded after being OCR'd has the
+same page under a different extension. So the match tries the full path,
+then the basename, then the basename without its extension — but each of
+those is an exact comparison, never a prefix. A fuzzy match here would
+silently put page 10's dialogue on page 1 (`001.jpg` is a prefix of
+`0010.jpg`), which is worse than showing nothing.
+
+**Nothing in the sidecar can stop the book opening.** A malformed block
+is dropped, a block with no box or no text is dropped, a `pages` array
+that isn't there yields a volume with no pages and the feature stays off.
+Same rule the resume file follows: losing a bubble is a nuisance,
+refusing to open the book over it is not a trade anyone would take.
+
+**Reading order comes from a sweep, not a grid.** Nothing in the file
+says which panel a bubble belongs to, but you read *across* first and
+*down* second, so the blocks are grouped into horizontal bands and sorted
+across within each — right to left for `rtl`, left to right for `ltr`.
+The first implementation quantised each `y1` to a sixteenth of the page
+and called that the band, and the tests caught what is wrong with that
+immediately: two bubbles 50px apart on a 1700px page landed in *different*
+bands purely because the 106px boundary happened to fall between them,
+and `Tab`'s order flipped for no reason a reader could see. It is now a
+top-down sweep that starts a new band where the gap from the band's
+*first* top edge exceeds the tolerance — nearby tops group however they
+are placed, and measuring from the band's start rather than from the
+previous block stops a ladder of small steps chaining a whole page into
+one band. The band is computed as data before the sort, so the comparator
+stays a valid strict weak ordering; a tolerance folded into the
+comparator itself would not be transitive, which `std.mem.sort` requires.
+
+**The hit test takes the smallest containing box.** mokuro nests boxes —
+a small bubble inside the bounds of a big one is common — so first-match
+or topmost-match would make the inner bubble unclickable.
+
+**Region marks are two rules, not a rectangle.** The `o` toggle outlines
+every text region on the page, and the block being read is always
+outlined. Drawing a full rectangle costs one write per row of the box,
+and on a page zoomed to 4x a bubble is hundreds of rows tall — a per-row
+loop per bubble on every page render. A top and a bottom rule bracket a
+speech bubble perfectly well, cost two writes whatever the zoom, and
+cover less of the artwork, which for a mark drawn *over* the art is the
+point. They go on the page layer itself (so they pan with the artwork for
+free) with a transparent background, so the art still shows around the
+glyphs.
+
+**A click that misses every bubble while the dialog is open closes it and
+stops there.** Everywhere else a click turns the page, and it still does
+when no dialog is up. But having just been reading a bubble, "get this
+out of the way" is far likelier to be what was meant than "and also turn
+the page", and a page turn you didn't want costs you your place.
+
+### Layer opacity
+
+`set_property(opacity, {value})`, `0.0`..`1.0`, non-root only.
+
+**Why not just `visibility`.** `gw-read` wanted to see the artwork
+*through* its text panel, not instead of it — hiding the layer answers a
+different question, and hiding it is already what `\` does. A faded layer
+also keeps its place in the stack and keeps taking the mouse, which a
+hidden one does not; that is the whole distinction, and it is why this is
+a second property rather than `visibility` growing a float.
+
+**Where the factor is applied, and why in two places.** glyphwire-host
+caches each layer as a set of static quad batches with the colours baked
+into the vertex data, so the natural place to apply a fade is at build
+time — which is what happens for the coloured batches (`color_bg`, the
+glyph batch, the selection and highlight tints). A change bumps the
+layer's render generation, which is already what invalidates the cache,
+so the rebuild comes for free. The *textured* batches — image cells,
+icons — have no per-vertex colour channel to bake into, so the texture
+shader grew a `tint` uniform and the batch a `drawTinted`. Doing only the
+first half would have been the visible-bug kind of shortcut: a
+half-transparent layer with fully opaque icons on it.
+
+**Every draw path that touches the texture shader sets the tint.** A
+uniform is program state and keeps its last value, so a path that skipped
+it would inherit the previous draw's fade. `draw` sets opaque white,
+which the shader multiplies away; `drawTinted` sets the real factor.
+
+**Out of range is clamped and `NaN` is taken as `1.0`.** A client
+computing a fade factor and dividing by zero should get a visible layer
+back, not one that silently vanishes with no wire path to notice it by.

@@ -116,6 +116,12 @@ pub const LayerBatches = struct {
     /// in absolute window pixels, so a pane that moved invalidates the
     /// batch even though the layer's own content is untouched.
     built_origin: geometry.Origin = .{ .x = std.math.minInt(i32), .y = std.math.minInt(i32) },
+    /// `Layer.opacity` at the last build (see `core.PropertyName.opacity`).
+    /// The coloured batches bake it into their vertex alpha, so a change
+    /// forces a rebuild; the textured ones have no colour channel and are
+    /// modulated at draw time instead, which is why the factor is kept
+    /// here rather than only consumed during the build.
+    built_opacity: f32 = 1.0,
 
     color_bg: ShapeBatch,
     icon_bg: SpriteBatch,
@@ -157,6 +163,14 @@ pub const LayerBatches = struct {
 /// and `TextRenderer.drawStringColored` use.
 fn quad4(l: f32, t: f32, r: f32, b: f32) [4][2]f32 {
     return .{ .{ l, b }, .{ l, t }, .{ r, t }, .{ r, b } };
+}
+
+/// `c` with its alpha scaled by a layer's opacity. Baked into the vertex
+/// colours at build time for the coloured batches -- the textured ones
+/// take the same factor as a shader tint at draw time (`drawBatchTinted`).
+fn fade(c: host_eng.Color, alpha: f32) host_eng.Color {
+    if (alpha >= 1.0) return c;
+    return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a * alpha };
 }
 
 fn colour4(c: host_eng.Color) [4][4]f32 {
@@ -720,11 +734,12 @@ pub const Renderer = struct {
             lb.built_cell_h != geometry.cell_h or
             lb.built_text_epoch != self.text_epoch or
             lb.built_origin.x != origin.x or
-            lb.built_origin.y != origin.y;
+            lb.built_origin.y != origin.y or
+            lb.built_opacity != layer.opacity;
         if (!need) return;
 
         self.app.profiler.add(.layers_rebuilt, 1);
-        self.rebuildLayer(eng, fa, lb, layer, origin.x, origin.y, view_offset);
+        self.rebuildLayer(eng, fa, lb, layer, origin.x, origin.y, view_offset, layer.opacity);
         lb.built = true;
         lb.built_gen = gen;
         lb.built_view_offset = view_offset;
@@ -732,6 +747,7 @@ pub const Renderer = struct {
         lb.built_cell_h = geometry.cell_h;
         lb.built_text_epoch = self.text_epoch;
         lb.built_origin = origin;
+        lb.built_opacity = layer.opacity;
     }
 
     fn rebuildLayer(
@@ -743,6 +759,8 @@ pub const Renderer = struct {
         origin_x: i32,
         origin_y: i32,
         view_offset: usize,
+        /// `Layer.opacity`, folded into every colour this build emits.
+        alpha: f32,
     ) void {
         // Per-texture batch lists are rebuilt from scratch (a layer rarely
         // has more than one image / non-atlas icon; this only runs on an
@@ -810,7 +828,7 @@ pub const Renderer = struct {
                             addRect(
                                 &lb.color_bg,
                                 host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
-                                host_eng.Color.from(bg.r, bg.g, bg.b, bg.a),
+                                fade(host_eng.Color.from(bg.r, bg.g, bg.b, bg.a), alpha),
                             );
                         }
                     },
@@ -830,14 +848,14 @@ pub const Renderer = struct {
                     addRect(
                         &lb.color_bg,
                         host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
-                        selection.selection_highlight_color,
+                        fade(selection.selection_highlight_color, alpha),
                     );
                 }
 
                 if (fa) |f| {
                     const g = c.grapheme();
                     if (g.len > 0) {
-                        emitGlyphs(&lb.text, f, g, px, py, host_eng.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a));
+                        emitGlyphs(&lb.text, f, g, px, py, fade(host_eng.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a), alpha));
                     }
                 }
             }
@@ -871,7 +889,7 @@ pub const Renderer = struct {
                 addRect(
                     &lb.color_bg,
                     host_eng.RectF.fromPosSize(x0, y0, rect_w, geometry.cell_h),
-                    selection.selection_highlight_color,
+                    fade(selection.selection_highlight_color, alpha),
                 );
             }
         }
@@ -1052,13 +1070,17 @@ pub const Renderer = struct {
         const lb = self.layer_batches.get(key) orelse return;
         if (!lb.built) return;
         const mvp = eng.projMat;
+        // The layer's opacity: already baked into the coloured batches'
+        // vertex alpha, and applied to the textured ones here -- they have
+        // no colour channel, so the shader's `tint` uniform carries it.
+        const a = lb.built_opacity;
         // Back to front: colour fills + tints, image cells, icon
         // backgrounds, foreground/overlay icons, non-atlas icons, text.
         self.drawBatch(&lb.color_bg, mvp);
-        for (lb.images.items) |*t| self.drawBatch(&t.batch, mvp);
-        self.drawBatch(&lb.icon_bg, mvp);
-        self.drawBatch(&lb.icon_fg, mvp);
-        for (lb.icon_fallback.items) |*t| self.drawBatch(&t.batch, mvp);
+        for (lb.images.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
+        self.drawBatchTinted(&lb.icon_bg, mvp, a);
+        self.drawBatchTinted(&lb.icon_fg, mvp, a);
+        for (lb.icon_fallback.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatch(&lb.text, mvp);
     }
 
@@ -1071,6 +1093,16 @@ pub const Renderer = struct {
         self.app.profiler.add(.draw_calls, 1);
         self.app.profiler.add(.quads, batch.quadCount());
         batch.draw(mvp);
+    }
+
+    /// `drawBatch` for a textured batch, with the layer's opacity as the
+    /// shader tint. `alpha` 1.0 is the plain draw -- `drawTinted` sets the
+    /// uniform to opaque white, which the shader multiplies away.
+    fn drawBatchTinted(self: *Renderer, batch: anytype, mvp: anytype, alpha: f32) void {
+        if (batch.isEmpty()) return;
+        self.app.profiler.add(.draw_calls, 1);
+        self.app.profiler.add(.quads, batch.quadCount());
+        batch.drawTinted(mvp, .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = alpha });
     }
 
     /// Reads every layer's cells straight out of the in-process `Context`

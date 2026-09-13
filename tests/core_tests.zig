@@ -4283,3 +4283,66 @@ pub fn sessionSweepOnlyRunsOverBudgetTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqual(try session.sweepImagesIfOverBudget(bytes.len - 1), bytes.len);
     try testz.expectTrue(root.imageInfo(handle) == null);
 }
+
+pub fn layerOpacityRoundTripsAndClampsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    const panel = try ctx.createLayer(20, 5, 0);
+
+    // Opaque until someone says otherwise.
+    try testz.expectTrue((try ctx.getLayerProperty(panel, .opacity)).opacity == 1.0);
+
+    try ctx.setLayerProperty(panel, .{ .opacity = 0.5 });
+    try testz.expectTrue((try ctx.getLayerProperty(panel, .opacity)).opacity == 0.5);
+
+    // Out of range is clamped, not rejected: a client computing a fade
+    // shouldn't have to range-check before every step.
+    try ctx.setLayerProperty(panel, .{ .opacity = 4.0 });
+    try testz.expectTrue((try ctx.getLayerProperty(panel, .opacity)).opacity == 1.0);
+    try ctx.setLayerProperty(panel, .{ .opacity = -1.0 });
+    try testz.expectTrue((try ctx.getLayerProperty(panel, .opacity)).opacity == 0.0);
+
+    // A NaN factor (a divide-by-zero upstream) leaves the layer visible
+    // rather than making it vanish.
+    try ctx.setLayerProperty(panel, .{ .opacity = std.math.nan(f32) });
+    try testz.expectTrue((try ctx.getLayerProperty(panel, .opacity)).opacity == 1.0);
+}
+
+pub fn opacityIsDistinctFromVisibilityTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    const panel = try ctx.createLayer(20, 5, 0);
+
+    // Fading a layer to nothing is not the same as hiding it: it keeps
+    // its place in the stack, which is what lets it still take the mouse.
+    try ctx.setLayerProperty(panel, .{ .opacity = 0.0 });
+    try testz.expectTrue(ctx.layerPtr(panel).?.visible);
+    try ctx.setLayerProperty(panel, .{ .visibility = false });
+    try testz.expectTrue(ctx.layerPtr(panel).?.opacity == 0.0);
+}
+
+pub fn rootRefusesOpacityWritesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+
+    // Same reason root refuses `visibility`: a root faded to 0 blanks the
+    // session with no wire path back.
+    try testz.expectError(ctx.setLayerProperty(null, .{ .opacity = 0.0 }), error.ReadOnlyProperty);
+    try testz.expectTrue(ctx.root.opacity == 1.0);
+}
+
+pub fn opacityChangeBumpsTheRenderGenerationTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+    const panel = try ctx.createLayer(20, 5, 0);
+
+    // glyphwire-host bakes the factor into its cached vertex colours, so
+    // a change that didn't invalidate the batch would never be drawn.
+    const before = ctx.layerPtr(panel).?.renderGeneration();
+    try ctx.setLayerProperty(panel, .{ .opacity = 0.25 });
+    try testz.expectTrue(ctx.layerPtr(panel).?.renderGeneration() != before);
+}

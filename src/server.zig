@@ -1148,6 +1148,31 @@ pub const Server = struct {
         self.broadcast(null, "selection", body);
     }
 
+    /// Which layer of the visible context currently holds a selection --
+    /// the topmost `create_layer` layer with one, else root (reported as
+    /// `null`, the handle every selection call takes for it), else `null`
+    /// again when nothing anywhere is selected.
+    ///
+    /// A selection can be set on any layer, by the host's own drag or by
+    /// a client's `set_selection`, so "the selection" is not a fixed
+    /// place. glyphwire-host's copy shortcut asks this rather than
+    /// assuming root; at most one layer is ever selected in practice
+    /// (every writer clears the old one first), and topmost-first
+    /// resolves the tie the way the user's eye does.
+    pub fn selectedLayer(self: *Server) ?core.LayerHandle {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+
+        var i = self.ctx.layer_order.items.len;
+        while (i > 0) {
+            i -= 1;
+            const handle = self.ctx.layer_order.items[i];
+            const layer = self.ctx.layers.getPtr(handle) orelse continue;
+            if (layer.selection != null) return handle;
+        }
+        return null;
+    }
+
     /// The selected text on `layer_handle` (null = root), or null when
     /// nothing is selected. Caller owns the result.
     pub fn selectionText(self: *Server, alloc: std.mem.Allocator, layer_handle: ?core.LayerHandle) !?[]u8 {

@@ -30,17 +30,24 @@ pub const TexVertexShader: ShaderCode =
     \\}
 ;
 
-/// A shader that just applies a texture to the fragment.
+/// A shader that applies a texture to the fragment, modulated by a
+/// per-draw `tint`. The tint is how a caller fades a whole textured batch
+/// that has no per-vertex colour channel -- glyphwire-host's per-layer
+/// opacity is the caller. Every draw path sets it, opaque white by
+/// default: a uniform keeps its last value for the life of the program
+/// object, so an unset one would leave the previous draw's fade on the
+/// next batch that happens to share this shader.
 pub const TexPixelShader: ShaderCode =
     \\#version 300 es
     \\precision mediump float;
     \\
     \\in vec2 Texcoord; // Received from vertex shader
     \\uniform sampler2D tex; // Texture sampler
+    \\uniform vec4 tint;     // Per-draw modulation; opaque white is a no-op
     \\out vec4 fragColor;
     \\
     \\void main() {
-    \\    fragColor = texture(tex, Texcoord); // Sample the texture at the given coordinates
+    \\    fragColor = texture(tex, Texcoord) * tint;
     \\}
 ;
 

@@ -1052,6 +1052,23 @@ pub const Client = struct {
         return parsed.value.result.visible;
     }
 
+    /// `set_property(layer, "opacity", {value})` -- a notification.
+    /// `value` is 0.0..1.0 and multiplies the alpha of everything the
+    /// layer composites, so what's behind it shows through. Unlike
+    /// `setLayerVisible` the layer stays in the stack and keeps taking
+    /// the mouse -- see `core.PropertyName.opacity`. Out-of-range values
+    /// are clamped server-side.
+    pub fn setLayerOpacity(self: *Client, layer: core.LayerHandle, value: f32) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "opacity", .value = value });
+    }
+
+    /// `get_property(layer?, "opacity")`.
+    pub fn getLayerOpacity(self: *Client, layer: ?core.LayerHandle) !f32 {
+        var parsed = try self.request(struct { value: f32 }, "get_property", .{ .layer = layer, .property = "opacity" });
+        defer parsed.deinit();
+        return parsed.value.result.value;
+    }
+
     /// `set_property(layer, "viewport", {cols, rows})` -- a notification.
     /// How much of the layer's content grid the host draws; zero on an
     /// axis means all of it. This is what makes a pane a *window onto*
@@ -1640,7 +1657,11 @@ pub const Client = struct {
         return .{ .parsed = try self.request(protocol.ErrorsResult, "get_errors", .{}) };
     }
 
-    fn colorToJson(c: ?core.Color) ?protocol.Color {
+    /// A `core.Color` in the shape the wire wants. Public because a
+    /// client hand-rolling a `Batch.notify` (rather than using one of the
+    /// typed `Batch` methods, which all target `default_layer`) has to
+    /// build the same `fg`/`bg` field itself.
+    pub fn colorToJson(c: ?core.Color) ?protocol.Color {
         const v = c orelse return null;
         return .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a };
     }

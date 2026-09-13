@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
         explicit_page = n - 1;
     }
 
-    if (args.hasOption("list")) return list(io, book);
+    if (args.hasOption("list")) return list(alloc, io, book, conf.ocr);
 
     // The remembered position, unless the command line named one.
     const config_dir: ?[]u8 = glyphwire.configDirPath(alloc, init.environ_map) catch null;
@@ -166,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
     var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
         // No display server: say what's in the book and leave, the same
         // shape zoe's headless fallback has.
-        return list(io, book);
+        return list(alloc, io, book, conf.ocr);
     };
     defer client.deinit();
 
@@ -181,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
         "mouse_button",
         "mouse_move",
         "context",
-    }) catch return list(io, book);
+    }) catch return list(alloc, io, book, conf.ocr);
     defer listener.deinit();
 
     const ui = try read.Ui.init(alloc, &client, listener, book, conf, .{
@@ -206,7 +206,13 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// The headless path: what was found, in reading order.
-fn list(io: std.Io, book: *read.Archive) !void {
+///
+/// Also where a mokuro sidecar is *verified*. There is no other way to
+/// check that a volume's OCR was found and lines up with its pages
+/// without a window in front of you -- and "lines up" is the part that
+/// actually goes wrong, since a sidecar dropped in beside the wrong
+/// volume opens perfectly and then never shows a word.
+fn list(alloc: std.mem.Allocator, io: std.Io, book: *read.Archive, want_ocr: bool) !void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
     const out = &w.interface;
@@ -215,8 +221,46 @@ fn list(io: std.Io, book: *read.Archive) !void {
     if (book.skipped > 0) try out.print(", {d} skipped -- unsupported image format", .{book.skipped});
     try out.writeAll(")\n");
 
+    var ocr: ?read.mokuro.Volume = null;
+    defer if (ocr) |*v| v.deinit();
+    if (want_ocr and book.hasMokuro()) {
+        if (book.readMokuro(alloc)) |maybe| {
+            if (maybe) |bytes| {
+                defer alloc.free(bytes);
+                ocr = read.mokuro.parse(alloc, bytes) catch null;
+            }
+        } else |err| {
+            try out.print("  mokuro: found, but unreadable ({t})\n", .{err});
+        }
+    }
+
+    if (ocr) |*v| {
+        var matched: usize = 0;
+        var blocks: usize = 0;
+        for (book.pages.items) |p| {
+            const op = v.pageFor(p.name) orelse continue;
+            if (op.blocks.len == 0) continue;
+            matched += 1;
+            blocks += op.blocks.len;
+        }
+        try out.print("  mokuro: {d} of {d} sidecar pages carry text; {d} book pages matched, {d} blocks\n", .{
+            v.pagesWithText(),
+            v.pages.len,
+            matched,
+            blocks,
+        });
+        if (matched == 0)
+            try out.writeAll("  mokuro: WARNING -- no book page matched; is this the right volume's sidecar?\n");
+    }
+
     for (book.pages.items, 1..) |p, n| {
-        try out.print("{d:>5}  {s}\n", .{ n, p.name });
+        try out.print("{d:>5}  {s}", .{ n, p.name });
+        if (ocr) |*v| {
+            if (v.pageFor(p.name)) |op| {
+                if (op.blocks.len > 0) try out.print("   [{d} ocr]", .{op.blocks.len});
+            }
+        }
+        try out.writeAll("\n");
     }
     try out.flush();
 }

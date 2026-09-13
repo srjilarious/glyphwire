@@ -169,6 +169,10 @@ const PropertyParams = struct {
     /// `"pty_mode"`'s bool -- kept off `visible` so a client setting one
     /// property doesn't have to think about the other's default.
     enabled: bool = false,
+    /// `"opacity"`'s 0.0..1.0 factor. Defaults to fully opaque, so a
+    /// client that names the property and forgets the field gets the
+    /// layer back rather than losing it.
+    value: f32 = 1.0,
 };
 
 const CursorResult = struct { row: usize, col: usize };
@@ -178,6 +182,7 @@ const CellPositionResult = struct { row: usize, col: usize };
 const SizeResult = struct { cols: usize, rows: usize };
 const ScrollResult = struct { offset: usize, max: usize };
 const VisibilityResult = struct { visible: bool };
+const OpacityResult = struct { value: f32 };
 const PtyModeResult = struct { enabled: bool };
 const ScrollOffsetResult = struct { row: usize, col: usize, max_row: usize, max_col: usize };
 const ScrollbarsResult = struct {
@@ -1662,6 +1667,8 @@ pub const Dispatcher = struct {
             .{ .size = .{ .cols = p.cols, .rows = p.rows } }
         else if (std.mem.eql(u8, p.property, "visibility"))
             .{ .visibility = p.visible }
+        else if (std.mem.eql(u8, p.property, "opacity"))
+            .{ .opacity = p.value }
         else if (std.mem.eql(u8, p.property, "viewport"))
             .{ .viewport = .{ .cols = p.cols, .rows = p.rows } }
         else if (std.mem.eql(u8, p.property, "scroll_offset"))
@@ -1786,6 +1793,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "pty_mode")) {
             const on = layer.getProperty(.pty_mode).pty_mode;
             return try rpc.response(alloc, id, PtyModeResult{ .enabled = on });
+        } else if (std.mem.eql(u8, p.property, "opacity")) {
+            const v = layer.getProperty(.opacity).opacity;
+            return try rpc.response(alloc, id, OpacityResult{ .value = v });
         }
         return DispatchError.UnknownProperty;
     }

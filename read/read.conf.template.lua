@@ -73,4 +73,37 @@
 --     -- Cells panned per arrow key / `hjkl` press when the page is
 --     -- bigger than the window. Range 1..64.
 --     pan_step = 3,
+--
+--     ---- mokuro OCR ------------------------------------------------
+--
+--     -- These only do anything for a volume that came with a mokuro
+--     -- sidecar: a `<book>.mokuro` beside the book, or a `*.mokuro`
+--     -- packed at the top level of the .cbz (or sitting directly
+--     -- inside the directory being read). Without one the reader
+--     -- behaves exactly as it did before the feature existed.
+--
+--     -- Read the sidecar at all. `false` ignores it entirely: no text
+--     -- dialog, no region outlines, no `ocr` marker on the statusline.
+--     ocr = true,
+--
+--     -- Whether every text region starts outlined on the page. Off by
+--     -- default -- the outlines are a "where can I click" hint, and a
+--     -- page covered in them is not what a reader is for. `o` toggles
+--     -- it at runtime; the bubble being read is always outlined.
+--     ocr_hints = false,
+--
+--     -- The dialog's opacity while the peek key (`z`) is held, 0..1.
+--     -- The point is to read the artwork *through* the text: mokuro
+--     -- drops furigana often, so checking the page itself is a normal
+--     -- part of reading with this on. 0 is fully transparent; 1
+--     -- disables the peek. (`\` hides the dialog outright instead.)
+--     ocr_peek = 0.5,
+--
+--     -- Widest the text dialog gets, in cells. Japanese sets two cells
+--     -- per character, so 40 is about 20 characters a line -- close to
+--     -- a bubble's own column length, which is what makes the re-wrap
+--     -- read naturally rather than as one long ribbon. The panel is
+--     -- sized to its text, so this is a cap, not a fixed width.
+--     -- Range 12..200.
+--     ocr_dialog_cols = 40,
 -- }

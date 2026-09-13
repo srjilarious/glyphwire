@@ -50,6 +50,17 @@ pub const Selection = struct {
     mouse_anchor: glyphwire.SelectionPoint = .{ .above = 0, .col = 0 },
     mouse_last_cell: glyphwire.CellPos = .{},
 
+    /// Which layer of the visible context the current selection lives on
+    /// -- null is the root layer, which is what keyboard mode and a drag
+    /// over bare scrollback both use. A drag that starts inside a
+    /// `create_layer` layer's viewport selects *that* layer's text
+    /// instead, so a popup, a sidebar or a reader's text panel is
+    /// selectable without the client having to run its own drag loop.
+    /// Resolved once at press time and held for the whole drag: a layer
+    /// that moves or resizes mid-drag would otherwise switch the
+    /// selection to a different grid halfway through.
+    layer: ?glyphwire.LayerHandle = null,
+
     /// Whether `input.KeyInput.reportKeyEvents` should hold this key back
     /// from the wire because `handleKeys` owns it this frame: Ctrl+Shift+
     /// C/V/Space always, and the motion/commit keys while keyboard
@@ -76,12 +87,111 @@ pub const Selection = struct {
         return server.ctx.root.view_scroll;
     }
 
-    /// The `SelectionPoint` for grid cell `(row, col)` at the current
-    /// view offset (see `glyphwire.SelectionPoint`: `above` is content-
-    /// anchored, `= view_scroll - row`).
-    fn pointFromScreen(self: *Selection, row: usize, col: usize) glyphwire.SelectionPoint {
-        const vs = self.rootViewScroll();
-        return .{ .above = @as(i64, @intCast(vs)) - @as(i64, @intCast(row)), .col = col };
+    /// A `create_layer` layer's placement and scroll position, snapshotted
+    /// under the lock so the pixel maths below runs without holding it.
+    const LayerHit = struct {
+        handle: glyphwire.LayerHandle,
+        rect: geometry.RectPx,
+        /// The layer's viewport offset into its own content grid: a
+        /// selection point is a *content* coordinate, so this goes back in
+        /// on the way from a screen pixel to a point.
+        scroll_off: glyphwire.CellPos,
+        view_cols: usize,
+        view_rows: usize,
+    };
+
+    /// The topmost visible `create_layer` layer of the visible context
+    /// whose viewport contains `(px, py)`, or null for a point over bare
+    /// root. Backwards through `layer_order` because later entries
+    /// composite on top, the same walk `panes.scrollablePaneAt` does.
+    ///
+    /// A zero-sized or scrollbar-only layer is still a hit: unlike the
+    /// wheel, which should fall through a layer with nothing to scroll,
+    /// a drag over a layer's text is unambiguously about *that* text.
+    fn layerAt(self: *Selection, px: f32, py: f32) ?LayerHit {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+
+        const ctx = server.ctx;
+        const origin = geometry.contextOrigin(ctx);
+        var i = ctx.layer_order.items.len;
+        while (i > 0) {
+            i -= 1;
+            const handle = ctx.layer_order.items[i];
+            const layer = ctx.layers.getPtr(handle) orelse continue;
+            if (!layer.visible) continue;
+            const cols = layer.viewportCols();
+            const rows = layer.viewportRows();
+            const rect = geometry.layerRectIn(origin, layer.pos, cols, rows);
+            if (!rect.contains(px, py)) continue;
+            return .{
+                .handle = handle,
+                .rect = rect,
+                .scroll_off = layer.scroll_off,
+                .view_cols = cols,
+                .view_rows = rows,
+            };
+        }
+        return null;
+    }
+
+    /// The `SelectionPoint` for the pixel `(px, py)` on whichever layer
+    /// the current drag owns (`self.layer`).
+    ///
+    /// For root that is the scrollback-anchored form (`above =
+    /// view_scroll - row`, see `glyphwire.SelectionPoint`). A
+    /// `create_layer` layer has no scrollback ring, so its `above` is
+    /// simply the negated *content* row -- the viewport row plus the
+    /// layer's own `scroll_off`, which is exactly the coordinate the
+    /// renderer's selection-tint pass asks `selectionColRange` for.
+    fn pointAtPixel(self: *Selection, px: f32, py: f32) glyphwire.SelectionPoint {
+        const handle = self.layer orelse {
+            const cell = geometry.cellFromPixel(px, py);
+            const vs = self.rootViewScroll();
+            return .{ .above = @as(i64, @intCast(vs)) - @as(i64, @intCast(cell.row)), .col = cell.col };
+        };
+        const hit = self.layerFor(handle) orelse return self.active;
+        return pointInLayer(hit, px, py);
+    }
+
+    /// `layerAt`, but for a handle already chosen -- re-read each call
+    /// rather than cached with the drag for the same reason
+    /// `Scroll.paneBarsFor` re-reads its track: the layer can move, resize
+    /// or scroll mid-drag, and stale geometry would land the active end on
+    /// the wrong cell.
+    fn layerFor(self: *Selection, handle: glyphwire.LayerHandle) ?LayerHit {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+
+        const ctx = server.ctx;
+        const layer = ctx.layers.getPtr(handle) orelse return null;
+        const cols = layer.viewportCols();
+        const rows = layer.viewportRows();
+        return .{
+            .handle = handle,
+            .rect = geometry.layerRectIn(geometry.contextOrigin(ctx), layer.pos, cols, rows),
+            .scroll_off = layer.scroll_off,
+            .view_cols = cols,
+            .view_rows = rows,
+        };
+    }
+
+    /// Pixel -> content-cell point within one layer, clamped to its
+    /// viewport so a pointer dragged off the edge pins to the last cell
+    /// rather than selecting cells that aren't on screen.
+    fn pointInLayer(hit: LayerHit, px: f32, py: f32) glyphwire.SelectionPoint {
+        const cw: f32 = @floatFromInt(geometry.cell_w);
+        const ch: f32 = @floatFromInt(geometry.cell_h);
+        const col_f = (px - hit.rect.x) / cw;
+        const row_f = (py - hit.rect.y) / ch;
+        const max_col: f32 = @floatFromInt(hit.view_cols -| 1);
+        const max_row: f32 = @floatFromInt(hit.view_rows -| 1);
+        const col: usize = @intFromFloat(std.math.clamp(col_f, 0, max_col));
+        const row: usize = @intFromFloat(std.math.clamp(row_f, 0, max_row));
+        const content_row = hit.scroll_off.row + row;
+        return .{ .above = -@as(i64, @intCast(content_row)), .col = hit.scroll_off.col + col };
     }
 
     /// Ctrl+Shift+C / +V / +Space, plus the keyboard-selection-mode
@@ -176,6 +286,10 @@ pub const Selection = struct {
         self.anchor = p;
         self.active = p;
         self.mode = true;
+        // Keyboard mode starts at the root cursor and walks the root
+        // grid, so it is always a root-layer selection -- a drag is the
+        // only gesture that can land on a `create_layer` layer.
+        self.layer = null;
         server.setSelection(self.app.alloc, null, p, p) catch |err| {
             std.log.err("glyphwire-host: setSelection (enter select mode) failed: {t}", .{err});
         };
@@ -183,7 +297,7 @@ pub const Selection = struct {
 
     fn endMode(self: *Selection, clear: bool) void {
         self.mode = false;
-        if (clear) self.app.server.clearSelection(self.app.alloc, null) catch |err| {
+        if (clear) self.app.server.clearSelection(self.app.alloc, self.layer) catch |err| {
             std.log.err("glyphwire-host: clearSelection failed: {t}", .{err});
         };
     }
@@ -191,6 +305,9 @@ pub const Selection = struct {
     /// Moves the selection's active end by `drow`/`dcol` cells (or to the
     /// line's start/end when `to_edge` is -1/+1), scrolling the view when
     /// the end walks past the top or bottom of the viewport.
+    ///
+    /// Root-layer only -- it is reached from keyboard mode, which
+    /// `toggleMode` pins to root.
     fn moveActive(self: *Selection, dcol: i64, drow: i64, to_edge: i8) void {
         const server = self.app.server;
         var width: usize = undefined;
@@ -245,12 +362,18 @@ pub const Selection = struct {
     /// prompt.
     fn copyShortcut(self: *Selection) void {
         const server = self.app.server;
-        const maybe_text = server.selectionText(self.app.alloc, null) catch |err| {
+        // Not `self.layer`: a *client* can set a selection on one of its
+        // own layers too (`set_selection` takes a handle), and the copy
+        // shortcut has to find that one as well -- a reader that drives
+        // its own drag over a text panel would otherwise copy nothing.
+        const target = server.selectedLayer();
+        const maybe_text = server.selectionText(self.app.alloc, target) catch |err| {
             std.log.err("glyphwire-host: selectionText failed: {t}", .{err});
             return;
         };
         if (maybe_text) |text| {
             defer self.app.alloc.free(text);
+            self.layer = target;
             self.endMode(true);
             if (text.len > 0) {
                 server.setClipboard(text) catch |err| {
@@ -329,7 +452,10 @@ pub const Selection = struct {
                 self.mouse_selecting = true;
                 self.mouse_moved = false;
                 self.mouse_last_cell = cell;
-                self.mouse_anchor = self.pointFromScreen(cell.row, cell.col);
+                // Which grid this drag is over, decided once at press
+                // time; null falls through to root, exactly as before.
+                self.layer = if (self.layerAt(pos.x, pos.y)) |hit| hit.handle else null;
+                self.mouse_anchor = self.pointAtPixel(pos.x, pos.y);
                 return true;
             }
             return false;
@@ -340,12 +466,17 @@ pub const Selection = struct {
             // edge -- this moves content under a stationary pointer, so it
             // also forces a selection update below.
             var edge_scrolled = false;
-            if (pos.y < @as(f32, @floatFromInt(geometry.cell_h))) {
-                server.reportScroll(self.app.alloc, null, 1) catch {};
-                edge_scrolled = true;
-            } else if (pos.y > @as(f32, @floatFromInt(@as(i32, @intCast(geometry.grid_rows -| 1)) * geometry.cell_h))) {
-                server.reportScroll(self.app.alloc, null, -1) catch {};
-                edge_scrolled = true;
+            // Root only: this drags the *scrollback ring* into view, which
+            // a `create_layer` layer doesn't have. A drag off the edge of
+            // a popup just pins to its last cell (`pointInLayer` clamps).
+            if (self.layer == null) {
+                if (pos.y < @as(f32, @floatFromInt(geometry.cell_h))) {
+                    server.reportScroll(self.app.alloc, null, 1) catch {};
+                    edge_scrolled = true;
+                } else if (pos.y > @as(f32, @floatFromInt(@as(i32, @intCast(geometry.grid_rows -| 1)) * geometry.cell_h))) {
+                    server.reportScroll(self.app.alloc, null, -1) catch {};
+                    edge_scrolled = true;
+                }
             }
 
             const moved_cell = cell.row != self.mouse_last_cell.row or cell.col != self.mouse_last_cell.col;
@@ -357,8 +488,8 @@ pub const Selection = struct {
                     self.mode = false;
                     self.anchor = self.mouse_anchor;
                 }
-                self.active = self.pointFromScreen(cell.row, cell.col);
-                server.setSelection(self.app.alloc, null, self.anchor, self.active) catch |err| {
+                self.active = self.pointAtPixel(pos.x, pos.y);
+                server.setSelection(self.app.alloc, self.layer, self.anchor, self.active) catch |err| {
                     std.log.err("glyphwire-host: setSelection (drag) failed: {t}", .{err});
                 };
             }
@@ -373,7 +504,11 @@ pub const Selection = struct {
             const vo = self.rootViewScroll();
             server.reportMouseButton(self.app.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, cell, vo) catch {};
             server.reportMouseButton(self.app.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, cell, vo) catch {};
-            server.clearSelection(self.app.alloc, null) catch {};
+            // Whatever was selected, wherever it was: a plain click
+            // clears it, which for a click on a different layer than the
+            // last selection means clearing that one, not this one.
+            server.clearSelection(self.app.alloc, server.selectedLayer()) catch {};
+            self.layer = null;
             self.mode = false;
         }
         return true;

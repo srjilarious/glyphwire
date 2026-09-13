@@ -73,6 +73,25 @@ pub const ReadConfig = struct {
     /// stops writing the state file entirely.
     remember_position: bool = true,
 
+    /// Read a book's mokuro OCR sidecar when one is found beside it (or
+    /// packed inside it). `false` ignores it entirely -- no dialog, no
+    /// region hints, no OCR marker on the statusline.
+    ocr: bool = true,
+    /// Whether the text regions start outlined on the page. Off by
+    /// default: the outlines are a "where can I click" hint, and a page
+    /// covered in boxes is not what a reader is for. `o` toggles it.
+    ocr_hints: bool = false,
+    /// The dialog's opacity while the peek key (`z`) is held, 0..1. The
+    /// point is to read the artwork *through* the text -- mokuro drops
+    /// furigana, so checking the page itself is a normal part of reading
+    /// with this on. 0 is fully transparent, 1 disables the peek.
+    ocr_peek: f32 = 0.5,
+    /// Widest the text dialog gets, in cells. Japanese sets two cells per
+    /// character, so 40 is about 20 characters a line -- close to a
+    /// bubble's own column length, which is what makes the re-wrap read
+    /// naturally rather than as one long ribbon.
+    ocr_dialog_cols: usize = 40,
+
     /// The zoom limits this config implies, handed to every `zoom.layout`
     /// call.
     pub fn limits(self: ReadConfig) zoom.Limits {
@@ -84,6 +103,11 @@ pub const ReadConfig = struct {
 };
 
 pub const zoom_max_ceiling: f32 = 16.0;
+/// Bounds on `ocr_dialog_cols`. The floor is "a wrap that isn't one
+/// character per line"; the ceiling is the widest a floating panel can be
+/// before it stops being a panel.
+pub const ocr_dialog_cols_min: usize = 12;
+pub const ocr_dialog_cols_max: usize = 200;
 pub const pan_step_max: usize = 64;
 pub const jump_pages_max: usize = 1000;
 pub const prefetch_max: usize = 8;
@@ -153,6 +177,11 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
         result.config.max_zoom = clampZoom(v);
     if (boolField(lua, "upscale")) |v| result.config.upscale = v;
     if (boolField(lua, "remember_position")) |v| result.config.remember_position = v;
+    if (boolField(lua, "ocr")) |v| result.config.ocr = v;
+    if (boolField(lua, "ocr_hints")) |v| result.config.ocr_hints = v;
+    if (numberField(lua, "ocr_peek")) |v| result.config.ocr_peek = clampPeek(v);
+    if (uintField(lua, "ocr_dialog_cols")) |v|
+        result.config.ocr_dialog_cols = clampUint("ocr_dialog_cols", v, ocr_dialog_cols_min, ocr_dialog_cols_max);
 
     // A `cache_pages` smaller than what the prefetch wants resident means
     // every prefetched page evicts the one being read. Nudge rather than
@@ -258,6 +287,13 @@ fn clampUint(key: []const u8, v: usize, lo: usize, hi: usize) usize {
     if (c != v)
         std.log.warn("gw-read: {s} `{s}` {d} out of range {d}..{d}; clamped to {d}", .{ conf_name, key, v, lo, hi, c });
     return c;
+}
+
+fn clampPeek(v: f64) f32 {
+    const c = std.math.clamp(v, 0.0, 1.0);
+    if (c != v)
+        std.log.warn("gw-read: {s} `ocr_peek` {d} out of range 0..1; clamped to {d}", .{ conf_name, v, c });
+    return @floatCast(c);
 }
 
 fn clampZoom(v: f64) f32 {

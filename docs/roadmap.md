@@ -2902,6 +2902,51 @@ headless path zoe's `--keys` driver is for it. See decisions.md's
   `layer?` on the wire and the server always honoured it; only the Zig
   helpers hardcoded `default_layer`. The old spellings delegate.
 
+### mokuro OCR overlays
+
+A volume run through mokuro comes with a `<volume>.mokuro` sidecar: per
+page, one box and its recognised `lines` per speech bubble. `gw-read`
+reads it and shows the current bubble's text in a floating panel.
+
+- **`read/mokuro.zig` is pure.** Parse, page matching, reading order,
+  hit test, join and wrap — JSON and numbers in, structs and numbers
+  out, and 20 new tests. `archive.zig` finds the file, `ui.zig` draws
+  what comes out. Nothing in the sidecar can stop the book opening: a
+  malformed block is dropped, an unparseable file leaves the feature off.
+- **Found, not configured.** A `*.mokuro` packed at the top level of the
+  `.cbz` (noticed as `indexZip` walks the central directory, no second
+  scan), else `<book>.mokuro` beside the book; a directory book checks
+  inside itself first. Top level only — a nested volume's sidecar is not
+  this one's. Read lazily, since it is megabytes of JSON and `--list`
+  never needs it.
+- **Pages match on full path, then basename, then stem — each exact.**
+  A prefix match would put page 10's dialogue on page 1.
+- **`Tab` order comes from a top-down sweep**, not a quantised grid: the
+  grid put bubbles 50px apart into different bands whenever a boundary
+  fell between them. See decisions.md; the tests caught it.
+- **Two rules, not a rectangle.** Region marks are a top and a bottom
+  edge on the page layer, transparent-backgrounded so the art shows
+  through, two writes per bubble whatever the zoom. A full outline would
+  be a per-row loop per bubble on a 4x-zoomed page.
+- **Selectable, and it gets out of the way.** A drag inside the panel
+  sets a selection on the dialog layer, which the host's Ctrl+Shift+C
+  now finds (see below); hold `z` to fade it to `ocr_peek`, `\` to hide
+  it. That is the groundwork for yomitan-style lookup.
+
+### Two protocol changes this needed
+
+- **`set_property(opacity)`** — a `0.0`..`1.0` factor on any non-root
+  layer, multiplying the alpha of everything it composites. Baked into
+  the coloured batches' vertex data at build time (a change bumps the
+  render generation, which already invalidates them) and applied to the
+  textured ones through a new `tint` uniform on the texture shader,
+  which has no per-vertex colour to bake into.
+- **Host selection on any layer.** A left-drag now hit-tests the topmost
+  visible `create_layer` layer under the pointer and selects that
+  layer's text, falling through to root only when the drag started over
+  bare root; the copy shortcut copies whichever layer holds a selection,
+  including one a client set. Keyboard selection mode stays root-only.
+
 **Next for the reader**, in the order they want doing:
 
 1. **A `draw_image` source offset** (`src_row`/`src_col`, or a pixel
@@ -2912,15 +2957,14 @@ headless path zoe's `--keys` driver is for it. See decisions.md's
 2. **Two-page spreads.** Pair facing pages, treat a wide page as a
    single, handle the cover alone. Mostly layout plus an LRU that warms
    two pages instead of one.
-3. **mokuro overlays and yomitan-style lookup.** The OCR boxes are
-   per-page rectangles with text; `create_metadata` + `tag_metadata`
-   over the page layer is the obvious carrier, and `find_metadata`
-   already resolves a click to a span.
+3. **Yomitan-style lookup.** The selection half is done; what is left is
+   a dictionary and somewhere to show the entry. A second panel is the
+   obvious shape, and `opacity` already exists to keep it out of the way.
 4. **`.epub` and `.pdf`.** Both need a real content pipeline rather than
    "hand bytes to stb_image", which is why `archive.Archive` is an
    interface rather than a zip reader with a nicer name.
 
-1021 tests passing.
+1074 tests passing.
 
 ## Open questions to settle before writing code
 

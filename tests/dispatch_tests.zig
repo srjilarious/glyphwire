@@ -3498,3 +3498,47 @@ pub fn destroyImageIsAllowedInBatchTest(io: std.Io, alloc: std.mem.Allocator) !v
     defer if (result.response) |r| alloc.free(r);
     try testz.expectTrue(ctx.imageInfo(1) == null);
 }
+
+pub fn opacityPropertyRoundTripsOverTheWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const panel = try ctx.createLayer(20, 5, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"opacity","value":0.5}}
+    );
+    try testz.expectTrue(ctx.layerPtr(panel).?.opacity == 0.5);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":9,"method":"get_property","params":{"layer":1,"property":"opacity"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+
+    const Response = struct { id: i64, result: struct { value: f32 } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.id, 9);
+    try testz.expectTrue(parsed.value.result.value == 0.5);
+}
+
+pub fn opacityWithNoValueFieldLeavesTheLayerOpaqueTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const panel = try ctx.createLayer(20, 5, 0);
+
+    // `value` defaults to 1.0 rather than 0: naming the property and
+    // forgetting the field should not make the layer disappear.
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"opacity"}}
+    );
+    try testz.expectTrue(ctx.layerPtr(panel).?.opacity == 1.0);
+}
