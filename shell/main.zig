@@ -67,6 +67,17 @@ const resize_poll_ms: i64 = 50;
 const autocomplete_idle_ms: i64 = 500;
 const autocomplete_hint_color = glyphwire.Color{ .r = 120, .g = 120, .b = 120 };
 
+/// Env var naming the write end of the "result pipe" `runCommand` opens
+/// before spawning every foreground command (see `Prompt.spawnResultPipe`):
+/// a glyphwire-aware interactive program -- an argument picker, a fuzzy
+/// finder, anything that builds up a value interactively and then hands
+/// it back -- can `write()` that value to this fd before exiting, and the
+/// shell replaces its own input line with it once the child is reaped
+/// (`Prompt.readResultPipe`). Not documented to the user as a public API
+/// yet, just a convention between the shell and its own bundled tools
+/// (`gw-hist` is the first); see docs/decisions.md "Shell result pipe".
+const result_fd_env = "GLYPHWIRE_RESULT_FD";
+
 comptime {
     // The captured-child marker detector keeps its own copy of the
     // marker string to stay dependency-free (see shell/handshake.zig);
@@ -86,6 +97,11 @@ const c = struct {
     extern "c" fn close(fd: c_int) c_int;
     extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
     extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
+    /// No `O_CLOEXEC`, matching `pipeexec.zig`'s pipes: `runCommand` wants
+    /// both ends to survive `fork`+`exec` into the spawned child with no
+    /// extra plumbing (see `Prompt.spawnResultPipe`), and it closes its
+    /// own copies explicitly rather than relying on close-on-exec.
+    extern "c" fn pipe2(fds: *[2]c_int, flags: c_int) c_int;
 };
 
 /// `signal(2)` just for the one-shot SIGPIPE ignore in `main`. Linux
@@ -768,6 +784,8 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             try prompt.killToStart();
         } else if (ctrl and std.mem.eql(u8, ev.key, "l")) {
             try prompt.clearScreen();
+        } else if (ctrl and std.mem.eql(u8, ev.key, "r")) {
+            try prompt.historySearch();
         } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
             // While browsing, ctrl+left/right is a bigger horizontal step
             // (`scrollback_jump` columns), mirroring ctrl+up/down's row
@@ -1056,6 +1074,12 @@ const Prompt = struct {
     /// (not a recalled history entry). Otherwise, an index into `history`
     /// for whichever entry `historyUp`/`historyDown` last loaded.
     history_index: ?usize = null,
+    /// Set by `runCommand` when the child it just reaped wrote something
+    /// to its result pipe (see `result_fd_env`) -- owned, taken (and
+    /// nulled) by `takePendingResultLine`. `showPrompt` picks it up for a
+    /// plain typed invocation; `historySearch` (Ctrl+R) takes it directly
+    /// instead of waiting for the next prompt.
+    pending_result_line: ?[]u8 = null,
     /// What `buffer` held right before the first `historyUp` of a
     /// recall -- `historyDown` past the newest entry restores this,
     /// mirroring a real shell's "go back to what I was typing" behavior.
@@ -1255,6 +1279,7 @@ const Prompt = struct {
         self.scratch.deinit(alloc);
         self.buffer.deinit(alloc);
         self.completion_hint.deinit(alloc);
+        if (self.pending_result_line) |line| alloc.free(line);
         self.aliases.deinit(alloc);
         for (self.marks.items) |m| freeMark(alloc, m);
         self.marks.deinit(alloc);
@@ -2163,8 +2188,25 @@ const Prompt = struct {
         self.line_start_col = cur.col;
         self.cursor = 0;
         self.buffer.clearRetainingCapacity();
+        // A plain typed invocation of a result-returning program (e.g.
+        // `gw-hist` run by hand rather than via its Ctrl+R binding) left
+        // its pick here instead of an empty line -- see
+        // `pending_result_line`.
+        if (self.takePendingResultLine()) |line| {
+            defer self.client.alloc.free(line);
+            try self.buffer.appendSlice(self.client.alloc, line);
+            self.cursor = self.buffer.items.len;
+        }
         self.armCompletionHint();
         try self.renderInputLine();
+    }
+
+    /// Takes and clears `pending_result_line`, if a foreground child left
+    /// one -- see `runCommand`'s use of `result_fd_env`. Caller frees.
+    fn takePendingResultLine(self: *Prompt) ?[]u8 {
+        const line = self.pending_result_line;
+        self.pending_result_line = null;
+        return line;
     }
 
     /// Records a resize event without redrawing -- the re-layout waits for
@@ -2776,24 +2818,14 @@ const Prompt = struct {
         try self.submitLine();
     }
 
-    /// The offset ctrl+right lands on: past any whitespace right of the
-    /// cursor, then past the following run of non-whitespace.
+    /// The offset ctrl+right lands on -- see `lineedit.wordRight`.
     fn wordRight(self: *const Prompt) usize {
-        const buf = self.buffer.items;
-        var i = self.cursor;
-        while (i < buf.len and buf[i] == ' ') : (i += 1) {}
-        while (i < buf.len and buf[i] != ' ') : (i += 1) {}
-        return i;
+        return lineedit.wordRight(self.buffer.items, self.cursor);
     }
 
-    /// The offset ctrl+left lands on: back past any whitespace left of the
-    /// cursor, then back past the preceding run of non-whitespace.
+    /// The offset ctrl+left lands on -- see `lineedit.wordLeft`.
     fn wordLeft(self: *const Prompt) usize {
-        const buf = self.buffer.items;
-        var i = self.cursor;
-        while (i > 0 and buf[i - 1] == ' ') : (i -= 1) {}
-        while (i > 0 and buf[i - 1] != ' ') : (i -= 1) {}
-        return i;
+        return lineedit.wordLeft(self.buffer.items, self.cursor);
     }
 
     /// Clamps `self.cursor` to `offset` (a byte offset into `buffer`),
@@ -2902,6 +2934,27 @@ const Prompt = struct {
         const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
         try self.client.setCursor(cur.row + 1, 0);
         try self.showPrompt();
+    }
+
+    /// Ctrl+R: fuzzy history search. Runs the bundled `gw-hist` directly
+    /// through `runCommand` -- not the full `submitLine` path, so it
+    /// doesn't echo/record itself as a typed command -- and, on a pick,
+    /// loads it into the *current* line right away (`setLine`) instead of
+    /// waiting for `showPrompt` to pick up `pending_result_line` on the
+    /// next prompt (see that field's doc comment for the plain-typed-
+    /// invocation case this shares its plumbing with).
+    ///
+    /// Flushes history first (`.due` -- only if something's actually
+    /// pending) so a line submitted earlier this session, not yet due for
+    /// the periodic flush gate, is already in the file `gw-hist` reads
+    /// directly rather than over any live connection to this process.
+    fn historySearch(self: *Prompt) !void {
+        self.flushPersistentState(.due);
+        try self.runCommand(&.{"gw-hist"});
+        if (self.takePendingResultLine()) |line| {
+            defer self.client.alloc.free(line);
+            try self.setLine(line);
+        }
     }
 
     /// Runs whatever the just-committed line (`self.buffer`) names.
@@ -3606,7 +3659,25 @@ const Prompt = struct {
         // prompt (this reduced std has no `std.time.Timer`).
         const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
 
-        var pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows), null) catch |err| {
+        // A "result pipe" every foreground child gets for free: a
+        // glyphwire-aware interactive program (`gw-hist`'s fuzzy history
+        // search is the first) can `write()` a value to
+        // `$GLYPHWIRE_RESULT_FD` before exiting and have it become this
+        // prompt's line once the child is reaped -- see `result_fd_env`
+        // and `readResultPipe`. No `O_CLOEXEC` on either end, matching
+        // `pipeexec.zig`'s pipes: the write end has to survive fork+exec
+        // into the child with no changes to `Pty.spawn` itself, and the
+        // child inheriting the unused read end too is harmless.
+        var result_pipe: [2]c_int = undefined;
+        if (c.pipe2(&result_pipe, 0) != 0) return error.PipeFailed;
+        const result_fd_var = try std.fmt.allocPrintSentinel(alloc, "{s}={d}", .{ result_fd_env, result_pipe[1] }, 0);
+        defer alloc.free(result_fd_var);
+        const envp = try glyphwire.pty.buildEnvWith(alloc, &.{result_fd_var});
+        defer alloc.free(envp);
+
+        var pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows), envp) catch |err| {
+            _ = c.close(result_pipe[0]);
+            _ = c.close(result_pipe[1]);
             var buf: [160]u8 = undefined;
             const msg = switch (err) {
                 error.CommandNotFound => std.fmt.bufPrint(&buf, "{s}: command not found", .{argv[0]}) catch "command not found",
@@ -3621,6 +3692,17 @@ const Prompt = struct {
             return;
         };
         defer pty.deinit();
+        // The child now holds its own copy of the write end (or, if it
+        // never touches it, will simply exit and close it); this process
+        // only ever reads (`readResultPipe`, after the child is reaped,
+        // below). Closing the parent's own write-end copy now is what
+        // lets that read see EOF once every process holding the write
+        // end -- just the child -- has exited.
+        _ = c.close(result_pipe[1]);
+        // Closed on every exit from here on, including the early
+        // returns below (a failed reader-thread spawn, no `self.listener`)
+        // -- `readResultPipe` itself only reads, it doesn't close.
+        defer _ = c.close(result_pipe[0]);
 
         // A foreground child's output is the only thing this layer draws
         // for the rest of `runCommand` -- turn on cross-call VT state
@@ -3786,6 +3868,14 @@ const Prompt = struct {
         // read returns EOF/EIO and the thread exits on its own.
         reader.join();
 
+        // Every process that held the write end (just the child) has now
+        // exited, so this is a bounded read to EOF, not a block -- see
+        // `readResultPipe`.
+        if (try self.readResultPipe(result_pipe[0])) |line| {
+            if (self.pending_result_line) |old| alloc.free(old);
+            self.pending_result_line = line;
+        }
+
         // Back to the shell's own prompt/echo writes on this layer --
         // restore the call-scoped reset (setting the property either way
         // also clears whatever the child left half-open or un-reset, the
@@ -3803,6 +3893,32 @@ const Prompt = struct {
         // alt screen) and would otherwise leave `regionActive()` stuck,
         // freezing scrollback and making the host wheel page the shell.
         self.client.writeText("\x1b[?1049l\x1b[!p", null, null) catch {};
+    }
+
+    /// Drains `read_fd` (the result pipe's read end) to EOF and returns
+    /// what it held, trimming exactly one trailing `\n` for convenience --
+    /// or `null` if the child never wrote anything (the ordinary case: a
+    /// plain command that doesn't know about `$GLYPHWIRE_RESULT_FD`, or a
+    /// cancelled interactive picker). Caller frees a non-null result;
+    /// caller also owns closing `read_fd` itself (see `runCommand`'s
+    /// `defer`) -- this only reads.
+    fn readResultPipe(self: *Prompt, read_fd: c_int) !?[]u8 {
+        const alloc = self.client.alloc;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+
+        var chunk: [1024]u8 = undefined;
+        while (true) {
+            const n = c.read(read_fd, &chunk, chunk.len);
+            if (n <= 0) break;
+            try out.appendSlice(alloc, chunk[0..@intCast(n)]);
+        }
+        if (out.items.len == 0) {
+            out.deinit(alloc);
+            return null;
+        }
+        if (out.items[out.items.len - 1] == '\n') out.items.len -= 1;
+        return try out.toOwnedSlice(alloc);
     }
 
     /// Context for `ptyReaderThread`. `master` is owned by `runCommand`
@@ -4995,7 +5111,9 @@ const Prompt = struct {
 
         if (cands.items.len == 1) {
             const only = cands.items[0];
-            try self.insertText(only.name[dp.prefix.len..]);
+            const escaped = try wordsplit.escapeSpecial(alloc, only.name[dp.prefix.len..]);
+            defer alloc.free(escaped);
+            try self.insertText(escaped);
             try self.insertText(if (only.is_dir) "/" else " ");
             self.completion_armed = false;
             return;
@@ -5007,7 +5125,9 @@ const Prompt = struct {
         const lcp = complete.commonPrefixLen(names.items);
 
         if (lcp > dp.prefix.len) {
-            try self.insertText(cands.items[0].name[dp.prefix.len..lcp]);
+            const escaped = try wordsplit.escapeSpecial(alloc, cands.items[0].name[dp.prefix.len..lcp]);
+            defer alloc.free(escaped);
+            try self.insertText(escaped);
             self.completion_armed = true;
             return;
         }

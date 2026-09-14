@@ -403,6 +403,30 @@ pub fn build(b: *std.Build) void {
     const ls_step = b.step("gw-ls", "Run the glyphwire ls client (directory listing over the wire)");
     ls_step.dependOn(&run_ls.step);
 
+    const hist_exe = b.addExecutable(.{
+        .name = "gw-hist",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("hist/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    hist_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    hist_exe.root_module.addImport("shell_support", shell_support_mod);
+    // shell_support -> config.zig / script_engine.zig -> ziglua, even
+    // though gw-hist itself only reaches into shell_support.history and
+    // shell_support.fuzzy -- same reason ls_exe links it above.
+    hist_exe.root_module.linkLibrary(lua_lib);
+    hist_exe.root_module.link_libc = true;
+    b.installArtifact(hist_exe);
+
+    const run_hist = b.addRunArtifact(hist_exe);
+    run_hist.step.dependOn(b.getInstallStep());
+    run_hist.addPassthruArgs();
+
+    const hist_step = b.step("gw-hist", "Run the glyphwire Ctrl+R fuzzy history search standalone");
+    hist_step.dependOn(&run_hist.step);
+
     const zoe_exe = b.addExecutable(.{
         .name = "zoe",
         .root_module = b.createModule(.{
@@ -570,7 +594,7 @@ pub fn build(b: *std.Build) void {
     // pulls in. The CI packaging job
     // (.github/workflows/linux-package.yml) drives this step.
     const package_step = b.step("package", "Install the shipped programs and assets into zig-out");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, read_exe, ls_exe, zoe_exe, agent_exe, gmux_exe }) |exe| {
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, read_exe, ls_exe, hist_exe, zoe_exe, agent_exe, gmux_exe }) |exe| {
         package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     package_step.dependOn(&installed_assets_step.step);
@@ -581,8 +605,8 @@ pub fn build(b: *std.Build) void {
     // runtime, so the packaged tree has to carry them alongside the binary.
     package_step.dependOn(grammars_step);
 
-    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-agent, gw-view, gw-read, gw-ls, zoe, gmux, grammars, and assets under the selected prefix");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, agent_exe, view_exe, read_exe, ls_exe, zoe_exe, gmux_exe }) |exe| {
+    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-agent, gw-view, gw-read, gw-ls, gw-hist, zoe, gmux, grammars, and assets under the selected prefix");
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, agent_exe, view_exe, read_exe, ls_exe, hist_exe, zoe_exe, gmux_exe }) |exe| {
         install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     install_local_step.dependOn(&installed_assets_step.step);

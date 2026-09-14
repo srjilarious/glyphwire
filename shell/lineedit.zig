@@ -62,6 +62,44 @@ pub fn cellWidth(text: []const u8) usize {
     return glyphwire.stringWidth(text);
 }
 
+/// Character classes a Ctrl+Left/Right hop stops at: letters, digits, and
+/// underscore are one "word" class (an identifier/filename segment);
+/// every other non-whitespace byte is its own "punct" class. So a path
+/// separator or a run of operator characters (`/`, `--`, `&&`) is its own
+/// stop rather than being swallowed into the surrounding text the way
+/// bash's word-jump skips over it silently.
+const WordClass = enum { space, word, punct };
+
+fn wordClass(ch: u8) WordClass {
+    if (ch == ' ' or ch == '\t') return .space;
+    if ((ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '_') return .word;
+    return .punct;
+}
+
+/// The offset a Ctrl+Right hop lands on: past any whitespace right of
+/// `cursor`, then past the following run of one `WordClass` -- e.g.
+/// `/home/jeff` takes two hops per path segment, one over the `/`, one
+/// over the name.
+pub fn wordRight(buf: []const u8, cursor: usize) usize {
+    var i = cursor;
+    while (i < buf.len and wordClass(buf[i]) == .space) : (i += 1) {}
+    if (i >= buf.len) return i;
+    const class = wordClass(buf[i]);
+    while (i < buf.len and wordClass(buf[i]) == class) : (i += 1) {}
+    return i;
+}
+
+/// The offset a Ctrl+Left hop lands on: back past any whitespace left of
+/// `cursor`, then back past the preceding run of one `WordClass`.
+pub fn wordLeft(buf: []const u8, cursor: usize) usize {
+    var i = cursor;
+    while (i > 0 and wordClass(buf[i - 1]) == .space) : (i -= 1) {}
+    if (i == 0) return 0;
+    const class = wordClass(buf[i - 1]);
+    while (i > 0 and wordClass(buf[i - 1]) == class) : (i -= 1) {}
+    return i;
+}
+
 /// Every maximal run of `\n` / `\r` in `text` replaced by a single space,
 /// as an owned copy (free with `alloc`). The shell's line editor is
 /// single-line; pasted text that carries newlines -- a multi-select copy

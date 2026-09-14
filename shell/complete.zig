@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 const std = @import("std");
+const wordsplit = @import("wordsplit.zig");
 
 /// Pure string helpers for glyphwire-shell's Tab completion. The actual
 /// directory scan and the edits to the on-screen line live in
@@ -71,14 +72,22 @@ pub fn commonPrefixLen(names: []const []const u8) usize {
 }
 
 /// The text a fish-style inline hint should draw after a typed completion
-/// prefix for one candidate. Returns `null` if `name` is not actually a
-/// completion of `prefix`; otherwise the result is owned by `alloc` and
-/// includes the same terminator Tab completion would insert (`/` for a
-/// directory, a space for anything else).
+/// prefix for one candidate, and the same text Tab completion inserts
+/// into the buffer. Returns `null` if `name` is not actually a completion
+/// of `prefix`; otherwise the result is owned by `alloc` and includes the
+/// same terminator Tab completion would insert (`/` for a directory, a
+/// space for anything else).
+///
+/// The filename portion is backslash-escaped (`wordsplit.escapeSpecial`)
+/// so a name with a space or shell metacharacter still parses back as one
+/// argument -- `prefix` is text the user already typed (and is trusted to
+/// already be escaped how they want), so only the new suffix is touched.
 pub fn candidateSuffix(alloc: std.mem.Allocator, prefix: []const u8, name: []const u8, is_dir: bool) !?[]u8 {
     if (!std.mem.startsWith(u8, name, prefix)) return null;
 
-    const rest = name[prefix.len..];
+    const rest = try wordsplit.escapeSpecial(alloc, name[prefix.len..]);
+    defer alloc.free(rest);
+
     const out = try alloc.alloc(u8, rest.len + 1);
     @memcpy(out[0..rest.len], rest);
     out[rest.len] = if (is_dir) '/' else ' ';

@@ -533,6 +533,107 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try testz.expectEqualStr("/", accepted.cellAt(0, text_col + 6).grapheme);
 }
 
+/// Ctrl+R end to end: the real shell spawns the real `gw-hist`, `gw-hist`
+/// reads a seeded history file and fuzzy-filters it live, and picking a
+/// line hands it back through `$GLYPHWIRE_RESULT_FD` to become the
+/// prompt's line -- `Prompt.historySearch` / `Prompt.runCommand` /
+/// `Prompt.takePendingResultLine` all in one pass, no library-level
+/// shortcut. `gw-hist` runs on its own alt screen (`CSI ?1049h`/`l`,
+/// mirrored onto the same root layer's `write_text` -- see
+/// `src/core.zig`'s alt-screen handling), so the shell's own prompt row
+/// stays put underneath and is what's checked here once `gw-hist` exits.
+///
+/// Unlike `sandboxShellConfig` (which sets `GLYPHWIRE_NO_HISTORY=1` so
+/// other tests don't touch a real history file), this test needs
+/// `gw-hist` to have something to search, so it points
+/// `GLYPHWIRE_CONFIG_DIR` at its own throwaway directory and seeds a
+/// `history` file there directly.
+pub fn shellCtrlRHistorySearchLoadsPickedLineIntoPromptTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shell-ctrlr-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+    const hist_bin_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-hist", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(hist_bin_path);
+    std.Io.Dir.accessAbsolute(io, hist_bin_path, .{}) catch |err| {
+        std.debug.print("e2e: required binary not found: {s} ({t})\n", .{ hist_bin_path, err });
+        return error.TestBinaryMissing;
+    };
+
+    const cfg_dir = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-e2e-ctrlr-cfg-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(cfg_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, cfg_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, cfg_dir);
+    const hist_file = try std.fs.path.join(alloc, &.{ cfg_dir, "history" });
+    defer alloc.free(hist_file);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = hist_file, .data = "ls -la\necho ctrlr-e2e-marker\ngit status\n" });
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try shell_env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
+    // `runCommand` resolves `gw-hist` via `execvp`'s `PATH` search, same
+    // as any other bare command name (see shell/main.zig's top doc
+    // comment) -- prepend the freshly built binaries the same way
+    // `shellRunsATwoStagePipelineTest`'s `PATH`-dependent siblings do.
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    const text_col = cwd_len + 3;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    try reporter.reportKey("left_control", true);
+    try reporter.reportKey("r", true);
+    try reporter.reportKey("r", false);
+    try reporter.reportKey("left_control", false);
+
+    // `gw-hist` is now the foreground child, on its own alt screen;
+    // typed text and Enter forward into its raw-mode stdin exactly like
+    // any other plain (non-aware) foreground program's pty.
+    try typeText(&reporter, "marker");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // Back on the same prompt row (nothing else ran to advance it) --
+    // now loaded with the picked line instead of an empty one.
+    try waitForCell(&reporter, 0, text_col, "e");
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+    try testz.expectEqualStr("e", snapshot.cellAt(0, text_col).grapheme);
+    try testz.expectEqualStr("c", snapshot.cellAt(0, text_col + 1).grapheme);
+    try testz.expectEqualStr("h", snapshot.cellAt(0, text_col + 2).grapheme);
+    try testz.expectEqualStr("o", snapshot.cellAt(0, text_col + 3).grapheme);
+    try testz.expectEqualStr(" ", snapshot.cellAt(0, text_col + 4).grapheme);
+    try testz.expectEqualStr("c", snapshot.cellAt(0, text_col + 5).grapheme);
+}
+
 /// Drives the real glyphwire-shell binary through a `*` glob expansion:
 /// types `echo *.zon` at the prompt and presses Enter. The shell's cwd
 /// (this repo's root, same assumption the other shell e2e tests make)

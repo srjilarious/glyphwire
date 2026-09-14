@@ -15,6 +15,7 @@
 //! module pulls in ziglua and the test runner links the Lua C library.
 
 pub const wordsplit = @import("wordsplit.zig");
+pub const fuzzy = @import("fuzzy.zig");
 pub const parse = @import("parse.zig");
 pub const envassign = @import("envassign.zig");
 pub const complete = @import("complete.zig");

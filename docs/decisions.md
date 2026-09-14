@@ -3219,6 +3219,115 @@ exist").
   it's the case the feature exists to serve and the typed-`cd` path — the
   one a user would notice getting noisier — is untouched.
 
+#### Tab completion escapes what it inserts; word navigation stops on punctuation
+- **A completed suffix is backslash-escaped before insertion**
+  (`wordsplit.escapeSpecial`, used by `complete.candidateSuffix` and both
+  insertion sites in `Prompt.doComplete`), not wrapped in quotes. A
+  filename with a space used to land in the buffer unescaped, so
+  `splitArgs` cut it into two arguments the moment the user pressed
+  Enter — `wordRange`'s own doc comment already documents `\ ` as the
+  word-boundary escape a typed word uses, so completion now produces the
+  same shape a careful typist would, rather than the alternative of
+  wrapping the new text in a pair of single quotes (`quoteArg`'s
+  approach) which would work too — `splitArgs` joins an adjacent
+  quoted/unquoted run into one token — but leaves a visible stray quote
+  mid-word. Only the *new* suffix is escaped, never the prefix the user
+  already typed: completion doesn't get to assume how they meant to
+  quote what's already on the line.
+- **Word navigation (Ctrl+Left/Right) stops at every character-class
+  change, not just whitespace runs.** `lineedit.wordRight`/`wordLeft`
+  classify each byte as whitespace, a "word" character (alnum +
+  underscore), or "punct" (everything else), and a hop crosses exactly
+  one run of one class past any leading whitespace. `/home/jeff` now
+  takes two hops per path segment — one over the `/`, one over the name
+  — matching VSCode/Sublime-style word-jump rather than bash's, which
+  treats a run of non-word bytes as no different from whitespace and
+  glides over it without stopping. Chosen because the request was
+  specifically to stop on `/`, which bash's model doesn't do at all.
+
+#### Ctrl+R fuzzy history search (`gw-hist`) and the shell result pipe
+- **A brand-new foreground program, not a builtin overlay inside
+  `gw-shell` itself.** `shell/main.zig` already draws its own browse
+  mode directly on the grid for scrollback (`browsescroll.zig`), which
+  would have been the smaller change — but the ask was explicitly for a
+  *generic* mechanism any interactive program could use to hand a value
+  back to the prompt, not a one-off Ctrl+R special case, so the shell
+  side had to support an arbitrary spawned child doing this, and
+  `gw-hist` became the first (and simplest possible) thing to build on
+  top of it.
+- **`gw-hist` is a plain terminal program, not a glyphwire-aware one —
+  no wire connection, no `core.Layer` calls of its own.** It takes over
+  the *primary* screen's alternate buffer (`CSI ?1049h` / `?1049l`,
+  written directly to its own stdout) the same way `vim`/`less` do. This
+  works today with zero changes to `runCommand`'s pty-forwarding loop:
+  `core.Layer` already interprets the alt-screen escape sequences
+  wherever a plain child's mirrored stdout lands (`writeText`'s Phase A
+  VT support — see the alt-screen entries earlier in this section), and
+  `runCommand` already defensively resets `?1049l` after every
+  foreground command in case one exits without cleaning up. Building
+  `gw-hist` as an *aware* client instead (its own `core.Layer`, JSON-RPC
+  drawing calls) would have needed a second wire connection, a session
+  handshake, and layer lifecycle management for a UI that's simpler than
+  what raw ANSI cursor positioning + SGR reverse-video already gets for
+  free.
+- **The generic half: every foreground command `runCommand` spawns gets
+  a "result pipe" for free.** Before `Pty.spawn`, `runCommand` opens a
+  plain (no `O_CLOEXEC`) pipe and passes its write end's fd number to
+  the child via `$GLYPHWIRE_RESULT_FD` (`glyphwire.pty.buildEnvWith`,
+  the same mechanism `gmux`'s `pane.zig` uses for `GLYPHWIRE_PANE`).
+  Neither end needs `O_CLOEXEC`-plus-`dup2` bookkeeping to land on a
+  fixed fd number in the child (the approach `pipeexec.zig`'s own pipes
+  use for stdin/stdout/stderr) — the child just reads the number out of
+  its own environment, so whatever fd `pipe2` happened to allocate is
+  fine. The parent closes its own copy of the write end immediately
+  after spawn (so the read end sees real EOF once the child's copy
+  closes too, whether the child ever writes to it or not) and drains it
+  right after `reader.join()` — every process that could hold the write
+  end open has exited by then, so the read is bounded, not a block. A
+  child that never heard of this fd just leaves it sitting open until it
+  exits normally; cost is two fds and a five-byte env var per spawn,
+  paid whether or not anything uses it.
+- **The result becomes the *next* prompt's line, not something that
+  auto-submits.** `runCommand` stashes whatever the pipe held in
+  `Prompt.pending_result_line`; `showPrompt` loads it into the freshly
+  cleared buffer instead of leaving an empty line, for a plain typed
+  invocation (`gw-hist` run by hand). Ctrl+R's own handler
+  (`Prompt.historySearch`) doesn't go through `submitLine` at all — it
+  calls `runCommand` directly (so `gw-hist` never gets echoed or
+  recorded as if the user had typed it) and takes the pending result
+  immediately afterward via `setLine`, landing it on the *same* prompt
+  row rather than waiting for a new one. Every real shell's Ctrl+R
+  (bash, zsh, fish, fzf, McFly) works the same way: the pick replaces
+  the line, it doesn't run it — the user still reviews and presses Enter
+  themselves.
+- **History has to be flushed to disk before `gw-hist` runs.**
+  `gw-hist` reads `~/.config/glyphwire/history` directly rather than
+  over any live channel to the shell process, so a line submitted
+  earlier this session that hasn't hit the periodic flush gate yet
+  (`flushgate.zig`, 25 changes / 120s) wouldn't be visible to it.
+  `historySearch` calls `flushPersistentState(.due)` first — a no-op if
+  nothing's pending, a real write if something is — rather than
+  building any kind of live IPC to hand the in-memory history across;
+  the file was already the shared, multi-shell-safe source of truth
+  (see the `history`/`z.db` merge entry above), so reusing it needs no
+  new mechanism at all.
+- **Fuzzy matching is plain ordered-subsequence, no contextual
+  scoring.** `shell/fuzzy.zig`'s `matches`/`score` only ask "do these
+  characters appear in this order" and "how tightly packed is the
+  match" — no directory weighting, no frequency, no recency decay the
+  way real McFly's ranking works. Ties are broken by the caller
+  (`gw-hist`'s `refilter`) with a stable sort over history already fed
+  in newest-first, so an unscored tie keeps recency as its only signal.
+  Matches the precedent `zj`'s matching already set (substring, not
+  fuzzy, deliberately kept simple) rather than growing a second, bigger
+  scoring model for the same category of problem.
+- **No live `SIGWINCH` handling in `gw-hist`.** The terminal size is
+  read once at startup (`TIOCGWINSZ`) and used for the rest of the
+  run — a resize mid-search just leaves the layout sized to whatever the
+  window was when Ctrl+R was pressed. Acceptable for a picker that's
+  normally open for a few keystrokes; revisit if that turns out to be
+  wrong in practice.
+
 ### Batch messages
 - **`batch` wraps an ordered list of other messages in one frame**,
   applied server-side in a single pass under the one `ctx_mutex` hold the

@@ -17,6 +17,7 @@ const pty = @import("shell_support").pty;
 const lineedit = @import("shell_support").lineedit;
 const browsescroll = @import("shell_support").browsescroll;
 const logicalpath = @import("shell_support").logicalpath;
+const fuzzy = @import("shell_support").fuzzy;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -172,6 +173,36 @@ pub fn quoteArgIfNeededQuotesWhenItHasToTest(_: std.Io, alloc: std.mem.Allocator
         try testz.expectEqual(toks.len, 1);
         try testz.expectEqualStr(s, toks[0]);
     }
+}
+
+// ─── wordsplit.escapeSpecial ───────────────────────────────────────────
+
+pub fn escapeSpecialLeavesPlainTextBareTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const got = try wordsplit.escapeSpecial(alloc, "src/docs/build.zig");
+    defer alloc.free(got);
+    try testz.expectEqualStr("src/docs/build.zig", got);
+}
+
+pub fn escapeSpecialEscapesSpacesAndMetacharactersTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const got = try wordsplit.escapeSpecial(alloc, "My File (1)*.txt");
+    defer alloc.free(got);
+    try testz.expectEqualStr("My\\ File\\ \\(1\\)\\*.txt", got);
+}
+
+/// The whole point: appending the escaped text onto an unescaped prefix
+/// the user already typed must re-split back to one token.
+pub fn escapeSpecialRoundTripsOntoPrefixTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const prefix = "My";
+    const rest = try wordsplit.escapeSpecial(alloc, " File & Friends.txt");
+    defer alloc.free(rest);
+
+    const line = try std.mem.concat(alloc, u8, &.{ prefix, rest });
+    defer alloc.free(line);
+
+    const toks = try wordsplit.split(alloc, line);
+    defer wordsplit.freeTokens(alloc, toks);
+    try testz.expectEqual(toks.len, 1);
+    try testz.expectEqualStr("My File & Friends.txt", toks[0]);
 }
 
 // ─── glob.hasWildcard ─────────────────────────────────────────────────
@@ -342,6 +373,12 @@ pub fn candidateSuffixAddsFileSpaceTest(_: std.Io, alloc: std.mem.Allocator) !vo
 pub fn candidateSuffixRejectsNonMatchTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const got = try complete.candidateSuffix(alloc, "zo", "src", true);
     try testz.expectEqual(got, null);
+}
+
+pub fn candidateSuffixEscapesSpacesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const got = (try complete.candidateSuffix(alloc, "My", "My Photo.jpg", false)).?;
+    defer alloc.free(got);
+    try testz.expectEqualStr("\\ Photo.jpg ", got);
 }
 
 // ─── handshake.aware ──────────────────────────────────────────────────
@@ -643,6 +680,73 @@ pub fn lineeditCellWidthCountsGridCellsNotBytesTest(_: std.Io, _: std.mem.Alloca
     try testz.expectEqual(lineedit.cellWidth(""), @as(usize, 0));
 }
 
+// ─── lineedit.wordRight / wordLeft ─────────────────────────────────────
+
+pub fn wordRightStopsOnEachPathSegmentTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "cat /home/jeff";
+    // "cat" -> space -> "/" -> "home" -> "/" -> "jeff"
+    var i: usize = 0;
+    i = lineedit.wordRight(buf, i);
+    try testz.expectEqualStr("cat", buf[0..i]);
+    i = lineedit.wordRight(buf, i);
+    try testz.expectEqualStr("cat /", buf[0..i]);
+    i = lineedit.wordRight(buf, i);
+    try testz.expectEqualStr("cat /home", buf[0..i]);
+    i = lineedit.wordRight(buf, i);
+    try testz.expectEqualStr("cat /home/", buf[0..i]);
+    i = lineedit.wordRight(buf, i);
+    try testz.expectEqualStr(buf, buf[0..i]);
+}
+
+pub fn wordLeftStopsOnEachPathSegmentTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "cat /home/jeff";
+    var i: usize = buf.len;
+    i = lineedit.wordLeft(buf, i);
+    try testz.expectEqualStr("cat /home/", buf[0..i]);
+    i = lineedit.wordLeft(buf, i);
+    try testz.expectEqualStr("cat /home", buf[0..i]);
+    i = lineedit.wordLeft(buf, i);
+    try testz.expectEqualStr("cat /", buf[0..i]);
+    // Landing here puts the cursor right before the `/`, with the space
+    // still to its left -- the space itself is only consumed once the
+    // cursor sits immediately after it, one more hop below (mirrors how
+    // a lone space between two different-class runs takes its own hop
+    // only when a hop starts adjacent to it).
+    i = lineedit.wordLeft(buf, i);
+    try testz.expectEqualStr("cat ", buf[0..i]);
+    i = lineedit.wordLeft(buf, i);
+    try testz.expectEqual(i, 0);
+}
+
+pub fn wordRightGroupsAPunctuationRunAsOneStopTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A run of the same punctuation class (e.g. `--flag`) is one hop, not
+    // one stop per character.
+    const buf = "run --flag";
+    var i: usize = 0;
+    i = lineedit.wordRight(buf, i);
+    try testz.expectEqualStr("run", buf[0..i]);
+    i = lineedit.wordRight(buf, i);
+    try testz.expectEqualStr("run --", buf[0..i]);
+    i = lineedit.wordRight(buf, i);
+    try testz.expectEqualStr(buf, buf[0..i]);
+}
+
+pub fn wordRightTreatsUnderscoreAsWordCharTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "my_var.txt";
+    const i = lineedit.wordRight(buf, 0);
+    try testz.expectEqualStr("my_var", buf[0..i]); // underscore stays in the word run
+}
+
+pub fn wordRightAtEndOfLineStaysPutTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "cat foo";
+    try testz.expectEqual(lineedit.wordRight(buf, buf.len), buf.len);
+}
+
+pub fn wordLeftAtStartOfLineStaysPutTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "cat foo";
+    try testz.expectEqual(lineedit.wordLeft(buf, 0), @as(usize, 0));
+}
+
 // ─── lineedit.flattenNewlines ─────────────────────────────────────────
 
 pub fn flattenNewlinesCollapsesRunsToSingleSpaceTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -889,4 +993,52 @@ pub fn historyMergeTrimsToMaxEntriesTest(_: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(merged.len, history.max_entries);
     try testz.expectEqualStr("cmd2", merged[0]);
     try testz.expectEqualStr("new-2", merged[merged.len - 1]);
+}
+
+// ─── fuzzy.matches / fuzzy.score ────────────────────────────────────────
+
+pub fn fuzzyMatchesInOrderSubsequenceTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(fuzzy.matches("git log --graph", "glg")); // g(it) -> l(og) -> g(raph)
+    try testz.expectTrue(fuzzy.matches("git log --graph", "gitlog"));
+    try testz.expectTrue(!fuzzy.matches("git log --graph", "pgi")); // no 'g' left after the only 'p'
+    try testz.expectTrue(!fuzzy.matches("git log --graph", "xyz"));
+}
+
+pub fn fuzzyMatchesIsCaseInsensitiveTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(fuzzy.matches("Git Log", "gl"));
+    try testz.expectTrue(fuzzy.matches("Git Log", "GL"));
+}
+
+pub fn fuzzyMatchesEmptyQueryMatchesEverythingTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(fuzzy.matches("anything", ""));
+    try testz.expectTrue(fuzzy.matches("", ""));
+}
+
+pub fn fuzzyScoreNullWhenNoMatchTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(fuzzy.score("git log", "xyz"), null);
+}
+
+pub fn fuzzyScoreZeroForEmptyQueryTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(fuzzy.score("anything", ""), @as(?usize, 0));
+}
+
+pub fn fuzzyScoreExactContiguousMatchIsTightestTest(_: std.Io, _: std.mem.Allocator) !void {
+    // "log" appears as one contiguous run -> span exactly 3.
+    try testz.expectEqual(fuzzy.score("git log --graph", "log"), @as(?usize, 3));
+}
+
+pub fn fuzzyScorePrefersTighterSpanTest(_: std.Io, _: std.mem.Allocator) !void {
+    // "gl" packs tighter in "git log" (span 5, "git l"... tightened to
+    // "g...l" = "git l" -> actually tightened via backward pass) than
+    // spread across "g-r-e-p l" style text.
+    const tight = fuzzy.score("git log", "gl").?;
+    const loose = fuzzy.score("g r e p l", "gl").?;
+    try testz.expectTrue(tight < loose);
+}
+
+pub fn fuzzyScoreFindsTightestNotFirstSpanTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Two possible "ab" matches: an early, spread-out one and a later,
+    // tight one. The tightest span wins regardless of position.
+    const s = fuzzy.score("a....ab", "ab").?;
+    try testz.expectEqual(s, @as(usize, 2)); // the contiguous "ab" at the end
 }

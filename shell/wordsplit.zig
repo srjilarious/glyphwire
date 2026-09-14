@@ -156,16 +156,41 @@ pub fn quoteArg(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
 /// metacharacter, a non-ASCII byte -- forces quoting.
 const plain_word_extra = "@%+=:,./_-";
 
+fn isPlainByte(c: u8) bool {
+    return (c >= 'A' and c <= 'Z') or
+        (c >= 'a' and c <= 'z') or
+        (c >= '0' and c <= '9') or
+        std.mem.indexOfScalar(u8, plain_word_extra, c) != null;
+}
+
 fn isPlainWord(s: []const u8) bool {
     if (s.len == 0) return false; // the empty string must become `''`
     for (s) |c| {
-        const safe = (c >= 'A' and c <= 'Z') or
-            (c >= 'a' and c <= 'z') or
-            (c >= '0' and c <= '9') or
-            std.mem.indexOfScalar(u8, plain_word_extra, c) != null;
-        if (!safe) return false;
+        if (!isPlainByte(c)) return false;
     }
     return true;
+}
+
+/// Backslash-escapes each byte of `s` that `splitArgs` (or `parse.zig`'s
+/// operator lexer, which replicates the same quote/escape rules) would
+/// otherwise treat specially: whitespace, a quote character, a literal
+/// backslash, a glob metacharacter, or an operator byte like `|`/`&`/`;`.
+/// E.g. `My File (1).txt` -> `My\ File\ \(1\).txt`.
+///
+/// Unlike `quoteArg`/`quoteArgIfNeeded`, this never wraps the result in
+/// quotes, so it's safe to append onto a prefix the user already typed
+/// unescaped -- Tab completion's job (`complete.candidateSuffix`,
+/// `shell/main.zig`'s `doComplete`) is inserting only the *new* suffix of
+/// a filename into the middle of a word, not replacing the whole word.
+/// Caller owns the returned bytes.
+pub fn escapeSpecial(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (s) |c| {
+        if (!isPlainByte(c)) try out.append(alloc, '\\');
+        try out.append(alloc, c);
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 /// Like `quoteArg`, but only wraps `s` when it actually needs it: a path
