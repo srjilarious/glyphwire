@@ -103,7 +103,7 @@ pub const ReadConfig = struct {
     dictionary: []const u8 = "",
     /// Default size of the lookup panel's title (the looked-up term) --
     /// `"1x"` (normal), `"1.5x"`, or `"2x"`, drawn via `write_text`'s
-    /// `scale` (see `core.TextScale`'s doc comment). `+`/`-` cycle it at
+    /// `scale` (see `core.TextScale`'s doc comment). `s` cycles it at
     /// runtime for the session; this is only the size a freshly opened
     /// book's lookup panel starts at.
     dictionary_title_scale: glyphwire.TextScale = .x1,
