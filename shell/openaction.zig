@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Deciding what command runs when an `ls` entry is activated -- the
 //! policy glyphwire-ls deliberately leaves out of its metadata blob.
 //!

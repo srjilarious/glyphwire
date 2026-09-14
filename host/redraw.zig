@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! The `Context`-derived half of glyphwire-host's "only draw when
 //! something changed" check (see decisions.md's "Redraw on change" and
 //! `render.zig`'s static-batch cache, which this sits on top of).

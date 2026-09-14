@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The file-tree model behind zoe's sidebar: a directory walked lazily,
 //! flattened into the rows the pane draws.
 //!

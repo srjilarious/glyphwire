@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Where glyphwire's per-user config files live -- `host.conf`,
 //! `shell.conf`, `ls.conf`, and the optional `icons/` override tree. Every
 //! binary resolves the same directory the same way, so this is the one

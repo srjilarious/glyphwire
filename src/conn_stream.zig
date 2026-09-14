@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! `ConnStream` -- the byte-stream a `Server` connection reads and writes,
 //! independent of where the peer actually is.
 //!

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The data model behind the `zj` builtin -- glyphwire-shell's take on
 //! `z` / zoxide / autojump directory jumping. Pure: `shell/main.zig` does
 //! the filesystem IO (reading and writing `~/.config/glyphwire/z.db`,

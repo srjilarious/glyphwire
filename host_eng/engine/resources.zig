@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! The resource manager: ref-counted textures, shaders, atlases and
 //! fonts, keyed by name. Two engine features glyphwire doesn't use are
 //! stripped or disabled here:

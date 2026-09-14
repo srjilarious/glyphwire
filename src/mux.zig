@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Channel multiplexing for the remote-session trunk.
 //!
 //! `glyphwire --ssh <dest>` spawns `gw-agent --stdio` on the far host and

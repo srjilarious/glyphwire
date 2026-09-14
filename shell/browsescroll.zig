@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pure scrolloff math for glyphwire-shell's Up/Down scrollback browsing
 //! (`Prompt.browseUp` / `browseDown`). No IO -- given the current browse
 //! state and the window geometry it returns where the browse cursor and

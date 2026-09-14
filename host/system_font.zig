@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Resolving a `host.conf` `font_face` / `font_fallback` value that names
 //! a system-installed font family ("DejaVu Sans Mono", "monospace") rather
 //! than a file. Done by shelling out to `fc-match` -- fontconfig's CLI,

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # Architectural review: panes should be contexts, not layers
 
 Status: review of `worktree-gmux` (10 commits over `dev` at `5ec395e`).

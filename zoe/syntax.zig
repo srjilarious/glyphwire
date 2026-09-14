@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! zoe's tree-sitter syntax highlighting: a registry that `dlopen`s
 //! language parsers at runtime, and a `Highlighter` that keeps a parse
 //! tree for the current buffer and turns it into per-line colour spans.

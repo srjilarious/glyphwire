@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! zoe's modal editing state machine: the buffer, the cursor, the mode,
 //! and the pending-command state that turns a stream of keystrokes into
 //! edits.

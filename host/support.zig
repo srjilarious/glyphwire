@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pure, engine-free pieces of glyphwire-host, re-exported as one module
 //! so the test runner (`tests/host_tests.zig`) can exercise them without
 //! pulling in SDL / OpenGL. Same cross-directory-module reason as

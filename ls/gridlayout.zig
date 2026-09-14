@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Column-packing math for glyphwire-ls's plain (non `-l`) listing. Given
 //! the entry count, the widest entry's display width in *cells*, and the
 //! layer width in cells, it decides how many entry columns fit and where

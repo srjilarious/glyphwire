@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Remote sessions: run the host locally, the shell (and the `gw-ls` /
 //! `gw-view` / `zoe` it launches) on a remote box, reached over one `ssh`
 //! connection.

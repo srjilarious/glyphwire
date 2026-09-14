@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pure size / permission / timestamp formatting for glyphwire-ls's `-l`
 //! listing (and the plain stdout fallback). No IO, no libc -- everything
 //! here works off values already in a `FileEntry`.

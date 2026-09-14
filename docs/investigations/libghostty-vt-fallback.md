@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # Investigation: a VT100/PTY-capable fallback via libghostty
 
 Status: **Phase A + B0 + B1 built** (all hand-rolled, not libghostty —

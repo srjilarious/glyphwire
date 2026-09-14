@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # Wire API Reference
 
 The concrete enumeration of glyphwire's message catalog — named as an

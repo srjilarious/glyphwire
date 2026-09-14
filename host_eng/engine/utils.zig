@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Utility/helper functions and structures that don't fit into other categories.
 const std = @import("std");
 

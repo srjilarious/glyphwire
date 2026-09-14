@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! glyphwire-host's concrete instantiation of the shared frame-timing
 //! profiler (`src/profiler.zig`). Defines the phases the host loop times
 //! and the volume counters `render.zig` feeds, plus the runtime HUD

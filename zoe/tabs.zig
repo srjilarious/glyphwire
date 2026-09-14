@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The buffer tab strip's geometry.
 //!
 //! One row above the buffer pane listing every open buffer, with a close

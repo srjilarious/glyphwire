@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Window metrics for the SDL3 backend. `Engine` owns one of these as
 //! `eng.window_state` and refreshes it whenever SDL reports a resize,
 //! pixel-size or display-scale change.

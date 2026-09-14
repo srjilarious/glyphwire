@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! zoe's optional startup config, `~/.config/glyphwire/zoe.conf` -- a Lua
 //! script assigning a global `config` table, the same shape `host.conf`
 //! and `ls.conf` use. It carries syntax-highlighting settings only:

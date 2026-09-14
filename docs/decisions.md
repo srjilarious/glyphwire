@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # glyphwire — Design Decisions & Open Items
 
 glyphwire is a 2D-grid terminal replacement. A duplex protocol over a local

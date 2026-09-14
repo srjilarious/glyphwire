@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! gmux's glyphwire client: a binary split tree of panes, each running a
 //! program of its own, plus the command loop behind the prefix key.
 //!

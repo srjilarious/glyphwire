@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! `gw-agent` -- the remote half of a `glyphwire --ssh <dest>` session.
 //!
 //! Launched by the local host as `ssh -T <dest> -- gw-agent --stdio`, so

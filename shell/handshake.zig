@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pure detection of the glyphwire handshake marker at the head of a
 //! captured child's stdout -- see glyphwire-shell's
 //! `Prompt.pumpChildOutput`. Dependency-free (a plain byte slice in, a

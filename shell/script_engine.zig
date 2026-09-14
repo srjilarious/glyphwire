@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The one Lua state glyphwire-shell keeps for a whole session.
 //!
 //! `shell/config.zig` runs `shell.conf` for its declarative `alias` /

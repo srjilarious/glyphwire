@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `gmux` -- a terminal multiplexer for glyphwire: a split tree of panes,
 //! each running a program of its own. See `ui.zig` for the client and
 //! `docs/decisions.md`'s gmux section for the design.

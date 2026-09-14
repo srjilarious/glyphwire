@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const wordsplit = @import("shell_support").wordsplit;

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pure key/mouse-event -> byte encoders for the B0 "dumb PTY" fallback
 //! (`pty.zig`). `charFromKeyName` turns a wire key name (`"a"`, `"three"`,
 //! `"slash"`, ...) plus shift into the character the prompt's line editor

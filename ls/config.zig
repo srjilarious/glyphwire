@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Loads glyphwire-ls's startup config, `~/.config/glyphwire/ls.conf`, a
 //! Lua script that assigns a global `config` table -- the same shape
 //! `host.conf` uses. Running it yields an `LsConfig`. Split into the

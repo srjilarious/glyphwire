@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Loads glyphwire-shell's startup config, `~/.config/glyphwire/shell.conf`,
 //! which is a Lua script. Running it produces a `ShellConfig` -- the Lua
 //! bindings (right now just `alias(name, value)`) append into that struct

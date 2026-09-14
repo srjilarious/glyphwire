@@ -6,8 +6,8 @@ and `status/slow` -- meant for `{icon:status/error}` in a
 `when = "slow"` one (see decisions.md's Shell section).
 
 32x32 PNGs from the KDE Oxygen icon theme (https://github.com/KDE/oxygen-icons),
-same source and license as ../oxygen/ -- see ../oxygen/README.txt and
-../oxygen/OXYGEN-LICENSE.txt (GNU LGPL v3, with that file's section 5 GUI
+same source and license as ../filetype/oxygen/ -- see ../filetype/oxygen/README.txt and
+../filetype/oxygen/LICENSE.txt (GNU LGPL v3, with that file's section 5 GUI
 exception). Normalized to 8-bit RGBA on import (chronometer ships 16-bit).
 
 Files here (name -> upstream icon):

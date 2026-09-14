@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! zoe's text storage: a byte-oriented gap buffer plus the line index the
 //! editor navigates by.
 //!

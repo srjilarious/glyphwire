@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! A tiny, allocation-free frame-timing profiler shared by glyphwire-host
 //! (`host/profiler.zig`) and any other client that wants the same
 //! machinery.

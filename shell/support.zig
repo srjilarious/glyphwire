@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Helpers for glyphwire-shell's prompt, gathered here as one module so
 //! both `shell/main.zig` and the test runner (`tests/shell_tests.zig`)
 //! can import them -- a Zig module can't reach across directories with a

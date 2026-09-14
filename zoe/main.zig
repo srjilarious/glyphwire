@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `zoe` -- a modal editor for glyphwire.
 //!
 //! Launched from a glyphwire-aware shell it connects to the display

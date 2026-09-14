@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Name -> icon-registry-name lookups for `glyphwire-ls`, split out of
 //! `ls/main.zig` into the pure `ls_support` module so `tests/ls_tests.zig`
 //! can exercise them directly (same reason `ls/format.zig` lives here).

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! zoe's glyphwire client: four panes in a split tree, the render pass
 //! that fills them, and the input loop that drives the editor.
 //!

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 const std = @import("std");
 const gl = @import("zopengl").bindings;
 const zmath = @import("zmath");

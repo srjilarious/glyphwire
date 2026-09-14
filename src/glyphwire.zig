@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 const core = @import("core.zig");
 pub const configDirPath = @import("config_dir.zig").configDirPath;
 pub const wire = @import("wire.zig");

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # glyphwire
 
 A 2D-grid terminal replacement. Instead of a stream of VT100/ANSI escape
@@ -19,8 +20,10 @@ in-tree 2D engine backend (SDL3 / OpenGL) — windowing, input, a quad/text
 renderer and a resource manager, and nothing else.
 
 > Status: pre-1.0, single context, single root layer plus `create_layer`
-> popups. `docs/decisions.md` is the "why", `docs/api.md` the concrete
-> wire reference, `docs/roadmap.md` the running implementation log.
+> popups. [`docs/protocol.md`](docs/protocol.md) is the normative
+> specification — enough to write a client or a host from, in any language.
+> `docs/decisions.md` is the "why", `docs/api.md` the annotated wire
+> reference, `docs/roadmap.md` the running implementation log.
 
 ## Screenshots
 
@@ -272,4 +275,39 @@ name and its shell command there to capture a new one.
 | `zoe/` | `zoe` — a vim-like modal editor, glyphwire's first multi-layer TUI: split panes, a file tree, tree-sitter syntax highlighting, its own context. See `docs/investigations/zoe-editor.md`. |
 | `server/` | Standalone socket server (host embeds its own; this is for testing). |
 | `tests/` | testz suite — `core`, `wire`, `dispatch`, `table`, `server`, `client`, `shell`, `ls`, `zoe`, `e2e`, ... |
-| `docs/` | `decisions.md`, `api.md`, `roadmap.md`, `investigations/`. |
+| `docs/` | `protocol.md` (the specification), `decisions.md`, `api.md`, `roadmap.md`, `investigations/`. |
+
+## License
+
+glyphwire is split three ways. Full detail in [`LICENSE.md`](LICENSE.md);
+bundled third-party code and assets in [`THIRD-PARTY.md`](THIRD-PARTY.md).
+
+| | License | |
+|---|---|---|
+| **The protocol** — [`docs/protocol.md`](docs/protocol.md) and the rest of `docs/` | `CC-BY-4.0` | Implement it in any language, under any license. Attribution is the only obligation, and it does not reach your code. |
+| **The plumbing** — `src/`, `host/`, `host_eng/`, `server/`, `client/`, `agent/`, and the demo and debug tools | `MPL-2.0` | File-level copyleft: embed and ship these unmodified in anything, and owe source only for MPL files you change. |
+| **The applications** — `gw-shell`, `gmux`, `gw-ls`, `gw-view`, `zoe` | `GPL-3.0-or-later` | Programs people run, not components people embed. |
+
+Every source file carries an `SPDX-License-Identifier`, so a single
+directory can be vendored without consulting the table. The GPL programs
+link the MPL core, which MPL-2.0 §3.3 permits; no MPL file in this repo
+carries the "Incompatible With Secondary Licenses" notice, and none ever
+should.
+
+Note for anyone embedding the host: the **default icon theme is LGPL-3.0**
+(KDE Oxygen) and a GPL-3.0 theme (Papirus) ships beside it. They are
+runtime data, not linked code, but they are copyleft. Ship the MIT Material
+theme instead and set `icon_theme = "material"` in `host.conf` if that
+matters to you. See [`THIRD-PARTY.md`](THIRD-PARTY.md).
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build, the test suite, the
+per-directory licensing rules, and the commit conventions.
+
+Contributions are accepted under a [Contributor Licence
+Agreement](CLA.md) so the project stays relicensable by a single decision;
+it grants your own work back to you under Apache-2.0. Bug reports,
+reproduction cases and design feedback need no agreement.
+
+Copyright (c) 2026 Jeff DeWall.

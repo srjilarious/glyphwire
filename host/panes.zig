@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! The host's side of both split trees: the divider geometry it draws and
 //! hit-tests, and the drag that resizes things.
 //!

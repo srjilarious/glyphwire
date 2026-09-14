@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! A tiny "is it time to write the file yet?" policy, shared by the two
 //! bits of persistent shell state that are now kept in memory and flushed
 //! lazily rather than rewritten on every change: the command history

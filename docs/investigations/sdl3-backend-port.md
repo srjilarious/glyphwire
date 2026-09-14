@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # Investigation: the SDL3 engine backend (`host_eng`)
 
 Status: **landed and the only backend.** `zig build host` produces

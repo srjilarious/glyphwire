@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Low-level pipeline spawner: forks a run of commands wired stdout->stdin
 //! with `pipe(2)`, all in one process group, and hands the parent the fds
 //! to pump. `shell/main.zig` layers policy on top (alias/glob resolution,

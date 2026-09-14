@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Logical-resolution viewport math: how a fixed logical area is mapped
 //! onto a framebuffer of a different size. Independent of the windowing
 //! backend -- `WindowState`, which is not, lives in `window.zig` next

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Cursor motions over a `Buffer`.
 //!
 //! Every function here is pure: buffer in, byte offset out, no editor

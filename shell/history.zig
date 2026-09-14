@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pure helpers for glyphwire-shell's persistent command history
 //! (`~/.config/glyphwire/history`). No IO: `shell/main.zig` reads and
 //! writes the file, this module only turns bytes into entries and back.

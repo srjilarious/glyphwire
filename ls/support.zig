@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Helpers shared by glyphwire-ls (`ls/main.zig`) and its test runner
 //! (`tests/ls_tests.zig`), gathered as the `ls_support` build module -- a
 //! Zig module can't reach across directories with a relative `@import`,

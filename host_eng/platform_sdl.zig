@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! The SDL3 window and its OpenGL context. Nothing above this file needs
 //! to know which windowing library is underneath.
 

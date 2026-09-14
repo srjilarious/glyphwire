@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 const std = @import("std");
 const builtin = @import("builtin");
 const glyphwire = @import("glyphwire");
@@ -645,7 +648,7 @@ const extension_mimetypes = [_]struct { ext: []const u8, mime: []const u8 }{
     .{ .ext = ".h", .mime = "text/x-c" },
     .{ .ext = ".cpp", .mime = "text/x-c++" },
     .{ .ext = ".py", .mime = "text/x-python" },
-    .{ .ext = ".zig", .mime = "text/plain" },
+    .{ .ext = ".zig", .mime = "text/x-zig" },
     .{ .ext = ".rs", .mime = "text/rust" },
     .{ .ext = ".go", .mime = "text/x-go" },
 };

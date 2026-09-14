@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! The namespace shim: one place for `root.zig`, `input.zig`,
 //! `window.zig` and `platform_sdl.zig` to reach the backend-independent
 //! engine pieces under `engine/` and the third-party modules, without

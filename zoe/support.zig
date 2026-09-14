@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! zoe's engine-free core, gathered as the `zoe_support` build module so
 //! `tests/zoe_tests.zig` can reach it -- a Zig module can't cross
 //! directories with a relative `@import`, the same reason `ls_support`

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pure UTF-8 / display-width helpers for glyphwire-shell's line editor,
 //! plus `flattenNewlines` for sanitizing pasted text into the single-line
 //! buffer. No IO.

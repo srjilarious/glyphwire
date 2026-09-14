@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! A vim-notation key script: `"ihello<esc>3jdd"` fed to an `Editor` as
 //! the same two streams glyphwire would deliver.
 //!

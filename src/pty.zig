@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared pty support: `Pty` allocates a pseudo-terminal, runs a command
 //! with the slave as its controlling terminal, and exposes the master fd
 //! for a read loop (master -> grid, `shell/main.zig`'s `ptyReaderThread`)

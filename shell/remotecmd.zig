@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pure argument parsing for glyphwire-shell's `gwssh` builtin -- the
 //! command that drops the pane it is typed in into a remote session (see
 //! `dispatch.RemoteStarter` and `host/remote.zig`).

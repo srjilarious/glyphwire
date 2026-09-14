@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! zoe's editor core: the gap buffer, the line index, the motions and the
 //! modal state machine.
 //!

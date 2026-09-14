@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 //! The host's `spawn_in_pane` implementation: one PTY-backed child process
 //! per pane, and the plumbing that makes a pane look like a whole host to
 //! whatever runs in it.

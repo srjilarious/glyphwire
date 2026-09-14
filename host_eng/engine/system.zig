@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 const std = @import("std");
 const builtin = @import("builtin");
 const web = @import("./web.zig");

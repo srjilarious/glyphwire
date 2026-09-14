@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # zoe — a modal editor on the glyphwire object model
 
 The plan for glyphwire's first real TUI, and the running record of what

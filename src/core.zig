@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: MPL-2.0
+
 const std = @import("std");
 
 /// Only for `Session.routeKey`'s printable-key test: whether a key name is

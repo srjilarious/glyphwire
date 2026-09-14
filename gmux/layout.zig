@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! gmux's pane-arrangement tree: a binary nested split tree over opaque
 //! `PaneId`s, with no glyphwire dependency at all -- just structure, so
 //! `tests/gmux_tests.zig` can exercise split/kill/promote without a

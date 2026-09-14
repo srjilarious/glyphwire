@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! gmux's optional startup config, `~/.config/glyphwire/gmux.conf` -- a
 //! Lua script assigning a global `config` table, same shape `zoe.conf` /
 //! `ls.conf` / `shell.conf` use. Deliberately tiny for the first version:

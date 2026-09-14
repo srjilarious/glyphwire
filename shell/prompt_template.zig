@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Jeff DeWall
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pure template engine for glyphwire-shell's configurable prompt.
 //!
 //! `shell.conf` (see `shell/config.zig`) can set `prompt.left` / `prompt.right`
