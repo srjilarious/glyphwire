@@ -1514,7 +1514,7 @@ surface.
   whatever comes next, exactly like a `draw_icon` caller sizing its own
   layout around a `"natural"` icon's known overflow. gw-read's dictionary
   panel does this by reserving the title row's full padded width up
-  front, independent of the glyph count `scale` will stretch it to.
+  front, independent of the glyph count `scale` will spread it across.
   Anchored top-left at the cell origin (not centered/end-aligned like
   icon's `h_align`/`v_align`) since a title is always read left-to-right
   from a fixed left margin — alignment options were left out as
@@ -1524,13 +1524,29 @@ surface.
   per-cell glyph pass and collected into `Renderer.deferred_scaled_text`,
   drawn in a second pass after the whole grid so an oversized glyph always
   paints over already-emitted neighbors regardless of row/col order (see
-  `host/render.zig`'s `DeferredScaledGlyph`/`emitGlyphs`'s `scale` param).
-  `1.5`/`2.0` multiply bearing, glyph size, and advance uniformly around
-  the cell's unscaled top-left anchor — the same atlas glyph the engine
-  already rasterized at one fixed pixel size, just enlarged at draw time
-  rather than re-rasterized, so "1.5x" and "2x" differ visually (unlike a
-  design that rounded both up to the same 2-cell reserved footprint and
-  lost the distinction between them).
+  `host/render.zig`'s `DeferredScaledGlyph`).
+- **Re-rasterized in a dedicated atlas, not a stretched sprite.** An
+  earlier version of this drew a `text_scale`d glyph by multiplying the
+  normal atlas glyph's bearing/size/advance and sampling the same,
+  normal-resolution texture region larger — cheap, but visibly blurry:
+  stretching a ~14px-tall rasterized glyph to 2x is exactly the "scale an
+  image up" problem `draw_image`'s own `scale` already has to live with
+  for pixel art, except here the content is text, where blur reads as a
+  bug rather than a style. `Renderer.atlasForScale` instead lazily clones
+  the *default* atlas at the target pixel size
+  (`host_eng.renderer.FontAtlas.cloneAtSize`, reusing each already-loaded
+  font face's bytes rather than re-reading anything from disk) — a real,
+  independent `FontAtlas` with its own CPU bitmap, GL texture, and glyph
+  cache, rasterizing every glyph at its own true size the same way the
+  default atlas does at 1x. `LayerBatches.scaled_text` gives each in-use
+  scale its own `GlyphBatch` (a `TexBatch`-shaped list, same reason
+  images need one per handle: a batch can only bind one texture, and a
+  scaled atlas's texture is never the default atlas's). Both scaled
+  atlases are torn down and rebuilt (bumping `text_epoch`, the same
+  invalidation a plain atlas grow already triggers) whenever the default
+  atlas's own `font_size` moves — a Ctrl+/- resize — so the ratio never
+  drifts; a session that never uses `.x1_5`/`.x2` never allocates either
+  one (`invalidateScaledAtlasesIfStale`).
 - **Not exposed on `get_cells`.** Every other cell field consumers can
   reasonably act on (`wide`, `fg_icon`, `metadata_id`, `focus`) is
   readable back; `text_scale` isn't, deliberately deferred rather than
@@ -5022,12 +5038,19 @@ separate from the reading/reason/position line the old single wrapped
 header block used to hold all three in — a scaled glyph's overflow (see
 the Text scale section above) would otherwise collide with whatever text
 followed it on the same wrapped line. `writeScaledTermRow` spaces each
-character `scale_cells` cells apart (2 for `.x1_5`/`.x2`, matching the
-box's reserved `term_cols` width) rather than the normal 1-cell pitch, so
-neighbouring enlarged glyphs don't draw on top of each other, and an
-extra blank row is reserved below the title when `scale_cells > 1` for
-the vertical half of the same overflow. This is the gw-read-side half of
-"the caller plans the gap" the Text scale section describes; the wire
+character `pitch` cells apart (2 for `.x1_5`/`.x2`, matching the box's
+reserved `term_cols` width) rather than the normal 1-cell pitch, so
+neighbouring enlarged glyphs don't draw on top of each other -- which
+leaves gap cells between characters that the row's background has to be
+filled *before* any character is written to cover (one `write_text` over
+the whole interior, then each character overwrites just its own anchor
+cell) rather than the normal "text, then one trailing pad" shape
+`writeLookupRow` uses; an earlier version only padded after the text and
+left every such gap showing the layer's un-filled default instead of the
+panel's `bg_dialog`. An extra blank row is reserved below the title when
+`scale_cells > 1` for the vertical half of the same overflow. This is the
+gw-read-side half of "the caller plans the gap" the Text scale section
+describes; the wire
 protocol itself reserves nothing.
 
 **Building the index shows progress by file, not by term.** The first

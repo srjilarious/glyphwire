@@ -63,6 +63,16 @@ const TexBatch = struct {
     batch: SpriteBatch,
 };
 
+/// One scaled-text batch, bound to whichever crisp per-size atlas
+/// (`Renderer.atlasForScale`) `scale` names -- `text_scale != .x1` glyphs
+/// can't share `LayerBatches.text`'s single texture bind (the default
+/// atlas's), so each scale in use on a layer gets its own batch, the same
+/// "one bound texture per batch" reason `TexBatch` exists for images.
+const ScaledTextBatch = struct {
+    scale: glyphwire.TextScale,
+    batch: GlyphBatch,
+};
+
 /// One uploaded image texture plus the `core.ImageEntry.generation` the
 /// upload was made from. The bytes behind a handle are mutable now
 /// (`update_image`), so the handle alone no longer identifies what is on
@@ -133,6 +143,8 @@ pub const LayerBatches = struct {
     rects: ShapeBatch,
     images: std.ArrayList(TexBatch) = .empty,
     icon_fallback: std.ArrayList(TexBatch) = .empty,
+    /// `text_scale != .x1` glyphs -- see `ScaledTextBatch`.
+    scaled_text: std.ArrayList(ScaledTextBatch) = .empty,
 
     fn init(
         alloc: std.mem.Allocator,
@@ -162,6 +174,8 @@ pub const LayerBatches = struct {
         self.images.deinit(alloc);
         for (self.icon_fallback.items) |*t| t.batch.deinit();
         self.icon_fallback.deinit(alloc);
+        for (self.scaled_text.items) |*t| t.batch.deinit();
+        self.scaled_text.deinit(alloc);
     }
 };
 
@@ -217,12 +231,19 @@ pub const DeferredIcon = struct {
 /// outlive the deferred pass (a scrolled/rewritten layer between the main
 /// loop and the deferred one, in principle -- matching `DeferredIcon`
 /// copying its `IconBg` by value rather than holding a `*Cell`).
+///
+/// `scale` names which atlas to draw from (`Renderer.atlasForScale`) --
+/// not a float pixel multiplier. A scaled glyph is rasterized at its own
+/// true size in a dedicated atlas (`host_eng.renderer.FontAtlas.cloneAtSize`)
+/// rather than stretching the normal-size glyph's texture region, which
+/// read as blurry and lost hinting -- see decisions.md's Text scale
+/// section.
 pub const DeferredScaledGlyph = struct {
     grapheme_bytes: [glyphwire.grapheme_inline_len]u8,
     grapheme_len: u8,
     pos: host_eng.Vec2I,
     color: host_eng.Color,
-    scale: f32,
+    scale: glyphwire.TextScale,
 
     fn grapheme(self: *const DeferredScaledGlyph) []const u8 {
         return self.grapheme_bytes[0..self.grapheme_len];
@@ -292,6 +313,21 @@ pub const Renderer = struct {
     /// convention as `deferred_icons`.
     deferred_scaled_text: std.ArrayList(DeferredScaledGlyph) = .empty,
 
+    /// Crisp, dedicated atlases for `write_text`'s `scale` -- see
+    /// `atlasForScale` and decisions.md's Text scale section. Lazily
+    /// (re)built by cloning the default atlas (`FontAtlas.cloneAtSize`)
+    /// the first time a session actually uses `.x1_5`/`.x2`, so a session
+    /// that never does never allocates either. Null again whenever the
+    /// default atlas's own `font_size` changes underneath them (a
+    /// Ctrl+/- resize) -- see `invalidateScaledAtlasesIfStale`.
+    scaled_atlas_1_5x: ?host_eng.renderer.FontAtlas = null,
+    scaled_atlas_2x: ?host_eng.renderer.FontAtlas = null,
+    /// The default atlas's `font_size` the two atlases above were last
+    /// (re)built against. Starts at a value no real font size will ever
+    /// equal, so the first `syncBatches` with a live default atlas always
+    /// runs the staleness check once (a no-op: both are already null).
+    scaled_atlas_base_size: f32 = -1,
+
     /// One `LayerBatches` per live layer, keyed by **context and** layer
     /// handle. The context half is load-bearing: layer handles are
     /// allocated per context and start at 1 in each, so with more than one
@@ -333,6 +369,8 @@ pub const Renderer = struct {
         const alloc = self.app.alloc;
         self.deferred_icons.deinit(alloc);
         self.deferred_scaled_text.deinit(alloc);
+        if (self.scaled_atlas_1_5x) |*a| a.deinit();
+        if (self.scaled_atlas_2x) |*a| a.deinit();
         self.image_textures.deinit();
         self.icon_uv.deinit();
         var it = self.layer_batches.valueIterator();
@@ -639,6 +677,7 @@ pub const Renderer = struct {
         if (!self.ensureShaders(eng)) return;
         const server = self.app.server;
         const fa = eng.defaultFontAtlas();
+        if (fa) |f| self.invalidateScaledAtlasesIfStale(f);
 
         // Reap batches whose layer -- or whose whole context -- no longer
         // exists. Keying by context means a visibility change in one pane
@@ -802,6 +841,8 @@ pub const Renderer = struct {
         lb.images.clearRetainingCapacity();
         for (lb.icon_fallback.items) |*t| t.batch.deinit();
         lb.icon_fallback.clearRetainingCapacity();
+        for (lb.scaled_text.items) |*t| t.batch.deinit();
+        lb.scaled_text.clearRetainingCapacity();
 
         lb.color_bg.beginBuild({});
         lb.rects.beginBuild({});
@@ -836,12 +877,29 @@ pub const Renderer = struct {
                 const cells = layer.viewRow(view_offset, off.row + row);
                 for (cells[off.col .. off.col + vp_cols]) |*c| {
                     const g = c.grapheme();
-                    if (g.len > 0) f.loadBlocksForText(g);
+                    if (g.len == 0) continue;
+                    if (c.text_scale == .x1) {
+                        f.loadBlocksForText(g);
+                    } else if (self.atlasForScale(f, c.text_scale)) |sa| {
+                        // A different, dedicated atlas (`atlasForScale`)
+                        // -- see `DeferredScaledGlyph`'s doc comment.
+                        sa.loadBlocksForText(g);
+                    }
                 }
             }
             const grew = f.grew_since_upload;
             f.commitTexture();
             if (grew) self.text_epoch +%= 1;
+            if (self.scaled_atlas_1_5x) |*a| {
+                const grew_s = a.grew_since_upload;
+                a.commitTexture();
+                if (grew_s) self.text_epoch +%= 1;
+            }
+            if (self.scaled_atlas_2x) |*a| {
+                const grew_s = a.grew_since_upload;
+                a.commitTexture();
+                if (grew_s) self.text_epoch +%= 1;
+            }
         }
 
         self.deferred_icons.clearRetainingCapacity();
@@ -892,14 +950,14 @@ pub const Renderer = struct {
                     if (g.len > 0) {
                         const color = fade(host_eng.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a), alpha);
                         if (c.text_scale == .x1) {
-                            emitGlyphs(&lb.text, f, g, px, py, color, 1.0);
+                            emitGlyphs(&lb.text, f, g, px, py, color);
                         } else {
                             var dg: DeferredScaledGlyph = .{
                                 .grapheme_bytes = undefined,
                                 .grapheme_len = @intCast(g.len),
                                 .pos = .{ .x = px, .y = py },
                                 .color = color,
-                                .scale = textScaleFactor(c.text_scale),
+                                .scale = c.text_scale,
                             };
                             @memcpy(dg.grapheme_bytes[0..g.len], g);
                             self.deferred_scaled_text.append(self.app.alloc, dg) catch {};
@@ -919,9 +977,15 @@ pub const Renderer = struct {
         // `text_scale != .x1` glyphs overflow past their own cell the same
         // way -- deferred so that overflow paints over already-emitted
         // neighbours regardless of grid order. See `DeferredScaledGlyph`.
+        // Each drawn from its own dedicated, already-loaded atlas
+        // (`atlasForScale`) into its own batch (`scaledTextBatchFor`),
+        // since it isn't bound to `lb.text`'s (the default atlas's)
+        // texture.
         if (fa) |f| {
             for (self.deferred_scaled_text.items) |d| {
-                emitGlyphs(&lb.text, f, d.grapheme(), d.pos.x, d.pos.y, d.color, d.scale);
+                const sa = self.atlasForScale(f, d.scale) orelse continue;
+                const batch = self.scaledTextBatchFor(lb, d.scale, &sa.texture) orelse continue;
+                emitGlyphs(batch, sa, d.grapheme(), d.pos.x, d.pos.y, d.color);
             }
         }
 
@@ -993,6 +1057,7 @@ pub const Renderer = struct {
         if (fa_tex != null) lb.text.endBuild();
         for (lb.images.items) |*t| t.batch.endBuild();
         for (lb.icon_fallback.items) |*t| t.batch.endBuild();
+        for (lb.scaled_text.items) |*t| t.batch.endBuild();
     }
 
     /// Finds (or lazily creates + `beginBuild`s) the per-handle sprite
@@ -1009,6 +1074,27 @@ pub const Renderer = struct {
             return null;
         };
         const bp = &list.items[list.items.len - 1].batch;
+        bp.beginBuild(tex);
+        return bp;
+    }
+
+    /// `texBatchFor`, but for a layer's `scaled_text` list -- keyed by
+    /// `TextScale` (at most 2 entries, `.x1_5`/`.x2`) instead of a handle,
+    /// and building a `GlyphBatch` (with a colour channel) instead of a
+    /// plain `SpriteBatch`. `rebuildLayer` empties `lb.scaled_text` at the
+    /// start of every rebuild, so "found existing" only ever means
+    /// "already created earlier in *this* rebuild".
+    fn scaledTextBatchFor(self: *Renderer, lb: *LayerBatches, scale: glyphwire.TextScale, tex: *const host_eng.Texture) ?*GlyphBatch {
+        for (lb.scaled_text.items) |*t| {
+            if (t.scale == scale) return &t.batch;
+        }
+        const nb = GlyphBatch.init(self.app.alloc, self.glyph_shader.?) catch return null;
+        lb.scaled_text.append(self.app.alloc, .{ .scale = scale, .batch = nb }) catch {
+            var m = nb;
+            m.deinit();
+            return null;
+        };
+        const bp = &lb.scaled_text.items[lb.scaled_text.items.len - 1].batch;
         bp.beginBuild(tex);
         return bp;
     }
@@ -1147,43 +1233,79 @@ pub const Renderer = struct {
     }
 
     /// Emits `text`'s glyph quads starting at cell top-left `(px, py)`,
-    /// mirroring `host_eng.renderer.TextRenderer.drawStringColored`: baseline
-    /// at `py + atlas.ascent`, each glyph placed by its bearing and
-    /// advanced by its `advance`, UVs straight from the atlas. `scale`
-    /// multiplies bearing/size/advance uniformly around the `(px, py)`
-    /// anchor -- `1.0` is the original 1:1 behavior; `> 1.0` (a
-    /// `text_scale`d cell) draws the same atlas glyph larger, overflowing
-    /// past the cell it was anchored in. See `TextScale`'s doc comment.
-    fn emitGlyphs(batch: *GlyphBatch, fa: *host_eng.renderer.FontAtlas, text: []const u8, px: i32, py: i32, color: host_eng.Color, scale: f32) void {
-        const pos_y_f: f32 = @as(f32, @floatFromInt(py)) + @as(f32, @floatFromInt(fa.ascent)) * scale;
-        var curr_x: f32 = @floatFromInt(px);
+    /// mirroring `host_eng.renderer.TextRenderer.drawStringColored`:
+    /// baseline at `py + atlas.ascent`, each glyph placed by its bearing
+    /// and advanced by its `advance`, UVs straight from `atlas`. Always
+    /// 1:1 against whatever `atlas` was rasterized at -- a `text_scale`d
+    /// cell draws from a bigger dedicated atlas (`atlasForScale`) rather
+    /// than stretching this one's glyphs, so there is no separate scale
+    /// factor here. See `TextScale`'s doc comment and decisions.md's Text
+    /// scale section.
+    fn emitGlyphs(batch: *GlyphBatch, atlas: *host_eng.renderer.FontAtlas, text: []const u8, px: i32, py: i32, color: host_eng.Color) void {
+        const pos_y = py + atlas.ascent;
+        var curr_x = px;
         var it = (std.unicode.Utf8View.initUnchecked(text)).iterator();
         while (it.nextCodepoint()) |cp| {
-            const cd = fa.getChar(@intCast(cp)) orelse continue;
+            const cd = atlas.getChar(@intCast(cp)) orelse continue;
             if (cd.size.x > 0 and cd.size.y > 0) {
-                const l = curr_x + @as(f32, @floatFromInt(cd.bearing.x)) * scale;
-                const t = pos_y_f - @as(f32, @floatFromInt(cd.bearing.y)) * scale;
-                const dest = host_eng.RectF{
-                    .l = l,
-                    .t = t,
-                    .r = l + @as(f32, @floatFromInt(cd.size.x)) * scale,
-                    .b = t + @as(f32, @floatFromInt(cd.size.y)) * scale,
-                };
+                const dest = host_eng.RectF.fromPosSize(curr_x + cd.bearing.x, pos_y - cd.bearing.y, cd.size.x, cd.size.y);
                 addGlyph(batch, dest, cd.coords, color);
             }
-            curr_x += @as(f32, @floatFromInt(cd.advance)) * scale;
+            curr_x += cd.advance;
         }
     }
 
-    /// `Cell.text_scale`'s pixel multiplier -- `1.5`/`2.0` for `.x1_5`/
-    /// `.x2`, matching the "1.5x"/"2x" naming exactly (see `TextScale`'s
-    /// doc comment).
+    /// `Cell.text_scale`'s pixel multiplier against the default atlas's
+    /// own `font_size` -- `1.5`/`2.0` for `.x1_5`/`.x2`, matching the
+    /// "1.5x"/"2x" naming exactly (see `TextScale`'s doc comment). Only
+    /// used to pick the target size for `atlasForScale`'s clone -- glyphs
+    /// themselves are drawn 1:1 out of whichever atlas that resolves to,
+    /// see `emitGlyphs`.
     fn textScaleFactor(scale: glyphwire.TextScale) f32 {
         return switch (scale) {
             .x1 => 1.0,
             .x1_5 => 1.5,
             .x2 => 2.0,
         };
+    }
+
+    /// Drops both scaled-text atlases when the default atlas's
+    /// `font_size` has moved since they were last built (a Ctrl+/-
+    /// resize) -- `atlasForScale` lazily rebuilds whichever one(s) a
+    /// layer's rebuild actually needs next, so a session that never uses
+    /// `.x1_5`/`.x2` never pays for either. Bumps `text_epoch` so every
+    /// layer with previously-baked scaled-glyph UVs (now pointing at a
+    /// just-destroyed texture) rebuilds this frame -- the same contract
+    /// a plain atlas grow already has.
+    fn invalidateScaledAtlasesIfStale(self: *Renderer, default: *host_eng.renderer.FontAtlas) void {
+        if (self.scaled_atlas_base_size == default.font_size) return;
+        if (self.scaled_atlas_1_5x) |*a| a.deinit();
+        if (self.scaled_atlas_2x) |*a| a.deinit();
+        self.scaled_atlas_1_5x = null;
+        self.scaled_atlas_2x = null;
+        self.scaled_atlas_base_size = default.font_size;
+        self.text_epoch +%= 1;
+    }
+
+    /// The atlas to draw a `scale`d glyph from: `default` itself for
+    /// `.x1`, or a lazily-built crisp clone at that pixel size otherwise
+    /// (`host_eng.renderer.FontAtlas.cloneAtSize`) -- see decisions.md's
+    /// Text scale section for why this beats stretching `default`'s own
+    /// glyphs. Null only if the clone itself fails (a bitmap-font default
+    /// atlas rejects `cloneAtSize` the same way it rejects `setFontSize`)
+    /// -- callers skip the glyph entirely rather than falling back to a
+    /// blurry stretch, the same way a missing default atlas already
+    /// skips *all* text.
+    fn atlasForScale(self: *Renderer, default: *host_eng.renderer.FontAtlas, scale: glyphwire.TextScale) ?*host_eng.renderer.FontAtlas {
+        const slot = switch (scale) {
+            .x1 => return default,
+            .x1_5 => &self.scaled_atlas_1_5x,
+            .x2 => &self.scaled_atlas_2x,
+        };
+        if (slot.* == null) {
+            slot.* = default.cloneAtSize(default.font_size * textScaleFactor(scale), self.app.alloc) catch return null;
+        }
+        return &slot.*.?;
     }
 
     fn drawLayerBatches(self: *Renderer, eng: *Engine, key: BatchKey) void {
@@ -1204,6 +1326,9 @@ pub const Renderer = struct {
         self.drawBatchTinted(&lb.icon_fg, mvp, a);
         for (lb.icon_fallback.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatch(&lb.text, mvp);
+        // Already-`fade`d per-vertex, same as `lb.text` -- plain, not
+        // tinted.
+        for (lb.scaled_text.items) |*t| self.drawBatch(&t.batch, mvp);
         self.drawBatch(&lb.rects, mvp);
     }
 

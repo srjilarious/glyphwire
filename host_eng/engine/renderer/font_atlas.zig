@@ -99,6 +99,10 @@ pub fn measureFontFile(fontPath: []const u8, fontSize: f32, alloc: std.mem.Alloc
 pub const FontFace = struct {
     data: []u8,
     owns_data: bool,
+    /// Which face inside `data` this is (0 for a plain font file) --
+    /// kept so `FontAtlas.cloneAtSize` can re-derive the same face at a
+    /// different pixel size without re-reading anything from disk.
+    face_index: i32,
     info: stb_tt.c.stbtt_fontinfo,
     /// stb pixel-height scale for the atlas's `font_size`.
     scale: f32,
@@ -116,6 +120,7 @@ pub const FontFace = struct {
         return .{
             .data = data,
             .owns_data = owns_data,
+            .face_index = face_index,
             .info = info,
             .scale = stb_tt.c.stbtt_ScaleForPixelHeight(&info, font_size),
         };
@@ -451,6 +456,36 @@ pub const FontAtlas = struct {
         const first = try FontFace.init(data, true, face_index, fontSize);
         try faces.append(alloc, first);
 
+        return finishInit(faces, fontSize, alloc);
+    }
+
+    /// A second, independent atlas rasterizing the *same* faces as `self`
+    /// (borrowed, not copied -- `self` must outlive the clone) at a
+    /// different pixel size, with its own CPU bitmap, GL texture, and
+    /// glyph cache. This is how `write_text`'s `scale` gets crisp
+    /// glyphs at 1.5x/2x instead of a blurry stretch of the normal-size
+    /// texture region -- see decisions.md's Text scale section and
+    /// `host/render.zig`'s scaled-atlas cache. Each borrowed face keeps
+    /// its own `face_index` (recorded on `FontFace` for exactly this),
+    /// so a `.ttc` fallback clones correctly too. `error.NotAScalableFont`
+    /// for a bitmap-font atlas, matching `setFontSize`.
+    pub fn cloneAtSize(self: *FontAtlas, fontSize: f32, alloc: std.mem.Allocator) !FontAtlas {
+        if (self.faces.items.len == 0) return error.NotAScalableFont;
+
+        var faces: std.ArrayListUnmanaged(FontFace) = .empty;
+        errdefer faces.deinit(alloc);
+        for (self.faces.items) |*f| {
+            try faces.append(alloc, try FontFace.init(f.data, false, f.face_index, fontSize));
+        }
+
+        return finishInit(faces, fontSize, alloc);
+    }
+
+    /// Shared tail of `initFromOwnedData`/`cloneAtSize`: given an already
+    /// -populated (but otherwise unused) `faces` list, allocates the CPU
+    /// bitmap and GL texture, packs the base ASCII/Latin-1 block, and
+    /// uploads it.
+    fn finishInit(faces: std.ArrayListUnmanaged(FontFace), fontSize: f32, alloc: std.mem.Allocator) !FontAtlas {
         var ascent: c_int = 0;
         var descent: c_int = 0;
         var line_gap: c_int = 0;

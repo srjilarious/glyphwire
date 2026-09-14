@@ -1354,7 +1354,7 @@ pub const Ui = struct {
         var pad_buf: [config_mod.ocr_dialog_cols_max]u8 = undefined;
         @memset(&pad_buf, ' ');
         var row_i: usize = 1;
-        try writeScaledTermRow(&b, self.dict_layer, row_i, entry.term, scale, term_cols, inner, &pad_buf, fg_lookup_term);
+        try writeScaledTermRow(&b, self.dict_layer, row_i, entry.term, scale, inner, &pad_buf, fg_lookup_term);
         row_i += 1;
         if (scale_cells > 1) {
             try writeLookupRow(&b, self.dict_layer, row_i, "", inner, &pad_buf, fg_lookup_term);
@@ -1640,27 +1640,32 @@ pub const Ui = struct {
 
     /// The lookup panel's title row: `term` drawn via `write_text`'s
     /// `scale` when `scale != .x1` -- see decisions.md's Text scale
-    /// section. Unlike `writeLookupRow`, this writes one character at a
-    /// time, each at `codepointWidth * scale_cells` cells of pitch from
-    /// the last (`scale_cells` is 2 for `.x1_5`/`.x2`, matching
-    /// `renderLookup`'s `term_cols`) -- a scaled glyph overflows past its
-    /// own cell, so back-to-back characters at the normal 1-cell pitch
-    /// would draw right on top of each other. `term_cols` is that
-    /// reserved footprint, used here only to place the right-hand pad.
+    /// section. Unlike `writeLookupRow`, the interior is filled with
+    /// blank + `bg_dialog` in one call *before* any character is drawn,
+    /// then each character is written at `codepointWidth * pitch` cells
+    /// from the last (`pitch` is 2 for `.x1_5`/`.x2`, matching
+    /// `renderLookup`'s `term_cols`) rather than sharing `writeLookupRow`'s
+    /// single "text, then one right-hand pad" shape: a scaled glyph
+    /// overflows past its own cell, so back-to-back characters at the
+    /// normal 1-cell pitch would draw on top of each other, and spacing
+    /// them out this way leaves gap cells between characters that a pad
+    /// only *after* the text would never reach -- background left over
+    /// from a previous frame (or the layer's un-filled default) would
+    /// show through there instead of `bg_dialog`.
     fn writeScaledTermRow(
         b: *glyphwire.Client.Batch,
         layer: glyphwire.LayerHandle,
         row: usize,
         term: []const u8,
         scale: glyphwire.TextScale,
-        term_cols: usize,
         inner: usize,
         pad_buf: []u8,
         fg: glyphwire.Color,
     ) !void {
         try cursorOn(b, layer, row, 0);
         try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
-        try textOn(b, layer, pad_buf[0..1], fg, bg_dialog);
+        try textOn(b, layer, pad_buf[0 .. inner + 2], fg, bg_dialog);
+        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
 
         const pitch: usize = if (scale == .x1) 1 else 2;
         var col: usize = 2;
@@ -1675,11 +1680,6 @@ pub const Ui = struct {
             const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
             col += @as(usize, glyphwire.codepointWidth(cp)) * pitch;
         }
-
-        const used = @min(term_cols, inner);
-        try cursorOn(b, layer, row, 2 + used);
-        try textOn(b, layer, pad_buf[0 .. inner - used + 1], fg, bg_dialog);
-        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
     }
 
     /// Queues the dialog's full redraw (border + every line) onto `b`
