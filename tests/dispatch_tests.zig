@@ -612,7 +612,7 @@ pub fn peekLoadImageExtractsHeaderTest(io: std.Io, alloc: std.mem.Allocator) !vo
     const message =
         \\{"jsonrpc":"2.0","id":7,"method":"load_image","params":{"format":"png","bytes":24}}
     ;
-    const hdr = (try dispatch.peekLoadImage(alloc, message)).?;
+    const hdr = (try dispatch.peekImagePayload(alloc, message)).?;
     try testz.expectEqual(hdr.bytes, 24);
     try testz.expectEqual(hdr.id.integer, 7);
     try testz.expectEqual(hdr.format, .png);
@@ -623,7 +623,7 @@ pub fn peekLoadImageRejectsUnknownFormatTest(io: std.Io, alloc: std.mem.Allocato
     const message =
         \\{"jsonrpc":"2.0","id":7,"method":"load_image","params":{"format":"webp","bytes":24}}
     ;
-    try testz.expectError(dispatch.peekLoadImage(alloc, message), dispatch.DispatchError.UnsupportedImageFormat);
+    try testz.expectError(dispatch.peekImagePayload(alloc, message), dispatch.DispatchError.UnsupportedImageFormat);
 }
 
 pub fn peekLoadImageReturnsNullForOtherMethodsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -631,7 +631,7 @@ pub fn peekLoadImageReturnsNullForOtherMethodsTest(io: std.Io, alloc: std.mem.Al
     const message =
         \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi"}}
     ;
-    try testz.expectTrue(try dispatch.peekLoadImage(alloc, message) == null);
+    try testz.expectTrue(try dispatch.peekImagePayload(alloc, message) == null);
 }
 
 pub fn loadImageThenGetImageInfoRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3310,4 +3310,119 @@ pub fn createPaneSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectError(d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_pane_split","params":{"axis":"diagonal"}}
     ), error.InvalidSplitAxis);
+}
+
+// ── Image lifecycle over the wire ────────────────────────────────────
+
+pub fn peekImagePayloadRecognizesUpdateImageTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const message =
+        \\{"jsonrpc":"2.0","id":9,"method":"update_image","params":{"handle":3,"format":"png","bytes":24}}
+    ;
+    const hdr = (try dispatch.peekImagePayload(alloc, message)).?;
+    try testz.expectEqual(hdr.bytes, 24);
+    try testz.expectEqual(hdr.id.integer, 9);
+    try testz.expectEqual(hdr.format, .png);
+    try testz.expectEqual(hdr.target.?, 3);
+}
+
+/// `load_image` allocates a handle, so it must not come back with a target
+/// -- that's what tells the two apart in server.zig's side-channel branch.
+pub fn peekImagePayloadLoadHasNoTargetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const message =
+        \\{"jsonrpc":"2.0","id":7,"method":"load_image","params":{"format":"png","bytes":24}}
+    ;
+    const hdr = (try dispatch.peekImagePayload(alloc, message)).?;
+    try testz.expectTrue(hdr.target == null);
+}
+
+pub fn peekImagePayloadUpdateWithoutHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const message =
+        \\{"jsonrpc":"2.0","id":9,"method":"update_image","params":{"format":"png","bytes":24}}
+    ;
+    try testz.expectError(dispatch.peekImagePayload(alloc, message), dispatch.DispatchError.UnknownImage);
+}
+
+/// An update answers with the handle it was given, so a page reader's
+/// refresh loop reads like its first load.
+pub fn updateImageKeepsHandleAndRemeasuresTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const first = fakePngBytes(64, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = first.len }, &first);
+    defer alloc.free(load_resp);
+    try testz.expectTrue(std.mem.indexOf(u8, load_resp, "\"handle\":1") != null);
+
+    const second = fakePngBytes(10, 20);
+    const update_resp = try d.handleLoadImage(
+        alloc,
+        .{ .id = .{ .integer = 2 }, .format = .png, .bytes = second.len, .target = 1 },
+        &second,
+    );
+    defer alloc.free(update_resp);
+    try testz.expectTrue(std.mem.indexOf(u8, update_resp, "\"handle\":1") != null);
+
+    const info = ctx.imageInfo(1).?;
+    try testz.expectEqual(info.width, 10);
+    try testz.expectEqual(info.height, 20);
+}
+
+pub fn destroyImageReleasesHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(64, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
+    defer alloc.free(load_resp);
+    try testz.expectTrue(ctx.imageInfo(1) != null);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"destroy_image","params":{"handle":1}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(ctx.imageInfo(1) == null);
+}
+
+pub fn destroyImageUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"destroy_image","params":{"handle":99}}
+    ;
+    try testz.expectError(d.handle(alloc, message), glyphwire.ImageResourceError.UnknownImage);
+}
+
+/// `destroy_image` carries no side-channel payload, so unlike
+/// `load_image`/`update_image` it batches like any other notification --
+/// which is what lets a client clear a region and release the image it
+/// held in one frame.
+pub fn destroyImageIsAllowedInBatchTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const png = fakePngBytes(64, 32);
+    const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
+    defer alloc.free(load_resp);
+
+    const message =
+        \\{"jsonrpc":"2.0","method":"batch","params":{"messages":[
+        \\{"method":"clear","params":{}},
+        \\{"method":"destroy_image","params":{"handle":1}}]}}
+    ;
+    const result = try d.handle(alloc, message);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(ctx.imageInfo(1) == null);
 }

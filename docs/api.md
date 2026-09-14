@@ -218,6 +218,7 @@ them, exactly as it does for a glyphwire-aware pty child.
 | `UnknownRole` | `request_role` named a role this server doesn't have |
 | `UnknownPane` | an unknown pane, or one not currently placed in the tree |
 | `RootPaneImmutable` | `destroy_pane` named the root pane, which has no lifecycle |
+| `ImageIsIcon` | `destroy_image` / `update_image` named a handle registered in the icon catalog, which is session-wide infrastructure no client owns |
 | `UnknownPaneSplit` | an unknown pane-split handle |
 | `InvalidPaneSplitChild` | a child naming both a pane and a split, or neither |
 | `SpawnUnsupported` | `spawn_in_pane` on a server with no spawner registered |
@@ -240,11 +241,52 @@ them, exactly as it does for a glyphwire-aware pty child.
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
 | `load_image` | request (binary side-channel: JSON header + raw bytes) | `format, bytes` | image handle | ✅ `format` is parsed — `"png"`, `"jpeg"` (also `"jpg"`), `"bmp"`, `"gif"` — and selects the header parser that measures the image (`core.imageDimensions`); an unknown format, or bytes that don't match the declared one, fails the request. Bytes are stored verbatim; pixel decoding stays renderer-only (glyphwire-host's stb_image auto-detects all four) |
+| `update_image` | request (binary side-channel: JSON header + raw bytes) | `handle, format, bytes` | the same image handle back | ✅ replaces the bytes behind an existing handle instead of allocating a new one — for a client that redraws the same slot repeatedly (a `.cbz` page reader, a refreshing plot), where `load_image` per step would leave one dead image behind each time. Rides the same side-channel framing `load_image` does, and `format` is parsed and the payload measured identically; a payload that doesn't match its declared format fails the request and leaves the **old** image intact. The replacement may have different natural dimensions than the image it replaces: cells already drawn from this handle keep the per-cell sampling offsets `draw_image` computed from the *old* size, so a caller that changes the size is expected to `draw_image` again with a span sized for the new dimensions — see decisions.md's Image lifecycle section for why the server doesn't auto-repaint. Errors `UnknownImage` for a handle that isn't loaded (or is missing entirely), `ImageIsIcon` for a catalog handle |
 | `get_image_info` | request | `handle` | natural pixel dimensions (read from the format's header — PNG IHDR / JPEG SOF / BMP DIB header / GIF screen descriptor — not a real decode) | ✅ |
+| `destroy_image` | notification | `handle` | — | ✅ frees a loaded image's bytes and drops its handle. Cells still backed by it are deliberately **left alone** and simply render nothing from then on — the same "report the dangling reference rather than chase it" treatment `get_metadata` gives a destroyed `metadata_id`; clear the region first if a blank matters. Errors `UnknownImage` for an unknown handle and `ImageIsIcon` for one registered in the icon catalog (icons are session-wide infrastructure shared through `asset_fallback`, and `get_cells` exposes their handles, so a client can't be allowed to release one). Mostly unnecessary for a short-lived program — an image loaded over a connection is reclaimed automatically once that connection is gone and the image has scrolled out of the scrollback (see **Image reclamation** below); this is for a long-running client that wants its memory back at a moment of its choosing. Batchable, unlike `load_image`/`update_image`, since it carries no side-channel payload |
 | `draw_image` | notification | `layer?, handle, row?, col?, row_span, col_span, scale?` | — | ✅ clips to the given span rather than stretching to fill it; see decisions.md. `row`/`col` default to the layer's cursor when omitted, same convention as `write_text`. `scale` (default `1.0`) is the uniform, aspect-preserving factor the image is drawn at: `1.0` is natural pixel size (the original behavior), `< 1.0` shrinks it — `glyphwire-view` sends `target_width_px / image_width_px` so the image fits the layer's width, and still sizes `row_span`/`col_span` itself from the scaled dimensions (aspect-ratio-aware placement stays the client's job). Each covered cell then samples `cell_px / scale` source pixels; a non-positive `scale` is treated as `1.0`. Exposed back through `get_cells` on every image-backed cell (`bg_image.scale`) |
 | `get_cell_metrics` | request | — | `{cell_px_w, cell_px_h}` | ✅ lets a client compute `row_span`/`col_span` from an image's natural size without hardcoding the session's cell pixel metrics |
 | `draw_icon` | notification | `layer?, row?, col?, name, scale?, h_align?, v_align?, max_w?, max_h?, metadata_id?, foreground?` | — | ✅ `metadata_id?` (see Metadata below) tags the anchor cell, same as `write_text`'s. resolves `name` against `Context.icons` (seeded at `glyphwire-host` startup by a recursive scan of `assets/icons/` — a name is the file's path under that directory without the `.png` extension, e.g. `oxygen/folder`, `distro/arch`, `status/error`) and draws it anchored at exactly one cell. `scale`: `"fit"` (the default, aspect-preserved to exactly fill the cell), `"natural"` (the image's own pixel size, optionally shrunk — aspect preserved, never upscaled — to stay within `max_w`/`max_h` pixels if given; can still overflow past the anchor cell), or `"stretch"` (fills the cell exactly on both axes, aspect *not* preserved — what `draw_box`'s tiles use). `h_align`/`v_align` (`"start"`/`"center"`/`"end"`, default `"center"`) place the result within/around the cell for `"fit"`/`"natural"` (no-ops for `"stretch"`, which always fills exactly) — see decisions.md's Icon section, including why `"natural"` overflow is a rendering-only effect with no data-model footprint on the cells it visually spills into. `foreground` (default `false`): draws into `Cell.fg_icon` instead of `style.bg`, compositing over whatever background is already on that cell (e.g. a `draw_box` fill) instead of replacing it — see decisions.md's Icon section. Theming and a wire-exposed catalog listing are still open. `row`/`col` default to the cursor when omitted |
 | `draw_box` | notification | `layer?, row?, col?, rows, cols, style, mode?` | — | ✅ resolves `style`'s 9 corner/edge/fill pieces (`"{style}/tl"`, ... — same `icons` catalog as `draw_icon`, from the bundled `assets/icons/box/` and `assets/icons/dialog/` subtrees) and composes them across the given rectangle per `mode` (`core.Layer.BoxMode`, default `"tile"`). `"tile"`: one tile per cell, each independently stretched (`draw_icon`'s `scale: "stretch"`) to fill its cell exactly so the border stays continuous regardless of the cell's aspect ratio — the original behavior. `"stretch"`: corners are still one tile each, but each edge/fill role's single source image is treated as one continuous picture spanning its whole run (`t`/`b` across every interior column, `l`/`r` across every interior row, `fill` across the whole interior rectangle), so e.g. a vertical gradient blends smoothly across however many cells the box spans instead of repeating per cell — see roadmap.md's `BoxMode.stretch` entry. `row`/`col` default to the cursor when omitted |
+
+
+### Image reclamation
+
+A client does **not** have to call `destroy_image` to avoid growing the
+session's memory. An image loaded over a connection is reclaimed
+automatically once both of these are true:
+
+1. **Its loading connection is gone.** While the connection that sent
+   `load_image` is still open the image is pinned, even if nothing has
+   been drawn with it yet — a client that loads and then waits before
+   drawing is the normal case, not a leak. An image loaded in-process
+   (the bundled icon catalog) is pinned for the life of the session.
+2. **No cell anywhere in the session still references it.** That means
+   every layer of every context, live viewport *and* retained scrollback —
+   an image the user can scroll back to is still on screen as far as this
+   is concerned. Only rows evicted past the layer's `scrollback_rows`
+   actually release anything.
+
+This is what keeps a shell from growing without bound as images are shown
+in it: `glyphwire-view` loads a picture, draws it and exits, and the bytes
+are freed once that picture has scrolled off the end of the scrollback
+ring.
+
+The sweep is mark-and-sweep over the cell grid, run when the session's
+stored image bytes cross a budget (64 MiB) on the `load_image` /
+`update_image` that pushed it over — so the client filling the scrollback
+pays for the cleanup, and a session that never accumulates images never
+sweeps. Nothing about it is observable on the wire beyond handles
+eventually ceasing to resolve, and a handle can only stop resolving after
+the connection that owned it has closed, so no live client can be
+surprised by one of its own handles disappearing.
+
+`destroy_image` is still there for a long-running client that wants its
+memory back at a specific moment rather than whenever the budget trips —
+and for one that keeps a single connection open across many images, where
+the pin in (1) never lapses. A client that shows a *sequence* of images in
+one place (a `.cbz` reader) should prefer `update_image`, which reuses the
+handle and so never accumulates anything to reclaim.
 
 ## Metadata
 
@@ -407,9 +449,11 @@ band at a time. See decisions.md's Batch section for the reasoning.
   all-or-nothing — there is no rollback (core has no transaction
   support), matching how a standalone notification's dispatch error is
   already just logged rather than severing the connection.
-- **Disallowed sub-methods:** `batch` (no nesting) and `load_image` (its
-  binary side-channel payload can't be framed inside the array) — both
-  skipped with a log line. Input / subscription messages (`report_*`,
+- **Disallowed sub-methods:** `batch` (no nesting) and
+  `load_image`/`update_image` (their binary side-channel payload can't be
+  framed inside the array) — all skipped with a log line. `destroy_image`
+  *is* allowed: it carries no payload, so a client can clear a region and
+  release the image it held in one frame. Input / subscription messages (`report_*`,
   `subscribe`, `scroll_view`, …) are accepted but their server→client
   broadcast is suppressed, so a batch is really for draw / layer / table
   / metadata commands.

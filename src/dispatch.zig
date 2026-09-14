@@ -686,19 +686,24 @@ const BatchParams = struct {
     messages: []const std.json.Value,
 };
 
-/// The `load_image` request's JSON header, peeked out of a frame body
-/// before the binary side-channel payload it declares (`bytes` raw bytes,
-/// following directly on the wire) can be read — see `peekLoadImage` and
-/// wire.zig's `readRaw`. `id` is copied by value straight out of the
-/// envelope's arena: safe only because `Client` always sends integer
-/// request ids (never a string, which would need its own copy) — see
+/// The JSON header of a request that carries image bytes on the binary
+/// side-channel (`load_image`, `update_image`), peeked out of a frame body
+/// before the payload it declares (`bytes` raw bytes, following directly
+/// on the wire) can be read — see `peekImagePayload` and wire.zig's
+/// `readRaw`. `id` is copied by value straight out of the envelope's
+/// arena: safe only because `Client` always sends integer request ids
+/// (never a string, which would need its own copy) — see
 /// `Client.request`'s `next_id: i64`. `format` is the wire string already
-/// resolved to a `core.ImageFormat` (`peekLoadImage` rejects an unknown
+/// resolved to a `core.ImageFormat` (`peekImagePayload` rejects an unknown
 /// one with `DispatchError.UnsupportedImageFormat`).
 pub const LoadImageHeader = struct {
     id: std.json.Value,
     format: core.ImageFormat,
     bytes: usize,
+    /// The handle to replace, for `update_image`; null for `load_image`,
+    /// which allocates a fresh one. What tells the two apart after the
+    /// peek, so server.zig's side-channel path stays one branch.
+    target: ?core.ImageHandle = null,
 };
 
 /// Which input event categories a connection has opted into (see
@@ -963,31 +968,43 @@ pub const RemoteStarter = struct {
     }
 };
 
-/// Peeks at a decoded frame body to see whether it's a `load_image`
-/// request — if so, the caller must read `bytes` raw bytes directly off
-/// the wire next, before normal frame processing can continue (the binary
-/// side-channel: a JSON header frame declares a byte count, then that many
-/// raw bytes follow directly on the wire, not wrapped in `Content-Length`
-/// framing — see decisions.md's Transport & Wire Format). Returns null for
-/// every other message, which the caller should route to `handle` as
-/// usual. Module-level (not a `Dispatcher` method) since it needs no
-/// `Context` access — it's pure parsing, done before dispatch.
-pub fn peekLoadImage(alloc: std.mem.Allocator, body: []const u8) !?LoadImageHeader {
+/// Peeks at a decoded frame body to see whether it's a request that
+/// carries image bytes on the binary side-channel (`load_image` or
+/// `update_image`) — if so, the caller must read `bytes` raw bytes
+/// directly off the wire next, before normal frame processing can
+/// continue (the side-channel: a JSON header frame declares a byte count,
+/// then that many raw bytes follow directly on the wire, not wrapped in
+/// `Content-Length` framing — see decisions.md's Transport & Wire Format).
+/// Returns null for every other message, which the caller should route to
+/// `handle` as usual. Module-level (not a `Dispatcher` method) since it
+/// needs no `Context` access — it's pure parsing, done before dispatch.
+///
+/// `update_image` rides the same path for the same reason `load_image`
+/// does: its payload is raw bytes that have to come off the stream before
+/// anything else on the connection can be read, whether they are becoming
+/// a new handle or replacing an existing one.
+pub fn peekImagePayload(alloc: std.mem.Allocator, body: []const u8) !?LoadImageHeader {
     const parsed = try std.json.parseFromSlice(Envelope, alloc, body, .{
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.method, "load_image")) return null;
+    const is_load = std.mem.eql(u8, parsed.value.method, "load_image");
+    const is_update = std.mem.eql(u8, parsed.value.method, "update_image");
+    if (!is_load and !is_update) return null;
     const id = parsed.value.id orelse return DispatchError.NotARequest;
 
-    const Params = struct { format: []const u8, bytes: usize };
+    const Params = struct { format: []const u8, bytes: usize, handle: ?core.ImageHandle = null };
     const p = try std.json.parseFromValue(Params, alloc, parsed.value.params, .{
         .ignore_unknown_fields = true,
     });
     defer p.deinit();
 
     const format = core.ImageFormat.fromName(p.value.format) orelse return DispatchError.UnsupportedImageFormat;
-    return .{ .id = id, .format = format, .bytes = p.value.bytes };
+    // `update_image` names the handle it replaces; without one there is
+    // nothing to update, and silently loading a new image instead would
+    // hand the caller a handle it isn't expecting.
+    const target = if (is_update) p.value.handle orelse return DispatchError.UnknownImage else null;
+    return .{ .id = id, .format = format, .bytes = p.value.bytes, .target = target };
 }
 
 /// Peeks at a decoded frame body to determine whether it's a notification
@@ -1345,6 +1362,7 @@ pub const Dispatcher = struct {
         .{ "subscribe", catBytesId(handleSubscribe) },
         .{ "get_input_state", catBytesIdNoParams(handleGetInputState) },
         .{ "get_image_info", catBytesId(handleGetImageInfo) },
+        .{ "destroy_image", catVoid(handleDestroyImage) },
         .{ "draw_image", catVoid(handleDrawImage) },
         .{ "draw_icon", catVoid(handleDrawIcon) },
         .{ "tag_metadata", catVoid(handleTagMetadata) },
@@ -1387,14 +1405,20 @@ pub const Dispatcher = struct {
 
     /// A `batch` sub-message method that can't run inside a batch,
     /// regardless of params: another `batch` (nesting is disallowed) or
-    /// `load_image` (handled by its own pre-dispatch path in server.zig
-    /// because of the binary side-channel payload -- it has no branch in
-    /// `dispatchEnvelope` at all). Everything else in the catalog is
-    /// allowed; a sub-message that happens to produce a `broadcast`
-    /// (`report_key`, `scroll_view`, ...) still applies its state change,
-    /// but the broadcast is dropped -- see `handleBatch`.
+    /// `load_image` / `update_image` (handled by their own pre-dispatch
+    /// path in server.zig because of the binary side-channel payload --
+    /// they have no branch in `dispatchEnvelope` at all). Everything else
+    /// in the catalog is allowed; a sub-message that happens to produce a
+    /// `broadcast` (`report_key`, `scroll_view`, ...) still applies its
+    /// state change, but the broadcast is dropped -- see `handleBatch`.
+    ///
+    /// `destroy_image` is *not* on this list: it carries no payload, so
+    /// it batches like any other notification -- which is what lets a
+    /// client clear a region and release the image it held in one frame.
     fn batchSubMethodInvalid(method: []const u8) bool {
-        return std.mem.eql(u8, method, "batch") or std.mem.eql(u8, method, "load_image");
+        return std.mem.eql(u8, method, "batch") or
+            std.mem.eql(u8, method, "load_image") or
+            std.mem.eql(u8, method, "update_image");
     }
 
     /// `batch`: applies an ordered list of sub-messages in one go. The
@@ -1481,15 +1505,43 @@ pub const Dispatcher = struct {
         return .{ .response = try rpc.response(alloc, id, BatchResult{ .responses = responses.items }) };
     }
 
-    /// Handles the `load_image` request's JSON header once its binary
-    /// payload has already been read off the wire by the caller (see
-    /// server.zig's `serveConnection`, which special-cases this method
-    /// instead of routing it through `handle` — the payload isn't a normal
-    /// frame `handle` can see). Stores `raw_bytes` and returns the response
-    /// frame for `hdr.id`.
+    /// Handles a `load_image` / `update_image` request's JSON header once
+    /// its binary payload has already been read off the wire by the caller
+    /// (see server.zig's `serveConnection`, which special-cases these
+    /// methods instead of routing them through `handle` — the payload
+    /// isn't a normal frame `handle` can see). Stores `raw_bytes` and
+    /// returns the response frame for `hdr.id`.
+    ///
+    /// `update_image` (a non-null `hdr.target`) answers with the same
+    /// handle it was given, so a caller can use one response shape for
+    /// both and a page reader's update loop reads like its first load.
     pub fn handleLoadImage(self: *Dispatcher, alloc: std.mem.Allocator, hdr: LoadImageHeader, raw_bytes: []const u8) ![]u8 {
-        const image_handle = try self.ctx.loadImage(hdr.format, raw_bytes);
+        const image_handle = if (hdr.target) |target| blk: {
+            try self.ctx.updateImage(target, hdr.format, raw_bytes);
+            break :blk target;
+        } else try self.ctx.loadImageFrom(hdr.format, raw_bytes, self.conn_id);
+
+        // Reclaim scrollback images now that this call has grown the
+        // session's image footprint -- see `Session.sweepImages`. Best
+        // effort: a sweep that can't allocate its mark set is not a
+        // reason to fail an otherwise successful load.
+        if (self.session) |session| {
+            _ = session.sweepImagesIfOverBudget(core.default_image_sweep_budget) catch |err| {
+                std.log.warn("glyphwire: image sweep failed: {t}", .{err});
+            };
+        }
         return try rpc.response(alloc, hdr.id, LoadImageResult{ .handle = image_handle });
+    }
+
+    /// `destroy_image`: releases a loaded image's bytes. A notification,
+    /// like every other `destroy_*` — see `handleDestroyImage`'s
+    /// registration below.
+    fn handleDestroyImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(ImageInfoParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        try self.ctx.destroyImage(parsed.value.handle);
     }
 
     /// Resolves a wire-level `layer` field (omitted means the root layer,

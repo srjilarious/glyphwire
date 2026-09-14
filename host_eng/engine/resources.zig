@@ -982,6 +982,44 @@ pub const ResourceManager = struct {
         return self.atlas.get(name) orelse return error.NoTextureWithThatName;
     }
 
+    /// Evicts a texture loaded under `name`, deleting its GL texture and
+    /// dropping both the `TextureImage` entry that owns it and the
+    /// `Texture` view registered alongside it (`loadTextureFromBuffer`
+    /// registers in both maps). Returns whether anything was there.
+    ///
+    /// For a caller that loads textures whose *number* grows with what the
+    /// user does rather than with the program's fixed asset set --
+    /// glyphwire-host uploads one per image a client sends, so without
+    /// this the GPU side keeps growing after the CPU-side bytes have been
+    /// reclaimed. An ordinary game never needs it: its textures live for
+    /// the process.
+    ///
+    /// The caller must have dropped every pointer into this texture
+    /// first (a `*Texture` from `ManagedTexture.get()`, anything cached
+    /// in a batch): those are not refcounted, so nothing here can detect
+    /// them. A still-held refcounted `Handle` is reported as a leak by
+    /// `ManagedResource.deinit` and the texture is freed anyway.
+    pub fn releaseTexture(self: *Self, name: []const u8) bool {
+        const baseName = utils.baseNameFromPath(name);
+        var found = false;
+        // The atlas view first: its free func is a no-op (the GL texture
+        // belongs to the `TextureImage` below), so this only drops the
+        // bookkeeping.
+        if (self.atlas.fetchRemove(baseName)) |entry| {
+            entry.value.deinit();
+            self.alloc.destroy(entry.value);
+            self.alloc.free(entry.key);
+            found = true;
+        }
+        if (self.textures.fetchRemove(baseName)) |entry| {
+            entry.value.deinit();
+            self.alloc.destroy(entry.value);
+            self.alloc.free(entry.key);
+            found = true;
+        }
+        return found;
+    }
+
     /// Acquires a refcounted handle to a texture by name. The handle stays
     /// alive until released via `handle.release()`. The owning managed resource
     /// marks the handle dirty when the texture is reloaded so the caller can

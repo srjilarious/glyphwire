@@ -612,3 +612,47 @@ fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
         std.debug.print("test server connection failed: {t}\n", .{err});
     };
 }
+
+/// `update_image` rides the same binary side-channel `load_image` does, so
+/// this covers both that the raw payload lands on the right handle and
+/// that the decoder resumes normal frame parsing afterwards -- then
+/// `destroy_image` releases it. The `.cbz` page-reader shape, end to end.
+pub fn clientUpdateImageThenDestroyImageRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-imgupd-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const first = fakePngBytes(24, 12);
+    const handle = try client.loadImage("png", &first);
+    try testz.expectEqual(handle, 1);
+
+    // A different page, a different size: the handle is kept.
+    const second = fakePngBytes(48, 24);
+    const same = try client.updateImage(handle, "png", &second);
+    try testz.expectEqual(same, handle);
+
+    const info = try client.getImageInfo(handle);
+    try testz.expectEqual(info.width, 48);
+    try testz.expectEqual(info.height, 24);
+
+    // A plain framed request right after the raw payload proves the
+    // decoder resumed normal parsing -- same check the load test makes.
+    try client.destroyImage(handle);
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+    try testz.expectEqual(snapshot.rows(), 10);
+
+    try testz.expectTrue(ctx.imageInfo(handle) == null);
+}

@@ -3917,3 +3917,223 @@ pub fn isSwallowedKeyTracksTheKeyWhoseReleaseIsStillOwedTest(io: std.Io, alloc: 
     try testz.expectEqual(session.routeKey("up", false), .swallow);
     try testz.expectTrue(!session.isSwallowedKey("up"));
 }
+
+// ── Image lifecycle: destroy / update / scrollback sweep ─────────────
+
+pub fn contextDestroyImageFreesHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try ctx.loadImage(.png, &bytes);
+    try testz.expectEqual(ctx.image_bytes, bytes.len);
+
+    try ctx.destroyImage(handle);
+    try testz.expectTrue(ctx.imageInfo(handle) == null);
+    try testz.expectEqual(ctx.image_bytes, 0);
+    // Gone for good: a second release is an error, not a silent no-op.
+    try testz.expectError(ctx.destroyImage(handle), glyphwire.ImageResourceError.UnknownImage);
+}
+
+/// The decided behavior for a destroyed image still on screen: the cell
+/// keeps its dangling handle and simply renders nothing, rather than the
+/// grid scan blanking it would take. See `Context.destroyImage`.
+pub fn contextDestroyImageLeavesCellsDanglingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try ctx.loadImage(.png, &bytes);
+    ctx.root.drawImage(handle, 0, 0, 2, 2, 48, 24, 12, 12, 1.0);
+    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.handle, handle);
+
+    try ctx.destroyImage(handle);
+    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.handle, handle);
+    try testz.expectTrue(ctx.imageEntry(handle) == null);
+}
+
+pub fn contextDestroyImageRefusesIconHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const bytes = fakePngBytes(16, 16);
+    const handle = try ctx.loadImage(.png, &bytes);
+    const name = try alloc.dupe(u8, "status/error");
+    try ctx.icons.put(name, handle);
+
+    try testz.expectError(ctx.destroyImage(handle), glyphwire.ImageResourceError.ImageIsIcon);
+    try testz.expectTrue(ctx.imageInfo(handle) != null);
+}
+
+pub fn contextUpdateImageReplacesBytesAndDimensionsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const first = fakePngBytes(48, 24);
+    const handle = try ctx.loadImage(.png, &first);
+    try testz.expectEqual(ctx.imageEntry(handle).?.generation, 0);
+
+    // A different size, the `.cbz` page-reader case: accepted, and the
+    // handle is kept so already-drawn cells keep resolving.
+    const second = fakePngBytes(100, 200);
+    try ctx.updateImage(handle, .png, &second);
+
+    const info = ctx.imageInfo(handle).?;
+    try testz.expectEqual(info.width, 100);
+    try testz.expectEqual(info.height, 200);
+    try testz.expectEqual(ctx.imageEntry(handle).?.generation, 1);
+    try testz.expectEqual(ctx.image_bytes, second.len);
+}
+
+/// A payload that doesn't match its declared format must leave the old
+/// image intact rather than blanking the handle -- see `updateImage`.
+pub fn contextUpdateImageRejectsBadBytesWithoutLosingOldTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const good = fakePngBytes(48, 24);
+    const handle = try ctx.loadImage(.png, &good);
+
+    try testz.expectError(ctx.updateImage(handle, .jpeg, &good), glyphwire.ImageError.InvalidJpeg);
+
+    const info = ctx.imageInfo(handle).?;
+    try testz.expectEqual(info.width, 48);
+    try testz.expectEqual(info.height, 24);
+    try testz.expectEqual(ctx.imageEntry(handle).?.generation, 0);
+}
+
+pub fn contextUpdateImageUnknownHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    try testz.expectError(ctx.updateImage(99, .png, &bytes), glyphwire.ImageResourceError.UnknownImage);
+}
+
+/// An image whose loading connection is still alive is pinned, even with
+/// no cell referencing it: the client may be about to draw it.
+pub fn sessionSweepKeepsPinnedImageTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try root.loadImageFrom(.png, &bytes, 7);
+
+    try testz.expectEqual(try session.sweepImages(), 0);
+    try testz.expectTrue(root.imageInfo(handle) != null);
+}
+
+/// An in-process load (the host's bundled icons) is never swept, however
+/// long it goes unreferenced.
+pub fn sessionSweepKeepsInProcessImageTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try root.loadImage(.png, &bytes);
+
+    try testz.expectEqual(try session.sweepImages(), 0);
+    try testz.expectTrue(root.imageInfo(handle) != null);
+}
+
+/// The whole point: a client loaded an image, drew it, and exited, and the
+/// rows holding it have since scrolled off the end of the scrollback.
+pub fn sessionSweepReclaimsScrolledOffImageTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // Two rows of scrollback, so a handful of newlines evicts the image.
+    var root = try glyphwire.Context.init(alloc, 80, 4, 2);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try root.loadImageFrom(.png, &bytes, 7);
+    root.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0);
+
+    // Still on screen, and its loader has gone: pinned no longer, but
+    // referenced, so the sweep must leave it.
+    session.releaseImages(7);
+    try testz.expectEqual(try session.sweepImages(), 0);
+    try testz.expectTrue(root.imageInfo(handle) != null);
+
+    // Push it past the viewport *and* the two retained scrollback rows.
+    for (0..10) |_| try root.root.writeText("\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqual(try session.sweepImages(), bytes.len);
+    try testz.expectTrue(root.imageInfo(handle) == null);
+    try testz.expectEqual(root.image_bytes, 0);
+}
+
+/// Scrolled out of the *viewport* but still in retained scrollback is
+/// still displayed the moment the user scrolls back, so it must survive.
+pub fn sessionSweepKeepsImageInRetainedScrollbackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 80, 4, 20);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try root.loadImageFrom(.png, &bytes, 7);
+    root.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0);
+    session.releaseImages(7);
+
+    // Off the viewport, but well inside the 20 retained rows.
+    for (0..8) |_| try root.root.writeText("\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try testz.expectEqual(try session.sweepImages(), 0);
+    try testz.expectTrue(root.imageInfo(handle) != null);
+}
+
+/// A `create_context` program's cells resolve root-context handles through
+/// `asset_fallback`, so marking has to span every context before any one
+/// of them is swept.
+pub fn sessionSweepKeepsImageReferencedFromAnotherContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 80, 4, 2);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try root.loadImageFrom(.png, &bytes, 7);
+    session.releaseImages(7);
+
+    const other = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    const other_ctx = session.contextPtr(other).?;
+    other_ctx.root.drawImage(handle, 0, 0, 1, 2, 48, 24, 12, 12, 1.0);
+
+    try testz.expectEqual(try session.sweepImages(), 0);
+    try testz.expectTrue(root.imageInfo(handle) != null);
+}
+
+pub fn sessionSweepOnlyRunsOverBudgetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 80, 4, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const bytes = fakePngBytes(48, 24);
+    const handle = try root.loadImageFrom(.png, &bytes, 7);
+    session.releaseImages(7);
+
+    // Unreferenced and unpinned, but under budget -- left alone.
+    try testz.expectEqual(try session.sweepImagesIfOverBudget(bytes.len * 4), 0);
+    try testz.expectTrue(root.imageInfo(handle) != null);
+
+    try testz.expectEqual(try session.sweepImagesIfOverBudget(bytes.len - 1), bytes.len);
+    try testz.expectTrue(root.imageInfo(handle) == null);
+}

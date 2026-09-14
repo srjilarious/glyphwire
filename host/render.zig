@@ -63,6 +63,15 @@ const TexBatch = struct {
     batch: SpriteBatch,
 };
 
+/// One uploaded image texture plus the `core.ImageEntry.generation` the
+/// upload was made from. The bytes behind a handle are mutable now
+/// (`update_image`), so the handle alone no longer identifies what is on
+/// the GPU -- see `Renderer.reconcileImageTextures`.
+pub const CachedImage = struct {
+    managed: *host_eng.ManagedTexture,
+    generation: u32,
+};
+
 /// Identifies one cached layer batch. Layer handles are per-context, so
 /// the context handle is part of the identity -- see
 /// `Renderer.layer_batches`.
@@ -201,7 +210,7 @@ pub const Renderer = struct {
     /// `ManagedTexture`'s heap-allocated `Handle` stays at a stable
     /// address for its full lifetime, so `&managed.get().?.val` stays
     /// valid across the frames a `StaticQuadBatch` holds it.
-    image_textures: std.AutoHashMap(glyphwire.ImageHandle, *host_eng.ManagedTexture),
+    image_textures: std.AutoHashMap(glyphwire.ImageHandle, CachedImage),
     /// Every bundled icon (`Context.icons`, seeded from the `assets/icons/`
     /// scan -- see `icons.loadIconsFromDir`) decoded once at startup and
     /// packed into a single texture, so a screen full of icons draws from
@@ -246,6 +255,12 @@ pub const Renderer = struct {
     /// at the new origin even though nothing about the layers themselves
     /// changed, so this forces a rebuild of the affected contexts.
     last_pane_layout_gen: u64 = 0,
+    /// The root context's `image_gen` as of the last `syncBatches`. Moves
+    /// when a `destroy_image` / `update_image` / scrollback sweep changed
+    /// what an image handle resolves to -- neither of which touches a
+    /// single cell, so no layer's `render_gen` would report it. See
+    /// `reconcileImageTextures`.
+    last_image_gen: u64 = 0,
 
     pub fn deinit(self: *Renderer) void {
         const alloc = self.app.alloc;
@@ -402,7 +417,7 @@ pub const Renderer = struct {
     /// decoding and uploading it first if this is the first time this App
     /// has seen it -- see `image_textures`'s doc comment.
     fn textureForImage(self: *Renderer, eng: *Engine, handle: glyphwire.ImageHandle) ?*host_eng.Texture {
-        const managed = self.image_textures.get(handle) orelse blk: {
+        const cached = self.image_textures.get(handle) orelse blk: {
             const entry = self.app.server.ctx.imageEntry(handle) orelse return null;
             var image = host_eng.stbi.Image.loadFromMemory(entry.bytes, 4) catch |err| {
                 std.log.err("glyphwire-host: failed to decode image handle {d}: {t}", .{ handle, err });
@@ -411,20 +426,92 @@ pub const Renderer = struct {
             defer image.deinit();
 
             var name_buf: [32]u8 = undefined;
-            const name = std.fmt.bufPrint(&name_buf, "glyphwire-image-{d}", .{handle}) catch unreachable;
+            const name = std.fmt.bufPrint(&name_buf, imageTextureNameFmt, .{handle}) catch unreachable;
             const managed = eng.resources.loadTextureFromBuffer(name, image.width, image.height, image.data) catch |err| {
                 std.log.err("glyphwire-host: failed to upload image handle {d}: {t}", .{ handle, err });
                 return null;
             };
-            self.image_textures.put(handle, managed) catch {};
-            break :blk managed;
+            const cached: CachedImage = .{ .managed = managed, .generation = entry.generation };
+            self.image_textures.put(handle, cached) catch {};
+            break :blk cached;
         };
 
-        const live = managed.get() orelse {
+        const live = cached.managed.get() orelse {
             std.log.warn("glyphwire-host: image handle {d} has no live generation", .{handle});
             return null;
         };
         return &live.val;
+    }
+
+    /// The `eng.resources` name an image handle's texture is registered
+    /// under -- shared by the upload above and the eviction below, which
+    /// have to agree on it.
+    const imageTextureNameFmt = "glyphwire-image-{d}";
+
+    /// Drops cached GPU textures for image handles that were destroyed,
+    /// swept, or replaced (`update_image`) since the last frame. Runs only
+    /// when the root context's `image_gen` has moved -- see
+    /// `last_image_gen`.
+    ///
+    /// **Every layer batch is dropped first.** A built batch holds a
+    /// `*Texture` pointing into a `ManagedTexture`'s current generation,
+    /// and those pointers are not refcounted: evicting (or re-uploading
+    /// over) a texture while a batch still references it would leave that
+    /// batch drawing freed memory. Dropping the batches is cheap next to
+    /// getting this wrong, and only happens on an actual image lifecycle
+    /// event, never per frame.
+    fn reconcileImageTextures(self: *Renderer, eng: *Engine) void {
+        const alloc = self.app.alloc;
+
+        // Collected before removal: a hash map can't be mutated through a
+        // live iterator.
+        var stale: std.ArrayList(glyphwire.ImageHandle) = .empty;
+        defer stale.deinit(alloc);
+
+        var it = self.image_textures.iterator();
+        while (it.next()) |entry| {
+            const handle = entry.key_ptr.*;
+            const live = self.lookupImage(handle);
+            // Gone entirely, or the same handle now holds different bytes.
+            const is_stale = if (live) |e| e.generation != entry.value_ptr.generation else true;
+            if (is_stale) stale.append(alloc, handle) catch {};
+        }
+        if (stale.items.len == 0) return;
+
+        self.dropAllBatches();
+
+        for (stale.items) |handle| {
+            _ = self.image_textures.remove(handle);
+            var name_buf: [32]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buf, imageTextureNameFmt, .{handle}) catch unreachable;
+            _ = eng.resources.releaseTexture(name);
+        }
+    }
+
+    /// Resolves an image handle against **every** context, not just the
+    /// focused one. The texture cache is keyed by handle alone and spans
+    /// whatever contexts have drawn images, so asking only the focused
+    /// context would report another pane's perfectly live image as gone
+    /// and evict it, to be re-uploaded on its next frame.
+    fn lookupImage(self: *Renderer, handle: glyphwire.ImageHandle) ?glyphwire.ImageEntry {
+        var it = self.app.server.session.contexts.valueIterator();
+        while (it.next()) |ctx| {
+            if (ctx.*.images.get(handle)) |e| return e;
+        }
+        return null;
+    }
+
+    /// Frees every cached layer batch. The blanket version of
+    /// `reapStaleBatches`, for when the thing that went stale isn't a
+    /// layer but something the batches merely point at.
+    fn dropAllBatches(self: *Renderer) void {
+        const alloc = self.app.alloc;
+        var it = self.layer_batches.valueIterator();
+        while (it.next()) |b| {
+            b.*.deinit(alloc);
+            alloc.destroy(b.*);
+        }
+        self.layer_batches.clearRetainingCapacity();
     }
 
     // ── Per-frame batch sync + draw ──────────────────────────────────
@@ -460,6 +547,14 @@ pub const Renderer = struct {
             self.last_visible_gen = vgen;
             self.last_pane_layout_gen = pgen;
             self.reapStaleBatches();
+        }
+
+        // Before any batch is (re)built, so a rebuilt batch never picks up
+        // a texture this pass is about to evict.
+        const igen = server.session.rootContext().image_gen;
+        if (igen != self.last_image_gen) {
+            self.last_image_gen = igen;
+            self.reconcileImageTextures(eng);
         }
 
         var pass: usize = 0;

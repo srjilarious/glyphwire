@@ -266,14 +266,15 @@ pub const Server = struct {
             while (try decoder.next(alloc)) |body| {
                 defer alloc.free(body);
 
-                // `load_image` is special: its JSON header frame declares a
-                // raw byte count that follows directly on the wire, not
-                // wrapped in another frame -- see wire.zig's `readRaw` and
-                // decisions.md's binary side-channel framing. That payload
-                // has to be pulled off this connection's stream (and
-                // decoder buffer) before dispatch can respond, so it can't
-                // go through `Dispatcher.handle`'s normal single-frame path.
-                if (try dispatch.peekLoadImage(alloc, body)) |hdr| {
+                // `load_image` / `update_image` are special: the JSON
+                // header frame declares a raw byte count that follows
+                // directly on the wire, not wrapped in another frame --
+                // see wire.zig's `readRaw` and decisions.md's binary
+                // side-channel framing. That payload has to be pulled off
+                // this connection's stream (and decoder buffer) before
+                // dispatch can respond, so it can't go through
+                // `Dispatcher.handle`'s normal single-frame path.
+                if (try dispatch.peekImagePayload(alloc, body)) |hdr| {
                     const raw = try wire.readRaw(self.io, &stream, &decoder, alloc, hdr.bytes);
                     defer alloc.free(raw);
 
@@ -381,6 +382,12 @@ pub const Server = struct {
                     std.log.err("glyphwire: layer cull for closed connection {d} failed: {t}", .{ conn.id, err });
                 };
             }
+            // Images stay -- a picture drawn by a program that has since
+            // exited is the normal case (`glyphwire-view` loads, draws and
+            // exits) -- but they lose their pin, so the scrollback sweep
+            // can reclaim them once they scroll away. See
+            // `core.Context.releaseImages`.
+            self.session.releaseImages(conn.id);
             // Then contexts this connection solely owned -- destroying one
             // takes its layers/splits/tables with it. An on-screen context
             // going this way pops its pane's stack back to whatever was

@@ -204,6 +204,26 @@ pub const ImageEntry = struct {
     format: ImageFormat,
     width: u32,
     height: u32,
+    /// Bumped by every `update_image` on this handle. The bytes behind a
+    /// handle are no longer immutable, so glyphwire-host can't treat "I
+    /// already uploaded handle N" as "my texture for handle N is current"
+    /// -- it caches this alongside the texture and re-decodes when it
+    /// moves. See `Context.updateImage`.
+    generation: u32 = 0,
+    /// The connection that issued `load_image`, or null for an image
+    /// loaded in-process (glyphwire-host's icon scan, `server/main.zig`,
+    /// tests). While this is non-null the image is **pinned**: the
+    /// scrollback sweep leaves it alone even with no cell referencing it,
+    /// because its loader is still alive and may draw (or `update_image`)
+    /// it at any moment. Cleared by `Context.releaseImages` when that
+    /// connection closes, which is what makes the image a sweep
+    /// candidate. See `sweepImages`.
+    loader: ?ConnId = null,
+    /// Whether this image may ever be swept (see `sweepImages`). True
+    /// only for an image that arrived over a socket: an in-process load
+    /// is host-owned infrastructure (the bundled icons) with no
+    /// connection lifecycle behind it, so it stays for the session.
+    sweepable: bool = false,
 };
 
 pub const ImageError = error{
@@ -211,6 +231,32 @@ pub const ImageError = error{
     InvalidJpeg,
     InvalidBmp,
     InvalidGif,
+};
+
+/// How many bytes of loaded images a session tolerates before a
+/// `load_image` / `update_image` triggers the scrollback sweep
+/// (`Session.sweepImages`). Not a hard cap: the sweep frees only what is
+/// genuinely unreachable, so a session legitimately displaying more than
+/// this simply stays above it and pays one wasted scan per load. Sized so
+/// an ordinary session never sweeps at all, and a shell that has scrolled
+/// a few hundred screenshots past sweeps every few dozen images.
+pub const default_image_sweep_budget: usize = 64 * 1024 * 1024;
+
+/// Failures of the image *lifecycle* messages (`destroy_image` /
+/// `update_image`), as opposed to `ImageError`'s header-parsing failures.
+/// `UnknownImage` deliberately shares its name with `DispatchError`'s --
+/// Zig merges same-named errors across sets, so the dispatcher's existing
+/// `UnknownImage` mapping covers both without a translation step.
+pub const ImageResourceError = error{
+    UnknownImage,
+    /// The handle is registered in the icon catalog (`Context.icons`).
+    /// Icons are session infrastructure shared by every context through
+    /// `asset_fallback`, and their handles are observable to any client
+    /// (`get_cells` reports `bg_icon.handle`), so destroying or replacing
+    /// one on a client's say-so would break `draw_icon` for everyone.
+    /// Refused rather than silently ignored, so a client that got a
+    /// handle from the wrong place hears about it.
+    ImageIsIcon,
 };
 
 /// Sniffs a container format from an image's leading magic bytes -- enough
@@ -4245,6 +4291,19 @@ pub const Context = struct {
     input: InputState,
     images: std.AutoHashMap(ImageHandle, ImageEntry),
     next_image_handle: ImageHandle = 1,
+    /// Sum of every stored `ImageEntry.bytes.len` in this context. What
+    /// the scrollback sweep's budget check reads, so deciding whether to
+    /// sweep never walks the `images` map.
+    image_bytes: usize = 0,
+    /// Bumped by `destroyImage` / `updateImage` / `sweepImages` -- i.e.
+    /// whenever an image handle's bytes changed identity or stopped
+    /// resolving. glyphwire-host caches decoded GPU textures by handle
+    /// and holds pointers to them inside already-built quad batches;
+    /// neither is invalidated by a cell change, so `render_gen` can't
+    /// tell it. It watches **the root context's** counter: `Session`
+    /// sweeps every context at once and bumps the root's whenever
+    /// anything anywhere was freed, so one number covers the session.
+    image_gen: u64 = 0,
     /// Name -> image handle, for `draw_icon` (decisions.md's Icon
     /// section). Populated by whoever loads the bundled icon files
     /// (`glyphwire-host`, scanning `assets/icons/` -- see `iconName`) --
@@ -5022,19 +5081,38 @@ pub const Context = struct {
         return null;
     }
 
+    /// `load_image` from an in-process caller: no owning connection, so
+    /// the result is never a sweep candidate. See `loadImageFrom`.
+    pub fn loadImage(self: *Context, format: ImageFormat, bytes: []const u8) !ImageHandle {
+        return self.loadImageFrom(format, bytes, null);
+    }
+
     /// `load_image`: stores `bytes` verbatim and reads their natural
     /// dimensions from `format`'s header (`imageDimensions`) -- see
     /// `ImageEntry`'s doc comment. Bytes that don't match the declared
     /// `format` fail with the matching `ImageError`. Returns a fresh
     /// server-generated handle.
-    pub fn loadImage(self: *Context, format: ImageFormat, bytes: []const u8) !ImageHandle {
+    ///
+    /// `loader` is the connection the request came in on (null for an
+    /// in-process caller), recorded so the image stays pinned against the
+    /// scrollback sweep for as long as that client is alive -- see
+    /// `ImageEntry.loader`.
+    pub fn loadImageFrom(self: *Context, format: ImageFormat, bytes: []const u8, loader: ?ConnId) !ImageHandle {
         const info = try imageDimensions(format, bytes);
         const owned = try self.alloc.dupe(u8, bytes);
         errdefer self.alloc.free(owned);
 
         const handle = self.next_image_handle;
         self.next_image_handle += 1;
-        try self.images.put(handle, .{ .bytes = owned, .format = format, .width = info.width, .height = info.height });
+        try self.images.put(handle, .{
+            .bytes = owned,
+            .format = format,
+            .width = info.width,
+            .height = info.height,
+            .loader = loader,
+            .sweepable = loader != null,
+        });
+        self.image_bytes += owned.len;
         return handle;
     }
 
@@ -5043,6 +5121,163 @@ pub const Context = struct {
     pub fn imageInfo(self: *const Context, handle: ImageHandle) ?ImageInfo {
         const entry = self.imageEntry(handle) orelse return null;
         return .{ .width = entry.width, .height = entry.height };
+    }
+
+    /// Whether `handle` is registered in this context's icon catalog --
+    /// the guard `destroyImage`/`updateImage`/`sweepImages` share. Walks
+    /// `icons` rather than keeping a reverse map: the catalog is a few
+    /// hundred entries scanned once at startup, and this runs only on the
+    /// lifecycle messages, never per frame.
+    pub fn isIconHandle(self: *const Context, handle: ImageHandle) bool {
+        var it = self.icons.valueIterator();
+        while (it.next()) |h| if (h.* == handle) return true;
+        return false;
+    }
+
+    /// `destroy_image`: frees a loaded image's bytes and drops its handle.
+    ///
+    /// Cells still backed by the handle are deliberately **left alone**.
+    /// The alternative -- scanning every layer's ring buffer to blank them
+    /// -- would make an O(1) release O(cells) and would silently wipe
+    /// content the caller didn't ask to touch. A dangling image handle
+    /// renders as nothing (glyphwire-host's `textureForImage` already
+    /// returns null for a handle it can't resolve), the same way
+    /// `get_metadata` reports a dangling `metadata_id` rather than
+    /// treating it as an error.
+    ///
+    /// Resolves only against **this** context's own `images`: an
+    /// `asset_fallback` entry belongs to the root context and is not this
+    /// context's to free.
+    pub fn destroyImage(self: *Context, handle: ImageHandle) ImageResourceError!void {
+        if (self.isIconHandle(handle)) return ImageResourceError.ImageIsIcon;
+        const removed = self.images.fetchRemove(handle) orelse return ImageResourceError.UnknownImage;
+        self.image_bytes -= removed.value.bytes.len;
+        self.alloc.free(removed.value.bytes);
+        self.image_gen +%= 1;
+    }
+
+    /// `update_image`: replaces a loaded image's bytes in place, keeping
+    /// its handle. For a client that redraws the same slot over and over
+    /// -- a comic/page reader stepping through a `.cbz`, a plot that
+    /// refreshes -- where `load_image`-per-frame would pile up one dead
+    /// entry per step.
+    ///
+    /// The new bytes may have different natural dimensions than the old.
+    /// Cells already drawn from this handle keep the per-cell sampling
+    /// offsets `drawImage` baked in from the *old* size, which stay exact
+    /// only while the size is unchanged; a caller that changes it is
+    /// expected to `draw_image` again with a span sized for the new
+    /// dimensions (which a page reader does anyway). Re-deriving those
+    /// offsets here would mean tracking every span a handle was ever
+    /// drawn into, and would silently repaint cells the caller may since
+    /// have cleared -- see decisions.md's Image lifecycle section.
+    pub fn updateImage(self: *Context, handle: ImageHandle, format: ImageFormat, bytes: []const u8) !void {
+        if (self.isIconHandle(handle)) return ImageResourceError.ImageIsIcon;
+        const entry = self.images.getPtr(handle) orelse return ImageResourceError.UnknownImage;
+
+        // Measure and copy before touching the existing entry, so a bad
+        // payload leaves the old image intact rather than blanking it.
+        const info = try imageDimensions(format, bytes);
+        const owned = try self.alloc.dupe(u8, bytes);
+
+        self.image_bytes -= entry.bytes.len;
+        self.alloc.free(entry.bytes);
+        entry.bytes = owned;
+        entry.format = format;
+        entry.width = info.width;
+        entry.height = info.height;
+        entry.generation +%= 1;
+        self.image_bytes += owned.len;
+        self.image_gen +%= 1;
+    }
+
+    /// Drops `conn`'s pin from every image it loaded (see
+    /// `ImageEntry.loader`), making those images sweep candidates the
+    /// moment nothing on screen references them. Called from server.zig
+    /// on disconnect alongside `removeConnectionOwnership`.
+    ///
+    /// Deliberately does *not* free anything itself: an image drawn by a
+    /// program that has since exited is exactly the case that has to keep
+    /// rendering -- `glyphwire-view` loads, draws and exits, and the
+    /// picture stays in the shell's scrollback afterwards. Reclaiming it
+    /// is the sweep's job, once it has actually scrolled away.
+    pub fn releaseImages(self: *Context, conn: ConnId) void {
+        var it = self.images.valueIterator();
+        while (it.next()) |entry| {
+            if (entry.loader) |c| {
+                if (c == conn) entry.loader = null;
+            }
+        }
+    }
+
+    /// Marks every image handle any cell in this context still references,
+    /// for the sweep below. Walks each layer's whole ring buffer (live
+    /// viewport *and* retained scrollback) plus its alt screen, since an
+    /// image that has merely scrolled out of view is still displayed the
+    /// moment the user scrolls back to it.
+    ///
+    /// Only `.image` backgrounds are marked. The `.icon` background and
+    /// `Cell.fg_icon` can only ever hold a catalog handle (`draw_icon`
+    /// resolves a *name*, never a raw handle), and catalog images are
+    /// loaded in-process and so never `sweepable` in the first place --
+    /// marking them would be work per cell to protect what is already
+    /// unreachable from the sweep.
+    pub fn markImageRefs(self: *const Context, seen: *std.AutoHashMap(ImageHandle, void)) !void {
+        try markLayerImageRefs(&self.root, seen);
+        var it = self.layers.valueIterator();
+        while (it.next()) |layer| try markLayerImageRefs(layer, seen);
+    }
+
+    fn markLayerImageRefs(layer: *const Layer, seen: *std.AutoHashMap(ImageHandle, void)) !void {
+        for (layer.buf) |c| {
+            if (c.style.bg == .image) try seen.put(c.style.bg.image.handle, {});
+        }
+        if (layer.alt_cells) |alt| {
+            for (alt) |c| {
+                if (c.style.bg == .image) try seen.put(c.style.bg.image.handle, {});
+            }
+        }
+    }
+
+    /// Frees every image in this context that is `sweepable`, unpinned
+    /// (its loading connection is gone) and absent from `referenced` --
+    /// i.e. loaded over a socket by a client that has since exited, and
+    /// no longer on any cell because the rows holding it fell off the end
+    /// of the scrollback ring. Returns the bytes reclaimed.
+    ///
+    /// `referenced` must have been marked across **every** context in the
+    /// session, not just this one: `asset_fallback` lets a
+    /// `create_context` program's cells resolve handles that live in the
+    /// root context's map, so a root-context image can be kept alive by a
+    /// cell somewhere else entirely. `Session.sweepImages` is what
+    /// guarantees that; call it rather than this directly.
+    ///
+    /// No icon check is needed here even though icons share the `images`
+    /// map: a catalog image is loaded in-process (`host/icons.zig`), so
+    /// it is never `sweepable`.
+    pub fn sweepImages(self: *Context, referenced: *const std.AutoHashMap(ImageHandle, void)) !usize {
+        // Collected first: removing from a hash map while iterating it
+        // would invalidate the iterator.
+        var doomed: std.ArrayList(ImageHandle) = .empty;
+        defer doomed.deinit(self.alloc);
+
+        var it = self.images.iterator();
+        while (it.next()) |entry| {
+            const e = entry.value_ptr;
+            if (!e.sweepable or e.loader != null) continue;
+            if (referenced.contains(entry.key_ptr.*)) continue;
+            try doomed.append(self.alloc, entry.key_ptr.*);
+        }
+
+        var freed: usize = 0;
+        for (doomed.items) |h| {
+            const removed = self.images.fetchRemove(h) orelse continue;
+            freed += removed.value.bytes.len;
+            self.alloc.free(removed.value.bytes);
+        }
+        self.image_bytes -= freed;
+        if (freed > 0) self.image_gen +%= 1;
+        return freed;
     }
 
     /// Records `conn` as an owner of this context (see `owners`). Adding
@@ -5507,6 +5742,66 @@ pub const Session = struct {
 
     pub fn contextPtr(self: *Session, handle: ContextHandle) ?*Context {
         return self.contexts.get(handle);
+    }
+
+    /// Total loaded-image bytes across every context -- what the sweep
+    /// trigger compares against `default_image_sweep_budget`.
+    pub fn imageBytes(self: *Session) usize {
+        var total: usize = 0;
+        var it = self.contexts.valueIterator();
+        while (it.next()) |ctx| total += ctx.*.image_bytes;
+        return total;
+    }
+
+    /// The scrollback image sweep: marks every image handle still
+    /// reachable from a cell anywhere in the session, then frees the
+    /// unreferenced, unpinned, socket-loaded ones in every context.
+    /// Returns the bytes reclaimed.
+    ///
+    /// Mark-and-sweep rather than a per-cell refcount because a cell's
+    /// image background is dropped by a dozen unrelated paths -- a
+    /// scrollback eviction, `clear`, `delete_cells`, any `write_text`
+    /// over the same cell, a `resize` that rebuilds the ring, a table
+    /// repaint -- and a refcount would have to be threaded correctly
+    /// through every one of them forever, where missing a single
+    /// decrement leaks and a single double-decrement frees a picture
+    /// still on screen. Scanning is O(cells), but it runs only when the
+    /// stored bytes cross the budget, not per frame or per scroll.
+    ///
+    /// The marking pass has to span every context before *any* context is
+    /// swept -- see `Context.sweepImages` on `asset_fallback`.
+    pub fn sweepImages(self: *Session) !usize {
+        var referenced = std.AutoHashMap(ImageHandle, void).init(self.alloc);
+        defer referenced.deinit();
+
+        var mark_it = self.contexts.valueIterator();
+        while (mark_it.next()) |ctx| try ctx.*.markImageRefs(&referenced);
+
+        var freed: usize = 0;
+        var sweep_it = self.contexts.valueIterator();
+        while (sweep_it.next()) |ctx| freed += try ctx.*.sweepImages(&referenced);
+
+        // One counter for glyphwire-host to watch, wherever the bytes
+        // actually came from -- see `Context.image_gen`.
+        if (freed > 0) self.rootContext().image_gen +%= 1;
+        return freed;
+    }
+
+    /// Sweeps only if the session is holding more image bytes than
+    /// `budget`. The trigger the dispatcher calls after a successful
+    /// `load_image` / `update_image`, so an interactive client that keeps
+    /// pushing pictures into the scrollback pays for the cleanup rather
+    /// than a background timer nobody owns.
+    pub fn sweepImagesIfOverBudget(self: *Session, budget: usize) !usize {
+        if (self.imageBytes() <= budget) return 0;
+        return self.sweepImages();
+    }
+
+    /// Drops `conn`'s image pins across every context -- see
+    /// `Context.releaseImages`. Called on disconnect.
+    pub fn releaseImages(self: *Session, conn: ConnId) void {
+        var it = self.contexts.valueIterator();
+        while (it.next()) |ctx| ctx.*.releaseImages(conn);
     }
 
     pub fn panePtr(self: *Session, handle: PaneHandle) ?*Pane {

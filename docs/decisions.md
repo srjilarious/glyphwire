@@ -1079,6 +1079,105 @@ surface.
   `manyLinesPastBottomCursorCappedAtHeight...Test` still pins the
   underlying `set_property(cursor)` + `resolveRow` behavior.
 
+
+**Image lifecycle: `destroy_image`, `update_image`, and the scrollback sweep**
+- Until now an image was load-only: `load_image` allocated a handle and
+  nothing ever released one. That is fine for a session that shows a
+  picture or two and wrong for the two real cases — a long-running client
+  that redraws the same slot over and over, and a shell that accumulates
+  every image ever shown in it. Three pieces, decided together.
+- **`destroy_image(handle)` is a notification, named `destroy_*` like
+  every other handle-lifecycle message** (`destroy_layer`,
+  `destroy_context`, `destroy_metadata`, `destroy_table`, `destroy_pane`).
+  `delete_cells` is not a counter-example: it names a *region*, not a
+  handle. Considered and rejected: adding `delete_image`/`delete_table`
+  spellings as synonyms — `destroy_table` already existed and worked, and
+  a permanent synonym pair in the dispatch table costs more than the
+  moment of name-recall it saves.
+- **A destroyed image leaves its cells dangling; they simply render
+  nothing.** The alternatives were to scan every layer's ring buffer and
+  blank the referencing cells, or to refuse with `ImageInUse` while any
+  remain — both turn an O(1) release into an O(cells) grid walk, and the
+  blanking version silently wipes content the caller never asked to
+  touch. glyphwire-host's `textureForImage` already returns null for a
+  handle it can't resolve, so nothing had to change to make this safe.
+  Same treatment `get_metadata` gives a dangling `metadata_id`: reported
+  as what it is, not escalated to an error.
+- **Handles registered in the icon catalog are refused
+  (`ImageIsIcon`).** Icons live in the same `Context.images` map, are
+  shared by every context through `asset_fallback`, and their handles are
+  observable to any client (`get_cells` reports `bg_icon.handle`) — so a
+  client that got a handle from the wrong place could otherwise break
+  `draw_icon` for the whole session with one message.
+- **No ownership check on `destroy_image`/`update_image`**, unlike
+  `destroy_layer`/`destroy_context`. An image is a shared, passive
+  resource — `draw_image` already lets any connection draw any handle —
+  and adding an owner check only here would be an inconsistency without a
+  threat model behind it. Revisit if a hostile-client story ever needs it.
+- **`update_image(handle, format, bytes)` replaces the bytes behind an
+  existing handle**, riding the same binary side-channel `load_image` uses
+  (it has the same "raw bytes have to come off the stream before anything
+  else on this connection can be read" problem), and answering with the
+  same handle so an update loop reads like the first load. `peekLoadImage`
+  became `peekImagePayload` and now recognizes both.
+- **An update may change the image's pixel dimensions, and the client is
+  expected to redraw.** Cells already drawn from the handle keep the
+  per-cell sampling offsets `draw_image` baked in from the *old* size,
+  which stay exact only while the size is unchanged. Considered: remember
+  the last span each handle was drawn into and auto-repaint it. Rejected —
+  it makes the server track draw history per handle, gets ambiguous the
+  moment a handle is drawn in more than one place, and would repaint cells
+  the caller may since have cleared. Also considered and rejected:
+  requiring identical dimensions, which would force a `.cbz` reader back
+  to one `load_image` per page and so reintroduce exactly the leak this
+  is here to close.
+- **Images that scroll out of the scrollback are reclaimed by a budgeted
+  mark-and-sweep, not by refcounting.** The motivating case is
+  `glyphwire-view`: it loads an image, draws it into the shell's context,
+  and *exits* — so no live connection owns those bytes, and before this
+  they stayed for the life of the session. A per-cell refcount would be
+  exact and prompt, but a cell's image background is dropped by a dozen
+  unrelated paths (a scrollback eviction, `clear`, `delete_cells`, any
+  `write_text` over the same cell, a `resize` that rebuilds the ring, a
+  table repaint), and every one of them would have to keep the count
+  correct forever — one missed decrement leaks, one double-decrement frees
+  a picture still on screen. The sweep is O(cells), but it runs only when
+  the session's stored image bytes cross `default_image_sweep_budget`
+  (64 MiB), on the `load_image`/`update_image` that pushed it over — so
+  the client filling the scrollback pays for the cleanup, and an ordinary
+  session never sweeps at all.
+- **Two things pin an image against the sweep.** Its loading connection,
+  while that connection is alive (`ImageEntry.loader`, cleared by
+  `Context.releaseImages` on disconnect) — without this, a client that
+  loads and then waits before drawing could have the image swept out from
+  under it. And being loaded in-process at all (`ImageEntry.sweepable` is
+  false): the bundled icon catalog is host infrastructure with no
+  connection lifecycle behind it.
+- **Marking spans every context before any context is swept.** A
+  `create_context` program's cells resolve root-context handles through
+  `asset_fallback`, so a root-context image can be held alive by a cell in
+  a completely different context — which is why the sweep lives on
+  `Session` and not on `Context`.
+- **Retained scrollback counts as referenced.** The sweep walks each
+  layer's whole ring buffer, not just its viewport: an image the user can
+  still scroll back to is on screen as far as this is concerned. Only rows
+  evicted past `scrollback_rows` actually release anything.
+- **glyphwire-host reconciles its GPU textures off a single counter,
+  `image_gen` on the root context.** Neither a destroy, an update, nor a
+  sweep touches a cell, so no layer's `render_gen` moves and the renderer
+  would otherwise keep drawing a texture for a handle that no longer
+  resolves — or, after an update, the *previous* picture. On a change it
+  drops every cached layer batch first and only then evicts textures:
+  a built batch holds a `*Texture` into a `ManagedTexture` generation and
+  those pointers are not refcounted, so evicting underneath one would
+  leave it drawing freed memory.
+- **`host_eng` gained `ResourceManager.releaseTexture(name)`.** Without a
+  way to evict, the CPU-side sweep would free the bytes while the GPU side
+  kept every texture ever uploaded — the same unbounded growth one level
+  down. An ordinary game never needs it (its textures live for the
+  process); glyphwire-host does, because its texture count grows with what
+  the user does rather than with a fixed asset set.
+
 **Icon**
 - A named reference to an image, resolved server-side rather than by raw
   handle — `draw_icon(row, col, name)` looks the name up against

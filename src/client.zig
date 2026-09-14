@@ -421,16 +421,53 @@ pub const Client = struct {
     /// that don't match the declared format fail the request. Returns a
     /// server-generated handle for `get_image_info`/`drawImage`.
     pub fn loadImage(self: *Client, format: []const u8, bytes: []const u8) !core.ImageHandle {
+        return self.sendImagePayload("load_image", null, format, bytes);
+    }
+
+    /// `update_image(handle, format, bytes)` -- a request on the same
+    /// binary side-channel `loadImage` uses, replacing the bytes behind an
+    /// existing handle instead of allocating a new one. For a client that
+    /// redraws the same slot repeatedly (a `.cbz` page reader stepping
+    /// through pages, a refreshing plot), where a `loadImage` per step
+    /// would leave one dead image behind each time.
+    ///
+    /// The replacement may have different natural dimensions than the
+    /// image it replaces; cells already drawn from this handle keep the
+    /// sampling offsets `drawImage` computed from the *old* size, so a
+    /// caller that changes the size should `drawImage` again with a span
+    /// sized for the new dimensions -- see `core.Context.updateImage`.
+    /// Answers with `handle` itself, so an update loop reads like the
+    /// first load.
+    pub fn updateImage(self: *Client, handle: core.ImageHandle, format: []const u8, bytes: []const u8) !core.ImageHandle {
+        return self.sendImagePayload("update_image", handle, format, bytes);
+    }
+
+    /// The shared body of `loadImage`/`updateImage`: a JSON header frame
+    /// declaring `bytes.len` (plus the target `handle`, for an update),
+    /// then `bytes` written directly to the socket, then the one response
+    /// frame carrying the handle. `handle` is `null` for a load, where the
+    /// server allocates one.
+    fn sendImagePayload(
+        self: *Client,
+        method: []const u8,
+        handle: ?core.ImageHandle,
+        format: []const u8,
+        bytes: []const u8,
+    ) !core.ImageHandle {
         const id = self.next_id;
         self.next_id += 1;
 
         const Msg = struct {
             jsonrpc: []const u8 = "2.0",
             id: i64,
-            method: []const u8 = "load_image",
-            params: struct { format: []const u8, bytes: usize },
+            method: []const u8,
+            params: struct { format: []const u8, bytes: usize, handle: ?core.ImageHandle },
         };
-        try self.send(Msg{ .id = id, .params = .{ .format = format, .bytes = bytes.len } });
+        try self.send(Msg{
+            .id = id,
+            .method = method,
+            .params = .{ .format = format, .bytes = bytes.len, .handle = handle },
+        });
 
         var write_buf: [4096]u8 = undefined;
         var w = self.stream.writer(self.io, &write_buf);
@@ -444,6 +481,20 @@ pub const Client = struct {
         });
         defer parsed.deinit();
         return parsed.value.result.handle;
+    }
+
+    /// `destroy_image(handle)` -- a notification releasing a loaded
+    /// image's bytes. Cells still backed by the handle are left as they
+    /// are and simply render nothing from then on; clear them first if
+    /// that matters -- see `core.Context.destroyImage`.
+    ///
+    /// Mostly unnecessary for a short-lived program (an image loaded over
+    /// a connection is reclaimed automatically once that connection is
+    /// gone and the image has scrolled out of the scrollback -- see
+    /// `core.Session.sweepImages`); this is for a long-running client that
+    /// wants its own memory back at a moment of its choosing.
+    pub fn destroyImage(self: *Client, handle: core.ImageHandle) !void {
+        try self.notify("destroy_image", .{ .handle = handle });
     }
 
     /// `get_image_info(handle)` -- a request returning the image's natural
