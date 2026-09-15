@@ -533,6 +533,183 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try testz.expectEqualStr("/", accepted.cellAt(0, text_col + 6).grapheme);
 }
 
+/// "cd d" + Tab matches four repo-root directories (debug, demo, docker,
+/// docs) sharing no more than the typed "d" -- the tie case that now opens
+/// the interactive picker instead of bash's flat printed list (see
+/// `Prompt.recomputeAndDrawPicker`). Checks the picker actually draws
+/// (marker + dimmed name on row 1, right below the input line), that Down
+/// moves the marker to row 2, and that Enter completes the word with the
+/// row-2 candidate ("demo/") rather than the first -- proving selection,
+/// not just the picker's existence, drives what gets inserted.
+pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shell-picker-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    const text_col = cwd_len + 3;
+
+    try waitForCell(&reporter, 0, arrow_col, ">");
+    try typeText(&reporter, "cd d");
+    try waitForCell(&reporter, 0, text_col + 3, "d");
+
+    try reporter.reportKey("tab", true);
+    try reporter.reportKey("tab", false);
+
+    // Sorted candidates: debug, demo, docker, docs -- row 1 (right below
+    // the input line) is "debug", the initial selection.
+    try waitForCell(&reporter, 1, 0, ">");
+    var opened = try reporter.getCells();
+    defer opened.deinit();
+    try testz.expectEqualStr(">", opened.cellAt(1, 0).grapheme);
+    try testz.expectEqualStr("d", opened.cellAt(1, 2).grapheme);
+    try testz.expectEqualStr("e", opened.cellAt(1, 3).grapheme);
+    try testz.expectEqualStr("b", opened.cellAt(1, 4).grapheme);
+    // Row 2 ("demo") isn't selected yet, so it's dimmed like the ghost hint.
+    const demo_row = opened.cellAt(2, 2);
+    try testz.expectEqualStr("d", demo_row.grapheme);
+    try testz.expectEqual(demo_row.fg.r, 120);
+    try testz.expectEqual(demo_row.fg.g, 120);
+    try testz.expectEqual(demo_row.fg.b, 120);
+
+    try reporter.reportKey("down", true);
+    try reporter.reportKey("down", false);
+    try waitForCell(&reporter, 2, 0, ">");
+
+    var moved = try reporter.getCells();
+    defer moved.deinit();
+    try testz.expectEqualStr(" ", moved.cellAt(1, 0).grapheme); // debug: no longer selected
+    try testz.expectEqualStr(">", moved.cellAt(2, 0).grapheme); // demo: now selected
+
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    // "cd d" + "emo/" -> "cd demo/"; also proves the picker's rows were
+    // cleared (Enter doesn't submit the line -- see `acceptCompletionPicker`).
+    try waitForCell(&reporter, 0, text_col + 7, "/");
+    var accepted = try reporter.getCells();
+    defer accepted.deinit();
+    try testz.expectEqualStr("e", accepted.cellAt(0, text_col + 4).grapheme);
+    try testz.expectEqualStr("m", accepted.cellAt(0, text_col + 5).grapheme);
+    try testz.expectEqualStr("o", accepted.cellAt(0, text_col + 6).grapheme);
+    try testz.expectEqualStr("/", accepted.cellAt(0, text_col + 7).grapheme);
+    // The picker's row was `clear`ed, not filled with space glyphs (that's
+    // `appendInputLine`'s box repaint, a different path) -- a cleared cell
+    // reports an empty grapheme.
+    try testz.expectEqualStr("", accepted.cellAt(1, 0).grapheme);
+}
+
+/// Ctrl+Backspace / Ctrl+Delete delete a whole word, using the same
+/// class-based span Ctrl+Left/Right jump over (see `Prompt.wordLeft`/
+/// `wordRight` and `deleteWordBackward`/`deleteWordForward`), not bash's
+/// whitespace-only `unix-word-rubout`.
+pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shell-wordkill-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    const text_col = cwd_len + 3;
+
+    try waitForCell(&reporter, 0, arrow_col, ">");
+    try typeText(&reporter, "echo foo bar");
+    try waitForCell(&reporter, 0, text_col + 11, "r");
+
+    try reporter.reportKey("left_control", true);
+    try reporter.reportKey("backspace", true);
+    try reporter.reportKey("backspace", false);
+    try reporter.reportKey("left_control", false);
+
+    // "echo foo bar" -> "echo foo " (the trailing space Ctrl+Left would
+    // have stopped just past is kept; only "bar" itself is deleted).
+    try waitForCursorCol(&reporter, text_col + 9);
+    var after_backspace = try reporter.getCells();
+    defer after_backspace.deinit();
+    try testz.expectEqualStr(" ", after_backspace.cellAt(0, text_col + 8).grapheme);
+    try testz.expectEqualStr(" ", after_backspace.cellAt(0, text_col + 9).grapheme);
+
+    try reporter.reportKey("home", true);
+    try reporter.reportKey("home", false);
+    try waitForCursorCol(&reporter, text_col);
+
+    try reporter.reportKey("left_control", true);
+    try reporter.reportKey("delete", true);
+    try reporter.reportKey("delete", false);
+    try reporter.reportKey("left_control", false);
+
+    // "echo foo " -> " foo " ("echo" deleted, cursor stays at column 0).
+    try waitForCell(&reporter, 0, text_col, " ");
+    var after_delete = try reporter.getCells();
+    defer after_delete.deinit();
+    try testz.expectEqualStr(" ", after_delete.cellAt(0, text_col).grapheme);
+    try testz.expectEqualStr("f", after_delete.cellAt(0, text_col + 1).grapheme);
+    try testz.expectEqualStr("o", after_delete.cellAt(0, text_col + 2).grapheme);
+    try testz.expectEqualStr("o", after_delete.cellAt(0, text_col + 3).grapheme);
+    try testz.expectEqualStr(" ", after_delete.cellAt(0, text_col + 4).grapheme);
+    const cur = try reporter.getCursor();
+    try testz.expectEqual(cur.col, text_col);
+}
+
 /// Ctrl+R end to end: the real shell spawns the real `gw-hist`, `gw-hist`
 /// reads a seeded history file and fuzzy-filters it live, and picking a
 /// line hands it back through `$GLYPHWIRE_RESULT_FD` to become the

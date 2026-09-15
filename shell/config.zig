@@ -146,6 +146,10 @@ pub const PromptConfig = struct {
     /// ends browse mode and inserts it on the live prompt (`true`, the
     /// default) or is ignored until Escape (`false`).
     scrollback_type_exits: ?bool = null,
+    /// Max candidates the interactive Tab-completion picker shows at
+    /// once before it scrolls (Up/Down/Tab to move, Enter to accept).
+    /// `null` -> the built-in default (5). Must be >= 1.
+    completion_max_items: ?u32 = null,
 };
 
 /// What a `zj{ ... }` call declared -- config for the `zj` directory-jump
@@ -387,6 +391,14 @@ fn luaPrompt(lua: *Lua) !i32 {
     if (!lua.isNoneOrNil(-1)) {
         lua.checkType(-1, .boolean);
         cfg.prompt.scrollback_type_exits = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "completion_max_items");
+    if (!lua.isNoneOrNil(-1)) {
+        const n = lua.checkNumber(-1);
+        if (n < 1) lua.raiseErrorStr("prompt: completion_max_items must be >= 1", .{});
+        cfg.prompt.completion_max_items = @as(u32, @intFromFloat(@min(n, 1_000_000)));
     }
     lua.pop(1);
 

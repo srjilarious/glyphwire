@@ -3245,6 +3245,78 @@ exist").
   glides over it without stopping. Chosen because the request was
   specifically to stop on `/`, which bash's model doesn't do at all.
 
+#### Ctrl+Backspace / Ctrl+Delete: word deletion
+- **Reuses the same class-based span as Ctrl+Left/Right** (`wordLeft`/
+  `wordRight`, above) rather than bash's whitespace-only
+  `unix-word-rubout`/`kill-word`. `deleteWordBackward`/`deleteWordForward`
+  are otherwise exactly `deleteBackward`/`deleteForward` with that wider
+  span deleted in one `buffer.replaceRange`. Chosen so "delete what
+  Ctrl+arrow just jumped over" holds as a rule on this line editor,
+  instead of the two gestures disagreeing about what a "word" is.
+
+#### Interactive Tab-completion picker
+- **Replaces the old bash-style "extend prefix, then print a flat list on
+  the second Tab" entirely** — any Tab that can't extend the shared
+  prefix any further now opens a dropdown of dimmed candidate rows below
+  the input line instead of requiring a second press. `completion_armed`
+  (the old "was the last key also Tab" streak flag) is gone; a `[tag]`
+  after each name (`file`/`dir`/`alias`/`builtin`/`script`, from the new
+  `CompletionCandidate.source` — replacing the old bare `is_dir: bool`)
+  is dimmed metadata carried for a later completion source (git branches,
+  flags, ...) to add its own.
+- **The candidate list is never cached across keystrokes.**
+  `Prompt.recomputeAndDrawPicker` rescans via the existing
+  `collectCompletionCandidates` from the *current* buffer/cursor on every
+  call — Up/Down/Tab moving the selection, and every edit
+  (`insertText`/`deleteBackward`/`deleteForward`/`deleteWord*`) while the
+  picker is open. This makes "typing narrows the list live, like fzf"
+  fall out for free instead of needing a second filter-state machine
+  alongside the real line buffer, at the cost of a redundant directory
+  scan on pure navigation (cheap; the existing ghost-hint idle tick
+  already does the same rescan). `CompletionPickerState` only tracks
+  `selected`/`scroll`/`drawn_rows` — indices into whatever the next scan
+  returns, not a copy of the candidates themselves.
+- **0 matches closes the picker; a fresh recompute (`move_delta == 0`)
+  landing on exactly 1 auto-accepts it** the same way a single-match Tab
+  always has (fill the suffix + `/` or space) — but only on a
+  buffer-changed recompute, not on Up/Down/Tab navigation, since
+  navigation can't change the candidate count and the check exists so
+  that typing a distinguishing character resolves and closes the picker
+  automatically rather than leaving a one-item dropdown open.
+- **Enter accepts the highlighted candidate and completes the word; it
+  does not submit the line.** Escape, or any explicit cursor
+  reposition (`moveCursorTo` — Left/Right/Home/End/Ctrl+arrows/Ctrl+A/E)
+  closes the picker without accepting, since those gestures mean "I'm
+  done with this word." An *edit* (`insertText`/`deleteBackward`/...)
+  is the opposite case — it keeps the picker open and re-filters,
+  reached via `refreshCompletionPickerIfOpen` rather than
+  `moveCursorTo`'s unconditional close, even though both end up calling
+  `setCursorAt`.
+- **Up/Down move the selection; Tab also cycles it forward** (zsh
+  menu-select style) while the picker is open, taking priority over
+  their usual meaning (history recall, Ctrl+Up/Down scrollback jump,
+  filename completion) for as long as it's on screen. The picker only
+  ever opens from live prompt editing, so this never conflicts with
+  scrollback browse mode, which the picker isn't reachable from.
+- **`completion_max_items` in `shell.conf.lua`'s `prompt{}` table**
+  (default 5, must be >= 1) caps rows shown before the list scrolls —
+  it's in `prompt{}` for the same reason `scrolloff`/`scrollback_jump`
+  are: it's the one table binding the shell config has.
+- **Rows are reserved below the input line by scrolling the layer
+  up-front** (`reservePickerRows`), the same overshoot trick
+  `writePowerlinePrefix` already uses when the prompt itself doesn't fit
+  — write enough `\n` at the bottom row to make room, then shift
+  `line_start_row` up by the same amount so the caret math that already
+  assumes an on-grid `line_start_row` keeps working.
+- **Known limitation:** a window resize while the picker is open just
+  drops it (`handleResize` nulls `completion_picker` alongside
+  `browse_pos`) rather than re-deriving where its rows landed after the
+  reflow. A stale dim row surviving a resize is a rare, self-correcting
+  cosmetic edge case (the next redraw overwrites it) — not worth the
+  bookkeeping to chase properly. A mouse click while the picker is open
+  is likewise unhandled; picker interaction was asked for as a
+  keyboard-driven flow.
+
 #### Ctrl+R fuzzy history search (`gw-hist`) and the shell result pipe
 - **A brand-new foreground program, not a builtin overlay inside
   `gw-shell` itself.** `shell/main.zig` already draws its own browse

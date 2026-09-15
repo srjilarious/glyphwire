@@ -46,6 +46,11 @@ const default_scrolloff: usize = 8;
 /// `Prompt.scrollbackJumpRows`.
 const default_scrollback_jump: usize = 5;
 
+/// Max candidates the interactive Tab-completion picker shows at once,
+/// when `shell.conf.lua`'s `prompt{ completion_max_items = N }` isn't
+/// set. See `Prompt.completionMaxItems`.
+const default_completion_max_items: usize = 5;
+
 /// Per-command wall-clock budget for a `prompt{ commands = { ... } }`
 /// var when its entry doesn't set `timeout_ms`. Kept short: the command
 /// runs synchronously while the prompt is being drawn, so a hung `git`
@@ -727,24 +732,29 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         // simply does nothing here.
         const ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
 
-        // Tab completion's "list on the second press" needs to know the
-        // previous key was also Tab; any other key breaks that streak.
-        if (!std.mem.eql(u8, ev.key, "tab")) prompt.completion_armed = false;
-
         if (std.mem.eql(u8, ev.key, "enter")) {
-            if (prompt.browse_pos != null) {
+            // The completion picker takes priority over both browsing and
+            // submitting -- accepting the highlighted candidate completes
+            // the word, it doesn't run the line.
+            if (prompt.completion_picker != null) {
+                try prompt.acceptCompletionPicker();
+            } else if (prompt.browse_pos != null) {
                 try prompt.browseEnter();
             } else {
                 try prompt.submitLine();
                 if (prompt.should_exit) return; // "exit" was typed -- see submitLine
             }
         } else if (std.mem.eql(u8, ev.key, "escape")) {
-            // The explicit "never mind" key. If entries are marked, the
-            // first Escape just clears the marks (and their highlight),
-            // leaving you where you were; otherwise it snaps browsing back
-            // to the prompt. Everything else that ends browsing (below)
-            // does so as a side effect of also doing something.
-            if (prompt.marks.items.len > 0) {
+            // The explicit "never mind" key. The picker, if open, is
+            // dismissed first (leaving whatever's already typed); then, if
+            // entries are marked, the first Escape just clears the marks
+            // (and their highlight), leaving you where you were; otherwise
+            // it snaps browsing back to the prompt. Everything else that
+            // ends browsing (below) does so as a side effect of also doing
+            // something.
+            if (prompt.completion_picker != null) {
+                try prompt.closeCompletionPicker();
+            } else if (prompt.marks.items.len > 0) {
                 try prompt.resetMarks();
             } else {
                 try prompt.setCursorAt(prompt.cursor);
@@ -756,9 +766,23 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // literal space on the live line comes from the `.text` stream.
             if (prompt.browse_pos) |bp| try prompt.toggleHighlightAt(bp.row, bp.col, prompt.view_scroll);
         } else if (std.mem.eql(u8, ev.key, "tab")) {
-            // Filename completion on the live line only -- Tab does
-            // nothing while browsing scrollback.
-            if (prompt.browse_pos == null) try prompt.doComplete();
+            // Tab cycles the picker's selection forward when it's open
+            // (zsh menu-select style, alongside Down); otherwise it's
+            // filename completion on the live line, which does nothing
+            // while browsing scrollback.
+            if (prompt.completion_picker != null) {
+                try prompt.moveCompletionPicker(1);
+            } else if (prompt.browse_pos == null) {
+                try prompt.doComplete();
+            }
+        } else if (ctrl and std.mem.eql(u8, ev.key, "backspace")) {
+            // Bash's Ctrl+Backspace/Ctrl+Delete (unix-word-rubout /
+            // kill-word), stopping at the same class boundaries as
+            // Ctrl+Left/Right below rather than bash's whitespace-only
+            // rule -- see `deleteWordBackward`'s doc comment.
+            try prompt.deleteWordBackward();
+        } else if (ctrl and std.mem.eql(u8, ev.key, "delete")) {
+            try prompt.deleteWordForward();
         } else if (std.mem.eql(u8, ev.key, "backspace")) {
             try prompt.deleteBackward();
         } else if (std.mem.eql(u8, ev.key, "delete")) {
@@ -804,11 +828,17 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
                 try prompt.moveCursorTo(prompt.wordRight());
             }
         } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
-            // Ctrl+Up breaks into scrollback browse mode from the live
-            // prompt (a one-row step off the input line); once browsing
-            // it's a bigger jump (`scrollback_jump` rows, default 5) for
-            // scanning a long listing faster.
-            if (prompt.browse_pos != null) {
+            // The picker (if open) takes priority over browse mode too --
+            // Ctrl+Up/Down move the selection exactly like plain Up/Down
+            // do below rather than jumping by `scrollback_jump`, since the
+            // picker's own list is short. Otherwise, Ctrl+Up breaks into
+            // scrollback browse mode from the live prompt (a one-row step
+            // off the input line); once browsing it's a bigger jump
+            // (`scrollback_jump` rows, default 5) for scanning a long
+            // listing faster.
+            if (prompt.completion_picker != null) {
+                try prompt.moveCompletionPicker(-1);
+            } else if (prompt.browse_pos != null) {
                 try prompt.browseUp(prompt.scrollbackJumpRows());
             } else {
                 try prompt.browseUp(1);
@@ -816,7 +846,11 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
             // The mirror jump while browsing. At the live prompt there's
             // nothing below the input line, so Ctrl+Down does nothing.
-            if (prompt.browse_pos != null) try prompt.browseDown(prompt.scrollbackJumpRows());
+            if (prompt.completion_picker != null) {
+                try prompt.moveCompletionPicker(1);
+            } else if (prompt.browse_pos != null) {
+                try prompt.browseDown(prompt.scrollbackJumpRows());
+            }
         } else if (ctrl and std.mem.eql(u8, ev.key, "page_up")) {
             // Ctrl+PgUp jumps the cursor to the previous metadata-id
             // span's landing cell (a gw-ls entry, say) -- the span's
@@ -830,15 +864,20 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // (nothing tagged below the input line).
             try prompt.metadataJump(.next);
         } else if (std.mem.eql(u8, ev.key, "up")) {
-            // Plain Up: readline-style history recall at the prompt, a
+            // Moves the picker's selection when it's open. Otherwise plain
+            // Up is readline-style history recall at the prompt, a
             // one-row browse step while already in scrollback mode.
-            if (prompt.browse_pos != null) {
+            if (prompt.completion_picker != null) {
+                try prompt.moveCompletionPicker(-1);
+            } else if (prompt.browse_pos != null) {
                 try prompt.browseUp(1);
             } else {
                 try prompt.historyUp();
             }
         } else if (std.mem.eql(u8, ev.key, "down")) {
-            if (prompt.browse_pos != null) {
+            if (prompt.completion_picker != null) {
+                try prompt.moveCompletionPicker(1);
+            } else if (prompt.browse_pos != null) {
                 try prompt.browseDown(1);
             } else {
                 try prompt.historyDown();
@@ -863,9 +902,12 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         } else if (std.mem.eql(u8, ev.key, "right")) {
             if (prompt.browse_pos != null) {
                 try prompt.browseRight(1);
-            } else if (prompt.cursor == prompt.buffer.items.len) {
+            } else if (prompt.completion_picker == null and prompt.cursor == prompt.buffer.items.len) {
                 try prompt.acceptCompletionHintOrComplete();
             } else {
+                // While the picker is open this just moves the cursor --
+                // `moveCursorTo` closes it, same as every other explicit
+                // reposition.
                 try prompt.moveCursorTo(lineedit.nextBoundary(prompt.buffer.items, prompt.cursor));
             }
         }
@@ -900,10 +942,41 @@ fn runScriptFile(io: std.Io, alloc: std.mem.Allocator, prompt: *Prompt, path: []
     }
 }
 
+/// Where a completion candidate came from -- drives both the `/` vs ` `
+/// terminator (only `.dir` gets `/`) and the dimmed `[tag]` the
+/// interactive picker shows next to each row (`completionSourceTag`), a
+/// hook for a later completion source (git branches, flags, ...) to
+/// identify itself the same way.
+const CompletionSource = enum { file, dir, alias, builtin, script };
+
+fn completionSourceTag(source: CompletionSource) []const u8 {
+    return switch (source) {
+        .file => "file",
+        .dir => "dir",
+        .alias => "alias",
+        .builtin => "builtin",
+        .script => "script",
+    };
+}
+
 /// One filename offered by Tab completion -- `name` is the raw directory
-/// entry (no trailing slash), `is_dir` drives the `/` vs ` ` suffix on a
-/// unique match and the `/` shown in a listing.
-const CompletionCandidate = struct { name: []const u8, is_dir: bool };
+/// entry (no trailing slash); `source` drives the `/` vs ` ` suffix on a
+/// unique match and the picker's metadata tag.
+const CompletionCandidate = struct { name: []const u8, source: CompletionSource };
+
+/// Live state for the interactive Tab-completion dropdown (see
+/// `Prompt.recomputeAndDrawPicker`). The candidate list itself is never
+/// cached here -- every redraw rescans via `collectCompletionCandidates`
+/// from the current buffer/cursor, so typing narrows the list for free
+/// and there's no stale-cache case to handle. `selected`/`scroll` index
+/// into that freshly-scanned list; `drawn_rows` is how many rows are
+/// currently painted below the input line, so a redraw knows how much to
+/// clear first and whether the screen still needs scrolling to make room.
+const CompletionPickerState = struct {
+    selected: usize = 0,
+    scroll: usize = 0,
+    drawn_rows: usize = 0,
+};
 
 /// The core builtins `dispatchLine` recognises by name (see the
 /// precedence comment there). Offered by Tab completion in command
@@ -1057,11 +1130,6 @@ const Prompt = struct {
     /// Alias bindings from the `alias` builtin -- see `AliasTable` and
     /// `expandAliases`. Empty until the user defines one.
     aliases: AliasTable = .{},
-    /// True when the last key was a Tab that found multiple matches with
-    /// no further common prefix to fill in -- the next Tab then prints the
-    /// candidate list (bash's "ring the bell once, list on the second
-    /// press"). Any non-Tab key clears it (see `runPrompt`).
-    completion_armed: bool = false,
     /// Fish-style inline autocomplete hint: after the prompt has been idle
     /// for `autocomplete_idle_ms`, the first completion candidate's suffix
     /// is drawn in a dim colour after the caret. The real line buffer is
@@ -1070,6 +1138,10 @@ const Prompt = struct {
     completion_hint_visible: bool = false,
     completion_hint_dirty: bool = true,
     completion_hint_activity_at: ?std.Io.Clock.Timestamp = null,
+    /// The interactive Tab-completion dropdown, non-null while it's on
+    /// screen -- see `CompletionPickerState` and
+    /// `Prompt.recomputeAndDrawPicker`.
+    completion_picker: ?CompletionPickerState = null,
     /// `null` means the line on screen is the one actually being typed
     /// (not a recalled history entry). Otherwise, an index into `history`
     /// for whichever entry `historyUp`/`historyDown` last loaded.
@@ -1340,6 +1412,14 @@ const Prompt = struct {
     fn scrollbackJumpRows(self: *Prompt) usize {
         if (self.promptCfg()) |p| if (p.scrollback_jump) |n| return @max(@as(usize, n), 1);
         return default_scrollback_jump;
+    }
+
+    /// Max rows the interactive Tab-completion picker shows at once
+    /// (see `default_completion_max_items`): `prompt.completion_max_items`
+    /// if set, else the default. Floored at 1.
+    fn completionMaxItems(self: *Prompt) usize {
+        if (self.promptCfg()) |p| if (p.completion_max_items) |n| return @max(@as(usize, n), 1);
+        return default_completion_max_items;
     }
 
     /// Whether typing a printable character while browsing scrollback
@@ -2263,6 +2343,12 @@ const Prompt = struct {
         // tags through the reflow.
 
         self.browse_pos = null;
+        // The picker's rows were positioned relative to the pre-resize
+        // `line_start_row`/`grid_rows`; rather than try to re-derive where
+        // they landed after the reflow, just drop it -- a stale dim row
+        // below the new prompt is a rare, self-correcting cosmetic edge
+        // case (the next redraw overwrites it), not worth chasing.
+        self.completion_picker = null;
         if (self.view_scroll != 0) {
             const res = try self.client.scrollView(0, null);
             self.view_scroll = res.offset;
@@ -2376,6 +2462,7 @@ const Prompt = struct {
         self.cursor = start;
         self.armCompletionHint();
         try self.setCursorAt(self.cursor);
+        try self.refreshCompletionPickerIfOpen();
     }
 
     /// Deletes the codepoint at the cursor (forward delete).
@@ -2385,11 +2472,38 @@ const Prompt = struct {
         try self.buffer.replaceRange(self.client.alloc, self.cursor, end - self.cursor, &.{});
         self.armCompletionHint();
         try self.setCursorAt(self.cursor);
+        try self.refreshCompletionPickerIfOpen();
+    }
+
+    /// Ctrl+Backspace: deletes the word behind the cursor, the same span
+    /// Ctrl+Left would jump over (`wordLeft` -- character-class based, so
+    /// it stops at `/` the way Ctrl+Left/Right already do on this line
+    /// editor, unlike bash's whitespace-only `unix-word-rubout`).
+    fn deleteWordBackward(self: *Prompt) !void {
+        if (self.cursor == 0) return;
+        const start = self.wordLeft();
+        try self.buffer.replaceRange(self.client.alloc, start, self.cursor - start, &.{});
+        self.cursor = start;
+        self.armCompletionHint();
+        try self.setCursorAt(self.cursor);
+        try self.refreshCompletionPickerIfOpen();
+    }
+
+    /// Ctrl+Delete: deletes the word ahead of the cursor -- the mirror of
+    /// `deleteWordBackward`, using `wordRight`'s span.
+    fn deleteWordForward(self: *Prompt) !void {
+        if (self.cursor >= self.buffer.items.len) return;
+        const end = self.wordRight();
+        try self.buffer.replaceRange(self.client.alloc, self.cursor, end - self.cursor, &.{});
+        self.armCompletionHint();
+        try self.setCursorAt(self.cursor);
+        try self.refreshCompletionPickerIfOpen();
     }
 
     /// ctrl+u: deletes from the start of the line through the cursor.
     fn killToStart(self: *Prompt) !void {
         if (self.cursor == 0) return;
+        if (self.completion_picker != null) try self.closeCompletionPicker();
         try self.buffer.replaceRange(self.client.alloc, 0, self.cursor, &.{});
         self.cursor = 0;
         self.armCompletionHint();
@@ -2397,8 +2511,13 @@ const Prompt = struct {
     }
 
     /// Moves the cursor without changing the buffer -- ctrl+a/ctrl+e,
-    /// ctrl+arrow word jumps, and plain arrow movement all end here.
+    /// ctrl+arrow word jumps, and plain arrow movement all end here. Any
+    /// of these is a deliberate reposition away from the word the
+    /// completion picker (if open) was filtering, so it closes first --
+    /// unlike an edit (`insertText`/`deleteBackward`/...), which keeps it
+    /// open and re-filters instead (see `refreshCompletionPickerIfOpen`).
     fn moveCursorTo(self: *Prompt, offset: usize) !void {
+        if (self.completion_picker != null) try self.closeCompletionPicker();
         try self.setCursorAt(offset);
     }
 
@@ -5074,6 +5193,7 @@ const Prompt = struct {
         self.cursor += text.len;
         self.armCompletionHint();
         try self.setCursorAt(self.cursor); // -> renderInputLine repaints the box
+        try self.refreshCompletionPickerIfOpen();
     }
 
     /// Tab: filename completion for the word under the cursor. Reads the
@@ -5086,9 +5206,9 @@ const Prompt = struct {
     ///                        a space (anything else);
     ///   * >1 matches with a longer shared prefix -> extends the word to
     ///                        that common prefix (bash's first-Tab behaviour);
-    ///   * >1 matches, nothing more to share -> prints the candidate list
-    ///                        below the prompt, but only on the *second*
-    ///                        consecutive Tab (`completion_armed`).
+    ///   * >1 matches, nothing more to share -> opens the interactive
+    ///                        completion picker (see `recomputeAndDrawPicker`)
+    ///                        instead of bash's flat printed list.
     ///
     /// Dot-files are skipped unless the typed prefix itself starts with a
     /// dot, matching every shell. Quoting inside the word isn't
@@ -5114,8 +5234,7 @@ const Prompt = struct {
             const escaped = try wordsplit.escapeSpecial(alloc, only.name[dp.prefix.len..]);
             defer alloc.free(escaped);
             try self.insertText(escaped);
-            try self.insertText(if (only.is_dir) "/" else " ");
-            self.completion_armed = false;
+            try self.insertText(if (only.source == .dir) "/" else " ");
             return;
         }
 
@@ -5128,16 +5247,10 @@ const Prompt = struct {
             const escaped = try wordsplit.escapeSpecial(alloc, cands.items[0].name[dp.prefix.len..lcp]);
             defer alloc.free(escaped);
             try self.insertText(escaped);
-            self.completion_armed = true;
             return;
         }
 
-        if (self.completion_armed) {
-            try self.listCompletions(cands.items);
-            self.completion_armed = false;
-        } else {
-            self.completion_armed = true;
-        }
+        try self.recomputeAndDrawPicker(0);
     }
 
     /// Appends the command-position names matching `prefix` to `cands`
@@ -5146,8 +5259,8 @@ const Prompt = struct {
     /// builtins (`ScriptEngine.collectCommandNames` -- `defcmd` names plus
     /// `~/.config/glyphwire/scripts/*.lua`). A name already in `cands`
     /// (from the directory scan or an earlier source here) is skipped, so
-    /// a script and a like-named file are offered once. All get
-    /// `is_dir = false`; `doComplete` sorts the merged list.
+    /// a script and a like-named file are offered once. `doComplete` sorts
+    /// the merged list.
     fn appendCommandNameCandidates(
         self: *Prompt,
         cands: *std.ArrayList(CompletionCandidate),
@@ -5156,21 +5269,21 @@ const Prompt = struct {
         const alloc = self.client.alloc;
 
         const push = struct {
-            fn f(a: std.mem.Allocator, list: *std.ArrayList(CompletionCandidate), name: []const u8) !void {
+            fn f(a: std.mem.Allocator, list: *std.ArrayList(CompletionCandidate), name: []const u8, source: CompletionSource) !void {
                 for (list.items) |cand| {
                     if (std.mem.eql(u8, cand.name, name)) return;
                 }
-                try list.append(a, .{ .name = try a.dupe(u8, name), .is_dir = false });
+                try list.append(a, .{ .name = try a.dupe(u8, name), .source = source });
             }
         }.f;
 
         for (core_builtin_names) |name| {
-            if (std.mem.startsWith(u8, name, prefix)) try push(alloc, cands, name);
+            if (std.mem.startsWith(u8, name, prefix)) try push(alloc, cands, name, .builtin);
         }
 
         var ai = self.aliases.map.keyIterator();
         while (ai.next()) |key| {
-            if (std.mem.startsWith(u8, key.*, prefix)) try push(alloc, cands, key.*);
+            if (std.mem.startsWith(u8, key.*, prefix)) try push(alloc, cands, key.*, .alias);
         }
 
         if (self.script_engine) |eng| {
@@ -5180,7 +5293,7 @@ const Prompt = struct {
                 names.deinit(alloc);
             }
             try eng.collectCommandNames(alloc, prefix, &names);
-            for (names.items) |n| try push(alloc, cands, n);
+            for (names.items) |n| try push(alloc, cands, n, .script);
         }
     }
 
@@ -5209,7 +5322,7 @@ const Prompt = struct {
                 if (!want_hidden and std.mem.startsWith(u8, entry.name, ".")) continue;
                 try cands.append(alloc, .{
                     .name = try alloc.dupe(u8, entry.name),
-                    .is_dir = entry.kind == .directory,
+                    .source = if (entry.kind == .directory) .dir else .file,
                 });
             }
         } else |_| {}
@@ -5237,6 +5350,7 @@ const Prompt = struct {
     fn maybeShowCompletionHint(self: *Prompt) !bool {
         if (!self.completion_hint_dirty or self.completion_hint_visible) return false;
         if (self.browse_pos != null or self.pending_resize != null) return false;
+        if (self.completion_picker != null) return false;
         const active_at = self.completion_hint_activity_at orelse return false;
         if (active_at.untilNow(self.client.io).raw.toMilliseconds() < autocomplete_idle_ms) return false;
 
@@ -5262,7 +5376,7 @@ const Prompt = struct {
         if (cands.items.len == 0) return false;
 
         const first = cands.items[0];
-        const suffix = (try complete.candidateSuffix(self.client.alloc, dp.prefix, first.name, first.is_dir)) orelse return false;
+        const suffix = (try complete.candidateSuffix(self.client.alloc, dp.prefix, first.name, first.source == .dir)) orelse return false;
         defer self.client.alloc.free(suffix);
         if (suffix.len == 0) return false;
 
@@ -5279,7 +5393,6 @@ const Prompt = struct {
         if (self.cursor != self.buffer.items.len or self.buffer.items.len == 0) return;
         if (self.completion_hint_visible and self.completion_hint.items.len > 0) {
             try self.insertText(self.completion_hint.items);
-            self.completion_armed = false;
             return;
         }
         try self.doComplete();
@@ -5297,25 +5410,177 @@ const Prompt = struct {
         return expanded; // expandTilde already returned an owned allocation
     }
 
-    /// Prints the completion candidates on the row below the prompt
-    /// (two spaces between, `/` after directories), then redraws the
-    /// prompt prefix and the in-progress line underneath and restores the
-    /// cursor -- the same "write below, then re-show the prompt" shape
-    /// `submitLine` uses.
-    fn listCompletions(self: *Prompt, cands: []const CompletionCandidate) !void {
-        try self.client.setCursor(self.line_start_row + 1, 0);
-        for (cands, 0..) |cand, i| {
-            if (i != 0) try self.client.writeText("  ", null, null);
-            try self.client.writeText(cand.name, null, null);
-            if (cand.is_dir) try self.client.writeText("/", null, null);
-        }
-        try self.client.writeText("\n", null, null);
+    /// The interactive Tab-completion dropdown: recomputes the candidate
+    /// list from the *current* buffer/cursor (never cached -- see
+    /// `CompletionPickerState`), then either resolves it away (0 or, on a
+    /// fresh recompute, exactly 1 match) or (re)draws up to
+    /// `completionMaxItems()` dimmed rows below the input line, one of
+    /// them highlighted as the current selection.
+    ///
+    /// `move_delta` is 0 for "the buffer changed, re-filter in place"
+    /// (called from `doComplete`'s first open and from every edit while
+    /// open -- `insertText`/`deleteBackward`/... via
+    /// `refreshCompletionPickerIfOpen`) and +-1 for "Up/Down/Tab moved the
+    /// selection" (`moveCompletionPicker`), which skips the single-match
+    /// auto-accept (the candidate count can't have changed from pure
+    /// navigation) and wraps the selection instead of resetting it.
+    fn recomputeAndDrawPicker(self: *Prompt, move_delta: isize) anyerror!void {
+        const alloc = self.client.alloc;
 
-        const cur = try self.writePromptPrefix(null);
-        self.line_start_row = cur.row;
-        self.line_start_col = cur.col;
-        self.input_scroll = 0;
-        try self.setCursorAt(self.cursor); // -> renderInputLine redraws the typed line
+        const line = self.buffer.items;
+        const wr = complete.wordRange(line, self.cursor);
+        const word = line[wr.start..self.cursor];
+        const dp = complete.dirPrefix(word);
+
+        var cands: std.ArrayList(CompletionCandidate) = .empty;
+        defer {
+            for (cands.items) |cand| alloc.free(cand.name);
+            cands.deinit(alloc);
+        }
+        try self.collectCompletionCandidates(&cands, line, wr, dp);
+
+        if (cands.items.len == 0) {
+            try self.closeCompletionPicker();
+            return;
+        }
+        if (move_delta == 0 and cands.items.len == 1) {
+            const only = cands.items[0];
+            try self.closeCompletionPicker();
+            const escaped = try wordsplit.escapeSpecial(alloc, only.name[dp.prefix.len..]);
+            defer alloc.free(escaped);
+            try self.insertText(escaped);
+            try self.insertText(if (only.source == .dir) "/" else " ");
+            return;
+        }
+
+        if (self.completion_picker == null) self.completion_picker = .{};
+        var st = self.completion_picker.?;
+
+        const max_items = self.completionMaxItems();
+        const visible = @min(max_items, cands.items.len);
+
+        if (move_delta == 0) {
+            st.selected = 0;
+            st.scroll = 0;
+        } else {
+            // `@mod`'s result takes the sign of a positive divisor, so
+            // this wraps cleanly in both directions with no extra
+            // negative-result check.
+            const total: isize = @intCast(cands.items.len);
+            const next: isize = @mod(@as(isize, @intCast(st.selected)) + move_delta, total);
+            st.selected = @intCast(next);
+        }
+        if (st.selected < st.scroll) st.scroll = st.selected;
+        if (st.selected >= st.scroll + visible) st.scroll = st.selected + 1 - visible;
+
+        if (st.drawn_rows == 0) try self.reservePickerRows(visible);
+
+        var b = self.client.batch();
+        defer b.deinit();
+        try b.clear(self.line_start_row + 1, 0, @max(st.drawn_rows, visible), self.grid_cols);
+
+        var i: usize = 0;
+        while (i < visible) : (i += 1) {
+            const idx = st.scroll + i;
+            const cand = cands.items[idx];
+            const selected = idx == st.selected;
+            const dim: ?glyphwire.Color = if (selected) null else autocomplete_hint_color;
+
+            try b.setCursor(self.line_start_row + 1 + i, 0);
+            try b.writeText(if (selected) "> " else "  ", dim, null);
+            try b.writeText(cand.name, dim, null);
+            if (cand.source == .dir) try b.writeText("/", dim, null);
+            try b.writeText("  [", autocomplete_hint_color, null);
+            try b.writeText(completionSourceTag(cand.source), autocomplete_hint_color, null);
+            try b.writeText("]", autocomplete_hint_color, null);
+        }
+
+        try self.appendInputLine(&b); // restores the caret to the live line
+        var res = try b.send();
+        res.deinit();
+
+        st.drawn_rows = visible;
+        self.completion_picker = st;
+    }
+
+    /// Reserves `rows_needed` grid rows below the input line for the
+    /// picker's first draw, scrolling the layer up-front (same trick as
+    /// `writePowerlinePrefix`'s overshoot) if the input line is close
+    /// enough to the bottom that they wouldn't otherwise fit.
+    fn reservePickerRows(self: *Prompt, rows_needed: usize) !void {
+        if (self.grid_rows == 0 or rows_needed == 0) return;
+        const need_bottom = self.line_start_row + rows_needed;
+        if (need_bottom < self.grid_rows) return;
+
+        const overshoot = need_bottom - self.grid_rows + 1;
+        var b = self.client.batch();
+        defer b.deinit();
+        try b.setCursor(self.grid_rows - 1, 0);
+        var k: usize = 0;
+        while (k < overshoot) : (k += 1) try b.writeText("\n", null, null);
+        var res = try b.send();
+        res.deinit();
+        self.line_start_row -= overshoot;
+    }
+
+    /// Up/Down (or Tab, to cycle) while the picker is open: wraps the
+    /// selection by `delta` and redraws. A no-op if the picker isn't open
+    /// (callers already gate on that, but this stays safe to call bare).
+    fn moveCompletionPicker(self: *Prompt, delta: isize) !void {
+        if (self.completion_picker == null) return;
+        try self.recomputeAndDrawPicker(delta);
+    }
+
+    /// Buffer changed (typed a character, backspaced, ...) while the
+    /// picker is open: re-filter in place. A no-op if it isn't open.
+    fn refreshCompletionPickerIfOpen(self: *Prompt) !void {
+        if (self.completion_picker != null) try self.recomputeAndDrawPicker(0);
+    }
+
+    /// Enter while the picker is open: completes the word with the
+    /// highlighted candidate (same suffix + terminator insertion as a
+    /// single-match Tab) and closes the picker, without submitting the
+    /// line.
+    fn acceptCompletionPicker(self: *Prompt) !void {
+        const st = self.completion_picker orelse return;
+        const alloc = self.client.alloc;
+
+        const line = self.buffer.items;
+        const wr = complete.wordRange(line, self.cursor);
+        const word = line[wr.start..self.cursor];
+        const dp = complete.dirPrefix(word);
+
+        var cands: std.ArrayList(CompletionCandidate) = .empty;
+        defer {
+            for (cands.items) |cand| alloc.free(cand.name);
+            cands.deinit(alloc);
+        }
+        try self.collectCompletionCandidates(&cands, line, wr, dp);
+
+        try self.closeCompletionPicker();
+        if (st.selected >= cands.items.len) return; // stale -- nothing sane to accept
+
+        const chosen = cands.items[st.selected];
+        const escaped = try wordsplit.escapeSpecial(alloc, chosen.name[dp.prefix.len..]);
+        defer alloc.free(escaped);
+        try self.insertText(escaped);
+        try self.insertText(if (chosen.source == .dir) "/" else " ");
+    }
+
+    /// Escape, an explicit cursor move, or the candidate list narrowing to
+    /// nothing all close the picker: clears its drawn rows and repaints
+    /// the input line + caret in their place, in one batch frame.
+    fn closeCompletionPicker(self: *Prompt) !void {
+        const st = self.completion_picker orelse return;
+        self.completion_picker = null;
+        if (st.drawn_rows == 0) return;
+
+        var b = self.client.batch();
+        defer b.deinit();
+        try b.clear(self.line_start_row + 1, 0, st.drawn_rows, self.grid_cols);
+        try self.appendInputLine(&b);
+        var res = try b.send();
+        res.deinit();
     }
 };
 
