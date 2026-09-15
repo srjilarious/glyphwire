@@ -123,6 +123,12 @@ pub fn cursorShapeFromStrTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectTrue(config.cursorShapeFromStr("diamond") == null);
 }
 
+pub fn bundledFontRelPathAcceptsLegacyAssetsPrefixForAnySlotTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(config.bundledFontRelPath("NotoSansCJK-Regular.ttc", config.font_path_default).?, "NotoSansCJK-Regular.ttc");
+    try testz.expectEqualStr(config.bundledFontRelPath("assets/NotoSansCJK-Regular.ttc", config.font_fallback_default).?, "NotoSansCJK-Regular.ttc");
+    try testz.expectTrue(config.bundledFontRelPath("Noto Sans Mono", config.font_fallback_default) == null);
+}
+
 // ─── system_font (fc-match parsing / match judging) ──────────────────
 
 pub fn fcMatchOutputParsesFourFieldsTest(_: std.Io, _: std.mem.Allocator) !void {

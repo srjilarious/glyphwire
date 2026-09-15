@@ -115,8 +115,8 @@ const ResolvedFont = struct {
 
 /// Turns a `host.conf` `font_face` / `font_fallback` value into a file on
 /// disk, trying in order:
-///   1. the untouched `*_default` value (or a legacy `assets/`-prefixed
-///      one) -> the bundled asset of the same name;
+///   1. the untouched `*_default` value, or any legacy `assets/...`
+///      spelling -> the bundled asset of that relative name;
 ///   2. the value as a path -> that file, if it exists (an absolute path,
 ///      or one resolved against the cwd);
 ///   3. `<asset_dir>/<value>` -> that file, if it exists (skipped for an
@@ -132,15 +132,14 @@ fn resolveFontFile(
     value: [:0]const u8,
     default_rel_path: []const u8,
 ) ?ResolvedFont {
-    const legacy_prefix = "assets/";
-
-    // 1. Untouched default -> the bundled file of that name.
-    if (std.mem.eql(u8, value, default_rel_path) or
-        (std.mem.startsWith(u8, value, legacy_prefix) and
-            std.mem.eql(u8, value[legacy_prefix.len..], default_rel_path)))
-    {
-        const p = bundledAssetPath(arena, asset_dir, default_rel_path) catch return null;
-        return .{ .path = p };
+    // 1. Bundled spellings. `assets/...` is accepted for both font slots so
+    // old configs keep resolving after install, when cwd is no longer the
+    // repo root.
+    if (config.bundledFontRelPath(value, default_rel_path)) |rel_path| {
+        const p = bundledAssetPath(arena, asset_dir, rel_path) catch return null;
+        if (std.mem.eql(u8, rel_path, default_rel_path) or fileExists(io, p)) {
+            return .{ .path = p };
+        }
     }
 
     // 2. The value as a path -- absolute, or relative to the cwd.

@@ -61,6 +61,17 @@ pub const FontConfig = struct {
     size: f32 = font_size_default,
 };
 
+/// Maps font config spellings that should be resolved under the bundled
+/// asset directory to the relative asset path. The bare built-in default
+/// form is the current spelling; `assets/...` is accepted for configs from
+/// the older repo-cwd era and must still work after a prefix install.
+pub fn bundledFontRelPath(value: []const u8, default_rel_path: []const u8) ?[]const u8 {
+    const legacy_prefix = "assets/";
+    if (std.mem.eql(u8, value, default_rel_path)) return default_rel_path;
+    if (std.mem.startsWith(u8, value, legacy_prefix)) return value[legacy_prefix.len..];
+    return null;
+}
+
 /// The four caret shapes `host.conf`'s `cursor_shape` can select.
 /// `line` (a vertical bar at the cell's left edge) is the default and the
 /// original behavior; the rest fill, outline, or underline the cell.
