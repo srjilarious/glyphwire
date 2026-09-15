@@ -16,10 +16,12 @@
 //! the visible rows and redraws whichever slice is in view rather than
 //! growing to hold every match, while `content_extent` + `scrollbars`
 //! tell the host the true total so it can draw a proportional, draggable
-//! scrollbar. Arrow keys move the selection and drag the view along with
-//! it (`syncScroll`); the host can also move the view on its own (wheel,
-//! scrollbar drag), which `drainEvents` picks up as a `scroll_offset`
-//! notification and follows without touching the selection.
+//! scrollbar. Up/Down move the selection by one and PageUp/PageDown by a
+//! screenful, dragging the view along with it (`syncScroll`); the host
+//! can also move the view on its own (wheel, scrollbar drag), which
+//! `drainEvents` picks up as a `scroll_offset` notification and follows
+//! without touching the selection. Every redraw goes out as one `batch`
+//! frame (`run`'s render step) rather than a round trip per row.
 //!
 //! On Enter, the selected line is written to `$GLYPHWIRE_RESULT_FD` --
 //! the shell opens this pipe before spawning every foreground command
@@ -43,8 +45,8 @@ const bg_list = glyphwire.Color{ .r = 16, .g = 16, .b = 20 };
 const fg_list = glyphwire.Color{ .r = 210, .g = 210, .b = 216 };
 // Selection uses the same blue as the header, tying the "you are here"
 // highlight to the chrome around it rather than inventing a third color.
-const bg_selected = bg_header;
-const fg_selected = fg_header;
+const bg_selected = glyphwire.Color{ .r = 70, .g = 120, .b = 200 };
+const fg_selected = glyphwire.Color{ .r = 245, .g = 250, .b = 255 };
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -202,13 +204,23 @@ const Ui = struct {
     fn run(self: *Ui) !void {
         while (!self.quit) {
             try self.drainEvents();
-            if (self.header_dirty) {
-                try self.renderHeader();
-                self.header_dirty = false;
-            }
-            if (self.list_dirty) {
-                try self.renderList();
-                self.list_dirty = false;
+            if (self.header_dirty or self.list_dirty) {
+                // One `batch` frame for everything dirty this tick --
+                // typing a character used to mean up to a dozen separate
+                // `write_text`/cursor round trips (three header rows plus
+                // every visible list row); now it's one.
+                var b = self.client.batch();
+                defer b.deinit();
+                if (self.header_dirty) {
+                    try self.renderHeader(&b);
+                    self.header_dirty = false;
+                }
+                if (self.list_dirty) {
+                    try self.renderList(&b);
+                    self.list_dirty = false;
+                }
+                var results = try b.send();
+                results.deinit();
             }
             if (self.quit) break;
 
@@ -293,6 +305,16 @@ const Ui = struct {
             if (self.filtered.items.len > 0) self.selected = (self.selected + 1) % self.filtered.items.len;
             try self.syncScroll();
             self.list_dirty = true;
+        } else if (eq(u8, key, "page_up")) {
+            self.selected = self.selected -| self.list_rows;
+            try self.syncScroll();
+            self.list_dirty = true;
+        } else if (eq(u8, key, "page_down")) {
+            if (self.filtered.items.len > 0) {
+                self.selected = @min(self.selected + self.list_rows, self.filtered.items.len - 1);
+            }
+            try self.syncScroll();
+            self.list_dirty = true;
         }
     }
 
@@ -361,27 +383,32 @@ const Ui = struct {
 
     // ── Rendering ───────────────────────────────────────────────────────
 
-    fn renderHeader(self: *Ui) !void {
-        try self.writeLine(self.header_layer, 0, "gw-hist -- fuzzy history search", fg_header, bg_header);
+    fn renderHeader(self: *Ui, b: *glyphwire.Client.Batch) !void {
+        try self.writeLine(b, self.header_layer, 0, "gw-hist -- fuzzy history search", fg_header, bg_header);
 
         self.scratch.clearRetainingCapacity();
         try self.scratch.appendSlice(self.alloc, "Search: ");
         try self.scratch.appendSlice(self.alloc, self.query.items);
-        try self.writeLine(self.header_layer, 1, self.scratch.items, fg_header, bg_header);
+        try self.writeLine(b, self.header_layer, 1, self.scratch.items, fg_header, bg_header);
         // A drawn caret (inverted cell), not the host's own cursor --
         // same choice `zoe` makes for its buffer caret, since a plain
         // text layer's cursor property is about the *next write*
         // position, not a persistent visual marker.
         const caret_col = @min(8 + self.query.items.len, self.cols -| 1);
-        try self.client.setCursorOn(self.header_layer, 1, caret_col);
-        try self.client.writeTextOn(self.header_layer, " ", bg_header, fg_header);
+        try b.notify("set_property", .{ .layer = self.header_layer, .property = "cursor", .row = 1, .col = caret_col });
+        try b.notify("write_text", .{
+            .layer = self.header_layer,
+            .text = " ",
+            .fg = glyphwire.Client.colorToJson(bg_header),
+            .bg = glyphwire.Client.colorToJson(fg_header),
+        });
 
         self.scratch.clearRetainingCapacity();
-        try self.scratch.print(self.alloc, "{d} match(es)   Enter picks   Esc/^C cancels   Down/^R next", .{self.filtered.items.len});
-        try self.writeLine(self.header_layer, 2, self.scratch.items, fg_header, bg_header);
+        try self.scratch.print(self.alloc, "{d} match(es)   Enter picks   Esc/^C cancels   Down/^R next   PgUp/PgDn page", .{self.filtered.items.len});
+        try self.writeLine(b, self.header_layer, 2, self.scratch.items, fg_header, bg_header);
     }
 
-    fn renderList(self: *Ui) !void {
+    fn renderList(self: *Ui, b: *glyphwire.Client.Batch) !void {
         var row: usize = 0;
         while (row < self.list_rows) : (row += 1) {
             const idx = self.view_top + row;
@@ -391,26 +418,35 @@ const Ui = struct {
                 try self.scratch.appendSlice(self.alloc, self.filtered.items[idx]);
                 const fg = if (idx == self.selected) fg_selected else fg_list;
                 const bg = if (idx == self.selected) bg_selected else bg_list;
-                try self.writeLine(self.list_layer, row, self.scratch.items, fg, bg);
+                try self.writeLine(b, self.list_layer, row, self.scratch.items, fg, bg);
             } else {
-                try self.writeLine(self.list_layer, row, "", fg_list, bg_list);
+                try self.writeLine(b, self.list_layer, row, "", fg_list, bg_list);
             }
         }
     }
 
-    /// Writes `text` at `(row, 0)` on `layer`, truncated or blank-padded
-    /// to the full window width so every cell in the row carries `bg` --
-    /// there is no `fillRect`/`clear(color)` call, so a solid-colored bar
-    /// (the header) or a solid-colored empty row (past the last match)
-    /// is built out of a space-padded `write_text` like every other
-    /// glyphwire client does (see `read/ui.zig`'s status bar).
-    fn writeLine(self: *Ui, layer: glyphwire.LayerHandle, row: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
+    /// Appends the sub-messages to draw `text` at `(row, 0)` on `layer`
+    /// into `b`, truncated or blank-padded to the full window width so
+    /// every cell in the row carries `bg` -- there is no `fillRect`/
+    /// `clear(color)` call, so a solid-colored bar (the header) or a
+    /// solid-colored empty row (past the last match) is built out of a
+    /// space-padded `write_text` like every other glyphwire client does
+    /// (see `read/ui.zig`'s status bar). Batched rather than sent
+    /// straight through `self.client` -- `renderHeader`/`renderList`
+    /// each draw several rows per redraw, and `run` wants all of them in
+    /// one `batch` frame rather than one round trip per row.
+    fn writeLine(self: *Ui, b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
         self.line_buf.clearRetainingCapacity();
         const shown = text[0..@min(text.len, self.cols)];
         try self.line_buf.appendSlice(self.alloc, shown);
         var pad = self.cols -| shown.len;
         while (pad > 0) : (pad -= 1) try self.line_buf.append(self.alloc, ' ');
-        try self.client.setCursorOn(layer, row, 0);
-        try self.client.writeTextOn(layer, self.line_buf.items, fg, bg);
+        try b.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = 0 });
+        try b.notify("write_text", .{
+            .layer = layer,
+            .text = self.line_buf.items,
+            .fg = glyphwire.Client.colorToJson(fg),
+            .bg = glyphwire.Client.colorToJson(bg),
+        });
     }
 };
