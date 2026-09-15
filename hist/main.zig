@@ -1,59 +1,50 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! gw-hist: Ctrl+R-style fuzzy history search for glyphwire-shell.
+//! gw-hist: Ctrl+R-style fuzzy history search for glyphwire-shell, and
+//! glyphwire's answer to mcfly -- a real glyphwire client (its own
+//! context and layers over the wire protocol), not a plain terminal
+//! program drawing raw ANSI. Requires a glyphwire session
+//! (`GLYPHWIRE_SOCK`); there is no headless fallback, since this program
+//! only ever makes sense launched as a foreground command by
+//! glyphwire-shell, itself always a glyphwire client.
 //!
-//! Deliberately a *plain* terminal program, not a glyphwire-aware one --
-//! no wire connection, no `core.Layer`. It takes over the primary screen
-//! the way `vim`/`less` do (`CSI ?1049h`, restored with `?1049l`), reads
-//! `~/.config/glyphwire/history` directly, and lets the user fuzzy-filter
-//! it live (`shell_support.fuzzy`). This works because `glyphwire-shell`
-//! always runs a foreground child on a real pty (`src/pty.zig`), so
-//! `stdin`/`stdout` here are a real controlling terminal and raw-mode
-//! `termios` behaves exactly as it would for any other full-screen
-//! program -- the shell's own foreground loop just forwards keystrokes
-//! into the pty and mirrors output back out, the same as it does for
-//! `vim` or `htop` (see `shell/main.zig`'s `runCommand`).
+//! Layout: a 3-row header (title, search field with its own drawn caret,
+//! match count / key hints) on a blue layer, and a list layer below it
+//! showing the filtered matches. The list is a *self-scrolling* pane in
+//! the sense `docs/api.md`'s Layer section describes: it stays sized to
+//! the visible rows and redraws whichever slice is in view rather than
+//! growing to hold every match, while `content_extent` + `scrollbars`
+//! tell the host the true total so it can draw a proportional, draggable
+//! scrollbar. Arrow keys move the selection and drag the view along with
+//! it (`syncScroll`); the host can also move the view on its own (wheel,
+//! scrollbar drag), which `drainEvents` picks up as a `scroll_offset`
+//! notification and follows without touching the selection.
 //!
 //! On Enter, the selected line is written to `$GLYPHWIRE_RESULT_FD` --
 //! the shell opens this pipe before spawning every foreground command
 //! (see `shell/main.zig`'s `result_fd_env`) so any program, not just this
-//! one, can hand a value back to become the next prompt line. That's the
-//! generic half of this feature; `gw-hist` is just its first user. Esc /
-//! Ctrl+C exit without writing anything, leaving the shell's current
-//! line untouched. Run without that env var set (e.g. testing by hand
-//! from a real terminal), the pick goes to stdout instead once the
-//! terminal is restored.
-//!
-//! Known limitations, left for later: no live `SIGWINCH` handling (the
-//! terminal size is read once at startup), and the query editor is
-//! byte-level rather than UTF-8-aware (Backspace over a multi-byte
-//! character removes one byte, not one codepoint) -- acceptable for
-//! command lines, which are overwhelmingly ASCII.
+//! one, can hand a value back to become the next prompt line. Esc /
+//! Ctrl+C exit without writing anything, leaving the shell's current line
+//! untouched. Run without that env var set (e.g. testing by hand), the
+//! pick goes to stdout instead.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const history = @import("shell_support").history;
 const fuzzy = @import("shell_support").fuzzy;
 
-const c = struct {
-    extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
-    extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
-    extern "c" fn close(fd: c_int) c_int;
-};
+/// Rows the header block occupies: title, search field, hint line.
+const header_rows: usize = 3;
 
-// <asm-generic/ioctls.h> -- same value `src/pty.zig` uses for the set
-// side (`TIOCSWINSZ`); this is the get side, one less.
-const TIOCGWINSZ: c_int = 0x5413;
-
-fn writeAll(fd: c_int, bytes: []const u8) void {
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const n = c.write(fd, bytes.ptr + off, bytes.len - off);
-        if (n <= 0) return;
-        off += @intCast(n);
-    }
-}
+const bg_header = glyphwire.Color{ .r = 40, .g = 90, .b = 170 };
+const fg_header = glyphwire.Color{ .r = 235, .g = 240, .b = 250 };
+const bg_list = glyphwire.Color{ .r = 16, .g = 16, .b = 20 };
+const fg_list = glyphwire.Color{ .r = 210, .g = 210, .b = 216 };
+// Selection uses the same blue as the header, tying the "you are here"
+// highlight to the chrome around it rather than inventing a third color.
+const bg_selected = bg_header;
+const fg_selected = fg_header;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -62,52 +53,40 @@ pub fn main(init: std.process.Init) !void {
     const entries = loadHistory(alloc, io, init.environ_map) catch &.{};
     defer if (entries.len > 0) history.freeEntries(alloc, @constCast(entries));
 
-    var ws: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
-    _ = std.c.ioctl(0, TIOCGWINSZ, &ws);
-    const rows: usize = @max(ws.row, 4);
-    const cols: usize = @max(ws.col, 20);
+    var client = try glyphwire.Client.connectFromEnv(io, alloc, init.environ_map);
+    defer client.deinit();
 
-    const orig_termios = std.posix.tcgetattr(0) catch {
-        // Not actually a tty (piped stdin, a test harness): nothing this
-        // program does makes sense without one.
-        return;
-    };
-    var raw = orig_termios;
-    raw.iflag.BRKINT = false;
-    raw.iflag.ICRNL = false;
-    raw.iflag.INPCK = false;
-    raw.iflag.ISTRIP = false;
-    raw.iflag.IXON = false;
-    raw.oflag.OPOST = false;
-    raw.lflag.ECHO = false;
-    raw.lflag.ICANON = false;
-    raw.lflag.IEXTEN = false;
-    raw.lflag.ISIG = false;
-    raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    try std.posix.tcsetattr(0, .FLUSH, raw);
-    defer std.posix.tcsetattr(0, .FLUSH, orig_termios) catch {};
+    const listener = try glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
+        "key",
+        "text",
+        "resize",
+        "scroll_offset",
+    });
+    defer listener.deinit();
 
-    writeAll(1, "\x1b[?1049h");
-    defer writeAll(1, "\x1b[?1049l");
+    const ui = try Ui.init(alloc, &client, listener, entries);
+    defer ui.deinit();
 
-    const picked = try runPicker(alloc, entries, rows, cols);
-    defer if (picked) |p| alloc.free(p);
+    try ui.run();
 
-    const result_fd = resultFd(init.environ_map);
-    if (picked) |p| {
-        const out_fd = result_fd orelse 1;
-        // Restore the terminal / leave the alt screen (the `defer`s
-        // above) before this returns, so a `result_fd`-less manual run
-        // prints to a normal, cooked stdout.
-        _ = c.write(out_fd, p.ptr, p.len);
-        if (result_fd) |fd| _ = c.close(fd);
+    if (ui.picked) |p| {
+        defer alloc.free(p);
+        const maybe_fd = resultFd(init.environ_map);
+        const out_file: std.Io.File = if (maybe_fd) |fd|
+            .{ .handle = fd, .flags = .{ .nonblocking = false } }
+        else
+            std.Io.File.stdout();
+        var buf: [4096]u8 = undefined;
+        var w = out_file.writer(io, &buf);
+        w.interface.writeAll(p) catch {};
+        w.interface.flush() catch {};
+        if (maybe_fd != null) out_file.close(io);
     }
 }
 
-fn resultFd(environ_map: *const std.process.Environ.Map) ?c_int {
+fn resultFd(environ_map: *const std.process.Environ.Map) ?std.Io.File.Handle {
     const s = environ_map.get("GLYPHWIRE_RESULT_FD") orelse return null;
-    return std.fmt.parseInt(c_int, s, 10) catch null;
+    return std.fmt.parseInt(std.Io.File.Handle, s, 10) catch null;
 }
 
 fn loadHistory(alloc: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map) ![]const []const u8 {
@@ -127,153 +106,311 @@ fn loadHistory(alloc: std.mem.Allocator, io: std.Io, environ_map: *const std.pro
     return try history.parse(alloc, bytes);
 }
 
-fn writeAt(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, row: usize, col: usize, text: []const u8) !void {
-    try buf.print(alloc, "\x1b[{d};{d}H\x1b[K", .{ row, col });
-    try buf.appendSlice(alloc, text);
-}
+const Ui = struct {
+    alloc: std.mem.Allocator,
+    client: *glyphwire.Client,
+    listener: *glyphwire.InputListener,
+    context: glyphwire.ContextHandle,
+    header_layer: glyphwire.LayerHandle,
+    list_layer: glyphwire.LayerHandle,
 
-/// Runs the picker loop until Enter (returns the owned selected line),
-/// or Esc / Ctrl+C (returns `null`). `entries` is oldest-first, same
-/// order `history.parse` returns; matches are shown newest-first so the
-/// most recent match starts selected, same as a normal Ctrl+R recall.
-fn runPicker(alloc: std.mem.Allocator, entries: []const []const u8, rows: usize, cols: usize) !?[]u8 {
-    var query: std.ArrayList(u8) = .empty;
-    defer query.deinit(alloc);
+    entries: []const []const u8,
+    query: std.ArrayList(u8) = .empty,
+    filtered: std.ArrayList([]const u8) = .empty,
+    /// Reused across renders so drawing a row/line never allocates on the
+    /// hot path -- only `query`/`filtered`, which change shape, do.
+    scratch: std.ArrayList(u8) = .empty,
+    line_buf: std.ArrayList(u8) = .empty,
 
-    var filtered: std.ArrayList([]const u8) = .empty;
-    defer filtered.deinit(alloc);
+    selected: usize = 0,
+    /// Index of the first entry drawn in the list layer's row 0.
+    view_top: usize = 0,
 
-    var selected: usize = 0;
-    const list_rows = rows -| 2;
+    cols: usize,
+    rows: usize,
+    list_rows: usize,
 
-    var frame: std.ArrayList(u8) = .empty;
-    defer frame.deinit(alloc);
+    header_dirty: bool = true,
+    list_dirty: bool = true,
+    quit: bool = false,
+    /// Set on Enter; `main` writes it out once `run` returns.
+    picked: ?[]u8 = null,
 
-    while (true) {
-        try refilter(alloc, entries, query.items, &filtered);
-        if (selected >= filtered.items.len) selected = filtered.items.len -| 1;
+    fn init(
+        alloc: std.mem.Allocator,
+        client: *glyphwire.Client,
+        listener: *glyphwire.InputListener,
+        entries: []const []const u8,
+    ) !*Ui {
+        const self = try alloc.create(Ui);
+        errdefer alloc.destroy(self);
 
-        frame.clearRetainingCapacity();
-        try frame.appendSlice(alloc, "\x1b[H\x1b[J");
-        try writeAt(&frame, alloc, 1, 1, "gw-hist -- fuzzy history search");
-        try frame.print(alloc, "\x1b[2;1H\x1b[KSearch: {s}", .{query.items});
-        try frame.print(alloc, "\x1b[3;1H\x1b[K{d} match(es) -- Enter picks, Esc/^C cancels, ^R/\x1b[7m\x1bOB\x1b[0m next", .{filtered.items.len});
+        // A dedicated context: from here on every layer call on `client`
+        // targets this, not the shell's, and it composites over the
+        // shell the way `read`/`zoe`'s own contexts do. `destroy_context`
+        // restores the shell's context underneath on the way out.
+        const context = try client.createContext(null, null, 0, false);
+        errdefer client.destroyContext(context) catch {};
+        try listener.attachContext(context);
 
-        var row: usize = 5;
-        var shown: usize = 0;
-        for (filtered.items, 0..) |line, i| {
-            if (shown >= list_rows) break;
-            const truncated = line[0..@min(line.len, cols -| 2)];
-            if (i == selected) {
-                try frame.print(alloc, "\x1b[{d};1H\x1b[K\x1b[7m {s}\x1b[0m", .{ row, truncated });
-            } else {
-                try frame.print(alloc, "\x1b[{d};1H\x1b[K {s}", .{ row, truncated });
+        const size = try client.getSize();
+        const cols = size.cols;
+        const rows = size.rows;
+        const list_rows = @max(rows -| header_rows, 1);
+
+        const header_layer = try client.createLayer(cols, header_rows, 0);
+        const list_layer = try client.createLayer(cols, list_rows, 0);
+        try client.setLayerCellPosition(list_layer, header_rows, 0);
+        // Sized to the visible rows only (self-scrolling); `syncScroll`
+        // below tells the host the true total via `content_extent` so
+        // its scrollbar thumb is proportional, not full-height.
+        try client.setLayerScrollbars(list_layer, true, false);
+
+        self.* = .{
+            .alloc = alloc,
+            .client = client,
+            .listener = listener,
+            .context = context,
+            .header_layer = header_layer,
+            .list_layer = list_layer,
+            .entries = entries,
+            .cols = cols,
+            .rows = rows,
+            .list_rows = list_rows,
+        };
+
+        try self.refilter();
+        try self.syncScroll();
+        return self;
+    }
+
+    fn deinit(self: *Ui) void {
+        self.query.deinit(self.alloc);
+        self.filtered.deinit(self.alloc);
+        self.scratch.deinit(self.alloc);
+        self.line_buf.deinit(self.alloc);
+        // Doesn't have to be called on a clean exit (the server culls an
+        // owning connection's contexts on disconnect), but doing it
+        // explicitly restores the shell's context immediately rather
+        // than waiting on socket teardown.
+        self.client.destroyContext(self.context) catch {};
+        self.alloc.destroy(self);
+    }
+
+    // ── Loop ────────────────────────────────────────────────────────────
+
+    fn run(self: *Ui) !void {
+        while (!self.quit) {
+            try self.drainEvents();
+            if (self.header_dirty) {
+                try self.renderHeader();
+                self.header_dirty = false;
             }
-            row += 1;
-            shown += 1;
-        }
-        try frame.print(alloc, "\x1b[2;{d}H", .{9 + query.items.len});
-        writeAll(1, frame.items);
+            if (self.list_dirty) {
+                try self.renderList();
+                self.list_dirty = false;
+            }
+            if (self.quit) break;
 
-        const key = try readKey();
-        switch (key) {
-            .char => |ch| {
-                try query.append(alloc, ch);
-                selected = 0;
-            },
-            .backspace => {
-                if (query.items.len > 0) query.items.len -= 1;
-                selected = 0;
-            },
-            .clear_query => {
-                query.clearRetainingCapacity();
-                selected = 0;
-            },
-            .up => {
-                if (selected > 0) selected -= 1;
-            },
-            .down, .ctrl_r => {
-                if (filtered.items.len > 0) selected = (selected + 1) % filtered.items.len;
-            },
-            .enter => {
-                if (filtered.items.len == 0) continue;
-                return try alloc.dupe(u8, filtered.items[selected]);
-            },
-            .cancel => return null,
+            // Block rather than spin; the timeout only exists so the
+            // resize/scroll queues polled in `drainEvents` get looked at
+            // even with no keystrokes coming in.
+            if (try self.listener.waitInputEvent(.{
+                .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake },
+            })) |ev| {
+                defer ev.deinit(self.alloc);
+                try self.handleInput(ev);
+            }
         }
     }
-}
 
-/// Rewrites `out` with every entry of `entries` (oldest-first) that
-/// fuzzy-matches `query`, newest-first, sorted by `fuzzy.score` (tighter
-/// match first) with a stable sort so equal scores keep the newest-first
-/// order -- the recency tiebreak (see `fuzzy.score`'s doc comment).
-fn refilter(alloc: std.mem.Allocator, entries: []const []const u8, query: []const u8, out: *std.ArrayList([]const u8)) !void {
-    out.clearRetainingCapacity();
-    var i: usize = entries.len;
-    while (i > 0) {
-        i -= 1;
-        if (fuzzy.matches(entries[i], query)) try out.append(alloc, entries[i]);
-    }
-    const Ctx = struct {
-        query: []const u8,
-        fn lessThan(ctx: @This(), a: []const u8, b: []const u8) bool {
-            const sa = fuzzy.score(a, ctx.query) orelse return false;
-            const sb = fuzzy.score(b, ctx.query) orelse return false;
-            return sa < sb;
+    fn drainEvents(self: *Ui) !void {
+        while (self.listener.pollResizeEvent()) |ev| {
+            self.cols = ev.cols;
+            self.rows = ev.rows;
+            self.list_rows = @max(self.rows -| header_rows, 1);
+            try self.client.setLayerSize(self.header_layer, self.cols, header_rows);
+            try self.client.setLayerSize(self.list_layer, self.cols, self.list_rows);
+            try self.syncScroll();
+            self.header_dirty = true;
+            self.list_dirty = true;
         }
-    };
-    std.mem.sort([]const u8, out.items, Ctx{ .query = query }, Ctx.lessThan);
-}
+        while (self.listener.pollScrollOffsetEvent()) |ev| {
+            // The wheel or a scrollbar drag over the list: the host has
+            // already moved the viewport and is telling us where it
+            // landed. Follow it without touching `selected` -- scrolling
+            // and picking are separate gestures here, same as browsing a
+            // file list without moving your cursor onto every row you
+            // pass over.
+            if (ev.layer == self.list_layer) {
+                self.view_top = @min(ev.row, self.filtered.items.len -| self.list_rows);
+                self.list_dirty = true;
+            }
+        }
+        while (self.listener.pollInputEvent()) |ev| {
+            defer ev.deinit(self.alloc);
+            try self.handleInput(ev);
+        }
+    }
 
-const Key = union(enum) {
-    char: u8,
-    backspace,
-    clear_query,
-    up,
-    down,
-    ctrl_r,
-    enter,
-    cancel,
+    // ── Input ───────────────────────────────────────────────────────────
+
+    fn handleInput(self: *Ui, ev: glyphwire.InputEvent) !void {
+        switch (ev) {
+            .key => |k| if (k.pressed) try self.handleKey(k.key),
+            .text => |t| try self.handleText(t.text),
+            .shutdown => self.quit = true,
+            else => {},
+        }
+    }
+
+    /// Named/control keys -- physical-key semantics (vim-style, same
+    /// split `gw-read`/`zoe` use). Ordinary typed characters arrive via
+    /// `handleText` instead, since `text` is already resolved through the
+    /// OS layout/IME and a search box has no reason to care which
+    /// physical key produced what was typed.
+    fn handleKey(self: *Ui, key: []const u8) !void {
+        const ctrl = self.listener.isKeyDown("left_control") or self.listener.isKeyDown("right_control");
+        const eq = std.mem.eql;
+
+        if (eq(u8, key, "enter")) {
+            if (self.filtered.items.len == 0) return;
+            self.picked = try self.alloc.dupe(u8, self.filtered.items[self.selected]);
+            self.quit = true;
+        } else if (eq(u8, key, "escape") or (ctrl and eq(u8, key, "c"))) {
+            self.quit = true;
+        } else if (eq(u8, key, "backspace")) {
+            self.deleteBackward();
+            try self.onQueryChanged();
+        } else if (ctrl and eq(u8, key, "u")) {
+            self.query.clearRetainingCapacity();
+            try self.onQueryChanged();
+        } else if (eq(u8, key, "up")) {
+            if (self.selected > 0) self.selected -= 1;
+            try self.syncScroll();
+            self.list_dirty = true;
+        } else if (eq(u8, key, "down") or (ctrl and eq(u8, key, "r"))) {
+            if (self.filtered.items.len > 0) self.selected = (self.selected + 1) % self.filtered.items.len;
+            try self.syncScroll();
+            self.list_dirty = true;
+        }
+    }
+
+    fn handleText(self: *Ui, text: []const u8) !void {
+        try self.query.appendSlice(self.alloc, text);
+        try self.onQueryChanged();
+    }
+
+    /// Removes one codepoint, not just one byte, off the end of `query`
+    /// -- typing is UTF-8 (`text` events), so backspace should be too.
+    fn deleteBackward(self: *Ui) void {
+        if (self.query.items.len == 0) return;
+        var i = self.query.items.len - 1;
+        while (i > 0 and (self.query.items[i] & 0xC0) == 0x80) i -= 1;
+        self.query.items.len = i;
+    }
+
+    fn onQueryChanged(self: *Ui) !void {
+        self.selected = 0;
+        try self.refilter();
+        try self.syncScroll();
+        self.header_dirty = true;
+        self.list_dirty = true;
+    }
+
+    /// Rewrites `filtered` with every entry of `entries` (oldest-first)
+    /// that fuzzy-matches `query`, newest-first, sorted by `fuzzy.score`
+    /// (tighter match first) with a stable sort so equal scores keep the
+    /// newest-first order -- the recency tiebreak (see `fuzzy.score`'s
+    /// doc comment).
+    fn refilter(self: *Ui) !void {
+        self.filtered.clearRetainingCapacity();
+        var i: usize = self.entries.len;
+        while (i > 0) {
+            i -= 1;
+            if (fuzzy.matches(self.entries[i], self.query.items)) try self.filtered.append(self.alloc, self.entries[i]);
+        }
+        const Ctx = struct {
+            query: []const u8,
+            fn lessThan(ctx: @This(), a: []const u8, b: []const u8) bool {
+                const sa = fuzzy.score(a, ctx.query) orelse return false;
+                const sb = fuzzy.score(b, ctx.query) orelse return false;
+                return sa < sb;
+            }
+        };
+        std.mem.sort([]const u8, self.filtered.items, Ctx{ .query = self.query.items }, Ctx.lessThan);
+        if (self.selected >= self.filtered.items.len) self.selected = self.filtered.items.len -| 1;
+    }
+
+    /// Keeps `view_top` covering `selected`, clamped to the list's actual
+    /// extent, then pushes both the true content size and the resulting
+    /// offset to the host so its scrollbar thumb and thumb position stay
+    /// correct.
+    fn syncScroll(self: *Ui) !void {
+        if (self.filtered.items.len == 0) {
+            self.view_top = 0;
+        } else {
+            if (self.selected < self.view_top) self.view_top = self.selected;
+            if (self.selected >= self.view_top + self.list_rows) self.view_top = self.selected - self.list_rows + 1;
+            const max_top = self.filtered.items.len -| self.list_rows;
+            if (self.view_top > max_top) self.view_top = max_top;
+        }
+        try self.client.setLayerContentExtent(self.list_layer, self.cols, self.filtered.items.len);
+        try self.client.setLayerScrollOffset(self.list_layer, self.view_top, 0);
+    }
+
+    // ── Rendering ───────────────────────────────────────────────────────
+
+    fn renderHeader(self: *Ui) !void {
+        try self.writeLine(self.header_layer, 0, "gw-hist -- fuzzy history search", fg_header, bg_header);
+
+        self.scratch.clearRetainingCapacity();
+        try self.scratch.appendSlice(self.alloc, "Search: ");
+        try self.scratch.appendSlice(self.alloc, self.query.items);
+        try self.writeLine(self.header_layer, 1, self.scratch.items, fg_header, bg_header);
+        // A drawn caret (inverted cell), not the host's own cursor --
+        // same choice `zoe` makes for its buffer caret, since a plain
+        // text layer's cursor property is about the *next write*
+        // position, not a persistent visual marker.
+        const caret_col = @min(8 + self.query.items.len, self.cols -| 1);
+        try self.client.setCursorOn(self.header_layer, 1, caret_col);
+        try self.client.writeTextOn(self.header_layer, " ", bg_header, fg_header);
+
+        self.scratch.clearRetainingCapacity();
+        try self.scratch.print(self.alloc, "{d} match(es)   Enter picks   Esc/^C cancels   Down/^R next", .{self.filtered.items.len});
+        try self.writeLine(self.header_layer, 2, self.scratch.items, fg_header, bg_header);
+    }
+
+    fn renderList(self: *Ui) !void {
+        var row: usize = 0;
+        while (row < self.list_rows) : (row += 1) {
+            const idx = self.view_top + row;
+            if (idx < self.filtered.items.len) {
+                self.scratch.clearRetainingCapacity();
+                try self.scratch.append(self.alloc, ' ');
+                try self.scratch.appendSlice(self.alloc, self.filtered.items[idx]);
+                const fg = if (idx == self.selected) fg_selected else fg_list;
+                const bg = if (idx == self.selected) bg_selected else bg_list;
+                try self.writeLine(self.list_layer, row, self.scratch.items, fg, bg);
+            } else {
+                try self.writeLine(self.list_layer, row, "", fg_list, bg_list);
+            }
+        }
+    }
+
+    /// Writes `text` at `(row, 0)` on `layer`, truncated or blank-padded
+    /// to the full window width so every cell in the row carries `bg` --
+    /// there is no `fillRect`/`clear(color)` call, so a solid-colored bar
+    /// (the header) or a solid-colored empty row (past the last match)
+    /// is built out of a space-padded `write_text` like every other
+    /// glyphwire client does (see `read/ui.zig`'s status bar).
+    fn writeLine(self: *Ui, layer: glyphwire.LayerHandle, row: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
+        self.line_buf.clearRetainingCapacity();
+        const shown = text[0..@min(text.len, self.cols)];
+        try self.line_buf.appendSlice(self.alloc, shown);
+        var pad = self.cols -| shown.len;
+        while (pad > 0) : (pad -= 1) try self.line_buf.append(self.alloc, ' ');
+        try self.client.setCursorOn(layer, row, 0);
+        try self.client.writeTextOn(layer, self.line_buf.items, fg, bg);
+    }
 };
-
-/// Blocking single-key read off the raw-mode stdin set up in `main`. An
-/// arrow key arrives as a 3-byte CSI sequence (`ESC [ A`/`ESC [ B`); a
-/// lone Esc press (no follow-up byte) has to be told apart from the
-/// start of one, so seeing Esc temporarily shortens `VTIME` to a ~100ms
-/// timeout for just the next read instead of blocking forever.
-fn readKey() !Key {
-    var b: [1]u8 = undefined;
-    while (true) {
-        const n = c.read(0, &b, 1);
-        if (n <= 0) continue;
-        switch (b[0]) {
-            0x03 => return .cancel, // Ctrl+C
-            0x12 => return .ctrl_r, // Ctrl+R
-            0x15 => return .clear_query, // Ctrl+U
-            0x7f, 0x08 => return .backspace,
-            '\r', '\n' => return .enter,
-            0x1b => return try readEscape(),
-            else => |ch| if (ch >= 0x20 and ch < 0x7f) return .{ .char = ch },
-        }
-    }
-}
-
-fn readEscape() !Key {
-    var raw = std.posix.tcgetattr(0) catch return .cancel;
-    const saved = raw;
-    raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 1; // deciseconds -- ~100ms
-    std.posix.tcsetattr(0, .NOW, raw) catch {};
-    defer std.posix.tcsetattr(0, .NOW, saved) catch {};
-
-    var b: [2]u8 = undefined;
-    if (c.read(0, &b, 1) <= 0) return .cancel; // lone Esc
-    if (b[0] != '[') return .cancel;
-    if (c.read(0, b[1..2].ptr, 1) <= 0) return .cancel;
-    return switch (b[1]) {
-        'A' => .up,
-        'B' => .down,
-        else => .cancel,
-    };
-}
