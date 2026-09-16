@@ -554,6 +554,11 @@ const TagMetadataParams = struct {
     /// `write_text`/`draw_icon` with `metadata_id` omitted instead, same
     /// as it already would to change what's drawn there anyway.
     metadata_id: core.MetadataHandle,
+    /// Mark this cell as its span's focus cell -- where `find_metadata`
+    /// lands instead of the span's first visible character. See
+    /// `core.Cell.meta_focus`. Defaults false, so an existing caller
+    /// tagging overflow cells keeps tagging them as plain span members.
+    focus: bool = false,
 };
 
 const DrawIconParams = struct {
@@ -2585,6 +2590,7 @@ pub const Dispatcher = struct {
                     .bg_icon = bg_icon,
                     .fg_icon = fg_icon,
                     .metadata_id = cell.metadata_id,
+                    .focus = cell.meta_focus,
                     .wide = switch (cell.wide) {
                         .narrow => null,
                         .wide_lead => "lead",
@@ -2869,7 +2875,7 @@ pub const Dispatcher = struct {
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
         const metadata_id = try self.resolveMetadata(p.metadata_id);
-        layer.tagMetadata(p.row, p.col, metadata_id);
+        layer.tagMetadata(p.row, p.col, metadata_id, p.focus);
     }
 
     /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog
@@ -2990,6 +2996,7 @@ pub const Dispatcher = struct {
                 .kind = try parseTableOption(core.ColumnKind, cj.kind, .text),
                 .sortable = cj.sortable,
                 .case_insensitive = cj.case_insensitive,
+                .focus = cj.focus,
                 .width = cj.width,
                 .min_width = cj.min_width,
                 .h_align = try parseTableOption(core.HAlign, cj.h_align, .start),
@@ -3173,6 +3180,7 @@ pub const Dispatcher = struct {
                 .kind = @tagName(c.kind),
                 .sortable = c.sortable,
                 .case_insensitive = c.case_insensitive,
+                .focus = c.focus,
                 .width = c.width,
                 .min_width = c.min_width,
                 .h_align = @tagName(c.h_align),

@@ -4,7 +4,7 @@
 const std = @import("std");
 const geometry = @import("geometry.zig");
 
-// Font defaults. `host.conf` (a global `config` table with
+// Font defaults. `host.conf.lua` (a global `config` table with
 // `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
 // subset) overrides these at startup; see `config_load.loadConfig`. The
 // primary is Noto Sans Mono CJK: one monospaced face covering Latin, Greek,
@@ -24,10 +24,10 @@ pub const font_fallback_default = "JetBrainsMono-Regular.ttf";
 pub const font_size_default: f32 = 20.0;
 
 // Basename of the host's startup config inside glyphwire's config
-// directory (see `glyphwire.configDirPath`): `~/.config/glyphwire/host.conf`.
-// Same Lua `config`-table format the shell's `shell.conf` uses; only the
-// basename differs.
-pub const host_conf_name = "host.conf";
+// directory (see `glyphwire.configDirPath`):
+// `~/.config/glyphwire/host.conf.lua`. Same Lua `config`-table format the
+// shell's `shell.conf.lua` uses; only the basename differs.
+pub const host_conf_name = "host.conf.lua";
 
 // Always-registered extra fallback: a tiny pyftsubset of a Nerd Font to
 // the Powerline range (U+E0A0-E0D7), for a configured powerline shell
@@ -41,18 +41,18 @@ pub const max_font_size: f32 = 72.0;
 pub const font_size_step: f32 = 2.0;
 
 // Root layer scrollback depth in rows, passed to `Context.init`.
-// `host.conf`'s `scrollback_rows` overrides this at startup,
+// `host.conf.lua`'s `scrollback_rows` overrides this at startup,
 // clamped to `[0, scrollback_rows_max]`. `var`, not `const`, for that.
 pub const scrollback_rows_default = 1000;
 pub const scrollback_rows_max = 100_000;
 pub var scrollback_rows: usize = scrollback_rows_default;
 
-/// Font settings resolved at startup from `host.conf` layered over the
+/// Font settings resolved at startup from `host.conf.lua` layered over the
 /// `*_default` constants above. String fields point at `arena`-allocated
 /// (process-lifetime) memory, or the default string literals.
 pub const FontConfig = struct {
     face: [:0]const u8 = font_path_default,
-    /// null unless `host.conf` set `font_face_name`. When set it picks a
+    /// null unless `host.conf.lua` set `font_face_name`. When set it picks a
     /// named face out of a `.ttc` (see `host/main.zig`); when null the
     /// bundled default collection is scanned for `font_face_name_default`,
     /// and a system `.ttc` uses the face `fc-match` resolved.
@@ -72,7 +72,7 @@ pub fn bundledFontRelPath(value: []const u8, default_rel_path: []const u8) ?[]co
     return null;
 }
 
-/// The four caret shapes `host.conf`'s `cursor_shape` can select.
+/// The four caret shapes `host.conf.lua`'s `cursor_shape` can select.
 /// `line` (a vertical bar at the cell's left edge) is the default and the
 /// original behavior; the rest fill, outline, or underline the cell.
 pub const CursorShape = enum { line, block, box, underline };
@@ -86,7 +86,7 @@ pub const cursor_blink_ms_default: f64 = 530;
 pub const cursor_blink_ms_min: f64 = 100;
 pub const cursor_blink_ms_max: f64 = 5000;
 
-/// Caret appearance, resolved at startup from `host.conf` (see
+/// Caret appearance, resolved at startup from `host.conf.lua` (see
 /// `config_load.loadConfig`). Host-local, like `FontConfig` -- the caret is
 /// a property of the rendering front end, not the shared grid model.
 pub const CursorConfig = struct {
@@ -96,7 +96,7 @@ pub const CursorConfig = struct {
 };
 
 /// Initial grid size and scrollback depth, resolved at startup from
-/// `host.conf`. A `null` field was not set by `host.conf`, so
+/// `host.conf.lua`. A `null` field was not set by `host.conf.lua`, so
 /// the module-level default (or a `--grid-cols` / `--grid-rows` flag)
 /// stands. `cols` / `rows` are already clamped up to `min_grid_*` and
 /// `scrollback` down to `scrollback_rows_max` by `config_load.loadConfig`.
@@ -140,7 +140,7 @@ pub const ProfileConfig = struct {
     log_interval_ms: f64 = profile_log_ms_default,
 };
 
-/// Everything `config_load.loadConfig` resolves from `host.conf`.
+/// Everything `config_load.loadConfig` resolves from `host.conf.lua`.
 pub const HostConfig = struct {
     font: FontConfig = .{},
     cursor: CursorConfig = .{},
@@ -150,7 +150,7 @@ pub const HostConfig = struct {
     /// backs the canonical `file/*` names glyphwire-ls draws with -- one
     /// of `oxygen` (default), `papirus`, `material`. An unknown value
     /// warns and falls back to `oxygen`. `arena`-owned when set from
-    /// `host.conf`, otherwise this literal.
+    /// `host.conf.lua`, otherwise this literal.
     icon_theme: []const u8 = default_icon_theme,
 };
 
@@ -161,7 +161,7 @@ pub fn cursorShapeFromStr(s: []const u8) ?CursorShape {
 }
 
 // ── Pure clamp helpers ─────────────────────────────────────────────────
-// `config_load.loadConfig` runs each `host.conf` value through the
+// `config_load.loadConfig` runs each `host.conf.lua` value through the
 // matching helper here; they are split out (rather than inlined) so the
 // clamp ranges have unit-test coverage without needing a Lua state.
 

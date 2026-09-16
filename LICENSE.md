@@ -104,7 +104,7 @@ and `assets/icons/filetype/papirus/` is GPL-3.0. They are data files the
 host reads at runtime, not linked code, but they are still copyleft and
 travel with their own terms. A product embedding the host that wants no
 copyleft assets should ship the MIT-licensed Material theme instead and set
-`icon_theme = "material"` in `host.conf`. See
+`icon_theme = "material"` in `host.conf.lua`. See
 [`THIRD-PARTY.md`](THIRD-PARTY.md).
 
 **Implementing the protocol carries no code obligation.** Reading

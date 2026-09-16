@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: MPL-2.0
 
-//! Resolving a `host.conf` `font_face` / `font_fallback` value that names
+//! Resolving a `host.conf.lua` `font_face` / `font_fallback` value that names
 //! a system-installed font family ("DejaVu Sans Mono", "monospace") rather
 //! than a file. Done by shelling out to `fc-match` -- fontconfig's CLI,
 //! present on any Linux desktop -- which turns a pattern into the file it
@@ -36,7 +36,7 @@ pub const RawMatch = struct {
 /// `|`, newline-terminated. `%{index}` is 0 for a plain `.ttf`/`.otf`.
 pub const output_format = "%{file}|%{family}|%{fullname}|%{index}\n";
 
-/// fontconfig's built-in generic aliases. A `host.conf` `font_face =
+/// fontconfig's built-in generic aliases. A `host.conf.lua` `font_face =
 /// "monospace"` is a deliberate "whatever the system's default monospace
 /// is", so `fc-match`'s answer is accepted even though the resolved family
 /// name ("Noto Sans Mono", say) won't contain the word "monospace".

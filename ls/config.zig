@@ -1,13 +1,13 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Loads glyphwire-ls's startup config, `~/.config/glyphwire/ls.conf`, a
+//! Loads glyphwire-ls's startup config, `~/.config/glyphwire/ls.conf.lua`, a
 //! Lua script that assigns a global `config` table -- the same shape
-//! `host.conf` uses. Running it yields an `LsConfig`. Split into the
+//! `host.conf.lua` uses. Running it yields an `LsConfig`. Split into the
 //! `ls_support` module (like `ls/icons.zig` / `ls/format.zig`) so
 //! `tests/ls_tests.zig` can exercise the parse without a running client.
 //!
-//! Right now `ls.conf` only carries the on-screen icon sizes; colour
+//! Right now `ls.conf.lua` only carries the on-screen icon sizes; colour
 //! overrides are expected to land here later as a nested `colors = { ... }`
 //! table, which is why it's a Lua script and not a flat key=value file.
 
@@ -15,7 +15,7 @@ const std = @import("std");
 const ziglua = @import("ziglua");
 const Lua = ziglua.Lua;
 
-const conf_name = "ls.conf";
+const conf_name = "ls.conf.lua";
 
 /// Rendered-icon height, in pixels, `glyphwire-ls` targets in each layout.
 /// `.natural` scaling is aspect-preserving and shrink-only, so these are
@@ -50,7 +50,7 @@ pub const LoadResult = struct {
     }
 };
 
-/// Parses `source` (the contents of `ls.conf`, null-terminated) and
+/// Parses `source` (the contents of `ls.conf.lua`, null-terminated) and
 /// returns the resulting `LsConfig`. Unknown keys are ignored; a key of
 /// the wrong type, or one outside `icon_px_min..icon_px_max`, keeps /
 /// clamps to a valid value and is noted on stderr. Only a genuine Lua-init

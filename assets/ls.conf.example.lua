@@ -1,12 +1,12 @@
 -- Example glyphwire-ls config.
 --
--- Copy to ~/.config/glyphwire/ls.conf (or $GLYPHWIRE_CONFIG_DIR, or
+-- Copy to ~/.config/glyphwire/ls.conf.lua (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
--- startup; every key is optional. See ls/ls.conf.template for the full
+-- startup; every key is optional. See ls/ls.conf.template.lua for the full
 -- reference.
 --
 -- The file-type icon *theme* (Oxygen / Papirus / Material) is set in
--- host.conf via `icon_theme`, not here.
+-- host.conf.lua via `icon_theme`, not here.
 
 config = {
     -- Bigger, chunkier icons than the 32 / 16 default.

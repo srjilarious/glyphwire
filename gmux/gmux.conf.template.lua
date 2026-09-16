@@ -1,11 +1,11 @@
 -- gmux configuration template.
 --
--- This is the full reference for `gmux.conf`, the file gmux runs once at
+-- This is the full reference for `gmux.conf.lua`, the file gmux runs once at
 -- startup (see gmux/config.zig `load`). Copy it to one of:
 --
---   $GLYPHWIRE_CONFIG_DIR/gmux.conf
---   $XDG_CONFIG_HOME/glyphwire/gmux.conf
---   ~/.config/glyphwire/gmux.conf                   (the usual location)
+--   $GLYPHWIRE_CONFIG_DIR/gmux.conf.lua
+--   $XDG_CONFIG_HOME/glyphwire/gmux.conf.lua
+--   ~/.config/glyphwire/gmux.conf.lua                   (the usual location)
 --
 -- Every key is listed below at its built-in default, with every line
 -- commented out -- so copying this file verbatim changes nothing.

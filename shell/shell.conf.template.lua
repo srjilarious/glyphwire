@@ -1,11 +1,11 @@
 -- gw-shell configuration template.
 --
--- This is the full reference for `shell.conf`, the file gw-shell
+-- This is the full reference for `shell.conf.lua`, the file gw-shell
 -- runs once at startup (see shell/config.zig `load`). Copy it to one of:
 --
---   $GLYPHWIRE_CONFIG_DIR/shell.conf
---   $XDG_CONFIG_HOME/glyphwire/shell.conf
---   ~/.config/glyphwire/shell.conf                 (the usual location)
+--   $GLYPHWIRE_CONFIG_DIR/shell.conf.lua
+--   $XDG_CONFIG_HOME/glyphwire/shell.conf.lua
+--   ~/.config/glyphwire/shell.conf.lua                 (the usual location)
 --
 -- Every binding below is listed at its built-in default with every line
 -- commented out, so copying this file verbatim changes nothing. Uncomment

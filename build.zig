@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
     ls_support_mod.addImport("glyphwire", glyphwire_mod);
 
     // Pure, engine-free pieces of glyphwire (pixel/cell geometry,
-    // scrollbar math, `host.conf` value clamps, the key-repeat timer) so
+    // scrollbar math, `host.conf.lua` value clamps, the key-repeat timer) so
     // the test runner can exercise them without an SDL/OpenGL link. Same
     // cross-directory-module reason as `shell_support` / `ls_support`;
     // imports `glyphwire` only for `CellPos` in `geometry.cellFromPixel`.
@@ -122,7 +122,7 @@ pub fn build(b: *std.Build) void {
     const zargunaught_mod = b.dependency("zargunaught", .{}).module("zargunaught");
 
     // Vendored Lua 5.3 (libs/ziglua) -- gw-shell embeds a Lua state
-    // to run ~/.config/glyphwire/shell.conf. `zlua` already links the Lua
+    // to run ~/.config/glyphwire/shell.conf.lua. `zlua` already links the Lua
     // C library into itself in ziglua's own build.zig; `lua_lib` is linked
     // onto each consuming executable explicitly.
     const ziglua = b.dependency("ziglua", .{ .target = target, .optimize = optimize, .lang = .lua53 });
@@ -143,13 +143,13 @@ pub fn build(b: *std.Build) void {
     // shell/config.zig lives in this module and imports ziglua; both
     // gw-shell and the test runner pull it in transitively.
     shell_support_mod.addImport("ziglua", ziglua_mod);
-    // ls/config.zig (glyphwire-ls's ls.conf parser) does the same -- so
+    // ls/config.zig (glyphwire-ls's ls.conf.lua parser) does the same -- so
     // `ls_support` is no longer strictly dependency-free, but the width
     // math it also carries still pulls in nothing at its own call sites.
     ls_support_mod.addImport("ziglua", ziglua_mod);
-    // zoe/langconf.zig (zoe.conf parser) is the third ziglua consumer.
+    // zoe/langconf.zig (zoe.conf.lua parser) is the third ziglua consumer.
     zoe_support_mod.addImport("ziglua", ziglua_mod);
-    // gmux/config.zig (gmux.conf parser) is the fourth.
+    // gmux/config.zig (gmux.conf.lua parser) is the fourth.
     gmux_support_mod.addImport("ziglua", ziglua_mod);
 
     // ── zoe syntax highlighting ──
@@ -351,7 +351,7 @@ pub fn build(b: *std.Build) void {
     ls_exe.root_module.addImport("zargunaught", zargunaught_mod);
     ls_exe.root_module.addImport("ls_support", ls_support_mod);
     // ls_support -> ls/config.zig -> ziglua: the Lua C library has to be
-    // linked onto the final binary, same as shell_exe does for shell.conf.
+    // linked onto the final binary, same as shell_exe does for shell.conf.lua.
     ls_exe.root_module.linkLibrary(lua_lib);
     ls_exe.root_module.link_libc = true;
     b.installArtifact(ls_exe);
@@ -404,7 +404,7 @@ pub fn build(b: *std.Build) void {
     });
     gmux_exe.root_module.addImport("glyphwire", glyphwire_mod);
     gmux_exe.root_module.addImport("gmux_support", gmux_support_mod);
-    // gmux_support -> config.zig -> ziglua (gmux.conf), so the final
+    // gmux_support -> config.zig -> ziglua (gmux.conf.lua), so the final
     // binary needs the Lua C lib and libc, same as gw-shell / gw-ls / zoe.
     gmux_exe.root_module.linkLibrary(lua_lib);
     gmux_exe.root_module.link_libc = true;

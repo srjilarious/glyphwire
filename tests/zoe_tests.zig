@@ -446,7 +446,7 @@ pub fn editorPageLinesIsConfigurableTest(_: std.Io, alloc: std.mem.Allocator) !v
     defer alloc.free(text);
     var ed = try Editor.initFromText(alloc, text, null);
     defer ed.deinit();
-    ed.page_lines = 15; // what `zoe.conf`'s `page_lines` would set
+    ed.page_lines = 15; // what `zoe.conf.lua`'s `page_lines` would set
     _ = try keys.feed(&ed, "<page_down>");
     try testz.expectEqual(ed.pos().line, 15);
 }

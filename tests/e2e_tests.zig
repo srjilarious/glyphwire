@@ -8,12 +8,12 @@ const wire = glyphwire.wire;
 
 /// Every test here that spawns the real `glyphwire-shell` binary with an
 /// interactive prompt runs it through this first. The prompt now reads
-/// `~/.config/glyphwire/shell.conf` and persists command history to
+/// `~/.config/glyphwire/shell.conf.lua` and persists command history to
 /// `~/.config/glyphwire/history` (see shell/main.zig) -- without this a
 /// test that threads a real `$HOME` (e.g. the `~/` expansion test) would
 /// write its typed commands into the developer's actual history file and
-/// could pick up a stray real `shell.conf`. `GLYPHWIRE_NO_HISTORY`
-/// disables history entirely; `GLYPHWIRE_CONFIG_DIR` points `shell.conf`
+/// could pick up a stray real `shell.conf.lua`. `GLYPHWIRE_NO_HISTORY`
+/// disables history entirely; `GLYPHWIRE_CONFIG_DIR` points `shell.conf.lua`
 /// lookup at a throwaway path that won't exist.
 fn sandboxShellConfig(env: *std.process.Environ.Map, alloc: std.mem.Allocator) !void {
     try env.put("GLYPHWIRE_NO_HISTORY", "1");
@@ -266,7 +266,7 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqualStr("z", snapshot.cellAt(2, text_col + 2).grapheme); // "e" was backspaced away, "z" took its place
 }
 
-/// Drives the real glyphwire-shell binary with a `shell.conf` that
+/// Drives the real glyphwire-shell binary with a `shell.conf.lua` that
 /// configures a powerline `left_segments` prompt, and checks the
 /// segment's text lands *on* its coloured background strip -- the
 /// regression `emitOps` had where `writeSpaces` left the cursor at the
@@ -291,13 +291,13 @@ pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc:
     // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
-    // A throwaway config dir with a powerline shell.conf. One segment,
+    // A throwaway config dir with a powerline shell.conf.lua. One segment,
     // literal text "AB" (no `{cwd}` etc.), a distinctive blue bg.
     const cfg_dir = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pl-e2e-cfg-{d}", .{std.Thread.getCurrentId()});
     defer alloc.free(cfg_dir);
     try std.Io.Dir.cwd().createDirPath(io, cfg_dir);
     defer std.Io.Dir.cwd().deleteTree(io, cfg_dir) catch {};
-    const conf_path = try std.fs.path.join(alloc, &.{ cfg_dir, "shell.conf" });
+    const conf_path = try std.fs.path.join(alloc, &.{ cfg_dir, "shell.conf.lua" });
     defer alloc.free(conf_path);
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = conf_path,
@@ -876,7 +876,7 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
     defer alloc.free(cfg_dir);
     try std.Io.Dir.cwd().createDirPath(io, cfg_dir);
     defer std.Io.Dir.cwd().deleteTree(io, cfg_dir) catch {};
-    const conf_path = try std.fs.path.join(alloc, &.{ cfg_dir, "shell.conf" });
+    const conf_path = try std.fs.path.join(alloc, &.{ cfg_dir, "shell.conf.lua" });
     defer alloc.free(conf_path);
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = conf_path,

@@ -2,7 +2,7 @@
 #
 # Fetches the KDE Oxygen file-type icons at their native 48x48 size into
 # assets/icons/filetype/oxygen/ -- the default set behind glyphwire's
-# canonical file/* icon names (see host.conf's icon_theme). Straight PNG
+# canonical file/* icon names (see host.conf.lua's icon_theme). Straight PNG
 # pull, no rasterization.
 #
 # Sources (both LGPL-3.0):

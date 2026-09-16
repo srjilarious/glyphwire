@@ -118,7 +118,7 @@ see it.
 
 | | Keys |
 |---|---|
-| Motions | `h` `j` `k` `l`, `w` `W` `b` `B` `e` `E`, `0` `^` `$`, `gg` `G`, arrows / Home / End, PageUp / PageDown / Ctrl-D / Ctrl-U (by `page_lines`, default 10, `zoe.conf`-settable) |
+| Motions | `h` `j` `k` `l`, `w` `W` `b` `B` `e` `E`, `0` `^` `$`, `gg` `G`, arrows / Home / End, PageUp / PageDown / Ctrl-D / Ctrl-U (by `page_lines`, default 10, `zoe.conf.lua`-settable) |
 | Counts | `3j`, `10l`, `3G`, `2gg`, and `2d3w` (the counts multiply, as in vim) |
 | Insert | `i` `a` `I` `A` `o` `O`, Escape, Backspace, Enter, Delete |
 | Edits | `x` `X` `D` `C` `s`, `dd`, `d{w,b,e,h,l,0,^,$}`, `dj` `dk` `dG` `dgg` |

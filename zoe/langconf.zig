@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! zoe's optional startup config, `~/.config/glyphwire/zoe.conf` -- a Lua
-//! script assigning a global `config` table, the same shape `host.conf`
-//! and `ls.conf` use. It carries syntax-highlighting settings only:
+//! zoe's optional startup config, `~/.config/glyphwire/zoe.conf.lua` -- a Lua
+//! script assigning a global `config` table, the same shape `host.conf.lua`
+//! and `ls.conf.lua` use. It carries syntax-highlighting settings only:
 //! extra languages / extension remaps, extra grammar directories,
 //! capture-group colour overrides, and an `injections` on/off switch.
 //! With no file present zoe runs on the built-in six languages, the dark
@@ -22,7 +22,7 @@ const editor = @import("editor.zig");
 const Lua = ziglua.Lua;
 const Color = glyphwire.Color;
 
-const conf_name = "zoe.conf";
+const conf_name = "zoe.conf.lua";
 
 /// The parsed config. Everything it points at is owned by `arena`.
 pub const Config = struct {
@@ -55,7 +55,7 @@ pub const Config = struct {
     }
 };
 
-/// Reads `zoe.conf` from glyphwire's config dir and returns the merged
+/// Reads `zoe.conf.lua` from glyphwire's config dir and returns the merged
 /// config. A missing file / missing config home is the normal case:
 /// defaults, no error, nothing logged. Any parse problem is logged and
 /// whatever parsed before it is kept.

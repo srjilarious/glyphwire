@@ -3,7 +3,7 @@
 
 //! The one Lua state glyphwire-shell keeps for a whole session.
 //!
-//! `shell/config.zig` runs `shell.conf` for its declarative `alias` /
+//! `shell/config.zig` runs `shell.conf.lua` for its declarative `alias` /
 //! `prompt` data; this module owns the *persistent* interpreter that runs
 //! it, so a `function` the conf defines -- or a file dropped in
 //! `~/.config/glyphwire/scripts/` -- stays callable as a builtin for the
@@ -120,7 +120,7 @@ pub const ScriptEngine = struct {
     /// `alias` / `prompt` declarations from the last `runConf`. Owned for
     /// the session; `shell/main.zig` reads it live on every prompt draw.
     cfg: config.ShellConfig,
-    /// Owned diagnostic from the last `runConf` (a `shell.conf` syntax or
+    /// Owned diagnostic from the last `runConf` (a `shell.conf.lua` syntax or
     /// runtime error), or null. The caller shows it once.
     conf_err: ?[]const u8 = null,
 
@@ -193,7 +193,7 @@ pub const ScriptEngine = struct {
         self.alloc.destroy(self);
     }
 
-    /// Runs `shell.conf` in the persistent state. `alias` / `prompt`
+    /// Runs `shell.conf.lua` in the persistent state. `alias` / `prompt`
     /// calls land in `self.cfg`; any `function` it defines and any
     /// `defcmd` it calls stay live as builtins. A syntax or runtime error
     /// is captured in `self.conf_err` (whatever ran before the failing
@@ -209,7 +209,7 @@ pub const ScriptEngine = struct {
         defer config.endCollecting(prev);
 
         self.lua.doString(source) catch {
-            const msg = self.lua.toString(-1) catch "shell.conf: unknown Lua error";
+            const msg = self.lua.toString(-1) catch "shell.conf.lua: unknown Lua error";
             self.conf_err = try self.alloc.dupe(u8, msg);
         };
         self.lua.setTop(0);
@@ -217,7 +217,7 @@ pub const ScriptEngine = struct {
 
     /// Fills in `sh.user` / `sh.host` / `sh.remote` -- who and where this
     /// shell is. Fields rather than functions because none of them changes
-    /// over a session, and because what `shell.conf` wants them for is
+    /// over a session, and because what `shell.conf.lua` wants them for is
     /// branching at load time:
     ///
     ///     if sh.remote then prompt{ left = "{remote_dest} {cwd}> " } end

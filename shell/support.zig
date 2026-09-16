@@ -10,10 +10,9 @@
 //! `history` / `lineedit` / `prompt_template` / `logicalpath` are pure (no
 //! libc, no IO).
 //! `config` and `script_engine` are the exceptions: they embed a Lua
-//! state (via
-//! ziglua) -- `config` for a one-shot `shell.conf` parse, `script_engine`
-//! for the shell's session-long interpreter -- so this module pulls in
-//! ziglua and the test runner links the Lua C library.
+//! state (via ziglua) -- `config` for a one-shot `shell.conf.lua` parse,
+//! `script_engine` for the shell's session-long interpreter -- so this
+//! module pulls in ziglua and the test runner links the Lua C library.
 
 pub const wordsplit = @import("wordsplit.zig");
 pub const parse = @import("parse.zig");

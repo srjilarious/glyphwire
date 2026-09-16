@@ -745,6 +745,18 @@ pub const Cell = struct {
     /// `grapheme`/`style` outright rather than merging with whatever was
     /// there before.
     metadata_id: ?MetadataHandle = null,
+    /// This cell is its span's *focus* cell: where `adjacentMetadataSpan`
+    /// lands instead of the span's first visible character. A `gw-ls -l`
+    /// row is one span across every column, so without this Ctrl+PgUp
+    /// would stop on the permissions column; the Name column sets it so
+    /// the cursor arrives on the first character of the filename.
+    ///
+    /// Only meaningful alongside `metadata_id` -- it names a cell *within*
+    /// a span, not a span of its own. Cleared by every write that sets
+    /// `metadata_id`, for the same "overwrite outright, don't merge"
+    /// reason `grapheme`/`style` are; the callers that want it set it
+    /// explicitly (`tag_metadata`'s `focus`, a `focus` table column).
+    meta_focus: bool = false,
     /// An icon drawn *over* `style.bg` and `grapheme` rather than replacing
     /// either -- unlike the ordinary `draw_icon` (`style.bg`'s `.icon`
     /// variant), which is itself one of `Background`'s mutually exclusive
@@ -1595,10 +1607,17 @@ pub const Layer = struct {
     /// metadata-id span adjacent in `dir`. The span the start cell already
     /// belongs to is stepped over (its metadata id, including any untagged
     /// cells embedded in that id's run, e.g. the inter-column gaps of a
-    /// `glyphwire-ls -l` row), as are untagged cells between spans. The
-    /// result is that span's first cell carrying a non-blank grapheme, so
-    /// a leading icon or padding cell tagged with the span's id is skipped;
-    /// a span with no visible text at all falls back to its first cell.
+    /// `glyphwire-ls -l` row), as are untagged cells between spans.
+    ///
+    /// The result is the span's *focus* cell when it has one
+    /// (`Cell.meta_focus` -- what a `focus` table column or a
+    /// `tag_metadata` with `focus` sets), else its first cell carrying a
+    /// non-blank grapheme, so a leading icon or padding cell tagged with
+    /// the span's id is skipped; a span with neither falls back to its
+    /// first cell. That ordering is what puts Ctrl+PgUp on the first
+    /// character of the *filename* in a `glyphwire-ls -l` row, whose
+    /// single span starts back at the permissions column.
+    ///
     /// null when there's no further span in that direction within retained
     /// content.
     ///
@@ -1639,15 +1658,23 @@ pub const Layer = struct {
             }
         }
 
-        // Phase 3: the span's first cell that holds a visible character.
+        // Phase 3: the span's focus cell if it declared one (see
+        // `Cell.meta_focus`), else its first cell holding a visible
+        // character. Both are found in the same forward walk, so a span
+        // with no focus cell costs nothing extra: remember the first
+        // visible character as we pass it and keep going until either the
+        // focus cell turns up or the span ends.
         var scan = span_start;
+        var first_text: ?WalkPos = null;
         while (self.cellSigned(scan.row, scan.col)) |c| {
             if (c.metadata_id) |mid| {
                 if (mid != target_id) break;
-                if (cellHasText(c)) return .{ .above = -scan.row, .col = scan.col, .id = target_id };
+                if (c.meta_focus) return .{ .above = -scan.row, .col = scan.col, .id = target_id };
+                if (first_text == null and cellHasText(c)) first_text = scan;
             }
             scan = self.walkNext(scan) orelse break;
         }
+        if (first_text) |p| return .{ .above = -p.row, .col = p.col, .id = target_id };
 
         // All-icon / all-blank span: land on its first cell.
         return .{ .above = -span_start.row, .col = span_start.col, .id = target_id };
@@ -2460,6 +2487,7 @@ pub const Layer = struct {
         c.style.fg = fg;
         if (bg) |b| c.style.bg = b;
         c.metadata_id = metadata_id;
+        c.meta_focus = false;
         c.fg_icon = null;
         c.wide = if (w == 2) .wide_lead else .narrow;
 
@@ -2677,6 +2705,7 @@ pub const Layer = struct {
             .max_h = opts.max_h,
         } };
         c.metadata_id = opts.metadata_id;
+        c.meta_focus = false;
         self.revision += 1;
         self.render_gen +%= 1;
     }
@@ -2699,6 +2728,7 @@ pub const Layer = struct {
             .max_h = opts.max_h,
         };
         c.metadata_id = opts.metadata_id;
+        c.meta_focus = false;
         self.revision += 1;
         self.render_gen +%= 1;
     }
@@ -2711,10 +2741,18 @@ pub const Layer = struct {
     /// into (see `IconScale`'s doc comment on that overflow having no
     /// automatic data-model footprint -- this is how a client opts into
     /// giving it one anyway, deliberately, cell by cell).
-    pub fn tagMetadata(self: *Layer, row: usize, col: usize, metadata_id: ?MetadataHandle) void {
+    ///
+    /// `focus` marks the cell as its span's landing point for
+    /// `adjacentMetadataSpan` -- see `Cell.meta_focus`. It's the general
+    /// way any client names a focus cell; a server-laid-out table instead
+    /// sets `TableColumn.focus`, since the client can't know where the
+    /// column ended up.
+    pub fn tagMetadata(self: *Layer, row: usize, col: usize, metadata_id: ?MetadataHandle, focus: bool) void {
         const resolved_row = self.resolveRow(row);
         if (col >= self.width) return;
-        self.cell(resolved_row, col).metadata_id = metadata_id;
+        const c = self.cell(resolved_row, col);
+        c.metadata_id = metadata_id;
+        c.meta_focus = focus;
         self.revision += 1;
         self.render_gen +%= 1;
     }
@@ -3184,6 +3222,13 @@ pub const TableColumn = struct {
     /// stays deterministic. Ignored for `.number` columns. `glyphwire-ls`
     /// sets it on its Name column.
     case_insensitive: bool = false,
+    /// Mark this column's body cell as the focus cell of its row's
+    /// metadata span (`Cell.meta_focus`), so Ctrl+PgUp/PgDn lands on the
+    /// first character of *this* column's value rather than the row's
+    /// leftmost one. A whole `glyphwire-ls -l` row shares one metadata id,
+    /// so it sets this on its Name column. At most one column should have
+    /// it; if several do, the leftmost wins (the walk stops at the first).
+    focus: bool = false,
     width: usize,
     min_width: usize = 1,
     h_align: HAlign = .start,
@@ -3724,7 +3769,7 @@ pub const Table = struct {
         var col = content_start_col;
         for (self.columns, 0..) |column, i| {
             if (i > 0) {
-                writeCellRun(layer, row, col, "", 1, .start, fg, self.style.header_bg, null);
+                writeCellRun(layer, row, col, "", 1, .start, fg, self.style.header_bg, null, false);
                 col += 1;
             }
             const width = self.headerColWidth(i);
@@ -3740,9 +3785,9 @@ pub const Table = struct {
                     "{s} {s}",
                     .{ column.name, sortArrowGlyph(self.sort_dir) },
                 ) catch column.name;
-                writeCellRun(layer, row, col, label, width, column.h_align, fg, self.style.header_bg, null);
+                writeCellRun(layer, row, col, label, width, column.h_align, fg, self.style.header_bg, null, false);
             } else {
-                writeCellRun(layer, row, col, column.name, width, column.h_align, fg, self.style.header_bg, null);
+                writeCellRun(layer, row, col, column.name, width, column.h_align, fg, self.style.header_bg, null, false);
             }
             col += width;
         }
@@ -3805,7 +3850,7 @@ pub const Table = struct {
             const text_col = col + icon_reserve;
             const text_width = width -| icon_reserve;
             const fg = cell.fg orelse default_style.fg;
-            writeCellRun(layer, mid_row, text_col, cell.display, text_width, column.h_align, fg, row_bg, cell.metadata_id);
+            writeCellRun(layer, mid_row, text_col, cell.display, text_width, column.h_align, fg, row_bg, cell.metadata_id, column.focus);
 
             col += width + 1;
         }
@@ -3868,6 +3913,7 @@ fn setCellText(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Co
     c.style.fg = fg;
     c.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
     c.metadata_id = metadata_id;
+    c.meta_focus = false;
     c.wide = .narrow;
 }
 
@@ -3883,6 +3929,7 @@ fn setCellWide(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Co
     lead.style.fg = fg;
     lead.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
     lead.metadata_id = metadata_id;
+    lead.meta_focus = false;
     lead.wide = .wide_lead;
     cells[col + 1] = .{ .style = lead.style, .metadata_id = metadata_id, .wide = .wide_spacer };
 }
@@ -3891,6 +3938,7 @@ fn setCellIcon(layer: *Layer, row: i64, col: usize, handle: ImageHandle, scale: 
     const c = layer.cellSigned(row, col) orelse return;
     c.style.bg = .{ .icon = .{ .handle = handle, .scale = scale, .h_align = h_align, .v_align = v_align, .max_h = max_h } };
     c.metadata_id = metadata_id;
+    c.meta_focus = false;
 }
 
 /// Like `setCellIcon`, but writes the icon into `Cell.fg_icon` instead of
@@ -3907,6 +3955,7 @@ fn setCellIconOver(layer: *Layer, row: i64, col: usize, handle: ImageHandle, sca
     const c = layer.cellSigned(row, col) orelse return;
     c.fg_icon = .{ .handle = handle, .scale = scale, .h_align = h_align, .v_align = v_align, .max_h = max_h };
     c.metadata_id = metadata_id;
+    c.meta_focus = false;
 }
 
 fn fillRowBg(layer: *Layer, top_row: i64, content_start_col: usize, content_width: usize, row_height: usize, bg: Color) void {
@@ -3946,7 +3995,11 @@ fn drawBorderTile(layer: *Layer, ctx: *const Context, row: i64, col: usize, box_
 /// layer's bounds and to `width` cells -- a column running off the right
 /// edge loses its tail, matching `Table.render`'s "clip, don't scroll".
 /// A no-op if `width` is 0.
-fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: usize, h_align: HAlign, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+/// `focus` marks the first cell the *body* of the run lands in (past any
+/// alignment padding) as its span's focus cell -- see `Cell.meta_focus`
+/// and `TableColumn.focus`. Nothing is marked when the run has no body at
+/// all (an empty `text`, or a column too narrow to fit a single glyph).
+fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: usize, h_align: HAlign, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle, focus: bool) void {
     if (width == 0 or col >= layer.width) return;
     if (layer.rowAtSigned(row) == null) return; // row not in the retained buffer
     const end_col = @min(col + width, layer.width);
@@ -3975,6 +4028,7 @@ fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: us
         const cp_bytes = it.nextCodepointSlice() orelse break;
         const w = codepointWidth(std.unicode.utf8Decode(cp_bytes) catch 0xFFFD);
         if (written + w > keep) break;
+        const body_start = c;
         if (w == 2) {
             if (c + 1 >= end_col) break; // wide glyph won't fit the column tail
             setCellWide(layer, row, c, cp_bytes, fg, bg, metadata_id);
@@ -3982,6 +4036,11 @@ fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: us
         } else {
             setCellText(layer, row, c, cp_bytes, fg, bg, metadata_id);
             c += 1;
+        }
+        // The first glyph of the body, once it's actually been written --
+        // `setCell*` clears `meta_focus`, so the mark has to go on after.
+        if (focus and written == 0) {
+            if (layer.cellSigned(row, body_start)) |bc| bc.meta_focus = true;
         }
         written += w;
     }

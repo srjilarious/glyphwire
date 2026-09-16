@@ -14,7 +14,7 @@
 //!   * `file/*` -- the coarser file-type buckets (folder, image, audio,
 //!     archive, pdf, ...), the fallback for everything without a `dev/`
 //!     logo. `file/*` is a *canonical* name: `glyphwire-host` resolves it
-//!     to whichever bundled icon theme `host.conf`'s `icon_theme` selects
+//!     to whichever bundled icon theme `host.conf.lua`'s `icon_theme` selects
 //!     (`assets/icons/filetype/{oxygen,papirus,material}/`), Oxygen by
 //!     default. `oxygen/*` still resolves too, as a back-compat alias.
 //!

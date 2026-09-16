@@ -1,7 +1,7 @@
 -- provision_remote <user@host> [ssh options...] -- build this checkout's
 -- remote-side glyphwire programs (gw-agent, gw-shell, gw-ls, gw-view,
 -- zoe) and copy them to a real remote server over ssh, then drop
--- shell.conf / zoe.conf there from the bundled templates if the remote
+-- shell.conf.lua / zoe.conf.lua there from the bundled templates if the remote
 -- doesn't already have one of its own.
 --
 -- Install as ~/.config/glyphwire/scripts/provision_remote.lua, then from
@@ -132,8 +132,8 @@ if copy_code ~= 0 then
   return copy_code
 end
 
-push_config_if_missing("shell/shell.conf.template", "~/.config/glyphwire/shell.conf", "shell.conf")
-push_config_if_missing("zoe/zoe.conf.template", "~/.config/glyphwire/zoe.conf", "zoe.conf")
+push_config_if_missing("shell/shell.conf.template.lua", "~/.config/glyphwire/shell.conf.lua", "shell.conf.lua")
+push_config_if_missing("zoe/zoe.conf.template.lua", "~/.config/glyphwire/zoe.conf.lua", "zoe.conf.lua")
 
 -- Both forms need the `--remote-command`: the binaries land in
 -- ~/.local/share/glyphwire/bin, which is not on the minimal PATH a

@@ -71,7 +71,7 @@ pub const KeyInput = struct {
         self.reportModifier(3, "left_super", kb.super());
 
         // Ctrl+Shift+P toggles the profiler HUD and Ctrl+Shift+R toggles
-        // forced every-frame redraw, but only when `host.conf` enabled
+        // forced every-frame redraw, but only when `host.conf.lua` enabled
         // profiling at all. Handled once here (not per-key in the loop)
         // and swallowed below so the shell / grid never see them.
         const profile_toggle = self.app.profiler.active() and kb.ctrl() and kb.shift();

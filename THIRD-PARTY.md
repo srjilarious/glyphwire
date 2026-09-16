@@ -78,7 +78,7 @@ assets in its package should:
 
 1. ship only `assets/icons/filetype/material/` (MIT) from the file-type
    themes, and
-2. set `icon_theme = "material"` in `host.conf`.
+2. set `icon_theme = "material"` in `host.conf.lua`.
 
 `assets/icons/status/` is Oxygen too, and is only referenced by
 `gw-shell` powerline prompt segments (itself GPL-3.0-or-later), so it can

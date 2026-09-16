@@ -1,12 +1,12 @@
 -- Example gw-shell config.
 --
--- Copy to ~/.config/glyphwire/shell.conf (or $GLYPHWIRE_CONFIG_DIR, or
+-- Copy to ~/.config/glyphwire/shell.conf.lua (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
 -- shell startup; every binding below is optional. See
--- shell/shell.conf.template for the full annotated reference of prompt
+-- shell/shell.conf.template.lua for the full annotated reference of prompt
 -- tokens, powerline segment keys, open_actions, zj and scripts.
 --
--- This is the maintainer's own working shell.conf, cleaned for sharing: a
+-- This is the maintainer's own working shell.conf.lua, cleaned for sharing: a
 -- two-line powerline prompt with an Arch badge, user, cwd, and a git
 -- segment that only appears inside a work tree, plus a right side that
 -- surfaces a non-zero exit code, a slow-command timer, and the clock.

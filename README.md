@@ -199,11 +199,11 @@ keystroke injection.
 
 ### Font configuration
 
-`glyphwire` runs **`~/.config/glyphwire/host.conf`** at startup, if
+`glyphwire` runs **`~/.config/glyphwire/host.conf.lua`** at startup, if
 present, for a global `config` table. The directory is resolved the same
-way as the shell's `shell.conf`: `$GLYPHWIRE_CONFIG_DIR` verbatim when
+way as the shell's `shell.conf.lua`: `$GLYPHWIRE_CONFIG_DIR` verbatim when
 set, else `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`.
-See `host/host.conf.template` for the full annotated reference.
+See `host/host.conf.template.lua` for the full annotated reference.
 
 | Field | Default | Notes |
 |---|---|---|
@@ -212,33 +212,35 @@ See `host/host.conf.template` for the full annotated reference.
 | `font_fallback` | `JetBrainsMono-Regular.ttf` | Face used for codepoints the primary lacks. |
 | `font_size` | `20.0` | Starting cell size in px, clamped to 8..72. |
 
-(`host.conf` also carries `cursor_shape` / `cursor_blink` /
+(`host.conf.lua` also carries `cursor_shape` / `cursor_blink` /
 `cursor_blink_ms`, `grid_cols` / `grid_rows` / `scrollback_rows`, and
 `icon_theme` — `"oxygen"` (default) / `"material"` / `"papirus"`, the set
 behind the `file/*` file-type icons; see the template.) Every field is
 optional and any omitted one keeps its default; a missing file (or no
 config directory at all) uses all defaults. `gw-ls` has its own
-optional `~/.config/glyphwire/ls.conf` (`large_icon_px` / `small_icon_px`;
-see `ls/ls.conf.template`), and `zoe` reads an optional
-`~/.config/glyphwire/zoe.conf` (syntax-highlight languages, grammar
+optional `~/.config/glyphwire/ls.conf.lua` (`large_icon_px` / `small_icon_px`;
+see `ls/ls.conf.template.lua`), and `zoe` reads an optional
+`~/.config/glyphwire/zoe.conf.lua` (syntax-highlight languages, grammar
 search path, capture-group colours, `page_lines`, `line_numbers`; see
-`zoe/zoe.conf.template`). At runtime **`Ctrl+-`** / **`Ctrl++`** step the
+`zoe/zoe.conf.template.lua`). At runtime **`Ctrl+-`** / **`Ctrl++`** step the
 font size by 2px and **`Ctrl+0`** restores the configured size — the
 window resizes to keep the same column/row count (best effort; a tiling
 WM that pins the window reflows the grid instead).
 
-Each config has two files in the repo: a `*.conf.template` next to its
-source with every option listed at its default and commented out (the
-full reference), and a shorter `assets/*.conf.example` — the maintainer's
-own working setup, cleaned for sharing. The examples ship in the package
-under `share/glyphwire/assets/`, alongside `assets/scripts/` (`up`,
+Every config file is Lua and named `*.conf.lua`, so editors highlight it
+off the extension with no per-project filetype rule. Each config has two
+files in the repo: a `*.conf.template.lua` next to its source with every
+option listed at its default and commented out (the full reference), and
+a shorter `assets/*.conf.example.lua` — the maintainer's own working
+setup, cleaned for sharing. The examples ship in the package under
+`share/glyphwire/assets/`, alongside `assets/scripts/` (`up`,
 `venv_activate` / `venv_deactivate`, `drop` / `yoink`). To adopt the
 setup wholesale:
 
 ```sh
 mkdir -p ~/.config/glyphwire/scripts
 cd .../share/glyphwire/assets           # or the repo's assets/
-for f in host shell ls zoe; do cp $f.conf.example ~/.config/glyphwire/$f.conf; done
+for f in host shell ls zoe gmux; do cp $f.conf.example.lua ~/.config/glyphwire/$f.conf.lua; done
 cp scripts/*.lua ~/.config/glyphwire/scripts/
 ```
 
@@ -297,7 +299,7 @@ should.
 Note for anyone embedding the host: the **default icon theme is LGPL-3.0**
 (KDE Oxygen) and a GPL-3.0 theme (Papirus) ships beside it. They are
 runtime data, not linked code, but they are copyleft. Ship the MIT Material
-theme instead and set `icon_theme = "material"` in `host.conf` if that
+theme instead and set `icon_theme = "material"` in `host.conf.lua` if that
 matters to you. See [`THIRD-PARTY.md`](THIRD-PARTY.md).
 
 ## Contributing

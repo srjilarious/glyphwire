@@ -27,13 +27,13 @@ const app_icon_asset = "glyphwire_icon.png";
 /// gw-shell child) and then handing off to the engine's app runner.
 /// Everything the running window does lives in `app.App` and the concern
 /// sub-structs it owns (`caret.zig`, `input.zig`, `selection.zig`,
-/// `scroll.zig`, `window_sizing.zig`, `render.zig`); the values `host.conf`
+/// `scroll.zig`, `window_sizing.zig`, `render.zig`); the values `host.conf.lua`
 /// resolves live in `config.zig` / `config_load.zig`; shared pixel/cell
 /// geometry lives in `geometry.zig`.
 ///
 /// The initial grid size is `geometry.initial_grid_cols` x
 /// `initial_grid_rows`; after startup the window is user-resizable and
-/// `geometry.grid_cols` / `grid_rows` track its live size. `host.conf`'s
+/// `geometry.grid_cols` / `grid_rows` track its live size. `host.conf.lua`'s
 /// `grid_cols` / `grid_rows` (and `--grid-cols` / `--grid-rows`, which win
 /// over the file) override the initial size here in `main`.
 /// Waits for gw-shell to exit, then flags `shell_exited` so
@@ -104,7 +104,7 @@ fn bundledAssetPath(alloc: std.mem.Allocator, asset_dir: []const u8, rel_path: [
     return std.fs.path.joinZ(alloc, &.{ asset_dir, rel_path });
 }
 
-/// A resolved `host.conf` `font_face` / `font_fallback`: the file on disk,
+/// A resolved `host.conf.lua` `font_face` / `font_fallback`: the file on disk,
 /// plus a face index when `fc-match` picked one for a system `.ttc`
 /// (`null` otherwise -- face selection then follows the `font_face_name`
 /// scan in `main`, as it always has).
@@ -113,7 +113,7 @@ const ResolvedFont = struct {
     fc_index: ?i32 = null,
 };
 
-/// Turns a `host.conf` `font_face` / `font_fallback` value into a file on
+/// Turns a `host.conf.lua` `font_face` / `font_fallback` value into a file on
 /// disk, trying in order:
 ///   1. the untouched `*_default` value, or any legacy `assets/...`
 ///      spelling -> the bundled asset of that relative name;
@@ -183,9 +183,9 @@ pub fn main(init: std.process.Init) !void {
     const asset_dir = try resolveAssetDir(arena, io, init.environ_map);
 
     // Font face/size/fallback, caret shape/blink, and initial grid size /
-    // scrollback: `~/.config/glyphwire/host.conf` if present, else the
+    // scrollback: `~/.config/glyphwire/host.conf.lua` if present, else the
     // `*_default` constants in `config.zig`. Loaded before the arg loop so
-    // a `--grid-cols` / `--grid-rows` flag can still override `host.conf`'s
+    // a `--grid-cols` / `--grid-rows` flag can still override `host.conf.lua`'s
     // `grid_cols` / `grid_rows`.
     const host_cfg = config_load.loadConfig(arena, alloc, io, init.environ_map);
     var font_cfg = host_cfg.font;
@@ -209,7 +209,7 @@ pub fn main(init: std.process.Init) !void {
     //   --screenshot <path>          write the grid region to <path> (PNG) then quit
     //   --screenshot-delay-ms <n>    wait n ms before capturing (default 2500)
     //   --grid-cols <n> / --grid-rows <n>   open at a non-default grid size,
-    //                                overriding host.conf's grid_cols / grid_rows
+    //                                overriding host.conf.lua's grid_cols / grid_rows
     //                                (handy for a screenshot whose output is
     //                                taller/wider than the default 120x50)
     //   --ssh <dest>                 run the shell on <dest> over ssh (see host/remote.zig)
@@ -261,7 +261,7 @@ pub fn main(init: std.process.Init) !void {
     // wanted face inside it so both the metrics measured here and the atlas
     // packed later (in AppRunner.init) use the same face. When `fc-match`
     // already resolved a face for a system `.ttc`, use that -- unless
-    // `host.conf` also set an explicit `font_face_name`, which still wins
+    // `host.conf.lua` also set an explicit `font_face_name`, which still wins
     // by re-scanning the resolved file. Otherwise scan for `font_face_name`
     // (the bundled Noto collection's "Mono CJK JP" default when unset); a
     // plain `.ttf` has no named faces, so this falls through to face 0.
@@ -298,7 +298,7 @@ pub fn main(init: std.process.Init) !void {
     const icons_dir = try std.fs.path.join(arena, &.{ asset_dir, "icons" });
     icons.loadIconsFromDir(io, alloc, &ctx, icons_dir, "", true);
     // The file-type icon set (`file/*`, aliased `oxygen/*`) comes from
-    // whichever `<asset-dir>/icons/filetype/<theme>/` `host.conf`'s
+    // whichever `<asset-dir>/icons/filetype/<theme>/` `host.conf.lua`'s
     // `icon_theme` names -- Oxygen by default, else Papirus / Material.
     // An unknown or missing theme falls back to Oxygen.
     {
@@ -312,7 +312,7 @@ pub fn main(init: std.process.Init) !void {
         if (!ok) std.log.warn("glyphwire: no file-type icon theme loaded under {s}/icons/filetype", .{asset_dir});
     }
     // User icons: new names and overrides of the bundled set, from
-    // `~/.config/glyphwire/icons/` (same config dir as `host.conf`, see
+    // `~/.config/glyphwire/icons/` (same config dir as `host.conf.lua`, see
     // `glyphwire.configDirPath`). Scanned last so a user file at a bundled
     // relative path -- `file/folder.png` included -- wins. Absent
     // directory is normal -- not warned.

@@ -2793,6 +2793,55 @@ implementation log.
 
 905 tests passing.
 
+## `X.conf.lua` configs, a metadata focus cell, and mergeable shell state
+
+Three unrelated papercuts, landed together.
+
+- **Configs renamed `X.conf` -> `X.conf.lua`.** Every glyphwire config is
+  a Lua script, but the old extension told no editor that, so highlighting
+  needed a per-project filetype rule. `host.conf.lua`, `shell.conf.lua`,
+  `ls.conf.lua`, `zoe.conf.lua`, `gmux.conf.lua`; the in-repo references
+  follow as `<name>.conf.template.lua` (next to each source) and
+  `assets/<name>.conf.example.lua`, keeping `.lua` last so the reference
+  files highlight too. A hard cut with no legacy fallback — see
+  decisions.md for why. `src/config_dir.zig` now documents the suffix as
+  deliberate; `provision_remote.lua` pushes the new names.
+- **`Cell.meta_focus`: a metadata span can name its own landing cell.**
+  Ctrl+PgUp/PgDn walks between metadata-id spans and used to land on each
+  span's first visible character. A `gw-ls -l` row is one span across
+  every column, so that put the cursor on the permissions column's `d`
+  rather than on the filename. `adjacentMetadataSpan` now prefers a
+  span's focus cell when it has one, falling back to the old rule
+  otherwise — both are found in the same forward walk, so a span without
+  one costs nothing.
+  - Wire: `tag_metadata` gained `focus` (the general per-cell form), and
+    a table column gained `focus` (`TableColumn.focus`), since a client
+    can't know where a server-laid-out column landed. `get_cells` reports
+    the bit per cell; `table_get_state` reports it per column.
+  - `Table.writeBodyRow` marks whichever cell the column's text actually
+    started in, past any alignment padding — so an `.end`-aligned focus
+    column would still land on its first character, not its leading pad.
+  - Every write that sets a cell's `metadata_id` clears the mark, so a
+    repaint can't leave a focus cell pointing at gone content.
+  - `glyphwire-ls` sets it on the Name column of its `-l` table, and on
+    the name's first cell in the icon grid (where the old fallback
+    already landed right, but only because icon cells carry no grapheme).
+- **`history` and `z.db` merge instead of overwriting.** Several
+  `gw-shell`s in one `gmux` session each loaded these files at startup and
+  wrote their whole in-memory copy back on flush — a lost update, so
+  whichever shell exited last silently reverted every other shell's
+  history and `zj` visits. Each shell now tracks a *delta*
+  (`Prompt.history_pending`, `zjump.Journal`) and a flush re-reads the
+  file, applies the delta to that, writes it, and clears the delta only
+  once the write landed. `z.db` visits add to the file's rank rather than
+  replacing it, and `last` takes the newer stamp; a prune wins over a
+  visit. No locking: both parsers skip malformed input, so a torn read
+  costs a few entries rather than the merge. A shell still doesn't pick
+  up other shells' entries mid-session — the bug was one shell destroying
+  another's state, not failing to see it live.
+
+974 tests passing.
+
 ## Open questions to settle before writing code
 
 1. Per-connection vs. per-process (`SO_PEERCRED`) layer ownership (Phase 2).

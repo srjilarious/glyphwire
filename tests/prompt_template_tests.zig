@@ -373,7 +373,7 @@ pub fn parseColorRejectsMalformedTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(pt.parseColor("#gggggg"), null);
 }
 
-// ─── {name} resolver hook (shell.conf's command vars) ─────────────────
+// ─── {name} resolver hook (shell.conf.lua's command vars) ─────────────────
 
 // Stands in for `shell/main.zig`'s `resolveCmdVar`: `branch` -> "main",
 // `flag` -> "" (a var that ran but produced nothing), `cwd` -> a value

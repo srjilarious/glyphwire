@@ -394,7 +394,7 @@ pub const Ui = struct {
         return self;
     }
 
-    /// Loads `zoe.conf` and resolves the grammar search path into a
+    /// Loads `zoe.conf.lua` and resolves the grammar search path into a
     /// registry. Any failure leaves all of it null, and every buffer then
     /// renders unhighlighted -- each buffer's own `Highlighter` is built
     /// against this in `newSlot`.
@@ -448,7 +448,7 @@ pub const Ui = struct {
             if (syntax.Highlighter.init(self.alloc, cfg.theme)) |h| {
                 slot.hl = h;
                 // The highlighter resolves injected grammars through the
-                // shared registry; `injections` is the `zoe.conf` switch.
+                // shared registry; `injections` is the `zoe.conf.lua` switch.
                 const reg: ?*syntax.Registry = if (self.grammars) |*g| g else null;
                 slot.hl.?.configureInjections(reg, cfg.injections);
                 // From here on `Buffer` keeps the edit journal the
@@ -1598,7 +1598,7 @@ pub const Ui = struct {
     }
 
     /// Cells the line-number gutter takes in the buffer pane right now --
-    /// zero unless `:set`/`zoe.conf` turned it on. Widens by a column each
+    /// zero unless `:set`/`zoe.conf.lua` turned it on. Widens by a column each
     /// time the line count crosses a power of ten; an edit that changes
     /// the count already forces a full pane repaint, so it is always safe
     /// to read fresh.

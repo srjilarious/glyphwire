@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! gmux's optional startup config, `~/.config/glyphwire/gmux.conf` -- a
-//! Lua script assigning a global `config` table, same shape `zoe.conf` /
-//! `ls.conf` / `shell.conf` use. Deliberately tiny for the first version:
+//! gmux's optional startup config, `~/.config/glyphwire/gmux.conf.lua` -- a
+//! Lua script assigning a global `config` table, same shape `zoe.conf.lua` /
+//! `ls.conf.lua` / `shell.conf.lua` use. Deliberately tiny for the first version:
 //! the prefix key, the shell to run in a fresh pane, and how much
 //! scrollback each pane's ring keeps. With no file present gmux runs on
 //! Ctrl-B, `gw-shell`, and 2000 rows.
@@ -14,7 +14,7 @@ const glyphwire = @import("glyphwire");
 
 const Lua = ziglua.Lua;
 
-const conf_name = "gmux.conf";
+const conf_name = "gmux.conf.lua";
 
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
@@ -40,7 +40,7 @@ pub const Config = struct {
     }
 };
 
-/// Reads `gmux.conf` from glyphwire's config dir and returns the merged
+/// Reads `gmux.conf.lua` from glyphwire's config dir and returns the merged
 /// config. A missing file / missing config home is the normal case:
 /// defaults, no error, nothing logged. Any parse problem is logged and
 /// whatever parsed before it is kept.

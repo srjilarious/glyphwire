@@ -1,12 +1,12 @@
 -- Example zoe config.
 --
--- Copy to ~/.config/glyphwire/zoe.conf (or $GLYPHWIRE_CONFIG_DIR, or
+-- Copy to ~/.config/glyphwire/zoe.conf.lua (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
 -- startup; assign a single global table named `config` and every key is
 -- optional -- with no config at all zoe highlights the seven bundled
 -- languages (zig, json, c, python, toml, markdown, markdown_inline) with
 -- its built-in dark theme, embedded languages included. See
--- zoe/zoe.conf.template for the full annotated reference.
+-- zoe/zoe.conf.template.lua for the full annotated reference.
 
 config = {
     -- Extra extension -> grammar mappings, merged ahead of the built-ins.

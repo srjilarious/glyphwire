@@ -18,7 +18,7 @@
 //!
 //! Everything is a cheap early-return when `enabled` is false, so a build
 //! that wires the calls in unconditionally pays effectively nothing until
-//! `host.conf` / `shell.conf` turns profiling on.
+//! `host.conf.lua` / `shell.conf.lua` turns profiling on.
 //!
 //! It reads the monotonic clock (`std.Io.Clock.awake`, via the `io` it is
 //! constructed with) for the window / summary cadence and the `frame`

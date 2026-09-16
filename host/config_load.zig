@@ -10,7 +10,7 @@ const geometry = @import("geometry.zig");
 
 const HostConfig = config.HostConfig;
 
-/// `host.conf` is a Lua script, so this file needs a Lua state -- but
+/// `host.conf.lua` is a Lua script, so this file needs a Lua state -- but
 /// nothing about parsing a config file belongs to the graphics engine, so
 /// it drives `ziglua` directly (`runConfigScript` below) instead of going
 /// through an engine scripting subsystem. It still reaches `ziglua`
@@ -21,7 +21,7 @@ const HostConfig = config.HostConfig;
 /// actually links.
 const Lua = host_eng.ziglua.Lua;
 
-/// Owned path to glyphwire's config directory (holds `host.conf`).
+/// Owned path to glyphwire's config directory (holds `host.conf.lua`).
 /// Shared with glyphwire-shell and glyphwire-ls -- see
 /// `glyphwire.configDirPath`.
 const configDirPath = glyphwire.configDirPath;
@@ -83,10 +83,11 @@ fn runConfigScript(lua: *Lua, code: [:0]const u8) !void {
     };
 }
 
-/// Resolves everything `host.conf` controls for this run: starts from the
-/// `*_default` constants and overlays whatever the global `config` table
-/// in `~/.config/glyphwire/host.conf` (see `configDirPath`) sets -- font
-/// fields (`font_face`, `font_face_name`, `font_fallback`, `font_size`),
+/// Resolves everything `host.conf.lua` controls for this run: starts from
+/// the `*_default` constants and overlays whatever the global `config`
+/// table in `~/.config/glyphwire/host.conf.lua` (see `configDirPath`)
+/// sets -- font fields (`font_face`, `font_face_name`, `font_fallback`,
+/// `font_size`),
 /// caret fields (`cursor_shape`, `cursor_blink`, `cursor_blink_ms`), and
 /// grid fields (`grid_cols`, `grid_rows`, `scrollback_rows`), any subset.
 /// A missing file (or no config home at all) is the normal case and is
@@ -156,7 +157,7 @@ pub fn loadConfig(
 
     const clamped = config.clampFontSize(cfg.font.size);
     if (clamped != cfg.font.size) {
-        std.log.warn("glyphwire-host: host.conf font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });
+        std.log.warn("glyphwire-host: host.conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });
         cfg.font.size = clamped;
     }
 
@@ -164,14 +165,14 @@ pub fn loadConfig(
         if (config.cursorShapeFromStr(v)) |shape| {
             cfg.cursor.shape = shape;
         } else {
-            std.log.warn("glyphwire-host: host.conf cursor_shape '{s}' unknown; keeping '{t}'", .{ v, cfg.cursor.shape });
+            std.log.warn("glyphwire-host: host.conf.lua cursor_shape '{s}' unknown; keeping '{t}'", .{ v, cfg.cursor.shape });
         }
     }
     if (luaBoolField(lua, "cursor_blink")) |v| cfg.cursor.blink = v;
     if (luaNumField(lua, "cursor_blink_ms")) |v| {
         cfg.cursor.blink_ms = config.clampBlinkMs(@as(f64, v));
         if (cfg.cursor.blink_ms != v)
-            std.log.warn("glyphwire-host: host.conf cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
+            std.log.warn("glyphwire-host: host.conf.lua cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
     }
 
     if (luaBoolField(lua, "profile")) |v| cfg.profile.enabled = v;
@@ -180,32 +181,32 @@ pub fn loadConfig(
     if (luaNumField(lua, "profile_window_ms")) |v| {
         const c = config.clampProfileWindowMs(@as(f64, v));
         if (c != @as(f64, v))
-            std.log.warn("glyphwire-host: host.conf profile_window_ms {d} out of range; clamped to {d}", .{ v, c });
+            std.log.warn("glyphwire-host: host.conf.lua profile_window_ms {d} out of range; clamped to {d}", .{ v, c });
         cfg.profile.window_ms = c;
     }
     if (luaNumField(lua, "profile_log_ms")) |v| {
         const c = config.clampProfileLogMs(@as(f64, v));
         if (c != @as(f64, v) and v > 0)
-            std.log.warn("glyphwire-host: host.conf profile_log_ms {d} out of range; clamped to {d}", .{ v, c });
+            std.log.warn("glyphwire-host: host.conf.lua profile_log_ms {d} out of range; clamped to {d}", .{ v, c });
         cfg.profile.log_interval_ms = c;
     }
 
     if (luaUintField(lua, "grid_cols")) |v| {
         const c = config.clampGridCols(v);
         if (c != v)
-            std.log.warn("glyphwire-host: host.conf grid_cols {d} below minimum {d}; clamped", .{ v, geometry.min_grid_cols });
+            std.log.warn("glyphwire-host: host.conf.lua grid_cols {d} below minimum {d}; clamped", .{ v, geometry.min_grid_cols });
         cfg.grid.cols = c;
     }
     if (luaUintField(lua, "grid_rows")) |v| {
         const r = config.clampGridRows(v);
         if (r != v)
-            std.log.warn("glyphwire-host: host.conf grid_rows {d} below minimum {d}; clamped", .{ v, geometry.min_grid_rows });
+            std.log.warn("glyphwire-host: host.conf.lua grid_rows {d} below minimum {d}; clamped", .{ v, geometry.min_grid_rows });
         cfg.grid.rows = r;
     }
     if (luaUintField(lua, "scrollback_rows")) |v| {
         const s = config.clampScrollback(v);
         if (s != v)
-            std.log.warn("glyphwire-host: host.conf scrollback_rows {d} above maximum {d}; clamped", .{ v, config.scrollback_rows_max });
+            std.log.warn("glyphwire-host: host.conf.lua scrollback_rows {d} above maximum {d}; clamped", .{ v, config.scrollback_rows_max });
         cfg.grid.scrollback = s;
     }
 

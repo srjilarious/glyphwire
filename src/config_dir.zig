@@ -1,11 +1,15 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: MPL-2.0
 
-//! Where glyphwire's per-user config files live -- `host.conf`,
-//! `shell.conf`, `ls.conf`, and the optional `icons/` override tree. Every
-//! binary resolves the same directory the same way, so this is the one
-//! copy they all call (`glyphwire.configDirPath`) rather than three that
-//! have to be kept "byte-for-byte in step" by hand.
+//! Where glyphwire's per-user config files live -- `host.conf.lua`,
+//! `shell.conf.lua`, `ls.conf.lua`, and the optional `icons/` override
+//! tree. Every binary resolves the same directory the same way, so this
+//! is the one copy they all call (`glyphwire.configDirPath`) rather than
+//! three that have to be kept "byte-for-byte in step" by hand.
+//!
+//! The `.conf.lua` suffix is deliberate: these files *are* Lua, and every
+//! editor highlights them as such off the extension alone with no
+//! per-project filetype rule.
 
 const std = @import("std");
 

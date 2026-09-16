@@ -62,6 +62,10 @@ pub const WireCell = struct {
     /// treatment `bg_image`/`bg_icon` already give image/icon handles.
     /// `get_metadata` resolves an id to its actual content.
     metadata_id: ?core.MetadataHandle = null,
+    /// This cell is the focus cell of its `metadata_id` span -- where
+    /// `find_metadata` lands instead of the span's first visible
+    /// character. See `core.Cell.meta_focus`.
+    focus: bool = false,
     /// East Asian Width role of the cell: `"lead"` = left half of a
     /// 2-cell wide character (holds the grapheme), `"spacer"` = its right
     /// half (renders nothing, carries the lead's bg + metadata), absent =
@@ -102,6 +106,9 @@ pub const TableColumn = struct {
     /// Fold ASCII case when sorting a `.text` column -- see
     /// `core.TableColumn.case_insensitive`.
     case_insensitive: bool = false,
+    /// Land Ctrl+PgUp/PgDn on this column's body cell -- see
+    /// `core.TableColumn.focus`.
+    focus: bool = false,
     width: usize,
     min_width: usize = 1,
     /// "start" (default), "center", or "end".
@@ -149,6 +156,7 @@ pub const ColumnState = struct {
     kind: []const u8,
     sortable: bool,
     case_insensitive: bool,
+    focus: bool,
     width: usize,
     min_width: usize,
     h_align: []const u8,

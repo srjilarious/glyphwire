@@ -1,12 +1,12 @@
 -- Example glyphwire (host) config.
 --
--- Copy to ~/.config/glyphwire/host.conf (or $GLYPHWIRE_CONFIG_DIR, or
+-- Copy to ~/.config/glyphwire/host.conf.lua (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
 -- startup; assign a single global table named `config`. Every key is
 -- optional and any omitted one keeps its default. See
--- host/host.conf.template for the full annotated reference.
+-- host/host.conf.template.lua for the full annotated reference.
 --
--- This is the maintainer's own working host.conf, lightly cleaned for
+-- This is the maintainer's own working host.conf.lua, lightly cleaned for
 -- sharing: a slightly larger font, an underline caret, and a roomier
 -- starting grid.
 

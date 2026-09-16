@@ -1,11 +1,11 @@
 -- zoe configuration template.
 --
--- This is the full reference for `zoe.conf`, the file zoe runs once at
+-- This is the full reference for `zoe.conf.lua`, the file zoe runs once at
 -- startup (see zoe/langconf.zig `load`). Copy it to one of:
 --
---   $GLYPHWIRE_CONFIG_DIR/zoe.conf
---   $XDG_CONFIG_HOME/glyphwire/zoe.conf
---   ~/.config/glyphwire/zoe.conf                   (the usual location)
+--   $GLYPHWIRE_CONFIG_DIR/zoe.conf.lua
+--   $XDG_CONFIG_HOME/glyphwire/zoe.conf.lua
+--   ~/.config/glyphwire/zoe.conf.lua                   (the usual location)
 --
 -- Every key is listed below at its built-in default, with every line
 -- commented out -- so copying this file verbatim changes nothing.
@@ -18,7 +18,7 @@
 -- wrong type is logged and the default stands. Any parse error is logged
 -- and whatever parsed before it is kept.
 --
--- zoe.conf carries syntax-highlighting and a couple of editor settings
+-- zoe.conf.lua carries syntax-highlighting and a couple of editor settings
 -- only. Buffer colours beyond the capture-group theme, keybindings, and
 -- the pane layout are not configurable yet.
 

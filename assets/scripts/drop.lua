@@ -3,7 +3,7 @@
 --
 -- Install as ~/.config/glyphwire/scripts/drop.lua
 --
--- Set the remote in your shell.conf (or environment):
+-- Set the remote in your shell.conf.lua (or environment):
 --   sh.setenv("GW_DROPBOX", "myhost:dropbox/")
 -- It's passed straight to rsync, so "user@host:path/" all work. The
 -- trailing slash matters -- it's the destination directory.

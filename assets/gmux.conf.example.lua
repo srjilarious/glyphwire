@@ -1,11 +1,11 @@
 -- Example gmux config.
 --
--- Copy to ~/.config/glyphwire/gmux.conf (or $GLYPHWIRE_CONFIG_DIR, or
+-- Copy to ~/.config/glyphwire/gmux.conf.lua (or $GLYPHWIRE_CONFIG_DIR, or
 -- $XDG_CONFIG_HOME/glyphwire) to use it. It's a Lua script, run once at
 -- startup; assign a single global table named `config` and every key is
 -- optional -- with no config at all gmux uses Ctrl-B as the prefix,
 -- gw-shell for every pane, and 2000 rows of scrollback per pane. See
--- gmux/gmux.conf.template for the full annotated reference.
+-- gmux/gmux.conf.template.lua for the full annotated reference.
 
 config = {
     -- screen-style Ctrl-A instead of tmux-style Ctrl-B.

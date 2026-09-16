@@ -237,7 +237,7 @@ final.
 
 - **Deferred:** auto-upload of a static `gw-agent`, `ControlPersist`
   tuning, reconnect + full-grid resync, detached persistent remote
-  sessions, image bandwidth adaptation, `host.conf` named remotes, and
+  sessions, image bandwidth adaptation, `host.conf.lua` named remotes, and
   several local + remote contexts live in one window (the `Context` is
   where local-vs-remote will eventually be modelled; phase 1 binds the
   trunk's channels to the default context).
@@ -858,18 +858,18 @@ surface.
   (the env var exists but inherit-the-visible + `attach_context` covers
   the need for now).
 - **v1 built — font config + runtime zoom:** `glyphwire-host` runs
-  `~/.config/glyphwire/host.conf` at startup (global `config` table:
+  `~/.config/glyphwire/host.conf.lua` at startup (global `config` table:
   `font_face`, `font_face_name`, `font_fallback`, `font_size`; any subset,
   missing file = all defaults). The config directory is resolved by the
-  same rule as the shell's `shell.conf` — `$GLYPHWIRE_CONFIG_DIR`
+  same rule as the shell's `shell.conf.lua` — `$GLYPHWIRE_CONFIG_DIR`
   verbatim, else `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`
-  — via a `configDirPath` in `host/main.zig` kept byte-for-byte in step
-  with the shell's own copy. Was previously read from `assets/conf.lua`
+  — via `src/config_dir.zig`, the one copy every binary calls (it used to
+  be a per-binary function kept byte-for-byte in step by hand). Was previously read from `assets/conf.lua`
   relative to the working directory; moved so a user's real config isn't
   the repo's checked-in file. Kept host-local rather than a wire concern —
   the font is a property of the rendering front end, not the shared grid
   model, and the shell already has its own separate Lua config
-  (`~/.config/glyphwire/shell.conf`), so no new dependency for it. At
+  (`~/.config/glyphwire/shell.conf.lua`), so no new dependency for it. At
   runtime `Ctrl+-` / `Ctrl++` / `Ctrl+0` repack the engine's default font
   atlas in place (`FontAtlas.setFontSize`) and
   the host re-measures `cell_w`/`cell_h`, updates `ctx.cell_px_*`, and
@@ -902,7 +902,7 @@ surface.
   font config: it's a front-end property, no wire surface. `fc-match`
   is Linux/BSD's answer; a future macOS/Windows host would need its own
   resolver behind the same `system_font.resolve` seam.
-- **v1 built — caret shape + blink (host-local):** `host.conf`'s
+- **v1 built — caret shape + blink (host-local):** `host.conf.lua`'s
   `config` table also carries `cursor_shape` (`line` \| `block` \| `box` \|
   `underline`; default `line`, the original left-edge bar), `cursor_blink`
   (default true), and `cursor_blink_ms` (half-period, default 530, clamped
@@ -914,7 +914,7 @@ surface.
   (`App.tickBlink`). block/box/underline span both cells when the caret
   sits on a `wide_lead`.
 - **v1 built — initial grid size + scrollback config (host-local):**
-  `host.conf`'s `config` table also carries `grid_cols` (default
+  `host.conf.lua`'s `config` table also carries `grid_cols` (default
   120), `grid_rows` (default 50) and `scrollback_rows` (default 1000, the
   root layer's history-ring depth passed to `Context.init`). `grid_cols` /
   `grid_rows` are clamped up to `min_grid_*` (16 / 4); `scrollback_rows` is
@@ -1241,7 +1241,7 @@ surface.
   under `assets/icons/` *is* the manifest, and dropping a `.png` into a
   subdirectory adds an icon. `glyphwire-host` then scans a second,
   optional tree — `~/.config/glyphwire/icons/` (the same config dir as
-  `host.conf`, `configDirPath`) — the same way; because `registerIcon`
+  `host.conf.lua`, `configDirPath`) — the same way; because `registerIcon`
   overwrites by name, a user file at a bundled relative path
   (`icons/file/folder.png`) replaces that bundled icon and a new
   relative path just adds one. A missing user directory is silent.
@@ -1252,7 +1252,7 @@ surface.
   bundled set is a flat directory under `assets/icons/filetype/<theme>/`
   — `oxygen` (the default, KDE Oxygen, LGPL-3.0), `material` (VS Code
   Material Icon Theme, MIT), `papirus` (GPL-3.0, fetched by
-  `scripts/fetch-icon-themes.sh`) — and `host.conf`'s `icon_theme` picks
+  `scripts/fetch-icon-themes.sh`) — and `host.conf.lua`'s `icon_theme` picks
   one. The generic `assets/icons/` walk skips `filetype/` entirely;
   `host/main.zig`'s `loadFiletypeTheme` then loads just the chosen set,
   registering each icon under the canonical `file/<name>` **and** the
@@ -1304,21 +1304,21 @@ surface.
   icons carry dialog-background styling for `glyphwire-notify`) — the
   path prefix keeps a bare `error` free for some future unrelated icon,
   the same job the old `status-`/`notify-` name prefixes did.
-- **Icon render size is `ls.conf`-configurable, capped consistently.**
+- **Icon render size is `ls.conf.lua`-configurable, capped consistently.**
   `glyphwire-ls`'s `writeGrid` and `writeLongTable` used to hardcode the
   `.natural` cap (one/two cell-heights, then a fixed 32px). Now
-  `~/.config/glyphwire/ls.conf` (`ls/config.zig`, a Lua `config` table
-  like `host.conf`) sets `large_icon_px` (default 32, for `-L`) and
+  `~/.config/glyphwire/ls.conf.lua` (`ls/config.zig`, a Lua `config` table
+  like `host.conf.lua`) sets `large_icon_px` (default 32, for `-L`) and
   `small_icon_px` (default 16); the grid band / table row height follows
   (`ceil(px / cell_h)`), and the `-l` table passes the size through as
   `TableStyle.max_icon_px` so `core.Table.writeBodyRow` caps a tall row's
   icon the same way the grid does — a 48px `dev/*` logo then renders the
-  same on-screen size as a `file/*` bucket icon everywhere. `ls.conf` is
+  same on-screen size as a `file/*` bucket icon everywhere. `ls.conf.lua` is
   Lua (not a flat key=value file) so a future `colors = { … }` override
   table fits without a format change. `ls` links the vendored Lua lib for
-  this, same as `glyphwire-shell` does for `shell.conf`.
+  this, same as `glyphwire-shell` does for `shell.conf.lua`.
 - **Partly built — theming.** The file-type slice is done (`file/*` +
-  `host.conf` `icon_theme`, above). Still open: a fully context-local
+  `host.conf.lua` `icon_theme`, above). Still open: a fully context-local
   catalog (a per-`Context` override so one connection can theme
   independently of another, live) and a way to query the catalog's
   contents over the wire (a client currently just has to know the names,
@@ -1486,9 +1486,9 @@ surface.
   tagged too — so browsing/hovering resolves correctly anywhere the icon
   actually renders, not just its leftmost column — has to say so
   explicitly, cell by cell. `tag_metadata` is that explicit opt-in: it
-  touches only `Cell.metadata_id`, nothing else, and takes a required (not
-  optional) `metadata_id` — there'd be no point calling it to tag with
-  nothing.
+  touches only `Cell.metadata_id` (and `meta_focus`, below), nothing else,
+  and takes a required (not optional) `metadata_id` — there'd be no point
+  calling it to tag with nothing.
 
 - **`find_metadata(layer?, above, col, direction)` — span-to-span
   navigation computed server-side.** `glyphwire-shell` wanted Ctrl+PgUp /
@@ -1513,11 +1513,44 @@ surface.
     across several columns with untagged separator cells between) counts as
     one span rather than several. Untagged cells *between* different ids
     are skipped too.
-  - **"First text character" skips leading non-text cells.** The landing
-    cell is the target span's first cell whose grapheme is more than
-    whitespace, so a leading icon or padding cell tagged with the span's
-    id is stepped past (matching the user's ask). A span with no visible
-    text at all falls back to its first cell.
+  - **"First text character" skips leading non-text cells.** Absent a
+    focus cell (below), the landing cell is the target span's first cell
+    whose grapheme is more than whitespace, so a leading icon or padding
+    cell tagged with the span's id is stepped past (matching the user's
+    ask). A span with no visible text at all falls back to its first
+    cell.
+  - **A span can name its own landing cell: `Cell.meta_focus`.** "First
+    text character" is the right default but the wrong answer for a
+    `gw-ls -l` row, whose single id starts back at the permissions column
+    — Ctrl+PgUp parked the cursor on a `d` or a `-` when what you want is
+    the filename. The fix is one bit per cell saying "this is where the
+    span is entered", checked before the first-text fallback. Both are
+    found in the same forward walk, so a span with no focus cell costs
+    nothing extra.
+
+    Alternatives rejected: a *column* offset stored per metadata id
+    (`glyphwire-ls` creates its ids in a batch before the table is laid
+    out, so it cannot know where the Name column will land — the server
+    does the layout); and a focus hint inside the metadata JSON blob,
+    which would make the server parse client JSON it has deliberately
+    never parsed (see the opaque-JSON decision above).
+
+    Who sets it: `tag_metadata`'s `focus` is the general, per-cell form
+    for a client drawing its own cells. A server-painted table instead
+    declares a `focus` **column** (`TableColumn.focus`), and
+    `Table.writeBodyRow` marks whichever cell that column's text actually
+    started in — the client can't compute that, since column widths, the
+    sort-arrow allowance and per-cell alignment are all server-side.
+    `glyphwire-ls` sets it on its Name column in the `-l` table, and on
+    the name's first cell in the icon grid (where the first-text fallback
+    already landed correctly, but only by the accident of icon cells
+    carrying no grapheme).
+
+    The mark is cleared by every write that sets a cell's `metadata_id` —
+    same "overwrite outright, don't merge" rule the grapheme and style
+    already follow. A repaint must not leave a focus cell pointing at
+    content that is no longer there, and the cost of that rule is only
+    that whoever wants the mark sets it last.
   - **No wrap-around.** `found: false` when there's no further span that
     direction within retained content; the shell then leaves the cursor
     where it is.
@@ -1932,7 +1965,7 @@ surface.
   before `feedKey`; `C` is swallowed by the host, so zoe answers the
   `copy_request` broadcast instead. (Ctrl+Shift+P is only swallowed by
   the host when the frame-timing profiler HUD is enabled, an opt-in
-  `host.conf` setting.) The conventional Ctrl+Shift+V still works via its
+  `host.conf.lua` setting.) The conventional Ctrl+Shift+V still works via its
   `paste` notification.
 - **The selection highlight is a second write over the row, not a colour
   in every run.** `paintSelectionRow` repaints the selected columns with
@@ -2048,7 +2081,7 @@ surface.
   Scope decided when asked: also cover file targets (mimetype-based
   actions like image preview), not just the literal directory complaint,
   since "metadata tagging based on the target" was the broader ask.
-- **The shell resolves activation through a `shell.conf` `open_actions`
+- **The shell resolves activation through a `shell.conf.lua` `open_actions`
   table over built-in defaults.** `shell/openaction.zig` maps a key —
   a mimetype (`image/png`), a mimetype group (`image/*`) or a `kind`
   keyword (`directory`) — to a command template, trying the three key
@@ -2093,7 +2126,7 @@ surface.
   and the copy path not fight over the one `selection` slot — see the
   Selection & clipboard section.
 - **`alias` / `unalias` are builtins.** The `alias` table is seeded at
-  startup from `shell.conf` (see below) and then mutated for the rest of
+  startup from `shell.conf.lua` (see below) and then mutated for the rest of
   the session by the builtins; a binding made or removed with the builtin
   is not written back, so it doesn't survive `exit`. `alias NAME=VALUE`
   uses **rest-of-line value semantics**: everything after the first `=`
@@ -2279,7 +2312,7 @@ surface.
   unit-tested in `tests/shell_envassign_tests.zig`; only the in-place
   `setenv` and the grid writes stay in `shell/main.zig`.
 
-#### Startup config: `~/.config/glyphwire/shell.conf`
+#### Startup config: `~/.config/glyphwire/shell.conf.lua`
 - **The config is a Lua script**, run once at prompt startup. The Lua
   library is vendored in-tree (`libs/ziglua`, Lua 5.3) so
   glyphwire-shell can embed an interpreter without depending on the
@@ -2288,7 +2321,7 @@ surface.
   `$XDG_CONFIG_HOME/glyphwire`, else `$HOME/.config/glyphwire`. A missing
   file is not an error — the shell just starts with nothing configured.
   `$GLYPHWIRE_CONFIG_DIR` is the override the e2e tests use so driving
-  the real shell binary can't read a developer's actual `shell.conf`.
+  the real shell binary can't read a developer's actual `shell.conf.lua`.
 - **The conf declares data, it doesn't touch the live prompt.** Running
   it produces a `config.ShellConfig` struct (`shell/config.zig`); the Lua
   bindings append into that, and `Prompt.loadStartupConfig` folds the
@@ -2307,7 +2340,7 @@ surface.
   the failing line is still applied (Lua stops at the error point).
 
 #### Prompt templating: `prompt{ ... }`
-- **`shell.conf` can define the prompt as a template string** —
+- **`shell.conf.lua` can define the prompt as a template string** —
   `prompt{ left = ..., right = ..., exit = ..., dur = ..., dur_min_ms =
   N }`, one table argument, every key optional, multiple calls merging key
   by key (last write wins). String keys must be strings (a number
@@ -2558,7 +2591,7 @@ surface.
     `shell/main.zig`'s `resolveCmdVar` is the implementation (with the
     cycle/depth guard for a `when` that references its own var); the
     module itself still takes no IO/exec/glyphwire dependency.
-- **Deferred:** a `prompt` *function* form — `shell.conf` sets a Lua
+- **Deferred:** a `prompt` *function* form — `shell.conf.lua` sets a Lua
   callback that receives the same data items and emits its own draw
   commands, for prompt logic a `commands` one-liner can't express.
   Recorded in `docs/ideas.md` / roadmap.md; the string + segment +
@@ -2568,7 +2601,7 @@ surface.
 
 #### Persistent command history: `~/.config/glyphwire/history`
 - **Plain text, one command per line, oldest first** — same directory
-  resolution as `shell.conf`. Loaded into `Prompt.history` at startup so
+  resolution as `shell.conf.lua`. Loaded into `Prompt.history` at startup so
   Up-arrow recall resumes the previous session.
 - **Written after every recorded line, not on exit.** An interactive
   session here is almost always *killed* (the host reaps the process;
@@ -2621,7 +2654,7 @@ surface.
   the margin — until the scrollback is exhausted, when the cursor is let
   the rest of the way to the edge. Down still can't move onto or past the
   prompt row (it ends browsing there).
-- **`scrolloff` is a `shell.conf` `prompt{}` key**, default `8`. It lives
+- **`scrolloff` is a `shell.conf.lua` `prompt{}` key**, default `8`. It lives
   in `prompt{}` because that's the one table binding the shell config
   has; it's clamped at use to half the rows between the top and the
   prompt so there's always room for the cursor to travel.
@@ -2634,9 +2667,9 @@ surface.
 
 #### Persistent Lua scripting: script builtins & the `sh` table
 - **One Lua state for the whole session.** `shell/config.zig`'s `load`
-  still spins up a throwaway interpreter for a one-shot `shell.conf`
+  still spins up a throwaway interpreter for a one-shot `shell.conf.lua`
   parse (that's what the unit tests drive), but the live shell keeps a
-  session-long state in `shell/script_engine.zig` and runs `shell.conf`
+  session-long state in `shell/script_engine.zig` and runs `shell.conf.lua`
   through *that*. So a `function` the conf defines, or a `defcmd(name,
   fn)` it calls, stays callable as a builtin for the rest of the session.
   This was chosen over adding a second config surface or a bespoke
@@ -2794,11 +2827,32 @@ surface.
   fuzzy/subsequence scoring was deliberately skipped as more than the
   feature needs. The current directory is never a result; `$HOME` and `/`
   are never *recorded* (a keystroke away without help); `exclude_dirs`
-  from `zj{}` in `shell.conf` drops a subtree from both. A single
+  from `zj{}` in `shell.conf.lua` drops a subtree from both. A single
   argument that is itself an existing directory falls back to plain `cd`
   (so `zj ../sibling` still works), and bare `zj` goes `$HOME`. A jump
   target that has since vanished is pruned from the database and
   reported. An interactive picker for ambiguous queries is deferred.
+
+#### Config files are named `X.conf.lua`
+- **The extension is the filetype declaration.** Every config glyphwire
+  reads — `host.conf.lua`, `shell.conf.lua`, `ls.conf.lua`,
+  `zoe.conf.lua`, `gmux.conf.lua` — is a Lua script run for a global
+  `config` table, but the old `X.conf` name told no editor that. Every
+  user (and `zoe` itself) had to carry a per-project filetype rule to get
+  highlighting on a file that is plainly Lua. Ending the name in `.lua`
+  makes it work everywhere with no configuration at all, which is the
+  whole point.
+- **A hard cut, no legacy fallback.** Reading `X.conf` when `X.conf.lua`
+  is missing would be one `if` per binary, but it's an `if` that never
+  goes away and a second name every doc has to mention. The project has
+  no external users yet and the migration is `mv`, so the cost of the
+  compatibility path outweighs what it buys. A config that isn't renamed
+  is silently ignored, the same as any missing config: all defaults.
+- **The reference files follow suit, with the qualifier in the middle.**
+  `host/host.conf.template.lua` and `assets/host.conf.example.lua`, not
+  `host.conf.lua.template` — the name still has to end in `.lua` for the
+  highlighting to work on the very files a user reads to learn the
+  format.
 
 #### Persistent state is flushed lazily, not on every change
 - **History and the `zj` database are kept in memory and written on a
@@ -2809,6 +2863,44 @@ surface.
   (`shell/flushgate.zig`) forces a write after 25 un-flushed changes or
   120s, whichever first, bounding what a `SIGKILL`/crash can lose; a
   clean exit and the `shutdown` path both force an unconditional flush.
+- **A flush is a read-modify-write merge, not a snapshot rewrite** — what
+  makes several `gw-shell`s in one `gmux` session share these two files.
+  Each shell loads `history` and `z.db` once at startup and keeps its own
+  in-memory copy; writing that copy back is a lost update, because it
+  still carries the startup snapshot and so silently reverts everything
+  every other shell added since. Whichever shell exited last won, and the
+  others' history and visits were simply gone.
+  - **Each shell tracks its own changes as a delta.** `history_pending`
+    is the lines submitted since the last flush; `zjump.Journal` is the
+    visits and prunes. A flush re-reads the file, applies its delta to
+    *that* (`history.mergeSerialize`, `zjump.Db.applyJournal`), writes the
+    result, and only then clears the delta — so a failed write keeps its
+    changes for the next attempt.
+  - **`z.db` visits add rather than overwrite.** Two shells that each
+    visited a directory twice leave it at +4, and `last` takes whichever
+    timestamp is newer. A prune (the directory turned out not to exist)
+    removes the entry outright and wins over a visit in the same journal,
+    since a missing directory is missing for every shell.
+  - **History interleaves by flush, not by timestamp.** The file format
+    carries no times, so a session's lines land as a contiguous block
+    wherever it happens to flush — two shells' commands end up grouped
+    rather than strictly chronological. That's the right trade for recall
+    (a shell's own recent lines stay together) and the only option the
+    format allows. The `ignoredups` rule is applied across the join, so a
+    line already at the end of the file isn't duplicated by a session that
+    also ran it.
+  - **A shell does *not* pick up other shells' entries mid-session.** Its
+    in-memory list stays the startup snapshot, so Up-arrow recall and `zj`
+    ranking don't shift under the user while they type. The bug being
+    fixed is one shell *destroying* another's state, not one shell failing
+    to see it live; refreshing in place would also disturb the browse
+    cursor and `zj`'s borrowed path slices for no asked-for gain.
+  - **No file locking.** The merge window is a read and a write of a small
+    file, and both files tolerate a torn read: `history.parse` skips blank
+    lines and `zjump.Db.parse` skips malformed ones, so a half-written
+    file costs at worst a few entries rather than corrupting the merge.
+    Lock files would add a failure mode (a stale lock from a `SIGKILL`ed
+    shell) worse than the one they'd close.
 - **The host tells clients it's closing (`shutdown` notification) instead
   of just dropping the socket.** On window close `host/main.zig` — after
   the render loop has ended but while the `serveForever` thread is still
@@ -2963,7 +3055,7 @@ surface.
 
 ### Profiler
 - **The profiler is a first-class runtime toggle, not a build flag.**
-  `host.conf`'s `profile` enables a small frame-timing subsystem
+  `host.conf.lua`'s `profile` enables a small frame-timing subsystem
   (`src/profiler.zig`, generic over a caller-supplied span/counter enum;
   `host/profiler.zig` instantiates it for the host loop). Every
   measurement call is written as an unconditional early-return guarded by
@@ -3012,7 +3104,7 @@ surface.
   report. It is off by default and drawn after any `--screenshot`
   capture so it never lands in a scripted screenshot.
 - **A separate "forced redraw" toggle restores the pre-optimisation
-  loop.** Ctrl+Shift+R (or `host.conf`'s `profile_force_redraw`) makes
+  loop.** Ctrl+Shift+R (or `host.conf.lua`'s `profile_force_redraw`) makes
   `needsRedraw` always true *and* `idleTimeoutMs` return 0, so the loop
   runs at the display's frame rate the way it did before
   redraw-on-demand -- for measuring steady-state `draw` / `present` /
@@ -3566,7 +3658,7 @@ indentation, text objects, incremental selection) are *more query files*
 against the same tree, not a new mechanism. A generic native-plugin
 event/callback ABI was explicitly deferred: it means a frozen C ABI,
 versioning, and a plugin crash taking down the editor, and zoe already
-embeds Lua (`ls.conf`/`shell.conf`) if scripted extension is wanted
+embeds Lua (`ls.conf.lua`/`shell.conf.lua`) if scripted extension is wanted
 later. See roadmap.md for the module breakdown.
 
 **Native `.so` grammars, not WASM, for v1.** WASM grammars are one
@@ -3607,9 +3699,9 @@ each reparse rather than kept incremental — they are small. Deliberately
 skipped for now: `injection.combined` (every content region of a language
 is parsed on its own) and `locals.scm`.
 
-**Config is Lua, like the other clients.** `~/.config/glyphwire/zoe.conf`
+**Config is Lua, like the other clients.** `~/.config/glyphwire/zoe.conf.lua`
 assigns a `config` table (`theme`, `languages`, `grammar_dirs`,
-`injections`), matching `ls.conf` / `host.conf`, rather than a separate
+`injections`), matching `ls.conf.lua` / `host.conf.lua`, rather than a separate
 declarative manifest format. Absent file = seven bundled grammars (zig,
 json, c, python, toml, markdown block + `markdown_inline`), a built-in
 dark theme, and injection on. `config.injections = false` is the escape
@@ -3625,7 +3717,7 @@ rather than mis-highlighting (every identifier painted as a constant).
 
 **On by default, but a setting rather than a hardcode.** The buffer pane
 now reserves a left gutter for line numbers. It is on out of the box (the
-common expectation for an editor) but `zoe.conf`'s `config.line_numbers`
+common expectation for an editor) but `zoe.conf.lua`'s `config.line_numbers`
 turns it off (`false`) or picks the style (`"absolute"` / `"relative"`),
 and `:set lineno=off|absolute|relative` flips it live. `"relative"` is
 vim's hybrid: the caret's own line shows its absolute number, every other
@@ -4064,11 +4156,11 @@ things are `{remote_dest}` (the destination as typed, from
 `GLYPHWIRE_REMOTE`) and `{remote}`, a conditional sub-template in the
 shape `{exit}` and `{dur}` already established, so a whole powerline
 segment can appear only when remote. The same three are readable from Lua
-as `sh.user` / `sh.host` / `sh.remote`, set before `shell.conf` runs;
+as `sh.user` / `sh.host` / `sh.remote`, set before `shell.conf.lua` runs;
 `sh.remote` is nil rather than `""` locally so it reads as a plain truth
 test.
 
 **Deferred:** reconnect after a dropped trunk, a remote session surviving
-its pane, and `host.conf` named remotes (`gwssh work` rather than the
+its pane, and `host.conf.lua` named remotes (`gwssh work` rather than the
 full destination) — all of which want the same thing first, which is a
 session that outlives the process that asked for it.

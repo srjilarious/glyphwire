@@ -46,7 +46,7 @@ pub const Mode = enum { normal, insert, command, visual, visual_line };
 /// only carries the setting so `:set lineno=…` can change it at runtime.
 /// `off` hides the gutter, `absolute` numbers every line from 1,
 /// `relative` shows each line's distance from the caret with the caret's
-/// own line still absolute. Defaults to `absolute`; `zoe.conf`'s
+/// own line still absolute. Defaults to `absolute`; `zoe.conf.lua`'s
 /// `line_numbers` overrides it after `init`, the way `page_lines` does.
 pub const LineNumbers = enum { off, absolute, relative };
 
@@ -141,12 +141,12 @@ pub const Editor = struct {
     /// Lines a PageDown / PageUp (or Ctrl-D / Ctrl-U) moves the cursor.
     /// vim scrolls close to a full screen, but the editor core has no
     /// viewport to measure, so this is a fixed count -- overridable from
-    /// `zoe.conf`'s `page_lines`, which the host writes here after
+    /// `zoe.conf.lua`'s `page_lines`, which the host writes here after
     /// `init`.
     page_lines: usize = 10,
 
     /// The buffer-pane line-number gutter -- see `LineNumbers`. Set from
-    /// `zoe.conf`'s `line_numbers` after `init`, changed live by
+    /// `zoe.conf.lua`'s `line_numbers` after `init`, changed live by
     /// `:set lineno=…`.
     line_numbers: LineNumbers = .absolute,
 

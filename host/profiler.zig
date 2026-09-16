@@ -50,14 +50,14 @@ pub const Profiler = glyphwire.Profiler(Span, Counter);
 pub const HostProfiler = struct {
     core: Profiler,
     /// Whether the on-screen overlay is currently painted. Only ever true
-    /// when `core.enabled`; `host.conf`'s `profile_hud` seeds it and
+    /// when `core.enabled`; `host.conf.lua`'s `profile_hud` seeds it and
     /// Ctrl+Shift+P flips it.
     hud_visible: bool = false,
     /// When set, `App.needsRedraw` always returns true and
     /// `App.idleTimeoutMs` stops blocking, so the host repaints every
     /// frame the way it did before redraw-on-demand -- for measuring
     /// draw cost continuously and A/B-ing it against the idle path. Only
-    /// ever true when `core.enabled`; `host.conf`'s `profile_force_redraw`
+    /// ever true when `core.enabled`; `host.conf.lua`'s `profile_force_redraw`
     /// seeds it and Ctrl+Shift+R flips it.
     force_redraw: bool = false,
 

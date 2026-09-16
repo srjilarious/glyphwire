@@ -67,8 +67,8 @@ pub fn main(init: std.process.Init) !void {
         .opts = &.{
             .{ .longName = "hidden", .shortName = "a", .description = "Show hidden files and directories", .maxNumParams = 0 },
             .{ .longName = "long", .shortName = "l", .description = "Long listing: adds permission bits, size, owner:group, and modified time", .maxNumParams = 0 },
-            .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger icons (ls.conf large_icon_px, 32 by default; taller rows in a long listing to fit). Wins over -S if both are given", .maxNumParams = 0 },
-            .{ .longName = "small", .shortName = "S", .description = "Small format: smaller icons (ls.conf small_icon_px, 16 by default) in both the normal and long (-l) listing", .maxNumParams = 0 },
+            .{ .longName = "large", .shortName = "L", .description = "Large format (the default): bigger icons (ls.conf.lua large_icon_px, 32 by default; taller rows in a long listing to fit). Wins over -S if both are given", .maxNumParams = 0 },
+            .{ .longName = "small", .shortName = "S", .description = "Small format: smaller icons (ls.conf.lua small_icon_px, 16 by default) in both the normal and long (-l) listing", .maxNumParams = 0 },
             .{ .longName = "human", .shortName = "h", .description = "Human-readable sizes (KB/MB/GB) -- the default; the explicit opposite of --bytes", .maxNumParams = 0 },
             .{ .longName = "bytes", .description = "Show sizes as a raw byte count instead of KB/MB/GB (wins unless -h is also given)", .maxNumParams = 0 },
             .{ .longName = "help", .description = "Print help" },
@@ -110,9 +110,10 @@ pub fn main(init: std.process.Init) !void {
     if (glyphwire.Client.connectFromEnv(io, alloc, init.environ_map)) |connected| {
         var client = connected;
         defer client.deinit();
-        // Icon sizes from `~/.config/glyphwire/ls.conf` (see `ls/config.zig`),
-        // or the built-in 32 / 16px defaults if there's no file. Read once
-        // here and passed to `writeGrid` / `writeLongTable`.
+        // Icon sizes from `~/.config/glyphwire/ls.conf.lua` (see
+        // `ls/config.zig`), or the built-in 32 / 16px defaults if there's
+        // no file. Read once here and passed to `writeGrid` /
+        // `writeLongTable`.
         const cfg = cfg: {
             const dir = glyphwire.configDirPath(alloc, init.environ_map) catch break :cfg lsconfig.LsConfig{};
             defer alloc.free(dir);
@@ -852,7 +853,7 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 ///
 /// The icon renders `.natural` (aspect-preserving, shrink-only) capped to
 /// `max_icon_h` pixels tall -- `cfg.small_icon_px` (default 16) or, with
-/// `-L`, `cfg.large_icon_px` (default 32), both from `ls.conf`. The block
+/// `-L`, `cfg.large_icon_px` (default 32), both from `ls.conf.lua`. The block
 /// height (`Grid.block_rows`) is `ceil(max_icon_h / cell_h)`, floored at 1
 /// (small) or 2 (large, so a blank row sits between bands and one band's
 /// icon doesn't overlap the next's text) and capped at 6. `h_align =
@@ -895,7 +896,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
 
     // The icon renders `.natural` (aspect-preserving, shrink-only) capped
     // to `max_icon_h` pixels tall -- `cfg.large_icon_px` / `small_icon_px`
-    // from `ls.conf` (32 / 16 by default). `block_rows` is how many
+    // from `ls.conf.lua` (32 / 16 by default). `block_rows` is how many
     // physical rows one band spans, derived from that height and the cell
     // size so the icon has room without a fixed 2-vs-1 assumption;
     // `icon_col_width` reserves the leading columns before the name and
@@ -1007,7 +1008,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
                 // the icon actually renders, not just its leftmost cell.
                 var icon_col: usize = 1;
                 while (icon_col < icon_cols_spanned) : (icon_col += 1) {
-                    try draw_batch.tagMetadata(null, draw_row, base_col + icon_col, metadata_id);
+                    try draw_batch.tagMetadata(null, draw_row, base_col + icon_col, metadata_id, false);
                 }
             } else {
                 try draw_batch.drawIconStyled(draw_row, base_col, iconForEntry(entry), .{ .metadata_id = metadata_id });
@@ -1037,6 +1038,13 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
                 else => file_color,
             };
             try draw_batch.writeTextTagged(name_text, name_fg, null, metadata_id);
+            // Mark the name's first cell as the entry's focus cell, the
+            // same landing point the `-l` table gets from its `focus`
+            // Name column. The icon cells ahead of it are blank, so
+            // `find_metadata`'s first-visible-character fallback already
+            // lands here -- but that's an accident of the icon carrying
+            // no grapheme, and this says it outright.
+            try draw_batch.tagMetadata(null, draw_row, base_col + icon_col_width, metadata_id, true);
         }
 
         // Advance past this band. `block_rows` is 2 in large mode: the
@@ -1053,8 +1061,8 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
 
 /// Body row height, in cells, for `writeLongTable`'s `large` mode when the
 /// session's cell size is unknown -- normally it's computed from
-/// `ls.conf`'s `large_icon_px` and the real cell height (`largeTableRowHeight`),
-/// so a `large_icon_px`-tall icon has room. Same "give a `.natural`-scaled
+/// `ls.conf.lua`'s `large_icon_px` and the real cell height
+/// (`largeTableRowHeight`), so a `large_icon_px`-tall icon has room. Same "give a `.natural`-scaled
 /// icon room to read as a picture" idea `writeGrid`'s `max_icon_h` gives
 /// its icons, as a real fixed-height table row.
 const large_table_row_height_fallback = 3;
@@ -1226,7 +1234,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
 
     // The stretched Name column reserves leading columns in its cell for a
     // `.natural`-scaled row icon. The icon renders at `large_icon_px` /
-    // `small_icon_px` (from `ls.conf`, passed to the table as
+    // `small_icon_px` (from `ls.conf.lua`, passed to the table as
     // `style.max_icon_px`), so the reserve is that many cells wide plus a
     // gap. `row_height` follows `large_icon_px` in large mode
     // (`largeTableRowHeight`), stays 1 otherwise. Without cell metrics the
@@ -1266,7 +1274,10 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         .{ .name = "User", .width = user_width, .sortable = true },
         .{ .name = "Group", .width = group_width, .sortable = true },
         .{ .name = "Time", .width = time_width, .kind = .number, .sortable = true },
-        .{ .name = "Name", .width = name_width, .sortable = true, .case_insensitive = true },
+        // `focus`: every cell in a row shares one metadata id, so without
+        // it Ctrl+PgUp would stop on the permissions column at the far
+        // left. The filename is what you actually want the cursor on.
+        .{ .name = "Name", .width = name_width, .sortable = true, .case_insensitive = true, .focus = true },
     }, .{
         .borders = false,
         .alt_row_bg = rgb(30, 30, 30),

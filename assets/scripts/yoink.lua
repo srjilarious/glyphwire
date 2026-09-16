@@ -4,7 +4,7 @@
 --
 -- Install as ~/.config/glyphwire/scripts/yoink.lua
 --
--- Set the remote in your shell.conf (or environment):
+-- Set the remote in your shell.conf.lua (or environment):
 --   sh.setenv("GW_DROPBOX", "myhost:dropbox/")
 -- Each argument is appended to it, so `yoink notes.txt` fetches
 -- myhost:dropbox/notes.txt.

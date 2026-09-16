@@ -16,7 +16,7 @@ const CursorShape = config.CursorShape;
 pub const Caret = struct {
     app: *App,
 
-    /// Caret appearance from `host.conf` (see `config.CursorConfig`).
+    /// Caret appearance from `host.conf.lua` (see `config.CursorConfig`).
     shape: CursorShape,
     blink: bool,
     blink_ms: f64,

@@ -8,7 +8,7 @@ const glyphwire = @import("glyphwire");
 // times the measured cell pixel size. After that the window is
 // user-resizable and `grid_cols`/`grid_rows` track its live size (see
 // `window_sizing.WindowSizing.syncWindowSize`) -- `var`, not `const`, for
-// that reason. `host.conf`'s `grid_cols` / `grid_rows` (and `--grid-cols` /
+// that reason. `host.conf.lua`'s `grid_cols` / `grid_rows` (and `--grid-cols` /
 // `--grid-rows`, which win over the file) override the initial size at
 // startup; see `config_load.loadConfig` and `main`.
 pub const initial_grid_cols = 120;

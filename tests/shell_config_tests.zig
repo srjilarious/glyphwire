@@ -7,7 +7,7 @@ const testz = @import("testz");
 // glyphwire-shell is an executable, so its Lua config loader lives in the
 // `shell_support` module (see build.zig) to be reachable here. Unlike the
 // other shell_support helpers this one embeds a real Lua 5.3 state, so
-// these tests run actual `shell.conf` snippets and assert what ends up in
+// these tests run actual `shell.conf.lua` snippets and assert what ends up in
 // the parsed `ShellConfig`.
 const config = @import("shell_support").config;
 

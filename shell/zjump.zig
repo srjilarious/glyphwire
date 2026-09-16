@@ -25,6 +25,13 @@
 //! by `aging_factor` and anything left below `drop_below` is removed. A
 //! long-lived database stays small and keeps reflecting recent habits.
 //!
+//! ## Concurrent shells
+//!
+//! Several `gw-shell`s in one `gmux` session share one `z.db`. Each keeps
+//! its own in-memory `Db` (loaded once at startup) but writes through a
+//! `Journal` of deltas, so a flush re-reads the file and adds to it
+//! instead of overwriting it with a stale snapshot. See `Journal`.
+//!
 //! ## Matching
 //!
 //! `zj a b c` matches an entry when every term is a case-insensitive
@@ -145,6 +152,33 @@ pub const Db = struct {
         }
     }
 
+    /// Replays `journal` -- this session's un-flushed changes -- onto a
+    /// database freshly parsed from the file, then ages the result. The
+    /// merge side of the multi-shell story: see `Journal`.
+    ///
+    /// A visit *adds* its count to whatever rank the file already carries
+    /// rather than overwriting it, so two shells that each visited a
+    /// directory twice leave it at +4, not +2; `last` takes whichever
+    /// timestamp is newer. A forget removes the entry outright -- it means
+    /// the directory is gone from disk, which is true for every shell, so
+    /// it wins over another session's stale rank.
+    pub fn applyJournal(self: *Db, journal: *const Journal) !void {
+        for (journal.entries.items) |v| {
+            if (v.forgotten) {
+                self.remove(v.path);
+                continue;
+            }
+            if (self.find(v.path)) |e| {
+                e.rank += v.count;
+                if (v.last > e.last) e.last = v.last;
+            } else {
+                const owned = try self.strings.allocator().dupe(u8, v.path);
+                try self.entries.append(self.alloc, .{ .path = owned, .rank = v.count, .last = v.last });
+            }
+        }
+        self.age();
+    }
+
     /// Scale every rank down and evict the faint ones, but only once the
     /// database as a whole has grown past `max_total_rank`.
     fn age(self: *Db) void {
@@ -206,6 +240,91 @@ pub const Db = struct {
             try out.append(alloc, '\n');
         }
         return out.toOwnedSlice(alloc);
+    }
+};
+
+/// One path's un-flushed change, as replayed by `Db.applyJournal`.
+pub const Visit = struct {
+    /// Absolute, canonical path. Owned by the `Journal`'s arena.
+    path: []const u8,
+    /// Visits recorded for `path` since the last flush -- *added* to the
+    /// file's rank rather than replacing it, so concurrent shells sum.
+    count: f64 = 0,
+    /// Newest visit this session saw, unix seconds. Merged with `max`.
+    last: i64 = 0,
+    /// The path turned out not to exist any more (`zj` pruned it). Wins
+    /// over `count`: the directory is gone for every shell, so it should
+    /// leave the file even if this session also visited it earlier.
+    forgotten: bool = false,
+};
+
+/// This session's changes to the directory database since its last
+/// flush, as *deltas* rather than a whole-database snapshot.
+///
+/// A snapshot is what the old flush wrote, and with several shells in one
+/// `gmux` session that is a lost-update bug: each shell loads the file at
+/// startup, adds its own visits, and writes the whole thing back, so
+/// whichever exits last silently reverts every other shell's visits.
+/// Recording deltas instead means a flush re-reads the file and *adds* to
+/// it (`Db.applyJournal`), which composes no matter how the writes
+/// interleave.
+///
+/// Pure, like the rest of this module -- `shell/main.zig` owns the file
+/// IO and calls `clear` once a flush has actually landed.
+pub const Journal = struct {
+    alloc: std.mem.Allocator,
+    /// Path bytes, same arena treatment `Db` gives its own: only ever
+    /// added, then dropped wholesale by `clear`.
+    strings: std.heap.ArenaAllocator,
+    entries: std.ArrayList(Visit) = .empty,
+
+    pub fn init(alloc: std.mem.Allocator) Journal {
+        return .{ .alloc = alloc, .strings = std.heap.ArenaAllocator.init(alloc) };
+    }
+
+    pub fn deinit(self: *Journal) void {
+        self.entries.deinit(self.alloc);
+        self.strings.deinit();
+    }
+
+    pub fn isEmpty(self: *const Journal) bool {
+        return self.entries.items.len == 0;
+    }
+
+    /// Note a visit to `path` at `now`. Refuses a path with a control
+    /// byte in it, same as `Db.record` -- it could not survive a
+    /// round-trip through the file.
+    pub fn recordVisit(self: *Journal, path: []const u8, now: i64) !void {
+        if (hasControlByte(path)) return;
+        const e = try self.entry(path);
+        e.count += 1;
+        if (now > e.last) e.last = now;
+        // A directory visited again is plainly there after all.
+        e.forgotten = false;
+    }
+
+    /// Note that `path` should be dropped from the database.
+    pub fn recordForget(self: *Journal, path: []const u8) !void {
+        if (hasControlByte(path)) return;
+        const e = try self.entry(path);
+        e.forgotten = true;
+        e.count = 0;
+    }
+
+    /// Drops every recorded change. Called after a flush has written the
+    /// merged file -- the deltas are in it now.
+    pub fn clear(self: *Journal) void {
+        self.entries.clearRetainingCapacity();
+        _ = self.strings.reset(.retain_capacity);
+    }
+
+    fn entry(self: *Journal, path: []const u8) !*Visit {
+        for (self.entries.items) |*e| {
+            if (std.mem.eql(u8, e.path, path)) return e;
+        }
+        const owned = try self.strings.allocator().dupe(u8, path);
+        try self.entries.append(self.alloc, .{ .path = owned });
+        return &self.entries.items[self.entries.items.len - 1];
     }
 };
 

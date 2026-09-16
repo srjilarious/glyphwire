@@ -1,11 +1,11 @@
 -- glyphwire configuration template.
 --
--- This is the full reference for `host.conf`, the file glyphwire runs
+-- This is the full reference for `host.conf.lua`, the file glyphwire runs
 -- once at startup (see host/main.zig `loadConfig`). Copy it to one of:
 --
---   $GLYPHWIRE_CONFIG_DIR/host.conf
---   $XDG_CONFIG_HOME/glyphwire/host.conf
---   ~/.config/glyphwire/host.conf                  (the usual location)
+--   $GLYPHWIRE_CONFIG_DIR/host.conf.lua
+--   $XDG_CONFIG_HOME/glyphwire/host.conf.lua
+--   ~/.config/glyphwire/host.conf.lua                  (the usual location)
 --
 -- Every option is listed below at its built-in default, with every line
 -- commented out -- so copying this file verbatim changes nothing.

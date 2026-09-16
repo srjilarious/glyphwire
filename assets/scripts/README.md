@@ -11,15 +11,15 @@ cp *.lua ~/.config/glyphwire/scripts/
 |---|---|
 | `up.lua` | `up [N]` -- `cd` this shell N directories toward the root (default 1). |
 | `venv_activate.lua` / `venv_deactivate.lua` | activate / deactivate a Python virtualenv for the session (see below). |
-| `drop.lua` / `yoink.lua` | `rsync` files to / from a "dropbox" directory on a remote host. Set the target with `sh.setenv("GW_DROPBOX", "myhost:dropbox/")` in `shell.conf`. |
+| `drop.lua` / `yoink.lua` | `rsync` files to / from a "dropbox" directory on a remote host. Set the target with `sh.setenv("GW_DROPBOX", "myhost:dropbox/")` in `shell.conf.lua`. |
 | `provision_remote.lua` | `provision_remote <user@host> [ssh options...]` -- build and copy the remote-side glyphwire programs to a real server for `glyphwire --ssh` (see below). |
 
 ## How script builtins work
 
-glyphwire-shell keeps one Lua state for the whole session. `shell.conf`
+glyphwire-shell keeps one Lua state for the whole session. `shell.conf.lua`
 runs in it, and so does every *script builtin*. A builtin is:
 
-- a `defcmd(name, fn)` registration in `shell.conf`, or
+- a `defcmd(name, fn)` registration in `shell.conf.lua`, or
 - a file `~/.config/glyphwire/scripts/<name>.lua`, looked up by basename
   and re-read on every call (so editing it takes effect immediately).
 
@@ -109,7 +109,7 @@ you'd notice interactively. Know your fleet is uniform, recent hardware?
 `GW_PROVISION_CPU=native provision_remote ...` (or a specific `-Dcpu`
 value) skips the safety margin.
 
-It then drops `shell.conf` / `zoe.conf` from this repo's templates onto
+It then drops `shell.conf.lua` / `zoe.conf.lua` from this repo's templates onto
 the remote *only if it doesn't already have one*. Binaries are always
 overwritten; run it again any time you want the remote caught up with a
 local rebuild.

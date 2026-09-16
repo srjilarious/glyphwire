@@ -1,11 +1,11 @@
 -- glyphwire-ls configuration template.
 --
--- This is the full reference for `ls.conf`, the file glyphwire-ls reads
+-- This is the full reference for `ls.conf.lua`, the file glyphwire-ls reads
 -- once at startup (see ls/config.zig `load`). Copy it to one of:
 --
---   $GLYPHWIRE_CONFIG_DIR/ls.conf
---   $XDG_CONFIG_HOME/glyphwire/ls.conf
---   ~/.config/glyphwire/ls.conf                    (the usual location)
+--   $GLYPHWIRE_CONFIG_DIR/ls.conf.lua
+--   $XDG_CONFIG_HOME/glyphwire/ls.conf.lua
+--   ~/.config/glyphwire/ls.conf.lua                    (the usual location)
 --
 -- Every key is listed below at its built-in default, with every line
 -- commented out -- so copying this file verbatim changes nothing.
@@ -17,7 +17,7 @@
 -- stands.
 --
 -- Which file-type icon set is used (Oxygen / Papirus / Material) is a
--- *host* setting, not an ls one -- see `icon_theme` in host.conf.
+-- *host* setting, not an ls one -- see `icon_theme` in host.conf.lua.
 
 -- config = {
 --

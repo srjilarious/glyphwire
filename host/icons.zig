@@ -40,7 +40,7 @@ fn scanIconDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, di
     }) |entry| {
         // The file-type icon *themes* live under `filetype/<theme>/` and
         // are loaded separately, under the canonical `file/` prefix, by
-        // whichever one `host.conf`'s `icon_theme` selects -- so the
+        // whichever one `host.conf.lua`'s `icon_theme` selects -- so the
         // generic walk skips the whole subtree.
         if (prefix.len == 0 and entry.kind == .directory and std.mem.eql(u8, entry.name, "filetype")) continue;
 

@@ -25,7 +25,7 @@ const remotecmd = @import("shell_support").remotecmd;
 const Pty = glyphwire.Pty;
 const ModeTracker = glyphwire.ModeTracker;
 
-/// The left prompt template used when `shell.conf` configured a prompt
+/// The left prompt template used when `shell.conf.lua` configured a prompt
 /// (`prompt.right` and/or the sub-templates) but not `prompt.left`. Byte
 /// for byte the same as the unconfigured default `writeDefaultPrefix`
 /// produces -- an absolute cwd, then `" > "`.
@@ -37,12 +37,12 @@ const err_color = glyphwire.Color{ .r = 255, .g = 85, .b = 85 };
 
 /// Rows of context kept between the browse cursor and the top/bottom of
 /// the window while walking scrollback with the arrow keys, when
-/// `shell.conf`'s `prompt{ scrolloff = N }` isn't set. See
+/// `shell.conf.lua`'s `prompt{ scrolloff = N }` isn't set. See
 /// `Prompt.scrolloffRows`.
 const default_scrolloff: usize = 8;
 
 /// Rows Ctrl+Up / Ctrl+Down jump per press while browsing scrollback,
-/// when `shell.conf`'s `prompt{ scrollback_jump = N }` isn't set. See
+/// when `shell.conf.lua`'s `prompt{ scrollback_jump = N }` isn't set. See
 /// `Prompt.scrollbackJumpRows`.
 const default_scrollback_jump: usize = 5;
 
@@ -302,7 +302,7 @@ fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
     return error.ServerNeverCameUp;
 }
 
-/// Owned path to glyphwire's config directory (holds `shell.conf` and
+/// Owned path to glyphwire's config directory (holds `shell.conf.lua` and
 /// `history`). Shared with glyphwire-host and glyphwire-ls -- see
 /// `glyphwire.configDirPath`.
 const configDirPath = glyphwire.configDirPath;
@@ -491,7 +491,7 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         prompt.initScriptEngine(config_dir) catch |err| {
             std.log.warn("prompt: couldn't start the script engine: {t}", .{err});
         };
-        // Before `shell.conf` runs, so it can branch on `sh.remote`.
+        // Before `shell.conf.lua` runs, so it can branch on `sh.remote`.
         if (prompt.script_engine) |eng| {
             eng.setIdentity(environ_map.get("USER") orelse "", prompt.host, prompt.remoteDest());
         }
@@ -800,9 +800,12 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             // nothing below the input line, so Ctrl+Down does nothing.
             if (prompt.browse_pos != null) try prompt.browseDown(prompt.scrollbackJumpRows());
         } else if (ctrl and std.mem.eql(u8, ev.key, "page_up")) {
-            // Ctrl+PgUp jumps the cursor to the first character of the
-            // previous metadata-id span (a gw-ls entry, say), entering
-            // scrollback browse mode from the live prompt if needed.
+            // Ctrl+PgUp jumps the cursor to the previous metadata-id
+            // span's landing cell (a gw-ls entry, say) -- the span's
+            // focus cell if it named one, which is how a `gw-ls -l` row
+            // lands on the filename rather than the permissions column,
+            // else its first visible character. Enters scrollback browse
+            // mode from the live prompt if needed.
             try prompt.metadataJump(.prev);
         } else if (ctrl and std.mem.eql(u8, ev.key, "page_down")) {
             // The mirror toward the live tail. A no-op at the live prompt
@@ -902,7 +905,7 @@ const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "gwss
 const provisioned_agent_path = "~/.local/share/glyphwire/bin/gw-agent";
 
 /// Alias store backing the prompt's `alias`/`unalias` builtins. Seeded at
-/// startup from `~/.config/glyphwire/shell.conf`'s `alias(name, value)`
+/// startup from `~/.config/glyphwire/shell.conf.lua`'s `alias(name, value)`
 /// calls (see `Prompt.loadStartupConfig`), then mutated for the rest of
 /// the session by the builtins; nothing here is written back to disk, so
 /// a session-only `alias` doesn't survive `exit`. Keys and values are
@@ -1115,7 +1118,7 @@ const Prompt = struct {
     /// `null` `zdb` or when the db is memory-only. Owned; freed in `deinit`.
     zdb_path: ?[]const u8 = null,
     /// Whether `zj` records visits and answers queries at all -- turned
-    /// off by `zj{ enabled = false }` in `shell.conf`. The db is still
+    /// off by `zj{ enabled = false }` in `shell.conf.lua`. The db is still
     /// loaded (so flipping it back on mid-config-reload isn't lossy) but
     /// left untouched.
     zj_enabled: bool = true,
@@ -1125,12 +1128,25 @@ const Prompt = struct {
     /// freed in `deinit`.
     zj_excludes: [][]const u8 = &.{},
 
-    /// Set when `self.history` has changed since it was last written to
-    /// disk. History is now kept in memory and flushed lazily (see
-    /// `persist_gate` / `flushPersistentState`) rather than rewritten on
-    /// every submitted line.
+    /// Lines submitted since the last flush, oldest first -- the *delta*
+    /// the next flush appends to whatever the history file holds by then
+    /// (`history.mergeSerialize`). Not a second copy of `self.history`:
+    /// writing that whole list back is what let one shell revert another
+    /// shell's lines, since it still carries the snapshot this session
+    /// loaded at startup. Owned; each entry and the list are freed in
+    /// `deinit`, and the list is emptied by every successful flush.
+    history_pending: std.ArrayList([]const u8) = .empty,
+    /// The `z.db` counterpart of `history_pending`: this session's visits
+    /// and prunes as deltas, replayed onto the re-read file at flush time.
+    /// See `zjump.Journal`. `null` alongside a `null` `zdb`.
+    zdb_journal: ?zjump.Journal = null,
+
+    /// Set when `history_pending` has anything in it. History is kept in
+    /// memory and flushed lazily (see `persist_gate` /
+    /// `flushPersistentState`) rather than rewritten on every submitted
+    /// line.
     history_dirty: bool = false,
-    /// Set when `self.zdb` has changed since it was last written.
+    /// Set when `zdb_journal` has anything in it.
     zdb_dirty: bool = false,
     /// Decides when the two lazily-flushed files (history, `z.db`) get
     /// written: after enough changes, or enough elapsed time, whichever
@@ -1138,13 +1154,13 @@ const Prompt = struct {
     /// the host's `shutdown` notification. See `flushgate.zig`.
     persist_gate: flushgate.FlushGate = .{},
 
-    /// The persistent Lua interpreter -- runs `shell.conf` and every
+    /// The persistent Lua interpreter -- runs `shell.conf.lua` and every
     /// script builtin (`~/.config/glyphwire/scripts/*.lua`, `defcmd`).
     /// `null` when the shell has no config directory. Heap-allocated and
     /// owned; `deinit` tears it down.
     script_engine: ?*script_engine.ScriptEngine = null,
 
-    /// The parsed `shell.conf`, kept alive for the whole session so the
+    /// The parsed `shell.conf.lua`, kept alive for the whole session so the
     /// prompt can read `.prompt` live on every redraw (see `promptCfg` /
     /// `writePromptPrefix`). `null` when there was no config file or no
     /// config directory. Borrowed from `script_engine.?.cfg` -- the
@@ -1234,6 +1250,8 @@ const Prompt = struct {
         self.flushPersistentState(.due);
         for (self.history.items) |line| alloc.free(line);
         self.history.deinit(alloc);
+        self.clearHistoryPending();
+        self.history_pending.deinit(alloc);
         self.scratch.deinit(alloc);
         self.buffer.deinit(alloc);
         self.completion_hint.deinit(alloc);
@@ -1242,6 +1260,7 @@ const Prompt = struct {
         self.marks.deinit(alloc);
         if (self.history_path) |p| alloc.free(p);
         if (self.zdb) |*db| db.deinit();
+        if (self.zdb_journal) |*j| j.deinit();
         if (self.zdb_path) |p| alloc.free(p);
         if (self.zj_excludes.len > 0) {
             for (self.zj_excludes) |s| alloc.free(s);
@@ -1266,7 +1285,7 @@ const Prompt = struct {
         self.cmd_var_depth = 0;
     }
 
-    /// The parsed prompt config, or `null` when there's no `shell.conf`.
+    /// The parsed prompt config, or `null` when there's no `shell.conf.lua`.
     fn promptCfg(self: *Prompt) ?*const config.PromptConfig {
         if (self.prompt_config) |pcfg| return &pcfg.prompt;
         return null;
@@ -1372,7 +1391,7 @@ const Prompt = struct {
     /// exit status, time, ...) so a `cd` or a failed command shows on the
     /// very next prompt.
     ///
-    /// Three shapes, by `shell.conf`:
+    /// Three shapes, by `shell.conf.lua`:
     ///   - nothing configured -> `writeDefaultPrefix` (`<cwd> > `)
     ///   - `prompt.left` / `prompt.right` strings -> `writeTemplatedPrefix`
     ///   - `prompt.left_segments` / `right_segments` -> `writePowerlinePrefix`
@@ -2497,8 +2516,12 @@ const Prompt = struct {
     }
 
     /// Ctrl+PgUp (`dir == .prev`) / Ctrl+PgDn (`dir == .next`): move the
-    /// cursor to the first character of the metadata-id span before / after
-    /// the one it's currently on -- a gw-ls entry, typically. From the live
+    /// cursor to the landing cell of the metadata-id span before / after
+    /// the one it's currently on -- a gw-ls entry, typically. That's the
+    /// span's *focus* cell when it declared one (see `core.Cell.meta_focus`
+    /// -- a `gw-ls -l` row marks its Name column, so the cursor arrives on
+    /// the filename, not the permissions the row's span starts at), else
+    /// its first visible character. From the live
     /// prompt, `.prev` breaks into scrollback browse mode (like Ctrl+Up);
     /// `.next` there is a no-op, since nothing tagged sits below the input
     /// line.
@@ -2586,7 +2609,7 @@ const Prompt = struct {
     }
 
     /// Resolves the `open_actions` command for one entry and runs it as if
-    /// typed. The user's `shell.conf` table is checked first, then the
+    /// typed. The user's `shell.conf.lua` table is checked first, then the
     /// built-in defaults (`cd` into a directory, `gw-view` an
     /// image) -- see `shell/openaction.zig`. A no-op when nothing matches,
     /// per the "don't guess" policy: an unrecognized file type does
@@ -2847,6 +2870,11 @@ const Prompt = struct {
                 null;
             if (history.shouldRecord(prev, self.buffer.items)) {
                 try self.history.append(alloc, try alloc.dupe(u8, self.buffer.items));
+                // The same line again in `history_pending`, which is what
+                // the next flush actually appends to the file -- see that
+                // field's doc comment on why the flush can't just write
+                // `self.history` back.
+                try self.history_pending.append(alloc, try alloc.dupe(u8, self.buffer.items));
                 self.history_dirty = true;
                 self.persist_gate.note();
             }
@@ -2854,7 +2882,7 @@ const Prompt = struct {
         self.history_index = null;
 
         // Cleared here (not just after) so a `sh.chdir` run from
-        // `shell.conf` at startup can't leave a stale listing queued for
+        // `shell.conf.lua` at startup can't leave a stale listing queued for
         // the first real prompt.
         self.chdir_pending_list = null;
 
@@ -3982,7 +4010,11 @@ const Prompt = struct {
         if (std.mem.eql(u8, cwd, "/")) return;
         if (zjump.isExcluded(cwd, self.zj_excludes)) return;
 
-        self.zdb.?.record(cwd, self.nowSecs()) catch return;
+        const now = self.nowSecs();
+        self.zdb.?.record(cwd, now) catch return;
+        // Also as a delta, for the flush to replay onto the re-read file
+        // -- see `zdb_journal`.
+        if (self.zdb_journal) |*j| j.recordVisit(cwd, now) catch return;
         self.zdb_dirty = true;
         self.persist_gate.note();
     }
@@ -4197,6 +4229,7 @@ const Prompt = struct {
 
         self.chdir(target) catch |err| {
             self.zdb.?.remove(target);
+            if (self.zdb_journal) |*j| j.recordForget(target) catch {};
             self.zdb_dirty = true;
             try self.reportZjError(target, err);
         };
@@ -4499,7 +4532,7 @@ const Prompt = struct {
         };
     }
 
-    /// Reads `shell.conf` and runs it through the persistent
+    /// Reads `shell.conf.lua` and runs it through the persistent
     /// `script_engine` (so a `function` it defines survives as a
     /// builtin). Its `alias` declarations are replayed into the live
     /// alias table; a syntax/runtime error is shown in red with whatever
@@ -4510,14 +4543,14 @@ const Prompt = struct {
 
         const eng = self.script_engine orelse return;
 
-        const path = try std.fs.path.join(alloc, &.{ config_dir, "shell.conf" });
+        const path = try std.fs.path.join(alloc, &.{ config_dir, "shell.conf.lua" });
         defer alloc.free(path);
 
         const source = std.Io.Dir.cwd().readFileAllocOptions(io, path, alloc, .limited(1 << 20), .of(u8), 0) catch |err| switch (err) {
             error.FileNotFound => return,
             error.OutOfMemory => return error.OutOfMemory,
             else => {
-                std.log.warn("shell.conf: could not read {s}: {t}", .{ path, err });
+                std.log.warn("shell.conf.lua: could not read {s}: {t}", .{ path, err });
                 return;
             },
         };
@@ -4531,7 +4564,7 @@ const Prompt = struct {
 
         if (eng.conf_err) |msg| {
             var buf: [512]u8 = undefined;
-            const line = std.fmt.bufPrint(&buf, "shell.conf: {s}\n", .{msg}) catch "shell.conf: error\n";
+            const line = std.fmt.bufPrint(&buf, "shell.conf.lua: {s}\n", .{msg}) catch "shell.conf.lua: error\n";
             try self.client.writeText(line, .{ .r = 255, .g = 85, .b = 85 }, null);
         }
 
@@ -4567,6 +4600,12 @@ const Prompt = struct {
     /// dropped) so it stays bounded. Creates the config directory if it's
     /// missing. Any IO failure just leaves `history_path` null -- the
     /// session runs with in-memory-only history rather than failing.
+    ///
+    /// `self.history` is a startup *snapshot*: lines another shell adds to
+    /// the file afterwards don't appear in this session's recall. That's
+    /// deliberate -- what must not happen is this session writing its
+    /// snapshot back over them, which is why flushes append
+    /// `history_pending` to a re-read file instead (`writeHistoryFile`).
     ///
     /// Setting `$GLYPHWIRE_NO_HISTORY` (to any non-empty value) skips all
     /// of this: no file is read or written and `history_path` stays null,
@@ -4624,6 +4663,8 @@ const Prompt = struct {
 
         if (self.environ_map.get("GLYPHWIRE_NO_HISTORY")) |v| {
             if (v.len > 0) {
+                // Memory-only: no journal either, since nothing will ever
+                // replay it onto a file.
                 self.zdb = zjump.Db.init(alloc);
                 return;
             }
@@ -4647,40 +4688,94 @@ const Prompt = struct {
 
         self.zdb = db;
         self.zdb_path = path;
+        self.zdb_journal = zjump.Journal.init(alloc);
     }
 
-    /// Rewrites the whole history file from `self.history` (trimmed to
-    /// the last `history.max_entries`). History is kept in memory and
-    /// this is called lazily -- see `flushPersistentState` /
-    /// `persist_gate` -- plus unconditionally on a clean exit and the
-    /// host `shutdown`. A no-op when there's no `history_path`; an IO
-    /// failure is logged, not propagated.
+    /// Re-reads the history file and writes it back with
+    /// `history_pending` -- this session's lines since the last flush --
+    /// appended, trimmed to the last `history.max_entries`. History is
+    /// kept in memory and this is called lazily (see
+    /// `flushPersistentState` / `persist_gate`), plus unconditionally on
+    /// a clean exit and the host `shutdown`. A no-op when there's no
+    /// `history_path`; an IO failure is logged, not propagated.
+    ///
+    /// The re-read is what makes several shells in one `gmux` session
+    /// share the file: writing `self.history` back instead would carry
+    /// this session's startup snapshot with it and revert everything
+    /// another shell had added in the meantime. `history_pending` is
+    /// cleared only once the write succeeds, so a failed flush still has
+    /// its lines to try again with.
     fn writeHistoryFile(self: *Prompt) void {
         const path = self.history_path orelse return;
         const alloc = self.client.alloc;
+        const io = self.client.io;
 
-        const bytes = history.serialize(alloc, self.history.items) catch return;
+        const on_disk: ?[]u8 = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20)) catch |err| switch (err) {
+            error.FileNotFound => null, // another shell hasn't created it either
+            else => {
+                std.log.warn("history: could not re-read {s}: {t}", .{ path, err });
+                return;
+            },
+        };
+        defer if (on_disk) |b| alloc.free(b);
+
+        const bytes = history.mergeSerialize(alloc, on_disk orelse "", self.history_pending.items) catch return;
         defer alloc.free(bytes);
 
-        std.Io.Dir.cwd().writeFile(self.client.io, .{ .sub_path = path, .data = bytes }) catch |err| {
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
             std.log.warn("history: could not write {s}: {t}", .{ path, err });
+            return;
         };
+        self.clearHistoryPending();
     }
 
-    /// Rewrites `~/.config/glyphwire/z.db` from `self.zdb`. Same lazy /
-    /// forced flush cadence as `writeHistoryFile`. A no-op without a
-    /// `zdb_path` or database; IO failures are logged.
+    /// Drops every line in `history_pending` -- called once a flush has
+    /// actually written them.
+    fn clearHistoryPending(self: *Prompt) void {
+        const alloc = self.client.alloc;
+        for (self.history_pending.items) |line| alloc.free(line);
+        self.history_pending.clearRetainingCapacity();
+    }
+
+    /// Re-reads `~/.config/glyphwire/z.db`, replays `zdb_journal` -- this
+    /// session's visits and prunes since the last flush -- onto it, and
+    /// writes the merged result back. Same lazy / forced flush cadence as
+    /// `writeHistoryFile`, and the same reason for the re-read: several
+    /// shells share this file, and writing `self.zdb` straight back would
+    /// revert the others' visits (see `zjump.Journal`). A no-op without a
+    /// `zdb_path`, database or journal; IO failures are logged.
     fn writeZdbFile(self: *Prompt) void {
         const path = self.zdb_path orelse return;
-        if (self.zdb == null) return;
+        const journal = if (self.zdb_journal) |*j| j else return;
         const alloc = self.client.alloc;
+        const io = self.client.io;
 
-        const bytes = self.zdb.?.serialize(alloc) catch return;
+        var merged: zjump.Db = blk: {
+            const on_disk = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20)) catch |err| switch (err) {
+                error.FileNotFound => break :blk zjump.Db.init(alloc),
+                else => {
+                    std.log.warn("zj: could not re-read {s}: {t}", .{ path, err });
+                    return;
+                },
+            };
+            defer alloc.free(on_disk);
+            // A file another shell left half-written parses as "whatever
+            // lines were intact" (see `Db.parse`), which is the right
+            // failure mode here: this session's deltas still land.
+            break :blk zjump.Db.parse(alloc, on_disk) catch zjump.Db.init(alloc);
+        };
+        defer merged.deinit();
+
+        merged.applyJournal(journal) catch return;
+
+        const bytes = merged.serialize(alloc) catch return;
         defer alloc.free(bytes);
 
-        std.Io.Dir.cwd().writeFile(self.client.io, .{ .sub_path = path, .data = bytes }) catch |err| {
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
             std.log.warn("zj: could not write {s}: {t}", .{ path, err });
+            return;
         };
+        journal.clear();
     }
 
     const FlushMode = enum { due, force };
@@ -4690,6 +4785,11 @@ const Prompt = struct {
     /// only what actually changed. Either way the dirty flags clear and
     /// the gate's clock restarts. IO failures are swallowed (logged in
     /// the write helpers), never propagated.
+    ///
+    /// Both writes are read-modify-write merges against the file as it
+    /// stands (`writeHistoryFile` / `writeZdbFile`), so a flush is safe
+    /// to repeat and safe to interleave with another shell's -- a forced
+    /// flush with nothing pending just rewrites equivalent content.
     fn flushPersistentState(self: *Prompt, mode: FlushMode) void {
         const force = mode == .force;
         if (self.history_dirty or force) {

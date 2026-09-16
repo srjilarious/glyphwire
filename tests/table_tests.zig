@@ -1157,3 +1157,70 @@ pub fn tableCaseInsensitiveColumnFoldsWhenSortedTest(io: std.Io, alloc: std.mem.
         try testz.expectEqualStr("Z", snap.cellAt(4, 0).grapheme); // Zebra
     }
 }
+
+/// A `focus` column marks its body cell as the row's metadata focus cell,
+/// so `find_metadata` (glyphwire-shell's Ctrl+PgUp/PgDn) lands on the
+/// first character of *that* column rather than the row's leftmost one.
+/// The `gw-ls -l` case: one metadata id spans the whole row, starting at
+/// the permissions column, but the cursor belongs on the filename.
+pub fn tableFocusColumnMarksItsBodyCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const meta_a = try client.createMetadata("{\"n\":\"a\"}");
+    const meta_b = try client.createMetadata("{\"n\":\"b\"}");
+
+    // Perms column at cols 0-3, Name column at cols 5-12 (col 4 is the
+    // inter-column gap). Only Name carries `focus`.
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Perm", .width = 4 },
+        .{ .name = "Name", .width = 8, .focus = true },
+    }, .{ .borders = false, .header_separator = false });
+
+    try client.tableSetRows(null, table, &.{
+        &.{ .{ .display = "drwx", .metadata_id = meta_a }, .{ .display = "alpha", .metadata_id = meta_a } },
+        &.{ .{ .display = "-rw-", .metadata_id = meta_b }, .{ .display = "bravo", .metadata_id = meta_b } },
+    });
+
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        // Row 1 is the first body row: "drwx" at 0-3, "alpha" at 5-9.
+        try testz.expectEqualStr("d", snap.cellAt(1, 0).grapheme);
+        try testz.expectEqualStr("a", snap.cellAt(1, 5).grapheme);
+        // The focus mark sits on the name's first cell, nowhere else.
+        try testz.expectTrue(!snap.cellAt(1, 0).focus);
+        try testz.expectTrue(snap.cellAt(1, 5).focus);
+        try testz.expectTrue(!snap.cellAt(1, 6).focus);
+    }
+
+    // End to end: walking forward from the header lands on the name, not
+    // the permissions column both rows actually start at.
+    const first = (try client.findMetadata(null, 0, 0, .next)).?;
+    try testz.expectEqual(first.above, @as(i64, -1));
+    try testz.expectEqual(first.col, @as(usize, 5));
+    try testz.expectEqual(first.id, meta_a);
+
+    const second = (try client.findMetadata(null, first.above, first.col, .next)).?;
+    try testz.expectEqual(second.above, @as(i64, -2));
+    try testz.expectEqual(second.col, @as(usize, 5));
+    try testz.expectEqual(second.id, meta_b);
+
+    // And back the other way.
+    const back = (try client.findMetadata(null, second.above, second.col, .prev)).?;
+    try testz.expectEqual(back.col, @as(usize, 5));
+    try testz.expectEqual(back.id, meta_a);
+}

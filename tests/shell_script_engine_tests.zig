@@ -148,7 +148,7 @@ fn uniqueDir(alloc: std.mem.Allocator, tag: []const u8) ![]const u8 {
     return std.fmt.allocPrint(alloc, "/tmp/glyphwire-se-{s}-{d}", .{ tag, std.Thread.getCurrentId() });
 }
 
-// ─── shell.conf through the persistent state ─────────────────────────
+// ─── shell.conf.lua through the persistent state ─────────────────────────
 
 pub fn runConfCollectsAliasesTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var host = TestHost{ .alloc = alloc };

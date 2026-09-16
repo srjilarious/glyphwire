@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Fetches the alternate file-type icon themes -- Papirus and Material --
-# into assets/icons/filetype/<theme>/, the sets host.conf's `icon_theme`
+# into assets/icons/filetype/<theme>/, the sets host.conf.lua's `icon_theme`
 # can select instead of the default Oxygen (scripts/fetch-oxygen.sh).
 # Each is rasterized from SVG to a 48x48 RGBA PNG under the canonical
 # name glyphwire uses (folder, file, image, pdf, ...).

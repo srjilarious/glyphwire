@@ -156,7 +156,7 @@ pub const App = struct {
     redraw_prev: ?RedrawSig = null,
 
     /// Frame-timing profiler + HUD toggle. Inert (every call an
-    /// early-return) unless `host.conf`'s `profile` is set. See
+    /// early-return) unless `host.conf.lua`'s `profile` is set. See
     /// `host/profiler.zig`.
     profiler: profiler_mod.HostProfiler,
 

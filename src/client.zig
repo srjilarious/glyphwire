@@ -614,8 +614,14 @@ pub const Client = struct {
     /// tagging the extra cells a `.natural`-scaled icon visually
     /// overflows into (see `core.IconScale`'s doc comment on why that
     /// overflow has no automatic data-model footprint on its own).
-    pub fn tagMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle) !void {
-        try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id });
+    ///
+    /// `focus` marks the cell as its span's landing point for
+    /// `findMetadata` (Ctrl+PgUp/PgDn in `glyphwire-shell`) -- see
+    /// `core.Cell.meta_focus`. A server-painted table names its focus
+    /// column with `TableColumnInput.focus` instead, since the client
+    /// can't know where the column landed.
+    pub fn tagMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle, focus: bool) !void {
+        try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id, .focus = focus });
     }
 
     /// `draw_box(row?, col?, rows, cols, style)` -- a notification. Draws a
@@ -1224,6 +1230,9 @@ pub const Client = struct {
         /// Fold ASCII case when sorting a `.text` column -- see
         /// `core.TableColumn.case_insensitive`.
         case_insensitive: bool = false,
+        /// Land Ctrl+PgUp/PgDn on this column's body cell rather than the
+        /// row's leftmost -- see `core.TableColumn.focus`.
+        focus: bool = false,
         width: usize,
         min_width: usize = 1,
         h_align: core.HAlign = .start,
@@ -1285,6 +1294,7 @@ pub const Client = struct {
                 .kind = @tagName(c.kind),
                 .sortable = c.sortable,
                 .case_insensitive = c.case_insensitive,
+                .focus = c.focus,
                 .width = c.width,
                 .min_width = c.min_width,
                 .h_align = @tagName(c.h_align),
@@ -1750,8 +1760,8 @@ pub const Client = struct {
         }
 
         /// Batched `tag_metadata` -- see `Client.tagMetadata`.
-        pub fn tagMetadata(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle) !void {
-            try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id });
+        pub fn tagMetadata(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle, focus: bool) !void {
+            try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id, .focus = focus });
         }
 
         /// Batched `move_content` -- see `Client.moveContentOn`. `null`
@@ -1963,6 +1973,8 @@ pub const RenderCell = struct {
     bg_icon: ?core.IconBg = null,
     fg_icon: ?core.IconBg = null,
     metadata_id: ?core.MetadataHandle = null,
+    /// This cell is its span's focus cell -- see `core.Cell.meta_focus`.
+    focus: bool = false,
     /// `.wide_lead` = left half of a 2-cell wide character (holds the
     /// grapheme), `.wide_spacer` = its blank right half, `.narrow` = an
     /// ordinary 1-cell character.
@@ -2015,6 +2027,7 @@ pub const CellsSnapshot = struct {
                 .max_h = icon.max_h,
             } else null,
             .metadata_id = c.metadata_id,
+            .focus = c.focus,
             .wide = blk: {
                 const w = c.wide orelse break :blk .narrow;
                 if (std.mem.eql(u8, w, "lead")) break :blk .wide_lead;

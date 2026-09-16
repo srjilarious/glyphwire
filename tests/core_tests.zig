@@ -1055,7 +1055,7 @@ pub fn layerTagMetadataSetsIdWithoutTouchingBgOrGraphemeTest(io: std.Io, alloc: 
     defer layer.deinit();
 
     layer.drawIcon(7, 1, 2, .{ .metadata_id = 42 });
-    layer.tagMetadata(1, 3, 42);
+    layer.tagMetadata(1, 3, 42, false);
 
     // The neighboring cell got tagged with the same id as the icon's
     // anchor, but its background/grapheme are untouched -- still whatever
@@ -1074,7 +1074,7 @@ pub fn layerTagMetadataOverwritesExistingTagTest(io: std.Io, alloc: std.mem.Allo
     defer layer.deinit();
 
     try layer.writeTextTagged("a", glyphwire.default_style.fg, glyphwire.default_style.bg, 1);
-    layer.tagMetadata(0, 0, 2);
+    layer.tagMetadata(0, 0, 2, false);
 
     try testz.expectEqual(layer.cell(0, 0).metadata_id.?, 2);
     // The grapheme write_text put there is still untouched.
@@ -3412,6 +3412,62 @@ pub fn adjacentMetadataSpanTreatsGappedSameIdRunAsOneSpanTest(io: std.Io, alloc:
     const back = layer.adjacentMetadataSpan(0, 12, .prev).?;
     try testz.expectEqual(back.col, @as(usize, 0));
     try testz.expectEqual(back.id, @as(glyphwire.MetadataHandle, 1));
+}
+
+pub fn adjacentMetadataSpanPrefersFocusCellOverFirstCharacterTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    // The `gw-ls -l` shape: one id across a permissions run and a name
+    // run, with the name's first cell marked as the span's focus cell.
+    try layer.writeTextTagged("x", fg, null, 1);
+    try layer.writeTextTagged("drwx", fg, null, 2); // cols 1-4
+    try layer.writeTextTagged(" ", fg, null, null); // col 5, untagged gap
+    try layer.writeTextTagged("file", fg, null, 2); // cols 6-9
+    layer.tagMetadata(0, 6, 2, true);
+
+    // Without the focus cell this would land on col 1 (the "d").
+    const hit = layer.adjacentMetadataSpan(0, 0, .next).?;
+    try testz.expectEqual(hit.col, @as(usize, 6));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 2));
+}
+
+pub fn adjacentMetadataSpanPrevFindsFocusCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    try layer.writeTextTagged("drwx", fg, null, 1); // cols 0-3
+    try layer.writeTextTagged("file", fg, null, 1); // cols 4-7
+    layer.tagMetadata(0, 4, 1, true);
+    try layer.writeTextTagged("next", fg, null, 2); // cols 8-11
+
+    // Walking back out of span 2 lands on span 1's focus cell, not its
+    // leftmost character.
+    const hit = layer.adjacentMetadataSpan(0, 9, .prev).?;
+    try testz.expectEqual(hit.col, @as(usize, 4));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 1));
+}
+
+pub fn writeTextClearsAStaleFocusMarkTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    try layer.writeTextTagged("ab", fg, null, 1);
+    layer.tagMetadata(0, 1, 1, true);
+    try testz.expectTrue(layer.cell(0, 1).meta_focus);
+
+    // Redrawing over the cell wipes the mark, the same way it wipes the
+    // grapheme and the tag -- a repaint must not leave a focus cell
+    // pointing at content that is no longer there.
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 0 } });
+    try layer.writeTextTagged("cd", fg, null, 2);
+    try testz.expectTrue(!layer.cell(0, 1).meta_focus);
 }
 
 pub fn adjacentMetadataSpanWalksIntoRetainedScrollbackTest(io: std.Io, alloc: std.mem.Allocator) !void {

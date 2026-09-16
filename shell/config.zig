@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Loads glyphwire-shell's startup config, `~/.config/glyphwire/shell.conf`,
+//! Loads glyphwire-shell's startup config, `~/.config/glyphwire/shell.conf.lua`,
 //! which is a Lua script. Running it produces a `ShellConfig` -- the Lua
 //! bindings (right now just `alias(name, value)`) append into that struct
 //! rather than touching the live prompt, so `shell/main.zig` can apply the
@@ -14,14 +14,14 @@
 //! for the whole session -- see `shell/script_engine.zig` -- and reuses
 //! the `alias`/`prompt` collectors here through `installBindings` +
 //! `beginCollecting`/`endCollecting`, so a `function` defined in
-//! `shell.conf` stays callable as a builtin afterwards.
+//! `shell.conf.lua` stays callable as a builtin afterwards.
 
 const std = @import("std");
 const ziglua = @import("ziglua");
 const Lua = ziglua.Lua;
 const openaction = @import("openaction.zig");
 
-/// One `alias(name, value)` call collected from a shell.conf run. Both
+/// One `alias(name, value)` call collected from a shell.conf.lua run. Both
 /// fields are owned by the enclosing `ShellConfig`.
 pub const AliasDef = struct {
     name: []const u8,
@@ -185,7 +185,7 @@ pub const OnConfig = struct {
     chdir: OnChdirConfig = .{},
 };
 
-/// Everything one shell.conf run declared, parsed into Zig data. Owns its
+/// Everything one shell.conf.lua run declared, parsed into Zig data. Owns its
 /// contents; call `deinit` once the caller has copied what it needs.
 pub const ShellConfig = struct {
     alloc: std.mem.Allocator,
@@ -241,7 +241,7 @@ pub const LoadResult = struct {
 
 /// The config currently being populated, reachable from the C-ABI Lua
 /// callbacks. Set only while a config run is in flight (`load` here, or a
-/// `shell.conf` run inside `script_engine`) -- the shell runs
+/// `shell.conf.lua` run inside `script_engine`) -- the shell runs
 /// single-threaded, so a module-level pointer is enough (same pattern as
 /// `script_engine.g_engine`).
 var g_active: ?*ShellConfig = null;
@@ -280,7 +280,7 @@ pub fn endCollecting(prev: ?*ShellConfig) void {
     g_active = prev;
 }
 
-/// Runs `source` (the contents of shell.conf, null-terminated) as Lua
+/// Runs `source` (the contents of shell.conf.lua, null-terminated) as Lua
 /// with glyphwire's config bindings installed, collecting what it
 /// declares. The standard Lua libraries are opened, so a conf can use
 /// `string`/`table`/loops/conditionals to build its alias list. Only a
@@ -291,7 +291,7 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) error{OutOfMemory}!L
     errdefer cfg.deinit();
 
     const lua = Lua.init(alloc) catch {
-        return .{ .config = cfg, .err = try alloc.dupe(u8, "shell.conf: could not create Lua interpreter") };
+        return .{ .config = cfg, .err = try alloc.dupe(u8, "shell.conf.lua: could not create Lua interpreter") };
     };
     defer lua.deinit();
     lua.openLibs();
@@ -302,7 +302,7 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) error{OutOfMemory}!L
     defer endCollecting(prev);
 
     lua.doString(source) catch {
-        const msg = lua.toString(-1) catch "shell.conf: unknown Lua error";
+        const msg = lua.toString(-1) catch "shell.conf.lua: unknown Lua error";
         return .{ .config = cfg, .err = try alloc.dupe(u8, msg) };
     };
 

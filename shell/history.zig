@@ -77,3 +77,41 @@ pub fn serialize(alloc: std.mem.Allocator, entries: []const []const u8) ![]u8 {
     }
     return out.toOwnedSlice(alloc);
 }
+
+/// Merges `pending` -- the lines this session has submitted since its
+/// last flush, oldest first -- onto `disk_bytes`, the file's *current*
+/// contents re-read at flush time, and renders the result back to file
+/// bytes.
+///
+/// This is what keeps several shells in one `gmux` session from
+/// clobbering each other. The old flush rendered the whole in-memory
+/// history, which includes the snapshot taken when *this* shell started:
+/// writing that back silently reverted every line any other shell had
+/// added since. Re-reading first and appending only this session's new
+/// lines means the last writer adds to the file instead of replacing it.
+///
+/// Interleaving is by flush, not by timestamp -- the history format
+/// carries no times, so a session's lines land as a contiguous block
+/// wherever it happens to flush. Two shells' commands therefore end up
+/// grouped rather than strictly chronological, which is the right
+/// trade for recall (a shell's own recent lines stay together) and the
+/// only option the file format allows.
+///
+/// `shouldRecord`'s consecutive-duplicate rule is applied across the
+/// join too, so a line already sitting at the end of the file isn't
+/// duplicated by a session that also ran it. Caller owns the result.
+pub fn mergeSerialize(alloc: std.mem.Allocator, disk_bytes: []const u8, pending: []const []const u8) ![]u8 {
+    const disk = try parse(alloc, disk_bytes);
+    defer freeEntries(alloc, disk);
+
+    var merged: std.ArrayList([]const u8) = .empty;
+    defer merged.deinit(alloc);
+    try merged.appendSlice(alloc, disk);
+    for (pending) |line| {
+        const prev: ?[]const u8 = if (merged.items.len > 0) merged.items[merged.items.len - 1] else null;
+        if (!shouldRecord(prev, line)) continue;
+        try merged.append(alloc, line);
+    }
+
+    return serialize(alloc, merged.items);
+}

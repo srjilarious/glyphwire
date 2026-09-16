@@ -303,7 +303,7 @@ pub fn iconForExtensionFallsBackToFileTest(_: std.Io, _: std.mem.Allocator) !voi
     try testz.expectEqualStr(lsicons.iconForExtension(""), "file/file");
 }
 
-// ─── ls.conf parsing (ls/config.zig) ───────────────────────────────────
+// ─── ls.conf.lua parsing (ls/config.zig) ───────────────────────────────────
 
 pub fn lsConfigDefaultsWhenEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var r = lsconfig.load(alloc, "");

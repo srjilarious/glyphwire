@@ -1112,7 +1112,7 @@ pub const Renderer = struct {
     }
 
     /// Paints the profiler overlay in the top-right corner while the HUD
-    /// is toggled on (Ctrl+Shift+P; only possible when `host.conf` set
+    /// is toggled on (Ctrl+Shift+P; only possible when `host.conf.lua` set
     /// `profile`). Immediate-mode like the caret. Lines are formatted
     /// first so the panel can be sized to the widest one (and clamped to
     /// the window) -- monospace, so column count is exact. All numbers

@@ -5,7 +5,7 @@
 //! policy glyphwire-ls deliberately leaves out of its metadata blob.
 //!
 //! An entry carries a `kind` ("file" / "directory" / "symlink" / "other")
-//! and, for regular files only, a real `mimetype`. `shell.conf`'s
+//! and, for regular files only, a real `mimetype`. `shell.conf.lua`'s
 //! `open_actions{}` table (parsed by `shell/config.zig`) maps a lookup
 //! key to a command template; those entries are checked ahead of the
 //! built-in `default_actions` below. `resolve` tries three key forms, in
@@ -49,7 +49,7 @@ pub const Action = struct {
     commands: []const []const u8,
 };
 
-/// Shipped defaults, overridable per key by a `shell.conf` `open_actions`
+/// Shipped defaults, overridable per key by a `shell.conf.lua` `open_actions`
 /// entry. Kept intentionally small: auto-`cd` into a directory, and hand
 /// an image to gw-view (only the formats it actually decodes --
 /// PNG / JPEG / GIF / BMP, not svg or webp).

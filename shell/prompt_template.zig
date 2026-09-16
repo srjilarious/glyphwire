@@ -3,10 +3,10 @@
 
 //! Pure template engine for glyphwire-shell's configurable prompt.
 //!
-//! `shell.conf` (see `shell/config.zig`) can set `prompt.left` / `prompt.right`
-//! strings; this module turns one of those strings, plus the shell's live
-//! state (`Data`), into an ordered list of draw ops (`Op`): literal text
-//! runs and icon placements. `shell/main.zig`'s `Prompt.writePromptPrefix`
+//! `shell.conf.lua` (see `shell/config.zig`) can set `prompt.left` /
+//! `prompt.right` strings; this module turns one of those, plus the live
+//! shell state (`Data`), into an ordered list of draw ops (`Op`): literal
+//! text runs and icon placements. `shell/main.zig`'s `writePromptPrefix`
 //! walks that list, emitting `write_text` for text and `draw_icon` for icons.
 //!
 //! No libc, no IO, no glyphwire import -- it's string math, unit-tested in
@@ -57,7 +57,7 @@ pub const Op = union(enum) {
 pub const Color = struct { r: u8, g: u8, b: u8 };
 
 /// Resolver for `{name}` tokens that match no built-in field -- lets the
-/// shell plug in `shell.conf`'s on-demand command vars without this
+/// shell plug in `shell.conf.lua`'s on-demand command vars without this
 /// module taking an IO/exec dependency. `render` calls `resolve(ctx,
 /// name)` for such a token: a non-null return is interpolated verbatim,
 /// a null return keeps the "unknown token stays literal" behaviour so a
@@ -100,7 +100,7 @@ pub const Data = struct {
     dur_min_ms: u64 = 2000,
 
     /// Sub-template `{exit}` expands to, rendered only on a non-zero status.
-    /// `null` (nothing set in shell.conf) means `{exit}` is always empty.
+    /// `null` (nothing set in shell.conf.lua) means `{exit}` is always empty.
     exit_section: ?[]const u8 = null,
     /// Sub-template `{dur}` expands to, rendered only past the threshold.
     /// `null` means `{dur}` is always empty.

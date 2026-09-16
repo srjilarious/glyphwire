@@ -827,3 +827,66 @@ pub fn resolveMultiSegmentRelativeTargetTest(_: std.Io, alloc: std.mem.Allocator
     defer alloc.free(p);
     try testz.expectEqualStr("/home/jeff/projects/glyphwire", p);
 }
+
+// ─── history merge (concurrent shells sharing one file) ─────────────────
+
+pub fn historyMergeAppendsPendingToDiskContentTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // What another shell has already written, plus this session's own
+    // un-flushed lines. The merge keeps both, in that order.
+    const bytes = try history.mergeSerialize(alloc, "other-a\nother-b\n", &.{ "mine-1", "mine-2" });
+    defer alloc.free(bytes);
+    try testz.expectEqualStr("other-a\nother-b\nmine-1\nmine-2\n", bytes);
+}
+
+pub fn historyMergeDoesNotRevertLinesAddedSinceLoadTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The regression this exists for: this session started when the file
+    // held only "old", and has since run "mine". Another shell appended
+    // "theirs" in the meantime. Merging against the *current* file keeps
+    // "theirs" -- writing a whole in-memory snapshot back would drop it.
+    const bytes = try history.mergeSerialize(alloc, "old\ntheirs\n", &.{"mine"});
+    defer alloc.free(bytes);
+    try testz.expectEqualStr("old\ntheirs\nmine\n", bytes);
+}
+
+pub fn historyMergeAppliesIgnoredupsAcrossTheJoinTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // "ls" is already the file's newest line, so this session re-running
+    // it adds nothing; the following line still lands.
+    const bytes = try history.mergeSerialize(alloc, "cd\nls\n", &.{ "ls", "pwd" });
+    defer alloc.free(bytes);
+    try testz.expectEqualStr("cd\nls\npwd\n", bytes);
+}
+
+pub fn historyMergeOnEmptyFileAndEmptyPendingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // First run: nothing on disk, nothing pending.
+    const empty = try history.mergeSerialize(alloc, "", &.{});
+    defer alloc.free(empty);
+    try testz.expectEqualStr("", empty);
+
+    // A flush with nothing pending rewrites what's there, trimmed --
+    // which is what the startup trim and a forced exit flush rely on.
+    const untouched = try history.mergeSerialize(alloc, "a\na\nb\n", &.{});
+    defer alloc.free(untouched);
+    try testz.expectEqualStr("a\nb\n", untouched);
+}
+
+pub fn historyMergeTrimsToMaxEntriesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    var i: usize = 0;
+    while (i < history.max_entries) : (i += 1) {
+        var line: [16]u8 = undefined;
+        try buf.appendSlice(alloc, try std.fmt.bufPrint(&line, "cmd{d}\n", .{i}));
+    }
+
+    // A full file plus two more lines stays at the cap, dropping the two
+    // oldest -- the merge must not let the file grow without bound just
+    // because it now appends rather than rewrites.
+    const bytes = try history.mergeSerialize(alloc, buf.items, &.{ "new-1", "new-2" });
+    defer alloc.free(bytes);
+
+    const merged = try history.parse(alloc, bytes);
+    defer history.freeEntries(alloc, merged);
+    try testz.expectEqual(merged.len, history.max_entries);
+    try testz.expectEqualStr("cmd2", merged[0]);
+    try testz.expectEqualStr("new-2", merged[merged.len - 1]);
+}
