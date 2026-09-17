@@ -281,16 +281,62 @@ pub const Client = struct {
 
     /// `write_text` with every option (see `TextOpts`) -- a notification.
     pub fn writeTextOpts(self: *Client, text: []const u8, opts: TextOpts) !void {
-        try self.notify("write_text", textParams(self.default_layer, text, opts));
+        try self.notify("write_text", textParams(self.default_layer, text, null, opts));
     }
 
-    /// The wire params for a `TextOpts` write. Shared with `Batch`.
-    fn textParams(default_layer: ?core.LayerHandle, text: []const u8, opts: TextOpts) WriteTextWire {
+    /// One styled piece of a `writeSpans` write. Every null field inherits
+    /// the write's `TextOpts` value.
+    pub const Span = struct {
+        text: []const u8,
+        fg: ?core.Color = null,
+        bg: ?core.Color = null,
+        metadata_id: ?core.MetadataHandle = null,
+        transparent_bg: ?bool = null,
+        scale: ?core.TextScale = null,
+    };
+
+    /// `write_text` with `spans`: several differently styled runs written
+    /// back to back in one message -- a syntax-coloured row, a status line
+    /// whose mode word has its own colour. `opts` places the write, gives
+    /// each span its defaults, and its `max_cols`/`pad` cover the whole
+    /// write. A notification.
+    pub fn writeSpans(self: *Client, spans: []const Span, opts: TextOpts) !void {
+        const wire_spans = try spansToWire(self.alloc, spans);
+        defer self.alloc.free(wire_spans);
+        try self.notify("write_text", textParams(self.default_layer, null, wire_spans, opts));
+    }
+
+    fn spansToWire(alloc: std.mem.Allocator, spans: []const Span) ![]SpanWire {
+        const out = try alloc.alloc(SpanWire, spans.len);
+        for (spans, out) |s, *w| w.* = .{
+            .text = s.text,
+            .fg = colorToJson(s.fg),
+            .bg = colorToJson(s.bg),
+            .metadata_id = s.metadata_id,
+            .transparent_bg = s.transparent_bg,
+            .scale = if (s.scale) |sc| @tagName(sc) else null,
+        };
+        return out;
+    }
+
+    const SpanWire = struct {
+        text: []const u8,
+        fg: ?protocol.Color,
+        bg: ?protocol.Color,
+        metadata_id: ?core.MetadataHandle,
+        transparent_bg: ?bool,
+        scale: ?[]const u8,
+    };
+
+    /// The wire params for a `TextOpts` write: either `text` or `spans`.
+    /// Shared with `Batch`.
+    fn textParams(default_layer: ?core.LayerHandle, text: ?[]const u8, spans: ?[]const SpanWire, opts: TextOpts) WriteTextWire {
         return .{
             .layer = opts.layer orelse default_layer,
             .row = opts.row,
             .col = opts.col,
             .text = text,
+            .spans = spans,
             .fg = colorToJson(opts.fg),
             .bg = colorToJson(opts.bg),
             .transparent_bg = opts.transparent_bg,
@@ -305,7 +351,8 @@ pub const Client = struct {
         layer: ?core.LayerHandle,
         row: ?usize,
         col: ?usize,
-        text: []const u8,
+        text: ?[]const u8,
+        spans: ?[]const SpanWire,
         fg: ?protocol.Color,
         bg: ?protocol.Color,
         transparent_bg: bool,
@@ -2001,7 +2048,13 @@ pub const Client = struct {
 
         /// Batched `write_text` with every option -- see `Client.TextOpts`.
         pub fn writeTextOpts(self: *Batch, text: []const u8, opts: TextOpts) !void {
-            try self.notify("write_text", textParams(self.client.default_layer, text, opts));
+            try self.notify("write_text", textParams(self.client.default_layer, text, null, opts));
+        }
+
+        /// Batched `write_text` with `spans` -- see `Client.writeSpans`.
+        pub fn writeSpans(self: *Batch, spans: []const Span, opts: TextOpts) !void {
+            const wire_spans = try spansToWire(self.arena.allocator(), spans);
+            try self.notify("write_text", textParams(self.client.default_layer, null, wire_spans, opts));
         }
 
         /// Batched `clear` with every option -- see `Client.ClearOpts`.

@@ -785,14 +785,25 @@ pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 /// A per-cell hint that the cell's glyph should be drawn larger than one
 /// cell's normal pixel size -- `write_text`'s optional `scale` (`x1_5` is
 /// "1.5x", `x2` is "2x"; wire strings match the tag names exactly, see
-/// `write_text` in docs/api.md). Like `draw_icon`'s `.natural` overflow,
-/// this is a rendering-only effect: the enlarged glyph visually spills
-/// into neighbouring cells, but only the cell holding the grapheme carries
-/// `text_scale` -- no reserved footprint, no spacer cells, unlike the
-/// East Asian wide-character model. See decisions.md's Text scale section
-/// for why. A caller wanting the overflow cells to hit-test as part of the
-/// run still needs `tag_metadata`, same as icon overflow.
+/// `write_text` in docs/api.md). The enlarged glyph still renders from the
+/// one cell that holds the grapheme and carries `text_scale`, but the
+/// write **advances the cursor by the scaled width** (`scaledPitch` cells
+/// per display column), filling the cells it steps over with blanks in
+/// the run's background and `metadata_id`. So back-to-back scaled
+/// characters no longer draw on top of each other, the gaps take the
+/// run's background, and a click anywhere under the glyph hit-tests as
+/// part of the run. Vertical overflow is still the caller's to plan for.
+/// See decisions.md's Text scale section.
 pub const TextScale = enum { x1, x1_5, x2 };
+
+/// Cells a `scale` glyph advances per display column: its size rounded up
+/// to whole cells, so 1.5x and 2x both step two.
+pub fn scaledPitch(scale: TextScale) usize {
+    return switch (scale) {
+        .x1 => 1,
+        .x1_5, .x2 => 2,
+    };
+}
 
 pub const Cell = struct {
     grapheme_bytes: [grapheme_inline_len]u8 = @splat(0),
@@ -2128,11 +2139,45 @@ pub const Layer = struct {
         pad: bool = false,
     };
 
-    /// `writeTextTaggedScaled` with `WriteOpts` -- what `write_text`
-    /// dispatches to.
+    /// `writeTextTaggedScaled` with `WriteOpts` -- a single styled run.
     pub fn writeTextOpts(self: *Layer, text: []const u8, fg: Color, bg: ?Background, opts: WriteOpts) !void {
-        const metadata_id = opts.metadata_id;
-        const scale = opts.scale;
+        const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale }};
+        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id });
+    }
+
+    /// One styled piece of a `write_text`: its text and everything that
+    /// styles it, already resolved (the dispatcher fills a span's omitted
+    /// fields from the message's top level). `bg` null leaves each touched
+    /// cell's background alone (`transparent_bg`).
+    pub const TextRun = struct {
+        text: []const u8,
+        fg: Color,
+        bg: ?Background,
+        metadata_id: ?MetadataHandle = null,
+        scale: TextScale = .x1,
+    };
+
+    /// The whole-write options for `writeRuns`: clipping and padding apply
+    /// across every run together, and the padding takes `pad_*`.
+    pub const RunsOpts = struct {
+        /// See `WriteOpts.max_cols` -- counted from where the first run
+        /// starts.
+        max_cols: ?usize = null,
+        /// See `WriteOpts.pad`.
+        pad: bool = false,
+        pad_fg: Color = default_style.fg,
+        pad_bg: ?Background = default_style.bg,
+        pad_metadata_id: ?MetadataHandle = null,
+    };
+
+    /// Writes `runs` back to back as one `write_text` -- `write_text`'s
+    /// `spans` form, and what the single-run form dispatches to. One SGR
+    /// pen and one escape machine span the whole call, exactly as if the
+    /// runs' text had been one string; only the styling changes at a run
+    /// boundary. All text is validated as UTF-8 before anything is drawn,
+    /// so a bad run can't leave the others half-written.
+    pub fn writeRuns(self: *Layer, runs: []const TextRun, opts: RunsOpts) !void {
+        for (runs) |r| _ = try std.unicode.Utf8View.init(r.text);
         // The clip limit is an absolute column on the starting row.
         const clip_end: ?usize = if (opts.max_cols) |n| @min(self.cursor.col + n, self.width) else null;
 
@@ -2148,36 +2193,28 @@ pub const Layer = struct {
         // resets it.
         if (!self.pty_mode) self.pen = .{};
 
-        const view = try std.unicode.Utf8View.init(text);
-        var it = view.iterator();
-        while (it.nextCodepointSlice()) |cp_bytes| {
-            if (cp_bytes.len == 1 and try self.consumeControl(cp_bytes[0])) continue;
-            const eff = self.pen.resolve(fg, bg);
-            // While the shifted-in charset is line drawing, a byte in
-            // `` ` ``..`~` names a box-drawing/symbol glyph, not itself --
-            // see `EscState`'s charset paragraph and `acsGraphic`.
-            const line_drawing = if (self.shift_out) self.g1_line_drawing else self.g0_line_drawing;
-            if (line_drawing and cp_bytes.len == 1 and cp_bytes[0] >= '`' and cp_bytes[0] <= '~') {
-                var buf: [4]u8 = undefined;
-                const n = std.unicode.utf8Encode(acsGraphic(cp_bytes[0]), &buf) catch unreachable;
-                self.putAtCursor(buf[0..n], 1, eff.fg, eff.bg, metadata_id, scale);
-                continue;
-            }
-            const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
-            const w = codepointWidth(cp);
-            if (clip_end) |end| {
-                if (self.cursor.col + w > end) {
-                    // A wide glyph straddling the limit: blank the half
-                    // that does fit rather than leave stale content.
-                    if (self.cursor.col < end) self.putAtCursor(" ", 1, eff.fg, eff.bg, metadata_id, scale);
-                    break;
+        runs: for (runs) |r| {
+            var it = (std.unicode.Utf8View.init(r.text) catch unreachable).iterator();
+            while (it.nextCodepointSlice()) |cp_bytes| {
+                if (cp_bytes.len == 1 and try self.consumeControl(cp_bytes[0])) continue;
+                const eff = self.pen.resolve(r.fg, r.bg);
+                // While the shifted-in charset is line drawing, a byte in
+                // `` ` ``..`~` names a box-drawing/symbol glyph, not itself
+                // -- see `EscState`'s charset paragraph and `acsGraphic`.
+                const line_drawing = if (self.shift_out) self.g1_line_drawing else self.g0_line_drawing;
+                if (line_drawing and cp_bytes.len == 1 and cp_bytes[0] >= '`' and cp_bytes[0] <= '~') {
+                    var buf: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(acsGraphic(cp_bytes[0]), &buf) catch unreachable;
+                    if (!self.putRunGlyph(buf[0..n], 1, eff.fg, eff.bg, r.metadata_id, r.scale, clip_end)) break :runs;
+                    continue;
                 }
+                const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
+                if (!self.putRunGlyph(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, r.metadata_id, r.scale, clip_end)) break :runs;
             }
-            self.putAtCursor(cp_bytes, w, eff.fg, eff.bg, metadata_id, scale);
         }
         if (clip_end) |end| {
             if (opts.pad) {
-                while (self.cursor.col < end) self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1);
+                while (self.cursor.col < end) self.putAtCursor(" ", 1, opts.pad_fg, opts.pad_bg, opts.pad_metadata_id, .x1);
             }
         }
         // Don't carry a half-consumed `ESC ...` sequence into the next
@@ -2658,6 +2695,33 @@ pub const Layer = struct {
             2, 3 => self.clear(0, 0, self.height, self.width),
             else => {},
         }
+    }
+
+    /// Places one glyph of a `write_text` run: its footprint is its display
+    /// width times `scaledPitch(scale)`, and the cells past the glyph's own
+    /// are filled with blanks in the run's style so they carry its
+    /// background and `metadata_id` (see `TextScale`). Returns false when
+    /// `clip_end` stops the write: the cells of the footprint that do fit
+    /// are blanked instead, never half a glyph.
+    fn putRunGlyph(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale, clip_end: ?usize) bool {
+        const footprint = @as(usize, w) * scaledPitch(scale);
+        if (clip_end) |end| {
+            if (self.cursor.col + footprint > end) {
+                while (self.cursor.col < end) self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1);
+                return false;
+            }
+        } else if (footprint > w and self.cursor.col > 0 and self.cursor.col + footprint > self.width) {
+            // A scaled glyph wraps whole, like a wide one does in
+            // `putAtCursor`.
+            self.cursor.col = 0;
+            self.cursor.row += 1;
+        }
+        self.putAtCursor(bytes, w, fg, bg, metadata_id, scale);
+        var extra = footprint - w;
+        while (extra > 0 and self.cursor.col < self.width) : (extra -= 1) {
+            self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1);
+        }
+        return true;
     }
 
     /// Places one grapheme cluster at the cursor. `w` is its East Asian

@@ -3010,6 +3010,72 @@ pub fn writeTextPadFillsTheClippedSpanTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqual(layer.cell(2, 0).style.bg.color.a, 0);
 }
 
+pub fn writeRunsStylesEachRunAndClipsTheWholeWriteTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+    const red: glyphwire.Color = .{ .r = 200, .g = 0, .b = 0 };
+    const bar: glyphwire.Background = .{ .color = .{ .r = 1, .g = 2, .b = 3 } };
+
+    try layer.writeRuns(&.{
+        .{ .text = "ab", .fg = glyphwire.default_style.fg, .bg = bar },
+        .{ .text = "cd", .fg = red, .bg = bar, .metadata_id = 7 },
+        .{ .text = "efgh", .fg = glyphwire.default_style.fg, .bg = bar },
+    }, .{ .max_cols = 5, .pad = false });
+    try testz.expectEqualStr("b", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cell(0, 2).style.fg.r, 200);
+    try testz.expectEqual(layer.cell(0, 3).metadata_id.?, 7);
+    try testz.expectTrue(layer.cell(0, 1).metadata_id == null);
+    // Clipped at five columns across all runs, not per run.
+    try testz.expectEqualStr("e", layer.cell(0, 4).grapheme());
+    try testz.expectEqual(layer.cell(0, 5).grapheme().len, 0);
+    try testz.expectEqual(layer.cursor.col, 5);
+}
+
+pub fn writeRunsRejectsBadUtf8BeforeDrawingAnythingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+    try testz.expectError(layer.writeRuns(&.{
+        .{ .text = "ok", .fg = fg, .bg = null },
+        .{ .text = "\xff", .fg = fg, .bg = null },
+    }, .{}), error.InvalidUtf8);
+    try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
+}
+
+pub fn scaledTextAdvancesByItsScaledWidthTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const bg: glyphwire.Background = .{ .color = .{ .r = 9, .g = 9, .b = 9 } };
+
+    // Two cells per column at 2x: "a" at 0, a filler at 1, "日" (two
+    // columns) at 2 with its spacer at 3 and fillers at 4-5.
+    try layer.writeRuns(&.{.{ .text = "a日", .fg = glyphwire.default_style.fg, .bg = bg, .metadata_id = 3, .scale = .x2 }}, .{});
+    try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
+    try testz.expectTrue(layer.cell(0, 0).text_scale == .x2);
+    try testz.expectEqual(layer.cell(0, 1).style.bg.color.r, 9);
+    try testz.expectEqual(layer.cell(0, 1).metadata_id.?, 3);
+    try testz.expectTrue(layer.cell(0, 1).text_scale == .x1);
+    try testz.expectEqualStr("日", layer.cell(0, 2).grapheme());
+    try testz.expectEqual(layer.cell(0, 5).metadata_id.?, 3);
+    try testz.expectEqual(layer.cursor.col, 6);
+
+    // A scaled glyph that doesn't fit before the edge wraps whole.
+    layer.cursor = .{ .row = 1, .col = 19 };
+    try layer.writeRuns(&.{.{ .text = "b", .fg = glyphwire.default_style.fg, .bg = bg, .scale = .x1_5 }}, .{});
+    try testz.expectEqualStr("b", layer.cell(2, 0).grapheme());
+    try testz.expectEqual(layer.cursor.col, 2);
+
+    // Under a clip, the part of a footprint that fits is blanked instead.
+    layer.cursor = .{ .row = 0, .col = 10 };
+    try layer.writeRuns(&.{.{ .text = "xy", .fg = glyphwire.default_style.fg, .bg = bg, .scale = .x2 }}, .{ .max_cols = 3 });
+    try testz.expectEqualStr("x", layer.cell(0, 10).grapheme());
+    try testz.expectEqualStr(" ", layer.cell(0, 12).grapheme());
+    try testz.expectEqual(layer.cell(0, 13).grapheme().len, 0);
+}
+
 pub fn clearFillPaintsAnOpaqueBackgroundTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);

@@ -430,6 +430,36 @@ pub fn writeTextRowColPlacesTheRunInOneMessageTest(io: std.Io, alloc: std.mem.Al
     try testz.expectEqual(ctx.root.cell(6, 11).style.bg.color.a, 0);
 }
 
+pub fn writeTextSpansInheritTheMessageDefaultsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"row":1,"col":0,"fg":{"r":10,"g":10,"b":10},"bg":{"r":5,"g":5,"b":5},"max_cols":8,"pad":true,"spans":[{"text":"ab"},{"text":"cd","fg":{"r":250,"g":0,"b":0}},{"text":"e","transparent_bg":true}]}}
+    );
+    try testz.expectEqualStr("a", ctx.root.cell(1, 0).grapheme());
+    try testz.expectEqual(ctx.root.cell(1, 0).style.fg.r, 10);
+    try testz.expectEqual(ctx.root.cell(1, 2).style.fg.r, 250);
+    try testz.expectEqual(ctx.root.cell(1, 2).style.bg.color.r, 5);
+    // `transparent_bg` on a span leaves the cell's own (default) background.
+    try testz.expectEqual(ctx.root.cell(1, 4).style.bg.color.a, 0);
+    // The pad uses the message's own bg, across the whole write.
+    try testz.expectEqual(ctx.root.cell(1, 7).style.bg.color.r, 5);
+    try testz.expectEqual(ctx.root.cell(1, 8).style.bg.color.a, 0);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"x","spans":[{"text":"y"}]}}
+    ), dispatch.DispatchError.InvalidSpans);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"row":0}}
+    ), dispatch.DispatchError.InvalidSpans);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"spans":[{"text":"y","scale":"x9"}]}}
+    ), dispatch.DispatchError.InvalidTextScale);
+}
+
 pub fn clearBgAndLayerBackgroundOverWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);

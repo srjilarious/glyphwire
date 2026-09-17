@@ -1268,12 +1268,11 @@ pub const Ui = struct {
         // The term's own row(s): `scale_cells` rows tall (2 for
         // `.x1_5`/`.x2`, reserving room below for the vertical overflow
         // a scaled glyph draws past its own cell) and `term_cols` wide
-        // (its normal display width times that same multiplier, since
-        // `writeScaledTermRow` spaces characters `scale_cells` cells
-        // apart so neighbouring enlarged glyphs don't collide) -- see
+        // (its normal display width times that same multiplier -- the
+        // host advances a scaled glyph by exactly that pitch) -- see
         // decisions.md's Text scale section.
         const scale = self.dict_title_scale;
-        const scale_cells: usize = if (scale == .x1) 1 else 2;
+        const scale_cells: usize = glyphwire.scaledPitch(scale);
         const term_cols = mokuro.displayWidth(entry.term) * scale_cells;
         const term_rows = scale_cells;
 
@@ -1585,19 +1584,10 @@ pub const Ui = struct {
     }
 
     /// The lookup panel's title row: `term` drawn via `write_text`'s
-    /// `scale` when `scale != .x1` -- see decisions.md's Text scale
-    /// section. Unlike `writeLookupRow`, the interior is filled with
-    /// blank + `bg_dialog` in one call *before* any character is drawn,
-    /// then each character is written at `codepointWidth * pitch` cells
-    /// from the last (`pitch` is 2 for `.x1_5`/`.x2`, matching
-    /// `renderLookup`'s `term_cols`) rather than sharing `writeLookupRow`'s
-    /// single "text, then one right-hand pad" shape: a scaled glyph
-    /// overflows past its own cell, so back-to-back characters at the
-    /// normal 1-cell pitch would draw on top of each other, and spacing
-    /// them out this way leaves gap cells between characters that a pad
-    /// only *after* the text would never reach -- background left over
-    /// from a previous frame (or the layer's un-filled default) would
-    /// show through there instead of `bg_dialog`.
+    /// `scale` -- see decisions.md's Text scale section. The same shape as
+    /// `writeLookupRow`: the host advances each scaled glyph by its scaled
+    /// width and fills the cells it steps over with `bg_dialog`, so the
+    /// term is one write rather than a positioned write per character.
     fn writeScaledTermRow(
         b: *glyphwire.Client.Batch,
         layer: glyphwire.LayerHandle,
@@ -1608,19 +1598,19 @@ pub const Ui = struct {
         pad_buf: []u8,
         fg: glyphwire.Color,
     ) !void {
-        try textAt(b, layer, row, 0, box_v, fg_dialog_border, bg_dialog);
-        try b.clearArea(.{ .layer = layer, .row = row, .col = 1, .rows = 1, .cols = inner + 2, .bg = bg_dialog });
-        try textAt(b, layer, row, inner + 3, box_v, fg_dialog_border, bg_dialog);
         _ = pad_buf;
-
-        const pitch: usize = if (scale == .x1) 1 else 2;
-        var col: usize = 2;
-        var it = (try std.unicode.Utf8View.init(term)).iterator();
-        while (it.nextCodepointSlice()) |cp_bytes| {
-            try b.writeTextOpts(cp_bytes, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg_dialog, .scale = scale });
-            const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
-            col += @as(usize, glyphwire.codepointWidth(cp)) * pitch;
-        }
+        try textAt(b, layer, row, 0, box_v, fg_dialog_border, bg_dialog);
+        try b.writeTextOpts(term, .{
+            .layer = layer,
+            .row = row,
+            .col = 2,
+            .fg = fg,
+            .bg = bg_dialog,
+            .scale = scale,
+            .max_cols = inner,
+            .pad = true,
+        });
+        try textAt(b, layer, row, inner + 3, box_v, fg_dialog_border, bg_dialog);
     }
 
     /// Queues the dialog's full redraw (border + every line) onto `b`

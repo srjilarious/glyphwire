@@ -234,6 +234,7 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `ReadOnlyProperty` | `set_property` on a get-only property, or `size`/`visibility` on a root layer |
 | `WrongScrollMode` | `content_extent` set on a layer whose `scroll_mode` is `host` |
 | `InvalidScrollMode` | `scroll_mode`'s `mode` is not `"host"` or `"client"` |
+| `InvalidSpans` | `write_text` has both `text` and `spans`, or neither |
 | `UnknownLayer` | any `layer` handle that does not exist, **and** the root handle where a non-root one is required |
 | `LayerPermissionDenied` | `destroy_layer` from a non-owner |
 | `UnknownContext`, `RootContextImmutable`, `ContextPermissionDenied`, `NoContextSession` | context messages |
@@ -523,7 +524,7 @@ default style); any explicit colour, black included, is opaque.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `write_text` | notification | `layer?`, `row?`, `col?`, `text`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false | — |
+| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false | — |
 | `insert_cells` | notification | `layer?`, `count` | — |
 | `delete_cells` | notification | `layer?`, `count` | — |
 | `move_content` | notification | `layer?`, `top?`, `bot?`, `count?` = 1, `direction?` | — |
@@ -535,7 +536,16 @@ default style); any explicit colour, black included, is opaque.
 axis keeps the cursor's current value. `max_cols` clips the run to that
 many display columns from its start (never splitting a wide character,
 never wrapping), and `pad` fills the rest of that span with blank `bg`
-cells. `fg`/`bg` omitted means the server default style. `transparent_bg` leaves whatever
+cells. `fg`/`bg` omitted means the server default style.
+
+`spans` replaces `text` with an array of `{text, fg?, bg?, metadata_id?,
+transparent_bg?, scale?}` written back to back; each omitted field takes
+the message's value, and `max_cols`/`pad` apply to the write as a whole.
+Sending both `text` and `spans`, or neither, reports `InvalidSpans`.
+
+A `scale` of `"x1_5"` or `"x2"` advances two cells per display column,
+filling the cells after each enlarged glyph with blanks in the run's
+background and `metadata_id`. `transparent_bg` leaves whatever
 background is already in the cell — an image, an icon, a panel gradient —
 instead of resetting it. `metadata_id` tags every cell written.
 

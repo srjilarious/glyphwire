@@ -1935,9 +1935,16 @@ pub const Ui = struct {
         // Text starts after the line-number gutter (zero when it is off).
         const gutter = self.gutterWidth();
 
-        var run_buf: std.ArrayList(u8) = .empty;
-        defer run_buf.deinit(self.alloc);
-        var run_dc = left;
+        // The row's visible text, and where each colour starts in it. A
+        // contiguous stretch of cells goes out as one `write_text` with a
+        // span per colour, padded by the host to the pane's edge; only a
+        // gap in the display cells (which `display.Cells` doesn't produce
+        // in practice) splits it into two writes.
+        var row_buf: std.ArrayList(u8) = .empty;
+        defer row_buf.deinit(self.alloc);
+        var ranges: std.ArrayList(RowRange) = .empty;
+        defer ranges.deinit(self.alloc);
+        var group_dc = left;
         var run_color: ?Color = null;
         var have_run = false;
         // The next column still to be filled, and so also where the run
@@ -1970,46 +1977,74 @@ pub const Ui = struct {
             else
                 spanColorAt(spans, cell.src);
 
-            if (!have_run or lo != dc or !colorOptEql(color, run_color)) {
-                if (have_run) try self.flushRun(batch, r, run_dc, run_buf.items, run_color);
-                run_buf.clearRetainingCapacity();
-                run_dc = lo;
+            if (!have_run or lo != dc) {
+                if (have_run) try self.flushRowGroup(batch, r, group_dc, row_buf.items, ranges.items, false);
+                row_buf.clearRetainingCapacity();
+                ranges.clearRetainingCapacity();
+                try ranges.append(self.alloc, .{ .start = 0, .color = color });
                 run_color = color;
+                group_dc = lo;
                 have_run = true;
                 dc = lo;
+            } else if (!colorOptEql(color, run_color)) {
+                try ranges.append(self.alloc, .{ .start = row_buf.items.len, .color = color });
+                run_color = color;
             }
 
             if (blanks) {
-                if (hi > dc) try run_buf.appendNTimes(self.alloc, ' ', hi - dc);
+                if (hi > dc) try row_buf.appendNTimes(self.alloc, ' ', hi - dc);
                 dc = hi;
             } else {
-                try run_buf.appendSlice(self.alloc, cell.bytes);
+                try row_buf.appendSlice(self.alloc, cell.bytes);
                 // The columns past the glyph -- a tab's run after its
                 // arrow. Unwritten cells would be transparent, not blank.
-                try run_buf.appendNTimes(self.alloc, ' ', cell.width - cell.glyph_cols);
+                try row_buf.appendNTimes(self.alloc, ' ', cell.width - cell.glyph_cols);
                 dc += cell.width;
             }
         }
-        if (have_run) try self.flushRun(batch, r, run_dc, run_buf.items, run_color);
 
-        // Pad the rest of the row -- the whole of it for an empty line,
-        // or one scrolled entirely off to the left.
-        if (dc < left + cols) {
-            try self.writeSpaces(batch, r, gutter + dc - left, left + cols - dc);
+        if (have_run) {
+            // The last stretch carries the pad for the rest of the row.
+            try self.flushRowGroup(batch, r, group_dc, row_buf.items, ranges.items, true);
+        } else {
+            // An empty line, or one scrolled entirely off to the left.
+            try self.writeSpaces(batch, r, gutter, cols);
         }
     }
 
-    fn flushRun(
+    /// Where one colour starts within a row's text; it runs to the next
+    /// range's start.
+    const RowRange = struct { start: usize, color: ?Color };
+
+    /// Writes one contiguous stretch of a buffer row, starting at display
+    /// column `start_dc`, as a single `write_text` with one span per
+    /// colour range. `pad_row` has the host fill the rest of the pane's
+    /// row in the buffer colour.
+    fn flushRowGroup(
         self: *Ui,
         batch: *glyphwire.client.Client.Batch,
         r: usize,
         start_dc: usize,
         bytes: []const u8,
-        color: ?Color,
+        ranges: []const RowRange,
+        pad_row: bool,
     ) !void {
-        if (bytes.len == 0 or start_dc < self.buf.left_col) return;
-        const col = self.gutterWidth() + start_dc - self.buf.left_col;
-        try writeAt(batch, self.buffer_layer, r, col, bytes, color orelse fg_text, bg_buffer);
+        const left = self.buf.left_col;
+        if (start_dc < left) return;
+        const row_spans = try self.alloc.alloc(glyphwire.client.Client.Span, ranges.len);
+        defer self.alloc.free(row_spans);
+        for (ranges, row_spans, 0..) |rg, *sp, i| {
+            const stop = if (i + 1 < ranges.len) ranges[i + 1].start else bytes.len;
+            sp.* = .{ .text = bytes[rg.start..stop], .fg = rg.color orelse fg_text };
+        }
+        try batch.writeSpans(row_spans, .{
+            .layer = self.buffer_layer,
+            .row = r,
+            .col = self.gutterWidth() + start_dc - left,
+            .bg = bg_buffer,
+            .max_cols = if (pad_row) left + self.textCols() - start_dc else null,
+            .pad = pad_row,
+        });
     }
 
     /// Blanks `n` cells of buffer row `r` to the pane colour -- a fill,
@@ -2324,7 +2359,11 @@ pub const Ui = struct {
             try line.appendSlice(self.alloc, tail);
         }
 
-        try batch.writeTextOpts(line.items, .{
+        // The mode word (right after the leading space, in the normal
+        // status form) gets its own colour as a span of the same write.
+        const mode_word = modeName(self.buf.ed.mode);
+        const show_mode = self.buf.ed.mode != .command and self.buf.ed.status.items.len == 0;
+        const opts: glyphwire.client.Client.TextOpts = .{
             .layer = self.status_layer,
             .row = 0,
             .col = 0,
@@ -2332,12 +2371,16 @@ pub const Ui = struct {
             .bg = bg_status,
             .max_cols = b.cols,
             .pad = true,
-        });
-
-        // The mode word gets its own colour, over the top of the run just
-        // written -- cheaper than splitting the line into two runs.
-        if (self.buf.ed.mode != .command and self.buf.ed.status.items.len == 0) {
-            try writeAt(batch, self.status_layer, 0, 1, modeName(self.buf.ed.mode), fg_mode, bg_status);
+        };
+        if (show_mode) {
+            const mode_end = 1 + mode_word.len;
+            try batch.writeSpans(&.{
+                .{ .text = line.items[0..1] },
+                .{ .text = line.items[1..mode_end], .fg = fg_mode },
+                .{ .text = line.items[mode_end..] },
+            }, opts);
+        } else {
+            try batch.writeTextOpts(line.items, opts);
         }
     }
 

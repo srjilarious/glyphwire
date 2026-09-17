@@ -85,6 +85,7 @@ pub const grapheme_inline_len = core.grapheme_inline_len;
 pub const Cell = core.Cell;
 pub const CellWidth = core.CellWidth;
 pub const TextScale = core.TextScale;
+pub const scaledPitch = core.scaledPitch;
 pub const codepointWidth = core.codepointWidth;
 pub const stringWidth = core.stringWidth;
 pub const Cursor = core.Cursor;

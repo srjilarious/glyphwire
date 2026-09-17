@@ -31,6 +31,8 @@ pub const DispatchError = error{
     WrongScrollMode,
     /// `scroll_mode`'s `mode` wasn't `"host"` or `"client"`.
     InvalidScrollMode,
+    /// `write_text` carried both `text` and `spans`, or neither.
+    InvalidSpans,
     NotARequest,
     UnknownImage,
     UnknownIcon,
@@ -126,7 +128,12 @@ const WriteTextParams = struct {
     layer: ?core.LayerHandle = null,
     row: ?usize = null,
     col: ?usize = null,
-    text: []const u8,
+    /// Exactly one of `text` and `spans`.
+    text: ?[]const u8 = null,
+    /// Styled runs written back to back as one write -- a syntax-coloured
+    /// row, or a status line with a highlighted word, in one message.
+    /// Each span's omitted fields fall back to this message's own.
+    spans: ?[]const SpanParams = null,
     /// See `core.Layer.WriteOpts.max_cols`.
     max_cols: ?usize = null,
     /// See `core.Layer.WriteOpts.pad`.
@@ -146,6 +153,17 @@ const WriteTextParams = struct {
     /// `"x1"` (default), `"x1_5"`, or `"x2"` -- see `core.TextScale`'s
     /// doc comment. Wire strings match the enum's tag names exactly, the
     /// same convention `draw_icon`'s `scale` already uses.
+    scale: ?[]const u8 = null,
+};
+
+/// One entry of `write_text`'s `spans`. Every field but `text` is optional
+/// and inherits the enclosing message's value when omitted.
+const SpanParams = struct {
+    text: []const u8,
+    fg: ?protocol.Color = null,
+    bg: ?protocol.Color = null,
+    metadata_id: ?core.MetadataHandle = null,
+    transparent_bg: ?bool = null,
     scale: ?[]const u8 = null,
 };
 
@@ -641,6 +659,20 @@ fn parseIconOption(comptime E: type, value: ?[]const u8, default: E) !E {
 /// `write_text`'s `scale` -- same shape as `parseIconOption`, but with its
 /// own error so a bad value is reported as `InvalidTextScale` rather than
 /// `InvalidIconOption`.
+/// `write_text`'s `fg`, defaulting to the default style's.
+fn resolveFg(c: ?protocol.Color) core.Color {
+    const v = c orelse return core.default_style.fg;
+    return .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a };
+}
+
+/// `write_text`'s background: null (leave each cell's own) under
+/// `transparent_bg`, else `bg`, else the default style's (transparent).
+fn resolveBg(c: ?protocol.Color, transparent_bg: bool) ?core.Background {
+    if (transparent_bg) return null;
+    const v = c orelse return core.default_style.bg;
+    return .{ .color = .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a } };
+}
+
 fn parseTextScale(value: ?[]const u8) !core.TextScale {
     const s = value orelse return .x1;
     return std.meta.stringToEnum(core.TextScale, s) orelse DispatchError.InvalidTextScale;
@@ -1677,24 +1709,47 @@ pub const Dispatcher = struct {
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
 
-        const fg: core.Color = if (p.fg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else core.default_style.fg;
-        const bg: ?core.Background = if (p.transparent_bg)
-            null
-        else if (p.bg) |c|
-            .{ .color = .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } }
-        else
-            core.default_style.bg;
+        const fg = resolveFg(p.fg);
+        const bg = resolveBg(p.bg, p.transparent_bg);
         const metadata_id = try self.resolveMetadata(p.metadata_id);
         const scale = try parseTextScale(p.scale);
+
+        // Everything is validated into runs before the cursor moves, so a
+        // bad span can't leave the write half-applied.
+        var one: [1]core.Layer.TextRun = undefined;
+        const runs: []const core.Layer.TextRun = if (p.text) |text| blk: {
+            if (p.spans != null) return DispatchError.InvalidSpans;
+            one[0] = .{ .text = text, .fg = fg, .bg = bg, .metadata_id = metadata_id, .scale = scale };
+            break :blk &one;
+        } else if (p.spans) |spans| blk: {
+            const out = try alloc.alloc(core.Layer.TextRun, spans.len);
+            errdefer alloc.free(out);
+            for (spans, out) |s, *r| {
+                r.* = .{
+                    .text = s.text,
+                    .fg = if (s.fg != null) resolveFg(s.fg) else fg,
+                    .bg = if (s.bg != null or s.transparent_bg != null)
+                        resolveBg(s.bg orelse p.bg, s.transparent_bg orelse p.transparent_bg)
+                    else
+                        bg,
+                    .metadata_id = if (s.metadata_id != null) try self.resolveMetadata(s.metadata_id) else metadata_id,
+                    .scale = if (s.scale != null) try parseTextScale(s.scale) else scale,
+                };
+            }
+            break :blk out;
+        } else return DispatchError.InvalidSpans;
+        defer if (p.spans != null) alloc.free(runs);
+
         if (p.row != null or p.col != null) {
             const anchor = resolveAnchor(layer, p.row, p.col);
             layer.setProperty(.{ .cursor = .{ .row = anchor.row, .col = anchor.col } });
         }
-        try layer.writeTextOpts(p.text, fg, bg, .{
-            .metadata_id = metadata_id,
-            .scale = scale,
+        try layer.writeRuns(runs, .{
             .max_cols = p.max_cols,
             .pad = p.pad,
+            .pad_fg = fg,
+            .pad_bg = bg,
+            .pad_metadata_id = metadata_id,
         });
 
         // A terminal query the text carried (`CSI 6n` / DA / DECRQM):
