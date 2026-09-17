@@ -82,9 +82,9 @@ extern "c" fn openpty(
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 // glibc extension: PATH-searching exec that also takes an explicit envp,
-// for `spawn`'s `envp` argument (a pane that needs `GLYPHWIRE_LAYER` set
-// to something other than the parent's own environment -- see `gmux`'s
-// `pane.zig`). Building that envp is the caller's job, done *before*
+// for `spawn`'s `envp` argument (a pane that needs `GLYPHWIRE_PANE` set
+// to something other than the parent's own environment). Building that
+// envp is the caller's job, done *before*
 // `fork` (see `buildEnvWith`): the child may only call async-signal-safe
 // libc between `fork` and `exec`, and neither `setenv` nor an allocation
 // is one of those.

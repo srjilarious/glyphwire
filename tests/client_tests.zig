@@ -119,15 +119,15 @@ pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.
     try testz.expectEqualStr("x", ctx.root.cell(1, 3).grapheme());
 }
 
-/// `Client.default_layer` retargets every root-implicit method (see its
-/// doc comment) onto a non-root layer instead -- what `glyphwire-shell`
-/// sets from `GLYPHWIRE_LAYER` to run embedded in a `gmux` pane. Checks
-/// both write and read paths land on the target layer, and that the root
-/// layer is left completely untouched.
-pub fn clientDefaultLayerRetargetsRootImplicitCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+/// A popup redrawn entirely from one `Client.Batch` using only typed
+/// adders -- size, placement, a clear, text, visibility -- lands every
+/// sub-message on the layer it names and leaves the root untouched. The
+/// shape `gw-read`'s dialogs use, which used to need raw `b.notify` calls
+/// because `Batch`'s helpers could only reach the root.
+pub fn clientBatchTypedAddersTargetNamedLayerTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
     defer ctx.deinit();
-    const pane = try ctx.createLayer(6, 2, 0);
+    const popup = try ctx.createLayer(4, 1, 0);
 
     const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
     defer alloc.free(socket_path);
@@ -141,26 +141,34 @@ pub fn clientDefaultLayerRetargetsRootImplicitCallsTest(io: std.Io, alloc: std.m
 
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     errdefer client.deinit();
-    client.default_layer = pane;
 
-    const size = try client.getSize();
-    try testz.expectEqual(size.cols, 6);
-    try testz.expectEqual(size.rows, 2);
-
-    try client.writeText("hi", null, null);
-    const cursor = try client.getCursor();
-    try testz.expectEqual(cursor.row, 0);
-    try testz.expectEqual(cursor.col, 2);
-
-    try client.setCursor(1, 0);
-    try client.writeText("x", null, null);
-    try client.clear(0, 0, 1, null);
+    {
+        var b = client.batch();
+        defer b.deinit();
+        try b.setLayerVisible(popup, false);
+        try b.setLayerSize(popup, 6, 2);
+        try b.setLayerCellPosition(popup, 1, 2);
+        try b.clearOn(popup, 0, 0, null, null);
+        try b.writeTextOpts("hi", .{ .layer = popup, .row = 0, .col = 0 });
+        try b.setCursorOn(popup, 1, 0);
+        try b.writeTextOn(popup, "x", null, null);
+        try b.setLayerVisible(popup, true);
+        var results = try b.send();
+        results.deinit();
+    }
 
     client.deinit();
     thread.join();
 
-    try testz.expectEqualStr("", ctx.layerPtr(pane).?.cell(0, 0).grapheme());
-    try testz.expectEqualStr("x", ctx.layerPtr(pane).?.cell(1, 0).grapheme());
+    const layer = ctx.layerPtr(popup).?;
+    try testz.expectEqual(layer.width, 6);
+    try testz.expectEqual(layer.height, 2);
+    try testz.expectTrue(layer.visible);
+    try testz.expectEqual(layer.pos_cells.?.row, 1);
+    try testz.expectEqual(layer.pos_cells.?.col, 2);
+    try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("i", layer.cell(0, 1).grapheme());
+    try testz.expectEqualStr("x", layer.cell(1, 0).grapheme());
     // The root layer never saw any of it.
     try testz.expectEqualStr("", ctx.root.cell(0, 0).grapheme());
     try testz.expectEqualStr("", ctx.root.cell(1, 0).grapheme());

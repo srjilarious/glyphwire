@@ -710,27 +710,32 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
     try testz.expectEqual(cur.col, text_col);
 }
 
-/// Ctrl+R end to end: the real shell spawns the real `gw-hist`, `gw-hist`
-/// reads a seeded history file and fuzzy-filters it live, and picking a
-/// line hands it back through `$GLYPHWIRE_RESULT_FD` to become the
-/// prompt's line -- `Prompt.historySearch` / `Prompt.runCommand` /
-/// `Prompt.takePendingResultLine` all in one pass, no library-level
-/// shortcut. `gw-hist` runs on its own alt screen (`CSI ?1049h`/`l`,
-/// mirrored onto the same root layer's `write_text` -- see
-/// `src/core.zig`'s alt-screen handling), so the shell's own prompt row
-/// stays put underneath and is what's checked here once `gw-hist` exits.
+/// Ctrl+R end to end, shell side: Ctrl+R spawns whatever `gw-hist` is
+/// first on `PATH`, and a line that program writes to
+/// `$GLYPHWIRE_RESULT_FD` becomes the prompt's line --
+/// `Prompt.historySearch` / `Prompt.runCommand` /
+/// `Prompt.takePendingResultLine` in one pass.
 ///
-/// Unlike `sandboxShellConfig` (which sets `GLYPHWIRE_NO_HISTORY=1` so
-/// other tests don't touch a real history file), this test needs
-/// `gw-hist` to have something to search, so it points
-/// `GLYPHWIRE_CONFIG_DIR` at its own throwaway directory and seeds a
-/// `history` file there directly.
-pub fn shellCtrlRHistorySearchLoadsPickedLineIntoPromptTest(_: std.Io, alloc: std.mem.Allocator) !void {
+/// The `gw-hist` here is a two-line `sh` stand-in, not the real binary.
+/// The real one opens its own context and reads keys from an
+/// `InputListener` attached to it, and this file's bare `Server` over one
+/// `Context` has no session to route input to that context -- so it sat
+/// waiting for keys that never came, and the test timed out on every run.
+/// The stand-in keeps what this test is actually about (the shell's
+/// spawn -> result pipe -> `setLine` path) and drops the part that needs
+/// a whole session to drive; `gw-hist`'s own filtering is covered by
+/// unit tests of `shell_support.fuzzy`.
+pub fn shellCtrlRLoadsResultFdLineIntoPromptTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    // Wider than the usual 80 columns these tests use: the prompt is the
+    // repo's absolute path, and once the picked line is loaded after it
+    // the row has to still fit or the line editor scrolls it sideways and
+    // the assertions below read the wrong cells. Checked out somewhere
+    // deep (a worktree under `.claude/worktrees/`), 80 isn't enough.
+    var ctx = try glyphwire.Context.init(alloc, 240, 24, 0);
     defer ctx.deinit();
 
     const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shell-ctrlr-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
@@ -745,31 +750,37 @@ pub fn shellCtrlRHistorySearchLoadsPickedLineIntoPromptTest(_: std.Io, alloc: st
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
     const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
     defer alloc.free(shell_path);
-    const hist_bin_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-hist", .{cwd_buf[0..cwd_len]});
-    defer alloc.free(hist_bin_path);
-    std.Io.Dir.accessAbsolute(io, hist_bin_path, .{}) catch |err| {
-        std.debug.print("e2e: required binary not found: {s} ({t})\n", .{ hist_bin_path, err });
-        return error.TestBinaryMissing;
-    };
 
-    const cfg_dir = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-e2e-ctrlr-cfg-{d}", .{std.Thread.getCurrentId()});
-    defer alloc.free(cfg_dir);
-    defer std.Io.Dir.cwd().deleteTree(io, cfg_dir) catch {};
-    try std.Io.Dir.cwd().createDirPath(io, cfg_dir);
-    const hist_file = try std.fs.path.join(alloc, &.{ cfg_dir, "history" });
-    defer alloc.free(hist_file);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = hist_file, .data = "ls -la\necho ctrlr-e2e-marker\ngit status\n" });
+    // The stand-in `gw-hist`. `/dev/fd/N` rather than `>&N`: POSIX `sh`
+    // (dash) only accepts a single-digit fd in a redirect, and the result
+    // pipe's number isn't guaranteed to be one. No trailing newline, same
+    // as the real `gw-hist` writes.
+    const fake_bin = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-e2e-ctrlr-bin-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(fake_bin);
+    defer std.Io.Dir.cwd().deleteTree(io, fake_bin) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, fake_bin);
+    const fake_hist = try std.fs.path.join(alloc, &.{ fake_bin, "gw-hist" });
+    defer alloc.free(fake_hist);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = fake_hist,
+        .data = "#!/bin/sh\nprintf 'echo ctrlr-e2e-marker' > \"/dev/fd/$GLYPHWIRE_RESULT_FD\"\n",
+        .flags = .{ .permissions = .executable_file },
+    });
 
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
-    try shell_env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
+    try sandboxShellConfig(&shell_env, alloc);
     // `runCommand` resolves `gw-hist` via `execvp`'s `PATH` search, same
     // as any other bare command name (see shell/main.zig's top doc
-    // comment) -- prepend the freshly built binaries the same way
-    // `shellRunsATwoStagePipelineTest`'s `PATH`-dependent siblings do.
+    // comment), so the stand-in only has to come first. The shell
+    // prepends its own bin dir at startup (`prependZigOutBinToPath`),
+    // which would put the real `gw-hist` back in front -- pointing
+    // `GLYPHWIRE_BIN_DIR` at the stand-in's directory makes that prepend
+    // name it instead.
+    try shell_env.put("GLYPHWIRE_BIN_DIR", fake_bin);
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
-    const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
+    const new_path = try std.fmt.allocPrint(alloc, "{s}:{s}/zig-out/bin:{s}", .{ fake_bin, cwd_buf[0..cwd_len], path_env });
     defer alloc.free(new_path);
     try shell_env.put("PATH", new_path);
 
@@ -791,24 +802,18 @@ pub fn shellCtrlRHistorySearchLoadsPickedLineIntoPromptTest(_: std.Io, alloc: st
     try reporter.reportKey("r", false);
     try reporter.reportKey("left_control", false);
 
-    // `gw-hist` is now the foreground child, on its own alt screen;
-    // typed text and Enter forward into its raw-mode stdin exactly like
-    // any other plain (non-aware) foreground program's pty.
-    try typeText(&reporter, "marker");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
-
-    // Back on the same prompt row (nothing else ran to advance it) --
-    // now loaded with the picked line instead of an empty one.
-    try waitForCell(&reporter, 0, text_col, "e");
+    // Back on the same prompt row (nothing ran to advance it) -- now
+    // loaded with the picked line instead of an empty one. Checked at
+    // the line's *end* so the wait can't pass on a half-drawn line.
+    const line = "echo ctrlr-e2e-marker";
+    try waitForCell(&reporter, 0, text_col + line.len - 1, "r");
     var snapshot = try reporter.getCells();
     defer snapshot.deinit();
-    try testz.expectEqualStr("e", snapshot.cellAt(0, text_col).grapheme);
-    try testz.expectEqualStr("c", snapshot.cellAt(0, text_col + 1).grapheme);
-    try testz.expectEqualStr("h", snapshot.cellAt(0, text_col + 2).grapheme);
-    try testz.expectEqualStr("o", snapshot.cellAt(0, text_col + 3).grapheme);
-    try testz.expectEqualStr(" ", snapshot.cellAt(0, text_col + 4).grapheme);
-    try testz.expectEqualStr("c", snapshot.cellAt(0, text_col + 5).grapheme);
+    for (line, 0..) |ch, i| {
+        try testz.expectEqualStr(&.{ch}, snapshot.cellAt(0, text_col + i).grapheme);
+    }
+    const cur = try reporter.getCursor();
+    try testz.expectEqual(cur.col, text_col + line.len);
 }
 
 /// Drives the real glyphwire-shell binary through a `*` glob expansion:

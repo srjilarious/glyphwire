@@ -99,22 +99,6 @@ pub const Client = struct {
     /// real round trip while still bounded; a test that wants to *assert*
     /// the timeout fires can shorten this field after `connect`.
     read_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(30_000), .clock = .awake } },
-    /// Overrides the implicit root target of every "root-implicit" method
-    /// below (`writeText`, `clear`, `setCursor`, `getCursor`, `getSize`,
-    /// `getCells`, `getScroll`/`scrollView`, `drawIconStyled`, ...) and is
-    /// substituted for an explicit `null` `layer` argument on the methods
-    /// that already take one (`getMetadata`, `findMetadata`,
-    /// `toggleHighlight`, `clearHighlight`, ...). Null (the default) keeps
-    /// every existing caller's behavior exactly as it was -- this only
-    /// changes anything once a caller sets it. For a client that is
-    /// itself layer-agnostic code embedded onto someone else's layer
-    /// (`glyphwire-shell` run as a `gmux` pane's pty child, via
-    /// `GLYPHWIRE_LAYER`): set this once after connecting and every
-    /// existing root-implicit call site keeps working unchanged, now
-    /// targeting that layer instead. `Client.Batch` reads it through its
-    /// owning `client` field, so a batch built after this is set is
-    /// layer-targeted too.
-    default_layer: ?core.LayerHandle = null,
 
     pub const ConnectError = std.Io.net.UnixAddress.InitError || std.Io.net.UnixAddress.ConnectError;
     pub const NoSessionError = error{NoSession};
@@ -198,7 +182,6 @@ pub const Client = struct {
     /// `core.default_style`), matching the wire params' optionality.
     pub fn writeText(self: *Client, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
         try self.notify("write_text", .{
-            .layer = self.default_layer,
             .text = text,
             .fg = colorToJson(fg),
             .bg = colorToJson(bg),
@@ -227,7 +210,6 @@ pub const Client = struct {
     /// values.
     pub fn writeTextScaled(self: *Client, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: ?core.MetadataHandle, scale: core.TextScale) !void {
         try self.notify("write_text", .{
-            .layer = self.default_layer,
             .text = text,
             .fg = colorToJson(fg),
             .bg = colorToJson(bg),
@@ -246,7 +228,6 @@ pub const Client = struct {
     /// has no default parameter values.
     pub fn writeTextTransparent(self: *Client, text: []const u8, fg: ?core.Color) !void {
         try self.notify("write_text", .{
-            .layer = self.default_layer,
             .text = text,
             .fg = colorToJson(fg),
             .transparent_bg = true,
@@ -259,7 +240,7 @@ pub const Client = struct {
     /// it with a cursor move. Shared by `Client.writeTextOpts` and
     /// `Batch.writeTextOpts`.
     pub const TextOpts = struct {
-        /// null = `default_layer` (root unless set).
+        /// null = the root layer.
         layer: ?core.LayerHandle = null,
         /// Where to start; either omitted keeps the cursor's value on that
         /// axis. Saves the separate `set_property(cursor)` message.
@@ -281,7 +262,7 @@ pub const Client = struct {
 
     /// `write_text` with every option (see `TextOpts`) -- a notification.
     pub fn writeTextOpts(self: *Client, text: []const u8, opts: TextOpts) !void {
-        try self.notify("write_text", textParams(self.default_layer, text, null, opts));
+        try self.notify("write_text", textParams(text, null, opts));
     }
 
     /// One styled piece of a `writeSpans` write. Every null field inherits
@@ -303,7 +284,7 @@ pub const Client = struct {
     pub fn writeSpans(self: *Client, spans: []const Span, opts: TextOpts) !void {
         const wire_spans = try spansToWire(self.alloc, spans);
         defer self.alloc.free(wire_spans);
-        try self.notify("write_text", textParams(self.default_layer, null, wire_spans, opts));
+        try self.notify("write_text", textParams(null, wire_spans, opts));
     }
 
     fn spansToWire(alloc: std.mem.Allocator, spans: []const Span) ![]SpanWire {
@@ -330,9 +311,9 @@ pub const Client = struct {
 
     /// The wire params for a `TextOpts` write: either `text` or `spans`.
     /// Shared with `Batch`.
-    fn textParams(default_layer: ?core.LayerHandle, text: ?[]const u8, spans: ?[]const SpanWire, opts: TextOpts) WriteTextWire {
+    fn textParams(text: ?[]const u8, spans: ?[]const SpanWire, opts: TextOpts) WriteTextWire {
         return .{
-            .layer = opts.layer orelse default_layer,
+            .layer = opts.layer,
             .row = opts.row,
             .col = opts.col,
             .text = text,
@@ -366,7 +347,7 @@ pub const Client = struct {
     /// an optional fill colour. Shared by `Client.clearArea` and
     /// `Batch.clearArea`.
     pub const ClearOpts = struct {
-        /// null = `default_layer` (root unless set).
+        /// null = the root layer.
         layer: ?core.LayerHandle = null,
         row: usize = 0,
         col: usize = 0,
@@ -380,12 +361,12 @@ pub const Client = struct {
 
     /// `clear` with every option (see `ClearOpts`) -- a notification.
     pub fn clearArea(self: *Client, opts: ClearOpts) !void {
-        try self.notify("clear", clearParams(self.default_layer, opts));
+        try self.notify("clear", clearParams(opts));
     }
 
-    fn clearParams(default_layer: ?core.LayerHandle, opts: ClearOpts) ClearWire {
+    fn clearParams(opts: ClearOpts) ClearWire {
         return .{
-            .layer = opts.layer orelse default_layer,
+            .layer = opts.layer,
             .row = opts.row,
             .col = opts.col,
             .rows = opts.rows,
@@ -405,7 +386,7 @@ pub const Client = struct {
 
     /// `set_property(layer, "cursor", {row, col})` -- a notification.
     pub fn setCursor(self: *Client, row: usize, col: usize) !void {
-        try self.notify("set_property", .{ .layer = self.default_layer, .property = "cursor", .row = row, .col = col });
+        try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
     }
 
     /// `insert_cells(count)` -- a notification. ECMA-48's ICH: shifts
@@ -450,7 +431,7 @@ pub const Client = struct {
 
     /// `get_property(layer, "cursor")` -- a request.
     pub fn getCursor(self: *Client) !core.Cursor {
-        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .layer = self.default_layer, .property = "cursor" });
+        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .property = "cursor" });
         defer parsed.deinit();
         return .{ .row = parsed.value.result.row, .col = parsed.value.result.col };
     }
@@ -464,29 +445,26 @@ pub const Client = struct {
         return parsed.value.result.revision;
     }
 
-    /// `get_property(layer, "size")` -- a request returning the layer's
-    /// viewport size in cells (`self.default_layer`, root unless set).
-    /// For the root layer this is the current window size; `InputListener`
-    /// subscribed to `"resize"` is the live-updating counterpart for a
-    /// client that wants to react to window resizes rather than poll --
-    /// `"layout"` is the counterpart for a `default_layer`-targeted one,
-    /// since `"resize"` only ever reports the root layer's size.
+    /// `get_property("size")` -- a request returning the root layer's
+    /// viewport size in cells, i.e. the current window size.
+    /// `InputListener` subscribed to `"resize"` is the live-updating
+    /// counterpart for a client that wants to react to window resizes
+    /// rather than poll; `getLayerSize` is the form for any other layer.
     pub fn getSize(self: *Client) !core.LayerSize {
-        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .layer = self.default_layer, .property = "size" });
+        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .property = "size" });
         defer parsed.deinit();
         return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
     }
 
     /// `get_cells(layer?)` -- a request returning a full row-major
-    /// snapshot of `self.default_layer`'s (root unless set) visible
-    /// viewport. Owns its own parsed JSON arena; caller must call
+    /// snapshot of the root layer's visible viewport. Owns its own parsed JSON arena; caller must call
     /// `.deinit()` on the result. `.{ .layer = ... }`, not a bare `.{}`:
     /// an empty anonymous struct serializes as a JSON *array* (Zig's
     /// tuple encoding), not `{}` -- fine for a method the server never
     /// parses params for, but `get_cells` now does (`GetCellsParams`), so
     /// it needs a real single-field object on the wire.
     pub fn getCells(self: *Client) !CellsSnapshot {
-        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = self.default_layer });
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = @as(?core.LayerHandle, null) });
         return .{ .parsed = parsed };
     }
 
@@ -497,36 +475,36 @@ pub const Client = struct {
         return .{ .parsed = parsed };
     }
 
-    /// `get_cells(layer?, view_offset)` -- `self.default_layer`'s (root
-    /// unless set) grid as it appears scrolled back by `view_offset` rows
+    /// `get_cells(layer?, view_offset)` -- the root layer's grid as it
+    /// appears scrolled back by `view_offset` rows
     /// of history (see `core.Layer.viewRow`). `view_offset == 0` is
     /// identical to `getCells`.
     pub fn getCellsView(self: *Client, view_offset: usize) !CellsSnapshot {
-        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = self.default_layer, .view_offset = view_offset });
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .view_offset = view_offset });
         return .{ .parsed = parsed };
     }
 
     /// `get_property(layer, "scroll")` -- a request returning
-    /// `self.default_layer`'s (root unless set) scrollback view state
+    /// the root layer's scrollback view state
     /// (`{offset, max}`): `offset` rows of history currently showing
     /// above the live viewport, out of `max` retained. `scrollView` is
     /// how a client moves it; `InputListener` subscribed to `"scroll"` is
     /// the live-updating counterpart.
     pub fn getScroll(self: *Client) !core.LayerScroll {
-        var parsed = try self.request(struct { offset: usize, max: usize }, "get_property", .{ .layer = self.default_layer, .property = "scroll" });
+        var parsed = try self.request(struct { offset: usize, max: usize }, "get_property", .{ .property = "scroll" });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
 
     /// `scroll_view(layer?, offset?, delta?)` -- a request that moves
-    /// `self.default_layer`'s (root unless set) scrollback view offset
+    /// the root layer's scrollback view offset
     /// (see `core.Layer.scrollView`) and returns the resulting `{offset,
     /// max}`. `offset` is an absolute target in rows; `delta` is added
     /// after; the result is clamped to `0..max`. Passing neither is a
     /// pure query. The server also broadcasts a `scroll` notification to
     /// other `"scroll"` subscribers.
     pub fn scrollView(self: *Client, offset: ?usize, delta: ?i64) !core.LayerScroll {
-        var parsed = try self.request(struct { offset: usize, max: usize }, "scroll_view", .{ .layer = self.default_layer, .offset = offset, .delta = delta });
+        var parsed = try self.request(struct { offset: usize, max: usize }, "scroll_view", .{ .offset = offset, .delta = delta });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
@@ -688,7 +666,7 @@ pub const Client = struct {
     /// `getCellMetrics` and `getSize` give it what it needs to compute
     /// that.
     pub fn drawImage(self: *Client, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize, scale: f32, src: core.ImageSrcRect) !void {
-        try self.drawImageOn(self.default_layer, handle, row, col, row_span, col_span, scale, src);
+        try self.drawImageOn(null, handle, row, col, row_span, col_span, scale, src);
     }
 
     /// `draw_image(layer, ...)` -- the explicitly-targeted form of
@@ -735,7 +713,11 @@ pub const Client = struct {
     /// `scale`/`h_align`/`v_align`/`max_w`/`max_h` for `drawIconStyled` --
     /// see `core.IconBg`'s doc comment. Defaults match `drawIcon`'s
     /// behavior. `max_w`/`max_h` only apply when `scale == .natural`.
+    /// Shared by `Client` and `Batch`.
     pub const DrawIconOpts = struct {
+        /// null = the root layer. Ignored by the `*On*` forms, whose
+        /// explicit `layer` argument wins.
+        layer: ?core.LayerHandle = null,
         scale: core.IconScale = .fit,
         h_align: core.HAlign = .center,
         v_align: core.VAlign = .center,
@@ -760,32 +742,14 @@ pub const Client = struct {
     /// `opts.metadata_id`. A separate method rather than extra params on
     /// `drawIcon` itself since Zig has no default parameter values.
     pub fn drawIconStyled(self: *Client, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
-        try self.notify("draw_icon", .{
-            .layer = self.default_layer,
-            .row = row,
-            .col = col,
-            .name = name,
-            .scale = @tagName(opts.scale),
-            .h_align = @tagName(opts.h_align),
-            .v_align = @tagName(opts.v_align),
-            .max_w = opts.max_w,
-            .max_h = opts.max_h,
-            .metadata_id = opts.metadata_id,
-            .foreground = opts.foreground,
-        });
+        try self.notify("draw_icon", iconParams(opts.layer, row, col, name, opts));
     }
 
-    /// `draw_icon(layer, row?, col?, name)` on a non-root layer -- see
-    /// `drawIcon` for the root-layer version.
-    pub fn drawIconOn(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8) !void {
-        try self.notify("draw_icon", .{ .layer = layer, .row = row, .col = col, .name = name });
-    }
-
-    /// `draw_icon(layer, row?, col?, name, scale?, h_align?, v_align?,
-    /// max_w?, max_h?, metadata_id?)` on a non-root layer -- see
-    /// `drawIconStyled` for the root-layer version.
-    pub fn drawIconOnStyled(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
-        try self.notify("draw_icon", .{
+    /// The wire params for a styled `draw_icon`. `layer` is passed
+    /// separately so the `*On*` forms can override `opts.layer`. Shared
+    /// with `Batch`.
+    fn iconParams(layer: ?core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) DrawIconWire {
+        return .{
             .layer = layer,
             .row = row,
             .col = col,
@@ -797,7 +761,34 @@ pub const Client = struct {
             .max_h = opts.max_h,
             .metadata_id = opts.metadata_id,
             .foreground = opts.foreground,
-        });
+        };
+    }
+
+    const DrawIconWire = struct {
+        layer: ?core.LayerHandle,
+        row: ?usize,
+        col: ?usize,
+        name: []const u8,
+        scale: []const u8,
+        h_align: []const u8,
+        v_align: []const u8,
+        max_w: ?u32,
+        max_h: ?u32,
+        metadata_id: ?core.MetadataHandle,
+        foreground: bool,
+    };
+
+    /// `draw_icon(layer, row?, col?, name)` on a non-root layer -- see
+    /// `drawIcon` for the root-layer version.
+    pub fn drawIconOn(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8) !void {
+        try self.notify("draw_icon", .{ .layer = layer, .row = row, .col = col, .name = name });
+    }
+
+    /// `draw_icon(layer, row?, col?, name, scale?, h_align?, v_align?,
+    /// max_w?, max_h?, metadata_id?)` on a non-root layer -- see
+    /// `drawIconStyled` for the root-layer version.
+    pub fn drawIconOnStyled(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
+        try self.notify("draw_icon", iconParams(layer, row, col, name, opts));
     }
 
     /// `tag_metadata(layer?, row, col, metadata_id)` -- a notification.
@@ -829,9 +820,38 @@ pub const Client = struct {
     }
 
     /// `mode` for `drawBoxStyled`/`drawBoxOnStyled` -- see
-    /// `core.Layer.BoxMode`. Defaults match `drawBox`'s behavior.
+    /// `core.Layer.BoxMode`. Defaults match `drawBox`'s behavior. Shared
+    /// by `Client` and `Batch`.
     pub const DrawBoxOpts = struct {
+        /// null = the root layer. Ignored by the `*On*` forms, whose
+        /// explicit `layer` argument wins.
+        layer: ?core.LayerHandle = null,
         mode: core.Layer.BoxMode = .tile,
+    };
+
+    /// The wire params for a styled `draw_box`. `layer` is passed
+    /// separately so the `*On*` forms can override `opts.layer`. Shared
+    /// with `Batch`.
+    fn boxParams(layer: ?core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) DrawBoxWire {
+        return .{
+            .layer = layer,
+            .row = row,
+            .col = col,
+            .rows = rows,
+            .cols = cols,
+            .style = style,
+            .mode = @tagName(opts.mode),
+        };
+    }
+
+    const DrawBoxWire = struct {
+        layer: ?core.LayerHandle,
+        row: ?usize,
+        col: ?usize,
+        rows: usize,
+        cols: usize,
+        style: []const u8,
+        mode: []const u8,
     };
 
     /// `draw_box(row?, col?, rows, cols, style, mode)` -- like `drawBox`,
@@ -842,28 +862,21 @@ pub const Client = struct {
     /// param on `drawBox` itself since Zig has no default parameter
     /// values.
     pub fn drawBoxStyled(self: *Client, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
-        try self.notify("draw_box", .{
-            .row = row,
-            .col = col,
-            .rows = rows,
-            .cols = cols,
-            .style = style,
-            .mode = @tagName(opts.mode),
-        });
+        try self.notify("draw_box", boxParams(opts.layer, row, col, rows, cols, style, opts));
     }
 
     /// `clear(layer?, row?, col?, rows?, cols?)` -- a notification.
-    /// Resets cells in the given region of `self.default_layer` (root
-    /// unless set) back to blank/default style. `rows`/`cols` null means
+    /// Resets cells in the given region of the root layer back to
+    /// blank/default style. `rows`/`cols` null means
     /// "the rest of the layer from `row`/`col`", so `clear(0, 0, null,
     /// null)` wipes the whole layer.
     pub fn clear(self: *Client, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-        try self.clearOn(self.default_layer, row, col, rows, cols);
+        try self.clearOn(null, row, col, rows, cols);
     }
 
     /// `clear(layer, ...)` -- the explicitly-targeted form of `clear`,
-    /// matching `writeTextOn` / `drawImageOn`. A TUI that keeps its
-    /// `default_layer` on the root still has to wipe its own layers.
+    /// matching `writeTextOn` / `drawImageOn`, for a TUI wiping one of its
+    /// own layers.
     pub fn clearOn(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
         try self.notify("clear", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols });
     }
@@ -1441,15 +1454,7 @@ pub const Client = struct {
     /// `draw_box(layer, row?, col?, rows, cols, style, mode)` on a
     /// non-root layer -- see `drawBoxStyled` for the root-layer version.
     pub fn drawBoxOnStyled(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
-        try self.notify("draw_box", .{
-            .layer = layer,
-            .row = row,
-            .col = col,
-            .rows = rows,
-            .cols = cols,
-            .style = style,
-            .mode = @tagName(opts.mode),
-        });
+        try self.notify("draw_box", boxParams(layer, row, col, rows, cols, style, opts));
     }
 
     /// `get_cell_metrics` -- a request returning the session's fixed cell
@@ -1674,7 +1679,7 @@ pub const Client = struct {
 
     /// `create_rect(layer?, x, y, w, h, color, line_width?, filled?)` --
     /// a request. Adds a first-class pixel-space overlay rectangle to
-    /// `layer` (defaulting to `default_layer`) and returns a fresh
+    /// `layer` (null = root) and returns a fresh
     /// handle for `updateRect`/`destroyRect`. Position/size are in the
     /// layer's own content pixel space -- see `core.Rect`'s doc comment.
     pub fn createRect(self: *Client, layer: ?core.LayerHandle, rect: core.Rect) !core.RectHandle {
@@ -1748,10 +1753,10 @@ pub const Client = struct {
     /// pass 0 for the live viewport, or the `view_offset` from a
     /// `mouse_button` event so a click made while scrolled back lands on
     /// the row actually under the pointer.
-    /// `layer` null resolves to `self.default_layer` (root unless set) --
-    /// same rule every layer-optional method on this type follows.
+    /// `layer` null means the root layer -- same rule every
+    /// layer-optional method on this type follows.
     pub fn getMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, view_offset: usize) !struct { id: ?core.MetadataHandle, json: ?[]u8 } {
-        var parsed = try self.request(struct { id: ?core.MetadataHandle, json: ?[]const u8 }, "get_metadata", .{ .layer = layer orelse self.default_layer, .row = row, .col = col, .view_offset = view_offset });
+        var parsed = try self.request(struct { id: ?core.MetadataHandle, json: ?[]const u8 }, "get_metadata", .{ .layer = layer, .row = row, .col = col, .view_offset = view_offset });
         defer parsed.deinit();
         const json = if (parsed.value.result.json) |j| try self.alloc.dupe(u8, j) else null;
         return .{ .id = parsed.value.result.id, .json = json };
@@ -1773,7 +1778,7 @@ pub const Client = struct {
         var parsed = try self.request(
             struct { found: bool, above: i64 = 0, col: usize = 0, id: ?core.MetadataHandle = null },
             "find_metadata",
-            .{ .layer = layer orelse self.default_layer, .above = above, .col = col, .direction = @tagName(dir) },
+            .{ .layer = layer, .above = above, .col = col, .direction = @tagName(dir) },
         );
         defer parsed.deinit();
         const r = parsed.value.result;
@@ -1848,7 +1853,7 @@ pub const Client = struct {
     /// call `.deinit()`.
     pub fn toggleHighlight(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, view_offset: usize) !HighlightSnapshot {
         return .{ .parsed = try self.request(protocol.HighlightState, "toggle_highlight", .{
-            .layer = layer orelse self.default_layer,
+            .layer = layer,
             .row = row,
             .col = col,
             .view_offset = view_offset,
@@ -1866,7 +1871,7 @@ pub const Client = struct {
     /// and returns the (now empty) `HighlightState`. Caller owns the
     /// snapshot.
     pub fn clearHighlight(self: *Client, layer: ?core.LayerHandle) !HighlightSnapshot {
-        return .{ .parsed = try self.request(protocol.HighlightState, "clear_highlight", .{ .layer = layer orelse self.default_layer }) };
+        return .{ .parsed = try self.request(protocol.HighlightState, "clear_highlight", .{ .layer = layer }) };
     }
 
     /// `get_highlight(layer?)` -- a request. The layer's current
@@ -1903,9 +1908,8 @@ pub const Client = struct {
     }
 
     /// A `core.Color` in the shape the wire wants. Public because a
-    /// client hand-rolling a `Batch.notify` (rather than using one of the
-    /// typed `Batch` methods, which all target `default_layer`) has to
-    /// build the same `fg`/`bg` field itself.
+    /// client hand-rolling a `Batch.notify` for something without a typed
+    /// adder has to build the same `fg`/`bg` field itself.
     pub fn colorToJson(c: ?core.Color) ?protocol.Color {
         const v = c orelse return null;
         return .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a };
@@ -2033,83 +2037,84 @@ pub const Client = struct {
             return .{ .id = sub_id };
         }
 
-        /// Batched `set_property(cursor)` -- see `Client.setCursor`.
-        /// Targets `self.client.default_layer` (root unless set), same as
-        /// every other root-implicit `Batch` method.
-        pub fn setCursor(self: *Batch, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .layer = self.client.default_layer, .property = "cursor", .row = row, .col = col });
-        }
+        // Every typed adder below mirrors the `Client` method of the same
+        // name and sends the same params, so moving a sequence of draws
+        // into a batch is a mechanical `client.` -> `b.` swap. Root-implicit
+        // forms (no `layer` argument, or a null one) target the root; the
+        // `*On` forms and every `setLayer*` target the layer they name.
 
-        /// Batched `clear` -- see `Client.clear`. `rows`/`cols` null means
-        /// "the rest of the layer from `row`/`col`".
-        pub fn clear(self: *Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-            try self.notify("clear", .{ .layer = self.client.default_layer, .row = row, .col = col, .rows = rows, .cols = cols });
-        }
+        // -- Text, clearing and the cursor --
 
         /// Batched `write_text` with every option -- see `Client.TextOpts`.
         pub fn writeTextOpts(self: *Batch, text: []const u8, opts: TextOpts) !void {
-            try self.notify("write_text", textParams(self.client.default_layer, text, null, opts));
+            try self.notify("write_text", textParams(text, null, opts));
         }
 
         /// Batched `write_text` with `spans` -- see `Client.writeSpans`.
         pub fn writeSpans(self: *Batch, spans: []const Span, opts: TextOpts) !void {
             const wire_spans = try spansToWire(self.arena.allocator(), spans);
-            try self.notify("write_text", textParams(self.client.default_layer, null, wire_spans, opts));
-        }
-
-        /// Batched `clear` with every option -- see `Client.ClearOpts`.
-        pub fn clearArea(self: *Batch, opts: ClearOpts) !void {
-            try self.notify("clear", clearParams(self.client.default_layer, opts));
-        }
-
-        /// Batched `set_property(layer, "cursor")` on any layer.
-        pub fn setCursorOn(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
-        }
-
-        /// Batched `Client.setLayerScrollOffset`, so a frame's scroll
-        /// position lands with the rows drawn for it.
-        pub fn setLayerScrollOffset(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "scroll_offset", .row = row, .col = col });
-        }
-
-        /// Batched `Client.setLayerContentExtent`.
-        pub fn setLayerContentExtent(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "content_extent", .cols = cols, .rows = rows });
-        }
-
-        /// Batched `Client.setLayerSize`, so a resize reflow and the rows
-        /// redrawn for the new size land in one frame.
-        pub fn setLayerSize(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "size", .cols = cols, .rows = rows });
-        }
-
-        /// Batched `Client.setLayerBackground`.
-        pub fn setLayerBackground(self: *Batch, layer: core.LayerHandle, color: ?core.Color) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "background", .color = colorToJson(color) });
+            try self.notify("write_text", textParams(null, wire_spans, opts));
         }
 
         /// Batched `write_text` -- see `Client.writeText`.
         pub fn writeText(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
-            try self.notify("write_text", .{ .layer = self.client.default_layer, .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg) });
+            try self.notify("write_text", .{ .text = text, .fg = colorToJson(fg), .bg = colorToJson(bg) });
         }
 
         /// Batched `write_text` with a metadata tag -- see
         /// `Client.writeTextTagged`.
         pub fn writeTextTagged(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: core.MetadataHandle) !void {
-            try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg), .metadata_id = metadata_id });
+            try self.notify("write_text", .{ .text = text, .fg = colorToJson(fg), .bg = colorToJson(bg), .metadata_id = metadata_id });
         }
 
         /// Batched `write_text` with a metadata tag and a `scale` -- see
         /// `Client.writeTextScaled`.
         pub fn writeTextScaled(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: ?core.MetadataHandle, scale: core.TextScale) !void {
-            try self.notify("write_text", .{ .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg), .metadata_id = metadata_id, .scale = @tagName(scale) });
+            try self.notify("write_text", .{ .text = text, .fg = colorToJson(fg), .bg = colorToJson(bg), .metadata_id = metadata_id, .scale = @tagName(scale) });
         }
 
         /// Batched `write_text(text, fg?, transparent_bg: true)` -- see
         /// `Client.writeTextTransparent`.
         pub fn writeTextTransparent(self: *Batch, text: []const u8, fg: ?core.Color) !void {
-            try self.notify("write_text", .{ .layer = self.client.default_layer, .text = text, .fg = Client.colorToJson(fg), .transparent_bg = true });
+            try self.notify("write_text", .{ .text = text, .fg = colorToJson(fg), .transparent_bg = true });
+        }
+
+        /// Batched `Client.writeTextOn`.
+        pub fn writeTextOn(self: *Batch, layer: core.LayerHandle, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
+            try self.notify("write_text", .{ .layer = layer, .text = text, .fg = colorToJson(fg), .bg = colorToJson(bg) });
+        }
+
+        /// Batched `Client.writeTextOnTransparent`.
+        pub fn writeTextOnTransparent(self: *Batch, layer: core.LayerHandle, text: []const u8, fg: ?core.Color) !void {
+            try self.notify("write_text", .{ .layer = layer, .text = text, .fg = colorToJson(fg), .transparent_bg = true });
+        }
+
+        /// Batched `clear` with every option -- see `Client.ClearOpts`.
+        pub fn clearArea(self: *Batch, opts: ClearOpts) !void {
+            try self.notify("clear", clearParams(opts));
+        }
+
+        /// Batched `clear` on the root layer -- see `Client.clear`.
+        /// `rows`/`cols` null means "the rest of the layer from
+        /// `row`/`col`".
+        pub fn clear(self: *Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+            try self.clearOn(null, row, col, rows, cols);
+        }
+
+        /// Batched `Client.clearOn`.
+        pub fn clearOn(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+            try self.notify("clear", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols });
+        }
+
+        /// Batched `set_property(cursor)` on the root layer -- see
+        /// `Client.setCursor`.
+        pub fn setCursor(self: *Batch, row: usize, col: usize) !void {
+            try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
+        }
+
+        /// Batched `Client.setCursorOn`.
+        pub fn setCursorOn(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
         }
 
         /// Batched `tag_metadata` -- see `Client.tagMetadata`.
@@ -2136,21 +2141,151 @@ pub const Client = struct {
             });
         }
 
+        // -- Icons, boxes and images --
+
+        /// Batched `Client.drawIcon`.
+        pub fn drawIcon(self: *Batch, row: ?usize, col: ?usize, name: []const u8) !void {
+            try self.notify("draw_icon", .{ .row = row, .col = col, .name = name });
+        }
+
         /// Batched `draw_icon` with options -- see `Client.drawIconStyled`.
+        /// `opts.layer` picks the layer.
         pub fn drawIconStyled(self: *Batch, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
-            try self.notify("draw_icon", .{
-                .layer = self.client.default_layer,
+            try self.notify("draw_icon", iconParams(opts.layer, row, col, name, opts));
+        }
+
+        /// Batched `Client.drawIconOn`.
+        pub fn drawIconOn(self: *Batch, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8) !void {
+            try self.notify("draw_icon", .{ .layer = layer, .row = row, .col = col, .name = name });
+        }
+
+        /// Batched `Client.drawIconOnStyled`.
+        pub fn drawIconOnStyled(self: *Batch, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
+            try self.notify("draw_icon", iconParams(layer, row, col, name, opts));
+        }
+
+        /// Batched `Client.drawBox`.
+        pub fn drawBox(self: *Batch, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
+            try self.notify("draw_box", .{ .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
+        }
+
+        /// Batched `Client.drawBoxStyled`. `opts.layer` picks the layer.
+        pub fn drawBoxStyled(self: *Batch, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
+            try self.notify("draw_box", boxParams(opts.layer, row, col, rows, cols, style, opts));
+        }
+
+        /// Batched `Client.drawBoxOn`.
+        pub fn drawBoxOn(self: *Batch, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
+            try self.notify("draw_box", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
+        }
+
+        /// Batched `Client.drawBoxOnStyled`.
+        pub fn drawBoxOnStyled(self: *Batch, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
+            try self.notify("draw_box", boxParams(layer, row, col, rows, cols, style, opts));
+        }
+
+        /// Batched `Client.drawImageOn` (null `layer` = root).
+        pub fn drawImageOn(
+            self: *Batch,
+            layer: ?core.LayerHandle,
+            handle: core.ImageHandle,
+            row: ?usize,
+            col: ?usize,
+            row_span: usize,
+            col_span: usize,
+            scale: f32,
+            src: core.ImageSrcRect,
+        ) !void {
+            try self.notify("draw_image", .{
+                .layer = layer,
+                .handle = handle,
                 .row = row,
                 .col = col,
-                .name = name,
-                .scale = @tagName(opts.scale),
-                .h_align = @tagName(opts.h_align),
-                .v_align = @tagName(opts.v_align),
-                .max_w = opts.max_w,
-                .max_h = opts.max_h,
-                .metadata_id = opts.metadata_id,
-                .foreground = opts.foreground,
+                .row_span = row_span,
+                .col_span = col_span,
+                .scale = scale,
+                .src_x = src.x,
+                .src_y = src.y,
+                .src_w = src.w,
+                .src_h = src.h,
             });
+        }
+
+        // -- Layer properties and stacking --
+
+        /// Batched `Client.setLayerPosition`.
+        pub fn setLayerPosition(self: *Batch, layer: core.LayerHandle, x: f32, y: f32) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "position", .x = x, .y = y });
+        }
+
+        /// Batched `Client.setLayerCellPosition`, so a popup moves in the
+        /// same frame its contents are redrawn.
+        pub fn setLayerCellPosition(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "cell_position", .row = row, .col = col });
+        }
+
+        /// Batched `Client.setLayerSize`, so a resize reflow and the rows
+        /// redrawn for the new size land in one frame.
+        pub fn setLayerSize(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "size", .cols = cols, .rows = rows });
+        }
+
+        /// Batched `Client.setLayerVisible`. Showing a layer as the last
+        /// sub-message of the batch that drew it means it never appears
+        /// half-drawn.
+        pub fn setLayerVisible(self: *Batch, layer: core.LayerHandle, visible: bool) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "visibility", .visible = visible });
+        }
+
+        /// Batched `Client.setLayerOpacity`.
+        pub fn setLayerOpacity(self: *Batch, layer: core.LayerHandle, value: f32) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "opacity", .value = value });
+        }
+
+        /// Batched `Client.setLayerViewport`.
+        pub fn setLayerViewport(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "viewport", .cols = cols, .rows = rows });
+        }
+
+        /// Batched `Client.setLayerScrollOffset`, so a frame's scroll
+        /// position lands with the rows drawn for it.
+        pub fn setLayerScrollOffset(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "scroll_offset", .row = row, .col = col });
+        }
+
+        /// Batched `Client.setLayerContentExtent`.
+        pub fn setLayerContentExtent(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "content_extent", .cols = cols, .rows = rows });
+        }
+
+        /// Batched `Client.setLayerScrollMode`.
+        pub fn setLayerScrollMode(self: *Batch, layer: core.LayerHandle, mode: core.ScrollMode) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "scroll_mode", .mode = @tagName(mode) });
+        }
+
+        /// Batched `Client.setLayerScrollbars`.
+        pub fn setLayerScrollbars(self: *Batch, layer: core.LayerHandle, vertical: bool, horizontal: bool) !void {
+            try self.notify("set_property", .{
+                .layer = layer,
+                .property = "scrollbars",
+                .vertical = vertical,
+                .horizontal = horizontal,
+            });
+        }
+
+        /// Batched `Client.setLayerBackground`.
+        pub fn setLayerBackground(self: *Batch, layer: core.LayerHandle, color: ?core.Color) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "background", .color = colorToJson(color) });
+        }
+
+        /// Batched `Client.raiseLayer`.
+        pub fn raiseLayer(self: *Batch, layer: core.LayerHandle, above: ?core.LayerHandle) !void {
+            try self.notify("raise_layer", .{ .layer = layer, .above = above });
+        }
+
+        /// Batched `Client.lowerLayer`.
+        pub fn lowerLayer(self: *Batch, layer: core.LayerHandle, below: ?core.LayerHandle) !void {
+            try self.notify("lower_layer", .{ .layer = layer, .below = below });
         }
 
         /// Batched `create_metadata` -- see `Client.createMetadata`.

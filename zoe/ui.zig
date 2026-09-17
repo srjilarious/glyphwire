@@ -2189,16 +2189,12 @@ pub const Ui = struct {
                 // `"fit"` shrinks a 32px source to the ~8px a cell is wide
                 // and is unreadable). Only `max_h` -- adding `max_w` would
                 // shrink it back to the narrow cell width. Falls back to
-                // `"fit"` if the cell metrics somehow didn't load.
+                // `.fit` if the cell metrics somehow didn't load.
                 const natural = self.cell_px_h > 0;
-                try batch.notify("draw_icon", .{
-                    .layer = self.tree_layer,
-                    .row = r,
-                    .col = e.depth * tree_mod.indent_cols,
-                    .name = iconFor(e),
-                    .scale = if (natural) "natural" else "fit",
-                    .h_align = "start",
-                    .v_align = "center",
+                try batch.drawIconOnStyled(self.tree_layer, r, e.depth * tree_mod.indent_cols, iconFor(e), .{
+                    .scale = if (natural) .natural else .fit,
+                    .h_align = .start,
+                    .v_align = .center,
                     .max_h = if (natural) self.cell_px_h else null,
                     .foreground = true,
                 });

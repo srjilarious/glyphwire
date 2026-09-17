@@ -1119,9 +1119,9 @@ pub const Ui = struct {
         var b = c.batch();
         defer b.deinit();
 
-        try b.notify("set_property", .{ .layer = self.dialog_layer, .property = "size", .cols = box_cols, .rows = box_rows });
-        try b.notify("set_property", .{ .layer = self.dialog_layer, .property = "cell_position", .row = at.row, .col = at.col });
-        try b.notify("clear", .{ .layer = self.dialog_layer, .row = 0, .col = 0, .rows = @as(?usize, null), .cols = @as(?usize, null) });
+        try b.setLayerSize(self.dialog_layer, box_cols, box_rows);
+        try b.setLayerCellPosition(self.dialog_layer, at.row, at.col);
+        try b.clearOn(self.dialog_layer, 0, 0, null, null);
 
         // Sized for the widest panel `ocr_dialog_cols` can be clamped to,
         // so the runtime width never overruns it.
@@ -1154,12 +1154,8 @@ pub const Ui = struct {
 
         // Both in the same batch, so the layer's first visible frame is
         // already the finished panel -- see `setHelp` for the same trick.
-        try b.notify("set_property", .{
-            .layer = self.dialog_layer,
-            .property = "opacity",
-            .value = if (o.peeking) self.conf.ocr_peek else @as(f32, 1.0),
-        });
-        try b.notify("set_property", .{ .layer = self.dialog_layer, .property = "visibility", .visible = true });
+        try b.setLayerOpacity(self.dialog_layer, if (o.peeking) self.conf.ocr_peek else 1.0);
+        try b.setLayerVisible(self.dialog_layer, true);
 
         var results = try b.send();
         results.deinit();
@@ -1294,9 +1290,9 @@ pub const Ui = struct {
         var b = c.batch();
         defer b.deinit();
 
-        try b.notify("set_property", .{ .layer = self.dict_layer, .property = "size", .cols = box_cols, .rows = box_rows });
-        try b.notify("set_property", .{ .layer = self.dict_layer, .property = "cell_position", .row = at.row, .col = at.col });
-        try b.notify("clear", .{ .layer = self.dict_layer, .row = 0, .col = 0, .rows = @as(?usize, null), .cols = @as(?usize, null) });
+        try b.setLayerSize(self.dict_layer, box_cols, box_rows);
+        try b.setLayerCellPosition(self.dict_layer, at.row, at.col);
+        try b.clearOn(self.dict_layer, 0, 0, null, null);
 
         var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, interior);
@@ -1331,12 +1327,8 @@ pub const Ui = struct {
         try textOn(&b, self.dict_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dict_layer, box_br, fg_dialog_border, bg_dialog);
 
-        try b.notify("set_property", .{
-            .layer = self.dict_layer,
-            .property = "opacity",
-            .value = if (self.ocr) |o| (if (o.peeking) self.conf.ocr_peek else @as(f32, 1.0)) else @as(f32, 1.0),
-        });
-        try b.notify("set_property", .{ .layer = self.dict_layer, .property = "visibility", .visible = true });
+        try b.setLayerOpacity(self.dict_layer, if (self.ocr) |o| (if (o.peeking) self.conf.ocr_peek else 1.0) else 1.0);
+        try b.setLayerVisible(self.dict_layer, true);
 
         var results = try b.send();
         results.deinit();
@@ -1397,14 +1389,9 @@ pub const Ui = struct {
         var batch = c.batch();
         defer batch.deinit();
 
-        try batch.notify("set_property", .{ .layer = self.dict_build_layer, .property = "size", .cols = box_cols, .rows = box_rows });
-        try batch.notify("set_property", .{
-            .layer = self.dict_build_layer,
-            .property = "cell_position",
-            .row = (self.win.rows -| box_rows) / 2,
-            .col = (self.win.cols -| box_cols) / 2,
-        });
-        try batch.notify("clear", .{ .layer = self.dict_build_layer, .row = 0, .col = 0, .rows = @as(?usize, null), .cols = @as(?usize, null) });
+        try batch.setLayerSize(self.dict_build_layer, box_cols, box_rows);
+        try batch.setLayerCellPosition(self.dict_build_layer, (self.win.rows -| box_rows) / 2, (self.win.cols -| box_cols) / 2);
+        try batch.clearOn(self.dict_build_layer, 0, 0, null, null);
 
         var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, interior);
@@ -1422,7 +1409,7 @@ pub const Ui = struct {
         try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&batch, self.dict_build_layer, box_br, fg_dialog_border, bg_dialog);
 
-        try batch.notify("set_property", .{ .layer = self.dict_build_layer, .property = "visibility", .visible = true });
+        try batch.setLayerVisible(self.dict_build_layer, true);
 
         var results = try batch.send();
         results.deinit();
@@ -1621,13 +1608,8 @@ pub const Ui = struct {
     /// the `visibility` flip into the same batch on open so the layer's
     /// very first visible frame is already the finished dialog.
     fn buildHelp(self: *Ui, b: *glyphwire.Client.Batch) !void {
-        try b.notify("set_property", .{
-            .layer = self.help_layer,
-            .property = "cell_position",
-            .row = (self.win.rows -| help_rows) / 2,
-            .col = (self.win.cols -| help_cols) / 2,
-        });
-        try b.notify("clear", .{ .layer = self.help_layer, .row = 0, .col = 0, .rows = @as(?usize, null), .cols = @as(?usize, null) });
+        try b.setLayerCellPosition(self.help_layer, (self.win.rows -| help_rows) / 2, (self.win.cols -| help_cols) / 2);
+        try b.clearOn(self.help_layer, 0, 0, null, null);
 
         var h_buf: [help_interior * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, help_interior);
@@ -1961,7 +1943,7 @@ pub const Ui = struct {
         if (visible) {
             var b = self.client.batch();
             defer b.deinit();
-            try b.notify("set_property", .{ .layer = self.help_layer, .property = "visibility", .visible = true });
+            try b.setLayerVisible(self.help_layer, true);
             try self.buildHelp(&b);
             var results = try b.send();
             results.deinit();
