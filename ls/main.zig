@@ -1280,7 +1280,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         .{ .name = "Name", .width = name_width, .sortable = true, .case_insensitive = true, .focus = true },
     }, .{
         .borders = false,
-        .alt_row_bg = rgb(30, 30, 30),
+        .alt_row_bg = rgb(20, 20, 20),
         .row_height = row_height,
         .max_icon_px = icon_px,
     });
