@@ -25,6 +25,7 @@
 const std = @import("std");
 const buffer = @import("buffer.zig");
 const motion = @import("motion.zig");
+const display = @import("display.zig");
 
 const Buffer = buffer.Buffer;
 const Pos = buffer.Pos;
@@ -41,6 +42,11 @@ const Pos = buffer.Pos;
 /// for a rare need, the same reason the wire's selection is linear-only
 /// (see decisions.md's Selection & clipboard section).
 pub const Mode = enum { normal, insert, command, visual, visual_line };
+
+/// Ceiling on `tab_width`, so an expanding Tab can build its run of
+/// spaces on the stack and a nonsense `:set tabwidth=9999` can't make one
+/// keystroke insert a screenful.
+pub const max_tab_width: usize = 16;
 
 /// The buffer-pane line-number gutter. `zoe/ui.zig` draws it; the core
 /// only carries the setting so `:set lineno=…` can change it at runtime.
@@ -149,6 +155,21 @@ pub const Editor = struct {
     /// `zoe.conf.lua`'s `line_numbers` after `init`, changed live by
     /// `:set lineno=…`.
     line_numbers: LineNumbers = .absolute,
+
+    /// Cells between tab stops: how wide a `\t` already in the file
+    /// renders, and the grid an expanding Tab key indents onto. vim's
+    /// `tabstop`, `zoe.conf`'s `tab_width`, `:set tabwidth=…`.
+    tab_width: usize = 4,
+    /// Whether the Tab key inserts spaces out to the next tab stop
+    /// rather than a literal `\t`. vim's `expandtab`, and on by default
+    /// here because every file in this tree is space-indented.
+    /// `zoe.conf`'s `expand_tab`, `:set expandtab=…`.
+    expand_tab: bool = true,
+    /// Whether the buffer pane paints each space as a faint dot. Off by
+    /// default. `zoe.conf`'s `show_spaces`, `:set spaces=…`. Like
+    /// `line_numbers` this is pure display -- the core only carries it so
+    /// `:set` has somewhere to put it.
+    show_spaces: bool = false,
 
     /// The `:` line being typed, without the leading colon.
     cmdline: std.ArrayList(u8) = .empty,
@@ -346,6 +367,8 @@ pub const Editor = struct {
                     self.pageMove(.up, true);
                 } else if (eq(u8, key, "enter")) {
                     try self.insertText("\n");
+                } else if (eq(u8, key, "tab")) {
+                    try self.insertTab();
                 } else if (eq(u8, key, "backspace")) {
                     try self.backspace();
                 } else if (eq(u8, key, "delete")) {
@@ -665,6 +688,29 @@ pub const Editor = struct {
         try self.buf.insert(self.cursor, text);
         self.cursor += text.len;
         self.syncSticky();
+    }
+
+    /// The Tab key in insert mode. With `expand_tab` off it is a literal
+    /// `\t`; with it on it is however many spaces reach the next
+    /// `tab_width` stop -- so Tab in column 2 of a 4-wide grid inserts
+    /// two spaces, not four, and the indentation lines up whatever
+    /// column it was typed in.
+    ///
+    /// The stop is measured in *display* columns, which is why this asks
+    /// `display.zig` rather than counting bytes: a line that already
+    /// holds a tab, or anything double-width, puts the next stop
+    /// somewhere the byte count would get wrong.
+    fn insertTab(self: *Editor) !void {
+        if (!self.expand_tab) return self.insertText("\t");
+
+        const line_start = self.buf.lineStart(self.buf.posOf(self.cursor).line);
+        const prefix = try self.buf.gap.read(self.alloc, line_start, self.cursor);
+        defer self.alloc.free(prefix);
+        const col = display.width(prefix, .{ .tab_width = self.tab_width });
+
+        var spaces: [max_tab_width]u8 = @splat(' ');
+        const n = @min(display.tabStop(col, self.tab_width), max_tab_width);
+        try self.insertText(spaces[0..n]);
     }
 
     fn backspace(self: *Editor) !void {
@@ -1122,11 +1168,17 @@ pub const Editor = struct {
         return .none;
     }
 
-    /// `:set lineno=off|absolute|relative` -- the one option `:set`
-    /// understands, driving the buffer-pane line-number gutter. Spaces
-    /// around the `=` are tolerated (`:set lineno = relative`). An unknown
-    /// option name or value leaves the setting as it was and reports the
-    /// matching vim error.
+    /// The options `:set` understands, all of them `name=value` with
+    /// spaces around the `=` tolerated (`:set lineno = relative`):
+    ///
+    ///  - `lineno=off|absolute|relative` -- the line-number gutter
+    ///  - `tabwidth=N`                   -- cells between tab stops
+    ///  - `expandtab=on|off`             -- Tab inserts spaces
+    ///  - `spaces=on|off`                -- paint spaces as faint dots
+    ///
+    /// An unknown option name or value leaves the setting as it was and
+    /// reports the matching vim error. `zoe/ui.zig` pushes whatever
+    /// changed to every open buffer, so `:set` reads as session-wide.
     fn applySet(self: *Editor, arg: ?[]const u8) void {
         const a = arg orelse {
             self.setStatus("E518: Unknown option: {s}", .{""});
@@ -1138,20 +1190,44 @@ pub const Editor = struct {
         };
         const opt = std.mem.trim(u8, a[0..eq_at], " \t");
         const val = std.mem.trim(u8, a[eq_at + 1 ..], " \t");
-        if (!std.mem.eql(u8, opt, "lineno")) {
-            self.setStatus("E518: Unknown option: {s}", .{opt});
+
+        if (std.mem.eql(u8, opt, "lineno")) {
+            self.line_numbers = if (std.mem.eql(u8, val, "off"))
+                .off
+            else if (std.mem.eql(u8, val, "absolute"))
+                .absolute
+            else if (std.mem.eql(u8, val, "relative"))
+                .relative
+            else {
+                self.setStatus("E474: Invalid argument: lineno={s}", .{val});
+                return;
+            };
             return;
         }
-        self.line_numbers = if (std.mem.eql(u8, val, "off"))
-            .off
-        else if (std.mem.eql(u8, val, "absolute"))
-            .absolute
-        else if (std.mem.eql(u8, val, "relative"))
-            .relative
-        else {
-            self.setStatus("E474: Invalid argument: lineno={s}", .{val});
+        if (std.mem.eql(u8, opt, "tabwidth")) {
+            const n = std.fmt.parseInt(usize, val, 10) catch 0;
+            if (n < 1 or n > max_tab_width) {
+                self.setStatus("E474: Invalid argument: tabwidth={s}", .{val});
+                return;
+            }
+            self.tab_width = n;
             return;
-        };
+        }
+        if (std.mem.eql(u8, opt, "expandtab")) {
+            self.expand_tab = parseFlag(val) orelse {
+                self.setStatus("E474: Invalid argument: expandtab={s}", .{val});
+                return;
+            };
+            return;
+        }
+        if (std.mem.eql(u8, opt, "spaces")) {
+            self.show_spaces = parseFlag(val) orelse {
+                self.setStatus("E474: Invalid argument: spaces={s}", .{val});
+                return;
+            };
+            return;
+        }
+        self.setStatus("E518: Unknown option: {s}", .{opt});
     }
 
     /// The `:` forms that move the cursor rather than run a command:
@@ -1232,6 +1308,18 @@ pub const Editor = struct {
         return true;
     }
 };
+
+/// A boolean `:set` value. vim writes these as `:set expandtab` /
+/// `:set noexpandtab`, but every option here takes `name=value`, so the
+/// spellings are the ones a config file would use. Null is "not a
+/// boolean", which the caller turns into E474.
+fn parseFlag(val: []const u8) ?bool {
+    const yes = [_][]const u8{ "on", "true", "yes", "1" };
+    const no = [_][]const u8{ "off", "false", "no", "0" };
+    for (yes) |v| if (std.ascii.eqlIgnoreCase(val, v)) return true;
+    for (no) |v| if (std.ascii.eqlIgnoreCase(val, v)) return false;
+    return null;
+}
 
 fn allDigits(s: []const u8) bool {
     for (s) |c| {

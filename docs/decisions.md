@@ -3701,11 +3701,20 @@ is parsed on its own) and `locals.scm`.
 
 **Config is Lua, like the other clients.** `~/.config/glyphwire/zoe.conf.lua`
 assigns a `config` table (`theme`, `languages`, `grammar_dirs`,
-`injections`), matching `ls.conf.lua` / `host.conf.lua`, rather than a separate
-declarative manifest format. Absent file = seven bundled grammars (zig,
-json, c, python, toml, markdown block + `markdown_inline`), a built-in
-dark theme, and injection on. `config.injections = false` is the escape
-hatch.
+`injections`), matching `ls.conf.lua` / `host.conf.lua`, rather than a
+separate declarative manifest format. Absent file = nine bundled grammars
+(zig, json, c, python, toml, lua, bash, markdown block +
+`markdown_inline`), a built-in dark theme, and injection on.
+`config.injections = false` is the escape hatch.
+
+**No `.conf` mapping: the rename already did it.** The lua grammar claims
+`.lua` and nothing else. glyphwire's own config files are Lua and were
+briefly worth a `.conf` → `lua` entry in `default_langs`, but renaming
+them `X.conf.lua` gets the same highlighting off the plain extension —
+in every editor, not just this one — and costs no guess about everyone
+else's `.conf` files, which mostly aren't Lua. Shell installs under the
+grammar's own name, `bash`, with `sh` / `shell` / `zsh` added to
+`lang_aliases` so a Markdown fence labelled any of them finds it.
 
 **Predicates we can't evaluate disable their pattern.** `#eq?` /
 `#any-of?` (and negations) are evaluated; `#match?` / `#lua-match?` need a
@@ -3742,6 +3751,95 @@ row's distance. `renderBuffer` handles both with one pass of
 `renderGutterCell` per visible row — a short unstyled write each, no
 syntax pass — gated on `scrolled or (relative and caret line moved)`. In
 `.absolute` mode a bare caret move still touches only two rows.
+
+### zoe whitespace: tabs and space dots
+
+**One module owns bytes-to-columns.** Rendering a tab as more than one
+cell means the byte offset of a character and the column it sits on stop
+being the same walk, and that mapping was previously spread across four
+copies in `ui.zig` (`sliceCols`, `displayColOfByte`, `byteAtDisplayCol`,
+and an inline loop in the row painter). `zoe/display.zig` replaces all
+four with a single `Cells` iterator that hands back, per character, its
+source byte, its starting column, its width, and the bytes to draw. Every
+crossing goes through it — painting a row, placing the caret, clipping a
+selection, resolving a mouse click — so there is exactly one answer to
+"which column is this byte on", and the tab logic exists once rather than
+four times. The row painter now takes an empty `spans` slice as the
+no-grammar path, which also collapsed the plain and highlighted paint
+paths into one.
+
+**`tab_width` is display *and* indent; `expand_tab` is only insert.**
+vim's split, for vim's reason: how wide a `\t` already in the file draws
+is a property of reading it, and whether the Tab key produces one is a
+property of writing it. Both live on `Editor` next to `line_numbers` and
+`page_lines` — `zoe.conf` writes them onto each buffer as it opens, and
+`:set tabwidth=` / `:set expandtab=` change them session-wide, since
+`Ui.handleInput` pushes a changed setting to every open `Slot`. Tab with
+`expand_tab` on inserts however many spaces reach the *next stop*, not a
+fixed run: Tab in column 2 of a 4-wide grid is two spaces. That stop is
+measured in display columns, which is why `editor.zig` — otherwise
+free of width tables — imports `display.zig` for this one calculation. A
+byte count would put the stop in the wrong place on any line already
+holding a tab or a double-width character. `max_tab_width` (16) caps it
+so one keystroke can't insert a screenful.
+
+**Only real spaces get dots.** `config.show_spaces` / `:set spaces=on`
+paints every `0x20` as a faint `·`; the cells an expanded tab covers stay
+blank. That is the point rather than an omission — it is what makes a
+tab-indented line tell itself apart from a space-indented one at a
+glance, and zoe has no tab marker precisely so the two don't look alike.
+The dot colour is a module constant, not a theme group: the theme maps
+tree-sitter captures and whitespace has none. A marker cell takes the dot
+colour instead of whatever syntax colour the byte under it had, which is
+why `Cell` carries a `marker` flag at all.
+
+**A character straddling a viewport edge is blanked, not half-drawn.**
+Already true of double-width characters before tabs existed; now it also
+covers a tab the horizontal scroll opens in the middle of. Blanking keeps
+the column arithmetic exact — the alternative is a glyph whose visible
+half is a lie about where the next column starts.
+
+### zoe pane focus
+
+**Ctrl + a direction, not a cycle.** Ctrl+W still toggles between the two
+panes, but Ctrl+H / Ctrl+L (and Ctrl+Left / Ctrl+Right) move focus
+*leftward* and *rightward*. With one sidebar and one buffer the two are
+indistinguishable; they stop being so as soon as zoe grows buffer panes
+side by side, and a chord that meant "cycle" would have to change meaning
+then. Ctrl+K / Ctrl+J (and the vertical arrows) are claimed now and do
+nothing, because there is nothing above or below either pane yet —
+leaving them to fall through to the editor would mean taking a meaning
+away later, which is the worse surprise. `focusDirection` is the single
+key-name-to-direction table, and returning null from it is what
+`handleInput` uses as "not a focus chord", so Ctrl+W, Ctrl+Tab and the
+Ctrl+D / Ctrl+U page keys still reach their own handlers.
+
+### zoe sidebar: two ways a hidden pane kept drawing
+
+**Hiding the sidebar hides its layer.** Ctrl+N rebuilds the row split
+without the tree child, which is what makes the buffer actually reclaim
+the columns. But the layer itself stayed mapped, and glyphwire-host draws
+every mapped layer's scrollbars in a pass of its own *after* everything
+else (`renderPaneScrollbars`) — so the tree's cells were covered by the
+widened buffer pane while its scrollbar went on floating down the middle
+of the text. `setLayerVisible(tree_layer, false)` is the fix and is what
+the `visibility` property was added for: a hidden layer keeps its cells,
+its scroll position and its metadata ids for when it comes back, which
+`destroy_layer` plus a rebuild would throw away.
+
+**The tree's content grid covers the viewport where it *is*, not where
+it started.** The grid was sized `max(listing, viewport)`, which is right
+until the host is scrolled down and the listing shrinks under it — a
+collapsed directory. The rows between the end of the shortened listing
+and the bottom of the viewport then had no cells at all, and a sidebar
+row with no cells is transparent, so the shell's scrollback showed
+through the bottom of the pane. Two halves to the fix: `clampTreeScroll`
+pulls the offset back when the listing shrinks, and `treeContentRows` /
+`treeContentCols` size the grid from `scroll_offset + viewport` rather
+than the viewport alone, so an offset that is momentarily stale still has
+cells under it. Both `syncContentSizes` and `renderTree` now call those
+two helpers instead of repeating the `@max` — the grid cannot be bigger
+than the rows written into it, which was the real bug.
 
 ### zoe multiple buffers
 

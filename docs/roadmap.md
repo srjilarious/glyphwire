@@ -2112,7 +2112,7 @@ this is the implementation shape.
   plus `config.grammar_dirs`), checks its ABI against the vendored
   libtree-sitter (`min_abi_version`..`max_abi_version`), and reads the
   sibling `highlights.scm`. Extension → grammar name comes from
-  `default_langs` (the seven bundled) plus `zoe.conf`. `Highlighter` owns
+  `default_langs` (the nine bundled) plus `zoe.conf`. `Highlighter` owns
   the `Parser`/`Tree`/`Query`, reparses **incrementally** — `applyEdit`
   replays `Buffer`'s edit journal onto the retained tree, then
   `reparseIncremental` parses against it and reports the changed byte
@@ -2132,13 +2132,24 @@ this is the implementation shape.
   with its own grammar over its included byte ranges, `lineSpans` blends
   the child layers over the primary — recursing to `max_injection_depth`.
   No `locals.scm`.
+- **`zoe/display.zig`** — the one bytes-to-display-cells mapping. `Cells`
+  walks a line handing back each character's source byte, starting
+  column, width and the bytes to draw: a tab covers the cells out to the
+  next `tab_width` stop, and with `show_spaces` a space draws as a faint
+  `·` (the cells an expanded tab covers stay blank, so tab- and
+  space-indented lines differ). `colOfByte` / `byteAtCol` / `width` /
+  `appendCols` are the callers' entry points — the caret, a mouse click,
+  the selection overlay and the row painter all go through them, and
+  `editor.zig` uses `tabStop` for an expanding Tab.
 - **`zoe/langconf.zig`** — `~/.config/glyphwire/zoe.conf`, a Lua
   `config` table like `ls.conf` / `host.conf`. `config.theme` overrides
   capture colours, `config.languages` adds/remaps extensions,
   `config.grammar_dirs` prepends search directories, `config.injections`
-  (default true) toggles embedded-language highlighting. Absent file =
-  the seven bundled languages and the built-in dark theme. Sample at
-  `assets/zoe.conf.example`.
+  (default true) toggles embedded-language highlighting, and
+  `config.tab_width` / `config.expand_tab` / `config.show_spaces` carry
+  the editor's whitespace settings alongside `page_lines` /
+  `line_numbers`. Absent file = the nine bundled languages and the
+  built-in dark theme. Sample at `assets/zoe.conf.example`.
 - **`zoe/ui.zig`** — `Ui` owns the `Registry` + `Highlighter` +
   `langconf.Config` (its arena backs the registry's language table);
   `configureInjections` hands the highlighter the registry to resolve
@@ -2146,15 +2157,18 @@ this is the implementation shape.
   bring the tree up to date; when the reparse was incremental and its
   effect bounded, `renderChangedRows` repaints just the affected rows,
   otherwise the pane redraws in full. `renderRowSpans` walks each visible
-  line codepoint by codepoint, grouping equal colours into runs and
-  emitting one `write_text` per run clipped to `[left_col, left_col+cols)`.
-  Any highlighter failure falls back to the original single plain write.
+  line through `zoe/display.zig`'s `Cells` — one *display cell* at a time,
+  so a tab covers the columns out to its stop and a space can carry a
+  marker dot — grouping equal colours into runs and emitting one
+  `write_text` per run clipped to `[left_col, left_col+cols)`. A
+  highlighter failure runs the same painter with an empty span list,
+  which is a plain row.
 - **`build.zig`** — `tree_sitter` is pinned to the exact
   `srjilarious/zig-tree-sitter` commit `testz` already uses (two pins of
   it collide on the shared `src/parser.zig`). `installGrammars` compiles
   each bundled grammar's `parser.c` (+ `scanner.c` where present) to
   `share/glyphwire/grammars/<name>/parser.so` and copies its
-  `highlights.scm` (and `injections.scm` for zig, markdown and
+  `highlights.scm` (and `injections.scm` for zig, lua, markdown and
   `markdown_inline`); the `grammar_*` deps are lazy source-only and never
   linked into a Zig binary. `zig build zoe` points
   `GLYPHWIRE_ZOE_GRAMMAR_DIR` at the just-installed set.

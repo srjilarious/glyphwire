@@ -553,6 +553,10 @@ const bundled_grammars = [_]BundledGrammar{
     .{ .name = "c", .dep = "grammar_c", .vendored = "vendor/grammars/c" },
     .{ .name = "python", .dep = "grammar_python", .scanner = true },
     .{ .name = "toml", .dep = "grammar_toml", .scanner = true },
+    // Lua's `injections.scm` only reaches into `ffi.cdef` strings, but it
+    // costs one file to ship and the C grammar it wants is already here.
+    .{ .name = "lua", .dep = "grammar_lua", .scanner = true, .injections = true },
+    .{ .name = "bash", .dep = "grammar_bash", .scanner = true },
     // Markdown ships as two grammars: the block grammar parses the
     // document structure and injects `markdown_inline` for every
     // paragraph's inline span (and other languages for fenced code

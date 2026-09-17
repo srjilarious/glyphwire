@@ -34,6 +34,7 @@ const glyphwire = @import("glyphwire");
 const ls_icons = @import("ls_support").icons;
 
 const editor = @import("editor.zig");
+const display = @import("display.zig");
 const tree_mod = @import("tree.zig");
 const syntax = @import("syntax.zig");
 const langconf = @import("langconf.zig");
@@ -66,6 +67,11 @@ const fg_status = Color{ .r = 226, .g = 226, .b = 236, .a = 255 };
 const fg_mode = Color{ .r = 150, .g = 220, .b = 160, .a = 255 };
 const fg_error = Color{ .r = 240, .g = 140, .b = 140, .a = 255 };
 const fg_cursor = Color{ .r = 24, .g = 24, .b = 29, .a = 255 };
+// The space dots `:set spaces=on` paints. Faint on purpose: bright enough
+// to read the indentation off, dim enough to disappear when you stop
+// looking for it. Not a theme group -- the theme maps tree-sitter
+// captures, and whitespace has none.
+const fg_whitespace = Color{ .r = 62, .g = 62, .b = 72, .a = 255 };
 // The tab strip. The active tab takes the buffer's own background so it
 // reads as the front of the pane below it, the way a tabbed window does;
 // the rest sit on a bar darker than either.
@@ -82,6 +88,27 @@ const Bounds = struct {
 
 const Focus = enum { buffer, tree };
 
+/// Which way a Ctrl+direction chord moves the focus.
+pub const Direction = enum { left, right, up, down };
+
+/// The direction a key names under Ctrl, for the focus chords: vim's
+/// `hjkl` and the arrow keys both, since the panes are navigated with
+/// either. Null for every other key, which is what lets `handleInput`
+/// use this as the test for "is this a focus chord at all".
+///
+/// Claiming the vertical pair now costs nothing and keeps the mapping
+/// whole: zoe will grow buffer panes stacked over each other, and having
+/// Ctrl+j mean something else in the meantime would be a worse surprise
+/// than it meaning nothing.
+pub fn focusDirection(key: []const u8) ?Direction {
+    const eq = std.mem.eql;
+    if (eq(u8, key, "h") or eq(u8, key, "left")) return .left;
+    if (eq(u8, key, "l") or eq(u8, key, "right")) return .right;
+    if (eq(u8, key, "k") or eq(u8, key, "up")) return .up;
+    if (eq(u8, key, "j") or eq(u8, key, "down")) return .down;
+    return null;
+}
+
 /// The slice of editor state the buffer pane draws from. `handleInput`
 /// takes one before dispatching a keystroke and one after; if they match,
 /// the buffer pane is untouched and `render` can skip it -- which is what
@@ -90,6 +117,12 @@ const EdSnapshot = struct {
     cursor: usize,
     edits: u64,
     line_numbers: editor.LineNumbers,
+    /// The display settings `:set` can change mid-session. Only
+    /// `tab_width` and `show_spaces` move a glyph, but `expand_tab` rides
+    /// along so the `:set` propagation below has one place to look.
+    tab_width: usize,
+    expand_tab: bool,
+    show_spaces: bool,
     /// The mode and selection anchor so a bare `v` / `V` / `<esc>` / `o`
     /// -- which can change the highlighted range without moving the
     /// cursor -- still repaints the buffer pane.
@@ -106,6 +139,9 @@ const EdSnapshot = struct {
             .cursor = ed.cursor,
             .edits = ed.buf.edits,
             .line_numbers = ed.line_numbers,
+            .tab_width = ed.tab_width,
+            .expand_tab = ed.expand_tab,
+            .show_spaces = ed.show_spaces,
             .mode = ed.mode,
             .anchor = ed.select_anchor,
             .dirty = ed.buf.dirty,
@@ -113,7 +149,9 @@ const EdSnapshot = struct {
     }
     fn eql(a: EdSnapshot, b: EdSnapshot) bool {
         return a.cursor == b.cursor and a.edits == b.edits and
-            a.line_numbers == b.line_numbers and a.mode == b.mode and a.anchor == b.anchor;
+            a.line_numbers == b.line_numbers and a.mode == b.mode and a.anchor == b.anchor and
+            a.tab_width == b.tab_width and a.expand_tab == b.expand_tab and
+            a.show_spaces == b.show_spaces;
     }
 };
 
@@ -444,6 +482,9 @@ pub const Ui = struct {
             // enabled below.
             slot.ed.page_lines = cfg.page_lines;
             slot.ed.line_numbers = cfg.line_numbers;
+            slot.ed.tab_width = cfg.tab_width;
+            slot.ed.expand_tab = cfg.expand_tab;
+            slot.ed.show_spaces = cfg.show_spaces;
 
             if (syntax.Highlighter.init(self.alloc, cfg.theme)) |h| {
                 slot.hl = h;
@@ -463,6 +504,9 @@ pub const Ui = struct {
         if (self.buffers.items.len > 0) {
             slot.ed.line_numbers = self.buf.ed.line_numbers;
             slot.ed.page_lines = self.buf.ed.page_lines;
+            slot.ed.tab_width = self.buf.ed.tab_width;
+            slot.ed.expand_tab = self.buf.ed.expand_tab;
+            slot.ed.show_spaces = self.buf.ed.show_spaces;
         }
         return slot;
     }
@@ -572,10 +616,41 @@ pub const Ui = struct {
         if (self.tree_visible and self.tree_bounds.cols > 0) {
             try self.client.setLayerSize(
                 self.tree_layer,
-                @max(self.tree.widestCols(), self.tree_bounds.cols),
-                @max(self.tree.len(), self.tree_bounds.rows),
+                self.treeContentCols(),
+                self.treeContentRows(),
             );
         }
+    }
+
+    /// The tree layer's content grid, which is also exactly what
+    /// `renderTree` paints -- one definition, so the grid can never be
+    /// bigger than the rows written into it.
+    ///
+    /// The listing, but never smaller than the viewport *at its current
+    /// scroll offset*. Sizing it to the listing alone leaves the rows
+    /// past the end transparent whenever the host is still scrolled down
+    /// into a listing that just got shorter (a collapsed directory), and
+    /// a transparent sidebar row shows the shell's scrollback through it.
+    /// `clampTreeScroll` pulls the offset back too, so in practice these
+    /// max out at the listing; this is the half that cannot be raced.
+    fn treeContentRows(self: *const Ui) usize {
+        return @max(self.tree.len(), self.tree_scroll.row + self.tree_bounds.rows);
+    }
+
+    fn treeContentCols(self: *const Ui) usize {
+        return @max(self.tree.widestCols(), self.tree_scroll.col + self.tree_bounds.cols);
+    }
+
+    /// Pulls the tree's scroll offset back when the listing shrank under
+    /// it, so the viewport keeps showing entries rather than the blank
+    /// rows past the last one.
+    fn clampTreeScroll(self: *Ui) void {
+        const rows = self.tree_bounds.rows;
+        if (rows == 0) return;
+        const max_top = self.tree.len() -| rows;
+        if (self.tree_scroll.row <= max_top) return;
+        self.tree_scroll.row = max_top;
+        self.client.setLayerScrollOffset(self.tree_layer, max_top, self.tree_scroll.col) catch {};
     }
 
     // ── Loop ────────────────────────────────────────────────────────────
@@ -690,12 +765,20 @@ pub const Ui = struct {
                     self.listener.isKeyDown("right_control");
                 if (ctrl) {
                     if (std.mem.eql(u8, k.key, "w")) {
-                        self.focus = if (self.focus == .buffer) .tree else .buffer;
-                        // Only the tree's selected-row highlight depends
-                        // on focus; the buffer draws its caret the same
-                        // in either pane.
-                        self.tree_dirty = true;
-                        self.status_dirty = true;
+                        self.setFocus(if (self.focus == .buffer) .tree else .buffer);
+                        return;
+                    }
+                    // Ctrl + a direction moves focus that way rather than
+                    // cycling, so it keeps meaning the same thing once
+                    // there is more than one buffer pane to move between.
+                    // The vertical pair is claimed now and does nothing
+                    // yet -- there is nothing above or below either pane.
+                    if (focusDirection(k.key)) |dir| {
+                        switch (dir) {
+                            .left => if (self.tree_visible) self.setFocus(.tree),
+                            .right => self.setFocus(.buffer),
+                            .up, .down => {},
+                        }
                         return;
                     }
                     if (std.mem.eql(u8, k.key, "n")) {
@@ -794,15 +877,22 @@ pub const Ui = struct {
         // The tab's `+` marker is the only thing the strip draws that a
         // keystroke can change.
         if (after.dirty != before.dirty) self.tabs_dirty = true;
-        // `:set lineno=…` moves the text origin, which a row shift can't
-        // express -- the whole pane has to be re-laid-out. The setting
-        // lives on the `Editor`, and there is one per buffer, so it is
-        // pushed to all of them: `:set` reads as a session-wide switch,
-        // not a per-tab one.
-        if (after.line_numbers != before.line_numbers) {
+        // A `:set` moves the text origin or the width of a glyph, which a
+        // row shift can't express -- the whole pane has to be
+        // re-laid-out. These settings live on the `Editor`, and there is
+        // one per buffer, so each is pushed to all of them: `:set` reads
+        // as a session-wide switch, not a per-tab one.
+        if (after.line_numbers != before.line_numbers or
+            after.tab_width != before.tab_width or
+            after.expand_tab != before.expand_tab or
+            after.show_spaces != before.show_spaces)
+        {
             self.buf.full_redraw = true;
             for (self.buffers.items) |slot| {
                 slot.ed.line_numbers = after.line_numbers;
+                slot.ed.tab_width = after.tab_width;
+                slot.ed.expand_tab = after.expand_tab;
+                slot.ed.show_spaces = after.show_spaces;
                 slot.full_redraw = true;
             }
         }
@@ -817,9 +907,28 @@ pub const Ui = struct {
         }
     }
 
+    /// Moves the focused pane. Only the tree's selected-row highlight
+    /// depends on focus -- the buffer draws its caret the same either way
+    /// -- and the statusline names the pane.
+    fn setFocus(self: *Ui, to: Focus) void {
+        if (self.focus == to) return;
+        self.focus = to;
+        self.tree_dirty = true;
+        self.status_dirty = true;
+    }
+
     fn toggleTree(self: *Ui) !void {
         self.tree_visible = !self.tree_visible;
         if (!self.tree_visible and self.focus == .tree) self.focus = .buffer;
+        // Dropping the layer from the split reclaims its columns but
+        // leaves the layer itself mapped, and the host draws every mapped
+        // layer's scrollbars in a pass of their own, over the top of
+        // everything -- so a hidden sidebar left its scrollbar floating
+        // down the middle of the buffer. Hiding the layer is what the
+        // `visibility` property is for (see core.zig): the tree keeps its
+        // cells, its scroll position and its metadata for when it comes
+        // back.
+        self.client.setLayerVisible(self.tree_layer, self.tree_visible) catch {};
         try self.applySplitChildren();
         // The buffer pane -- and the strip above it -- is about to be
         // re-laid-out wider or narrower.
@@ -889,6 +998,10 @@ pub const Ui = struct {
         const entry = self.tree.at(self.tree.cursor) orelse return;
         if (entry.is_dir) {
             try self.tree.toggle(self.io, self.tree.cursor);
+            // A collapse can leave the host scrolled past the end of the
+            // shortened listing; pull it back before the grid is resized
+            // around it.
+            self.clampTreeScroll();
             try self.syncContentSizes();
             return;
         }
@@ -997,7 +1110,8 @@ pub const Ui = struct {
         const line_text = self.buf.ed.buf.lineText(self.alloc, line) catch
             return self.buf.ed.buf.lineStart(line);
         defer self.alloc.free(line_text);
-        return self.buf.ed.buf.lineStart(line) + byteAtDisplayCol(line_text, dcol);
+        return self.buf.ed.buf.lineStart(line) +
+            display.byteAtCol(line_text, dcol, self.displayOpts());
     }
 
     /// Whether zoe's context is the one currently on screen. Used to
@@ -1637,11 +1751,10 @@ pub const Ui = struct {
 
         try self.renderGutterCell(batch, r);
 
-        var pad: std.ArrayList(u8) = .empty;
-        defer pad.deinit(self.alloc);
-
         if (line >= self.buf.ed.buf.lineCount()) {
             // vim's marker for "past the end of the buffer".
+            var pad: std.ArrayList(u8) = .empty;
+            defer pad.deinit(self.alloc);
             try pad.append(self.alloc, '~');
             try padTo(self.alloc, &pad, 1, cols);
             try writeAt(batch, self.buffer_layer, r, gutter, pad.items, fg_dim, bg_buffer);
@@ -1652,17 +1765,13 @@ pub const Ui = struct {
         defer self.alloc.free(text);
 
         // Highlighted rows are painted a colour run at a time; on any
-        // failure (or with no grammar) fall through to one plain write.
+        // failure (or with no grammar) the same painter runs with no
+        // spans at all, which is exactly a plain row in `fg_text`.
         var painted = false;
         if (self.buf.hl) |*h| {
             if (h.ready() and self.renderRowSpans(batch, r, line, text)) painted = true;
         }
-        if (!painted) {
-            const visible = sliceCols(text, self.buf.left_col, cols);
-            try pad.appendSlice(self.alloc, visible);
-            try padTo(self.alloc, &pad, glyphwire.stringWidth(visible), cols);
-            try writeAt(batch, self.buffer_layer, r, gutter, pad.items, fg_text, bg_buffer);
-        }
+        if (!painted) try self.rowSpansImpl(batch, r, text, &.{});
 
         // Overpaint the selected span of this row, if any, with the
         // selection background. Done as a second write over the text just
@@ -1701,11 +1810,12 @@ pub const Ui = struct {
         const sel_hi_b = span.hi - ls; // may exceed text.len (newline / EOL)
         const to_eol = span.linewise or sel_hi_b > text.len;
 
-        const start_dc = displayColOfByte(text, @min(sel_lo_b, text.len));
+        const opts = self.displayOpts();
+        const start_dc = display.colOfByte(text, @min(sel_lo_b, text.len), opts);
         const end_dc = if (to_eol)
             self.buf.left_col + cols
         else
-            displayColOfByte(text, @min(sel_hi_b, text.len));
+            display.colOfByte(text, @min(sel_hi_b, text.len), opts);
         if (end_dc <= self.buf.left_col or start_dc >= self.buf.left_col + cols) return;
 
         const vis_lo = @max(start_dc, self.buf.left_col);
@@ -1714,12 +1824,11 @@ pub const Ui = struct {
 
         // The characters under the highlight, then spaces out to the
         // selection's end (a linewise selection past the text, or the
-        // newline slot of a charwise one).
+        // newline slot of a charwise one) -- `appendCols` fills the whole
+        // range either way.
         var overlay: std.ArrayList(u8) = .empty;
         defer overlay.deinit(self.alloc);
-        const chars = sliceCols(text, vis_lo, vis_hi - vis_lo);
-        try overlay.appendSlice(self.alloc, chars);
-        try padTo(self.alloc, &overlay, glyphwire.stringWidth(chars), vis_hi - vis_lo);
+        try display.appendCols(self.alloc, &overlay, text, vis_lo, vis_hi - vis_lo, opts);
 
         try writeAt(batch, self.buffer_layer, r, gutter + vis_lo - self.buf.left_col, overlay.items, fg_text, bg_selected);
     }
@@ -1743,6 +1852,12 @@ pub const Ui = struct {
         return true;
     }
 
+    /// Paints one buffer row as colour runs, walking the line's *display*
+    /// cells (`zoe/display.zig`) rather than its bytes: a tab covers the
+    /// columns out to its stop, and with `:set spaces=on` each space is a
+    /// dot in the whitespace colour. `spans` empty is a legitimate call
+    /// -- it paints the whole row in `fg_text`, which is the no-grammar
+    /// path.
     fn rowSpansImpl(
         self: *Ui,
         batch: *glyphwire.client.Client.Batch,
@@ -1751,55 +1866,62 @@ pub const Ui = struct {
         spans: []const syntax.Span,
     ) !void {
         const cols = self.textCols();
+        if (cols == 0) return;
         const left = self.buf.left_col;
         // Text starts after the line-number gutter (zero when it is off).
         const gutter = self.gutterWidth();
 
-        const visible = sliceCols(text, left, cols);
-        if (visible.len == 0) {
-            // Line is entirely scrolled off to the left, or empty.
-            try self.writeSpaces(batch, r, gutter, cols);
-            return;
-        }
-        const vis_start_bo: usize = @intFromPtr(visible.ptr) - @intFromPtr(text.ptr);
-        const vis_start_dc = displayColOfByte(text, vis_start_bo);
-
-        // A double-width char straddling the left edge is dropped by
-        // `sliceCols`; fill the gap it leaves so the text starts flush
-        // against the gutter.
-        if (vis_start_dc > left) {
-            try self.writeSpaces(batch, r, gutter, vis_start_dc - left);
-        }
-
         var run_buf: std.ArrayList(u8) = .empty;
         defer run_buf.deinit(self.alloc);
-        var run_dc = vis_start_dc;
+        var run_dc = left;
         var run_color: ?Color = null;
         var have_run = false;
+        // The next column still to be filled, and so also where the run
+        // being built ends -- which is how a gap is spotted.
+        var dc = left;
 
-        var dc = vis_start_dc;
-        var i: usize = 0;
-        while (i < visible.len) {
-            const seq = std.unicode.utf8ByteSequenceLength(visible[i]) catch 1;
-            const end = @min(i + seq, visible.len);
-            const cp = std.unicode.utf8Decode(visible[i..end]) catch 0xFFFD;
-            const w = glyphwire.codepointWidth(cp);
+        var it = display.Cells{ .text = text, .opts = self.displayOpts() };
+        while (it.next()) |cell| {
+            // `@max(width, 1)` keeps a zero-width combining mark sitting
+            // exactly on the left edge rather than dropping it.
+            if (cell.col + @max(cell.width, 1) <= left) continue;
+            if (cell.col >= left + cols) break;
 
-            const color = spanColorAt(spans, vis_start_bo + i);
-            if (!have_run or !colorOptEql(color, run_color)) {
+            const lo = @max(cell.col, left);
+            const hi = @min(cell.col + cell.width, left + cols);
+            // An expanded tab, or a character straddling either edge of
+            // the viewport: blanks, rather than half a glyph.
+            const clipped = cell.col < left or cell.col + cell.width > left + cols;
+            const blanks = cell.bytes.len == 0 or clipped;
+
+            const color: ?Color = if (blanks)
+                null
+            else if (cell.marker)
+                fg_whitespace
+            else
+                spanColorAt(spans, cell.src);
+
+            if (!have_run or lo != dc or !colorOptEql(color, run_color)) {
                 if (have_run) try self.flushRun(batch, r, run_dc, run_buf.items, run_color);
                 run_buf.clearRetainingCapacity();
-                run_dc = dc;
+                run_dc = lo;
                 run_color = color;
                 have_run = true;
+                dc = lo;
             }
-            try run_buf.appendSlice(self.alloc, visible[i..end]);
-            dc += w;
-            i = end;
+
+            if (blanks) {
+                if (hi > dc) try run_buf.appendNTimes(self.alloc, ' ', hi - dc);
+                dc = hi;
+            } else {
+                try run_buf.appendSlice(self.alloc, cell.bytes);
+                dc += cell.width;
+            }
         }
         if (have_run) try self.flushRun(batch, r, run_dc, run_buf.items, run_color);
 
-        // Pad the rest of the row.
+        // Pad the rest of the row -- the whole of it for an empty line,
+        // or one scrolled entirely off to the left.
         if (dc < left + cols) {
             try self.writeSpaces(batch, r, gutter + dc - left, left + cols - dc);
         }
@@ -1883,20 +2005,35 @@ pub const Ui = struct {
         self.buf.pushed_bar = now;
     }
 
+    /// How the buffer pane lays a line out, from the active buffer's own
+    /// settings. One accessor so every column calculation in this file --
+    /// painting, the caret, the selection, a mouse click -- agrees.
+    fn displayOpts(self: *const Ui) display.Opts {
+        return .{
+            .tab_width = self.buf.ed.tab_width,
+            .show_spaces = self.buf.ed.show_spaces,
+        };
+    }
+
     /// The caret's column in *display* cells, which is not its byte
-    /// column once a line holds anything multi-byte or double-width.
+    /// column once a line holds anything multi-byte, double-width, or a
+    /// tab.
     fn cursorDisplayCol(self: *Ui) !usize {
         const pos = self.buf.ed.pos();
         const start = self.buf.ed.buf.lineStart(pos.line);
         const text = try self.buf.ed.buf.gap.read(self.alloc, start, start + pos.col);
         defer self.alloc.free(text);
-        return glyphwire.stringWidth(text);
+        return display.width(text, self.displayOpts());
     }
 
-    /// The grapheme the caret sits on, or a space at end of line.
+    /// The grapheme the caret sits on, or a space at end of line. A tab
+    /// reads as a space: the caret is one inverted cell and sits on the
+    /// first of the several the tab covers, the way vim draws it.
     fn cursorGrapheme(self: *Ui) ![]u8 {
         const c = self.buf.ed.cursor;
-        if (c >= self.buf.ed.buf.len() or self.buf.ed.buf.byteAt(c) == '\n') {
+        if (c >= self.buf.ed.buf.len() or self.buf.ed.buf.byteAt(c) == '\n' or
+            self.buf.ed.buf.byteAt(c) == '\t')
+        {
             return self.alloc.dupe(u8, " ");
         }
         const seq = std.unicode.utf8ByteSequenceLength(self.buf.ed.buf.byteAt(c)) catch 1;
@@ -1910,8 +2047,8 @@ pub const Ui = struct {
         // The whole listing is written, not just the visible slice: the
         // content grid *is* the tree, and the host scrolls a viewport over
         // it. This runs on an expand or collapse, never on a scroll.
-        const content_cols = @max(self.tree.widestCols(), b.cols);
-        const content_rows = @max(self.tree.len(), b.rows);
+        const content_cols = self.treeContentCols();
+        const content_rows = self.treeContentRows();
 
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(self.alloc);
@@ -2048,8 +2185,11 @@ pub const Ui = struct {
         const hi = @min(start + width, view_hi);
         if (lo >= hi) return;
 
-        const slice = text[byteAtDisplayCol(text, lo - start)..byteAtDisplayCol(text, hi - start)];
-        try writeAt(batch, self.tabs_layer, 0, lo - view_lo, slice, fg, bg);
+        // Tab labels hold no tabs and take no space markers, so the
+        // default `Opts` is the plain codepoint-width walk this wants.
+        const from = display.byteAtCol(text, lo - start, .{});
+        const to = display.byteAtCol(text, hi - start, .{});
+        try writeAt(batch, self.tabs_layer, 0, lo - view_lo, text[from..to], fg, bg);
     }
 
     /// Keeps the tabs layer's virtual extent and offset in step with the
@@ -2242,41 +2382,6 @@ fn padTo(alloc: std.mem.Allocator, line: *std.ArrayList(u8), width: usize, targe
     try line.appendNTimes(alloc, ' ', target - width);
 }
 
-/// The byte offset in `text` at display column `col` -- the inverse of
-/// `displayColOfByte`, clamped to the end of the text. A column that
-/// falls on the trailing half of a wide character resolves to that
-/// character's start. Used to turn a mouse cell into a buffer position.
-fn byteAtDisplayCol(text: []const u8, col: usize) usize {
-    var c: usize = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        const seq = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const end = @min(i + seq, text.len);
-        const cp = std.unicode.utf8Decode(text[i..end]) catch 0xFFFD;
-        const w = glyphwire.codepointWidth(cp);
-        if (c + w > col) return i;
-        c += w;
-        i = end;
-    }
-    return text.len;
-}
-
-/// The display column at which byte `off` of `text` sits -- the summed
-/// width of every codepoint before it. Used to place the first colour
-/// run of a horizontally-scrolled row.
-fn displayColOfByte(text: []const u8, off: usize) usize {
-    var col: usize = 0;
-    var i: usize = 0;
-    while (i < off and i < text.len) {
-        const seq = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const end = @min(i + seq, text.len);
-        const cp = std.unicode.utf8Decode(text[i..end]) catch 0xFFFD;
-        col += glyphwire.codepointWidth(cp);
-        i = end;
-    }
-    return col;
-}
-
 /// The colour of the span covering line-relative byte `off`, or null for
 /// "no span here" (the default text colour). Spans are sorted and
 /// non-overlapping, so the first hit is the answer.
@@ -2292,30 +2397,4 @@ fn colorOptEql(a: ?Color, b: ?Color) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
     return a.?.r == b.?.r and a.?.g == b.?.g and a.?.b == b.?.b and a.?.a == b.?.a;
-}
-
-/// The slice of `text` starting at display column `start` and at most
-/// `max` columns wide.
-///
-/// Display columns, not bytes: a line of CJK is half as many columns as
-/// it is codepoints, and clipping by bytes would cut a character in half.
-/// A double-width character straddling either edge is dropped rather than
-/// half-drawn.
-pub fn sliceCols(text: []const u8, start: usize, max: usize) []const u8 {
-    var col: usize = 0;
-    var from: ?usize = null;
-    var i: usize = 0;
-
-    while (i < text.len) {
-        const seq = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const end = @min(i + seq, text.len);
-        const cp = std.unicode.utf8Decode(text[i..end]) catch 0xFFFD;
-        const w = glyphwire.codepointWidth(cp);
-
-        if (from == null and col >= start) from = i;
-        if (from != null and col + w > start + max) return text[from.?..i];
-        col += w;
-        i = end;
-    }
-    return if (from) |f| text[f..] else text[text.len..];
 }

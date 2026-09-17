@@ -23,8 +23,9 @@ const usage =
     \\  --quiet          Headless: don't print the buffer afterwards.
     \\
     \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
-    \\glyphwire display server. Ctrl+W switches panes, Ctrl+N toggles the
-    \\file tree, Ctrl+Tab / Ctrl+Shift+Tab walk the open buffers (also
+    \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
+    \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
+    \\the file tree; Ctrl+Tab / Ctrl+Shift+Tab walk the open buffers (also
     \\:bn / :bp, closed with :bd or a tab's ×).
     \\See docs/investigations/zoe-editor.md.
     \\

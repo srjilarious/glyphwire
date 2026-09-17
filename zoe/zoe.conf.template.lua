@@ -18,9 +18,9 @@
 -- wrong type is logged and the default stands. Any parse error is logged
 -- and whatever parsed before it is kept.
 --
--- zoe.conf.lua carries syntax-highlighting and a couple of editor settings
--- only. Buffer colours beyond the capture-group theme, keybindings, and
--- the pane layout are not configurable yet.
+-- zoe.conf.lua carries syntax-highlighting and the editor's display
+-- settings only. Buffer colours beyond the capture-group theme,
+-- keybindings, and the pane layout are not configurable yet.
 
 -- config = {
 --
@@ -40,11 +40,13 @@
 --     --   c                 .c .h
 --     --   python            .py .pyi
 --     --   toml              .toml
+--     --   lua               .lua
+--     --   bash              .sh .bash .zsh
 --     --   markdown          .md .markdown
 --     --   markdown_inline   (used via injections, no extensions)
 --     languages = {
---         -- { name = "c",   extensions = { ".c", ".h", ".ino" } },
---         -- { name = "lua", extensions = { ".lua" } },  -- needs a `lua` grammar dir
+--         -- { name = "c",    extensions = { ".c", ".h", ".ino" } },
+--         -- { name = "toml", extensions = { ".toml", ".conf" } },
 --     },
 --
 --     ---- Grammar search path -------------------------------------
@@ -88,6 +90,22 @@
 --     --   "relative"   -- distance from the cursor, cursor line still absolute
 --     -- `:set lineno=off|absolute|relative` changes it live.
 --     line_numbers = "absolute",
+--
+--     -- Cells between tab stops: how wide a tab already in the file
+--     -- renders, and the grid the Tab key indents onto. 1..16.
+--     -- `:set tabwidth=N` changes it live.
+--     tab_width = 4,
+--
+--     -- Whether the Tab key inserts spaces out to the next stop rather
+--     -- than a literal tab character. `:set expandtab=on|off` changes it
+--     -- live.
+--     expand_tab = true,
+--
+--     -- Paint every space in the buffer pane as a faint middle dot. The
+--     -- cells an expanded tab covers stay blank, so tab-indented and
+--     -- space-indented lines tell themselves apart.
+--     -- `:set spaces=on|off` changes it live.
+--     show_spaces = false,
 --
 --     ---- Theme --------------------------------------------------------
 --

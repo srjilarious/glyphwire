@@ -1,13 +1,16 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! zoe's optional startup config, `~/.config/glyphwire/zoe.conf.lua` -- a Lua
-//! script assigning a global `config` table, the same shape `host.conf.lua`
-//! and `ls.conf.lua` use. It carries syntax-highlighting settings only:
+//! zoe's optional startup config, `~/.config/glyphwire/zoe.conf.lua` --
+//! a Lua script assigning a global `config` table, the same shape
+//! `host.conf.lua` and `ls.conf.lua` use. It carries the settings zoe
+//! reads at startup:
 //! extra languages / extension remaps, extra grammar directories,
-//! capture-group colour overrides, and an `injections` on/off switch.
-//! With no file present zoe runs on the built-in six languages, the dark
-//! theme, and injection enabled.
+//! capture-group colour overrides, an `injections` on/off switch, and
+//! the editor's display options (`page_lines`, `line_numbers`,
+//! `tab_width`, `expand_tab`, `show_spaces`). With no file present zoe
+//! runs on the built-in languages, the dark theme, injection enabled,
+//! and a 4-cell expanding Tab.
 //!
 //! Split out here (rather than in `ui.zig`) so `tests/zoe_tests.zig` can
 //! exercise the parse without a Lua state wired into a running client,
@@ -49,6 +52,17 @@ pub const Config = struct {
     /// `"relative"` keeps the caret's own line absolute. `:set lineno=…`
     /// overrides it at runtime.
     line_numbers: editor.LineNumbers = .absolute,
+    /// `config.tab_width` -- cells between tab stops, both for a `\t`
+    /// already in the file and for the grid an expanding Tab indents
+    /// onto. Default 4; anything outside 1..`editor.max_tab_width` is
+    /// ignored. `:set tabwidth=…` overrides it at runtime.
+    tab_width: usize = 4,
+    /// `config.expand_tab` -- whether the Tab key inserts spaces rather
+    /// than a literal `\t`. Default true; `:set expandtab=…` overrides.
+    expand_tab: bool = true,
+    /// `config.show_spaces` -- paint every space in the buffer pane as a
+    /// faint middle dot. Default false; `:set spaces=…` overrides.
+    show_spaces: bool = false,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -105,6 +119,9 @@ pub fn load(
     cfg.injections = readInjections(lua);
     cfg.page_lines = readPageLines(lua, cfg.page_lines);
     cfg.line_numbers = readLineNumbers(lua, cfg.line_numbers);
+    cfg.tab_width = readTabWidth(lua, cfg.tab_width);
+    cfg.expand_tab = readFlag(lua, "expand_tab", cfg.expand_tab);
+    cfg.show_spaces = readFlag(lua, "show_spaces", cfg.show_spaces);
     return cfg;
 }
 
@@ -117,6 +134,27 @@ fn readPageLines(lua: *Lua, current: usize) usize {
     const n = lua.toNumber(-1) catch return current;
     if (n < 1) return current;
     return @intFromFloat(n);
+}
+
+/// `config.tab_width = 8`. A number in 1..`editor.max_tab_width`
+/// replaces the default; anything else (absent, zero, huge, non-number)
+/// leaves it.
+fn readTabWidth(lua: *Lua, current: usize) usize {
+    const t = lua.getField(-1, "tab_width");
+    defer lua.pop(1);
+    if (t != .number) return current;
+    const n = lua.toNumber(-1) catch return current;
+    if (n < 1 or n > @as(f64, @floatFromInt(editor.max_tab_width))) return current;
+    return @intFromFloat(n);
+}
+
+/// A plain `config.<name> = true|false`. A non-boolean (including
+/// absent) leaves `current`.
+fn readFlag(lua: *Lua, comptime name: [:0]const u8, current: bool) bool {
+    const t = lua.getField(-1, name);
+    defer lua.pop(1);
+    if (t != .boolean) return current;
+    return lua.toBoolean(-1);
 }
 
 /// `config.line_numbers`: `false` -> off, `true` -> absolute,

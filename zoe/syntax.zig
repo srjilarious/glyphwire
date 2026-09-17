@@ -269,7 +269,7 @@ pub const LangDef = struct {
     extensions: []const []const u8,
 };
 
-/// The six grammars `build.zig` compiles and installs. A config can add
+/// The grammars `build.zig` compiles and installs. A config can add
 /// more or remap these.
 pub const default_langs = [_]LangDef{
     .{ .name = "zig", .extensions = &.{ ".zig", ".zon" } },
@@ -278,6 +278,10 @@ pub const default_langs = [_]LangDef{
     .{ .name = "python", .extensions = &.{ ".py", ".pyi" } },
     .{ .name = "toml", .extensions = &.{ ".toml" } },
     .{ .name = "markdown", .extensions = &.{ ".md", ".markdown" } },
+    // glyphwire's own configs are `X.conf.lua`, so `.lua` already covers
+    // them and `.conf` is left to whoever actually owns it.
+    .{ .name = "lua", .extensions = &.{".lua"} },
+    .{ .name = "bash", .extensions = &.{ ".sh", ".bash", ".zsh" } },
 };
 
 /// The grammar directories to search, highest priority first:
@@ -390,6 +394,11 @@ pub const Registry = struct {
         .{ "md", "markdown" },
         .{ "py", "python" },
         .{ "py3", "python" },
+        // What a Markdown code fence is actually labelled, nine times in
+        // ten, when it holds shell.
+        .{ "sh", "bash" },
+        .{ "shell", "bash" },
+        .{ "zsh", "bash" },
     });
 
     /// The grammar-directory name for a possibly-aliased language name.

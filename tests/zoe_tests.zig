@@ -955,6 +955,72 @@ pub fn commandLineSetRejectsUnknownOptionAndValueTest(_: std.Io, alloc: std.mem.
     try testz.expectEqual(ed.line_numbers, .absolute);
 }
 
+pub fn commandLineSetTabOptionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    // The defaults: a 4-cell expanding Tab, no space dots.
+    try testz.expectEqual(ed.tab_width, 4);
+    try testz.expectTrue(ed.expand_tab);
+    try testz.expectTrue(!ed.show_spaces);
+
+    _ = try keys.feed(&ed, ":set tabwidth=8<cr>");
+    try testz.expectEqual(ed.tab_width, 8);
+    _ = try keys.feed(&ed, ":set expandtab=off<cr>");
+    try testz.expectTrue(!ed.expand_tab);
+    _ = try keys.feed(&ed, ":set spaces=on<cr>");
+    try testz.expectTrue(ed.show_spaces);
+
+    // A width outside 1..max is refused and leaves the setting alone.
+    _ = try keys.feed(&ed, ":set tabwidth=0<cr>");
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E474:"));
+    try testz.expectEqual(ed.tab_width, 8);
+    _ = try keys.feed(&ed, ":set tabwidth=4096<cr>");
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E474:"));
+    try testz.expectEqual(ed.tab_width, 8);
+
+    _ = try keys.feed(&ed, ":set spaces=sometimes<cr>");
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E474:"));
+    try testz.expectTrue(ed.show_spaces);
+}
+
+pub fn insertTabExpandsToTheNextStopTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "", null);
+    defer ed.deinit();
+
+    // Column 0: the full width.
+    _ = try keys.feed(&ed, "i<tab>x");
+    try expectText(alloc, &ed.buf, "    x");
+
+    // Column 5 now, so the next stop is 3 cells away, not 4.
+    _ = try keys.feed(&ed, "<tab>y");
+    try expectText(alloc, &ed.buf, "    x   y");
+}
+
+pub fn insertTabHonoursTabWidthAndExpandTabTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "", null);
+    defer ed.deinit();
+
+    _ = try keys.feed(&ed, ":set tabwidth=2<cr>i<tab>x");
+    try expectText(alloc, &ed.buf, "  x");
+
+    // `expandtab=off` puts the byte itself in, whatever the width is.
+    _ = try keys.feed(&ed, "<esc>:set expandtab=off<cr>A<tab>z");
+    try expectText(alloc, &ed.buf, "  x\tz");
+}
+
+pub fn insertTabStepsOverAnExistingTabTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A line that already holds a tab: the stop is measured in display
+    // columns, so the tab counts as the cells it covers, not one byte.
+    var ed = try Editor.initFromText(alloc, "\tab", null);
+    defer ed.deinit();
+
+    // Append at end of line: the tab covers columns 0..3 and `ab` takes
+    // 4 and 5, so the Tab is typed at column 6 and inserts the two
+    // spaces that reach the stop at 8 -- not four.
+    _ = try keys.feed(&ed, "A<tab>z");
+    try expectText(alloc, &ed.buf, "\tab  z");
+}
+
 pub fn commandLineEscapeAbandonsTheLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
@@ -1102,25 +1168,133 @@ pub fn treeCollapsePullsTheCursorBackTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqual(t.cursor, 1);
 }
 
-// ─── Column slicing for the buffer pane ─────────────────────────────────
+// ─── Display cells: tabs, spaces and column slicing ────────────────────
 
-pub fn sliceColsClipsToTheViewportTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqualStr(zoe.ui.sliceCols("abcdefgh", 0, 4), "abcd");
-    try testz.expectEqualStr(zoe.ui.sliceCols("abcdefgh", 2, 3), "cde");
-    // Past the end of the line is empty, not an error.
-    try testz.expectEqualStr(zoe.ui.sliceCols("abc", 10, 4), "");
+/// `display.appendCols` into a fresh list, so a test reads as one
+/// expected string. Always exactly `max` columns wide.
+fn cols(alloc: std.mem.Allocator, text: []const u8, start: usize, max: usize, opts: zoe.display.Opts) !std.ArrayList(u8) {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try zoe.display.appendCols(alloc, &out, text, start, max, opts);
+    return out;
 }
 
-pub fn sliceColsCountsDisplayWidthTest(_: std.Io, _: std.mem.Allocator) !void {
+pub fn appendColsClipsToTheViewportTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var a = try cols(alloc, "abcdefgh", 0, 4, .{});
+    defer a.deinit(alloc);
+    try testz.expectEqualStr(a.items, "abcd");
+
+    var b = try cols(alloc, "abcdefgh", 2, 3, .{});
+    defer b.deinit(alloc);
+    try testz.expectEqualStr(b.items, "cde");
+
+    // Past the end of the line is blanks, not an error: the row still has
+    // to paint its background out to the pane's edge.
+    var c = try cols(alloc, "abc", 10, 4, .{});
+    defer c.deinit(alloc);
+    try testz.expectEqualStr(c.items, "    ");
+}
+
+pub fn appendColsCountsDisplayWidthTest(_: std.Io, alloc: std.mem.Allocator) !void {
     // Three double-width characters: six columns, nine bytes. Asking for
     // four columns gets two of them, not four bytes through the middle of
     // one.
     const cjk = "\u{65e5}\u{672c}\u{8a9e}";
-    try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 0, 4), "\u{65e5}\u{672c}");
-    // A double-width character straddling the right edge is dropped
+    var a = try cols(alloc, cjk, 0, 4, .{});
+    defer a.deinit(alloc);
+    try testz.expectEqualStr(a.items, "\u{65e5}\u{672c}");
+
+    // A double-width character straddling the right edge is blanked
     // rather than half-drawn.
-    try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 0, 3), "\u{65e5}");
-    try testz.expectEqualStr(zoe.ui.sliceCols(cjk, 2, 2), "\u{672c}");
+    var b = try cols(alloc, cjk, 0, 3, .{});
+    defer b.deinit(alloc);
+    try testz.expectEqualStr(b.items, "\u{65e5} ");
+
+    var c = try cols(alloc, cjk, 2, 2, .{});
+    defer c.deinit(alloc);
+    try testz.expectEqualStr(c.items, "\u{672c}");
+}
+
+pub fn tabsExpandToTheNextStopTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const opts = zoe.display.Opts{ .tab_width = 4 };
+    // A tab in column 0 covers four cells; one in column 2 covers the two
+    // that reach the stop, not another four.
+    try testz.expectEqual(zoe.display.width("\tx", opts), 5);
+    try testz.expectEqual(zoe.display.width("ab\tx", opts), 5);
+
+    var a = try cols(alloc, "ab\tcd", 0, 6, opts);
+    defer a.deinit(alloc);
+    try testz.expectEqualStr(a.items, "ab  cd");
+
+    // A viewport opening inside a tab sees blanks, never a stray glyph.
+    var b = try cols(alloc, "\tx", 2, 3, opts);
+    defer b.deinit(alloc);
+    try testz.expectEqualStr(b.items, "  x");
+}
+
+pub fn tabColumnsMapBothWaysTest(_: std.Io, _: std.mem.Allocator) !void {
+    const opts = zoe.display.Opts{ .tab_width = 4 };
+    const text = "\tab";
+    // The tab is byte 0 at column 0; `a` is byte 1 at column 4.
+    try testz.expectEqual(zoe.display.colOfByte(text, 0, opts), 0);
+    try testz.expectEqual(zoe.display.colOfByte(text, 1, opts), 4);
+    try testz.expectEqual(zoe.display.colOfByte(text, 2, opts), 5);
+    // Every column the tab covers resolves back to the tab's own byte,
+    // which is what makes a click anywhere in the indent land on it.
+    try testz.expectEqual(zoe.display.byteAtCol(text, 0, opts), 0);
+    try testz.expectEqual(zoe.display.byteAtCol(text, 3, opts), 0);
+    try testz.expectEqual(zoe.display.byteAtCol(text, 4, opts), 1);
+    // Past the end clamps rather than running off.
+    try testz.expectEqual(zoe.display.byteAtCol(text, 99, opts), text.len);
+}
+
+pub fn tabStopWidthTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(zoe.display.tabStop(0, 4), 4);
+    try testz.expectEqual(zoe.display.tabStop(1, 4), 3);
+    try testz.expectEqual(zoe.display.tabStop(3, 4), 1);
+    try testz.expectEqual(zoe.display.tabStop(4, 4), 4);
+    // A nonsense width can't divide by zero.
+    try testz.expectEqual(zoe.display.tabStop(7, 0), 1);
+}
+
+pub fn showSpacesMarksOnlyRealSpacesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const opts = zoe.display.Opts{ .tab_width = 4, .show_spaces = true };
+    var a = try cols(alloc, "a b", 0, 3, opts);
+    defer a.deinit(alloc);
+    try testz.expectEqualStr(a.items, "a" ++ zoe.display.space_marker ++ "b");
+
+    // The cells an expanded tab covers stay blank, which is what lets a
+    // tab-indented line tell itself apart from a space-indented one.
+    var b = try cols(alloc, "\tx", 0, 5, opts);
+    defer b.deinit(alloc);
+    try testz.expectEqualStr(b.items, "    x");
+
+    // Padding past the end of the line is background, not whitespace the
+    // file actually holds, so it gets no dots.
+    var c = try cols(alloc, "a", 0, 3, opts);
+    defer c.deinit(alloc);
+    try testz.expectEqualStr(c.items, "a  ");
+}
+
+// ─── Pane focus chords ─────────────────────────────────────────────────
+
+pub fn focusDirectionReadsHjklAndArrowsTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(zoe.ui.focusDirection("h").?, .left);
+    try testz.expectEqual(zoe.ui.focusDirection("left").?, .left);
+    try testz.expectEqual(zoe.ui.focusDirection("l").?, .right);
+    try testz.expectEqual(zoe.ui.focusDirection("right").?, .right);
+    try testz.expectEqual(zoe.ui.focusDirection("k").?, .up);
+    try testz.expectEqual(zoe.ui.focusDirection("up").?, .up);
+    try testz.expectEqual(zoe.ui.focusDirection("j").?, .down);
+    try testz.expectEqual(zoe.ui.focusDirection("down").?, .down);
+
+    // Everything else is not a focus chord, which is what keeps Ctrl+W,
+    // Ctrl+Tab and the Ctrl+D / Ctrl+U page keys reaching their own
+    // handlers.
+    try testz.expectTrue(zoe.ui.focusDirection("w") == null);
+    try testz.expectTrue(zoe.ui.focusDirection("tab") == null);
+    try testz.expectTrue(zoe.ui.focusDirection("d") == null);
+    try testz.expectTrue(zoe.ui.focusDirection("u") == null);
 }
 
 // ─── Line-number gutter ────────────────────────────────────────────────
@@ -1234,6 +1408,60 @@ pub fn syntaxHighlightsJsonSpansTest(io: std.Io, alloc: std.mem.Allocator) !void
         if (sp.start <= 6 and sp.end >= 7) covers_number = true;
     }
     try testz.expectTrue(covers_number);
+}
+
+pub fn syntaxMapsLuaAndShellExtensionsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+
+    try testz.expectEqualStr(reg.nameForPath("init.lua").?, "lua");
+    // glyphwire's own configs are `X.conf.lua`, so the plain `.lua`
+    // mapping is what highlights them -- no `.conf` entry needed.
+    try testz.expectEqualStr(reg.nameForPath("~/.config/glyphwire/zoe.conf.lua").?, "lua");
+    try testz.expectTrue(reg.nameForPath("nginx.conf") == null);
+    try testz.expectEqualStr(reg.nameForPath("build.sh").?, "bash");
+    try testz.expectEqualStr(reg.nameForPath("prompt.zsh").?, "bash");
+
+    // A Markdown fence labelled `sh` has to find the `bash` directory.
+    try testz.expectEqualStr(syntax.Registry.resolveAlias("sh"), "bash");
+    try testz.expectEqualStr(syntax.Registry.resolveAlias("shell"), "bash");
+}
+
+pub fn syntaxHighlightsLuaAndShellTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+
+    const cases = [_]struct { name: []const u8, src: []const u8 }{
+        .{ .name = "lua", .src = "local x = 1" },
+        .{ .name = "bash", .src = "if true; then echo hi; fi" },
+    };
+    for (cases) |c| {
+        const g = reg.get(c.name) orelse return error.GrammarMissing;
+        try testz.expectTrue(g.language.abiVersion() >= syntax.min_abi_version);
+
+        var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+        defer hl.deinit();
+        try hl.setLanguage(c.name, g);
+
+        var buf = try Buffer.initFromText(alloc, c.src);
+        defer buf.deinit();
+        try hl.reparse(&buf);
+        try testz.expectTrue(hl.ready());
+
+        var spans: std.ArrayList(syntax.Span) = .empty;
+        defer spans.deinit(alloc);
+        try hl.lineSpans(0, c.src.len, &spans);
+
+        // Both lines open with a keyword, so something must colour the
+        // first byte -- which is the proof the query actually compiled
+        // against the grammar rather than silently producing nothing.
+        try testz.expectTrue(spans.items.len >= 1);
+        try testz.expectEqual(spans.items[0].start, 0);
+    }
 }
 
 // ─── Incremental reparse: the buffer edit journal ───────────────────────

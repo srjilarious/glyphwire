@@ -84,6 +84,16 @@
             .hash = "N-V-__8AAPRhUwBHS53YVU2fqpXuZ8VMvL_vIKp2AQo4Ja7V",
             .lazy = true,
         },
+        .grammar_lua = .{
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-lua#10fe0054734eec83049514ea2e718b2a56acd0c9",
+            .hash = "N-V-__8AAE5ZCQA-BW5BOioWVkGcPTjhC5x1Qv07BH3Xt3dR",
+            .lazy = true,
+        },
+        .grammar_bash = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-bash#a06c2e4415e9bc0346c6b86d401879ffb44058f7",
+            .hash = "N-V-__8AANjenwCy_cXlIbU8nqBzGxMlEHVokLZJYrmIXtoz",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",
