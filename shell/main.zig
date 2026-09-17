@@ -61,11 +61,14 @@ const default_cmd_var_timeout_ms: u64 = 400;
 /// Resize debounce (see the resize handling in `runPrompt`). A resize
 /// drag emits an event per frame; redrawing the prompt on each one looks
 /// messy, so the redraw waits until the size has been quiet for
-/// `resize_settle_ms`. `resize_poll_ms` is the short `waitInputEvent`
-/// timeout used while a resize is pending -- resize notifications don't
-/// wake that wait, so the loop has to check back on its own.
+/// `resize_settle_ms`. Every resize wakes the prompt's wait, so while one
+/// is pending the loop only has to time out once the drag goes quiet.
 const resize_settle_ms: i64 = 140;
-const resize_poll_ms: i64 = 50;
+
+/// How often the prompt's idle work (the ticking `{time}` right chain, a
+/// due persistent-state flush) runs when nothing is typed. Also the
+/// prompt loop's wait timeout.
+const prompt_idle_ms: i64 = 500;
 
 /// Fish-style inline completion hint delay. The prompt loop already uses
 /// a 500ms idle heartbeat, so this stays aligned with that cadence.
@@ -353,14 +356,13 @@ fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
     prompt.applyPendingResize(false) catch {};
 }
 
-/// The modifier keys currently held, as `key_encode` wants them -- shared
-/// by the pty key loop and the mouse encoder.
-fn ptyMods(listener: *glyphwire.InputListener) keyencode.Mods {
-    return .{
-        .ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control"),
-        .shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift"),
-        .alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt"),
-    };
+/// An event's modifiers as `key_encode` wants them -- shared by every key
+/// and mouse encoder here. Always the event's own `mods`, stamped by the
+/// host when it generated the event: sampling the live down-set instead
+/// lets a shell that fell behind send a TUI the wrong escape sequence
+/// (Ctrl released before its keystroke was encoded).
+fn ptyMods(mods: glyphwire.Mods) keyencode.Mods {
+    return .{ .ctrl = mods.ctrl, .shift = mods.shift, .alt = mods.alt };
 }
 
 /// The primary mouse button currently held, or null if none -- used to
@@ -373,40 +375,80 @@ fn heldMouseButton(listener: *glyphwire.InputListener) ?keyencode.MouseButton {
     return null;
 }
 
-/// Drains `InputListener`'s mouse queues once. When the foregrounded pty
-/// child has a mouse-reporting mode on (`glyphwire.ModeTracker`), each
-/// event is re-encoded as an xterm mouse report and written to the pty;
-/// otherwise the events are just discarded so the queues don't fill while
-/// a command runs. `mev.button` is freed either way.
-fn pumpPtyMouse(
-    alloc: std.mem.Allocator,
-    listener: *glyphwire.InputListener,
-    pty: *Pty,
-    modes: *ModeTracker,
-) void {
-    const reporting = modes.mouseReporting();
+/// Re-encodes one mouse button event as an xterm mouse report for the
+/// foregrounded pty child, when it has a mouse-reporting mode on
+/// (`glyphwire.ModeTracker`); otherwise drops it.
+fn ptyMouseButton(pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseButtonEvent) void {
+    if (!modes.mouseReporting()) return;
     const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
+    const btn = keyencode.mouseButtonFromName(mev.button) orelse return;
+    const action: keyencode.MouseAction = if (mev.pressed) .press else .release;
+    var buf: [16]u8 = undefined;
+    if (keyencode.encodeMouse(enc, btn, action, mev.cell.col, mev.cell.row, ptyMods(mev.mods), &buf)) |seq|
+        pty.writeAll(seq);
+}
 
-    while (listener.pollMouseButtonEvent()) |mev| {
-        defer alloc.free(mev.button);
-        if (!reporting) continue;
-        const btn = keyencode.mouseButtonFromName(mev.button) orelse continue;
-        const action: keyencode.MouseAction = if (mev.pressed) .press else .release;
-        var buf: [16]u8 = undefined;
-        if (keyencode.encodeMouse(enc, btn, action, mev.cell.col, mev.cell.row, ptyMods(listener), &buf)) |seq|
-            pty.writeAll(seq);
+/// `ptyMouseButton` for pointer motion.
+fn ptyMouseMove(listener: *glyphwire.InputListener, pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseMoveEvent) void {
+    if (!modes.mouseReporting() or !modes.wantsMotion()) return;
+    const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
+    // `?1002` reports motion only while a button is held; `?1003`
+    // reports it with a "no button" code the rest of the time.
+    const btn = heldMouseButton(listener) orelse
+        (if (modes.wantsAnyMotion()) keyencode.MouseButton.none else return);
+    var buf: [16]u8 = undefined;
+    if (keyencode.encodeMouse(enc, btn, .motion, mev.cell.col, mev.cell.row, ptyMods(mev.mods), &buf)) |seq|
+        pty.writeAll(seq);
+}
+
+/// The prompt's idle work: a due persistent-state flush, the inline
+/// completion hint, and the ticking `{time}` right chain. Returns true
+/// when it drew the completion hint (which already placed the cursor).
+fn promptIdleTick(prompt: *Prompt) bool {
+    // An idle moment is a good time to flush persistent state if the age
+    // trigger has come due.
+    prompt.maybeFlushPersistentState();
+    if (prompt.pending_resize == null and prompt.browse_pos == null) {
+        const drew_hint = prompt.maybeShowCompletionHint() catch false;
+        if (drew_hint) return true;
     }
+    if (prompt.pending_resize == null and prompt.right_dynamic and prompt.browse_pos == null) {
+        // Refresh the powerline right chain so `{time}` keeps ticking
+        // while nothing is typed; skipped while a resize is in flight so
+        // it isn't drawn at an intermediate size.
+        prompt.drawRightChain() catch {};
+        prompt.placeInputCursor() catch {};
+    }
+    return false;
+}
 
-    const want_motion = reporting and modes.wantsMotion();
-    while (listener.pollMouseMoveEvent()) |mev| {
-        if (!want_motion) continue;
-        // `?1002` reports motion only while a button is held; `?1003`
-        // reports it with a "no button" code the rest of the time.
-        const btn = heldMouseButton(listener) orelse
-            (if (modes.wantsAnyMotion()) keyencode.MouseButton.none else continue);
-        var buf: [16]u8 = undefined;
-        if (keyencode.encodeMouse(enc, btn, .motion, mev.cell.col, mev.cell.row, ptyMods(listener), &buf)) |seq|
-            pty.writeAll(seq);
+/// A mouse click at the prompt. A left click resolves the same way
+/// Enter-while-browsing does (`activateSelectionAt`), regardless of
+/// whether anything's currently being typed: a click is a deliberate,
+/// targeted action, not something that should be gated on browse state
+/// the way keyboard Enter is.
+fn promptClick(prompt: *Prompt, mev: glyphwire.MouseButtonEvent) !void {
+    if (!mev.pressed or !std.mem.eql(u8, mev.button, "left")) return;
+    // `mev.view_offset` is how far the host was scrolled back when the
+    // click happened -- ground truth, stamped by the host atomically with
+    // the click, so trust it over the locally-mirrored `view_scroll`
+    // (which can lag a host-driven wheel/scrollbar scroll). It's both the
+    // lookup offset (resolve against the row actually under the pointer)
+    // and, once recorded here, what makes `setLine` -> `setCursorAt` snap
+    // the view back down to the live prompt when the click activates a
+    // command -- clicking an `ls` entry in scrollback should land you back
+    // at the new prompt, not leave you scrolled up.
+    prompt.view_scroll = mev.view_offset;
+    if (mev.mods.ctrl) {
+        // Ctrl+click toggles the entry in the multi-select mark set (same
+        // as Space while browsing).
+        try prompt.toggleHighlightAt(mev.cell.row, mev.cell.col, mev.view_offset);
+    } else {
+        // A plain click always runs the entry's own action (the first
+        // `open_actions` command for its type), regardless of what's
+        // marked -- marks are built and acted on from the keyboard (Space
+        // to mark, Enter to run) or copied with Ctrl+Shift+C.
+        try prompt.activateSelectionAt(mev.cell.row, mev.cell.col, mev.view_offset);
     }
 }
 
@@ -543,91 +585,50 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         }
     }
 
+    var last_idle = std.Io.Clock.Timestamp.now(io, .awake);
     while (true) {
-        // One profiler "tick" per loop iteration (per input event or idle
+        // One profiler "tick" per loop iteration (per event or idle
         // timeout): rolls the counter windows and fires the periodic
         // summary. Inert unless GLYPHWIRE_SHELL_PROFILE is set.
         _ = prompt.profiler.frameBoundary();
 
-        // Drains any pending mouse click before (possibly) blocking below
-        // -- non-blocking, so this never delays key handling. A left
-        // click resolves the same way Enter-while-browsing does
-        // (`activateSelectionAt`), regardless of whether anything's
-        // currently being typed: a click is a deliberate, targeted
-        // action, not something that should be gated on browse state the
-        // way keyboard Enter is. Worst-case latency for a click that
-        // arrives with no keyboard activity at all is bounded by the
-        // 500ms fallback timeout below, same as this loop's general
-        // responsiveness tradeoff -- there's no single wait that blocks
-        // on both key and mouse events at once.
-        if (listener.pollMouseButtonEvent()) |mev| {
-            defer alloc.free(mev.button);
-            if (mev.pressed and std.mem.eql(u8, mev.button, "left")) {
-                // `mev.view_offset` is how far the host was scrolled back
-                // when the click happened -- ground truth, stamped by the
-                // host atomically with the click, so trust it over the
-                // locally-mirrored `view_scroll` (which can lag a
-                // host-driven wheel/scrollbar scroll by a loop iteration).
-                // It's both the lookup offset (resolve against the row
-                // actually under the pointer) and, once recorded here,
-                // what makes `setLine` -> `setCursorAt` snap the view back
-                // down to the live prompt when the click activates a
-                // command -- clicking an `ls` entry in scrollback should
-                // land you back at the new prompt, not leave you scrolled
-                // up.
-                prompt.view_scroll = mev.view_offset;
-                const ctrl_held = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
-                if (ctrl_held) {
-                    // Ctrl+click toggles the entry in the multi-select mark
-                    // set (same as Space while browsing).
-                    try prompt.toggleHighlightAt(mev.cell.row, mev.cell.col, mev.view_offset);
-                } else {
-                    // A plain click always runs the entry's own action
-                    // (the first `open_actions` command for its type),
-                    // regardless of what's marked -- marks are built and
-                    // acted on from the keyboard (Space to mark, Enter to
-                    // run) or copied with Ctrl+Shift+C.
-                    try prompt.activateSelectionAt(mev.cell.row, mev.cell.col, mev.view_offset);
-                }
+        // A resize that has gone quiet for `resize_settle_ms` is applied
+        // now; one still settling is left for the next pass.
+        prompt.applyPendingResize(false) catch {};
+
+        // Every notification wakes this wait -- clicks, scrolls and
+        // resizes included -- so its timeout is purely the idle cadence,
+        // or the settle window while a resize drag is in flight.
+        const wait_ms: i64 = if (prompt.pending_resize != null) resize_settle_ms else prompt_idle_ms;
+        const any_ev = (try listener.next(.{ .duration = .{ .raw = .fromMilliseconds(wait_ms), .clock = .awake } })) orelse {
+            last_idle = std.Io.Clock.Timestamp.now(io, .awake);
+            if (promptIdleTick(&prompt)) continue;
+            continue;
+        };
+        const input_ev = any_ev.asInput() orelse {
+            defer any_ev.deinit(alloc);
+            switch (any_ev) {
+                .mouse_button => |mev| try promptClick(&prompt, mev),
+                // Keep `prompt.view_scroll` current with any host-driven
+                // scroll (mouse wheel, scrollbar) so browse-down and the
+                // type-to-snap-back in `setCursorAt` know the real offset.
+                .scroll => |sev| prompt.view_scroll = sev.offset,
+                // A window resize rebuilt the grid (bottom-anchored) and
+                // changed its dimensions. The re-layout is debounced
+                // (`Prompt.noteResize` / `applyPendingResize`). `resize`
+                // only reports the root layer's size, so a prompt drawn
+                // into a layer (`GLYPHWIRE_LAYER`) watches `layout`.
+                .resize => |rev| if (client.default_layer == null) prompt.noteResize(rev.cols, rev.rows),
+                .layout => |lev| if (client.default_layer) |layer| {
+                    if (lev.boundsFor(layer)) |b| prompt.noteResize(b.cols, b.rows);
+                },
+                else => {},
             }
-        }
-
-        // Keep `prompt.view_scroll` current with any host-driven scroll
-        // (mouse wheel, scrollbar) so browse-down and the type-to-snap-back
-        // in `setCursorAt` know the real offset. Drained non-blocking,
-        // same as the mouse queue above.
-        while (listener.pollScrollEvent()) |sev| prompt.view_scroll = sev.offset;
-
-        // A window resize rebuilt the grid (bottom-anchored) and changed
-        // its dimensions, so the recorded prompt rows, the right chain's
-        // column and every grid-size clamp are stale. The re-layout is
-        // debounced (`Prompt.noteResize` / `applyPendingResize`): drain
-        // the burst here, redraw only once the size has settled.
-        drainResizes(listener, &prompt);
-
-        // One ordered stream of key + text events (see `InputEvent`).
-        // Blocks until one is queued rather than polling on a fixed
-        // interval; the timeout is just a fallback heartbeat -- but while a
-        // resize is settling it polls fast (`resize_poll_ms`), since resize
-        // notifications don't wake this wait.
-        const wait_ms: i64 = if (prompt.pending_resize != null) resize_poll_ms else 500;
-        const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(wait_ms), .clock = .awake } })) orelse {
-            // Idle tick. Drain/apply any resize first; skip the right-chain
-            // refresh entirely while a resize is still in flight so it
-            // isn't drawn at an intermediate size.
-            drainResizes(listener, &prompt);
-            // An idle moment is a good time to flush persistent state if
-            // the age trigger has come due.
-            prompt.maybeFlushPersistentState();
-            if (prompt.pending_resize == null and prompt.browse_pos == null) {
-                const drew_hint = prompt.maybeShowCompletionHint() catch false;
-                if (drew_hint) continue;
-            }
-            if (prompt.pending_resize == null and prompt.right_dynamic and prompt.browse_pos == null) {
-                // Refresh the powerline right chain so `{time}` keeps
-                // ticking while nothing is typed.
-                prompt.drawRightChain() catch {};
-                prompt.placeInputCursor() catch {};
+            // A steady stream of pointer events must not starve the idle
+            // work a timeout would otherwise have run.
+            if (last_idle.untilNow(io).raw.toMilliseconds() >= prompt_idle_ms) {
+                last_idle = std.Io.Clock.Timestamp.now(io, .awake);
+                _ = promptIdleTick(&prompt);
             }
             continue;
         };
@@ -729,8 +730,8 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         // explicit cases and no longer need checking: plain characters
         // come from the `text` stream, and the host doesn't emit `text`
         // for a genuine modifier chord, so an unhandled alt/super combo
-        // simply does nothing here.
-        const ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
+        // simply does nothing here. Read off the event, as it was pressed.
+        const ctrl = ev.ctrl();
 
         if (std.mem.eql(u8, ev.key, "enter")) {
             // The completion picker takes priority over both browsing and
@@ -3647,7 +3648,7 @@ const Prompt = struct {
             .key => |kev| {
                 defer alloc.free(kev.key);
                 if (!kev.pressed) return false;
-                const ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control");
+                const ctrl = kev.ctrl();
                 if (ctrl and std.mem.eql(u8, kev.key, "c")) return true;
                 if (ctrl and std.mem.eql(u8, kev.key, "d")) {
                     if (sp.stdin_w >= 0) {
@@ -3656,11 +3657,7 @@ const Prompt = struct {
                     }
                     return false;
                 }
-                const mods = keyencode.Mods{
-                    .ctrl = ctrl,
-                    .shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift"),
-                    .alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt"),
-                };
+                const mods = ptyMods(kev.mods);
                 // A plain printable key already arrived as `.text`.
                 if (!mods.ctrl and !mods.alt and keyencode.charFromKeyName(kev.key, false) != null)
                     return false;
@@ -3682,8 +3679,7 @@ const Prompt = struct {
         while (listener.pollInputEvent()) |iev| switch (iev) {
             .key => |kev| {
                 defer self.client.alloc.free(kev.key);
-                if (kev.pressed and std.mem.eql(u8, kev.key, "c") and
-                    (listener.isKeyDown("left_control") or listener.isKeyDown("right_control")))
+                if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c"))
                     hit = true;
             },
             .text => |tev| self.client.alloc.free(tev.text),
@@ -3866,16 +3862,12 @@ const Prompt = struct {
             return;
         };
 
-        // Foreground: forward keystrokes to the pty until the child exits.
-        // `pty.reaped()` polls (WNOHANG) once per loop; the wait's short
-        // timeout bounds how long an exit-with-no-keypress waits.
+        // Foreground: forward input to the pty until the child exits, in
+        // the order the host sent it -- a click, a resize and a keystroke
+        // reach the child in the sequence they happened. `pty.reaped()`
+        // polls (WNOHANG) once per loop; every event wakes the wait, so
+        // its timeout only bounds how long an exit-with-no-input waits.
         while (!pty.reaped()) {
-            // Terminal resize -> SIGWINCH the child (via the kernel line
-            // discipline). Coalesced: only the final size matters.
-            var new_size: ?glyphwire.ResizeEvent = null;
-            while (listener.pollResizeEvent()) |rev| new_size = rev;
-            if (new_size) |rev| pty.resize(@intCast(rev.cols), @intCast(rev.rows));
-
             // Once the handshake resolves an aware child, it's drawing
             // over its own wire connection and never reads its own stdin
             // -- forwarding anything into its pty would just sit unread
@@ -3885,23 +3877,25 @@ const Prompt = struct {
             // process's own real stdout as if the child had printed it.
             const is_aware = awareState(&reader_ctx) orelse false;
 
-            // Mouse: encode to the child when it asked for reporting,
-            // otherwise drain the queues so `InputListener` doesn't sit
-            // full while a command runs.
-            if (!is_aware) pumpPtyMouse(alloc, listener, &pty, &modes);
-
-            // Terminal query replies (`CSI 6n` / DA / DECRQM) the host
-            // parsed out of the child's own output on the way to the grid.
-            while (listener.pollTerminalReply()) |reply| {
-                defer alloc.free(reply);
-                if (!is_aware) pty.writeAll(reply);
-            }
-
-            // Poll faster while a mouse-mode TUI is foregrounded so
-            // pointer motion isn't a frame behind; the plain case stays
-            // lazy.
-            const wait_ms: i64 = if (modes.mouseReporting()) 16 else 120;
-            const input_ev = (listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(wait_ms), .clock = .awake } }) catch null) orelse continue;
+            const any_ev = (listener.next(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
+            const input_ev = any_ev.asInput() orelse {
+                defer any_ev.deinit(alloc);
+                switch (any_ev) {
+                    // Terminal resize -> SIGWINCH the child (via the kernel
+                    // line discipline). The listener coalesces a burst.
+                    .resize => |rev| pty.resize(@intCast(rev.cols), @intCast(rev.rows)),
+                    // Mouse: encoded to the child when it asked for
+                    // reporting, dropped otherwise.
+                    .mouse_button => |mev| if (!is_aware) ptyMouseButton(&pty, &modes, mev),
+                    .mouse_move => |mev| if (!is_aware) ptyMouseMove(listener, &pty, &modes, mev),
+                    // Terminal query replies (`CSI 6n` / DA / DECRQM) the
+                    // host parsed out of the child's own output on the way
+                    // to the grid.
+                    .terminal_reply => |reply| if (!is_aware) pty.writeAll(reply),
+                    else => {},
+                }
+                continue;
+            };
 
             if (is_aware) {
                 switch (input_ev) {
@@ -3968,11 +3962,7 @@ const Prompt = struct {
             };
             defer alloc.free(ev.key);
             if (!ev.pressed) continue;
-            const mods = keyencode.Mods{
-                .ctrl = listener.isKeyDown("left_control") or listener.isKeyDown("right_control"),
-                .shift = listener.isKeyDown("left_shift") or listener.isKeyDown("right_shift"),
-                .alt = listener.isKeyDown("left_alt") or listener.isKeyDown("right_alt"),
-            };
+            const mods = ptyMods(ev.mods);
             // A plain printable key (no ctrl/alt) is delivered as a `text`
             // event, not re-encoded here -- otherwise the child sees it
             // twice. `toPtyBytes` still handles the named keys (Enter,
@@ -4380,9 +4370,7 @@ const Prompt = struct {
             switch (ev) {
                 .key => |kev| {
                     defer alloc.free(kev.key);
-                    if (kev.pressed and std.mem.eql(u8, kev.key, "c") and
-                        (listener.isKeyDown("left_control") or listener.isKeyDown("right_control")))
-                    {
+                    if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c")) {
                         self.client.stopRemote(session) catch {};
                     }
                 },
@@ -5658,8 +5646,7 @@ fn hookPollInterrupt(ctx: *anyopaque) bool {
     while (listener.pollInputEvent()) |iev| switch (iev) {
         .key => |kev| {
             defer self.client.alloc.free(kev.key);
-            if (kev.pressed and std.mem.eql(u8, kev.key, "c") and
-                (listener.isKeyDown("left_control") or listener.isKeyDown("right_control")))
+            if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c"))
                 hit = true;
         },
         .text => |tev| self.client.alloc.free(tev.text),

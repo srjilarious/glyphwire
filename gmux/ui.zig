@@ -163,33 +163,24 @@ pub const Ui = struct {
 
     // ── Loop ────────────────────────────────────────────────────────────
 
+    /// Blocks on the listener's one ordered queue: every window command,
+    /// pane layout and pane exit wakes it, so there is nothing to poll.
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
-            try self.drainEvents();
-            if (self.quit) break;
-
-            if (self.listener.waitInputEvent(.{
-                .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake },
-            }) catch null) |ev| {
-                defer ev.deinit(self.alloc);
-                try self.handleInput(ev);
-            }
-        }
-    }
-
-    fn drainEvents(self: *Ui) !void {
-        while (self.listener.pollPaneLayoutEvent()) |ev| {
+            const ev = try self.listener.next(.none) orelse continue;
             defer ev.deinit(self.alloc);
-            for (ev.panes) |b| {
-                if (!self.bounds.contains(b.pane)) continue;
-                try self.bounds.put(b.pane, .{ .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows });
+            switch (ev) {
+                .pane_layout => |l| for (l.panes) |b| {
+                    if (!self.bounds.contains(b.pane)) continue;
+                    try self.bounds.put(b.pane, .{ .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows });
+                },
+                // A pane's program exited. Nothing happens to the pane on
+                // its own: it belongs to gmux, not to the program, so
+                // closing it is gmux's decision -- and closing the last one
+                // is gmux's cue to quit.
+                .pane_exit => |e| try self.removePane(e.pane),
+                else => if (ev.asInput()) |input| try self.handleInput(input),
             }
-        }
-        // A pane's program exited. Nothing happens to the pane on its own:
-        // it belongs to gmux, not to the program, so closing it is gmux's
-        // decision -- and closing the last one is gmux's cue to quit.
-        while (self.listener.pollPaneExitEvent()) |ev| {
-            try self.removePane(ev.pane);
         }
     }
 

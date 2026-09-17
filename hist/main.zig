@@ -11,17 +11,17 @@
 //!
 //! Layout: a 3-row header (title, search field with its own drawn caret,
 //! match count / key hints) on a blue layer, and a list layer below it
-//! showing the filtered matches. The list is a *self-scrolling* pane in
-//! the sense `docs/api.md`'s Layer section describes: it stays sized to
-//! the visible rows and redraws whichever slice is in view rather than
+//! showing the filtered matches. The list layer is in `client` scroll
+//! mode (see `docs/api.md`'s `scroll_mode`): it stays sized to the
+//! visible rows and redraws whichever slice is in view rather than
 //! growing to hold every match, while `content_extent` + `scrollbars`
 //! tell the host the true total so it can draw a proportional, draggable
 //! scrollbar. Up/Down move the selection by one and PageUp/PageDown by a
-//! screenful, dragging the view along with it (`syncScroll`); the host
-//! can also move the view on its own (wheel, scrollbar drag), which
-//! `drainEvents` picks up as a `scroll_offset` notification and follows
-//! without touching the selection. Every redraw goes out as one `batch`
-//! frame (`run`'s render step) rather than a round trip per row.
+//! screenful, dragging the view along with it (`followSelection`); the
+//! host can also move the view on its own (wheel, scrollbar drag), which
+//! arrives as a `scroll_offset` event and is followed without touching
+//! the selection. Every redraw -- rows, sizes and scroll position -- goes
+//! out as one `batch` frame (`render`).
 //!
 //! On Enter, the selected line is written to `$GLYPHWIRE_RESULT_FD` --
 //! the shell opens this pipe before spawning every foreground command
@@ -119,10 +119,9 @@ const Ui = struct {
     entries: []const []const u8,
     query: std.ArrayList(u8) = .empty,
     filtered: std.ArrayList([]const u8) = .empty,
-    /// Reused across renders so drawing a row/line never allocates on the
-    /// hot path -- only `query`/`filtered`, which change shape, do.
+    /// Reused across renders so drawing a line never allocates on the hot
+    /// path -- only `query`/`filtered`, which change shape, do.
     scratch: std.ArrayList(u8) = .empty,
-    line_buf: std.ArrayList(u8) = .empty,
 
     selected: usize = 0,
     /// Index of the first entry drawn in the list layer's row 0.
@@ -134,6 +133,8 @@ const Ui = struct {
 
     header_dirty: bool = true,
     list_dirty: bool = true,
+    /// Layer sizes need re-sending (a `resize` arrived).
+    layout_dirty: bool = false,
     quit: bool = false,
     /// Set on Enter; `main` writes it out once `run` returns.
     picked: ?[]u8 = null,
@@ -163,9 +164,14 @@ const Ui = struct {
         const header_layer = try client.createLayer(cols, header_rows, 0);
         const list_layer = try client.createLayer(cols, list_rows, 0);
         try client.setLayerCellPosition(list_layer, header_rows, 0);
-        // Sized to the visible rows only (self-scrolling); `syncScroll`
-        // below tells the host the true total via `content_extent` so
-        // its scrollbar thumb is proportional, not full-height.
+        // Solid panels without padding every row with spaces: whatever
+        // isn't written composites as the layer background.
+        try client.setLayerBackground(header_layer, bg_header);
+        try client.setLayerBackground(list_layer, bg_list);
+        // Sized to the visible rows only; `render` tells the host the
+        // true total via `content_extent` so its scrollbar thumb is
+        // proportional, not full-height.
+        try client.setLayerScrollMode(list_layer, .client);
         try client.setLayerScrollbars(list_layer, true, false);
 
         self.* = .{
@@ -182,7 +188,7 @@ const Ui = struct {
         };
 
         try self.refilter();
-        try self.syncScroll();
+        self.followSelection();
         return self;
     }
 
@@ -190,7 +196,6 @@ const Ui = struct {
         self.query.deinit(self.alloc);
         self.filtered.deinit(self.alloc);
         self.scratch.deinit(self.alloc);
-        self.line_buf.deinit(self.alloc);
         // Doesn't have to be called on a clean exit (the server culls an
         // owning connection's contexts on disconnect), but doing it
         // explicitly restores the shell's context immediately rather
@@ -203,86 +208,59 @@ const Ui = struct {
 
     fn run(self: *Ui) !void {
         while (!self.quit) {
-            try self.drainEvents();
-            if (self.header_dirty or self.list_dirty) {
-                // One `batch` frame for everything dirty this tick --
-                // typing a character used to mean up to a dozen separate
-                // `write_text`/cursor round trips (three header rows plus
-                // every visible list row); now it's one.
-                var b = self.client.batch();
-                defer b.deinit();
-                if (self.header_dirty) {
-                    try self.renderHeader(&b);
-                    self.header_dirty = false;
-                }
-                if (self.list_dirty) {
-                    try self.renderList(&b);
-                    self.list_dirty = false;
-                }
-                var results = try b.send();
-                results.deinit();
-            }
-            if (self.quit) break;
-
-            // Block rather than spin; the timeout only exists so the
-            // resize/scroll queues polled in `drainEvents` get looked at
-            // even with no keystrokes coming in.
-            if (try self.listener.waitInputEvent(.{
-                .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake },
-            })) |ev| {
-                defer ev.deinit(self.alloc);
-                try self.handleInput(ev);
+            try self.render();
+            // Every notification wakes this, so it can block outright.
+            const first = try self.listener.next(.none) orelse continue;
+            try self.handleEvent(first);
+            // Fold everything else already queued into the same redraw.
+            while (!self.quit) {
+                const ev = self.listener.pollNext() orelse break;
+                try self.handleEvent(ev);
             }
         }
     }
 
-    fn drainEvents(self: *Ui) !void {
-        while (self.listener.pollResizeEvent()) |ev| {
-            self.cols = ev.cols;
-            self.rows = ev.rows;
-            self.list_rows = @max(self.rows -| header_rows, 1);
-            try self.client.setLayerSize(self.header_layer, self.cols, header_rows);
-            try self.client.setLayerSize(self.list_layer, self.cols, self.list_rows);
-            try self.syncScroll();
-            self.header_dirty = true;
-            self.list_dirty = true;
-        }
-        while (self.listener.pollScrollOffsetEvent()) |ev| {
+    fn handleEvent(self: *Ui, ev: glyphwire.Event) !void {
+        defer ev.deinit(self.alloc);
+        switch (ev) {
+            .key => |k| if (k.pressed) try self.handleKey(k),
+            .text => |t| try self.handleText(t.text),
+            .shutdown => self.quit = true,
+            .resize => |r| {
+                self.cols = r.cols;
+                self.rows = r.rows;
+                self.list_rows = @max(self.rows -| header_rows, 1);
+                self.followSelection();
+                self.layout_dirty = true;
+                self.header_dirty = true;
+                self.list_dirty = true;
+            },
             // The wheel or a scrollbar drag over the list: the host has
             // already moved the viewport and is telling us where it
             // landed. Follow it without touching `selected` -- scrolling
             // and picking are separate gestures here, same as browsing a
             // file list without moving your cursor onto every row you
             // pass over.
-            if (ev.layer == self.list_layer) {
-                self.view_top = @min(ev.row, self.filtered.items.len -| self.list_rows);
+            .scroll_offset => |so| if (so.layer == self.list_layer) {
+                self.view_top = @min(so.row, self.filtered.items.len -| self.list_rows);
                 self.list_dirty = true;
-            }
-        }
-        while (self.listener.pollInputEvent()) |ev| {
-            defer ev.deinit(self.alloc);
-            try self.handleInput(ev);
+            },
+            else => {},
         }
     }
 
     // ── Input ───────────────────────────────────────────────────────────
-
-    fn handleInput(self: *Ui, ev: glyphwire.InputEvent) !void {
-        switch (ev) {
-            .key => |k| if (k.pressed) try self.handleKey(k.key),
-            .text => |t| try self.handleText(t.text),
-            .shutdown => self.quit = true,
-            else => {},
-        }
-    }
 
     /// Named/control keys -- physical-key semantics (vim-style, same
     /// split `gw-read`/`zoe` use). Ordinary typed characters arrive via
     /// `handleText` instead, since `text` is already resolved through the
     /// OS layout/IME and a search box has no reason to care which
     /// physical key produced what was typed.
-    fn handleKey(self: *Ui, key: []const u8) !void {
-        const ctrl = self.listener.isKeyDown("left_control") or self.listener.isKeyDown("right_control");
+    fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        // Read off the event, not the live down-set, so a fast Ctrl+C is
+        // still Ctrl+C when this loop is behind.
+        const ctrl = k.ctrl();
+        const key = k.key;
         const eq = std.mem.eql;
 
         if (eq(u8, key, "enter")) {
@@ -299,21 +277,21 @@ const Ui = struct {
             try self.onQueryChanged();
         } else if (eq(u8, key, "up")) {
             if (self.selected > 0) self.selected -= 1;
-            try self.syncScroll();
+            self.followSelection();
             self.list_dirty = true;
         } else if (eq(u8, key, "down") or (ctrl and eq(u8, key, "r"))) {
             if (self.filtered.items.len > 0) self.selected = (self.selected + 1) % self.filtered.items.len;
-            try self.syncScroll();
+            self.followSelection();
             self.list_dirty = true;
         } else if (eq(u8, key, "page_up")) {
             self.selected = self.selected -| self.list_rows;
-            try self.syncScroll();
+            self.followSelection();
             self.list_dirty = true;
         } else if (eq(u8, key, "page_down")) {
             if (self.filtered.items.len > 0) {
                 self.selected = @min(self.selected + self.list_rows, self.filtered.items.len - 1);
             }
-            try self.syncScroll();
+            self.followSelection();
             self.list_dirty = true;
         }
     }
@@ -335,7 +313,7 @@ const Ui = struct {
     fn onQueryChanged(self: *Ui) !void {
         self.selected = 0;
         try self.refilter();
-        try self.syncScroll();
+        self.followSelection();
         self.header_dirty = true;
         self.list_dirty = true;
     }
@@ -365,10 +343,8 @@ const Ui = struct {
     }
 
     /// Keeps `view_top` covering `selected`, clamped to the list's actual
-    /// extent, then pushes both the true content size and the resulting
-    /// offset to the host so its scrollbar thumb and thumb position stay
-    /// correct.
-    fn syncScroll(self: *Ui) !void {
+    /// extent. `render` pushes the result to the host.
+    fn followSelection(self: *Ui) void {
         if (self.filtered.items.len == 0) {
             self.view_top = 0;
         } else {
@@ -377,11 +353,37 @@ const Ui = struct {
             const max_top = self.filtered.items.len -| self.list_rows;
             if (self.view_top > max_top) self.view_top = max_top;
         }
-        try self.client.setLayerContentExtent(self.list_layer, self.cols, self.filtered.items.len);
-        try self.client.setLayerScrollOffset(self.list_layer, self.view_top, 0);
     }
 
     // ── Rendering ───────────────────────────────────────────────────────
+
+    /// Sends everything dirty as one `batch` frame -- typing a character
+    /// used to mean a dozen separate round trips, and the scroll position
+    /// used to go out ahead of the rows it described.
+    fn render(self: *Ui) !void {
+        if (!self.header_dirty and !self.list_dirty and !self.layout_dirty) return;
+        var b = self.client.batch();
+        defer b.deinit();
+        if (self.layout_dirty) {
+            try b.setLayerSize(self.header_layer, self.cols, header_rows);
+            try b.setLayerSize(self.list_layer, self.cols, self.list_rows);
+            self.layout_dirty = false;
+        }
+        if (self.header_dirty) {
+            try self.renderHeader(&b);
+            self.header_dirty = false;
+        }
+        if (self.list_dirty) {
+            try self.renderList(&b);
+            // The host only broadcasts a `scroll_offset` that actually
+            // moved, so re-sending an unchanged one every frame is silent.
+            try b.setLayerContentExtent(self.list_layer, self.cols, self.filtered.items.len);
+            try b.setLayerScrollOffset(self.list_layer, self.view_top, 0);
+            self.list_dirty = false;
+        }
+        var results = try b.send();
+        results.deinit();
+    }
 
     fn renderHeader(self: *Ui, b: *glyphwire.Client.Batch) !void {
         try self.writeLine(b, self.header_layer, 0, "gw-hist -- fuzzy history search", fg_header, bg_header);
@@ -389,19 +391,22 @@ const Ui = struct {
         self.scratch.clearRetainingCapacity();
         try self.scratch.appendSlice(self.alloc, "Search: ");
         try self.scratch.appendSlice(self.alloc, self.query.items);
-        try self.writeLine(b, self.header_layer, 1, self.scratch.items, fg_header, bg_header);
-        // A drawn caret (inverted cell), not the host's own cursor --
-        // same choice `zoe` makes for its buffer caret, since a plain
-        // text layer's cursor property is about the *next write*
-        // position, not a persistent visual marker.
-        const caret_col = @min(8 + self.query.items.len, self.cols -| 1);
-        try b.notify("set_property", .{ .layer = self.header_layer, .property = "cursor", .row = 1, .col = caret_col });
-        try b.notify("write_text", .{
+        // The caret goes right after the query, wherever the host's own
+        // width table put it: blank the row back to the layer background,
+        // write the text unpadded, then one inverted cell at the cursor it
+        // left. A drawn caret rather than the host's -- a text layer's
+        // cursor property is the *next write* position, not a visual
+        // marker.
+        try b.clearArea(.{ .layer = self.header_layer, .row = 1, .rows = 1 });
+        try b.writeTextOpts(self.scratch.items, .{
             .layer = self.header_layer,
-            .text = " ",
-            .fg = glyphwire.Client.colorToJson(bg_header),
-            .bg = glyphwire.Client.colorToJson(fg_header),
+            .row = 1,
+            .col = 0,
+            .fg = fg_header,
+            .bg = bg_header,
+            .max_cols = self.cols,
         });
+        try b.writeTextOpts(" ", .{ .layer = self.header_layer, .fg = bg_header, .bg = fg_header, .max_cols = 1 });
 
         self.scratch.clearRetainingCapacity();
         try self.scratch.print(self.alloc, "{d} match(es)   Enter picks   Esc/^C cancels   Down/^R next   PgUp/PgDn page", .{self.filtered.items.len});
@@ -420,33 +425,26 @@ const Ui = struct {
                 const bg = if (idx == self.selected) bg_selected else bg_list;
                 try self.writeLine(b, self.list_layer, row, self.scratch.items, fg, bg);
             } else {
-                try self.writeLine(b, self.list_layer, row, "", fg_list, bg_list);
+                // Rows past the last match: back to transparent, which
+                // the layer background paints.
+                try b.clearArea(.{ .layer = self.list_layer, .row = row, .rows = 1 });
             }
         }
     }
 
-    /// Appends the sub-messages to draw `text` at `(row, 0)` on `layer`
-    /// into `b`, truncated or blank-padded to the full window width so
-    /// every cell in the row carries `bg` -- there is no `fillRect`/
-    /// `clear(color)` call, so a solid-colored bar (the header) or a
-    /// solid-colored empty row (past the last match) is built out of a
-    /// space-padded `write_text` like every other glyphwire client does
-    /// (see `read/ui.zig`'s status bar). Batched rather than sent
-    /// straight through `self.client` -- `renderHeader`/`renderList`
-    /// each draw several rows per redraw, and `run` wants all of them in
-    /// one `batch` frame rather than one round trip per row.
+    /// One full-width row at `(row, 0)` in a single `write_text`: the host
+    /// clips `text` to the window at a display-column boundary (CJK-safe)
+    /// and pads the rest of the row in `bg`, so stale content from a
+    /// longer previous line never survives.
     fn writeLine(self: *Ui, b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
-        self.line_buf.clearRetainingCapacity();
-        const shown = text[0..@min(text.len, self.cols)];
-        try self.line_buf.appendSlice(self.alloc, shown);
-        var pad = self.cols -| shown.len;
-        while (pad > 0) : (pad -= 1) try self.line_buf.append(self.alloc, ' ');
-        try b.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = 0 });
-        try b.notify("write_text", .{
+        try b.writeTextOpts(text, .{
             .layer = layer,
-            .text = self.line_buf.items,
-            .fg = glyphwire.Client.colorToJson(fg),
-            .bg = glyphwire.Client.colorToJson(bg),
+            .row = row,
+            .col = 0,
+            .fg = fg,
+            .bg = bg,
+            .max_cols = self.cols,
+            .pad = true,
         });
     }
 };

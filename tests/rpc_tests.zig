@@ -32,25 +32,36 @@ pub fn notificationWrapsParamsInEnvelopeTest(io: std.Io, alloc: std.mem.Allocato
 
 pub fn keyNotificationPicksMethodFromPressedTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const down = try rpc.keyNotification(alloc, "space", true);
+    const down = try rpc.keyNotification(alloc, "space", true, .{});
     defer alloc.free(down);
     try testz.expectEqualStr(
-        \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"space"}}
+        \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"space","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
     , down);
 
-    const up = try rpc.keyNotification(alloc, "space", false);
+    const up = try rpc.keyNotification(alloc, "space", false, .{});
     defer alloc.free(up);
     try testz.expectEqualStr(
-        \\{"jsonrpc":"2.0","method":"key_up","params":{"key":"space"}}
+        \\{"jsonrpc":"2.0","method":"key_up","params":{"key":"space","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
     , up);
+}
+
+/// The modifiers ride on the event itself, so a consumer that falls
+/// behind still sees the chord as it was pressed.
+pub fn keyNotificationCarriesModsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const body = try rpc.keyNotification(alloc, "w", true, .{ .ctrl = true });
+    defer alloc.free(body);
+    try testz.expectEqualStr(
+        \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"w","mods":{"ctrl":true,"alt":false,"shift":false,"super":false}}}
+    , body);
 }
 
 pub fn keyRepeatNotificationIsAlwaysKeyDownTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const body = try rpc.keyRepeatNotification(alloc, "left");
+    const body = try rpc.keyRepeatNotification(alloc, "left", .{});
     defer alloc.free(body);
     try testz.expectEqualStr(
-        \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"left"}}
+        \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"left","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
     , body);
 }
 
@@ -63,10 +74,11 @@ pub fn mouseButtonNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !v
         .{ .x = 12.5, .y = 30 },
         .{ .row = 2, .col = 1 },
         4,
+        .{ .shift = true },
     );
     defer alloc.free(body);
     try testz.expectEqualStr(
-        \\{"jsonrpc":"2.0","method":"mouse_button","params":{"button":"left","pressed":true,"px":{"x":12.5,"y":30},"cell":{"row":2,"col":1},"view_offset":4}}
+        \\{"jsonrpc":"2.0","method":"mouse_button","params":{"button":"left","pressed":true,"px":{"x":12.5,"y":30},"cell":{"row":2,"col":1},"view_offset":4,"mods":{"ctrl":false,"alt":false,"shift":true,"super":false}}}
     , body);
 }
 

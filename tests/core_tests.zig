@@ -2869,18 +2869,11 @@ pub fn shrinkingContentReclampsScrollTest(io: std.Io, alloc: std.mem.Allocator) 
 
 pub fn viewportOverABiggerGridScrollsTheRealOffsetTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    // The *other* scroll model, and the one a client wants when the whole
-    // of its content genuinely is in the layer's grid: a viewport smaller
-    // than the real grid, and **no** `content_extent`. Here the host does
-    // the scrolling -- `scroll_off` moves and the renderer draws a
+    // The host scroll model (the default `scroll_mode`), and the one a
+    // client wants when the whole of its content genuinely is in the
+    // layer's grid: a viewport smaller than the real grid. Here the host
+    // does the scrolling -- `scroll_off` moves and the renderer draws a
     // different window of the same cells.
-    //
-    // Setting `content_extent` as well switches this into the virtual
-    // model above, where `scroll_off` never moves and the client is
-    // expected to repaint its own content against the broadcast offset.
-    // Doing that to a layer whose grid already holds everything is a
-    // silent no-op on screen -- the scrollbar slides and the picture sits
-    // still -- which is exactly how gw-read's pan first shipped.
     var layer = try glyphwire.Layer.init(alloc, 40, 100, 0);
     defer layer.deinit();
     layer.setProperty(.{ .viewport = .{ .cols = 40, .rows = 25 } });
@@ -2901,6 +2894,14 @@ pub fn viewportOverABiggerGridScrollsTheRealOffsetTest(io: std.Io, alloc: std.me
     // the real grid when it isn't set.
     try testz.expectEqual(layer.getProperty(.scroll_offset).scroll_offset.row, 30);
     try testz.expectEqual(layer.getProperty(.content_extent).content_extent.rows, 100);
+
+    // A `content_extent` can no longer flip this layer into the virtual
+    // model by accident (how gw-read's pan first shipped: the scrollbar
+    // slid and the picture sat still). In host mode it is ignored here,
+    // and refused with `WrongScrollMode` on the wire path.
+    layer.setProperty(.{ .content_extent = .{ .cols = 40, .rows = 1000 } });
+    try testz.expectEqual(layer.maxScroll().row, 75);
+    try testz.expectEqual(layer.scroll_off.row, 30);
 }
 
 pub fn contentExtentDrivesAVirtualScrollbarTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -2911,6 +2912,7 @@ pub fn contentExtentDrivesAVirtualScrollbarTest(io: std.Io, alloc: std.mem.Alloc
     defer layer.deinit();
     try testz.expectFalse(layer.scrollsAnywhere()); // grid == viewport
 
+    layer.setProperty(.{ .scroll_mode = .client });
     layer.setProperty(.{ .content_extent = .{ .cols = 30, .rows = 1000 } });
     try testz.expectTrue(layer.scrollsAnywhere());
     try testz.expectEqual(layer.maxScroll().row, 980);
@@ -2930,6 +2932,111 @@ pub fn contentExtentDrivesAVirtualScrollbarTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectFalse(layer.scrollsAnywhere());
     try testz.expectEqual(layer.content_off.row, 0);
     try testz.expectEqual(layer.getProperty(.content_extent).content_extent.rows, 20);
+}
+
+pub fn scrollModeSwitchResetsBothOffsetsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 30, 100, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .viewport = .{ .cols = 30, .rows = 20 } });
+    _ = layer.setScrollOffset(.{ .row = 40, .col = 0 });
+    try testz.expectEqual(layer.scroll_off.row, 40);
+
+    // Into client mode: the real offset goes back to the origin, so the
+    // picture doesn't stay parked mid-grid under a virtual position.
+    layer.setProperty(.{ .scroll_mode = .client });
+    try testz.expectEqual(layer.scroll_off.row, 0);
+    layer.setProperty(.{ .content_extent = .{ .cols = 30, .rows = 500 } });
+    _ = layer.setScrollOffset(.{ .row = 200, .col = 0 });
+    try testz.expectEqual(layer.content_off.row, 200);
+
+    // And back: the extent and virtual offset are dropped with the mode.
+    layer.setProperty(.{ .scroll_mode = .host });
+    try testz.expectTrue(layer.content_extent == null);
+    try testz.expectEqual(layer.content_off.row, 0);
+    try testz.expectEqual(layer.maxScroll().row, 80);
+}
+
+pub fn contentExtentOnHostScrolledLayerIsWrongScrollModeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    const h = try ctx.createLayer(40, 10, 0);
+
+    try testz.expectError(
+        ctx.setLayerProperty(h, .{ .content_extent = .{ .cols = 40, .rows = 500 } }),
+        glyphwire.PropertyError.WrongScrollMode,
+    );
+    try ctx.setLayerProperty(h, .{ .scroll_mode = .client });
+    try ctx.setLayerProperty(h, .{ .content_extent = .{ .cols = 40, .rows = 500 } });
+    try testz.expectEqual(ctx.layerPtr(h).?.maxScroll().row, 490);
+}
+
+pub fn writeTextMaxColsClipsAtADisplayColumnTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+
+    // "日本語" is 6 columns; a 5-column limit fits two wide characters and
+    // half of the third, which must not be drawn half-way.
+    layer.cursor = .{ .row = 0, .col = 2 };
+    try layer.writeTextOpts("日本語abc", fg, glyphwire.default_style.bg, .{ .max_cols = 5 });
+    try testz.expectEqualStr("日", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("本", layer.cell(0, 4).grapheme());
+    try testz.expectEqualStr(" ", layer.cell(0, 6).grapheme());
+    try testz.expectEqual(layer.cell(0, 7).grapheme().len, 0);
+    try testz.expectEqual(layer.cursor.col, 7);
+    // Clipping never wraps onto the next row.
+    try testz.expectEqual(layer.cell(1, 0).grapheme().len, 0);
+}
+
+pub fn writeTextPadFillsTheClippedSpanTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    const bar: glyphwire.Color = .{ .r = 40, .g = 40, .b = 90 };
+
+    try layer.writeTextOpts("ok", glyphwire.default_style.fg, .{ .color = bar }, .{ .max_cols = 8, .pad = true });
+    try testz.expectEqualStr("k", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cell(0, 7).style.bg.color.b, 90);
+    try testz.expectEqual(layer.cell(0, 8).style.bg.color.a, 0);
+    try testz.expectEqual(layer.cursor.col, 8);
+
+    // A span past the layer's right edge clamps to it.
+    layer.cursor = .{ .row = 1, .col = 15 };
+    try layer.writeTextOpts("x", glyphwire.default_style.fg, .{ .color = bar }, .{ .max_cols = 50, .pad = true });
+    try testz.expectEqual(layer.cell(1, 19).style.bg.color.b, 90);
+    try testz.expectEqual(layer.cell(2, 0).style.bg.color.a, 0);
+}
+
+pub fn clearFillPaintsAnOpaqueBackgroundTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
+    defer layer.deinit();
+    try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Black is a real fill now: only alpha makes a background transparent.
+    layer.clearFill(0, 1, 2, 3, .{ .r = 0, .g = 0, .b = 0 });
+    try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cell(0, 1).grapheme().len, 0);
+    try testz.expectEqual(layer.cell(1, 3).style.bg.color.a, 255);
+    try testz.expectEqual(layer.cell(0, 4).style.bg.color.a, 0);
+    try testz.expectEqualStr("o", layer.cell(0, 4).grapheme());
+
+    // Plain `clear` still leaves transparent cells.
+    layer.clear(0, 0, 5, 10);
+    try testz.expectEqual(layer.cell(1, 3).style.bg.color.a, 0);
+}
+
+pub fn sgrInverseOnTheDefaultBackgroundStaysVisibleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 0);
+    defer layer.deinit();
+    // The default background is transparent black; swapped into the
+    // foreground by SGR 7 it must come out as opaque ink.
+    try layer.writeText("\x1b[7mx", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).style.fg.a, 255);
 }
 
 pub fn scrollbarStateReportsDerivedMaximaTest(io: std.Io, alloc: std.mem.Allocator) !void {

@@ -232,6 +232,8 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `NotARequest` | `load_image` sent without an `id` |
 | `UnknownProperty` | `get_property` / `set_property` |
 | `ReadOnlyProperty` | `set_property` on a get-only property, or `size`/`visibility` on a root layer |
+| `WrongScrollMode` | `content_extent` set on a layer whose `scroll_mode` is `host` |
+| `InvalidScrollMode` | `scroll_mode`'s `mode` is not `"host"` or `"client"` |
 | `UnknownLayer` | any `layer` handle that does not exist, **and** the root handle where a non-root one is required |
 | `LayerPermissionDenied` | `destroy_layer` from a non-owner |
 | `UnknownContext`, `RootContextImmutable`, `ContextPermissionDenied`, `NoContextSession` | context messages |
@@ -474,7 +476,9 @@ takes the value as **flat sibling fields**, not a nested `value` object —
 | `scroll` | `{offset, max}` — scrollback view | get |
 | `scroll_offset` | `{row, col, max_row, max_col}` — viewport over content | get / set |
 | `scrollbars` | `{vertical, horizontal, row, col, max_row, max_col}` | get / set |
-| `content_extent` | content grid size | get / set |
+| `scroll_mode` | `{mode}` — `"host"` (default) or `"client"` | get / set |
+| `content_extent` | `{cols, rows}` — virtual content size, `client` mode only | get / set |
+| `background` | `{color?}` — fill under unwritten cells; omitted = none | get / set |
 | `visibility` | `{visible}` | get; set on non-root layers only |
 | `pty_mode` | `{enabled}` | get / set |
 | `profile` | profiler state | get |
@@ -497,20 +501,41 @@ cell that was set, else the cell the layer's top-left corner lands in.
 Writing a get-only property, or `size`/`visibility` on a root layer,
 reports `ReadOnlyProperty`.
 
+**Scroll models.** A layer has two ways to show more content than fits,
+chosen explicitly with `scroll_mode`, and both are separate from the root
+layer's terminal scrollback (`scroll`, `scroll_view`, `view_offset`):
+
+- `host` (default): the content grid holds everything and `viewport` is a
+  window onto it. The host moves `scroll_offset` on a wheel or scrollbar
+  drag and redraws on its own.
+- `client`: the grid is only the visible rows. The client declares the
+  whole size with `content_extent`, and a wheel or drag produces a
+  `scroll_offset` notification the client redraws against.
+
+`content_extent` on a `host` layer reports `WrongScrollMode`; switching
+modes resets the offset and drops the extent.
+
+**`background`** paints the layer's whole viewport under its cells. A
+cell's own background is transparent only when its alpha is 0 (the
+default style); any explicit colour, black included, is opaque.
+
 ### 6.4 Content
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `write_text` | notification | `layer?`, `text`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false | — |
+| `write_text` | notification | `layer?`, `row?`, `col?`, `text`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false | — |
 | `insert_cells` | notification | `layer?`, `count` | — |
 | `delete_cells` | notification | `layer?`, `count` | — |
 | `move_content` | notification | `layer?`, `top?`, `bot?`, `count?` = 1, `direction?` | — |
-| `clear` | notification | `layer?`, `row?` = 0, `col?` = 0, `rows?`, `cols?` | — |
+| `clear` | notification | `layer?`, `row?` = 0, `col?` = 0, `rows?`, `cols?`, `bg?` | — |
 | `get_cells` | request | `layer?`, `view_offset?` = 0 | `{cols, rows, revision, cells}` |
 | `scroll_view` | request | `layer?`, `offset?`, `delta?` | `{offset, max}` |
 
-`write_text` writes at the layer's cursor and advances it. `fg`/`bg`
-omitted means the server default style. `transparent_bg` leaves whatever
+`write_text` writes at `row`/`col` and advances the cursor; each omitted
+axis keeps the cursor's current value. `max_cols` clips the run to that
+many display columns from its start (never splitting a wide character,
+never wrapping), and `pad` fills the rest of that span with blank `bg`
+cells. `fg`/`bg` omitted means the server default style. `transparent_bg` leaves whatever
 background is already in the cell — an image, an icon, a panel gradient —
 instead of resetting it. `metadata_id` tags every cell written.
 
@@ -522,6 +547,8 @@ bright variant), `dim` and `inverse`. There are no attribute bitflags on
 the wire. A sequence that is a *query* (`CSI 6n`, device attributes,
 DECRQM) produces a `terminal_reply` notification (section 7) rather than a
 grid change.
+
+`clear` with `bg` leaves the region blank but opaque in that colour.
 
 `move_content` scrolls a row range: `direction` is `"up"` or `"down"`;
 anything else reports `InvalidMoveDirection`.
@@ -891,10 +918,10 @@ the client drains with `get_errors`.
 
 | Notification | Params |
 |---|---|
-| `key_down` / `key_up` | `{key}` |
+| `key_down` / `key_up` | `{key, mods}` |
 | `text` | `{text}` |
-| `mouse_button` | `{button, pressed, px, cell, view_offset}` |
-| `mouse_move` | `{px, cell}` |
+| `mouse_button` | `{button, pressed, px, cell, view_offset, mods}` |
+| `mouse_move` | `{px, cell, mods}` |
 | `resize` | `{cols, rows}` |
 | `scroll` | `{layer, offset, max}` |
 | `scroll_offset` | `{layer, row, col, max_row, max_col}` |
@@ -906,7 +933,7 @@ the client drains with `get_errors`.
 | `context` | `{context, cols, rows}` |
 | `pane_layout` | `{panes: [{pane, row, col, cols, rows}]}` |
 | `pane_exit` | `{pane, status}` |
-| `window_key_down` / `window_key_up` | `{key}` |
+| `window_key_down` / `window_key_up` | `{key, mods}` |
 | `window_text` | `{text}` |
 | `remote_exit` | `{session, status, started}` |
 | `shutdown` | `{grace_ms}` |
@@ -918,6 +945,11 @@ keyboard layout, dead keys and IME composition — which for a non-US
 layout, an AltGr combination or a CJK IME is not derivable from the key
 name. A client editing a line subscribes to both and inserts from `text`.
 A typematic repeat arrives as another `key_down`; nothing distinguishes it.
+
+**`mods`** is `{ctrl, alt, shift, super}` as held when the host generated
+the event, left and right folded. Read chords from it, not from a live
+key-state query made when the event is handled: by then a quick chord may
+already be released.
 
 **`mouse_button`'s `view_offset`** is the root layer's scrollback offset at
 click time. Pass it back to `get_metadata` to resolve `cell` against the

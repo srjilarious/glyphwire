@@ -86,10 +86,18 @@ pub fn contentExtentAndVirtualOffsetRoundTripOverWireTest(io: std.Io, alloc: std
     const mk_body = (try d.handle(alloc, mk)).response.?;
     defer alloc.free(mk_body);
 
+    // Refused until the layer is explicitly client-scrolled.
     const set_extent = try roundTripThroughWire(alloc,
         \\{"method":"set_property","params":{"layer":1,"property":"content_extent","cols":40,"rows":500}}
     );
     defer alloc.free(set_extent);
+    try testz.expectError(d.handle(alloc, set_extent), dispatch.DispatchError.WrongScrollMode);
+
+    const set_mode = try roundTripThroughWire(alloc,
+        \\{"method":"set_property","params":{"layer":1,"property":"scroll_mode","mode":"client"}}
+    );
+    defer alloc.free(set_mode);
+    try testz.expectTrue((try d.handle(alloc, set_mode)).response == null);
     try testz.expectTrue((try d.handle(alloc, set_extent)).response == null);
 
     const set_off = try roundTripThroughWire(alloc,
@@ -370,6 +378,100 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
     const release_broadcast = release_result.broadcast.?;
     defer alloc.free(release_broadcast.body);
     try testz.expectTrue(std.mem.indexOf(u8, release_broadcast.body, "key_up") != null);
+}
+
+pub fn reportKeyStampsModifiersHeldAtRoutingTimeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+
+    const ctrl_down = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"left_control","pressed":true}}
+    );
+    defer alloc.free(ctrl_down.broadcast.?.body);
+    // A modifier's own press already counts itself.
+    try testz.expectTrue(std.mem.indexOf(u8, ctrl_down.broadcast.?.body, "\"ctrl\":true") != null);
+
+    const w_down = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"w","pressed":true}}
+    );
+    const body = w_down.broadcast.?.body;
+    defer alloc.free(body);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"key\":\"w\",\"mods\":{\"ctrl\":true,\"alt\":false,\"shift\":false,\"super\":false}") != null);
+
+    const ctrl_up = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"left_control","pressed":false}}
+    );
+    defer alloc.free(ctrl_up.broadcast.?.body);
+    try testz.expectTrue(std.mem.indexOf(u8, ctrl_up.broadcast.?.body, "\"ctrl\":false") != null);
+}
+
+pub fn writeTextRowColPlacesTheRunInOneMessageTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"row":3,"col":5,"text":"hi"}}
+    );
+    try testz.expectEqualStr("h", ctx.root.cell(3, 5).grapheme());
+    try testz.expectEqualStr("i", ctx.root.cell(3, 6).grapheme());
+
+    // Only `row` given: the column comes from the cursor, like draw_icon.
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"row":6,"text":"x","max_cols":4,"pad":true,"bg":{"r":9,"g":9,"b":9}}}
+    );
+    try testz.expectEqualStr("x", ctx.root.cell(6, 7).grapheme());
+    try testz.expectEqual(ctx.root.cell(6, 10).style.bg.color.r, 9);
+    try testz.expectEqual(ctx.root.cell(6, 11).style.bg.color.a, 0);
+}
+
+pub fn clearBgAndLayerBackgroundOverWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"clear","params":{"row":2,"rows":1,"bg":{"r":1,"g":2,"b":3}}}
+    );
+    try testz.expectEqual(ctx.root.cell(2, 39).style.bg.color.b, 3);
+    try testz.expectEqual(ctx.root.cell(3, 0).style.bg.color.a, 0);
+
+    const mk = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"width":10,"height":4}}
+    );
+    alloc.free(mk.response.?);
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"background","color":{"r":20,"g":30,"b":40}}}
+    );
+    try testz.expectEqual(ctx.layerPtr(1).?.background.?.g, 30);
+
+    const get = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"get_property","params":{"layer":1,"property":"background"}}
+    );
+    defer alloc.free(get.response.?);
+    try testz.expectTrue(std.mem.indexOf(u8, get.response.?, "\"b\":40") != null);
+
+    // No `color` clears it back to see-through.
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"background"}}
+    );
+    try testz.expectTrue(ctx.layerPtr(1).?.background == null);
+}
+
+pub fn scrollModeRejectsAnUnknownModeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"property":"scroll_mode","mode":"sideways"}}
+    ), dispatch.DispatchError.InvalidScrollMode);
 }
 
 pub fn reportMouseMoveBroadcastsOnlyOnCellChangeTest(io: std.Io, alloc: std.mem.Allocator) !void {

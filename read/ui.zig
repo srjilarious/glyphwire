@@ -267,9 +267,6 @@ pub const Ui = struct {
     quit: bool = false,
     page_dirty: bool = true,
     status_dirty: bool = true,
-    /// The root-layer fill behind everything. Only redrawn on a resize --
-    /// nothing else can uncover it.
-    backdrop_dirty: bool = true,
     /// A transient message shown in place of the page name -- a failed
     /// load, an out-of-range jump. Owned, cleared on the next keystroke.
     message: ?[]u8 = null,
@@ -319,6 +316,16 @@ pub const Ui = struct {
         // `hint_layer` -- most sessions never touch a dictionary at all,
         // let alone one that still needs building.
         const dict_build_layer = try client.createLayer(1, 1, 0);
+
+        // The letterbox around a fitted page: the root layer's background
+        // colour, painted by the host under every cell -- once, rather
+        // than a row of spaces per window row on every resize.
+        try client.setLayerBackground(glyphwire.root_layer_handle, bg_page);
+        // The panels' fill, so a row only has to write its border and its
+        // text; the cells between composite as `bg_dialog`.
+        try client.setLayerBackground(dialog_layer, bg_dialog);
+        try client.setLayerBackground(dict_layer, bg_dialog);
+        try client.setLayerBackground(dict_build_layer, bg_dialog);
 
         try client.setLayerVisible(help_layer, false);
         try client.setLayerVisible(dialog_layer, false);
@@ -487,13 +494,11 @@ pub const Ui = struct {
 
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
-            try self.drainEvents();
             // One term bank file per tick rather than looping to
-            // completion here: `waitInputEvent`'s 20ms timeout below
-            // keeps ticks coming even with no input, so this still
-            // finishes promptly, but the reader stays responsive (and
-            // `renderDictBuild` gets to actually show a frame) the whole
-            // time a real dictionary is being indexed.
+            // completion here: the wait below times out while a build is
+            // running, so ticks keep coming with no input, and the reader
+            // stays responsive (and `renderDictBuild` gets to actually
+            // show a frame) the whole time a real dictionary is indexed.
             if (self.dict_build) |*b| {
                 self.dict_build_dirty = true;
                 if (b.isDone()) {
@@ -509,10 +514,6 @@ pub const Ui = struct {
                     self.dict_build = null;
                 }
             }
-            if (self.backdrop_dirty) {
-                self.backdrop_dirty = false;
-                try self.renderBackdrop();
-            }
             if (self.page_dirty) try self.renderPage();
             // Both after the page: `renderPage` recomputes the layout the
             // marks and the dialog are placed against, and marks them
@@ -524,57 +525,56 @@ pub const Ui = struct {
             if (self.status_dirty) try self.renderStatus();
             if (self.quit) break;
 
-            // Block rather than spin; the timeout is only so the other
-            // queues (resize, mouse, scroll) get looked at. The waiting
-            // form *consumes* what it waited for, so it's handled here --
-            // `drainEvents` will never see it.
-            if (self.listener.waitInputEvent(.{
-                .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake },
-            }) catch null) |ev| {
-                defer ev.deinit(self.alloc);
-                try self.handleInput(ev);
+            // Every notification wakes this, so with nothing to do in the
+            // background it blocks outright; only a dictionary build needs
+            // the timeout, to keep stepping. Then everything already
+            // queued is handled in arrival order before the next frame.
+            const timeout: std.Io.Timeout = if (self.dict_build != null)
+                .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }
+            else
+                .none;
+            const first = try self.listener.next(timeout) orelse continue;
+            try self.handleEvent(first);
+            while (!self.quit) {
+                const ev = self.listener.pollNext() orelse break;
+                try self.handleEvent(ev);
             }
         }
     }
 
-    fn drainEvents(self: *Ui) !void {
-        while (self.listener.pollResizeEvent()) |ev| {
-            self.win = .{ .cols = ev.cols, .rows = ev.rows };
-            // A font-size step reflows the grid *and* changes the cell
-            // metrics, and arrives as one resize -- so re-read them here
-            // rather than only at startup.
-            if (self.client.getCellMetrics()) |m| {
-                self.cell = .{ .w = m.w, .h = m.h };
-            } else |_| {}
-            self.backdrop_dirty = true;
-            self.page_dirty = true;
-            self.status_dirty = true;
-        }
-        while (self.listener.pollScrollOffsetEvent()) |ev| {
-            // The wheel or a scrollbar thumb over the page: the host has
-            // already moved the viewport and is telling us where it
-            // landed. Follow it rather than pushing our own value back --
-            // but the *other* layer still has to be told, since the host
-            // only moved the one under the pointer. That can be the marks
-            // layer: it covers the page exactly and, while visible, is the
-            // topmost thing `scrollablePaneAt` finds there.
-            if (ev.layer == self.page_layer or ev.layer == self.hint_layer) {
-                self.pan = .{ .row = ev.row, .col = ev.col };
-                const other = if (ev.layer == self.page_layer) self.hint_layer else self.page_layer;
-                self.client.setLayerScrollOffset(other, ev.row, ev.col) catch {};
+    fn handleEvent(self: *Ui, ev: glyphwire.Event) !void {
+        defer ev.deinit(self.alloc);
+        switch (ev) {
+            .resize => |r| {
+                self.win = .{ .cols = r.cols, .rows = r.rows };
+                // A font-size step reflows the grid *and* changes the cell
+                // metrics, and arrives as one resize -- so re-read them here
+                // rather than only at startup.
+                if (self.client.getCellMetrics()) |m| {
+                    self.cell = .{ .w = m.w, .h = m.h };
+                } else |_| {}
+                self.page_dirty = true;
                 self.status_dirty = true;
-            }
-        }
-        while (self.listener.pollMouseMoveEvent()) |ev| {
-            try self.handleMouseMove(ev);
-        }
-        while (self.listener.pollMouseButtonEvent()) |ev| {
-            defer ev.deinit(self.alloc);
-            try self.handleMouseButton(ev);
-        }
-        while (self.listener.pollInputEvent()) |ev| {
-            defer ev.deinit(self.alloc);
-            try self.handleInput(ev);
+            },
+            .scroll_offset => |so| {
+                // The wheel or a scrollbar thumb over the page: the host has
+                // already moved the viewport and is telling us where it
+                // landed. Follow it rather than pushing our own value back --
+                // but the *other* layer still has to be told, since the host
+                // only moved the one under the pointer. That can be the marks
+                // layer: it covers the page exactly and, while visible, is the
+                // topmost thing `scrollablePaneAt` finds there.
+                if (so.layer == self.page_layer or so.layer == self.hint_layer) {
+                    self.pan = .{ .row = so.row, .col = so.col };
+                    const other = if (so.layer == self.page_layer) self.hint_layer else self.page_layer;
+                    self.client.setLayerScrollOffset(other, so.row, so.col) catch {};
+                    self.status_dirty = true;
+                }
+            },
+            .mouse_move => |m| try self.handleMouseMove(m),
+            // `defer ev.deinit` above frees the button string.
+            .mouse_button => |m| try self.handleMouseButton(m),
+            else => if (ev.asInput()) |input| try self.handleInput(input),
         }
     }
 
@@ -762,33 +762,6 @@ pub const Ui = struct {
         return .{ .cols = self.win.cols, .rows = self.win.rows -| status_rows };
     }
 
-    /// Fills the context's root layer with the page background.
-    ///
-    /// A fitted page is *smaller* than the window on at least one axis,
-    /// and the page layer is exactly the page's size -- so without this
-    /// the letterbox around it is transparent and the shell's scrollback
-    /// shows through, which is the same trap zoe's sidebar fell into.
-    /// `clear` resets to the default style rather than a chosen colour,
-    /// so the fill is rows of spaces; one batch keeps it to a single
-    /// round trip per resize rather than one per row.
-    fn renderBackdrop(self: *Ui) !void {
-        if (self.win.cols == 0 or self.win.rows == 0) return;
-
-        const blanks = try self.alloc.alloc(u8, self.win.cols);
-        defer self.alloc.free(blanks);
-        @memset(blanks, ' ');
-
-        var b = self.client.batch();
-        defer b.deinit();
-        var row: usize = 0;
-        while (row < self.win.rows) : (row += 1) {
-            try b.setCursor(row, 0);
-            try b.writeText(blanks, null, bg_page);
-        }
-        var results = try b.send();
-        results.deinit();
-    }
-
     fn renderPage(self: *Ui) !void {
         self.page_dirty = false;
 
@@ -827,17 +800,9 @@ pub const Ui = struct {
         const c = self.client;
         try c.setLayerSize(self.page_layer, self.layout.cols, self.layout.rows);
         // The window is the layer's window onto its own, larger grid --
-        // the host-scrolled model, the one zoe's *tree* pane uses.
-        //
-        // Deliberately **no `content_extent`**. That property switches a
-        // layer into the client-scrolled model zoe's *buffer* pane uses:
-        // the host then moves a virtual `content_off` and broadcasts a
-        // `scroll_offset` for the client to repaint against, and the real
-        // `scroll_off` the renderer reads never moves -- the scrollbar
-        // slides and the picture sits still. It isn't needed for the
-        // scrollbars either: `maxScroll` falls back to the real grid, so
-        // a grid bigger than the viewport already reports slack, which is
-        // what turns the bars and the wheel on.
+        // the page layer stays in the default `host` scroll mode, the one
+        // zoe's *tree* pane uses, so a grid bigger than the viewport is
+        // all it takes to turn the bars and the wheel on.
         try c.setLayerViewport(self.page_layer, @min(self.layout.cols, view.cols), @min(self.layout.rows, view.rows));
         try c.setLayerScrollbars(self.page_layer, self.layout.max_pan_row > 0, self.layout.max_pan_col > 0);
         try c.setLayerCellPosition(self.page_layer, self.layout.row, self.layout.col);
@@ -1079,14 +1044,8 @@ pub const Ui = struct {
     /// One row of a mark on the marks layer. Transparent-backgrounded, and
     /// the layer's cells start blank, so the page shows through both the
     /// box's interior and the gaps around the glyphs themselves.
-    fn emitMarkRow(self: *Ui, b: anytype, row: usize, col: usize, text: []const u8, fg: glyphwire.Color) !void {
-        try b.notify("set_property", .{ .layer = self.hint_layer, .property = "cursor", .row = row, .col = col });
-        try b.notify("write_text", .{
-            .layer = self.hint_layer,
-            .text = text,
-            .fg = glyphwire.Client.colorToJson(fg),
-            .transparent_bg = true,
-        });
+    fn emitMarkRow(self: *Ui, b: *glyphwire.Client.Batch, row: usize, col: usize, text: []const u8, fg: glyphwire.Color) !void {
+        try b.writeTextOpts(text, .{ .layer = self.hint_layer, .row = row, .col = col, .fg = fg, .transparent_bg = true });
     }
 
     /// Draws (and places) the OCR text panel for the block the dialog is
@@ -1169,8 +1128,7 @@ pub const Ui = struct {
         var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, interior);
 
-        try cursorOn(&b, self.dialog_layer, 0, 0);
-        try textOn(&b, self.dialog_layer, box_tl, fg_dialog_border, bg_dialog);
+        try textAt(&b, self.dialog_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dialog_layer, box_tr, fg_dialog_border, bg_dialog);
 
@@ -1183,16 +1141,14 @@ pub const Ui = struct {
         @memset(&pad_buf, ' ');
         for (rows, 0..) |line, i| {
             const used = @min(mokuro.displayWidth(line), inner);
-            try cursorOn(&b, self.dialog_layer, i + 1, 0);
-            try textOn(&b, self.dialog_layer, box_v, fg_dialog_border, bg_dialog);
+            try textAt(&b, self.dialog_layer, i + 1, 0, box_v, fg_dialog_border, bg_dialog);
             try textOn(&b, self.dialog_layer, pad_buf[0..1], fg_dialog, bg_dialog);
             try textOn(&b, self.dialog_layer, line, fg_dialog, bg_dialog);
             try textOn(&b, self.dialog_layer, pad_buf[0 .. inner - used + 1], fg_dialog, bg_dialog);
             try textOn(&b, self.dialog_layer, box_v, fg_dialog_border, bg_dialog);
         }
 
-        try cursorOn(&b, self.dialog_layer, box_rows - 1, 0);
-        try textOn(&b, self.dialog_layer, box_bl, fg_dialog_border, bg_dialog);
+        try textAt(&b, self.dialog_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
 
@@ -1346,8 +1302,7 @@ pub const Ui = struct {
         var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, interior);
 
-        try cursorOn(&b, self.dict_layer, 0, 0);
-        try textOn(&b, self.dict_layer, box_tl, fg_dialog_border, bg_dialog);
+        try textAt(&b, self.dict_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dict_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dict_layer, box_tr, fg_dialog_border, bg_dialog);
 
@@ -1373,8 +1328,7 @@ pub const Ui = struct {
             row_i += 1;
         }
 
-        try cursorOn(&b, self.dict_layer, box_rows - 1, 0);
-        try textOn(&b, self.dict_layer, box_bl, fg_dialog_border, bg_dialog);
+        try textAt(&b, self.dict_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dict_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dict_layer, box_br, fg_dialog_border, bg_dialog);
 
@@ -1456,8 +1410,7 @@ pub const Ui = struct {
         var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, interior);
 
-        try cursorOn(&batch, self.dict_build_layer, 0, 0);
-        try textOn(&batch, self.dict_build_layer, box_tl, fg_dialog_border, bg_dialog);
+        try textAt(&batch, self.dict_build_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
         try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&batch, self.dict_build_layer, box_tr, fg_dialog_border, bg_dialog);
 
@@ -1466,8 +1419,7 @@ pub const Ui = struct {
         try writeLookupRow(&batch, self.dict_build_layer, 1, line1, inner, &pad_buf, fg_dialog);
         try writeLookupRow(&batch, self.dict_build_layer, 2, line2, inner, &pad_buf, fg_dialog);
 
-        try cursorOn(&batch, self.dict_build_layer, box_rows - 1, 0);
-        try textOn(&batch, self.dict_build_layer, box_bl, fg_dialog_border, bg_dialog);
+        try textAt(&batch, self.dict_build_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
         try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&batch, self.dict_build_layer, box_br, fg_dialog_border, bg_dialog);
 
@@ -1598,22 +1550,15 @@ pub const Ui = struct {
         return buf[0 .. n * s.len];
     }
 
-    /// `set_property(help_layer, "cursor", ...)` queued on `b` -- the
-    /// `Batch` type has no non-default-layer convenience for this (its
-    /// typed methods are all root-implicit, see `Client.Batch`'s doc
-    /// comment), so this goes through `notify`, the same escape hatch
-    /// `Client.setCursorOn` itself is built on.
-    fn cursorOn(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, col: usize) !void {
-        try b.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
+    /// `write_text` on `layer` at `(row, col)`, queued on `b`.
+    fn textAt(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, col: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
+        try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg });
     }
 
-    /// `write_text(help_layer, ...)` queued on `b` -- see `cursorOn`.
-    /// `fg`/`bg` serialize the same whether passed as `core.Color` or
-    /// the wire's own `protocol.Color` (identical field shape), so this
-    /// skips the private `colorToJson` conversion `Client.writeTextOn`
-    /// uses internally.
+    /// `write_text` on `layer` continuing from wherever the last write
+    /// left the cursor, queued on `b`.
     fn textOn(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
-        try b.notify("write_text", .{ .layer = layer, .text = text, .fg = fg, .bg = bg });
+        try b.writeTextOpts(text, .{ .layer = layer, .fg = fg, .bg = bg });
     }
 
     /// One panel row -- border, pad, text, pad-to-width, border -- the
@@ -1629,13 +1574,14 @@ pub const Ui = struct {
         pad_buf: []u8,
         fg: glyphwire.Color,
     ) !void {
-        const used = @min(mokuro.displayWidth(text), inner);
-        try cursorOn(b, layer, row, 0);
-        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
-        try textOn(b, layer, pad_buf[0..1], fg, bg_dialog);
-        try textOn(b, layer, text, fg, bg_dialog);
-        try textOn(b, layer, pad_buf[0 .. inner - used + 1], fg, bg_dialog);
-        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
+        _ = pad_buf;
+        // Border, then the text clipped and padded to the interior by the
+        // host (display columns, so CJK lines can't overrun the border),
+        // then the right border. The one-cell gutter either side is the
+        // layer background.
+        try textAt(b, layer, row, 0, box_v, fg_dialog_border, bg_dialog);
+        try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = 2, .fg = fg, .bg = bg_dialog, .max_cols = inner, .pad = true });
+        try textAt(b, layer, row, inner + 3, box_v, fg_dialog_border, bg_dialog);
     }
 
     /// The lookup panel's title row: `term` drawn via `write_text`'s
@@ -1662,21 +1608,16 @@ pub const Ui = struct {
         pad_buf: []u8,
         fg: glyphwire.Color,
     ) !void {
-        try cursorOn(b, layer, row, 0);
-        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
-        try textOn(b, layer, pad_buf[0 .. inner + 2], fg, bg_dialog);
-        try textOn(b, layer, box_v, fg_dialog_border, bg_dialog);
+        try textAt(b, layer, row, 0, box_v, fg_dialog_border, bg_dialog);
+        try b.clearArea(.{ .layer = layer, .row = row, .col = 1, .rows = 1, .cols = inner + 2, .bg = bg_dialog });
+        try textAt(b, layer, row, inner + 3, box_v, fg_dialog_border, bg_dialog);
+        _ = pad_buf;
 
         const pitch: usize = if (scale == .x1) 1 else 2;
         var col: usize = 2;
         var it = (try std.unicode.Utf8View.init(term)).iterator();
         while (it.nextCodepointSlice()) |cp_bytes| {
-            try cursorOn(b, layer, row, col);
-            if (scale == .x1) {
-                try textOn(b, layer, cp_bytes, fg, bg_dialog);
-            } else {
-                try b.notify("write_text", .{ .layer = layer, .text = cp_bytes, .fg = fg, .bg = bg_dialog, .scale = @tagName(scale) });
-            }
+            try b.writeTextOpts(cp_bytes, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg_dialog, .scale = scale });
             const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
             col += @as(usize, glyphwire.codepointWidth(cp)) * pitch;
         }
@@ -1701,8 +1642,7 @@ pub const Ui = struct {
         var h_buf: [help_interior * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, help_interior);
 
-        try cursorOn(b, self.help_layer, 0, 0);
-        try textOn(b, self.help_layer, box_tl, fg_status, bg_status);
+        try textAt(b, self.help_layer, 0, 0, box_tl, fg_status, bg_status);
         try textOn(b, self.help_layer, h_line, fg_status, bg_status);
         try textOn(b, self.help_layer, box_tr, fg_status, bg_status);
 
@@ -1712,14 +1652,12 @@ pub const Ui = struct {
             @memcpy(line_buf[0..keep], line[0..keep]);
             @memset(line_buf[keep..], ' ');
 
-            try cursorOn(b, self.help_layer, i + 1, 0);
-            try textOn(b, self.help_layer, box_v, fg_status, bg_status);
+            try textAt(b, self.help_layer, i + 1, 0, box_v, fg_status, bg_status);
             try textOn(b, self.help_layer, &line_buf, fg_status, bg_status);
             try textOn(b, self.help_layer, box_v, fg_status, bg_status);
         }
 
-        try cursorOn(b, self.help_layer, help_rows - 1, 0);
-        try textOn(b, self.help_layer, box_bl, fg_status, bg_status);
+        try textAt(b, self.help_layer, help_rows - 1, 0, box_bl, fg_status, bg_status);
         try textOn(b, self.help_layer, h_line, fg_status, bg_status);
         try textOn(b, self.help_layer, box_br, fg_status, bg_status);
     }
@@ -1769,14 +1707,15 @@ pub const Ui = struct {
             // Every physical keystroke is a press *and* a release; acting
             // on both would turn two pages per tap. The one exception is
             // the hold-to-peek key, which is *defined* by the release.
-            .key => |k| if (k.pressed) try self.handleKey(k.key) else try self.handleKeyRelease(k.key),
+            .key => |k| if (k.pressed) try self.handleKey(k) else try self.handleKeyRelease(k.key),
             .text => |t| try self.handleText(t.text),
             .shutdown => self.quit = true,
             else => {},
         }
     }
 
-    fn handleKey(self: *Ui, key: []const u8) !void {
+    fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        const key = k.key;
         const eq = std.mem.eql;
         self.clearMessage();
 
@@ -1805,7 +1744,8 @@ pub const Ui = struct {
             // Anything else cancels the prefix and is handled normally.
         }
 
-        const shift = self.listener.isKeyDown("left_shift") or self.listener.isKeyDown("right_shift");
+        // Off the event, as it was pressed -- not the live down-set.
+        const shift = k.shift();
 
         // ── quit / overlay ──
         if (eq(u8, key, "q") or eq(u8, key, "escape")) {

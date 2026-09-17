@@ -906,6 +906,24 @@ pub const Renderer = struct {
         self.deferred_scaled_text.clearRetainingCapacity();
         const any_highlight = layer.highlighted_ids.items.len > 0;
 
+        // `background` (see `core.PropertyName.background`): one rect
+        // under the whole viewport, emitted first so every cell's own
+        // background and glyph composite over it.
+        if (layer.background) |bg| {
+            if (bg.a != 0) {
+                addRect(
+                    &lb.color_bg,
+                    host_eng.RectF.fromPosSize(
+                        origin_x,
+                        origin_y,
+                        @as(i32, @intCast(vp_cols)) * geometry.cell_w,
+                        @as(i32, @intCast(vp_rows)) * geometry.cell_h,
+                    ),
+                    fade(host_eng.Color.from(bg.r, bg.g, bg.b, bg.a), alpha),
+                );
+            }
+        }
+
         var row: usize = 0;
         while (row < vp_rows) : (row += 1) {
             const cells = layer.viewRow(view_offset, off.row + row);
@@ -917,7 +935,10 @@ pub const Renderer = struct {
 
                 switch (c.style.bg) {
                     .color => |bg| {
-                        if (bg.r != 0 or bg.g != 0 or bg.b != 0) {
+                        // Alpha alone decides transparency: the default
+                        // background is alpha 0, and an explicit black
+                        // paints (see `core.default_style`).
+                        if (bg.a != 0) {
                             addRect(
                                 &lb.color_bg,
                                 host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),

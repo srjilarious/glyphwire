@@ -203,8 +203,10 @@ pub const TableStateResult = struct {
 // envelope, and `client.zig`'s `InputListener` for the parse side.
 
 /// `key_down` / `key_up` params. The pressed/released bit is the method
-/// name, not a field.
-pub const KeyParams = struct { key: []const u8 };
+/// name, not a field. `mods` is the modifier state when the host routed
+/// the event (see `core.Mods`); a modifier's own press already counts
+/// itself (`left_control` down carries `ctrl: true`).
+pub const KeyParams = struct { key: []const u8, mods: core.Mods = .{} };
 
 /// `text` params: a run of committed text input, already resolved through
 /// the OS keyboard layout, dead keys and IME composition -- one or more
@@ -225,6 +227,8 @@ pub const MouseButtonParams = struct {
     px: PxPos,
     cell: CellPos,
     view_offset: usize = 0,
+    /// See `KeyParams.mods`.
+    mods: core.Mods = .{},
 };
 
 /// `mouse_move` params: the pointer's new pixel and cell position. Sent
@@ -235,6 +239,8 @@ pub const MouseButtonParams = struct {
 pub const MouseMoveParams = struct {
     px: PxPos,
     cell: CellPos,
+    /// See `KeyParams.mods`.
+    mods: core.Mods = .{},
 };
 
 /// `scroll` params: a layer's scrollback-ring view offset and the

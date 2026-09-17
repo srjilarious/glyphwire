@@ -253,6 +253,109 @@ pub const Client = struct {
         });
     }
 
+    /// Everything `write_text` can take besides the text, as one options
+    /// struct -- the one write call a program needs instead of choosing
+    /// between `writeText`/`writeTextOn`/`writeTextTagged`/... and pairing
+    /// it with a cursor move. Shared by `Client.writeTextOpts` and
+    /// `Batch.writeTextOpts`.
+    pub const TextOpts = struct {
+        /// null = `default_layer` (root unless set).
+        layer: ?core.LayerHandle = null,
+        /// Where to start; either omitted keeps the cursor's value on that
+        /// axis. Saves the separate `set_property(cursor)` message.
+        row: ?usize = null,
+        col: ?usize = null,
+        fg: ?core.Color = null,
+        bg: ?core.Color = null,
+        /// Leave each cell's existing background instead of setting `bg`.
+        transparent_bg: bool = false,
+        metadata_id: ?core.MetadataHandle = null,
+        scale: core.TextScale = .x1,
+        /// Clip to this many display columns (host-measured, CJK-correct,
+        /// never splitting a character). See `core.Layer.WriteOpts`.
+        max_cols: ?usize = null,
+        /// With `max_cols`: fill the remainder with blank `bg` cells, so a
+        /// full-width bar or list row is one write whatever the text.
+        pad: bool = false,
+    };
+
+    /// `write_text` with every option (see `TextOpts`) -- a notification.
+    pub fn writeTextOpts(self: *Client, text: []const u8, opts: TextOpts) !void {
+        try self.notify("write_text", textParams(self.default_layer, text, opts));
+    }
+
+    /// The wire params for a `TextOpts` write. Shared with `Batch`.
+    fn textParams(default_layer: ?core.LayerHandle, text: []const u8, opts: TextOpts) WriteTextWire {
+        return .{
+            .layer = opts.layer orelse default_layer,
+            .row = opts.row,
+            .col = opts.col,
+            .text = text,
+            .fg = colorToJson(opts.fg),
+            .bg = colorToJson(opts.bg),
+            .transparent_bg = opts.transparent_bg,
+            .metadata_id = opts.metadata_id,
+            .scale = @tagName(opts.scale),
+            .max_cols = opts.max_cols,
+            .pad = opts.pad,
+        };
+    }
+
+    const WriteTextWire = struct {
+        layer: ?core.LayerHandle,
+        row: ?usize,
+        col: ?usize,
+        text: []const u8,
+        fg: ?protocol.Color,
+        bg: ?protocol.Color,
+        transparent_bg: bool,
+        metadata_id: ?core.MetadataHandle,
+        scale: []const u8,
+        max_cols: ?usize,
+        pad: bool,
+    };
+
+    /// `clear`'s options: the region (defaulting to the whole layer) and
+    /// an optional fill colour. Shared by `Client.clearArea` and
+    /// `Batch.clearArea`.
+    pub const ClearOpts = struct {
+        /// null = `default_layer` (root unless set).
+        layer: ?core.LayerHandle = null,
+        row: usize = 0,
+        col: usize = 0,
+        /// null = to the layer's edge.
+        rows: ?usize = null,
+        cols: ?usize = null,
+        /// Paint the cleared cells this colour instead of leaving them
+        /// transparent -- a solid panel or bar without writing spaces.
+        bg: ?core.Color = null,
+    };
+
+    /// `clear` with every option (see `ClearOpts`) -- a notification.
+    pub fn clearArea(self: *Client, opts: ClearOpts) !void {
+        try self.notify("clear", clearParams(self.default_layer, opts));
+    }
+
+    fn clearParams(default_layer: ?core.LayerHandle, opts: ClearOpts) ClearWire {
+        return .{
+            .layer = opts.layer orelse default_layer,
+            .row = opts.row,
+            .col = opts.col,
+            .rows = opts.rows,
+            .cols = opts.cols,
+            .bg = colorToJson(opts.bg),
+        };
+    }
+
+    const ClearWire = struct {
+        layer: ?core.LayerHandle,
+        row: usize,
+        col: usize,
+        rows: ?usize,
+        cols: ?usize,
+        bg: ?protocol.Color,
+    };
+
     /// `set_property(layer, "cursor", {row, col})` -- a notification.
     pub fn setCursor(self: *Client, row: usize, col: usize) !void {
         try self.notify("set_property", .{ .layer = self.default_layer, .property = "cursor", .row = row, .col = col });
@@ -1133,8 +1236,35 @@ pub const Client = struct {
     /// can draw a proportional scrollbar and turn a wheel / drag over the
     /// pane into a `scroll_offset` the client obeys. `{0, 0}` clears it.
     /// See `core.PropertyName.content_extent`.
+    ///
+    /// Only accepted on a layer in `.client` scroll mode
+    /// (`setLayerScrollMode`); on a host-scrolled layer the host reports
+    /// `WrongScrollMode` and changes nothing.
     pub fn setLayerContentExtent(self: *Client, layer: core.LayerHandle, cols: usize, rows: usize) !void {
         try self.notify("set_property", .{ .layer = layer, .property = "content_extent", .cols = cols, .rows = rows });
+    }
+
+    /// `set_property(layer, "scroll_mode", {mode})` -- a notification.
+    /// `.host` (the default): the host slides the viewport over a real
+    /// content grid. `.client`: the program redraws its visible rows and
+    /// reports a virtual `content_extent`. Switching resets the scroll
+    /// position. See `core.PropertyName.scroll_mode`.
+    pub fn setLayerScrollMode(self: *Client, layer: core.LayerHandle, mode: core.ScrollMode) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "scroll_mode", .mode = @tagName(mode) });
+    }
+
+    /// `get_property(layer?, "scroll_mode")`.
+    pub fn getLayerScrollMode(self: *Client, layer: ?core.LayerHandle) !core.ScrollMode {
+        var parsed = try self.request(struct { mode: []const u8 }, "get_property", .{ .layer = layer, .property = "scroll_mode" });
+        defer parsed.deinit();
+        return std.meta.stringToEnum(core.ScrollMode, parsed.value.result.mode) orelse error.InvalidScrollMode;
+    }
+
+    /// `set_property(layer, "background", {color?})` -- a notification.
+    /// The colour every transparent cell of the layer composites as;
+    /// `null` restores see-through. See `core.PropertyName.background`.
+    pub fn setLayerBackground(self: *Client, layer: core.LayerHandle, color: ?core.Color) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "background", .color = colorToJson(color) });
     }
 
     /// `set_property(layer, "pty_mode", {enabled})` -- a notification.
@@ -1869,6 +1999,43 @@ pub const Client = struct {
             try self.notify("clear", .{ .layer = self.client.default_layer, .row = row, .col = col, .rows = rows, .cols = cols });
         }
 
+        /// Batched `write_text` with every option -- see `Client.TextOpts`.
+        pub fn writeTextOpts(self: *Batch, text: []const u8, opts: TextOpts) !void {
+            try self.notify("write_text", textParams(self.client.default_layer, text, opts));
+        }
+
+        /// Batched `clear` with every option -- see `Client.ClearOpts`.
+        pub fn clearArea(self: *Batch, opts: ClearOpts) !void {
+            try self.notify("clear", clearParams(self.client.default_layer, opts));
+        }
+
+        /// Batched `set_property(layer, "cursor")` on any layer.
+        pub fn setCursorOn(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
+        }
+
+        /// Batched `Client.setLayerScrollOffset`, so a frame's scroll
+        /// position lands with the rows drawn for it.
+        pub fn setLayerScrollOffset(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "scroll_offset", .row = row, .col = col });
+        }
+
+        /// Batched `Client.setLayerContentExtent`.
+        pub fn setLayerContentExtent(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "content_extent", .cols = cols, .rows = rows });
+        }
+
+        /// Batched `Client.setLayerSize`, so a resize reflow and the rows
+        /// redrawn for the new size land in one frame.
+        pub fn setLayerSize(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "size", .cols = cols, .rows = rows });
+        }
+
+        /// Batched `Client.setLayerBackground`.
+        pub fn setLayerBackground(self: *Batch, layer: core.LayerHandle, color: ?core.Color) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "background", .color = colorToJson(color) });
+        }
+
         /// Batched `write_text` -- see `Client.writeText`.
         pub fn writeText(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
             try self.notify("write_text", .{ .layer = self.client.default_layer, .text = text, .fg = Client.colorToJson(fg), .bg = Client.colorToJson(bg) });
@@ -2258,27 +2425,35 @@ pub const InputStateSnapshot = struct {
     }
 };
 
-/// A dedicated, subscribed connection: sends `subscribe(events)` once,
-/// then a background thread continuously reads pushed `key_down`/
-/// `key_up`/`text`/`mouse_button`/`resize`/`scroll` notifications and
-/// updates local, mutex-guarded caches and queues -- so
-/// `isKeyDown`/`isMouseButtonDown`/`cursorPixel`/`cursorCell` are instant
-/// local reads, and `pollInputEvent`/`waitInputEvent` (key + text, one
-/// order) drain without a round trip per call.
-///
-/// Deliberately a separate connection from `Client`: interleaving
-/// unsolicited push notifications with synchronous request/response
-/// traffic on one connection would need demuxing this codebase doesn't
-/// build yet (see `Client`'s doc comment -- one request in flight at a
-/// time, assuming the next frame off the wire is always that request's
-/// response). A program that both polls (e.g. `getCells`) and listens
-/// for input -- glyphwire-host -- holds one of each.
 /// One queued, discrete key press/release, in arrival order -- unlike
 /// `InputState`'s down-set (a live cache, good for "is X held right
 /// now"), this is what a line editor needs ("the user just pressed
 /// enter", exactly once). `key` is owned; free it with the same allocator
 /// passed to `InputListener.connect`.
-pub const KeyEvent = struct { key: []const u8, pressed: bool };
+///
+/// `mods` is the modifier state *when the host generated the event*, not
+/// when it is consumed -- use it rather than `InputListener.isKeyDown`
+/// for chords, or a program that falls behind reads a quick Ctrl+W as a
+/// plain `w` because Ctrl was released by the time it got there.
+pub const KeyEvent = struct {
+    key: []const u8,
+    pressed: bool,
+    mods: core.Mods = .{},
+
+    /// `mods.ctrl`, spelled the way a key handler reads.
+    pub fn ctrl(self: KeyEvent) bool {
+        return self.mods.ctrl;
+    }
+    pub fn alt(self: KeyEvent) bool {
+        return self.mods.alt;
+    }
+    pub fn shift(self: KeyEvent) bool {
+        return self.mods.shift;
+    }
+    pub fn super(self: KeyEvent) bool {
+        return self.mods.super;
+    }
+};
 /// One queued `text` notification: committed text input (`text` is a
 /// UTF-8 string of one or more codepoints). `text` is owned -- free it
 /// with the same allocator passed to `InputListener.connect`. Distinct
@@ -2351,6 +2526,8 @@ pub const MouseButtonEvent = struct {
     /// `Client.getMetadata`'s `view_offset` so a click made while the host
     /// is scrolled back resolves to the row actually under the pointer.
     view_offset: usize = 0,
+    /// Modifiers held when the click happened -- see `KeyEvent.mods`.
+    mods: core.Mods = .{},
 
     /// Frees the owned `.button` string, like `InputEvent.deinit`. Every
     /// drained event owns its own copy (the listener dupes it per
@@ -2363,7 +2540,7 @@ pub const MouseButtonEvent = struct {
 /// One `mouse_move` notification: the pointer's new pixel + cell
 /// position. No owned memory -- handed back by value like `ResizeEvent`.
 /// Only arrives on a cell change (the server coalesces per-pixel motion).
-pub const MouseMoveEvent = struct { px: PxPos, cell: CellPos };
+pub const MouseMoveEvent = struct { px: PxPos, cell: CellPos, mods: core.Mods = .{} };
 /// One `resize` notification: the window's new size in cells. No owned
 /// memory (unlike `KeyEvent.key`), so `pollResizeEvent` hands it back by
 /// value with nothing for the caller to free.
@@ -2471,9 +2648,6 @@ pub const LayoutBounds = struct {
     rows: usize,
 };
 
-/// A `layout` notification: every pane whose bounds changed after the
-/// split tree was re-laid-out. Owns `layers`; `pollLayoutEvent` hands
-/// ownership to the caller, which must call `deinit`.
 /// One pane's window rect, as carried by a `pane_layout` notification.
 pub const PaneBounds = struct {
     pane: core.PaneHandle,
@@ -2523,6 +2697,9 @@ pub const RemoteExitEvent = struct {
     started: bool,
 };
 
+/// A `layout` notification: every pane whose bounds changed after the
+/// split tree was re-laid-out. Owns `layers`; the caller that takes it off
+/// the queue must call `deinit`.
 pub const LayoutEvent = struct {
     layers: []LayoutBounds,
 
@@ -2554,6 +2731,89 @@ pub const ScrollEvent = struct { layer: ?core.LayerHandle = null, offset: usize,
 /// from "I've been backgrounded (or culled)". No owned memory.
 pub const ContextEvent = struct { context: core.ContextHandle, cols: usize, rows: usize };
 
+/// Every notification an `InputListener` can queue, in one tagged union
+/// so a program handles them from a single ordered loop
+/// (`InputListener.next`). `deinit` frees whatever the variant owns; a
+/// variant with nothing owned makes it a no-op, so a consumer can always
+/// `defer ev.deinit(alloc)` without caring which kind it got.
+pub const Event = union(enum) {
+    key: KeyEvent,
+    text: TextEvent,
+    paste: TextEvent,
+    copy_request,
+    shutdown: ShutdownEvent,
+    window_key: KeyEvent,
+    window_text: TextEvent,
+    mouse_button: MouseButtonEvent,
+    mouse_move: MouseMoveEvent,
+    /// A `CSI 6n` / DA / DECRQM answer to write to a pty master. Owned.
+    terminal_reply: []u8,
+    resize: ResizeEvent,
+    scroll: ScrollEvent,
+    scroll_offset: ScrollOffsetEvent,
+    layout: LayoutEvent,
+    pane_layout: PaneLayoutEvent,
+    pane_exit: PaneExitEvent,
+    remote_exit: RemoteExitEvent,
+    context: ContextEvent,
+
+    pub fn deinit(self: Event, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .key, .window_key => |k| alloc.free(k.key),
+            .text, .paste, .window_text => |t| alloc.free(t.text),
+            .mouse_button => |m| m.deinit(alloc),
+            .terminal_reply => |b| alloc.free(b),
+            .layout => |l| l.deinit(alloc),
+            .pane_layout => |l| l.deinit(alloc),
+            .copy_request, .shutdown, .mouse_move, .resize, .scroll, .scroll_offset, .pane_exit, .remote_exit, .context => {},
+        }
+    }
+
+    /// The same event as the narrower `InputEvent`, for the older
+    /// key/text-only queue API; null for every non-input kind. Ownership
+    /// moves with it.
+    pub fn asInput(self: Event) ?InputEvent {
+        return switch (self) {
+            .key => |k| .{ .key = k },
+            .text => |t| .{ .text = t },
+            .paste => |t| .{ .paste = t },
+            .copy_request => .copy_request,
+            .shutdown => |s| .{ .shutdown = s },
+            .window_key => |k| .{ .window_key = k },
+            .window_text => |t| .{ .window_text = t },
+            else => null,
+        };
+    }
+};
+
+/// A dedicated, subscribed connection: sends `subscribe(events)` once,
+/// then a background thread continuously reads pushed notifications and
+/// appends each one to a **single arrival-ordered queue** of `Event`s,
+/// while keeping mutex-guarded live caches (`isKeyDown`, `cursorCell`,
+/// `size`, `scroll`, `visibleContext`) current.
+///
+/// The one loop a program needs is `next`:
+///
+/// ```zig
+/// while (try listener.next(timeout)) |ev| {
+///     defer ev.deinit(listener.alloc);
+///     switch (ev) { .key => |k| ..., .resize => |r| ..., else => {} }
+/// }
+/// ```
+///
+/// Every notification wakes it -- resize, scroll, layout and context
+/// included -- so there is no reason to poll on a fixed interval, and
+/// events come out in the order the host sent them (a resize that arrived
+/// after a keystroke is handled after it). The per-stream `pollX`/`waitX`
+/// methods are kept as filters over the same queue for programs that only
+/// care about one stream.
+///
+/// Deliberately a separate connection from `Client`: interleaving
+/// unsolicited push notifications with synchronous request/response
+/// traffic on one connection would need demuxing this codebase doesn't
+/// build yet (see `Client`'s doc comment -- one request in flight at a
+/// time, assuming the next frame off the wire is always that request's
+/// response).
 pub const InputListener = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
@@ -2561,81 +2821,29 @@ pub const InputListener = struct {
     listen_thread: std.Thread,
     mutex: std.Io.Mutex = .init,
     state: core.InputState,
-    /// Key and text events in a single arrival-ordered queue (see
-    /// `InputEvent`) -- they share one timeline on the wire, so keeping
-    /// two queues would let "type then Enter" reorder. `input_sem` is
-    /// posted once per append so `waitInputEvent` can block instead of
-    /// polling; it isn't kept in exact sync with the queue length
-    /// (`pollInputEvent` drains without touching it) -- a stale permit
-    /// just wakes one `waitInputEvent` to an empty queue, no worse than a
-    /// spurious poll.
-    input_events: std.ArrayList(InputEvent) = .empty,
-    input_sem: std.Io.Semaphore = .{},
-    /// Edge events (button-down and button-up, like `key_events`), not
-    /// just the level state `isMouseButtonDown`/`cursorCell` already
-    /// tracked -- a click handler (e.g. glyphwire-shell's auto-cd) needs
-    /// to know *when* a press happened, not just whether the button is
-    /// currently down.
-    mouse_events: std.ArrayList(MouseButtonEvent) = .empty,
-    mouse_sem: std.Io.Semaphore = .{},
-    /// Queued `mouse_move` notifications, same drain-on-poll shape. Motion
-    /// is high-rate even after the server's per-cell coalescing, so the
-    /// queue is capped: a consumer that stops draining (the prompt loop,
-    /// which doesn't care about motion) makes it drop the backlog rather
-    /// than grow without bound. The pty foreground loop is the real
-    /// consumer.
-    mouse_move_events: std.ArrayList(MouseMoveEvent) = .empty,
-    mouse_move_sem: std.Io.Semaphore = .{},
-    /// Queued `terminal_reply` notifications: owned byte slices (a
-    /// `CSI 6n` / DA / DECRQM answer a mirrored `write_text` produced).
-    /// glyphwire-shell drains these and writes them to the pty master.
-    /// Freed by the consumer (`pollTerminalReply`) or in `deinit`.
-    terminal_reply_events: std.ArrayList([]u8) = .empty,
-    terminal_reply_sem: std.Io.Semaphore = .{},
-    /// Queued `resize` notifications (see `ResizeEvent`), same
-    /// drain-on-poll shape as `key_events`/`mouse_events`. `last_size`
-    /// caches the most recent one for `size()`'s instant read; it stays
-    /// null until the first `resize` arrives (a client that needs the
-    /// size before then should ask `Client.getSize` once).
-    resize_events: std.ArrayList(ResizeEvent) = .empty,
-    resize_sem: std.Io.Semaphore = .{},
+    /// Every queued notification, oldest first. See `Event`.
+    events: std.ArrayList(Event) = .empty,
+    /// Posted once per appended event (not on a coalescing replace), so
+    /// `next`/`waitX` block instead of polling. Not kept in exact sync with
+    /// `events.items.len` -- a `pollX` pops without taking a permit -- so a
+    /// waiter re-checks the queue after every wake and treats an empty one
+    /// as a spurious wake.
+    sem: std.Io.Semaphore = .{},
+    /// How many `.mouse_move` entries `events` holds, for the cap in
+    /// `enqueue`.
+    mouse_moves_queued: usize = 0,
+    /// Live caches of the newest `resize` / `scroll` / `context`, readable
+    /// whether or not the queued event has been consumed yet. Each stays
+    /// null until its first notification arrives.
     last_size: ?ResizeEvent = null,
-    /// Queued `scroll` notifications (see `ScrollEvent`), same
-    /// drain-on-poll shape as `resize_events`. `last_scroll` caches the
-    /// most recent one for `scroll()`'s instant read; null until the
-    /// first `scroll` arrives.
-    scroll_events: std.ArrayList(ScrollEvent) = .empty,
-    scroll_sem: std.Io.Semaphore = .{},
     last_scroll: ?ScrollEvent = null,
-    /// Queued `scroll_offset` notifications -- a *layer's* viewport
-    /// moving over its content, as opposed to `scroll_events`' root
-    /// scrollback. Same drain-on-poll shape; no owned memory.
-    scroll_offset_events: std.ArrayList(ScrollOffsetEvent) = .empty,
-    scroll_offset_sem: std.Io.Semaphore = .{},
-    /// Queued `layout` notifications. Each owns its `layers` slice, so an
-    /// undrained queue is freed in `deinit` and a drained one transfers
-    /// ownership to the caller (`pollLayoutEvent`).
-    layout_events: std.ArrayList(LayoutEvent) = .empty,
-    layout_sem: std.Io.Semaphore = .{},
-    /// Queued `pane_layout` / `pane_exit` notifications, same
-    /// drain-on-poll shape as `layout_events`. Both stay empty unless this
-    /// connection subscribed to them, which only a window manager does.
-    pane_layout_events: std.ArrayList(PaneLayoutEvent) = .empty,
-    pane_layout_sem: std.Io.Semaphore = .{},
-    pane_exit_events: std.ArrayList(PaneExitEvent) = .empty,
-    pane_exit_sem: std.Io.Semaphore = .{},
-    /// Queued `remote_exit` notifications, same drain-on-poll shape.
-    /// Empty unless this connection subscribed to `"remote"`, which only a
-    /// program waiting out a `start_remote` session does.
-    remote_exit_events: std.ArrayList(RemoteExitEvent) = .empty,
-    /// Queued `context` notifications (see `ContextEvent`), same
-    /// drain-on-poll shape as `resize_events`. `last_context` caches the
-    /// most recent for `visibleContext()`'s instant read; null until the
-    /// first `context` arrives. Only produced while subscribed to
-    /// `"context"`.
-    context_events: std.ArrayList(ContextEvent) = .empty,
-    context_sem: std.Io.Semaphore = .{},
     last_context: ?ContextEvent = null,
+
+    /// A queue that nobody drains `mouse_move` from (a prompt loop that
+    /// only wants keys) must not grow without bound: past this many queued
+    /// moves the oldest is dropped. A consumer that fell this far behind
+    /// isn't tracking a gesture any more.
+    const max_queued_mouse_moves = 512;
 
     /// Connects, subscribes to `events`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
@@ -2709,24 +2917,88 @@ pub const InputListener = struct {
         self.listen_thread.join();
         self.stream.close(self.io);
         self.state.deinit();
-        for (self.input_events.items) |ev| ev.deinit(self.alloc);
-        self.input_events.deinit(self.alloc);
-        for (self.mouse_events.items) |ev| self.alloc.free(ev.button);
-        self.mouse_events.deinit(self.alloc);
-        self.mouse_move_events.deinit(self.alloc);
-        for (self.terminal_reply_events.items) |b| self.alloc.free(b);
-        self.terminal_reply_events.deinit(self.alloc);
-        self.resize_events.deinit(self.alloc);
-        self.scroll_offset_events.deinit(self.alloc);
-        for (self.layout_events.items) |ev| ev.deinit(self.alloc);
-        self.layout_events.deinit(self.alloc);
-        for (self.pane_layout_events.items) |ev| ev.deinit(self.alloc);
-        self.pane_layout_events.deinit(self.alloc);
-        self.pane_exit_events.deinit(self.alloc);
-        self.remote_exit_events.deinit(self.alloc);
-        self.scroll_events.deinit(self.alloc);
-        self.context_events.deinit(self.alloc);
+        for (self.events.items) |ev| ev.deinit(self.alloc);
+        self.events.deinit(self.alloc);
         self.alloc.destroy(self);
+    }
+
+    /// Pops the oldest queued event of any kind, blocking until one
+    /// arrives or `timeout` elapses (`null` on timeout). The caller owns
+    /// the result: `ev.deinit(listener.alloc)`.
+    pub fn next(self: *InputListener, timeout: std.Io.Timeout) !?Event {
+        return self.waitFirst(timeout, anyEvent);
+    }
+
+    /// `next` without blocking.
+    pub fn pollNext(self: *InputListener) ?Event {
+        return self.takeFirst(anyEvent);
+    }
+
+    fn anyEvent(_: Event) bool {
+        return true;
+    }
+
+    /// Removes and returns the oldest queued event `matches` accepts.
+    fn takeFirst(self: *InputListener, comptime matches: fn (Event) bool) ?Event {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.events.items, 0..) |ev, i| {
+            if (!matches(ev)) continue;
+            if (ev == .mouse_move) self.mouse_moves_queued -= 1;
+            return self.events.orderedRemove(i);
+        }
+        return null;
+    }
+
+    /// `takeFirst`, blocking on `sem` until a matching event is queued or
+    /// `timeout` passes. Converts the timeout to a deadline once so a
+    /// wake for some other stream doesn't restart the clock.
+    fn waitFirst(self: *InputListener, timeout: std.Io.Timeout, comptime matches: fn (Event) bool) !?Event {
+        const deadline = timeout.toDeadline(self.io);
+        while (true) {
+            if (self.takeFirst(matches)) |ev| return ev;
+            self.sem.waitTimeout(self.io, deadline) catch |err| switch (err) {
+                error.Timeout => return null,
+                error.Canceled => |e| return e,
+            };
+        }
+    }
+
+    /// Appends one parsed notification (the reader thread's only way into
+    /// the queue). Coalesces a `resize` or `mouse_move` onto an identical
+    /// kind at the tail -- only the newest value of a run matters, and
+    /// replacing the tail never reorders anything.
+    fn enqueue(self: *InputListener, ev: Event) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        switch (ev) {
+            .resize => |r| self.last_size = r,
+            .scroll => |s| self.last_scroll = s,
+            .context => |c| self.last_context = c,
+            else => {},
+        }
+        if (self.events.items.len > 0) {
+            const tail = &self.events.items[self.events.items.len - 1];
+            const coalesce = (ev == .resize and tail.* == .resize) or
+                (ev == .mouse_move and tail.* == .mouse_move);
+            if (coalesce) {
+                tail.* = ev;
+                return;
+            }
+        }
+        if (ev == .mouse_move) {
+            if (self.mouse_moves_queued >= max_queued_mouse_moves) {
+                for (self.events.items, 0..) |old, i| {
+                    if (old != .mouse_move) continue;
+                    _ = self.events.orderedRemove(i);
+                    self.mouse_moves_queued -= 1;
+                    break;
+                }
+            }
+            self.mouse_moves_queued += 1;
+        }
+        try self.events.append(self.alloc, ev);
+        self.sem.post(self.io);
     }
 
     pub fn isKeyDown(self: *InputListener, key: []const u8) bool {
@@ -2735,23 +3007,26 @@ pub const InputListener = struct {
         return self.state.isKeyDown(key);
     }
 
-    /// Pops the oldest queued input event (key or text), if any
-    /// (non-blocking). Caller must free the variant's owned string --
-    /// `InputEvent.deinit`, or free `.key.key` / `.text.text` directly --
-    /// with the same allocator passed to `connect`.
-    pub fn pollInputEvent(self: *InputListener) ?InputEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.input_events.items.len == 0) return null;
-        return self.input_events.orderedRemove(0);
+    fn isInput(ev: Event) bool {
+        return ev.asInput() != null;
     }
 
-    /// Blocks until an input event is queued or `timeout` elapses (`null`
-    /// on timeout), instead of `pollInputEvent`'s non-blocking check -- for
-    /// a consumer loop that wants to react immediately rather than
-    /// re-polling on a fixed interval.
+    /// Pops the oldest queued input event (key, text, paste, copy request,
+    /// shutdown, or a window-manager key/text), if any (non-blocking).
+    /// Caller must free it with `InputEvent.deinit` and the same allocator
+    /// passed to `connect`.
+    pub fn pollInputEvent(self: *InputListener) ?InputEvent {
+        const ev = self.takeFirst(isInput) orelse return null;
+        return ev.asInput().?;
+    }
+
+    /// Blocks until *any* event is queued or `timeout` elapses, then
+    /// returns the oldest input event if there is one (null otherwise, or
+    /// on timeout). Wakes for every stream, so a loop that drains other
+    /// queues after this returns handles them immediately -- but `next`
+    /// is the better shape for a new loop.
     pub fn waitInputEvent(self: *InputListener, timeout: std.Io.Timeout) !?InputEvent {
-        self.input_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
+        self.sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
             error.Timeout => return null,
             error.Canceled => |e| return e,
         };
@@ -2764,181 +3039,132 @@ pub const InputListener = struct {
         return self.state.isMouseButtonDown(button);
     }
 
-    /// Pops the oldest queued mouse button event, if any -- see
-    /// `pollKeyEvent`, the same non-blocking-drain shape. Caller must free
-    /// the event with `MouseButtonEvent.deinit` (or free `.button`
-    /// directly) using the same allocator passed to `connect`.
+    /// Generates the non-blocking `pollX` for one payload-carrying `Event`
+    /// variant: removes the oldest event of that kind and returns its
+    /// payload. Ownership passes to the caller exactly as `Event.deinit`
+    /// would have freed it.
+    fn Poller(comptime tag: std.meta.Tag(Event)) type {
+        return struct {
+            fn matches(ev: Event) bool {
+                return ev == tag;
+            }
+            fn poll(self: *InputListener) ?@FieldType(Event, @tagName(tag)) {
+                const ev = self.takeFirst(matches) orelse return null;
+                return @field(ev, @tagName(tag));
+            }
+            fn wait(self: *InputListener, timeout: std.Io.Timeout) !?@FieldType(Event, @tagName(tag)) {
+                const ev = try self.waitFirst(timeout, matches) orelse return null;
+                return @field(ev, @tagName(tag));
+            }
+        };
+    }
+
+    /// Oldest queued mouse button event, if any. Free with
+    /// `MouseButtonEvent.deinit`.
     pub fn pollMouseButtonEvent(self: *InputListener) ?MouseButtonEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.mouse_events.items.len == 0) return null;
-        return self.mouse_events.orderedRemove(0);
+        return Poller(.mouse_button).poll(self);
     }
 
-    /// Blocks until a mouse button event is queued or `timeout` elapses --
-    /// see `waitKeyEvent`.
+    /// Blocks until a mouse button event is queued or `timeout` elapses.
     pub fn waitMouseButtonEvent(self: *InputListener, timeout: std.Io.Timeout) !?MouseButtonEvent {
-        self.mouse_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
-            error.Timeout => return null,
-            error.Canceled => |e| return e,
-        };
-        return self.pollMouseButtonEvent();
+        return Poller(.mouse_button).wait(self, timeout);
     }
 
-    /// Pops the oldest queued `mouse_move` event, if any (non-blocking) --
-    /// see `pollMouseButtonEvent`, the same drain shape. Nothing to free.
-    /// Only produced while subscribed to `"mouse_move"`.
+    /// Oldest queued `mouse_move`, if any. Nothing to free. Only produced
+    /// while subscribed to `"mouse_move"`.
     pub fn pollMouseMoveEvent(self: *InputListener) ?MouseMoveEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.mouse_move_events.items.len == 0) return null;
-        return self.mouse_move_events.orderedRemove(0);
+        return Poller(.mouse_move).poll(self);
     }
 
-    /// Blocks until a `mouse_move` event is queued or `timeout` elapses --
-    /// see `waitMouseButtonEvent`.
+    /// Blocks until a `mouse_move` is queued or `timeout` elapses.
     pub fn waitMouseMoveEvent(self: *InputListener, timeout: std.Io.Timeout) !?MouseMoveEvent {
-        self.mouse_move_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
-            error.Timeout => return null,
-            error.Canceled => |e| return e,
-        };
-        return self.pollMouseMoveEvent();
+        return Poller(.mouse_move).wait(self, timeout);
     }
 
-    /// Pops the oldest queued `terminal_reply` (non-blocking). The caller
-    /// owns the returned slice and frees it with the `connect` allocator.
-    /// Only produced while subscribed to `"terminal"`.
+    /// Oldest queued `terminal_reply`. The caller owns the returned slice
+    /// and frees it with the `connect` allocator. Only produced while
+    /// subscribed to `"terminal"`.
     pub fn pollTerminalReply(self: *InputListener) ?[]u8 {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.terminal_reply_events.items.len == 0) return null;
-        return self.terminal_reply_events.orderedRemove(0);
+        return Poller(.terminal_reply).poll(self);
     }
 
-    /// Pops the oldest queued `resize` event, if any (non-blocking) --
-    /// see `pollKeyEvent`, the same drain shape. Nothing to free.
-    /// Next queued `scroll_offset` event, or null -- see
-    /// `pollResizeEvent` for the drain shape. Nothing to free.
+    /// Oldest queued `scroll_offset`, if any. Nothing to free.
     pub fn pollScrollOffsetEvent(self: *InputListener) ?ScrollOffsetEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.scroll_offset_events.items.len == 0) return null;
-        return self.scroll_offset_events.orderedRemove(0);
+        return Poller(.scroll_offset).poll(self);
     }
 
-    /// Next queued `layout` event, or null. **The caller owns the result**
-    /// and must `deinit` it -- unlike the other pollers, this one carries
-    /// a slice.
+    /// Oldest queued `layout`, if any. **The caller owns the result** and
+    /// must `deinit` it.
     pub fn pollLayoutEvent(self: *InputListener) ?LayoutEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.layout_events.items.len == 0) return null;
-        return self.layout_events.orderedRemove(0);
+        return Poller(.layout).poll(self);
     }
 
-    /// The next queued `pane_layout`, or null. The caller owns the returned
-    /// event and must `deinit` it.
+    /// Oldest queued `pane_layout`, if any. The caller must `deinit` it.
     pub fn pollPaneLayoutEvent(self: *InputListener) ?PaneLayoutEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.pane_layout_events.items.len == 0) return null;
-        return self.pane_layout_events.orderedRemove(0);
+        return Poller(.pane_layout).poll(self);
     }
 
-    /// The next queued `pane_exit`, or null. Nothing to free.
+    /// Oldest queued `pane_exit`, if any. Nothing to free.
     pub fn pollPaneExitEvent(self: *InputListener) ?PaneExitEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.pane_exit_events.items.len == 0) return null;
-        return self.pane_exit_events.orderedRemove(0);
+        return Poller(.pane_exit).poll(self);
     }
 
-    /// The next queued `remote_exit`, or null. Nothing to free.
+    /// Oldest queued `remote_exit`, if any. Nothing to free.
     pub fn pollRemoteExitEvent(self: *InputListener) ?RemoteExitEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.remote_exit_events.items.len == 0) return null;
-        return self.remote_exit_events.orderedRemove(0);
+        return Poller(.remote_exit).poll(self);
     }
 
+    /// Oldest queued `resize`, if any. Nothing to free.
     pub fn pollResizeEvent(self: *InputListener) ?ResizeEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.resize_events.items.len == 0) return null;
-        return self.resize_events.orderedRemove(0);
+        return Poller(.resize).poll(self);
     }
 
-    /// Blocks until a `resize` event is queued or `timeout` elapses -- see
-    /// `waitKeyEvent`.
+    /// Blocks until a `resize` is queued or `timeout` elapses.
     pub fn waitResizeEvent(self: *InputListener, timeout: std.Io.Timeout) !?ResizeEvent {
-        self.resize_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
-            error.Timeout => return null,
-            error.Canceled => |e| return e,
-        };
-        return self.pollResizeEvent();
+        return Poller(.resize).wait(self, timeout);
     }
 
     /// The most recently pushed window size, or null if no `resize`
     /// notification has arrived on this listener yet -- a live-cache read
-    /// (like `isKeyDown`), independent of whether `pollResizeEvent` has
-    /// drained the event queue.
+    /// (like `isKeyDown`), independent of whether the queued event has
+    /// been consumed.
     pub fn size(self: *InputListener) ?ResizeEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.last_size;
     }
 
-    /// Pops the oldest queued `scroll` event, if any (non-blocking) --
-    /// see `pollResizeEvent`, the same drain shape. Nothing to free.
+    /// Oldest queued `scroll`, if any. Nothing to free.
     pub fn pollScrollEvent(self: *InputListener) ?ScrollEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.scroll_events.items.len == 0) return null;
-        return self.scroll_events.orderedRemove(0);
+        return Poller(.scroll).poll(self);
     }
 
-    /// Blocks until a `scroll` event is queued or `timeout` elapses -- see
-    /// `waitKeyEvent`.
+    /// Blocks until a `scroll` is queued or `timeout` elapses.
     pub fn waitScrollEvent(self: *InputListener, timeout: std.Io.Timeout) !?ScrollEvent {
-        self.scroll_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
-            error.Timeout => return null,
-            error.Canceled => |e| return e,
-        };
-        return self.pollScrollEvent();
+        return Poller(.scroll).wait(self, timeout);
     }
 
     /// The most recently pushed scrollback view offset, or null if no
     /// `scroll` notification has arrived yet -- a live-cache read (like
-    /// `size`), independent of whether `pollScrollEvent` has drained the
-    /// queue.
+    /// `size`).
     pub fn scroll(self: *InputListener) ?ScrollEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.last_scroll;
     }
 
-    /// Pops the oldest queued `context` event, if any (non-blocking) --
-    /// see `pollResizeEvent`, the same drain shape. Nothing to free.
+    /// Oldest queued `context`, if any. Nothing to free.
     pub fn pollContextEvent(self: *InputListener) ?ContextEvent {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.context_events.items.len == 0) return null;
-        return self.context_events.orderedRemove(0);
+        return Poller(.context).poll(self);
     }
 
-    /// Blocks until a `context` event is queued or `timeout` elapses --
-    /// see `waitResizeEvent`.
+    /// Blocks until a `context` is queued or `timeout` elapses.
     pub fn waitContextEvent(self: *InputListener, timeout: std.Io.Timeout) !?ContextEvent {
-        self.context_sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
-            error.Timeout => return null,
-            error.Canceled => |e| return e,
-        };
-        return self.pollContextEvent();
+        return Poller(.context).wait(self, timeout);
     }
 
     /// The most recently pushed visible-context event, or null if none
-    /// has arrived yet -- a live-cache read (like `size`), independent of
-    /// whether `pollContextEvent` has drained the queue.
+    /// has arrived yet -- a live-cache read (like `size`).
     pub fn visibleContext(self: *InputListener) ?ContextEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -3082,133 +3308,105 @@ pub const InputListener = struct {
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
+        const method = parsed.value.method;
+        const params = parsed.value.params;
+        const eql = std.mem.eql;
 
-        if (std.mem.eql(u8, parsed.value.method, "key_down") or std.mem.eql(u8, parsed.value.method, "key_up")) {
-            const P = protocol.KeyParams;
-            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+        if (eql(u8, method, "key_down") or eql(u8, method, "key_up") or
+            eql(u8, method, "window_key_down") or eql(u8, method, "window_key_up"))
+        {
+            const p = try self.parseParams(protocol.KeyParams, params);
             defer p.deinit();
-
-            const pressed = std.mem.eql(u8, parsed.value.method, "key_down");
+            const window = eql(u8, method[0..@min(method.len, 7)], "window_");
+            const pressed = std.mem.endsWith(u8, method, "_down");
             const owned_key = try self.alloc.dupe(u8, p.value.key);
             errdefer self.alloc.free(owned_key);
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            _ = try self.state.setKey(p.value.key, pressed);
-            try self.input_events.append(self.alloc, .{ .key = .{ .key = owned_key, .pressed = pressed } });
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "text")) {
-            const P = protocol.TextParams;
-            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            const ev: KeyEvent = .{ .key = owned_key, .pressed = pressed, .mods = p.value.mods };
+            if (window) {
+                // Deliberately *not* folded into `state`'s down-set: this
+                // key never reached any program, so reporting it as held
+                // would make a manager's own modifier checks disagree with
+                // the keyboard.
+                try self.enqueue(.{ .window_key = ev });
+            } else {
+                {
+                    self.mutex.lockUncancelable(self.io);
+                    defer self.mutex.unlock(self.io);
+                    _ = try self.state.setKey(p.value.key, pressed);
+                }
+                try self.enqueue(.{ .key = ev });
+            }
+        } else if (eql(u8, method, "text") or eql(u8, method, "window_text") or eql(u8, method, "paste")) {
+            const text = if (eql(u8, method, "paste")) blk: {
+                const p = try self.parseParams(protocol.ClipboardTextParams, params);
+                defer p.deinit();
+                break :blk try self.alloc.dupe(u8, p.value.text);
+            } else blk: {
+                const p = try self.parseParams(protocol.TextParams, params);
+                defer p.deinit();
+                break :blk try self.alloc.dupe(u8, p.value.text);
+            };
+            errdefer self.alloc.free(text);
+            const ev: TextEvent = .{ .text = text };
+            try self.enqueue(if (eql(u8, method, "text"))
+                .{ .text = ev }
+            else if (eql(u8, method, "paste"))
+                .{ .paste = ev }
+            else
+                .{ .window_text = ev });
+        } else if (eql(u8, method, "mouse_button")) {
+            const p = try self.parseParams(protocol.MouseButtonParams, params);
             defer p.deinit();
-
-            const owned_text = try self.alloc.dupe(u8, p.value.text);
-            errdefer self.alloc.free(owned_text);
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.input_events.append(self.alloc, .{ .text = .{ .text = owned_text } });
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "mouse_button")) {
-            const P = protocol.MouseButtonParams;
-            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
-            defer p.deinit();
-
             const owned_button = try self.alloc.dupe(u8, p.value.button);
             errdefer self.alloc.free(owned_button);
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
-            self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
-            _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
-            try self.mouse_events.append(self.alloc, .{ .button = owned_button, .pressed = p.value.pressed, .px = p.value.px, .cell = p.value.cell, .view_offset = p.value.view_offset });
-            self.mouse_sem.post(self.io);
-            // Also wake `waitInputEvent`: a consumer loop that blocks on
-            // it between keystrokes (glyphwire-shell) drains the mouse
-            // queue at the top of every iteration, so a spurious wake here
-            // is all it takes to handle a click immediately instead of
-            // after the loop's fallback timeout. `waitInputEvent` returns
-            // null (the input queue is untouched), which that loop already
-            // treats as an idle tick.
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "mouse_move")) {
-            const P = protocol.MouseMoveParams;
-            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
+                self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
+                _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
+            }
+            try self.enqueue(.{ .mouse_button = .{
+                .button = owned_button,
+                .pressed = p.value.pressed,
+                .px = p.value.px,
+                .cell = p.value.cell,
+                .view_offset = p.value.view_offset,
+                .mods = p.value.mods,
+            } });
+        } else if (eql(u8, method, "mouse_move")) {
+            const p = try self.parseParams(protocol.MouseMoveParams, params);
             defer p.deinit();
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
-            self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
-            // Drop the backlog if nothing's draining (see the field doc):
-            // only the newest position matters for the pty consumer, and a
-            // consumer that fell 512+ cells behind isn't tracking a
-            // gesture any more.
-            if (self.mouse_move_events.items.len >= 512) self.mouse_move_events.clearRetainingCapacity();
-            try self.mouse_move_events.append(self.alloc, .{ .px = p.value.px, .cell = p.value.cell });
-            self.mouse_move_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "terminal_reply")) {
-            const p = try std.json.parseFromValue(protocol.TerminalReplyParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
+                self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
+            }
+            try self.enqueue(.{ .mouse_move = .{ .px = p.value.px, .cell = p.value.cell, .mods = p.value.mods } });
+        } else if (eql(u8, method, "terminal_reply")) {
+            const p = try self.parseParams(protocol.TerminalReplyParams, params);
             defer p.deinit();
-
             const owned = try self.alloc.dupe(u8, p.value.bytes);
             errdefer self.alloc.free(owned);
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.terminal_reply_events.append(self.alloc, owned);
-            self.terminal_reply_sem.post(self.io);
-            // Wake a consumer parked in `waitInputEvent` (the pty
-            // foreground loop) so a startup `CSI 6n` / DA probe is
-            // answered right away, not after the loop's fallback timeout.
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "scroll")) {
-            const P = protocol.ScrollParams;
-            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            try self.enqueue(.{ .terminal_reply = owned });
+        } else if (eql(u8, method, "scroll")) {
+            const p = try self.parseParams(protocol.ScrollParams, params);
             defer p.deinit();
-
-            const ev: ScrollEvent = .{ .layer = p.value.layer, .offset = p.value.offset, .max = p.value.max };
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            self.last_scroll = ev;
-            try self.scroll_events.append(self.alloc, ev);
-            self.scroll_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "scroll_offset")) {
-            const p = try std.json.parseFromValue(protocol.ScrollOffsetParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            try self.enqueue(.{ .scroll = .{ .layer = p.value.layer, .offset = p.value.offset, .max = p.value.max } });
+        } else if (eql(u8, method, "scroll_offset")) {
+            const p = try self.parseParams(protocol.ScrollOffsetParams, params);
             defer p.deinit();
-
-            const ev: ScrollOffsetEvent = .{
+            try self.enqueue(.{ .scroll_offset = .{
                 .layer = p.value.layer,
                 .row = p.value.row,
                 .col = p.value.col,
                 .max_row = p.value.max_row,
                 .max_col = p.value.max_col,
-            };
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.scroll_offset_events.append(self.alloc, ev);
-            self.scroll_offset_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "layout")) {
-            const p = try std.json.parseFromValue(protocol.LayoutParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            } });
+        } else if (eql(u8, method, "layout")) {
+            const p = try self.parseParams(protocol.LayoutParams, params);
             defer p.deinit();
-
             // The parsed slice lives in `p`'s arena, so it's copied out
             // before that's freed -- the event outlives this frame.
             const owned = try self.alloc.alloc(LayoutBounds, p.value.layers.len);
@@ -3216,146 +3414,46 @@ pub const InputListener = struct {
             for (p.value.layers, 0..) |b, i| {
                 owned[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
             }
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.layout_events.append(self.alloc, .{ .layers = owned });
-            self.layout_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "window_key_down") or
-            std.mem.eql(u8, parsed.value.method, "window_key_up"))
-        {
-            const p = try std.json.parseFromValue(protocol.KeyParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            try self.enqueue(.{ .layout = .{ .layers = owned } });
+        } else if (eql(u8, method, "pane_layout")) {
+            const p = try self.parseParams(protocol.PaneLayoutParams, params);
             defer p.deinit();
-
-            const pressed = std.mem.eql(u8, parsed.value.method, "window_key_down");
-            const owned_key = try self.alloc.dupe(u8, p.value.key);
-            errdefer self.alloc.free(owned_key);
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            // Deliberately *not* folded into `state`'s down-set: this key
-            // never reached any program, so reporting it as held would make
-            // a manager's own modifier checks disagree with the keyboard.
-            try self.input_events.append(self.alloc, .{ .window_key = .{ .key = owned_key, .pressed = pressed } });
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "window_text")) {
-            const p = try std.json.parseFromValue(protocol.TextParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
-            defer p.deinit();
-
-            const owned_text = try self.alloc.dupe(u8, p.value.text);
-            errdefer self.alloc.free(owned_text);
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.input_events.append(self.alloc, .{ .window_text = .{ .text = owned_text } });
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "pane_layout")) {
-            const p = try std.json.parseFromValue(protocol.PaneLayoutParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
-            defer p.deinit();
-
-            // Copied out of `p`'s arena, same as `layout` above.
             const owned = try self.alloc.alloc(PaneBounds, p.value.panes.len);
             errdefer self.alloc.free(owned);
             for (p.value.panes, 0..) |b, i| {
                 owned[i] = .{ .pane = b.pane, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
             }
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.pane_layout_events.append(self.alloc, .{ .panes = owned });
-            self.pane_layout_sem.post(self.io);
-            // Wake a manager parked in `waitInputEvent` between keystrokes,
-            // the same way `mouse_button` does: a pane layout change is
-            // something it needs to act on now, not at the next timeout.
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "pane_exit")) {
-            const p = try std.json.parseFromValue(protocol.PaneExitParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            try self.enqueue(.{ .pane_layout = .{ .panes = owned } });
+        } else if (eql(u8, method, "pane_exit")) {
+            const p = try self.parseParams(protocol.PaneExitParams, params);
             defer p.deinit();
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.pane_exit_events.append(self.alloc, .{ .pane = p.value.pane, .status = p.value.status });
-            self.pane_exit_sem.post(self.io);
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "remote_exit")) {
-            const p = try std.json.parseFromValue(protocol.RemoteExitParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            try self.enqueue(.{ .pane_exit = .{ .pane = p.value.pane, .status = p.value.status } });
+        } else if (eql(u8, method, "remote_exit")) {
+            const p = try self.parseParams(protocol.RemoteExitParams, params);
             defer p.deinit();
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.remote_exit_events.append(self.alloc, .{
+            try self.enqueue(.{ .remote_exit = .{
                 .session = p.value.session,
                 .status = p.value.status,
                 .started = p.value.started,
-            });
-            // Wake a waiter parked in `waitInputEvent`: the whole point of
-            // this event is that the program blocked behind the remote
-            // session gets its terminal back at once, not at the next
-            // fallback timeout.
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "resize")) {
-            const P = protocol.ResizeParams;
-            const p = try std.json.parseFromValue(P, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            } });
+        } else if (eql(u8, method, "resize")) {
+            const p = try self.parseParams(protocol.ResizeParams, params);
             defer p.deinit();
-
-            const ev: ResizeEvent = .{ .cols = p.value.cols, .rows = p.value.rows };
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            self.last_size = ev;
-            try self.resize_events.append(self.alloc, ev);
-            self.resize_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "shutdown")) {
-            const p = try std.json.parseFromValue(protocol.ShutdownParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            try self.enqueue(.{ .resize = .{ .cols = p.value.cols, .rows = p.value.rows } });
+        } else if (eql(u8, method, "shutdown")) {
+            const p = try self.parseParams(protocol.ShutdownParams, params);
             defer p.deinit();
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.input_events.append(self.alloc, .{ .shutdown = .{ .grace_ms = p.value.grace_ms } });
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "context")) {
-            const p = try std.json.parseFromValue(protocol.ContextParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
+            try self.enqueue(.{ .shutdown = .{ .grace_ms = p.value.grace_ms } });
+        } else if (eql(u8, method, "context")) {
+            const p = try self.parseParams(protocol.ContextParams, params);
             defer p.deinit();
-
-            const ev: ContextEvent = .{ .context = p.value.context, .cols = p.value.cols, .rows = p.value.rows };
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            self.last_context = ev;
-            try self.context_events.append(self.alloc, ev);
-            self.context_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "paste")) {
-            const p = try std.json.parseFromValue(protocol.ClipboardTextParams, self.alloc, parsed.value.params, .{
-                .ignore_unknown_fields = true,
-            });
-            defer p.deinit();
-
-            const owned_text = try self.alloc.dupe(u8, p.value.text);
-            errdefer self.alloc.free(owned_text);
-
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.input_events.append(self.alloc, .{ .paste = .{ .text = owned_text } });
-            self.input_sem.post(self.io);
-        } else if (std.mem.eql(u8, parsed.value.method, "copy_request")) {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.input_events.append(self.alloc, .copy_request);
-            self.input_sem.post(self.io);
+            try self.enqueue(.{ .context = .{ .context = p.value.context, .cols = p.value.cols, .rows = p.value.rows } });
+        } else if (eql(u8, method, "copy_request")) {
+            try self.enqueue(.copy_request);
         }
+    }
+
+    fn parseParams(self: *InputListener, comptime T: type, params: std.json.Value) !std.json.Parsed(T) {
+        return std.json.parseFromValue(T, self.alloc, params, .{ .ignore_unknown_fields = true });
     }
 };

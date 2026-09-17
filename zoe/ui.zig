@@ -358,13 +358,23 @@ pub const Ui = struct {
         const buffer_layer = try client.createLayer(size.cols, size.rows, 0);
         const status_layer = try client.createLayer(size.cols, 1, 0);
 
-        // The tree is host-scrolled (both bars). The buffer scrolls
-        // itself, but a `content_extent` (pushed each frame from the line
-        // count -- see `syncBufferScrollbar`) lets the host draw a
-        // proportional vertical bar and turn a wheel or thumb drag over
-        // the pane into a `scroll_offset` zoe then follows.
+        // The tree is host-scrolled (both bars). The buffer is in
+        // `client` scroll mode: it redraws its own visible rows, and a
+        // `content_extent` (pushed each frame from the line count -- see
+        // `syncBufferScrollbar`) lets the host draw a proportional
+        // vertical bar and turn a wheel or thumb drag over the pane into
+        // a `scroll_offset` zoe then follows.
+        try client.setLayerScrollMode(buffer_layer, .client);
+        try client.setLayerScrollMode(tabs_layer, .client);
         try client.setLayerScrollbars(tree_layer, true, true);
         try client.setLayerScrollbars(buffer_layer, true, false);
+        // Each pane's resting colour, so a cell nothing has written yet
+        // (a frame racing a resize, the columns past a short tab strip)
+        // is the pane's colour rather than whatever is behind zoe.
+        try client.setLayerBackground(tree_layer, bg_tree);
+        try client.setLayerBackground(tabs_layer, bg_tab_bar);
+        try client.setLayerBackground(buffer_layer, bg_buffer);
+        try client.setLayerBackground(status_layer, bg_status);
         // The tab strip scrolls sideways but draws no bar of its own: it
         // is one row tall, and a horizontal bar under it would double its
         // height for a scrollbar nothing needs to see. It still reports a
@@ -721,78 +731,68 @@ pub const Ui = struct {
 
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
-            try self.drainEvents();
-            // After the events, before the frame they produced: a mode
-            // change in that batch retimes the host's key repeat before
-            // the user can hold anything down in the new mode.
-            self.syncKeyRepeat();
             if (self.buffer_dirty or self.tree_dirty or self.tabs_dirty or self.status_dirty)
                 try self.render();
             if (self.quit) break;
 
-            // Block until something arrives rather than spinning; the
-            // timeout is only so the other event queues get looked at.
-            //
-            // The waiting form *consumes* the event it waited for, so it
-            // has to be handled right here -- `drainEvents` above will
-            // never see it, and discarding it drops a keystroke on the
-            // floor (and leaks its text).
-            if (self.listener.waitInputEvent(.{
-                .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake },
-            }) catch null) |ev| {
-                defer ev.deinit(self.alloc);
-                try self.handleInput(ev);
+            // Every notification wakes this -- layout and scroll included
+            // -- so it blocks outright instead of polling on a timer. Then
+            // everything already queued is folded into the same frame, in
+            // the order it arrived (a drag's moves before its release, a
+            // resize after the keystroke that preceded it).
+            const first = try self.listener.next(.none) orelse continue;
+            try self.handleEvent(first);
+            while (!self.quit) {
+                const ev = self.listener.pollNext() orelse break;
+                try self.handleEvent(ev);
             }
+            // After the events, before the frame they produced: a mode
+            // change in that batch retimes the host's key repeat before
+            // the user can hold anything down in the new mode.
+            self.syncKeyRepeat();
         }
     }
 
-    fn drainEvents(self: *Ui) !void {
-        while (self.listener.pollLayoutEvent()) |ev| {
-            defer ev.deinit(self.alloc);
-            if (ev.boundsFor(self.tree_layer)) |b| self.tree_bounds = toBounds(b);
-            if (ev.boundsFor(self.tabs_layer)) |b| self.tabs_bounds = toBounds(b);
-            if (ev.boundsFor(self.buffer_layer)) |b| self.buffer_bounds = toBounds(b);
-            if (ev.boundsFor(self.status_layer)) |b| self.status_bounds = toBounds(b);
-            try self.syncContentSizes();
-            // The buffer layer's grid was resized: the rows it holds no
-            // longer line up with the panes, so the next frame can't
-            // shift them -- it has to repaint. Every pane moved.
-            self.buf.full_redraw = true;
-            self.buffer_dirty = true;
-            self.tree_dirty = true;
-            self.tabs_dirty = true;
-            self.status_dirty = true;
-        }
-        while (self.listener.pollScrollOffsetEvent()) |ev| {
-            if (ev.layer == self.tree_layer) self.tree_scroll = .{ .row = ev.row, .col = ev.col };
-            // A wheel or thumb drag over the buffer pane: the host moved
-            // the virtual offset and told us where. Follow it, and drag
-            // the cursor along so it stays on screen (like vim's Ctrl-E /
-            // Ctrl-Y). `pushed_bar` is updated so `syncBufferScrollbar`
-            // doesn't immediately echo this straight back.
-            if (ev.layer == self.buffer_layer) self.scrollBufferTo(ev.row, ev.col);
-            // A shift+wheel or thumb drag over the tab strip. Only the
-            // column matters -- the strip is one row tall -- and the
-            // offset is recorded as already pushed so `syncTabScrollbar`
-            // doesn't echo it straight back.
-            if (ev.layer == self.tabs_layer and ev.col != self.tab_scroll) {
-                self.tab_scroll = ev.col;
-                self.pushed_tab_bar[1] = ev.col;
+    fn handleEvent(self: *Ui, ev: glyphwire.Event) !void {
+        defer ev.deinit(self.alloc);
+        switch (ev) {
+            .layout => |l| {
+                if (l.boundsFor(self.tree_layer)) |b| self.tree_bounds = toBounds(b);
+                if (l.boundsFor(self.tabs_layer)) |b| self.tabs_bounds = toBounds(b);
+                if (l.boundsFor(self.buffer_layer)) |b| self.buffer_bounds = toBounds(b);
+                if (l.boundsFor(self.status_layer)) |b| self.status_bounds = toBounds(b);
+                try self.syncContentSizes();
+                // The buffer layer's grid was resized: the rows it holds no
+                // longer line up with the panes, so the next frame can't
+                // shift them -- it has to repaint. Every pane moved.
+                self.buf.full_redraw = true;
+                self.buffer_dirty = true;
+                self.tree_dirty = true;
                 self.tabs_dirty = true;
-            }
-        }
-        // Mouse moves before buttons: a drag's pending moves should
-        // update the selection before its release closes it out.
-        while (self.listener.pollMouseMoveEvent()) |ev| {
-            try self.handleMouseDrag(ev);
-        }
-        while (self.listener.pollMouseButtonEvent()) |ev| {
-            defer ev.deinit(self.alloc);
-            try self.handleMouseButton(ev);
-        }
-        while (self.listener.pollInputEvent()) |ev| {
-            defer ev.deinit(self.alloc);
-            try self.handleInput(ev);
+                self.status_dirty = true;
+            },
+            .scroll_offset => |so| {
+                if (so.layer == self.tree_layer) self.tree_scroll = .{ .row = so.row, .col = so.col };
+                // A wheel or thumb drag over the buffer pane: the host moved
+                // the virtual offset and told us where. Follow it, and drag
+                // the cursor along so it stays on screen (like vim's Ctrl-E /
+                // Ctrl-Y). `pushed_bar` is updated so `syncBufferScrollbar`
+                // doesn't immediately echo this straight back.
+                if (so.layer == self.buffer_layer) self.scrollBufferTo(so.row, so.col);
+                // A shift+wheel or thumb drag over the tab strip. Only the
+                // column matters -- the strip is one row tall -- and the
+                // offset is recorded as already pushed so `syncTabScrollbar`
+                // doesn't echo it straight back.
+                if (so.layer == self.tabs_layer and so.col != self.tab_scroll) {
+                    self.tab_scroll = so.col;
+                    self.pushed_tab_bar[1] = so.col;
+                    self.tabs_dirty = true;
+                }
+            },
+            .mouse_move => |m| try self.handleMouseDrag(m),
+            // `defer ev.deinit` above frees the button string.
+            .mouse_button => |m| try self.handleMouseButton(m),
+            else => if (ev.asInput()) |input| try self.handleInput(input),
         }
     }
 
@@ -827,10 +827,11 @@ pub const Ui = struct {
 
                 // Ctrl+w switches panes, Ctrl+n toggles the sidebar --
                 // taken before the editor sees them so they work in any
-                // mode. Modifiers arrive as their own key events, so the
-                // listener's down-set is what answers "was ctrl held".
-                const ctrl = self.listener.isKeyDown("left_control") or
-                    self.listener.isKeyDown("right_control");
+                // mode. The modifiers come off the event itself, as they
+                // were when the host generated it: asking the live
+                // down-set here would read a quick Ctrl+W as a plain `w`
+                // whenever a heavy redraw left this loop behind.
+                const ctrl = k.ctrl();
                 if (ctrl) {
                     if (std.mem.eql(u8, k.key, "w")) {
                         self.setFocus(if (self.focus == .buffer) .tree else .buffer);
@@ -858,9 +859,7 @@ pub const Ui = struct {
                     // they work in insert mode too, where a bare Tab is
                     // still a Tab.
                     if (std.mem.eql(u8, k.key, "tab")) {
-                        const back = self.listener.isKeyDown("left_shift") or
-                            self.listener.isKeyDown("right_shift");
-                        self.stepBuffer(!back);
+                        self.stepBuffer(!k.shift());
                         return;
                     }
                     // Ctrl+Shift+X cut and Ctrl+Shift+P paste, both
@@ -868,9 +867,7 @@ pub const Ui = struct {
                     // swallowed by glyphwire-host, which broadcasts a
                     // `copy_request` instead -- see the `.copy_request`
                     // arm.)
-                    const shift = self.listener.isKeyDown("left_shift") or
-                        self.listener.isKeyDown("right_shift");
-                    if (shift and self.focus == .buffer) {
+                    if (k.shift() and self.focus == .buffer) {
                         if (std.mem.eql(u8, k.key, "x")) {
                             try self.applyOutcome(try self.buf.ed.clipboardCut());
                             self.buf.full_redraw = true;
@@ -1504,9 +1501,8 @@ pub const Ui = struct {
         self.status_dirty = false;
     }
 
-    /// Places the cursor on a layer, then writes one run there. Every
-    /// write below goes through this: `write_text` is cursor-implicit, so
-    /// a layer-scoped write is always a pair.
+    /// Writes one run at `(row, col)` on a layer -- a single positioned
+    /// `write_text`.
     fn writeAt(
         batch: *glyphwire.client.Client.Batch,
         layer: glyphwire.LayerHandle,
@@ -1516,13 +1512,7 @@ pub const Ui = struct {
         fg: Color,
         bg: Color,
     ) !void {
-        try batch.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
-        try batch.notify("write_text", .{
-            .layer = layer,
-            .text = text,
-            .fg = .{ .r = fg.r, .g = fg.g, .b = fg.b, .a = fg.a },
-            .bg = .{ .r = bg.r, .g = bg.g, .b = bg.b, .a = bg.a },
-        });
+        try batch.writeTextOpts(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg });
     }
 
     /// Redraws the buffer pane.
@@ -1543,7 +1533,7 @@ pub const Ui = struct {
         const b = self.buffer_bounds;
         if (b.cols == 0 or b.rows == 0) return;
         self.scrollBufferToCursor();
-        try self.syncBufferScrollbar();
+        try self.syncBufferScrollbar(batch);
 
         // A fresh edit (or the first parse after choosing a language)
         // means the tree is stale. `syncHighlight` reparses -- incremental
@@ -1820,12 +1810,17 @@ pub const Ui = struct {
         try self.renderGutterCell(batch, r);
 
         if (line >= self.buf.ed.buf.lineCount()) {
-            // vim's marker for "past the end of the buffer".
-            var pad: std.ArrayList(u8) = .empty;
-            defer pad.deinit(self.alloc);
-            try pad.append(self.alloc, '~');
-            try padTo(self.alloc, &pad, 1, cols);
-            try writeAt(batch, self.buffer_layer, r, gutter, pad.items, fg_dim, bg_buffer);
+            // vim's marker for "past the end of the buffer", the rest of
+            // the row padded by the host.
+            try batch.writeTextOpts("~", .{
+                .layer = self.buffer_layer,
+                .row = r,
+                .col = gutter,
+                .fg = fg_dim,
+                .bg = bg_buffer,
+                .max_cols = cols,
+                .pad = true,
+            });
             return;
         }
 
@@ -2017,12 +2012,11 @@ pub const Ui = struct {
         try writeAt(batch, self.buffer_layer, r, col, bytes, color orelse fg_text, bg_buffer);
     }
 
+    /// Blanks `n` cells of buffer row `r` to the pane colour -- a fill,
+    /// not a run of spaces.
     fn writeSpaces(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize, col: usize, n: usize) !void {
         if (n == 0) return;
-        var pad: std.ArrayList(u8) = .empty;
-        defer pad.deinit(self.alloc);
-        try pad.appendNTimes(self.alloc, ' ', n);
-        try writeAt(batch, self.buffer_layer, r, col, pad.items, fg_text, bg_buffer);
+        try batch.clearArea(.{ .layer = self.buffer_layer, .row = r, .col = col, .rows = 1, .cols = n, .bg = bg_buffer });
     }
 
     /// Keeps the caret inside the buffer pane, both axes.
@@ -2069,16 +2063,17 @@ pub const Ui = struct {
     /// `top_line`/`left_col`. Only sent when something changed, so a
     /// still buffer is silent. A wheel or thumb drag over the pane comes
     /// back the other way as a `scroll_offset` notification (see
-    /// `drainEvents`).
-    fn syncBufferScrollbar(self: *Ui) !void {
+    /// `handleEvent`). Batched with the frame, so the bar never moves
+    /// ahead of the rows it describes.
+    fn syncBufferScrollbar(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const b = self.buffer_bounds;
         const now: [4]usize = .{ self.buf.ed.buf.lineCount(), b.cols, self.buf.top_line, self.buf.left_col };
         if (std.mem.eql(usize, &now, &self.buf.pushed_bar)) return;
 
         if (now[0] != self.buf.pushed_bar[0] or now[1] != self.buf.pushed_bar[1]) {
-            try self.client.setLayerContentExtent(self.buffer_layer, now[1], now[0]);
+            try batch.setLayerContentExtent(self.buffer_layer, now[1], now[0]);
         }
-        try self.client.setLayerScrollOffset(self.buffer_layer, self.buf.top_line, self.buf.left_col);
+        try batch.setLayerScrollOffset(self.buffer_layer, self.buf.top_line, self.buf.left_col);
         self.buf.pushed_bar = now;
     }
 
@@ -2140,9 +2135,16 @@ pub const Ui = struct {
             if (entry) |e| {
                 try line.appendNTimes(self.alloc, ' ', e.depth * tree_mod.indent_cols + tree_mod.icon_cols);
                 try line.appendSlice(self.alloc, e.name);
-                const width = e.depth * tree_mod.indent_cols + tree_mod.icon_cols + glyphwire.stringWidth(e.name);
-                try padTo(self.alloc, &line, width, content_cols);
-                try writeAt(batch, self.tree_layer, r, 0, line.items, if (e.is_dir) fg_dir else fg_text, bg);
+                // The host pads the row to the full content width.
+                try batch.writeTextOpts(line.items, .{
+                    .layer = self.tree_layer,
+                    .row = r,
+                    .col = 0,
+                    .fg = if (e.is_dir) fg_dir else fg_text,
+                    .bg = bg,
+                    .max_cols = content_cols,
+                    .pad = true,
+                });
 
                 // The icon composites *over* the row's background rather
                 // than replacing it, so a selected row stays highlighted
@@ -2166,8 +2168,7 @@ pub const Ui = struct {
                     .foreground = true,
                 });
             } else {
-                try padTo(self.alloc, &line, 0, content_cols);
-                try writeAt(batch, self.tree_layer, r, 0, line.items, fg_dim, bg_tree);
+                try batch.clearArea(.{ .layer = self.tree_layer, .row = r, .rows = 1, .cols = content_cols, .bg = bg_tree });
             }
         }
     }
@@ -2209,13 +2210,12 @@ pub const Ui = struct {
                 self.tab_total,
             );
         }
-        try self.syncTabScrollbar();
+        try self.syncTabScrollbar(batch);
 
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(self.alloc);
 
-        try text.appendNTimes(self.alloc, ' ', b.cols);
-        try writeAt(batch, self.tabs_layer, 0, 0, text.items, fg_dim, bg_tab_bar);
+        try batch.clearArea(.{ .layer = self.tabs_layer, .row = 0, .rows = 1, .bg = bg_tab_bar });
 
         for (self.tab_spans.items, labels.items, 0..) |span, tab, i| {
             const active = i == self.active;
@@ -2273,19 +2273,19 @@ pub const Ui = struct {
     /// strip, the same arrangement the buffer pane has: the layer's grid
     /// is only pane-wide, and reporting the strip's real width is what
     /// lets the host turn a shift+wheel or a drag over it into the
-    /// `scroll_offset` `drainEvents` follows. Silent when nothing moved.
-    fn syncTabScrollbar(self: *Ui) !void {
+    /// `scroll_offset` `handleEvent` follows. Silent when nothing moved.
+    fn syncTabScrollbar(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const now: [2]usize = .{ self.tab_total, self.tab_scroll };
         if (std.mem.eql(usize, &now, &self.pushed_tab_bar)) return;
 
         if (now[0] != self.pushed_tab_bar[0]) {
-            try self.client.setLayerContentExtent(
+            try batch.setLayerContentExtent(
                 self.tabs_layer,
                 @max(self.tab_total, self.tabs_bounds.cols),
                 1,
             );
         }
-        try self.client.setLayerScrollOffset(self.tabs_layer, 0, self.tab_scroll);
+        try batch.setLayerScrollOffset(self.tabs_layer, 0, self.tab_scroll);
         self.pushed_tab_bar = now;
     }
 
@@ -2324,8 +2324,15 @@ pub const Ui = struct {
             try line.appendSlice(self.alloc, tail);
         }
 
-        try padTo(self.alloc, &line, glyphwire.stringWidth(line.items), b.cols);
-        try writeAt(batch, self.status_layer, 0, 0, line.items, fg, bg_status);
+        try batch.writeTextOpts(line.items, .{
+            .layer = self.status_layer,
+            .row = 0,
+            .col = 0,
+            .fg = fg,
+            .bg = bg_status,
+            .max_cols = b.cols,
+            .pad = true,
+        });
 
         // The mode word gets its own colour, over the top of the run just
         // written -- cheaper than splitting the line into two runs.
@@ -2453,11 +2460,6 @@ pub fn gutterCellText(
     return buf[0..width];
 }
 
-/// Pads `line` with spaces from `width` display cells out to `target`.
-fn padTo(alloc: std.mem.Allocator, line: *std.ArrayList(u8), width: usize, target: usize) !void {
-    if (width >= target) return;
-    try line.appendNTimes(alloc, ' ', target - width);
-}
 
 /// The colour of the span covering line-relative byte `off`, or null for
 /// "no span here" (the default text colour). Spans are sorted and

@@ -26,6 +26,11 @@ pub const DispatchError = error{
     /// `size` / `visibility` on the root layer, or any get-only property.
     /// See `core.PropertyError.ReadOnlyProperty`.
     ReadOnlyProperty,
+    /// `content_extent` set on a `scroll_mode: "host"` layer. See
+    /// `core.PropertyName.scroll_mode`.
+    WrongScrollMode,
+    /// `scroll_mode`'s `mode` wasn't `"host"` or `"client"`.
+    InvalidScrollMode,
     NotARequest,
     UnknownImage,
     UnknownIcon,
@@ -112,14 +117,20 @@ const Envelope = struct {
     params: std.json.Value = .null,
 };
 
-/// No `row`/`col` fields: this slice's `Layer.writeText` only supports
-/// cursor-implicit writes (see core.zig). Explicit positioning is decided
-/// in decisions.md but not needed until a milestone past this slice.
-/// `layer` (omitted, or `root_layer_handle`) means the root layer, same
-/// convention as `row`/`col` defaulting to the cursor elsewhere.
+/// `layer` (omitted, or `root_layer_handle`) means the root layer.
+/// `row`/`col` place the cursor before writing, each defaulting to the
+/// cursor's current value -- the same rule `draw_icon`/`draw_image` use,
+/// so a positioned write is one message rather than a `set_property`
+/// cursor move followed by a write.
 const WriteTextParams = struct {
     layer: ?core.LayerHandle = null,
+    row: ?usize = null,
+    col: ?usize = null,
     text: []const u8,
+    /// See `core.Layer.WriteOpts.max_cols`.
+    max_cols: ?usize = null,
+    /// See `core.Layer.WriteOpts.pad`.
+    pad: bool = false,
     fg: ?protocol.Color = null,
     bg: ?protocol.Color = null,
     /// See `core.Cell.metadata_id`'s doc comment.
@@ -182,6 +193,10 @@ const PropertyParams = struct {
     /// client that names the property and forgets the field gets the
     /// layer back rather than losing it.
     value: f32 = 1.0,
+    /// `"scroll_mode"`'s `"host"` / `"client"`.
+    mode: ?[]const u8 = null,
+    /// `"background"`'s colour; omitted clears it back to transparent.
+    color: ?protocol.Color = null,
 };
 
 const CursorResult = struct { row: usize, col: usize };
@@ -193,6 +208,8 @@ const ScrollResult = struct { offset: usize, max: usize };
 const VisibilityResult = struct { visible: bool };
 const OpacityResult = struct { value: f32 };
 const PtyModeResult = struct { enabled: bool };
+const ScrollModeResult = struct { mode: []const u8 };
+const BackgroundResult = struct { color: ?protocol.Color };
 const ScrollOffsetResult = struct { row: usize, col: usize, max_row: usize, max_col: usize };
 const ScrollbarsResult = struct {
     vertical: bool,
@@ -748,13 +765,15 @@ const DestroyRectParams = struct {
 
 /// `rows`/`cols` are optional: omitted means "the rest of the layer from
 /// `row`/`col`", so a bare `clear()` (every field defaulted) wipes the
-/// whole layer -- see `handleClear`.
+/// whole layer -- see `handleClear`. `bg` fills the cleared cells with an
+/// opaque background instead of leaving them transparent.
 const ClearParams = struct {
     layer: ?core.LayerHandle = null,
     row: usize = 0,
     col: usize = 0,
     rows: ?usize = null,
     cols: ?usize = null,
+    bg: ?protocol.Color = null,
 };
 
 /// `batch` params: an ordered list of sub-messages, each a normal
@@ -1667,7 +1686,16 @@ pub const Dispatcher = struct {
             core.default_style.bg;
         const metadata_id = try self.resolveMetadata(p.metadata_id);
         const scale = try parseTextScale(p.scale);
-        try layer.writeTextTaggedScaled(p.text, fg, bg, metadata_id, scale);
+        if (p.row != null or p.col != null) {
+            const anchor = resolveAnchor(layer, p.row, p.col);
+            layer.setProperty(.{ .cursor = .{ .row = anchor.row, .col = anchor.col } });
+        }
+        try layer.writeTextOpts(p.text, fg, bg, .{
+            .metadata_id = metadata_id,
+            .scale = scale,
+            .max_cols = p.max_cols,
+            .pad = p.pad,
+        });
 
         // A terminal query the text carried (`CSI 6n` / DA / DECRQM):
         // hand the reply bytes to `"terminal"` subscribers -- glyphwire-
@@ -1753,6 +1781,11 @@ pub const Dispatcher = struct {
             } }
         else if (std.mem.eql(u8, p.property, "content_extent"))
             .{ .content_extent = .{ .cols = p.cols, .rows = p.rows } }
+        else if (std.mem.eql(u8, p.property, "scroll_mode"))
+            .{ .scroll_mode = std.meta.stringToEnum(core.ScrollMode, p.mode orelse "") orelse
+                return DispatchError.InvalidScrollMode }
+        else if (std.mem.eql(u8, p.property, "background"))
+            .{ .background = if (p.color) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else null }
         else if (std.mem.eql(u8, p.property, "pty_mode"))
             .{ .pty_mode = p.enabled }
         else
@@ -1763,6 +1796,7 @@ pub const Dispatcher = struct {
         self.ctx.setLayerProperty(p.layer, value) catch |err| return switch (err) {
             error.UnknownLayer => DispatchError.UnknownLayer,
             error.ReadOnlyProperty => DispatchError.ReadOnlyProperty,
+            error.WrongScrollMode => DispatchError.WrongScrollMode,
             error.UnknownProperty => DispatchError.UnknownProperty,
             error.OutOfMemory => error.OutOfMemory,
         };
@@ -1856,6 +1890,15 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "scroll")) {
             const sc = layer.getProperty(.scroll).scroll;
             return try rpc.response(alloc, id, ScrollResult{ .offset = sc.offset, .max = sc.max });
+        } else if (std.mem.eql(u8, p.property, "scroll_mode")) {
+            const mode = layer.getProperty(.scroll_mode).scroll_mode;
+            return try rpc.response(alloc, id, ScrollModeResult{ .mode = @tagName(mode) });
+        } else if (std.mem.eql(u8, p.property, "background")) {
+            const bg: ?protocol.Color = if (layer.getProperty(.background).background) |c|
+                .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a }
+            else
+                null;
+            return try rpc.response(alloc, id, BackgroundResult{ .color = bg });
         } else if (std.mem.eql(u8, p.property, "pty_mode")) {
             const on = layer.getProperty(.pty_mode).pty_mode;
             return try rpc.response(alloc, id, PtyModeResult{ .enabled = on });
@@ -2761,6 +2804,21 @@ pub const Dispatcher = struct {
         return .{ .response = resp_body, .broadcast = .{ .event = "scroll", .body = notif_body } };
     }
 
+    /// The modifiers to stamp on an input notification: the session's
+    /// window-global set (see `core.Session.mods`), or -- for a bare
+    /// dispatcher with no session, which only tests build -- this
+    /// context's own down-set.
+    fn currentMods(self: *Dispatcher) core.Mods {
+        if (self.session) |session| return session.mods;
+        const in = &self.ctx.input;
+        return .{
+            .ctrl = in.isKeyDown("left_control") or in.isKeyDown("right_control"),
+            .alt = in.isKeyDown("left_alt") or in.isKeyDown("right_alt"),
+            .shift = in.isKeyDown("left_shift") or in.isKeyDown("right_shift"),
+            .super = in.isKeyDown("left_super") or in.isKeyDown("right_super"),
+        };
+    }
+
     /// A notification from an input-capturing client (glyphwire-host, in
     /// practice -- nothing here restricts it to a particular sender, see
     /// decisions.md's stance on there being no auth model yet). Updates
@@ -2788,7 +2846,7 @@ pub const Dispatcher = struct {
             switch (route) {
                 .swallow => return .{},
                 .manager => {
-                    const body = try rpc.windowKeyNotification(alloc, p.key, p.pressed);
+                    const body = try rpc.windowKeyNotification(alloc, p.key, p.pressed, session.mods);
                     return .{ .broadcast = .{
                         .event = if (p.pressed) "window_key_down" else "window_key_up",
                         .body = body,
@@ -2799,7 +2857,7 @@ pub const Dispatcher = struct {
         }
         if (!changed) return .{};
 
-        const notif_body = try rpc.keyNotification(alloc, p.key, p.pressed);
+        const notif_body = try rpc.keyNotification(alloc, p.key, p.pressed, self.currentMods());
         return .{ .broadcast = .{ .event = "key", .body = notif_body } };
     }
 
@@ -2841,7 +2899,7 @@ pub const Dispatcher = struct {
         const changed = try self.ctx.input.setMouseButton(p.button, p.pressed);
         if (!changed) return .{};
 
-        const notif_body = try rpc.mouseButtonNotification(alloc, p.button, p.pressed, p.px, p.cell, p.view_offset);
+        const notif_body = try rpc.mouseButtonNotification(alloc, p.button, p.pressed, p.px, p.cell, p.view_offset, self.currentMods());
         return .{ .broadcast = .{ .event = "mouse_button", .body = notif_body } };
     }
 
@@ -2863,7 +2921,7 @@ pub const Dispatcher = struct {
         self.ctx.input.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
         if (!cell_changed) return .{};
 
-        const notif_body = try rpc.mouseMoveNotification(alloc, p.px, p.cell);
+        const notif_body = try rpc.mouseMoveNotification(alloc, p.px, p.cell, self.currentMods());
         return .{ .broadcast = .{ .event = "mouse_move", .body = notif_body } };
     }
 
@@ -3062,7 +3120,8 @@ pub const Dispatcher = struct {
         const layer = try self.resolveLayer(p.layer);
         const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
         const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
-        layer.clear(p.row, p.col, rows, cols);
+        const bg: ?core.Color = if (p.bg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else null;
+        layer.clearFill(p.row, p.col, rows, cols, bg);
     }
 
     /// A client-side convenience for aspect-ratio-aware placement

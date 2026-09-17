@@ -418,9 +418,29 @@ pub const Style = struct {
     bg: Background,
 };
 
+/// The blank cell's style. `bg` is **fully transparent** (alpha 0), and
+/// alpha is the only thing that makes a cell background transparent: the
+/// renderer skips a `.color` background whose alpha is 0 and paints any
+/// other one, black included. An explicit `{r: 0, g: 0, b: 0}` from a
+/// client (whose wire `a` defaults to 255) is therefore an opaque black
+/// fill, not "the default" -- which is what makes `clear`'s `bg` and the
+/// layer `background` property usable with a black theme.
 pub const default_style: Style = .{
     .fg = .{ .r = 255, .g = 255, .b = 255 },
-    .bg = .{ .color = .{ .r = 0, .g = 0, .b = 0 } },
+    .bg = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } },
+};
+
+/// Modifier keys held when an input event was generated, folded left and
+/// right. Captured by the server at the moment it routes the event (from
+/// `Session.mods`) and carried on `key_down`/`key_up`/`mouse_button`/
+/// `mouse_move`, so a client that falls behind still sees the chord the
+/// user actually pressed rather than whatever is held when it gets round
+/// to the event.
+pub const Mods = struct {
+    ctrl: bool = false,
+    alt: bool = false,
+    shift: bool = false,
+    super: bool = false,
 };
 
 /// The "current pen" a `Layer` builds up from SGR (`ESC [ ... m`) sequences
@@ -610,7 +630,9 @@ pub const SgrPen = struct {
                 else => default_style.bg.color,
             };
             const new_bg = fg;
-            fg = bg_color;
+            // The default background is transparent (alpha 0); swapped
+            // into the foreground it has to become visible ink.
+            fg = .{ .r = bg_color.r, .g = bg_color.g, .b = bg_color.b };
             bg = .{ .color = new_bg };
         }
 
@@ -1029,6 +1051,30 @@ pub const PropertyName = enum {
     /// host-scrolled pane. Get reports the effective content size (the
     /// virtual one if set, else the real grid).
     content_extent,
+    /// Which of the two viewport scroll models this layer uses
+    /// (`{mode: "host" | "client"}`, default `"host"`):
+    ///
+    /// - `host`: the content grid is the whole content, and the host
+    ///   slides the `viewport` over it (`scroll_offset` moves the real
+    ///   grid window). `content_extent` is refused (`WrongScrollMode`).
+    /// - `client`: the client redraws its visible rows itself and tells
+    ///   the host the virtual size with `content_extent`; `scroll_offset`
+    ///   is a virtual position the host only reports, the real grid never
+    ///   moves.
+    ///
+    /// Both are separate from the root layer's terminal *scrollback*
+    /// (`scroll` / `scroll_view` / `view_offset`), which is a ring buffer
+    /// of rows that scrolled off the top, not a viewport. The model used
+    /// to be implied by whether `content_extent` was set, which let a
+    /// client flip a picture layer into the virtual model by accident; it
+    /// is explicit now, and switching it resets the scroll position.
+    scroll_mode,
+    /// The colour an unwritten (transparent-background) cell composites
+    /// as (`{color: {r, g, b, a}}`, or no `color` for none -- the
+    /// default, where such cells show whatever is behind the layer).
+    /// Painted under every cell of the layer's viewport, so rows past the
+    /// end of a list stay opaque without the client writing padding.
+    background,
     /// Whether this layer keeps its escape-sequence / charset / SGR-pen
     /// state across `write_text` calls instead of resetting it at each
     /// call boundary (`{enabled: bool}`, default off). See
@@ -1052,8 +1098,13 @@ pub const PropertyValue = union(PropertyName) {
     scroll_offset: CellPos,
     scrollbars: ScrollbarState,
     content_extent: Viewport,
+    scroll_mode: ScrollMode,
+    background: ?Color,
     pty_mode: bool,
 };
+
+/// See `PropertyName.scroll_mode`.
+pub const ScrollMode = enum { host, client };
 
 pub const PropertyError = error{
     UnknownProperty,
@@ -1062,6 +1113,9 @@ pub const PropertyError = error{
     /// geometry and compositing the host owns. See each one's doc
     /// comment above.
     ReadOnlyProperty,
+    /// `content_extent` set on a layer whose `scroll_mode` is `host`. See
+    /// `PropertyName.scroll_mode`.
+    WrongScrollMode,
 };
 
 /// A server-generated handle for a layer created via `create_layer`.
@@ -1384,7 +1438,12 @@ pub const Layer = struct {
     /// itself: the size of the whole content the client redraws, which
     /// the scrollbar/viewport maths use in place of the real grid.
     content_extent: ?CellPos = null,
-    /// The virtual scroll position while `content_extent` is set --
+    /// See `PropertyName.scroll_mode`. `content_extent`/`content_off` are
+    /// only ever non-default in `.client`.
+    scroll_mode: ScrollMode = .host,
+    /// See `PropertyName.background`.
+    background: ?Color = null,
+    /// The virtual scroll position of a `.client` scroll-mode layer --
     /// `scroll_off` stays put (the real grid never moves) and this is
     /// what `set_property(scroll_offset)`, the scrollbar and the wheel
     /// move instead.
@@ -1459,6 +1518,7 @@ pub const Layer = struct {
     /// virtual `content_extent` for a self-scrolling pane, else the real
     /// cell grid.
     fn effectiveContent(self: *const Layer) CellPos {
+        if (self.scroll_mode == .host) return .{ .row = self.height, .col = self.width };
         return self.content_extent orelse .{ .row = self.height, .col = self.width };
     }
 
@@ -1466,7 +1526,7 @@ pub const Layer = struct {
     /// wheel / drag move: the virtual `content_off` for a self-scrolling
     /// pane, else the real `scroll_off`.
     pub fn effectiveScrollOffset(self: *const Layer) CellPos {
-        return if (self.content_extent != null) self.content_off else self.scroll_off;
+        return if (self.scroll_mode == .client) self.content_off else self.scroll_off;
     }
 
     /// The largest legal scroll offset on each axis: how much content the
@@ -1510,7 +1570,7 @@ pub const Layer = struct {
         const next: CellPos = .{ .row = @min(off.row, max.row), .col = @min(off.col, max.col) };
         const cur = self.effectiveScrollOffset();
         if (next.row != cur.row or next.col != cur.col) {
-            if (self.content_extent != null) {
+            if (self.scroll_mode == .client) {
                 self.content_off = next;
             } else {
                 self.scroll_off = next;
@@ -1533,12 +1593,27 @@ pub const Layer = struct {
     }
 
     /// Sets (or, with `null`, clears) the virtual content extent and
-    /// re-clamps the virtual offset into it. See
+    /// re-clamps the virtual offset into it. Only meaningful in `.client`
+    /// scroll mode; `Context.setLayerProperty` refuses it otherwise. See
     /// `PropertyName.content_extent`.
     pub fn setContentExtent(self: *Layer, extent: ?CellPos) void {
+        std.debug.assert(self.scroll_mode == .client);
         self.content_extent = extent;
         if (extent == null) self.content_off = .{};
         _ = self.setScrollOffset(self.effectiveScrollOffset());
+        self.touchRender();
+    }
+
+    /// Switches scroll model. A no-op when unchanged; otherwise both scroll
+    /// positions reset to the origin and any `content_extent` is dropped,
+    /// so nothing from one model's coordinates leaks into the other. See
+    /// `PropertyName.scroll_mode`.
+    pub fn setScrollMode(self: *Layer, mode: ScrollMode) void {
+        if (mode == self.scroll_mode) return;
+        self.scroll_mode = mode;
+        self.content_extent = null;
+        self.content_off = .{};
+        self.scroll_off = .{};
         self.touchRender();
     }
 
@@ -2030,6 +2105,37 @@ pub const Layer = struct {
     /// "Zig has no default parameter values" reason `writeTextTagged`
     /// itself got split out from `writeText`.
     pub fn writeTextTaggedScaled(self: *Layer, text: []const u8, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale) !void {
+        return self.writeTextOpts(text, fg, bg, .{ .metadata_id = metadata_id, .scale = scale });
+    }
+
+    /// The options `write_text` can carry beyond text and colour. Every
+    /// field defaults to the original behaviour, so `writeTextOpts(t, fg,
+    /// bg, .{})` is `writeText`.
+    pub const WriteOpts = struct {
+        metadata_id: ?MetadataHandle = null,
+        scale: TextScale = .x1,
+        /// Clip the run to this many display columns from where it starts
+        /// (further clamped to the layer's right edge): a grapheme that
+        /// would cross the limit is dropped along with everything after
+        /// it, and the run never wraps. A wide character that only half
+        /// fits leaves a blank cell in its place. The host's East Asian
+        /// Width table decides, so a client never measures text itself.
+        max_cols: ?usize = null,
+        /// With `max_cols`: fill the rest of the clipped span with blank
+        /// cells in `bg`, leaving the cursor at the span's end -- a whole
+        /// row of a list or a status bar in one write, whatever the text
+        /// length. Ignored without `max_cols`.
+        pad: bool = false,
+    };
+
+    /// `writeTextTaggedScaled` with `WriteOpts` -- what `write_text`
+    /// dispatches to.
+    pub fn writeTextOpts(self: *Layer, text: []const u8, fg: Color, bg: ?Background, opts: WriteOpts) !void {
+        const metadata_id = opts.metadata_id;
+        const scale = opts.scale;
+        // The clip limit is an absolute column on the starting row.
+        const clip_end: ?usize = if (opts.max_cols) |n| @min(self.cursor.col + n, self.width) else null;
+
         // The SGR pen is call-local: an `ESC [ ... m` colour is honoured
         // only for the rest of *this* `write_text`, never carried into
         // the next call. Cross-call persistence was tried and reverted --
@@ -2058,7 +2164,21 @@ pub const Layer = struct {
                 continue;
             }
             const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
-            self.putAtCursor(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, metadata_id, scale);
+            const w = codepointWidth(cp);
+            if (clip_end) |end| {
+                if (self.cursor.col + w > end) {
+                    // A wide glyph straddling the limit: blank the half
+                    // that does fit rather than leave stale content.
+                    if (self.cursor.col < end) self.putAtCursor(" ", 1, eff.fg, eff.bg, metadata_id, scale);
+                    break;
+                }
+            }
+            self.putAtCursor(cp_bytes, w, eff.fg, eff.bg, metadata_id, scale);
+        }
+        if (clip_end) |end| {
+            if (opts.pad) {
+                while (self.cursor.col < end) self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1);
+            }
         }
         // Don't carry a half-consumed `ESC ...` sequence into the next
         // call: a lone trailing `ESC`, a truncated `ESC [ ...`, or an
@@ -3009,14 +3129,23 @@ pub const Layer = struct {
     /// the cursor -- a caller wanting "clear and home the cursor" (a real
     /// terminal's `clear`/ctrl+l) does that itself via `set_property`.
     pub fn clear(self: *Layer, row: usize, col: usize, rows: usize, cols: usize) void {
+        self.clearFill(row, col, rows, cols, null);
+    }
+
+    /// `clear`, but the blanked cells take `bg` as their background
+    /// instead of the transparent default -- `clear`'s `bg` param, the
+    /// "paint a solid panel" primitive. `null` is exactly `clear`.
+    pub fn clearFill(self: *Layer, row: usize, col: usize, rows: usize, cols: usize, bg: ?Color) void {
         if (row >= self.height or col >= self.width or rows == 0 or cols == 0) return;
 
         const row_end = @min(row + rows, self.height);
         const col_end = @min(col + cols, self.width);
+        var blank: Cell = .{};
+        if (bg) |c| blank.style.bg = .{ .color = c };
 
         var r = row;
         while (r < row_end) : (r += 1) {
-            for (self.liveRow(r)[col..col_end]) |*cell_ptr| cell_ptr.* = .{};
+            for (self.liveRow(r)[col..col_end]) |*cell_ptr| cell_ptr.* = blank;
         }
         self.revision += 1;
         self.render_gen +%= 1;
@@ -3039,6 +3168,8 @@ pub const Layer = struct {
                 const c = self.effectiveContent();
                 break :blk .{ .cols = c.col, .rows = c.row };
             } },
+            .scroll_mode => .{ .scroll_mode = self.scroll_mode },
+            .background => .{ .background = self.background },
             .pty_mode => .{ .pty_mode = self.pty_mode },
         };
     }
@@ -3066,9 +3197,13 @@ pub const Layer = struct {
             },
             .scroll_offset => |off| _ = self.setScrollOffset(off),
             .scrollbars => |sb| self.scrollbars = .{ .vertical = sb.vertical, .horizontal = sb.horizontal },
-            .content_extent => |v| self.setContentExtent(
+            // Ignored in host mode; `Context.setLayerProperty` is where
+            // the wire path reports `WrongScrollMode` instead.
+            .content_extent => |v| if (self.scroll_mode == .client) self.setContentExtent(
                 if (v.cols == 0 and v.rows == 0) null else .{ .row = v.rows, .col = v.cols },
             ),
+            .scroll_mode => |m| self.setScrollMode(m),
+            .background => |c| self.background = c,
             .pty_mode => |v| {
                 self.pty_mode = v;
                 // Setting it either way is also the re-arm point: drop
@@ -4917,7 +5052,11 @@ pub const Context = struct {
                 layer.touchRender();
             },
             .revision, .scroll => return PropertyError.ReadOnlyProperty,
-            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .content_extent, .pty_mode => layer.setProperty(value),
+            .content_extent => {
+                if (layer.scroll_mode != .client) return PropertyError.WrongScrollMode;
+                layer.setProperty(value);
+            },
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode => layer.setProperty(value),
         }
     }
 
@@ -5960,7 +6099,10 @@ pub const Session = struct {
     /// moved to, failed to match, and went to that pane's program.
     ///
     /// A keyboard is one keyboard. Its state belongs to the window.
-    mods: struct { ctrl: bool = false, alt: bool = false, shift: bool = false } = .{},
+    ///
+    /// Also what every `key_*`/`mouse_*` notification's `mods` is stamped
+    /// from, for the same reason (see `Mods`).
+    mods: Mods = .{},
 
     /// Denormalised copies of "which context is on screen in the focused
     /// pane" and a change-counter, kept so lock-free readers
@@ -6352,10 +6494,12 @@ pub const Session = struct {
             self.mods.shift = pressed;
             return true;
         }
-        // Recognised but not stored: `WindowPrefix` has no Super, so there
-        // is nothing to match against. Still a modifier, and so still must
-        // not be taken for a command.
-        if (eql(u8, key_name, "left_super") or eql(u8, key_name, "right_super")) return true;
+        // `WindowPrefix` has no Super, so the prefix never matches on it;
+        // it is stored for the `mods` stamped on input notifications.
+        if (eql(u8, key_name, "left_super") or eql(u8, key_name, "right_super")) {
+            self.mods.super = pressed;
+            return true;
+        }
         return false;
     }
 

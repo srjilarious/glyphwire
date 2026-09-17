@@ -750,13 +750,15 @@ pub const Server = struct {
             // goes stale the instant focus moves. See `Session.mods`.
             const changed = try self.ctx.input.setKey(key, pressed);
             const route = self.session.routeKey(key, pressed);
-            break :decision .{ .changed = changed, .route = route };
+            // Read after `routeKey` has folded this key in, so a
+            // modifier's own event reports itself.
+            break :decision .{ .changed = changed, .route = route, .mods = self.session.mods };
         };
 
         switch (decision.route) {
             .swallow => return,
             .manager => {
-                const body = try rpc.windowKeyNotification(alloc, key, pressed);
+                const body = try rpc.windowKeyNotification(alloc, key, pressed, decision.mods);
                 defer alloc.free(body);
                 self.deliverToManager("window_key", body);
                 return;
@@ -765,7 +767,7 @@ pub const Server = struct {
         }
         if (!decision.changed) return;
 
-        const body = try rpc.keyNotification(alloc, key, pressed);
+        const body = try rpc.keyNotification(alloc, key, pressed, decision.mods);
         defer alloc.free(body);
         self.broadcast(null, "key", body);
     }
@@ -815,13 +817,14 @@ pub const Server = struct {
         // one-shot, so a repeat has nothing to mean. The same goes once the
         // command has fired, while the key is still held: its press was
         // withheld, so its repeats are too (`Session.isSwallowedKey`).
-        {
+        const mods = mods: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             if (self.session.prefix_armed) return;
             if (self.session.isSwallowedKey(key)) return;
-        }
-        const body = try rpc.keyRepeatNotification(alloc, key);
+            break :mods self.session.mods;
+        };
+        const body = try rpc.keyRepeatNotification(alloc, key, mods);
         defer alloc.free(body);
         self.broadcast(null, "key", body);
     }
@@ -860,16 +863,16 @@ pub const Server = struct {
     /// so a subscriber (glyphwire-shell) can resolve `cell` against the
     /// same scrolled-back row the user actually clicked.
     pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos, view_offset: usize) !void {
-        const changed = changed: {
+        const changed, const mods = changed: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             self.ctx.input.cursor_px = px;
             self.ctx.input.cursor_cell = cell;
-            break :changed try self.ctx.input.setMouseButton(button, pressed);
+            break :changed .{ try self.ctx.input.setMouseButton(button, pressed), self.session.mods };
         };
         if (!changed) return;
 
-        const body = try rpc.mouseButtonNotification(alloc, button, pressed, px, cell, view_offset);
+        const body = try rpc.mouseButtonNotification(alloc, button, pressed, px, cell, view_offset, mods);
         defer alloc.free(body);
         self.broadcast(null, "mouse_button", body);
     }
@@ -961,17 +964,17 @@ pub const Server = struct {
     /// per-pixel motion the host reports off the wire. Cheap to call
     /// every frame.
     pub fn reportMouseMove(self: *Server, alloc: std.mem.Allocator, px: core.PxPos, cell: core.CellPos) !void {
-        const cell_changed = changed: {
+        const cell_changed, const mods = changed: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             const before = self.ctx.input.cursor_cell;
             self.ctx.input.cursor_px = px;
             self.ctx.input.cursor_cell = cell;
-            break :changed before.row != cell.row or before.col != cell.col;
+            break :changed .{ before.row != cell.row or before.col != cell.col, self.session.mods };
         };
         if (!cell_changed) return;
 
-        const body = try rpc.mouseMoveNotification(alloc, px, cell);
+        const body = try rpc.mouseMoveNotification(alloc, px, cell, mods);
         defer alloc.free(body);
         self.broadcast(null, "mouse_move", body);
     }

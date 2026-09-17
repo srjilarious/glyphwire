@@ -42,16 +42,17 @@ pub fn notification(alloc: std.mem.Allocator, method: []const u8, params: anytyp
 // the client by `InputListener.handleNotification` against the same
 // `protocol.*Params` types.
 
-/// `key_down` (pressed) or `key_up` (released) for `key`.
-pub fn keyNotification(alloc: std.mem.Allocator, key: []const u8, pressed: bool) ![]u8 {
-    return notification(alloc, if (pressed) "key_down" else "key_up", protocol.KeyParams{ .key = key });
+/// `key_down` (pressed) or `key_up` (released) for `key`, stamped with
+/// the modifiers held at routing time.
+pub fn keyNotification(alloc: std.mem.Allocator, key: []const u8, pressed: bool, mods: core.Mods) ![]u8 {
+    return notification(alloc, if (pressed) "key_down" else "key_up", protocol.KeyParams{ .key = key, .mods = mods });
 }
 
 /// `key_down` for an already-held `key` -- a typematic repeat. Same shape
 /// as a fresh press; nothing downstream needs to tell them apart (see
 /// `Server.reportKeyRepeat`).
-pub fn keyRepeatNotification(alloc: std.mem.Allocator, key: []const u8) ![]u8 {
-    return notification(alloc, "key_down", protocol.KeyParams{ .key = key });
+pub fn keyRepeatNotification(alloc: std.mem.Allocator, key: []const u8, mods: core.Mods) ![]u8 {
+    return notification(alloc, "key_down", protocol.KeyParams{ .key = key, .mods = mods });
 }
 
 /// `text` -- committed text input (`text` is a UTF-8 string of one or
@@ -69,6 +70,7 @@ pub fn mouseButtonNotification(
     px: protocol.PxPos,
     cell: protocol.CellPos,
     view_offset: usize,
+    mods: core.Mods,
 ) ![]u8 {
     return notification(alloc, "mouse_button", protocol.MouseButtonParams{
         .button = button,
@@ -76,14 +78,15 @@ pub fn mouseButtonNotification(
         .px = px,
         .cell = cell,
         .view_offset = view_offset,
+        .mods = mods,
     });
 }
 
 /// `mouse_move` -- the pointer moved to a new cell (`px`/`cell`). See
 /// `protocol.MouseMoveParams`; broadcast by `Server.reportMouseMove` /
 /// `handleReportMouseMove` only on a cell change.
-pub fn mouseMoveNotification(alloc: std.mem.Allocator, px: protocol.PxPos, cell: protocol.CellPos) ![]u8 {
-    return notification(alloc, "mouse_move", protocol.MouseMoveParams{ .px = px, .cell = cell });
+pub fn mouseMoveNotification(alloc: std.mem.Allocator, px: protocol.PxPos, cell: protocol.CellPos, mods: core.Mods) ![]u8 {
+    return notification(alloc, "mouse_move", protocol.MouseMoveParams{ .px = px, .cell = cell, .mods = mods });
 }
 
 /// `scroll` -- a layer's scrollback-ring view moved to `offset` (of
@@ -146,11 +149,11 @@ pub fn paneLayoutNotification(alloc: std.mem.Allocator, panes: []const protocol.
 /// registered prefix. Addressed to the manager alone, never broadcast,
 /// because a window command has exactly one recipient by definition.
 /// Press/release is in the method name, matching `key_down`/`key_up`.
-pub fn windowKeyNotification(alloc: std.mem.Allocator, key: []const u8, pressed: bool) ![]u8 {
+pub fn windowKeyNotification(alloc: std.mem.Allocator, key: []const u8, pressed: bool, mods: core.Mods) ![]u8 {
     return notification(
         alloc,
         if (pressed) "window_key_down" else "window_key_up",
-        protocol.KeyParams{ .key = key },
+        protocol.KeyParams{ .key = key, .mods = mods },
     );
 }
 

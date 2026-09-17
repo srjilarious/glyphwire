@@ -334,6 +334,76 @@ pub fn inputListenerQueuesTextEventsTest(_: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqualStr(ev.?.text.text, "a\u{3042}b");
 }
 
+/// `InputListener.next`: one ordered queue across streams, key events
+/// carrying the modifiers held when they were generated (not when they
+/// are consumed), and a `resize` waking the waiter like any keystroke.
+pub fn inputListenerNextKeepsOrderAndEventTimeModsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "resize" });
+    defer listener.deinit();
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+    // A fast Ctrl+W, fully released before anything is consumed.
+    try reporter.reportKey("left_control", true);
+    try reporter.reportKey("w", true);
+    try reporter.reportKey("w", false);
+    try reporter.reportKey("left_control", false);
+    try reporter.reportText("x");
+
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(2000), .clock = .awake } };
+    const Expect = struct { key: []const u8, pressed: bool, ctrl: bool };
+    const keys = [_]Expect{
+        .{ .key = "left_control", .pressed = true, .ctrl = true },
+        .{ .key = "w", .pressed = true, .ctrl = true },
+        .{ .key = "w", .pressed = false, .ctrl = true },
+        .{ .key = "left_control", .pressed = false, .ctrl = false },
+    };
+    for (keys) |want| {
+        const ev = (try listener.next(timeout)) orelse return error.TestUnexpectedResult;
+        defer ev.deinit(alloc);
+        try testz.expectTrue(ev == .key);
+        try testz.expectEqualStr(ev.key.key, want.key);
+        try testz.expectEqual(ev.key.pressed, want.pressed);
+        try testz.expectEqual(ev.key.ctrl(), want.ctrl);
+    }
+    // By now the live down-set says Ctrl is up -- the race the event's own
+    // `mods` exists to avoid.
+    try testz.expectTrue(!listener.isKeyDown("left_control"));
+
+    {
+        const ev = (try listener.next(timeout)) orelse return error.TestUnexpectedResult;
+        defer ev.deinit(alloc);
+        try testz.expectTrue(ev == .text);
+        try testz.expectEqualStr(ev.text.text, "x");
+    }
+
+    try srv.reportResize(alloc, 100, 30);
+    const ev = (try listener.next(timeout)) orelse return error.TestUnexpectedResult;
+    defer ev.deinit(alloc);
+    try testz.expectTrue(ev == .resize);
+    try testz.expectEqual(ev.resize.cols, 100);
+    try testz.expectEqual(listener.size().?.rows, 30);
+}
+
 /// A minimal byte stream `pngDimensions` accepts -- see core_tests.zig's
 /// identical fixture. Exercises `Client.loadImage` over a real socket, the
 /// one path that needs the binary side-channel's raw-byte framing (see
