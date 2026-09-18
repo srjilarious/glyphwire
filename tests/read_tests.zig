@@ -511,7 +511,7 @@ pub fn configAiDefaultsAreOffAndCautiousTest(_: std.Io, alloc: std.mem.Allocator
     try testz.expectTrue(c.ai_provider == .openai);
     try testz.expectEqualStr(c.aiModel(), "gpt-5");
     try testz.expectEqualStr(c.aiEndpoint(), "https://api.openai.com/v1/responses");
-    try testz.expectEqualStr(c.ai_api_key_env, "OPENAI_API_KEY");
+    try testz.expectEqualStr(c.aiApiKeyEnv(), "OPENAI_API_KEY");
     try testz.expectTrue(c.ai_include_neighbor_dialog);
     try testz.expectFalse(c.ai_include_book_info);
     try testz.expectTrue(c.ai_confirm_before_send);
@@ -538,6 +538,26 @@ pub fn configReadsAiSettingsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqualStr(c.ai_prompt, "N3 learner, brief.");
     try testz.expectFalse(c.ai_include_neighbor_dialog);
     try testz.expectFalse(c.ai_confirm_before_send);
+}
+
+pub fn configClaudeProvidersDefaultToOpus5Test(_: std.Io, alloc: std.mem.Allocator) !void {
+    var api = rconfig.load(alloc,
+        \\config = { ai_provider = "anthropic" }
+    );
+    defer api.deinit(alloc);
+    try testz.expectEqualStr(api.config.aiModel(), "claude-opus-5");
+    try testz.expectEqualStr(api.config.aiEndpoint(), "https://api.anthropic.com/v1/messages");
+    try testz.expectEqualStr(api.config.aiApiKeyEnv(), "ANTHROPIC_API_KEY");
+
+    var cli = rconfig.load(alloc,
+        \\config = { ai_provider = "claude_code" }
+    );
+    defer cli.deinit(alloc);
+    try testz.expectEqualStr(cli.config.aiModel(), "claude-opus-5");
+    try testz.expectEqualStr(cli.config.aiEndpoint(), "claude");
+    // The CLI brings its own login: no key to look for.
+    try testz.expectEqualStr(cli.config.aiApiKeyEnv(), "");
+    try testz.expectFalse(cli.config.ai_provider.needsKey());
 }
 
 pub fn configIgnoresAnUnknownAiProviderTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -624,6 +644,96 @@ pub fn aiOllamaBodyIsANonStreamingChatTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqual(msgs.len, 2);
     try testz.expectEqualStr(msgs[0].object.get("role").?.string, "system");
     try testz.expectEqualStr(msgs[1].object.get("content").?.string, p.user);
+}
+
+pub fn aiAnthropicBodyIsAMessagesRequestTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try ai.buildPrompt(alloc, "", .{ .dialog = "やあ" });
+    defer p.deinit(alloc);
+
+    const body = try ai.buildBody(alloc, .anthropic, "claude-opus-5", p);
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const o = parsed.value.object;
+    try testz.expectEqualStr(o.get("model").?.string, "claude-opus-5");
+    try testz.expectEqualStr(o.get("system").?.string, p.instructions);
+    try testz.expectEqual(o.get("max_tokens").?.integer, 16000);
+    const msgs = o.get("messages").?.array.items;
+    try testz.expectEqual(msgs.len, 1);
+    try testz.expectEqualStr(msgs[0].object.get("role").?.string, "user");
+    try testz.expectEqualStr(msgs[0].object.get("content").?.string, p.user);
+    // Opus 5 takes server-side refusal fallbacks...
+    try testz.expectEqualStr(o.get("fallbacks").?.string, "default");
+
+    // ...a model that doesn't publish fallback models would 400 on it.
+    const older = try ai.buildBody(alloc, .anthropic, "claude-haiku-4-5", p);
+    defer alloc.free(older);
+    const parsed_older = try std.json.parseFromSlice(std.json.Value, alloc, older, .{});
+    defer parsed_older.deinit();
+    try testz.expectTrue(parsed_older.value.object.get("fallbacks") == null);
+}
+
+pub fn aiParsesAnAnthropicAnswerSkippingThinkingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const body =
+        \\{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5",
+        \\ "content":[
+        \\   {"type":"thinking","thinking":"","signature":"x"},
+        \\   {"type":"text","text":"\"What?!\""},
+        \\   {"type":"text","text":" (surprised)"}
+        \\ ],"stop_reason":"end_turn"}
+    ;
+    const ans = try ai.parseAnswer(alloc, .anthropic, 200, body);
+    defer ans.deinit(alloc);
+    try testz.expectEqualStr(ans.text, "\"What?!\" (surprised)");
+}
+
+pub fn aiReportsAnAnthropicRefusalAndErrorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A decline is HTTP 200: `stop_reason` has to be checked first.
+    const refusal = try ai.parseAnswer(alloc, .anthropic, 200,
+        \\{"type":"message","content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":null}}
+    );
+    defer refusal.deinit(alloc);
+    try testz.expectTrue(refusal == .failure);
+
+    const err = try ai.parseAnswer(alloc, .anthropic, 401,
+        \\{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}
+    );
+    defer err.deinit(alloc);
+    try testz.expectEqualStr(err.failure, "HTTP 401: invalid x-api-key");
+}
+
+pub fn aiParsesTheClaudeCliResultTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const ok = try ai.parseAnswer(alloc, .claude_code, 200,
+        \\{"type":"result","subtype":"success","is_error":false,"result":"Alright.","stop_reason":"end_turn"}
+    );
+    defer ok.deinit(alloc);
+    try testz.expectEqualStr(ok.text, "Alright.");
+
+    // The CLI's own failures come back as a result with `is_error`.
+    const failed = try ai.parseAnswer(alloc, .claude_code, 500,
+        \\{"type":"result","subtype":"success","is_error":true,"result":"Not logged in - Please run /login"}
+    );
+    defer failed.deinit(alloc);
+    try testz.expectEqualStr(failed.failure, "Not logged in - Please run /login");
+}
+
+pub fn aiClaudeArgvIsHeadlessToollessAndPositionalLastTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try ai.buildPrompt(alloc, "", .{ .dialog = "-やあ" });
+    defer p.deinit(alloc);
+    var buf: [13][]const u8 = undefined;
+    const argv = ai.claudeArgv(&buf, "claude", "claude-opus-5", p);
+    try testz.expectEqualStr(argv[0], "claude");
+    try testz.expectEqualStr(argv[1], "-p");
+    // No --bare: it would refuse the user's Claude Code login.
+    for (argv) |a| try testz.expectFalse(std.mem.eql(u8, a, "--bare"));
+    // Tools off, the app's instructions replacing Claude Code's prompt.
+    try testz.expectEqualStr(argv[5], "--tools");
+    try testz.expectEqualStr(argv[6], "");
+    try testz.expectEqualStr(argv[9], "--system-prompt");
+    try testz.expectEqualStr(argv[10], p.instructions);
+    // `--` first, so a message starting with `-` is never read as a flag.
+    try testz.expectEqualStr(argv[argv.len - 2], "--");
+    try testz.expectEqualStr(argv[argv.len - 1], p.user);
 }
 
 pub fn aiParsesAnOpenAiResponsesAnswerTest(_: std.Io, alloc: std.mem.Allocator) !void {

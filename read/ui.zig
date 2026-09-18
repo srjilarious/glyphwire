@@ -1464,10 +1464,16 @@ pub const Ui = struct {
                 // leaves the machine.
                 const neighbours = self.conf.ai_include_neighbor_dialog;
                 const book_info = self.conf.ai_include_book_info;
+                // `claude_code` has no URL to name: the text goes to
+                // Anthropic through the CLI, on the user's own login.
+                const dest = if (provider == .claude_code)
+                    try std.fmt.allocPrint(a, "Anthropic through `{s} -p` on your Claude Code login", .{self.conf.aiEndpoint()})
+                else
+                    self.conf.aiEndpoint();
                 const what = try std.fmt.allocPrint(a, "This bubble's OCR text{s}{s} will be sent to {s} ({s}). No images are sent.", .{
                     if (neighbours and book_info) ", the bubbles either side of it" else if (neighbours) " and the bubbles either side of it" else "",
                     if (book_info) " and the book's title and page number" else "",
-                    self.conf.aiEndpoint(),
+                    dest,
                     model,
                 });
                 try appendWrapped(a, &lines, what, inner_max, fg_dialog);
@@ -2666,7 +2672,7 @@ pub const Ui = struct {
             panel.phase = .{ .failure = try std.fmt.allocPrint(
                 alloc,
                 "No API key: ${s} is not set. Export it before starting gw-read, or point ai_api_key_env at the variable that holds it.",
-                .{self.conf.ai_api_key_env},
+                .{self.conf.aiApiKeyEnv()},
             ) };
             return;
         }
@@ -2688,19 +2694,13 @@ pub const Ui = struct {
         const io = self.client.io;
         const provider = self.conf.ai_provider;
 
-        const body = ai.buildBody(alloc, provider, self.conf.aiModel(), panel.prompt) catch
-            return self.failAi("out of memory building the request");
-        const job = ai.Job.create(
-            alloc,
-            io,
-            provider,
-            self.conf.aiEndpoint(),
-            if (provider.needsKey()) self.ai_api_key else null,
-            body,
-        ) catch {
-            alloc.free(body);
-            return self.failAi("out of memory building the request");
-        };
+        const job = ai.Job.create(alloc, io, .{
+            .provider = provider,
+            .endpoint = self.conf.aiEndpoint(),
+            .model = self.conf.aiModel(),
+            .api_key = if (provider.needsKey()) self.ai_api_key else null,
+            .prompt = panel.prompt,
+        }) catch return self.failAi("out of memory building the request");
         const future = io.concurrent(ai.Job.run, .{job}) catch |err| {
             job.destroy();
             const msg = std.fmt.allocPrint(alloc, "couldn't start the request ({t})", .{err}) catch return;

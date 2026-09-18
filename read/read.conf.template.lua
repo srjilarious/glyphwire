@@ -144,22 +144,36 @@
 --     -- never the book's path -- so it is off until you turn it on.
 --     ai_lookup = false,
 --
---     -- "openai" (the Responses API) or "ollama" (a local /api/chat).
+--     -- Where the text goes:
+--     --   "openai"      OpenAI's Responses API (API key, billed by OpenAI)
+--     --   "anthropic"   Anthropic's Messages API (API key from
+--     --                 console.anthropic.com, billed per token -- *not*
+--     --                 covered by a Claude/Claude Code subscription)
+--     --   "claude_code" runs the `claude` CLI headless (`claude -p`, no
+--     --                 tools, no saved session) on your existing Claude
+--     --                 Code login, so it counts against that plan's usage
+--     --                 rather than needing API credits
+--     --   "ollama"      a local Ollama's /api/chat (no key, nothing leaves
+--     --                 the machine unless the endpoint is remote)
 --     ai_provider = "openai",
 --
 --     -- Empty means the provider's default: "gpt-5" for openai,
---     -- "qwen2.5" for ollama.
+--     -- "claude-opus-5" for anthropic and claude_code, "qwen2.5" for
+--     -- ollama. claude_code also takes the CLI's aliases ("sonnet").
 --     ai_model = "",
 --
---     -- Empty means the provider's default URL:
---     -- https://api.openai.com/v1/responses or
---     -- http://localhost:11434/api/chat. Set it for an Ollama on another
---     -- host or an OpenAI-compatible proxy.
+--     -- Empty means the provider's default: the API URL
+--     -- (https://api.openai.com/v1/responses,
+--     -- https://api.anthropic.com/v1/messages,
+--     -- http://localhost:11434/api/chat), or for claude_code the
+--     -- executable to run ("claude", looked up on PATH).
 --     ai_endpoint = "",
 --
 --     -- The *name* of the environment variable holding the API key (not
---     -- the key), so this file can be shared. Ollama ignores it.
---     ai_api_key_env = "OPENAI_API_KEY",
+--     -- the key), so this file can be shared. Empty means the provider's
+--     -- own: OPENAI_API_KEY or ANTHROPIC_API_KEY. ollama and claude_code
+--     -- don't use one.
+--     ai_api_key_env = "",
 --
 --     -- Your reading level and the style you want, appended to gw-read's
 --     -- fixed rules (plain short text, translation first, no tables, no

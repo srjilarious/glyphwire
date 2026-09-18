@@ -128,8 +128,10 @@ pub const ReadConfig = struct {
     ai_endpoint: []const u8 = "",
     /// The *name* of the environment variable holding the API key, never
     /// the key itself, so a config file can be shared or committed.
-    /// Ollama doesn't use one.
-    ai_api_key_env: []const u8 = "OPENAI_API_KEY",
+    /// Empty means the provider's own (`ai.Provider.defaultKeyEnv`:
+    /// `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`). Ollama and `claude_code`
+    /// don't use one.
+    ai_api_key_env: []const u8 = "",
     /// The user's reading-level/style instruction, appended to the fixed
     /// app rules in the request's instructions (`ai.buildPrompt`).
     ai_prompt: []const u8 = ai.default_style,
@@ -161,9 +163,16 @@ pub const ReadConfig = struct {
         return if (self.ai_model.len > 0) self.ai_model else self.ai_provider.defaultModel();
     }
 
-    /// The URL actually posted to: `ai_endpoint`, or the provider's default.
+    /// The URL actually posted to (or, for `claude_code`, the executable
+    /// run): `ai_endpoint`, or the provider's default.
     pub fn aiEndpoint(self: *const ReadConfig) []const u8 {
         return if (self.ai_endpoint.len > 0) self.ai_endpoint else self.ai_provider.defaultEndpoint();
+    }
+
+    /// The environment variable the API key is read from: `ai_api_key_env`,
+    /// or the provider's default. Empty for a provider that takes none.
+    pub fn aiApiKeyEnv(self: *const ReadConfig) []const u8 {
+        return if (self.ai_api_key_env.len > 0) self.ai_api_key_env else self.ai_provider.defaultKeyEnv();
     }
 
     /// The zoom limits this config implies, handed to every `zoom.layout`
@@ -287,7 +296,7 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     if (boolField(lua, "ai_lookup")) |v| result.config.ai_lookup = v;
     if (stringField(lua, "ai_provider")) |v| {
         if (ai.Provider.parse(v)) |p| result.config.ai_provider = p else std.log.warn(
-            "gw-read: {s} `ai_provider` = '{s}' is not 'openai' or 'ollama'; ignored",
+            "gw-read: {s} `ai_provider` = '{s}' is not 'openai', 'anthropic', 'claude_code' or 'ollama'; ignored",
             .{ conf_name, v },
         );
     }

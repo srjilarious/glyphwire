@@ -195,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
         .config_dir = config_dir,
         // Read here, where the environment is, rather than threading the
         // whole environ map into the UI. Only ever sent to the endpoint.
-        .ai_api_key = if (conf.ai_lookup) init.environ_map.get(conf.ai_api_key_env) else null,
+        .ai_api_key = if (conf.ai_lookup and conf.aiApiKeyEnv().len > 0) init.environ_map.get(conf.aiApiKeyEnv()) else null,
     });
     defer ui.deinit();
 
