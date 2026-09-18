@@ -233,9 +233,10 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try reporter.reportKey("enter", false);
 
     // The failed-command report lands on row 1 (always at col 0 -- it's
-    // written before any prompt prefix); the next prompt starts on row 2
-    // once the shell resyncs its cursor after that.
-    try waitForCell(&reporter, 2, arrow_col, ">");
+    // written before any prompt prefix). It has no trailing newline, so
+    // row 2 is the blank gap `promptrow.afterCommand` leaves and the next
+    // prompt starts on row 3.
+    try waitForCell(&reporter, 3, arrow_col, ">");
 
     // "z" after the backspace is an unambiguous completion marker: it can
     // only land where "e" was if the backspace actually ran first, so
@@ -250,7 +251,7 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try reporter.reportKey("backspace", false);
     try reporter.reportText("z");
 
-    try waitForCell(&reporter, 2, text_col + 2, "z");
+    try waitForCell(&reporter, 3, text_col + 2, "z");
 
     var snapshot = try reporter.getCells();
     defer snapshot.deinit();
@@ -260,10 +261,10 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqualStr("n", snapshot.cellAt(1, 0).grapheme); // "nosuchcmd: command not found (...)"
     try testz.expectEqualStr("o", snapshot.cellAt(1, 1).grapheme);
     try testz.expectEqualStr(":", snapshot.cellAt(1, 9).grapheme);
-    try testz.expectEqualStr(">", snapshot.cellAt(2, arrow_col).grapheme);
-    try testz.expectEqualStr("b", snapshot.cellAt(2, text_col).grapheme);
-    try testz.expectEqualStr("y", snapshot.cellAt(2, text_col + 1).grapheme);
-    try testz.expectEqualStr("z", snapshot.cellAt(2, text_col + 2).grapheme); // "e" was backspaced away, "z" took its place
+    try testz.expectEqualStr(">", snapshot.cellAt(3, arrow_col).grapheme);
+    try testz.expectEqualStr("b", snapshot.cellAt(3, text_col).grapheme);
+    try testz.expectEqualStr("y", snapshot.cellAt(3, text_col + 1).grapheme);
+    try testz.expectEqualStr("z", snapshot.cellAt(3, text_col + 2).grapheme); // "e" was backspaced away, "z" took its place
 }
 
 /// Drives the real glyphwire-shell binary with a `shell.conf.lua` that
@@ -981,13 +982,13 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
         try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, i).grapheme);
     }
 
-    // The next prompt lands on the row directly below the captured line:
-    // the trailing newline `Layer.writeText` advanced past while mirroring
-    // the output left the cursor at column 0 of row 2, and `promptrow.next`
-    // leaves an already-fresh row alone. Proves the shell picked its cursor
-    // back up correctly after a captured command ran, not just that the
-    // capture itself worked.
-    try waitForCell(&reporter, 2, arrow_col, ">");
+    // The next prompt lands two rows below the captured line: the
+    // trailing newline `Layer.writeText` advanced past while mirroring the
+    // output left the cursor at column 0 of row 2, which
+    // `promptrow.afterCommand` keeps as the blank gap before the prompt on
+    // row 3. Proves the shell picked its cursor back up correctly after a
+    // captured command ran, not just that the capture itself worked.
+    try waitForCell(&reporter, 3, arrow_col, ">");
 }
 
 /// A two-stage pipeline: `echo hello | tr a-z A-Z`. Only the last stage's
@@ -1426,10 +1427,10 @@ fn waitForCursorCol(client: *glyphwire.Client, want_col: usize) !void {
 /// cursor back on the subdirectory's row (deterministic here -- a single
 /// entry's icon lands at row 2, per `lsClientWritesEntriesOverRealSocketTest`'s
 /// row-math comment (`writeGrid` leaves a blank leading row), and the next
-/// prompt three rows below that, at row 5, since `writeGrid` leaves the
+/// prompt four rows below that, at row 6, since `writeGrid` leaves the
 /// cursor at `entry_row + block_rows` (3 at this test's 12px cells) at
-/// column 0 and `promptrow.next` leaves an already-fresh row alone), then
-/// presses Enter and confirms the *next* prompt's cwd
+/// column 0 and `promptrow.afterCommand` keeps that row as a blank gap),
+/// then presses Enter and confirms the *next* prompt's cwd
 /// echo shows the subdirectory -- i.e. a real `cd` actually ran, not just
 /// that browsing moved a cursor around.
 ///
@@ -1507,25 +1508,25 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // `writeGrid`'s blank leading row, name at icon_col_width == 4).
     try waitForCell(&reporter, 2, 4, "t");
     // The next prompt: entry_row (2) + 3 (writeGrid's post-entry advance,
-    // block_rows at 12px cells) == row 5 -- `writeGrid` left the cursor at
-    // column 0, and `promptrow.next` doesn't push an already-fresh row
-    // down. Same cwd (nothing's cd'd yet) so the same arrow_col.
-    try waitForCell(&reporter, 5, arrow_col, ">");
+    // block_rows at 12px cells) == row 5, left blank by
+    // `promptrow.afterCommand`, so the prompt is on row 6. Same cwd
+    // (nothing's cd'd yet) so the same arrow_col.
+    try waitForCell(&reporter, 6, arrow_col, ">");
 
     // Ctrl+Up breaks into scrollback browse mode, a one-row step off the
-    // prompt line (row 5 -> row 4). Gate the modifier release on the
+    // prompt line (row 6 -> row 5). Gate the modifier release on the
     // cursor actually having moved so the shell's key loop sees `up` with
     // ctrl still held (isKeyDown is a level cache, not queue-ordered).
     try reporter.reportKey("left_control", true);
     try reporter.reportKey("up", true);
     try reporter.reportKey("up", false);
-    try waitForCursorRow(&reporter, 4);
+    try waitForCursorRow(&reporter, 5);
     try reporter.reportKey("left_control", false);
 
-    // Two more plain Up presses walk the browse cursor from row 4 up to
+    // Three more plain Up presses walk the browse cursor from row 5 up to
     // the entry's row (2).
     var row_presses: usize = 0;
-    while (row_presses < 2) : (row_presses += 1) {
+    while (row_presses < 3) : (row_presses += 1) {
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }
@@ -1550,11 +1551,11 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     try reporter.reportKey("enter", false);
 
     // A real `cd` ran: the next prompt's cwd echo includes "target". Row
-    // 6 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
+    // 8 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
     // post-command `getCursor()` still reads back the row it set for
     // itself before running browseEnter's synthesized "cd ..." line
-    // (prompt row 5, + 1), and `promptrow.next` leaves that column-0 row
-    // alone.
+    // (prompt row 6, + 1 == 7), which `promptrow.afterCommand` keeps as
+    // the blank gap before the prompt.
     var found = false;
     var attempts: usize = 0;
     while (attempts < 1000 and !found) : (attempts += 1) {
@@ -1564,7 +1565,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
         while (col + 6 <= snapshot.cols()) : (col += 1) {
             var matched = true;
             for ("target", 0..) |expected_ch, i| {
-                if (snapshot.cellAt(6, col + i).grapheme.len != 1 or snapshot.cellAt(6, col + i).grapheme[0] != expected_ch) {
+                if (snapshot.cellAt(8, col + i).grapheme.len != 1 or snapshot.cellAt(8, col + i).grapheme[0] != expected_ch) {
                     matched = false;
                     break;
                 }
@@ -1655,16 +1656,16 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
     try reporter.reportKey("enter", false);
 
     try waitForCell(&reporter, 2, 4, "t");
-    try waitForCell(&reporter, 5, arrow_col, ">");
+    try waitForCell(&reporter, 6, arrow_col, ">");
 
     try reporter.reportKey("left_control", true);
     try reporter.reportKey("up", true);
     try reporter.reportKey("up", false);
-    try waitForCursorRow(&reporter, 4);
+    try waitForCursorRow(&reporter, 5);
     try reporter.reportKey("left_control", false);
 
     var row_presses: usize = 0;
-    while (row_presses < 2) : (row_presses += 1) {
+    while (row_presses < 3) : (row_presses += 1) {
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }

@@ -2988,11 +2988,12 @@ const Prompt = struct {
     /// to wrap gets its output below the whole thing rather than over the
     /// wrapped tail.
     ///
-    /// Afterwards the next prompt goes wherever `promptrow.next` puts it,
-    /// relative to the cursor the server reports -- which for a
-    /// context-owning full-screen program (zoe) is still the row this
-    /// dropped to, so its prompt lands directly under the command line
-    /// with the shell's scrollback untouched.
+    /// Afterwards the next prompt goes one blank row below whatever the
+    /// command left behind (`promptrow.afterCommand` of the cursor the
+    /// server reports). For a context-owning full-screen program (zoe)
+    /// that cursor is still the row this dropped to, so its prompt lands
+    /// one blank row under the command line with the shell's scrollback
+    /// untouched.
     fn submitLine(self: *Prompt) !void {
         // A metadata activation (`activateSelectionAt` / `runMarkedAction`)
         // set `chdir_method` just before calling us; make sure it's back
@@ -3074,7 +3075,7 @@ const Prompt = struct {
         self.adoptPendingResize();
 
         const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
-        try self.client.setCursor(promptrow.next(cur.row, cur.col), 0);
+        try self.client.setCursor(promptrow.afterCommand(cur.row, cur.col), 0);
         try self.showPrompt();
     }
 

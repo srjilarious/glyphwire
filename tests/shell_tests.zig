@@ -773,21 +773,27 @@ pub fn flattenNewlinesLeavesNewlineFreeTextAloneTest(_: std.Io, alloc: std.mem.A
 
 // ─── promptrow: where the next prompt lands after a command ───────────
 
-pub fn nextPromptRowStaysPutOnAFreshRowTest(_: std.Io, _: std.mem.Allocator) !void {
-    // Column 0 means the row is already fresh: the command's last write
-    // ended in a newline, or -- the full-screen case -- it drew in its own
-    // context and never touched this layer, leaving the cursor on the
-    // blank row `submitLine` dropped to. Either way the prompt goes right
-    // there, directly under the command line.
+pub fn promptRowNextStaysPutOnAFreshRowTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Column 0 means the row is already fresh: the last write ended in a
+    // newline, or nothing was written at all.
     try testz.expectEqual(promptrow.next(12, 0), @as(usize, 12));
     try testz.expectEqual(promptrow.next(0, 0), @as(usize, 0));
 }
 
-pub fn nextPromptRowAdvancesPastAPartialLineTest(_: std.Io, _: std.mem.Allocator) !void {
-    // Output that didn't end in a newline left the cursor mid-row; the
-    // prompt has to drop below it rather than draw over it.
+pub fn promptRowNextAdvancesPastAPartialLineTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A cursor left mid-row has to drop below it rather than draw over it.
     try testz.expectEqual(promptrow.next(12, 1), @as(usize, 13));
     try testz.expectEqual(promptrow.next(12, 79), @as(usize, 13));
+}
+
+pub fn promptRowAfterCommandLeavesOneBlankRowEitherWayTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Newline-terminated output (or a full-screen program that drew in its
+    // own context and left the cursor on the fresh row `submitLine`
+    // dropped to): row 12 stays blank, prompt on 13.
+    try testz.expectEqual(promptrow.afterCommand(12, 0), @as(usize, 13));
+    // Output with no trailing newline: its row is 12, row 13 stays blank,
+    // prompt on 14 -- the same one-row gap, not zero.
+    try testz.expectEqual(promptrow.afterCommand(12, 5), @as(usize, 14));
 }
 
 // ─── browsescroll: scrollback browsing scrolloff math ──────────────────
