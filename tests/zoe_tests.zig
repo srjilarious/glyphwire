@@ -961,14 +961,14 @@ pub fn commandLineSetTabOptionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     // The defaults: a 4-cell expanding Tab, no space dots.
     try testz.expectEqual(ed.tab_width, 4);
     try testz.expectTrue(ed.expand_tab);
-    try testz.expectTrue(!ed.show_spaces);
+    try testz.expectTrue(!ed.show_whitespace);
 
     _ = try keys.feed(&ed, ":set tabwidth=8<cr>");
     try testz.expectEqual(ed.tab_width, 8);
     _ = try keys.feed(&ed, ":set expandtab=off<cr>");
     try testz.expectTrue(!ed.expand_tab);
-    _ = try keys.feed(&ed, ":set spaces=on<cr>");
-    try testz.expectTrue(ed.show_spaces);
+    _ = try keys.feed(&ed, ":set whitespace=on<cr>");
+    try testz.expectTrue(ed.show_whitespace);
 
     // A width outside 1..max is refused and leaves the setting alone.
     _ = try keys.feed(&ed, ":set tabwidth=0<cr>");
@@ -978,9 +978,9 @@ pub fn commandLineSetTabOptionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E474:"));
     try testz.expectEqual(ed.tab_width, 8);
 
-    _ = try keys.feed(&ed, ":set spaces=sometimes<cr>");
+    _ = try keys.feed(&ed, ":set whitespace=sometimes<cr>");
     try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E474:"));
-    try testz.expectTrue(ed.show_spaces);
+    try testz.expectTrue(ed.show_whitespace);
 }
 
 pub fn insertTabExpandsToTheNextStopTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -1215,6 +1215,14 @@ pub fn appendColsCountsDisplayWidthTest(_: std.Io, alloc: std.mem.Allocator) !vo
     try testz.expectEqualStr(c.items, "\u{672c}");
 }
 
+pub fn tabsPaintBlankWithoutWhitespaceMarksTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Markers off is the default: a tab is its run of blanks and nothing
+    // else, which is what every editor shows until you ask otherwise.
+    var a = try cols(alloc, "\tx", 0, 5, .{ .tab_width = 4 });
+    defer a.deinit(alloc);
+    try testz.expectEqualStr(a.items, "    x");
+}
+
 pub fn tabsExpandToTheNextStopTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const opts = zoe.display.Opts{ .tab_width = 4 };
     // A tab in column 0 covers four cells; one in column 2 covers the two
@@ -1257,23 +1265,38 @@ pub fn tabStopWidthTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(zoe.display.tabStop(7, 0), 1);
 }
 
-pub fn showSpacesMarksOnlyRealSpacesTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    const opts = zoe.display.Opts{ .tab_width = 4, .show_spaces = true };
+pub fn showWhitespaceMarksSpacesAndTabsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const opts = zoe.display.Opts{ .tab_width = 4, .show_whitespace = true };
     var a = try cols(alloc, "a b", 0, 3, opts);
     defer a.deinit(alloc);
     try testz.expectEqualStr(a.items, "a" ++ zoe.display.space_marker ++ "b");
 
-    // The cells an expanded tab covers stay blank, which is what lets a
-    // tab-indented line tell itself apart from a space-indented one.
+    // A tab is an arrow in its *first* cell and blanks the rest of the
+    // way, so four spaces and one tab still read differently.
     var b = try cols(alloc, "\tx", 0, 5, opts);
     defer b.deinit(alloc);
-    try testz.expectEqualStr(b.items, "    x");
+    try testz.expectEqualStr(b.items, zoe.display.tab_marker ++ "   x");
+
+    // A tab reaching only one cell is the arrow alone -- the marker can
+    // never overflow its run.
+    var c = try cols(alloc, "abc\tx", 0, 5, opts);
+    defer c.deinit(alloc);
+    try testz.expectEqualStr(c.items, "abc" ++ zoe.display.tab_marker ++ "x");
 
     // Padding past the end of the line is background, not whitespace the
-    // file actually holds, so it gets no dots.
-    var c = try cols(alloc, "a", 0, 3, opts);
-    defer c.deinit(alloc);
-    try testz.expectEqualStr(c.items, "a  ");
+    // file actually holds, so it gets no marks.
+    var d = try cols(alloc, "a", 0, 3, opts);
+    defer d.deinit(alloc);
+    try testz.expectEqualStr(d.items, "a  ");
+}
+
+pub fn showWhitespaceHidesAClippedTabArrowTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const opts = zoe.display.Opts{ .tab_width = 4, .show_whitespace = true };
+    // Scrolled two columns in: the arrow is off to the left, so the two
+    // columns of the tab still on screen are blanks, not a second arrow.
+    var a = try cols(alloc, "\tx", 2, 3, opts);
+    defer a.deinit(alloc);
+    try testz.expectEqualStr(a.items, "  x");
 }
 
 // ─── Pane focus chords ─────────────────────────────────────────────────

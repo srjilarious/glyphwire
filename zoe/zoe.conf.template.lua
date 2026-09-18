@@ -101,11 +101,11 @@
 --     -- live.
 --     expand_tab = true,
 --
---     -- Paint every space in the buffer pane as a faint middle dot. The
---     -- cells an expanded tab covers stay blank, so tab-indented and
---     -- space-indented lines tell themselves apart.
---     -- `:set spaces=on|off` changes it live.
---     show_spaces = false,
+--     -- Mark whitespace in the buffer pane: a faint middle dot on each
+--     -- space, a faint arrow on the first cell of each tab. The rest of
+--     -- a tab's run stays blank, so four spaces and one tab still read
+--     -- differently. `:set whitespace=on|off` changes it live.
+--     show_whitespace = false,
 --
 --     ---- Theme --------------------------------------------------------
 --

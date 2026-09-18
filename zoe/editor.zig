@@ -165,11 +165,12 @@ pub const Editor = struct {
     /// here because every file in this tree is space-indented.
     /// `zoe.conf`'s `expand_tab`, `:set expandtab=…`.
     expand_tab: bool = true,
-    /// Whether the buffer pane paints each space as a faint dot. Off by
-    /// default. `zoe.conf`'s `show_spaces`, `:set spaces=…`. Like
-    /// `line_numbers` this is pure display -- the core only carries it so
-    /// `:set` has somewhere to put it.
-    show_spaces: bool = false,
+    /// Whether the buffer pane marks whitespace -- a faint dot on each
+    /// space, a faint arrow on each tab. Off by default. `zoe.conf`'s
+    /// `show_whitespace`, `:set whitespace=…`. Like `line_numbers` this
+    /// is pure display -- the core only carries it so `:set` has
+    /// somewhere to put it.
+    show_whitespace: bool = false,
 
     /// The `:` line being typed, without the leading colon.
     cmdline: std.ArrayList(u8) = .empty,
@@ -1174,7 +1175,7 @@ pub const Editor = struct {
     ///  - `lineno=off|absolute|relative` -- the line-number gutter
     ///  - `tabwidth=N`                   -- cells between tab stops
     ///  - `expandtab=on|off`             -- Tab inserts spaces
-    ///  - `spaces=on|off`                -- paint spaces as faint dots
+    ///  - `whitespace=on|off`            -- mark spaces and tabs
     ///
     /// An unknown option name or value leaves the setting as it was and
     /// reports the matching vim error. `zoe/ui.zig` pushes whatever
@@ -1220,9 +1221,9 @@ pub const Editor = struct {
             };
             return;
         }
-        if (std.mem.eql(u8, opt, "spaces")) {
-            self.show_spaces = parseFlag(val) orelse {
-                self.setStatus("E474: Invalid argument: spaces={s}", .{val});
+        if (std.mem.eql(u8, opt, "whitespace")) {
+            self.show_whitespace = parseFlag(val) orelse {
+                self.setStatus("E474: Invalid argument: whitespace={s}", .{val});
                 return;
             };
             return;

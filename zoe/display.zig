@@ -12,23 +12,33 @@
 //! Two characters don't render as themselves:
 //!
 //!  - **A tab** occupies the cells out to the next `tab_width` stop, so
-//!    its width depends on where it starts. It paints as blanks; zoe has
-//!    no tab marker of its own.
-//!  - **A space**, when `show_spaces` is on, paints as a faint middle dot
-//!    so indentation is visible. Only a real `0x20` gets one -- the cells
-//!    an expanded tab covers stay empty, which is what makes tab-indented
-//!    and space-indented lines tell themselves apart.
+//!    its width depends on where it starts. It paints as blanks, or --
+//!    with `show_whitespace` on -- a faint arrow in its first cell and
+//!    blanks for the rest of the run.
+//!  - **A space**, with `show_whitespace` on, paints as a faint middle
+//!    dot. Only a real `0x20` gets one: the cells *after* a tab's arrow
+//!    stay empty, so four spaces and one tab still read differently.
 //!
 //! A `Cell` carries the source byte it came from, which is what lets the
 //! renderer look a syntax colour up per column without keeping a second
-//! byte-to-column map around.
+//! byte-to-column map around. It also carries `glyph_cols` separately
+//! from `width`, because a marker is one cell standing in for a run that
+//! may be several -- the columns past the glyph are blanks the painter
+//! still has to write, or they would be transparent.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 
-/// What the space dot is drawn with: U+00B7 MIDDLE DOT, one cell wide and
-/// present in every font zoe is likely to fall back through.
+/// What a space is drawn with under `show_whitespace`: U+00B7 MIDDLE
+/// DOT. One cell wide (it is not in glyphwire's wide table) and present
+/// in every font zoe is likely to fall back through.
 pub const space_marker = "\u{00b7}";
+
+/// What a tab is drawn with under `show_whitespace`: U+2192 RIGHTWARDS
+/// ARROW in the tab's *first* cell, the rest of the run left blank --
+/// the spelling vim's `listchars` and every GUI editor settled on. Also
+/// one cell wide, so it can't overflow the run even at `tab_width = 1`.
+pub const tab_marker = "\u{2192}";
 
 /// The display settings a line is laid out under. Both come from the
 /// `Editor` (`zoe.conf`, or `:set` at runtime) -- see `editor.Editor`.
@@ -36,8 +46,9 @@ pub const Opts = struct {
     /// Cells between tab stops. Clamped to at least 1 wherever it is
     /// used, so a config of `0` can't divide by zero.
     tab_width: usize = 4,
-    /// Paint each space as `space_marker` rather than a blank.
-    show_spaces: bool = false,
+    /// Paint whitespace: each space as `space_marker`, each tab as
+    /// `tab_marker` followed by blanks.
+    show_whitespace: bool = false,
 };
 
 /// One character of a line, placed. `width` is the cells it occupies --
@@ -50,8 +61,13 @@ pub const Cell = struct {
     /// Cells occupied, counting from `col`.
     width: usize,
     /// What to draw at `col`. Empty means "blanks the whole way" -- an
-    /// expanded tab.
+    /// expanded tab with no marker.
     bytes: []const u8,
+    /// Columns `bytes` itself occupies, out of `width`. Equal to `width`
+    /// for an ordinary character; 1 for a tab's arrow, whose run is
+    /// wider than its glyph; 0 for an unmarked tab. The difference is
+    /// blanks the painter must still write, or the cells stay unpainted.
+    glyph_cols: usize,
     /// This is a whitespace marker standing in for the source character,
     /// so it takes the dim marker colour rather than the syntax colour
     /// the byte under it would have had.
@@ -73,14 +89,29 @@ pub const Cells = struct {
 
         if (self.text[start] == '\t') {
             const w = tabStop(col, self.opts.tab_width);
+            const marked = self.opts.show_whitespace;
             self.i += 1;
             self.col += w;
-            return .{ .src = start, .col = col, .width = w, .bytes = "", .marker = false };
+            return .{
+                .src = start,
+                .col = col,
+                .width = w,
+                .bytes = if (marked) tab_marker else "",
+                .glyph_cols = if (marked) 1 else 0,
+                .marker = marked,
+            };
         }
-        if (self.text[start] == ' ' and self.opts.show_spaces) {
+        if (self.text[start] == ' ' and self.opts.show_whitespace) {
             self.i += 1;
             self.col += 1;
-            return .{ .src = start, .col = col, .width = 1, .bytes = space_marker, .marker = true };
+            return .{
+                .src = start,
+                .col = col,
+                .width = 1,
+                .bytes = space_marker,
+                .glyph_cols = 1,
+                .marker = true,
+            };
         }
 
         const seq = std.unicode.utf8ByteSequenceLength(self.text[start]) catch 1;
@@ -89,7 +120,14 @@ pub const Cells = struct {
         const w = glyphwire.codepointWidth(cp);
         self.i = end;
         self.col += w;
-        return .{ .src = start, .col = col, .width = w, .bytes = self.text[start..end], .marker = false };
+        return .{
+            .src = start,
+            .col = col,
+            .width = w,
+            .bytes = self.text[start..end],
+            .glyph_cols = w,
+            .marker = false,
+        };
     }
 };
 
@@ -169,7 +207,7 @@ pub fn appendCols(
         }
 
         const clipped = cell.col < start or cell.col + cell.width > end;
-        if (cell.bytes.len == 0 or clipped) {
+        if (clipped) {
             const hi = @min(cell.col + cell.width, end);
             if (hi > col) {
                 try out.appendNTimes(alloc, ' ', hi - col);
@@ -177,6 +215,9 @@ pub fn appendCols(
             }
         } else {
             try out.appendSlice(alloc, cell.bytes);
+            // The columns past the glyph: a tab's run after its arrow,
+            // or the whole run of an unmarked tab.
+            try out.appendNTimes(alloc, ' ', cell.width - cell.glyph_cols);
             col += cell.width;
         }
     }

@@ -3783,15 +3783,26 @@ byte count would put the stop in the wrong place on any line already
 holding a tab or a double-width character. `max_tab_width` (16) caps it
 so one keystroke can't insert a screenful.
 
-**Only real spaces get dots.** `config.show_spaces` / `:set spaces=on`
-paints every `0x20` as a faint `·`; the cells an expanded tab covers stay
-blank. That is the point rather than an omission — it is what makes a
-tab-indented line tell itself apart from a space-indented one at a
-glance, and zoe has no tab marker precisely so the two don't look alike.
-The dot colour is a module constant, not a theme group: the theme maps
-tree-sitter captures and whitespace has none. A marker cell takes the dot
-colour instead of whatever syntax colour the byte under it had, which is
-why `Cell` carries a `marker` flag at all.
+**One switch, two marks: `·` for a space, `→` for a tab.**
+`config.show_whitespace` / `:set whitespace=on` paints every `0x20` as a
+faint middle dot and every tab as a faint rightwards arrow in the *first*
+cell of its run, the rest of the run blank — vim's `listchars` spelling
+and every GUI editor's. Off by default; a tab is invisible until you ask,
+the same as everywhere else. The two marks together are what keep four
+spaces and one tab distinguishable: the run after the arrow stays empty,
+so the arrow marks where the tab is and the blank width says how far it
+reached. The marker colour is a module constant, not a theme group: the
+theme maps tree-sitter captures and whitespace has none. A marker cell
+takes that colour instead of whatever syntax colour the byte under it
+had, which is why `Cell` carries a `marker` flag at all.
+
+**`glyph_cols` is separate from `width` because a marker is narrower than
+its run.** A tab's arrow is one cell standing in for up to `tab_width` of
+them. The columns past the glyph are not "nothing" — an unwritten cell in
+a client-owned pane is *transparent*, not blank, so the painter has to
+emit them as spaces inside the same run. Every other character has
+`glyph_cols == width` and the padding is zero, so the one field carries
+the whole special case and the painter has no tab-shaped branch in it.
 
 **A character straddling a viewport edge is blanked, not half-drawn.**
 Already true of double-width characters before tabs existed; now it also

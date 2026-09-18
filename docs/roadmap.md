@@ -2135,9 +2135,11 @@ this is the implementation shape.
 - **`zoe/display.zig`** — the one bytes-to-display-cells mapping. `Cells`
   walks a line handing back each character's source byte, starting
   column, width and the bytes to draw: a tab covers the cells out to the
-  next `tab_width` stop, and with `show_spaces` a space draws as a faint
-  `·` (the cells an expanded tab covers stay blank, so tab- and
-  space-indented lines differ). `colOfByte` / `byteAtCol` / `width` /
+  next `tab_width` stop, and with `show_whitespace` a space draws as a
+  faint `·` and a tab as a faint `→` in the first cell of its run (the
+  rest stays blank, so tab- and space-indented lines differ). `glyph_cols`
+  is carried next to `width` so the painter blanks the columns a marker
+  doesn't cover. `colOfByte` / `byteAtCol` / `width` /
   `appendCols` are the callers' entry points — the caret, a mouse click,
   the selection overlay and the row painter all go through them, and
   `editor.zig` uses `tabStop` for an expanding Tab.
@@ -2146,7 +2148,7 @@ this is the implementation shape.
   capture colours, `config.languages` adds/remaps extensions,
   `config.grammar_dirs` prepends search directories, `config.injections`
   (default true) toggles embedded-language highlighting, and
-  `config.tab_width` / `config.expand_tab` / `config.show_spaces` carry
+  `config.tab_width` / `config.expand_tab` / `config.show_whitespace` carry
   the editor's whitespace settings alongside `page_lines` /
   `line_numbers`. Absent file = the nine bundled languages and the
   built-in dark theme. Sample at `assets/zoe.conf.example`.
@@ -2158,8 +2160,8 @@ this is the implementation shape.
   effect bounded, `renderChangedRows` repaints just the affected rows,
   otherwise the pane redraws in full. `renderRowSpans` walks each visible
   line through `zoe/display.zig`'s `Cells` — one *display cell* at a time,
-  so a tab covers the columns out to its stop and a space can carry a
-  marker dot — grouping equal colours into runs and emitting one
+  so a tab covers the columns out to its stop and whitespace can carry a
+  marker — grouping equal colours into runs and emitting one
   `write_text` per run clipped to `[left_col, left_col+cols)`. A
   highlighter failure runs the same painter with an empty span list,
   which is a plain row.

@@ -67,10 +67,10 @@ const fg_status = Color{ .r = 226, .g = 226, .b = 236, .a = 255 };
 const fg_mode = Color{ .r = 150, .g = 220, .b = 160, .a = 255 };
 const fg_error = Color{ .r = 240, .g = 140, .b = 140, .a = 255 };
 const fg_cursor = Color{ .r = 24, .g = 24, .b = 29, .a = 255 };
-// The space dots `:set spaces=on` paints. Faint on purpose: bright enough
-// to read the indentation off, dim enough to disappear when you stop
-// looking for it. Not a theme group -- the theme maps tree-sitter
-// captures, and whitespace has none.
+// The space dots and tab arrows `:set whitespace=on` paints. Faint on
+// purpose: bright enough to read the indentation off, dim enough to
+// disappear when you stop looking for it. Not a theme group -- the theme
+// maps tree-sitter captures, and whitespace has none.
 const fg_whitespace = Color{ .r = 62, .g = 62, .b = 72, .a = 255 };
 // The tab strip. The active tab takes the buffer's own background so it
 // reads as the front of the pane below it, the way a tabbed window does;
@@ -118,11 +118,11 @@ const EdSnapshot = struct {
     edits: u64,
     line_numbers: editor.LineNumbers,
     /// The display settings `:set` can change mid-session. Only
-    /// `tab_width` and `show_spaces` move a glyph, but `expand_tab` rides
+    /// `tab_width` and `show_whitespace` move a glyph, but `expand_tab` rides
     /// along so the `:set` propagation below has one place to look.
     tab_width: usize,
     expand_tab: bool,
-    show_spaces: bool,
+    show_whitespace: bool,
     /// The mode and selection anchor so a bare `v` / `V` / `<esc>` / `o`
     /// -- which can change the highlighted range without moving the
     /// cursor -- still repaints the buffer pane.
@@ -141,7 +141,7 @@ const EdSnapshot = struct {
             .line_numbers = ed.line_numbers,
             .tab_width = ed.tab_width,
             .expand_tab = ed.expand_tab,
-            .show_spaces = ed.show_spaces,
+            .show_whitespace = ed.show_whitespace,
             .mode = ed.mode,
             .anchor = ed.select_anchor,
             .dirty = ed.buf.dirty,
@@ -151,7 +151,7 @@ const EdSnapshot = struct {
         return a.cursor == b.cursor and a.edits == b.edits and
             a.line_numbers == b.line_numbers and a.mode == b.mode and a.anchor == b.anchor and
             a.tab_width == b.tab_width and a.expand_tab == b.expand_tab and
-            a.show_spaces == b.show_spaces;
+            a.show_whitespace == b.show_whitespace;
     }
 };
 
@@ -484,7 +484,7 @@ pub const Ui = struct {
             slot.ed.line_numbers = cfg.line_numbers;
             slot.ed.tab_width = cfg.tab_width;
             slot.ed.expand_tab = cfg.expand_tab;
-            slot.ed.show_spaces = cfg.show_spaces;
+            slot.ed.show_whitespace = cfg.show_whitespace;
 
             if (syntax.Highlighter.init(self.alloc, cfg.theme)) |h| {
                 slot.hl = h;
@@ -506,7 +506,7 @@ pub const Ui = struct {
             slot.ed.page_lines = self.buf.ed.page_lines;
             slot.ed.tab_width = self.buf.ed.tab_width;
             slot.ed.expand_tab = self.buf.ed.expand_tab;
-            slot.ed.show_spaces = self.buf.ed.show_spaces;
+            slot.ed.show_whitespace = self.buf.ed.show_whitespace;
         }
         return slot;
     }
@@ -885,14 +885,14 @@ pub const Ui = struct {
         if (after.line_numbers != before.line_numbers or
             after.tab_width != before.tab_width or
             after.expand_tab != before.expand_tab or
-            after.show_spaces != before.show_spaces)
+            after.show_whitespace != before.show_whitespace)
         {
             self.buf.full_redraw = true;
             for (self.buffers.items) |slot| {
                 slot.ed.line_numbers = after.line_numbers;
                 slot.ed.tab_width = after.tab_width;
                 slot.ed.expand_tab = after.expand_tab;
-                slot.ed.show_spaces = after.show_spaces;
+                slot.ed.show_whitespace = after.show_whitespace;
                 slot.full_redraw = true;
             }
         }
@@ -1854,8 +1854,9 @@ pub const Ui = struct {
 
     /// Paints one buffer row as colour runs, walking the line's *display*
     /// cells (`zoe/display.zig`) rather than its bytes: a tab covers the
-    /// columns out to its stop, and with `:set spaces=on` each space is a
-    /// dot in the whitespace colour. `spans` empty is a legitimate call
+    /// columns out to its stop, and with `:set whitespace=on` a space is
+    /// a dot and a tab an arrow, both in the whitespace colour but a run
+    /// of their own. `spans` empty is a legitimate call
     /// -- it paints the whole row in `fg_text`, which is the no-grammar
     /// path.
     fn rowSpansImpl(
@@ -1889,10 +1890,15 @@ pub const Ui = struct {
 
             const lo = @max(cell.col, left);
             const hi = @min(cell.col + cell.width, left + cols);
-            // An expanded tab, or a character straddling either edge of
-            // the viewport: blanks, rather than half a glyph.
+            // A character straddling either edge of the viewport is
+            // painted blank rather than half-drawn -- including a tab the
+            // horizontal scroll opened in the middle of, whose arrow is
+            // off to the left.
             const clipped = cell.col < left or cell.col + cell.width > left + cols;
-            const blanks = cell.bytes.len == 0 or clipped;
+            // Nothing visible of its own: a clipped glyph, or a tab with
+            // markers off. Colour is irrelevant to a run of blanks, and
+            // saying so keeps it from splitting a run in two.
+            const blanks = clipped or cell.glyph_cols == 0;
 
             const color: ?Color = if (blanks)
                 null
@@ -1915,6 +1921,9 @@ pub const Ui = struct {
                 dc = hi;
             } else {
                 try run_buf.appendSlice(self.alloc, cell.bytes);
+                // The columns past the glyph -- a tab's run after its
+                // arrow. Unwritten cells would be transparent, not blank.
+                try run_buf.appendNTimes(self.alloc, ' ', cell.width - cell.glyph_cols);
                 dc += cell.width;
             }
         }
@@ -2011,7 +2020,7 @@ pub const Ui = struct {
     fn displayOpts(self: *const Ui) display.Opts {
         return .{
             .tab_width = self.buf.ed.tab_width,
-            .show_spaces = self.buf.ed.show_spaces,
+            .show_whitespace = self.buf.ed.show_whitespace,
         };
     }
 

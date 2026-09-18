@@ -8,9 +8,9 @@
 //! extra languages / extension remaps, extra grammar directories,
 //! capture-group colour overrides, an `injections` on/off switch, and
 //! the editor's display options (`page_lines`, `line_numbers`,
-//! `tab_width`, `expand_tab`, `show_spaces`). With no file present zoe
-//! runs on the built-in languages, the dark theme, injection enabled,
-//! and a 4-cell expanding Tab.
+//! `tab_width`, `expand_tab`, `show_whitespace`). With no file present
+//! zoe runs on the built-in languages, the dark theme, injection
+//! enabled, and a 4-cell expanding Tab.
 //!
 //! Split out here (rather than in `ui.zig`) so `tests/zoe_tests.zig` can
 //! exercise the parse without a Lua state wired into a running client,
@@ -60,9 +60,10 @@ pub const Config = struct {
     /// `config.expand_tab` -- whether the Tab key inserts spaces rather
     /// than a literal `\t`. Default true; `:set expandtab=…` overrides.
     expand_tab: bool = true,
-    /// `config.show_spaces` -- paint every space in the buffer pane as a
-    /// faint middle dot. Default false; `:set spaces=…` overrides.
-    show_spaces: bool = false,
+    /// `config.show_whitespace` -- mark whitespace in the buffer pane:
+    /// a faint middle dot on each space, a faint arrow on each tab.
+    /// Default false; `:set whitespace=…` overrides.
+    show_whitespace: bool = false,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -121,7 +122,7 @@ pub fn load(
     cfg.line_numbers = readLineNumbers(lua, cfg.line_numbers);
     cfg.tab_width = readTabWidth(lua, cfg.tab_width);
     cfg.expand_tab = readFlag(lua, "expand_tab", cfg.expand_tab);
-    cfg.show_spaces = readFlag(lua, "show_spaces", cfg.show_spaces);
+    cfg.show_whitespace = readFlag(lua, "show_whitespace", cfg.show_whitespace);
     return cfg;
 }
 

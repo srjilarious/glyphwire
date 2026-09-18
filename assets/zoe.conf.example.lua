@@ -31,9 +31,9 @@ config = {
     tab_width = 4,
     expand_tab = true,
 
-    -- Paint every space as a faint middle dot. The cells an expanded tab
-    -- covers stay blank. `:set spaces=on|off` changes it live.
-    show_spaces = false,
+    -- Mark whitespace: a faint dot on each space, a faint arrow on each
+    -- tab. `:set whitespace=on|off` changes it live.
+    show_whitespace = false,
 
     -- A few capture-group colors; unset groups keep the built-in value.
     theme = {
