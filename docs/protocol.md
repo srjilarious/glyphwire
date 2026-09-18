@@ -408,7 +408,9 @@ Each entry gives the method, its kind, its params and its result.
 retargets the issuing connection onto it. `width`/`height` default to the
 visible context's root layer size. `window_scrollbar` is whether the host
 draws its right-edge scrollbar for this context; a TUI whose panes carry
-their own scrollbars passes `false`, and the gutter is reclaimed.
+their own scrollbars passes `false`. The gutter stays reserved either
+way — the flag only decides whether the bar is painted, so creating or
+destroying such a context never resizes the grid.
 
 `destroy_context` frees the context and everything in it. If it was
 visible, visibility pops to whatever was underneath — the alternate-screen

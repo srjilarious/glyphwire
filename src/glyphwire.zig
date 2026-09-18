@@ -89,6 +89,7 @@ pub const scaledPitch = core.scaledPitch;
 pub const codepointWidth = core.codepointWidth;
 pub const stringWidth = core.stringWidth;
 pub const Cursor = core.Cursor;
+pub const shiftRowByHeightDelta = core.shiftRowByHeightDelta;
 pub const SelectionPoint = core.SelectionPoint;
 pub const Selection = core.Selection;
 pub const tab_width = core.tab_width;

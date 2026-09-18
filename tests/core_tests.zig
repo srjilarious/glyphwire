@@ -514,6 +514,44 @@ pub fn layerResizeClampsCursorIntoNewBoundsTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectEqual(layer.cursor.col, 3);
 }
 
+/// A resize is bottom-anchored -- every retained row keeps its distance
+/// from the last viewport row -- so the cursor has to move with the
+/// content rather than just being clamped. glyphwire-shell asks
+/// `get_cursor` where its next prompt goes after a foreground command; a
+/// cursor left on a stale row index puts that prompt on top of retained
+/// output (the "prompt stuck mid-screen after exiting zoe" bug).
+pub fn layerResizeMovesCursorWithBottomAnchoredContentTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // width=3, height=4, scrollback=4: rows abc / def / ghi, row 3 blank.
+    var layer = try glyphwire.Layer.init(alloc, 3, 4, 4);
+    defer layer.deinit();
+    try layer.writeText("abcdefghi", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.setProperty(.{ .cursor = .{ .row = 1, .col = 0 } });
+    try testz.expectEqualStr("d", layer.cell(layer.cursor.row, 0).grapheme());
+
+    // Grow by 2: content slides down two rows and the cursor with it, so
+    // it's still on "def".
+    try layer.resize(3, 6);
+    try testz.expectEqual(layer.cursor.row, 3);
+    try testz.expectEqualStr("d", layer.cell(layer.cursor.row, 0).grapheme());
+
+    // Shrink past where it started: content slides up, cursor follows.
+    try layer.resize(3, 3);
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqualStr("d", layer.cell(layer.cursor.row, 0).grapheme());
+}
+
+pub fn shiftRowByHeightDeltaClampsToTheNewViewportTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    try testz.expectEqual(glyphwire.shiftRowByHeightDelta(3, 2, 10), 5);
+    try testz.expectEqual(glyphwire.shiftRowByHeightDelta(3, -2, 10), 1);
+    // A shrink can push a row that was near the top out into scrollback;
+    // a grow can't invent rows above zero.
+    try testz.expectEqual(glyphwire.shiftRowByHeightDelta(1, -4, 10), 0);
+    try testz.expectEqual(glyphwire.shiftRowByHeightDelta(9, 4, 6), 5);
+}
+
 pub fn layerResizeToSameSizeIsANoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 8, 4, 2);

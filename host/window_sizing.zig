@@ -57,10 +57,9 @@ pub const WindowSizing = struct {
     /// from the usable width before dividing into cells, so the last
     /// column isn't lost under the bar or the padding. The initial window
     /// (see `main`) is opened that much wider than the grid for the same
-    /// reason. When the visible context has opted the bar out, that
-    /// gutter is zero and the grid reflows wider to fill it -- a
-    /// debounced `reportResize` on the context switch, same path as a
-    /// window drag.
+    /// reason. The gutter is unconditional -- a context that opts the bar
+    /// out does not reclaim its columns, so creating or destroying such a
+    /// context never resizes the grid; see `geometry.rightGutterPx`.
     ///
     /// The new size is debounced: while the window is actively being
     /// dragged the grid stays put (the render clips or letterboxes the
@@ -73,10 +72,7 @@ pub const WindowSizing = struct {
         const fb = eng.window_state.framebuffer_size;
         if (geometry.cell_w <= 0 or geometry.cell_h <= 0) return;
 
-        const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        const gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
-        server.ctx_mutex.unlock(server.io);
+        const gutter = geometry.rightGutterPx();
 
         const cols: usize = @intCast(@max(@divTrunc(fb.x - 2 * geometry.content_pad_px - gutter, geometry.cell_w), geometry.min_grid_cols));
         const rows: usize = @intCast(@max(@divTrunc(fb.y, geometry.cell_h), geometry.min_grid_rows));
@@ -189,15 +185,12 @@ pub const WindowSizing = struct {
     /// `divCeil` biases the window up so rounding never drops a cell. A
     /// tiling WM that ignores the request just leaves `syncWindowSize` to
     /// reflow the grid to whatever size it forces instead.
-    pub fn resizeWindowForCells(self: *WindowSizing, eng: *Engine) void {
+    pub fn resizeWindowForCells(_: *WindowSizing, eng: *Engine) void {
         const ws = &eng.window_state;
         const fb = ws.framebuffer_size;
         if (fb.x <= 0 or fb.y <= 0 or ws.window_size.x <= 0 or ws.window_size.y <= 0) return;
 
-        const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        const gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
-        server.ctx_mutex.unlock(server.io);
+        const gutter = geometry.rightGutterPx();
 
         const target_fb_w = @as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w + 2 * geometry.content_pad_px + gutter;
         const target_fb_h = @as(i32, @intCast(geometry.grid_rows)) * geometry.cell_h;

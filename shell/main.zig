@@ -19,6 +19,7 @@ const keyencode = @import("shell_support").keyencode;
 const lineedit = @import("shell_support").lineedit;
 const prompt_template = @import("shell_support").prompt_template;
 const browsescroll = @import("shell_support").browsescroll;
+const promptrow = @import("shell_support").promptrow;
 const openaction = @import("shell_support").openaction;
 const logicalpath = @import("shell_support").logicalpath;
 const remotecmd = @import("shell_support").remotecmd;
@@ -2277,6 +2278,42 @@ const Prompt = struct {
         try self.handleResize(rev.cols, rev.rows);
     }
 
+    /// Takes on a resize that landed while a foreground child owned the
+    /// screen (`runCommand`'s loop notes them but can't act on them) --
+    /// adopting the new size and shifting the recorded prompt row, with no
+    /// drawing at all.
+    ///
+    /// `handleResize` is the wrong tool on this path: it redraws the
+    /// prompt where it used to be, and `submitLine` is about to lay a
+    /// fresh one out from the server's cursor anyway. All that's needed is
+    /// for `grid_cols`/`grid_rows` to describe the grid that now exists,
+    /// and for `line_start_row` to follow the bottom-anchored content the
+    /// same way `core.Layer.resize` moves the cursor -- it's only a
+    /// fallback here, but a stale one is how the next prompt ends up over
+    /// old output.
+    fn adoptPendingResize(self: *Prompt) void {
+        const rev = self.pending_resize orelse return;
+        self.pending_resize = null;
+        self.resize_seen_at = null;
+        if (rev.cols == 0 or rev.rows == 0) return;
+
+        // `grid_rows == 0` means no size has been learned yet (see
+        // `runPrompt`'s startup snapshot), so there is no delta to shift by.
+        const dh: i64 = if (self.grid_rows == 0)
+            0
+        else
+            @as(i64, @intCast(rev.rows)) - @as(i64, @intCast(self.grid_rows));
+        self.grid_cols = rev.cols;
+        self.grid_rows = rev.rows;
+        self.line_start_row = glyphwire.shiftRowByHeightDelta(self.line_start_row, dh, rev.rows);
+        self.pl_top_row = glyphwire.shiftRowByHeightDelta(self.pl_top_row, dh, rev.rows);
+        self.input_max_col = self.grid_cols;
+        // The rows a browse cursor or a completion picker referred to are
+        // gone, same as in `handleResize`.
+        self.browse_pos = null;
+        self.completion_picker = null;
+    }
+
     /// Re-lays-out the prompt after a window resize (see `noteResize` /
     /// `applyPendingResize`). The grid was rebuilt bottom-anchored, so the
     /// previously-drawn prompt cells moved by the height change, and
@@ -2946,10 +2983,16 @@ const Prompt = struct {
     /// `runCommand`), resyncing from the server before a fresh prompt.
     /// `exit` skips all of that and just sets `should_exit`.
     ///
-    /// The drop is to `line_start_row + 1`, not the end of a re-echo that
-    /// wrapped -- matching the pre-repaint editor, where a long command
-    /// naturally wrapped onto the next row as it was typed and the
-    /// command's output then drew over that wrapped tail.
+    /// The drop is to the row the re-echo ended on (`promptrow.next` of
+    /// the cursor the server reports back), so a command line long enough
+    /// to wrap gets its output below the whole thing rather than over the
+    /// wrapped tail.
+    ///
+    /// Afterwards the next prompt goes wherever `promptrow.next` puts it,
+    /// relative to the cursor the server reports -- which for a
+    /// context-owning full-screen program (zoe) is still the row this
+    /// dropped to, so its prompt lands directly under the command line
+    /// with the shell's scrollback untouched.
     fn submitLine(self: *Prompt) !void {
         // A metadata activation (`activateSelectionAt` / `runMarkedAction`)
         // set `chdir_method` just before calling us; make sure it's back
@@ -2967,7 +3010,19 @@ const Prompt = struct {
 
         try self.client.setCursor(self.line_start_row, self.line_start_col);
         if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
-        try self.client.setCursor(self.line_start_row + 1, 0);
+        // Drop to the row the re-echo actually ended on, read back from
+        // the server rather than assumed: a command line longer than the
+        // grid wraps onto further rows here, and `line_start_row + 1`
+        // (what this used to be) lands in the middle of that wrap. With
+        // the repaint editor the input box scrolls horizontally instead
+        // of wrapping as you type, so those wrapped rows are fresh
+        // content nothing else is going to overwrite -- unlike in the
+        // pre-repaint editor this rule was written for, where the line
+        // had wrapped on screen already and the command's own output was
+        // expected to draw over the tail.
+        const echoed = self.client.getCursor() catch
+            glyphwire.Cursor{ .row = self.line_start_row, .col = self.line_start_col };
+        try self.client.setCursor(promptrow.next(echoed.row, echoed.col), 0);
 
         const alloc = self.client.alloc;
 
@@ -3014,8 +3069,12 @@ const Prompt = struct {
             try self.dispatchLineText(listing);
         }
 
+        // A resize the foreground loop recorded but couldn't act on: adopt
+        // it before anything below reads `grid_*` or `line_start_row`.
+        self.adoptPendingResize();
+
         const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
-        try self.client.setCursor(cur.row + 1, 0);
+        try self.client.setCursor(promptrow.next(cur.row, cur.col), 0);
         try self.showPrompt();
     }
 
@@ -3846,7 +3905,23 @@ const Prompt = struct {
                 switch (any_ev) {
                     // Terminal resize -> SIGWINCH the child (via the kernel
                     // line discipline). The listener coalesces a burst.
-                    .resize => |rev| pty.resize(@intCast(rev.cols), @intCast(rev.rows)),
+                    //
+                    // It is also recorded for *this* process: the prompt's
+                    // own `grid_cols`/`grid_rows` and `line_start_row`
+                    // describe a grid that just moved out from under it,
+                    // and this loop is the only place those events are
+                    // read while a child holds the foreground. Dropping
+                    // them here (what used to happen) left the shell
+                    // laying out the next prompt against the pre-resize
+                    // grid -- the prompt landing mid-screen on top of
+                    // retained output, unusable until a ctrl+l. Applied by
+                    // `adoptPendingResize` once the child is reaped; not
+                    // here, since `handleResize` would redraw a prompt
+                    // over whatever the child is showing.
+                    .resize => |rev| {
+                        pty.resize(@intCast(rev.cols), @intCast(rev.rows));
+                        self.noteResize(rev.cols, rev.rows);
+                    },
                     // Mouse: encoded to the child when it asked for
                     // reporting, dropped otherwise.
                     .mouse_button => |mev| if (!is_aware) ptyMouseButton(&pty, &modes, mev),

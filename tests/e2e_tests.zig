@@ -981,12 +981,13 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
         try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, i).grapheme);
     }
 
-    // The next prompt lands two rows below the captured line: one for the
-    // trailing newline `Layer.writeText` already advanced past while
-    // mirroring the output, one more for `submitLine`'s own resync --
-    // proving the shell picked its cursor back up correctly after a
-    // captured command ran, not just that the capture itself worked.
-    try waitForCell(&reporter, 3, arrow_col, ">");
+    // The next prompt lands on the row directly below the captured line:
+    // the trailing newline `Layer.writeText` advanced past while mirroring
+    // the output left the cursor at column 0 of row 2, and `promptrow.next`
+    // leaves an already-fresh row alone. Proves the shell picked its cursor
+    // back up correctly after a captured command ran, not just that the
+    // capture itself worked.
+    try waitForCell(&reporter, 2, arrow_col, ">");
 }
 
 /// A two-stage pipeline: `echo hello | tr a-z A-Z`. Only the last stage's
@@ -1425,10 +1426,10 @@ fn waitForCursorCol(client: *glyphwire.Client, want_col: usize) !void {
 /// cursor back on the subdirectory's row (deterministic here -- a single
 /// entry's icon lands at row 2, per `lsClientWritesEntriesOverRealSocketTest`'s
 /// row-math comment (`writeGrid` leaves a blank leading row), and the next
-/// prompt four rows below that, at row 6, since `writeGrid` leaves the
-/// cursor at `entry_row + block_rows` (3 at this test's 12px cells) and
-/// `submitLine` adds one more), then presses Enter and confirms the
-/// *next* prompt's cwd
+/// prompt three rows below that, at row 5, since `writeGrid` leaves the
+/// cursor at `entry_row + block_rows` (3 at this test's 12px cells) at
+/// column 0 and `promptrow.next` leaves an already-fresh row alone), then
+/// presses Enter and confirms the *next* prompt's cwd
 /// echo shows the subdirectory -- i.e. a real `cd` actually ran, not just
 /// that browsing moved a cursor around.
 ///
@@ -1506,24 +1507,25 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // `writeGrid`'s blank leading row, name at icon_col_width == 4).
     try waitForCell(&reporter, 2, 4, "t");
     // The next prompt: entry_row (2) + 3 (writeGrid's post-entry advance,
-    // block_rows at 12px cells) + 1 (submitLine's own advance) == row 6,
-    // same cwd (nothing's cd'd yet) so the same arrow_col.
-    try waitForCell(&reporter, 6, arrow_col, ">");
+    // block_rows at 12px cells) == row 5 -- `writeGrid` left the cursor at
+    // column 0, and `promptrow.next` doesn't push an already-fresh row
+    // down. Same cwd (nothing's cd'd yet) so the same arrow_col.
+    try waitForCell(&reporter, 5, arrow_col, ">");
 
     // Ctrl+Up breaks into scrollback browse mode, a one-row step off the
-    // prompt line (row 6 -> row 5). Gate the modifier release on the
+    // prompt line (row 5 -> row 4). Gate the modifier release on the
     // cursor actually having moved so the shell's key loop sees `up` with
     // ctrl still held (isKeyDown is a level cache, not queue-ordered).
     try reporter.reportKey("left_control", true);
     try reporter.reportKey("up", true);
     try reporter.reportKey("up", false);
-    try waitForCursorRow(&reporter, 5);
+    try waitForCursorRow(&reporter, 4);
     try reporter.reportKey("left_control", false);
 
-    // Three more plain Up presses walk the browse cursor from row 5 up to
+    // Two more plain Up presses walk the browse cursor from row 4 up to
     // the entry's row (2).
     var row_presses: usize = 0;
-    while (row_presses < 3) : (row_presses += 1) {
+    while (row_presses < 2) : (row_presses += 1) {
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }
@@ -1548,10 +1550,11 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     try reporter.reportKey("enter", false);
 
     // A real `cd` ran: the next prompt's cwd echo includes "target". Row
-    // 8 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
+    // 6 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
     // post-command `getCursor()` still reads back the row it set for
-    // itself (entry_row(2) + block_rows(3), from browseEnter's synthesized
-    // "cd ..." line, then +1 again) before the final +1 for the new prompt.
+    // itself before running browseEnter's synthesized "cd ..." line
+    // (prompt row 5, + 1), and `promptrow.next` leaves that column-0 row
+    // alone.
     var found = false;
     var attempts: usize = 0;
     while (attempts < 1000 and !found) : (attempts += 1) {
@@ -1561,7 +1564,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
         while (col + 6 <= snapshot.cols()) : (col += 1) {
             var matched = true;
             for ("target", 0..) |expected_ch, i| {
-                if (snapshot.cellAt(8, col + i).grapheme.len != 1 or snapshot.cellAt(8, col + i).grapheme[0] != expected_ch) {
+                if (snapshot.cellAt(6, col + i).grapheme.len != 1 or snapshot.cellAt(6, col + i).grapheme[0] != expected_ch) {
                     matched = false;
                     break;
                 }
@@ -1652,16 +1655,16 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
     try reporter.reportKey("enter", false);
 
     try waitForCell(&reporter, 2, 4, "t");
-    try waitForCell(&reporter, 6, arrow_col, ">");
+    try waitForCell(&reporter, 5, arrow_col, ">");
 
     try reporter.reportKey("left_control", true);
     try reporter.reportKey("up", true);
     try reporter.reportKey("up", false);
-    try waitForCursorRow(&reporter, 5);
+    try waitForCursorRow(&reporter, 4);
     try reporter.reportKey("left_control", false);
 
     var row_presses: usize = 0;
-    while (row_presses < 3) : (row_presses += 1) {
+    while (row_presses < 2) : (row_presses += 1) {
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }

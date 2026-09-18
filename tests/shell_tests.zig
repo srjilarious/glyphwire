@@ -16,6 +16,7 @@ const keyencode = @import("shell_support").keyencode;
 const pty = @import("shell_support").pty;
 const lineedit = @import("shell_support").lineedit;
 const browsescroll = @import("shell_support").browsescroll;
+const promptrow = @import("shell_support").promptrow;
 const logicalpath = @import("shell_support").logicalpath;
 const fuzzy = @import("shell_support").fuzzy;
 
@@ -768,6 +769,25 @@ pub fn flattenNewlinesLeavesNewlineFreeTextAloneTest(_: std.Io, alloc: std.mem.A
     const empty = try lineedit.flattenNewlines(alloc, "");
     defer alloc.free(empty);
     try testz.expectEqual(empty.len, 0);
+}
+
+// ─── promptrow: where the next prompt lands after a command ───────────
+
+pub fn nextPromptRowStaysPutOnAFreshRowTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Column 0 means the row is already fresh: the command's last write
+    // ended in a newline, or -- the full-screen case -- it drew in its own
+    // context and never touched this layer, leaving the cursor on the
+    // blank row `submitLine` dropped to. Either way the prompt goes right
+    // there, directly under the command line.
+    try testz.expectEqual(promptrow.next(12, 0), @as(usize, 12));
+    try testz.expectEqual(promptrow.next(0, 0), @as(usize, 0));
+}
+
+pub fn nextPromptRowAdvancesPastAPartialLineTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Output that didn't end in a newline left the cursor mid-row; the
+    // prompt has to drop below it rather than draw over it.
+    try testz.expectEqual(promptrow.next(12, 1), @as(usize, 13));
+    try testz.expectEqual(promptrow.next(12, 79), @as(usize, 13));
 }
 
 // ─── browsescroll: scrollback browsing scrolloff math ──────────────────

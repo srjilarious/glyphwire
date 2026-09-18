@@ -857,6 +857,20 @@ pub const Cursor = struct {
     col: usize = 0,
 };
 
+/// Where a viewport row index lands after a bottom-anchored resize that
+/// changed the height by `dh` (new minus old). `Layer.resize` keeps every
+/// retained row's distance from the *last* viewport row, so a row index
+/// simply moves by the delta; the result is clamped into the new
+/// viewport, since a shrink can push a row that was near the top out into
+/// scrollback and a grow can't invent rows above zero. Shared by the
+/// cursor and by anything else pinned to a row through a resize.
+pub fn shiftRowByHeightDelta(row: usize, dh: i64, new_height: usize) usize {
+    std.debug.assert(new_height > 0);
+    const shifted = @as(i64, @intCast(row)) + dh;
+    if (shifted <= 0) return 0;
+    return @min(@as(usize, @intCast(shifted)), new_height - 1);
+}
+
 /// One end of a linear text selection on a layer, in scroll-stable
 /// coordinates. `above` is how many grid rows this point sits above the
 /// live viewport's top row: positive counts up into retained scrollback
@@ -2039,11 +2053,22 @@ pub const Layer = struct {
         // click resolving after a window resize, when the client that
         // drew the table (`glyphwire-ls -l`) has long since exited and
         // nothing re-renders it.
+        const dh = @as(i64, @intCast(new_height)) - @as(i64, @intCast(old_height));
         if (self.tables.count() > 0) {
-            const dh = @as(i64, @intCast(new_height)) - @as(i64, @intCast(old_height));
             var it = self.tables.valueIterator();
             while (it.next()) |t| t.top_live += dh;
         }
+
+        // The cursor rides the content for exactly the same reason, and
+        // it's the one piece of this that a client can't recompute for
+        // itself: glyphwire-shell asks `get_cursor` where its next prompt
+        // goes after a foreground command, so a cursor left on its old row
+        // index while the rows around it moved puts that prompt on top of
+        // retained output. Only the *primary* cursor indexes the ring
+        // buffer -- the alt buffer is rebuilt blank below, so its cursor
+        // is merely clamped by the lines that follow.
+        const primary: *Cursor = if (self.on_alt) &self.stashed_cursor else &self.cursor;
+        primary.row = shiftRowByHeightDelta(primary.row, dh, new_height);
 
         if (self.cursor.row >= new_height) self.cursor.row = new_height - 1;
         if (self.cursor.col >= new_width) self.cursor.col = new_width - 1;

@@ -341,12 +341,13 @@ pub fn paneThumbFractionFollowsTheVirtualExtentTest(_: std.Io, _: std.mem.Alloca
     try testz.expectTrue(v.thumb.h < v.track.h);
 }
 
-pub fn rightGutterIsZeroWithoutAScrollbarTest(_: std.Io, _: std.mem.Allocator) !void {
-    // A bar-less visible context reclaims the gutter, so px<->cell math
-    // on both sides (`syncWindowSize`, `resizeWindowForCells`) reserves
-    // nothing and the grid reflows wider.
-    try testz.expectEqual(geometry.rightGutterPx(true), geometry.scrollbar_width_px);
-    try testz.expectEqual(geometry.rightGutterPx(false), 0);
+pub fn rightGutterIsReservedUnconditionallyTest(_: std.Io, _: std.mem.Allocator) !void {
+    // The gutter belongs to the window, not to the visible context: a
+    // bar-less context does *not* reclaim its columns, so creating one
+    // (zoe) can't reflow the grid out from under every other context.
+    // Both sides of the px<->cell math (`syncWindowSize`,
+    // `resizeWindowForCells`) read this one value.
+    try testz.expectEqual(geometry.rightGutterPx(), geometry.scrollbar_width_px);
 }
 
 // ─── geometry.layerRect / cellRectPx ──────────────────────────────────

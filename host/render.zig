@@ -1707,7 +1707,7 @@ pub const Renderer = struct {
         const x0: i32 = geometry.content_pad_px;
 
         var used_rows: usize = geometry.min_grid_rows;
-        var gutter: i32 = geometry.scrollbar_width_px;
+        const gutter: i32 = geometry.rightGutterPx();
         {
             const server = self.app.server;
             server.ctx_mutex.lockUncancelable(server.io);
@@ -1723,7 +1723,6 @@ pub const Renderer = struct {
             } else {
                 used_rows = @max(geometry.min_grid_rows, server.ctx.root.cursor.row + 2);
             }
-            gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
         }
         const w: i32 = @min(@as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w, fb.x - gutter - 2 * geometry.content_pad_px);
         used_rows = @min(used_rows, geometry.grid_rows);
