@@ -258,6 +258,10 @@ pub const Client = struct {
         /// With `max_cols`: fill the remainder with blank `bg` cells, so a
         /// full-width bar or list row is one write whatever the text.
         pad: bool = false,
+        /// `false` keeps the written cells out of any selection's tint
+        /// and copied text -- a panel's border and pad. See
+        /// `core.Cell.selectable`.
+        selectable: bool = true,
     };
 
     /// `write_text` with every option (see `TextOpts`) -- a notification.
@@ -325,6 +329,7 @@ pub const Client = struct {
             .scale = @tagName(opts.scale),
             .max_cols = opts.max_cols,
             .pad = opts.pad,
+            .selectable = opts.selectable,
         };
     }
 
@@ -341,6 +346,7 @@ pub const Client = struct {
         scale: []const u8,
         max_cols: ?usize,
         pad: bool,
+        selectable: bool,
     };
 
     /// `clear`'s options: the region (defaulting to the whole layer) and

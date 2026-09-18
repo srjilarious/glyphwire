@@ -532,7 +532,7 @@ default style); any explicit colour, black included, is opaque.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false | — |
+| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false, `selectable?` = true | — |
 | `insert_cells` | notification | `layer?`, `count` | — |
 | `delete_cells` | notification | `layer?`, `count` | — |
 | `move_content` | notification | `layer?`, `top?`, `bot?`, `count?` = 1, `direction?` | — |
@@ -544,7 +544,9 @@ default style); any explicit colour, black included, is opaque.
 axis keeps the cursor's current value. `max_cols` clips the run to that
 many display columns from its start (never splitting a wide character,
 never wrapping), and `pad` fills the rest of that span with blank `bg`
-cells. `fg`/`bg` omitted means the server default style.
+cells. `fg`/`bg` omitted means the server default style. `selectable:
+false` keeps every cell the write touches out of any selection's tint and
+copied text (a panel's border and pad).
 
 `spans` replaces `text` with an array of `{text, fg?, bg?, metadata_id?,
 transparent_bg?, scale?}` written back to back; each omitted field takes
@@ -734,7 +736,11 @@ viewport's top (positive = scrollback), `col` a 0-based column. Points are
 content-anchored rather than screen-anchored, so a selection survives
 scrolling and new output. A point may land on either half of a wide
 character; what the selection *covers* (the tint and
-`get_selection_text`) always widens to the whole character.
+`get_selection_text`) always widens to the whole character. A point on
+the rows a scaled glyph draws down into belongs to the glyph's own row,
+and the tint covers every row the selected glyphs draw into. Each row's
+tint and text stop at its last non-blank cell, and cells written with
+`write_text`'s `selectable: false` are never tinted or copied.
 
 **Selection state** is `{active, anchor?, active_end?}`; `anchor` and
 `active_end` are absent when `active` is false.

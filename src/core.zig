@@ -891,6 +891,20 @@ pub const Cell = struct {
     grapheme_len: u8 = 0,
     wide: CellWidth = .narrow,
     text_scale: TextScale = .x1,
+    /// Nonzero on a blank a scaled glyph draws down over (see
+    /// `TextScale`): how many rows *below* the glyph's own row this cell
+    /// sits, `1..scaledPitch - 1`. Selection reads it to treat the whole
+    /// block as the glyph's row -- a drag onto the lower half of a scaled
+    /// line lands on that line, not on a line of its own, and the tint
+    /// covers every row the glyph draws into. Zero for every other cell.
+    under_scaled: u2 = 0,
+    /// Whether a selection takes this cell in -- `write_text`'s
+    /// `selectable` (default true). A client's panel chrome (borders,
+    /// padding) writes `false` so a selection's tint and copied text stop
+    /// at the text inside it: an unselectable cell is never copied, and
+    /// the tint on a row starts after any leading unselectable cells and
+    /// ends at the last selectable non-blank one.
+    selectable: bool = true,
     style: Style = default_style,
     /// Sibling of `style.bg`, not part of it -- a cell can be tagged
     /// regardless of whether its background is a color/image/icon. Set (or
@@ -1403,6 +1417,13 @@ pub const Layer = struct {
     /// (`consumeControl` -> `stepEscape` -> `execCsi`) needs somewhere to
     /// accumulate it mid-call.
     pen: SgrPen = .{},
+    /// `Cell.selectable` for every cell the `write_text` in progress
+    /// touches -- `RunsOpts.selectable`, set by `writeRuns` for the length
+    /// of the call and back to true after it, so every other write path
+    /// (the pty stream, tables) leaves cells selectable. Lives on the
+    /// `Layer` for the same reason `pen` does: `putAtCursor` is reached
+    /// from deep inside the escape machine too.
+    write_selectable: bool = true,
     /// When set, the escape-sequence machine (`esc_state` / `csi_buf` /
     /// `csi_len`), the alternate-charset designation (`shift_out` /
     /// `g0_line_drawing` / `g1_line_drawing`) and the SGR `pen` are **kept
@@ -2243,12 +2264,15 @@ pub const Layer = struct {
         /// row of a list or a status bar in one write, whatever the text
         /// length. Ignored without `max_cols`.
         pad: bool = false,
+        /// `Cell.selectable` for every cell the write touches, padding
+        /// and a scaled glyph's fill included.
+        selectable: bool = true,
     };
 
     /// `writeTextTaggedScaled` with `WriteOpts` -- a single styled run.
     pub fn writeTextOpts(self: *Layer, text: []const u8, fg: Color, bg: ?Background, opts: WriteOpts) !void {
         const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale }};
-        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id });
+        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable });
     }
 
     /// One styled piece of a `write_text`: its text and everything that
@@ -2274,6 +2298,8 @@ pub const Layer = struct {
         pad_fg: Color = default_style.fg,
         pad_bg: ?Background = default_style.bg,
         pad_metadata_id: ?MetadataHandle = null,
+        /// See `WriteOpts.selectable` -- covers every run and the padding.
+        selectable: bool = true,
     };
 
     /// Writes `runs` back to back as one `write_text` -- `write_text`'s
@@ -2284,6 +2310,8 @@ pub const Layer = struct {
     /// so a bad run can't leave the others half-written.
     pub fn writeRuns(self: *Layer, runs: []const TextRun, opts: RunsOpts) !void {
         for (runs) |r| _ = try std.unicode.Utf8View.init(r.text);
+        self.write_selectable = opts.selectable;
+        defer self.write_selectable = true;
         // The clip limit is an absolute column on the starting row.
         const clip_end: ?usize = if (opts.max_cols) |n| @min(self.cursor.col + n, self.width) else null;
 
@@ -2839,16 +2867,17 @@ pub const Layer = struct {
         var r = row + 1;
         while (r < row + pitch and r < self.height) : (r += 1) {
             var col = start_col;
-            while (col < end_col) : (col += 1) self.blankScaledCell(r, col, fg, bg, metadata_id);
+            while (col < end_col) : (col += 1) self.blankScaledCell(r, col, @intCast(r - row), fg, bg, metadata_id);
         }
         return true;
     }
 
     /// One cell under a scaled glyph (see `putRunGlyph`): a narrow blank
-    /// in the run's style, written in place without moving the cursor.
-    /// `bg == null` (`transparent_bg`) leaves the cell's background alone,
-    /// same as `putAtCursor`.
-    fn blankScaledCell(self: *Layer, row: usize, col: usize, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {
+    /// in the run's style, written in place without moving the cursor,
+    /// marked as sitting `below` rows under the glyph's own row
+    /// (`Cell.under_scaled`). `bg == null` (`transparent_bg`) leaves the
+    /// cell's background alone, same as `putAtCursor`.
+    fn blankScaledCell(self: *Layer, row: usize, col: usize, below: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {
         self.clearWidePartner(row, col);
         const c = self.cell(row, col);
         c.setGrapheme(" ");
@@ -2859,6 +2888,8 @@ pub const Layer = struct {
         c.fg_icon = null;
         c.wide = .narrow;
         c.text_scale = .x1;
+        c.under_scaled = below;
+        c.selectable = self.write_selectable;
     }
 
     /// Places one grapheme cluster at the cursor. `w` is its East Asian
@@ -2896,6 +2927,8 @@ pub const Layer = struct {
         c.fg_icon = null;
         c.wide = if (w == 2) .wide_lead else .narrow;
         c.text_scale = scale;
+        c.under_scaled = 0;
+        c.selectable = self.write_selectable;
 
         if (w == 2) {
             // The spacer renders nothing of its own; give it the lead's
@@ -2903,7 +2936,7 @@ pub const Layer = struct {
             // the lead's `metadata_id` so a hit-test on either half maps
             // to the same entry.
             const s = self.cell(row, col + 1);
-            s.* = .{ .style = c.style, .metadata_id = metadata_id, .wide = .wide_spacer };
+            s.* = .{ .style = c.style, .metadata_id = metadata_id, .wide = .wide_spacer, .selectable = c.selectable };
         }
 
         self.cursor.col += w;
@@ -3508,84 +3541,197 @@ pub const Layer = struct {
         return self.rowSlice(self.physicalRow(@intCast(live_row)));
     }
 
+    /// How many rows below its scaled glyph's own row the row `cells`
+    /// sits (`Cell.under_scaled`), or 0 for an ordinary row. The cell at
+    /// `col` decides when it's under a glyph; otherwise any cell in the
+    /// row does, so a point past the end of a scaled line's lower half --
+    /// a blank the glyphs never reached -- still belongs to that line.
+    fn underScaledRows(cells: []const Cell, col: ?usize) i64 {
+        if (col) |c| {
+            if (c < cells.len and cells[c].under_scaled != 0) return cells[c].under_scaled;
+        }
+        for (cells) |c| {
+            if (c.under_scaled != 0) return c.under_scaled;
+        }
+        return 0;
+    }
+
+    /// `p` moved up onto its scaled glyph's own row when it sits in the
+    /// rows that glyph draws down into (see `underScaledRows`); any other
+    /// point unchanged. The column needs no fixing: the blanks under a
+    /// glyph line up with its footprint on the glyph row.
+    fn glyphRowPoint(self: *const Layer, p: SelectionPoint) SelectionPoint {
+        const cells = self.rowForAbove(p.above) orelse return p;
+        return .{ .above = p.above + underScaledRows(cells, p.col), .col = p.col };
+    }
+
+    /// The selection's ends in reading order after `glyphRowPoint` --
+    /// what every span below is measured against. The stored points stay
+    /// raw (a drag lands wherever the pointer is); only what they *cover*
+    /// is resolved to glyph rows.
+    fn selectionBounds(self: *const Layer, sel: Selection) struct { start: SelectionPoint, end: SelectionPoint } {
+        const s: Selection = .{ .anchor = self.glyphRowPoint(sel.anchor), .active = self.glyphRowPoint(sel.active) };
+        const o = s.ordered();
+        return .{ .start = o.start, .end = o.end };
+    }
+
     /// For the renderer: the `[start, end)` column range selected on the
     /// row `above` rows above the live viewport's top (see
-    /// `SelectionPoint`), or null if that row is outside the selection.
-    /// Linear model -- interior rows select their whole width, the first
-    /// and last row are clipped to the selection's start/end column, each
-    /// widened to cover a whole wide character (`snapWideSpan`).
+    /// `SelectionPoint`), or null if that row is outside the selection or
+    /// has nothing selectable in it. Linear model -- the first and last
+    /// row are clipped to the selection's start/end column, and each row
+    /// is trimmed to its text (`selectedSpan`). A row a scaled glyph
+    /// draws down into reports its glyph row's range, so the tint covers
+    /// the whole enlarged line.
     pub fn selectionColRange(self: *const Layer, above: i64) ?struct { start: usize, end: usize } {
         const sel = self.selection orelse return null;
         if (sel.isEmpty()) return null;
-        const o = sel.ordered();
-        if (above > o.start.above or above < o.end.above) return null;
-        var lo: usize = if (above == o.start.above) @min(o.start.col, self.width) else 0;
-        var hi: usize = if (above == o.end.above) o.end.col + 1 else self.width;
+        const b = self.selectionBounds(sel);
+        const glyph_above = if (self.rowForAbove(above)) |cells| above + underScaledRows(cells, null) else above;
+        if (glyph_above > b.start.above or glyph_above < b.end.above) return null;
+        const span = self.selectedSpan(glyph_above, b.start, b.end) orelse return null;
+        return .{ .start = span.lo, .end = span.hi };
+    }
+
+    /// The selected `[lo, hi)` columns of glyph row `above`, shared by
+    /// the tint and the copied text so the two always agree. Starts from
+    /// the raw linear span (clipped at `start`/`end` on the first and
+    /// last row, the whole width between), then:
+    ///   - snaps both ends to whole glyphs (`snapGlyphSpan`),
+    ///   - drops leading unselectable cells (`Cell.selectable`, a panel's
+    ///     border and pad),
+    ///   - drops trailing blanks and unselectable cells, so a row's tint
+    ///     ends at its last character rather than the layer's edge,
+    ///   - and snaps the end again, since the trim can cut into the blank
+    ///     fill to the right of a scaled glyph.
+    /// Null when nothing is left. A row no longer retained keeps the raw
+    /// span -- there are no cells to trim against.
+    fn selectedSpan(self: *const Layer, above: i64, start: SelectionPoint, end: SelectionPoint) ?struct { lo: usize, hi: usize } {
+        var lo: usize = if (above == start.above) @min(start.col, self.width) else 0;
+        var hi: usize = if (above == end.above) end.col + 1 else self.width;
         if (hi > self.width) hi = self.width;
         if (lo >= hi) return null;
-        if (self.rowForAbove(above)) |cells| {
-            const span = snapWideSpan(cells, lo, hi);
-            lo = span.lo;
-            hi = span.hi;
+        const cells = self.rowForAbove(above) orelse return .{ .lo = lo, .hi = hi };
+
+        var span = snapGlyphSpan(cells, lo, hi);
+        lo = span.lo;
+        hi = span.hi;
+        while (lo < hi and !cells[lo].selectable) lo += 1;
+        while (hi > lo and (!cells[hi - 1].selectable or isBlankCell(cells[hi - 1]))) hi -= 1;
+        if (lo >= hi) return null;
+        span = snapGlyphSpan(cells, lo, hi);
+        return .{ .lo = span.lo, .hi = span.hi };
+    }
+
+    /// A narrow, unscaled cell showing nothing -- what trailing-blank
+    /// trimming drops. A wide character's spacer isn't blank: it's half
+    /// of the character to its left.
+    fn isBlankCell(c: Cell) bool {
+        if (c.wide != .narrow or c.text_scale != .x1) return false;
+        const g = c.grapheme();
+        return g.len == 0 or std.mem.eql(u8, g, " ");
+    }
+
+    /// Cells glyph cell `c` covers on its own row: its display width
+    /// times its scale's pitch (`putRunGlyph`'s footprint).
+    fn glyphFootprint(c: Cell) usize {
+        const w: usize = if (c.wide == .wide_lead) 2 else 1;
+        return w * scaledPitch(c.text_scale);
+    }
+
+    /// The glyph whose footprint covers column `col` of `cells` when that
+    /// glyph spans more than one cell -- a wide character or a scaled one
+    /// -- as its first column and width, or null for a cell that is its
+    /// own glyph. Walks left from `col` over the spacer and blank fill a
+    /// wide or scaled glyph leaves to its right, stopping at the first
+    /// real character.
+    fn multiCellGlyphAt(cells: []const Cell, col: usize) ?struct { start: usize, len: usize } {
+        const max_footprint = 2 * scaledPitch(.x3);
+        var k: usize = 0;
+        while (k < max_footprint and k <= col) : (k += 1) {
+            const at = col - k;
+            const c = cells[at];
+            if (c.wide == .wide_lead or c.text_scale != .x1) {
+                const len = glyphFootprint(c);
+                if (at + len > col and len > 1) return .{ .start = at, .len = len };
+                return null;
+            }
+            if (c.wide == .wide_spacer or isBlankCell(c)) continue;
+            return null;
         }
-        return .{ .start = lo, .end = hi };
+        return null;
     }
 
     /// Widens the selected column span `[lo, hi)` of row `cells` so it
-    /// never splits a wide character: a start on a `.wide_spacer` moves
-    /// back onto its lead, an end on a `.wide_lead` takes in its spacer.
-    /// The selection itself stays in raw cells (a drag or a client's
-    /// `set_selection` can land on either half); only what it *covers*
-    /// snaps, so the tint and the copied text always agree on whole
-    /// characters.
-    fn snapWideSpan(cells: []const Cell, lo: usize, hi: usize) struct { lo: usize, hi: usize } {
+    /// never splits a glyph: a start inside a wide or scaled glyph's
+    /// footprint moves back to the glyph's own cell, an end inside one
+    /// runs to the footprint's last cell. The selection itself stays in
+    /// raw cells (a drag or a client's `set_selection` can land on any of
+    /// them); only what it *covers* snaps, so the tint and the copied
+    /// text always agree on whole characters.
+    fn snapGlyphSpan(cells: []const Cell, lo: usize, hi: usize) struct { lo: usize, hi: usize } {
         var out_lo = lo;
         var out_hi = hi;
-        if (out_lo > 0 and out_lo < cells.len and cells[out_lo].wide == .wide_spacer) out_lo -= 1;
-        if (out_hi > 0 and out_hi < cells.len and cells[out_hi - 1].wide == .wide_lead) out_hi += 1;
+        if (out_lo < cells.len) {
+            if (multiCellGlyphAt(cells, out_lo)) |g| out_lo = g.start;
+        }
+        if (out_hi > 0 and out_hi <= cells.len) {
+            if (multiCellGlyphAt(cells, out_hi - 1)) |g| out_hi = @max(out_hi, @min(g.start + g.len, cells.len));
+        }
         return .{ .lo = out_lo, .hi = out_hi };
     }
 
     /// The selected text, or null when nothing is selected (a zero-width
-    /// selection returns `""`). Rows are joined with `\n`, each row's
-    /// trailing blanks trimmed; a blank cell inside the range becomes a
-    /// space, a wide character's spacer half is skipped. A row no longer
-    /// retained in scrollback contributes an empty line. Caller owns the
-    /// result.
+    /// selection returns `""`). Each row is its `selectedSpan` -- the
+    /// same cells the tint covers -- and rows join with `\n`. A blank cell
+    /// inside the span becomes a space; a wide or scaled glyph's spacer
+    /// and fill are skipped, as is any unselectable cell. The rows a
+    /// scaled glyph draws down into, and rows with no selectable cell at
+    /// all (a panel's top or bottom border), contribute no line. A row no
+    /// longer retained in scrollback contributes an empty line. Caller
+    /// owns the result.
     pub fn selectionText(self: *const Layer, alloc: std.mem.Allocator) !?[]u8 {
         const sel = self.selection orelse return null;
         if (sel.isEmpty()) return try alloc.dupe(u8, "");
-        const o = sel.ordered();
+        const b = self.selectionBounds(sel);
 
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(alloc);
 
-        var above = o.start.above;
-        while (above >= o.end.above) : (above -= 1) {
-            const lo: usize = if (above == o.start.above) @min(o.start.col, self.width) else 0;
-            var hi: usize = if (above == o.end.above) o.end.col + 1 else self.width;
-            if (hi > self.width) hi = self.width;
+        var first_line = true;
+        var above = b.start.above;
+        while (above >= b.end.above) : (above -= 1) {
+            const row_cells = self.rowForAbove(above);
+            if (row_cells) |cells| {
+                if (underScaledRows(cells, null) != 0) continue;
+                if (!anySelectable(cells)) continue;
+            }
+            if (!first_line) try out.append(alloc, '\n');
+            first_line = false;
 
-            const line_start = out.items.len;
-            if (lo < hi) {
-                if (self.rowForAbove(above)) |cells| {
-                    const span = snapWideSpan(cells, lo, hi);
-                    var col = span.lo;
-                    while (col < span.hi) : (col += 1) {
-                        const c = cells[col];
-                        if (c.wide == .wide_spacer) continue;
-                        const g = c.grapheme();
-                        if (g.len == 0) try out.append(alloc, ' ') else try out.appendSlice(alloc, g);
-                    }
+            const cells = row_cells orelse continue;
+            const span = self.selectedSpan(above, b.start, b.end) orelse continue;
+            var col = span.lo;
+            while (col < span.hi) {
+                const c = cells[col];
+                if (!c.selectable or c.wide == .wide_spacer) {
+                    col += 1;
+                    continue;
                 }
+                const g = c.grapheme();
+                if (g.len == 0) try out.append(alloc, ' ') else try out.appendSlice(alloc, g);
+                col += glyphFootprint(c);
             }
-            while (out.items.len > line_start and out.items[out.items.len - 1] == ' ') {
-                out.items.len -= 1;
-            }
-            if (above != o.end.above) try out.append(alloc, '\n');
         }
 
         return try out.toOwnedSlice(alloc);
+    }
+
+    fn anySelectable(cells: []const Cell) bool {
+        for (cells) |c| {
+            if (c.selectable) return true;
+        }
+        return false;
     }
 };
 
@@ -4489,6 +4635,8 @@ fn setCellText(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Co
     c.metadata_id = metadata_id;
     c.meta_focus = false;
     c.wide = .narrow;
+    c.under_scaled = 0;
+    c.selectable = true;
 }
 
 /// Writes a 2-cell wide grapheme: the lead cell at `(row, col)` holds it,
@@ -4505,6 +4653,8 @@ fn setCellWide(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Co
     lead.metadata_id = metadata_id;
     lead.meta_focus = false;
     lead.wide = .wide_lead;
+    lead.under_scaled = 0;
+    lead.selectable = true;
     cells[col + 1] = .{ .style = lead.style, .metadata_id = metadata_id, .wide = .wide_spacer };
 }
 

@@ -432,6 +432,26 @@ pub fn writeTextRowColPlacesTheRunInOneMessageTest(io: std.Io, alloc: std.mem.Al
     try testz.expectEqual(ctx.root.cell(6, 11).style.bg.color.a, 0);
 }
 
+/// `selectable: false` marks every cell the write touches, its padding
+/// included, and the next plain write is selectable again.
+pub fn writeTextSelectableFalseMarksChromeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"row":0,"col":0,"text":"|","max_cols":2,"pad":true,"selectable":false}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"ab"}}
+    );
+    try testz.expectFalse(ctx.root.cell(0, 0).selectable);
+    try testz.expectFalse(ctx.root.cell(0, 1).selectable);
+    try testz.expectTrue(ctx.root.cell(0, 2).selectable);
+    try testz.expectTrue(ctx.root.cell(0, 3).selectable);
+}
+
 pub fn writeTextSpansInheritTheMessageDefaultsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);

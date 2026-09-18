@@ -2457,12 +2457,13 @@ pub fn selectionTextEmptyForZeroWidthTest(io: std.Io, alloc: std.mem.Allocator) 
 }
 
 /// `selectionColRange` reports the selected span per row for the
-/// renderer: clipped on the first/last row, full width between, null
+/// renderer: clipped on the first/last row, the whole row between, null
 /// outside.
 pub fn selectionColRangeClipsEndsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
     defer layer.deinit();
+    try layer.writeText("0123456789\n0123456789\n0123456789", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     layer.setSelection(.{ .above = 0, .col = 3 }, .{ .above = -2, .col = 6 });
 
@@ -2477,6 +2478,113 @@ pub fn selectionColRangeClipsEndsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqual(last.start, 0);
     try testz.expectEqual(last.end, 7); // end col + 1
     try testz.expectTrue(layer.selectionColRange(-3) == null); // below
+}
+
+/// A selection wrapping onto the next line tints each row only up to
+/// its last character, not out to the layer's edge -- the same cells the
+/// copied text covers. A blank row inside the selection tints nothing.
+pub fn selectionColRangeStopsAtRowTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 4, 0);
+    defer layer.deinit();
+    try layer.writeText("hello there\n\nnext line", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    layer.setSelection(.{ .above = 0, .col = 6 }, .{ .above = -2, .col = 3 });
+
+    const first = layer.selectionColRange(0).?;
+    try testz.expectEqual(first.start, 6);
+    try testz.expectEqual(first.end, 11);
+    try testz.expectTrue(layer.selectionColRange(-1) == null);
+    const last = layer.selectionColRange(-2).?;
+    try testz.expectEqual(last.start, 0);
+    try testz.expectEqual(last.end, 4);
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("there\n\nnext", text);
+}
+
+/// Two 2x-scaled lines: `ab` on rows 0-1 and `cd` on rows 2-3 (each
+/// glyph two cells wide, its lower half the row below). A drag ending on
+/// a lower-half row belongs to the glyph row above it, so dragging from
+/// `b` back onto the lower half of `a` selects `ab` -- not `b` plus the
+/// start of a phantom line -- and the tint covers both rows of each
+/// selected glyph. Wrapping onto the second line starts it at its own
+/// first glyph, and the copied text skips the fill and the lower rows.
+pub fn selectionTracksScaledGlyphRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 6, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+    const bg = glyphwire.default_style.bg;
+    try layer.writeTextOpts("ab", fg, bg, .{ .scale = .x2 });
+    layer.setProperty(.{ .cursor = .{ .row = 2, .col = 0 } });
+    try layer.writeTextOpts("cd", fg, bg, .{ .scale = .x2 });
+
+    // From `b` (row 0, col 2) back onto the lower half of `a` (row 1).
+    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = -1, .col = 1 });
+    const top = layer.selectionColRange(0).?;
+    try testz.expectEqual(top.start, 0);
+    try testz.expectEqual(top.end, 4);
+    const lower = layer.selectionColRange(-1).?;
+    try testz.expectEqual(lower.start, 0);
+    try testz.expectEqual(lower.end, 4);
+    try testz.expectTrue(layer.selectionColRange(-2) == null);
+    {
+        const text = (try layer.selectionText(alloc)).?;
+        defer alloc.free(text);
+        try testz.expectEqualStr("ab", text);
+    }
+
+    // From `b` down onto the lower half of `c` (row 3, col 1): two
+    // pieces, `b` on the first line and `c` on the second.
+    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = -3, .col = 1 });
+    const first = layer.selectionColRange(0).?;
+    try testz.expectEqual(first.start, 2);
+    try testz.expectEqual(first.end, 4);
+    const first_lower = layer.selectionColRange(-1).?;
+    try testz.expectEqual(first_lower.start, 2);
+    try testz.expectEqual(first_lower.end, 4);
+    const second = layer.selectionColRange(-2).?;
+    try testz.expectEqual(second.start, 0);
+    try testz.expectEqual(second.end, 2);
+    const second_lower = layer.selectionColRange(-3).?;
+    try testz.expectEqual(second_lower.start, 0);
+    try testz.expectEqual(second_lower.end, 2);
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("b\nc", text);
+}
+
+/// Cells written `selectable = false` -- a panel's border and pad --
+/// stay out of the tint and the copied text, and a row made of nothing
+/// else (the top and bottom border) contributes no line.
+pub fn selectionSkipsUnselectableChromeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 8, 4, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+    const bg = glyphwire.default_style.bg;
+    const chrome: glyphwire.Layer.WriteOpts = .{ .selectable = false };
+
+    try layer.writeTextOpts("+------+", fg, bg, chrome);
+    for ([_][]const u8{ "hi", "yo" }, 1..) |line, row| {
+        layer.setProperty(.{ .cursor = .{ .row = row, .col = 0 } });
+        try layer.writeTextOpts("| ", fg, bg, chrome);
+        try layer.writeTextOpts(line, fg, bg, .{ .max_cols = 4, .pad = true });
+        try layer.writeTextOpts(" |", fg, bg, chrome);
+    }
+    layer.setProperty(.{ .cursor = .{ .row = 3, .col = 0 } });
+    try layer.writeTextOpts("+------+", fg, bg, chrome);
+
+    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = -3, .col = 7 });
+    try testz.expectTrue(layer.selectionColRange(0) == null);
+    const row1 = layer.selectionColRange(-1).?;
+    try testz.expectEqual(row1.start, 2);
+    try testz.expectEqual(row1.end, 4);
+    try testz.expectTrue(layer.selectionColRange(-3) == null);
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("hi\nyo", text);
 }
 
 /// A selection whose ends land mid-character covers whole wide

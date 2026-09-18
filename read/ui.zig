@@ -1254,9 +1254,9 @@ pub const Ui = struct {
         const h_line = try repeatAlloc(self.alloc, box_h, interior);
         defer self.alloc.free(h_line);
 
-        try textAt(&b, self.dialog_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
-        try textOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
-        try textOn(&b, self.dialog_layer, box_tr, fg_dialog_border, bg_dialog);
+        try chromeAt(&b, self.dialog_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, self.dialog_layer, box_tr, fg_dialog_border, bg_dialog);
 
         // Each text row is written as border, pad, text, pad-to-width,
         // border -- one run per piece, all with the panel's background, so
@@ -1269,7 +1269,7 @@ pub const Ui = struct {
         // border cells: the glyph's own fill already paints the rest.
         for (rows, 0..) |line, i| {
             const row = 1 + i * pitch;
-            try textAt(&b, self.dialog_layer, row, 0, box_v, fg_dialog_border, bg_dialog);
+            try chromeAt(&b, self.dialog_layer, row, 0, box_v_pad, fg_dialog_border, bg_dialog);
             try b.writeTextOpts(line, .{
                 .layer = self.dialog_layer,
                 .row = row,
@@ -1280,17 +1280,17 @@ pub const Ui = struct {
                 .max_cols = inner,
                 .pad = true,
             });
-            try textAt(&b, self.dialog_layer, row, inner + 3, box_v, fg_dialog_border, bg_dialog);
+            try chromeAt(&b, self.dialog_layer, row, inner + 2, pad_box_v, fg_dialog_border, bg_dialog);
             for (1..pitch) |k| {
-                try textAt(&b, self.dialog_layer, row + k, 0, box_v, fg_dialog_border, bg_dialog);
-                try textAt(&b, self.dialog_layer, row + k, inner + 3, box_v, fg_dialog_border, bg_dialog);
+                try chromeAt(&b, self.dialog_layer, row + k, 0, box_v_pad, fg_dialog_border, bg_dialog);
+                try chromeAt(&b, self.dialog_layer, row + k, inner + 2, pad_box_v, fg_dialog_border, bg_dialog);
             }
         }
 
-        try textAt(&b, self.dialog_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
-        try textOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
-        try textOn(&b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
-        if (o.ai_tag) |tag| try textAt(&b, self.dialog_layer, box_rows - 1, tag.col, ai_tag, fg_lookup_term, bg_dialog);
+        try chromeAt(&b, self.dialog_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
+        if (o.ai_tag) |tag| try chromeAt(&b, self.dialog_layer, box_rows - 1, tag.col, ai_tag, fg_lookup_term, bg_dialog);
 
         // Both in the same batch, so the layer's first visible frame is
         // already the finished panel -- see `setHelp` for the same trick.
@@ -1558,9 +1558,9 @@ pub const Ui = struct {
         const h_line = try repeatAlloc(self.alloc, box_h, interior);
         defer self.alloc.free(h_line);
 
-        try textAt(&b, layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
-        try textOn(&b, layer, h_line, fg_dialog_border, bg_dialog);
-        try textOn(&b, layer, box_tr, fg_dialog_border, bg_dialog);
+        try chromeAt(&b, layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, layer, box_tr, fg_dialog_border, bg_dialog);
 
         var row: usize = 1;
         for (lines) |l| {
@@ -1569,15 +1569,15 @@ pub const Ui = struct {
             // The rows a scaled glyph draws down into carry only their
             // border cells; its own fill paints the rest.
             for (1..p) |k| {
-                try textAt(&b, layer, row + k, 0, box_v, fg_dialog_border, bg_dialog);
-                try textAt(&b, layer, row + k, inner + 3, box_v, fg_dialog_border, bg_dialog);
+                try chromeAt(&b, layer, row + k, 0, box_v, fg_dialog_border, bg_dialog);
+                try chromeAt(&b, layer, row + k, inner + 3, box_v, fg_dialog_border, bg_dialog);
             }
             row += p;
         }
 
-        try textAt(&b, layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
-        try textOn(&b, layer, h_line, fg_dialog_border, bg_dialog);
-        try textOn(&b, layer, box_br, fg_dialog_border, bg_dialog);
+        try chromeAt(&b, layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, layer, box_br, fg_dialog_border, bg_dialog);
 
         try b.setLayerOpacity(layer, if (self.ocr) |o| (if (o.peeking) self.conf.ocr_peek else 1.0) else 1.0);
         try b.setLayerVisible(layer, true);
@@ -1650,16 +1650,16 @@ pub const Ui = struct {
         var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, interior);
 
-        try textAt(&batch, self.dict_build_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
-        try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
-        try textOn(&batch, self.dict_build_layer, box_tr, fg_dialog_border, bg_dialog);
+        try chromeAt(&batch, self.dict_build_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
+        try chromeOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(&batch, self.dict_build_layer, box_tr, fg_dialog_border, bg_dialog);
 
         try writePanelRow(&batch, self.dict_build_layer, 1, line1, inner, fg_dialog, .x1);
         try writePanelRow(&batch, self.dict_build_layer, 2, line2, inner, fg_dialog, .x1);
 
-        try textAt(&batch, self.dict_build_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
-        try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
-        try textOn(&batch, self.dict_build_layer, box_br, fg_dialog_border, bg_dialog);
+        try chromeAt(&batch, self.dict_build_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
+        try chromeOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(&batch, self.dict_build_layer, box_br, fg_dialog_border, bg_dialog);
 
         try batch.setLayerVisible(self.dict_build_layer, true);
 
@@ -1784,6 +1784,11 @@ pub const Ui = struct {
     const box_br = "\u{2518}";
     const box_h = "\u{2500}";
     const box_v = "\u{2502}";
+    /// A text row's left and right edges: the border plus its one-cell
+    /// pad, written as one chrome run so the pad is unselectable too and
+    /// a wrapped selection's tint starts at the text, not the pad.
+    const box_v_pad = box_v ++ " ";
+    const pad_box_v = " " ++ box_v;
 
     /// `s` repeated `n` times into `buf` (sized by the caller for exactly
     /// that many copies) -- used to draw a solid horizontal border run
@@ -1806,22 +1811,26 @@ pub const Ui = struct {
     /// when `ai_lookup` is on. Names the key that does the same thing.
     const ai_tag = " a:AI ";
 
-    /// `write_text` on `layer` at `(row, col)`, queued on `b`.
-    fn textAt(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, col: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
-        try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg });
+    /// Panel chrome (border, pad, the AI tag) on `layer` at `(row, col)`,
+    /// queued on `b`. Written `selectable = false`, so a selection over
+    /// the panel tints and copies only the text inside it
+    /// (`core.Cell.selectable`).
+    fn chromeAt(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, col: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
+        try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg, .selectable = false });
     }
 
-    /// `write_text` on `layer` continuing from wherever the last write
-    /// left the cursor, queued on `b`.
-    fn textOn(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
-        try b.writeTextOpts(text, .{ .layer = layer, .fg = fg, .bg = bg });
+    /// `chromeAt` continuing from wherever the last write left the
+    /// cursor.
+    fn chromeOn(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
+        try b.writeTextOpts(text, .{ .layer = layer, .fg = fg, .bg = bg, .selectable = false });
     }
 
     /// One panel row -- border, text, border -- the piece every bordered
     /// panel repeats once per line. The text is clipped and padded to the
     /// interior by the host (`max_cols` + `pad`, in display columns, so a
-    /// CJK line can't overrun the border); the one-cell gutter either side
-    /// is the layer background. A `scale`d row is still one write: the
+    /// CJK line can't overrun the border); the one-cell pad either side is
+    /// written with its border as chrome, so a selection skips it. A
+    /// `scale`d row is still one write: the
     /// host advances each glyph by its scaled width and fills the cells
     /// it steps over, the rows below included (`core.TextScale`) -- the
     /// caller leaves those rows alone apart from their borders.
@@ -1834,7 +1843,7 @@ pub const Ui = struct {
         fg: glyphwire.Color,
         scale: glyphwire.TextScale,
     ) !void {
-        try textAt(b, layer, row, 0, box_v, fg_dialog_border, bg_dialog);
+        try chromeAt(b, layer, row, 0, box_v_pad, fg_dialog_border, bg_dialog);
         try b.writeTextOpts(text, .{
             .layer = layer,
             .row = row,
@@ -1845,7 +1854,7 @@ pub const Ui = struct {
             .max_cols = inner,
             .pad = true,
         });
-        try textAt(b, layer, row, inner + 3, box_v, fg_dialog_border, bg_dialog);
+        try chromeAt(b, layer, row, inner + 2, pad_box_v, fg_dialog_border, bg_dialog);
     }
 
     /// Queues the dialog's full redraw (border + every line) onto `b`
@@ -1862,9 +1871,9 @@ pub const Ui = struct {
         var h_buf: [help_interior * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, help_interior);
 
-        try textAt(b, self.help_layer, 0, 0, box_tl, fg_status, bg_status);
-        try textOn(b, self.help_layer, h_line, fg_status, bg_status);
-        try textOn(b, self.help_layer, box_tr, fg_status, bg_status);
+        try chromeAt(b, self.help_layer, 0, 0, box_tl, fg_status, bg_status);
+        try chromeOn(b, self.help_layer, h_line, fg_status, bg_status);
+        try chromeOn(b, self.help_layer, box_tr, fg_status, bg_status);
 
         var line_buf: [help_interior]u8 = undefined;
         for (help_lines, 0..) |line, i| {
@@ -1872,14 +1881,14 @@ pub const Ui = struct {
             @memcpy(line_buf[0..keep], line[0..keep]);
             @memset(line_buf[keep..], ' ');
 
-            try textAt(b, self.help_layer, i + 1, 0, box_v, fg_status, bg_status);
-            try textOn(b, self.help_layer, &line_buf, fg_status, bg_status);
-            try textOn(b, self.help_layer, box_v, fg_status, bg_status);
+            try chromeAt(b, self.help_layer, i + 1, 0, box_v, fg_status, bg_status);
+            try b.writeTextOpts(&line_buf, .{ .layer = self.help_layer, .fg = fg_status, .bg = bg_status });
+            try chromeOn(b, self.help_layer, box_v, fg_status, bg_status);
         }
 
-        try textAt(b, self.help_layer, help_rows - 1, 0, box_bl, fg_status, bg_status);
-        try textOn(b, self.help_layer, h_line, fg_status, bg_status);
-        try textOn(b, self.help_layer, box_br, fg_status, bg_status);
+        try chromeAt(b, self.help_layer, help_rows - 1, 0, box_bl, fg_status, bg_status);
+        try chromeOn(b, self.help_layer, h_line, fg_status, bg_status);
+        try chromeOn(b, self.help_layer, box_br, fg_status, bg_status);
     }
 
     /// Redraws the dialog in place -- e.g. `render()` keeping it current
@@ -2511,9 +2520,9 @@ pub const Ui = struct {
         // Text rows are 1-based on the panel (row 0 is the border) and
         // text columns start at 2 (border, then pad) -- see
         // `dialogTextPos`. At scale each display column is `pitch` cells,
-        // and the inclusive end runs to the last of them. The highlight
-        // sits on the glyph row only: a selection is a stream, so it
-        // can't also cover the rows a scaled glyph draws down into.
+        // and the inclusive end runs to the last of them. Both ends sit
+        // on glyph rows; the host extends the tint down over the rows a
+        // scaled glyph draws into (`core.Cell.under_scaled`).
         const pitch = o.pitch;
         const first: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.first.row * pitch + 1)), .col = span.first.col * pitch + 2 };
         const last: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.last.row * pitch + 1)), .col = span.last.col * pitch + pitch - 1 + 2 };

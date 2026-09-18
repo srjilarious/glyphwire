@@ -138,6 +138,9 @@ const WriteTextParams = struct {
     max_cols: ?usize = null,
     /// See `core.Layer.WriteOpts.pad`.
     pad: bool = false,
+    /// `false` marks every cell this write touches as outside any
+    /// selection -- see `core.Cell.selectable`. Whole-write, like `pad`.
+    selectable: bool = true,
     fg: ?protocol.Color = null,
     bg: ?protocol.Color = null,
     /// See `core.Cell.metadata_id`'s doc comment.
@@ -1754,6 +1757,7 @@ pub const Dispatcher = struct {
             .pad_fg = fg,
             .pad_bg = bg,
             .pad_metadata_id = metadata_id,
+            .selectable = p.selectable,
         });
 
         // A terminal query the text carried (`CSI 6n` / DA / DECRQM):
