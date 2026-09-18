@@ -46,6 +46,8 @@ const cache_mod = @import("cache.zig");
 const config_mod = @import("config.zig");
 const mokuro = @import("mokuro.zig");
 const dict_mod = @import("dict.zig");
+const ai = @import("ai.zig");
+const ai_cache = @import("ai_cache.zig");
 const state_mod = @import("state.zig");
 const zoom = @import("zoom.zig");
 
@@ -110,6 +112,14 @@ const Ocr = struct {
     /// can turn its row/column back into source text without redoing the
     /// join/wrap `renderDialog` already did.
     text: struct { joined: []u8 = &.{}, rows: []const []const u8 = &.{} } = .{},
+    /// Cells per text row/column the last `renderDialog` drew at --
+    /// `glyphwire.scaledPitch(Ui.ocr_scale)`. A panel point maps back to
+    /// text by dividing by this (`Ui.dialogTextPos`).
+    pitch: usize = 1,
+    /// The clickable ` a:AI ` tag on the dialog's bottom border, in
+    /// panel columns, when `ai_lookup` is on and the panel is wide enough
+    /// to carry it.
+    ai_tag: ?struct { col: usize, cols: usize } = null,
 
     /// The block the dialog is showing, or null.
     fn current(self: *const Ocr) ?*const mokuro.Block {
@@ -147,7 +157,6 @@ const Lookup = struct {
     /// `source_len`, which is what the dialog's highlight follows as the
     /// shown hit changes (`Ui.highlightLookup`).
     source_start: usize,
-    rect: struct { row: usize = 0, col: usize = 0, rows: usize = 0, cols: usize = 0 } = .{},
 
     fn current(self: Lookup) dict_mod.Hit {
         return self.match.hits[self.hit];
@@ -156,6 +165,36 @@ const Lookup = struct {
     fn count(self: Lookup) usize {
         return self.match.hits.len;
     }
+};
+
+/// The AI translation panel, shown in the dictionary panel's slot
+/// (`Ui.dict_layer`) -- the two replace each other, never both. Opened
+/// by `a` or a click on the dialog's ` a:AI ` tag (`Ui.startAi`).
+const AiPanel = struct {
+    phase: union(enum) {
+        /// `ai_confirm_before_send`: the first send of the session waits
+        /// here for Enter, naming where the text is about to go.
+        confirm,
+        /// A request is out. `future` runs `job.run`; `run` polls
+        /// `job.done` once a tick and `Ui.cancelAi` cancels the future.
+        sending: struct { job: *ai.Job, future: std.Io.Future(void), started: std.Io.Timestamp },
+        /// Owned, already passed through `ai.plainText`.
+        answer: []u8,
+        /// Owned: why there is no answer.
+        failure: []u8,
+    },
+    /// Owned. Kept for the send after a confirm, and for the cache write
+    /// when the answer arrives.
+    prompt: ai.Prompt,
+    key: ai_cache.Key,
+    /// What `ai_cache.Meta` records beside the answer. `highlight` is
+    /// owned (or empty).
+    page: usize,
+    block: usize,
+    highlight: []u8,
+    /// Whole seconds shown on the sending panel, so `run` only redraws it
+    /// when the count changes.
+    shown_secs: u64 = 0,
 };
 
 pub const Ui = struct {
@@ -246,11 +285,47 @@ pub const Ui = struct {
     dict: ?dict_mod.Dict = null,
     /// The last word looked up, shown in `dict_layer`. See `Lookup`.
     lookup: ?Lookup = null,
-    lookup_dirty: bool = false,
+    /// The AI panel, shown in the same slot. See `AiPanel`. At most one
+    /// of `lookup` / `ai` is set.
+    ai: ?AiPanel = null,
+    /// Either side panel's content changed: `renderSide` redraws
+    /// whichever one is up.
+    side_dirty: bool = false,
+    /// The side panel's on-screen rect in window cells (its *viewport*,
+    /// when it scrolls), from the last `renderSide`. A press inside it is
+    /// swallowed rather than panning or closing anything.
+    side_rect: struct { row: usize = 0, col: usize = 0, rows: usize = 0, cols: usize = 0 } = .{},
+    /// How far the side panel is scrolled, and how far it can be. Reset
+    /// to the top whenever its content changes; the wheel reports it back
+    /// through `scroll_offset`, PgUp/PgDn move it (`scrollSide`).
+    side_scroll: usize = 0,
+    side_max_scroll: usize = 0,
+    /// Set by anything that replaces the side panel's content, so the
+    /// next `renderSide` starts it at the top rather than keeping the
+    /// previous content's offset.
+    side_reset_scroll: bool = false,
     /// The lookup panel's title size -- `conf.dictionary_title_scale` at
-    /// startup, cycled 1x -> 1.5x -> 2x -> 1x by `s` for the rest of the
-    /// session (`Ui.cycleDictTitleScale`).
+    /// startup, cycled 1x -> 1.5x -> 2x -> 3x -> 1x by `s` for the rest of
+    /// the session (`Ui.cycleDictTitleScale`).
     dict_title_scale: glyphwire.TextScale = .x1,
+    /// The OCR dialog's text size -- `conf.ocr_text_scale` at startup,
+    /// cycled by `S` (`Ui.cycleOcrScale`).
+    ocr_scale: glyphwire.TextScale = .x1,
+
+    /// The first AI send of the session has been confirmed (or
+    /// `ai_confirm_before_send` is off). Never persisted: every session
+    /// starts by asking again.
+    ai_confirmed: bool = false,
+    /// The answer cache, opened on first use. `ai_cache_failed` stops a
+    /// broken cache file from being retried (and logged) on every send.
+    ai_cache: ?ai_cache.Cache = null,
+    ai_cache_failed: bool = false,
+    /// glyphwire's config directory, where the cache lives. Borrowed from
+    /// main.zig, which outlives the UI.
+    config_dir: ?[]const u8 = null,
+    /// The API key, read from `conf.ai_api_key_env` by main.zig. Borrowed
+    /// from the environment map.
+    ai_api_key: ?[]const u8 = null,
 
     /// Set for as long as `conf.dictionary` is being indexed for the
     /// first time -- `run` steps it one `term_bank_*.json` file per tick
@@ -279,7 +354,13 @@ pub const Ui = struct {
         listener: *glyphwire.InputListener,
         book: *archive_mod.Archive,
         conf: config_mod.ReadConfig,
-        start: struct { page: usize, mode: zoom.Mode, direction: Direction },
+        start: struct {
+            page: usize,
+            mode: zoom.Mode,
+            direction: Direction,
+            config_dir: ?[]const u8 = null,
+            ai_api_key: ?[]const u8 = null,
+        },
     ) !*Ui {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
@@ -354,6 +435,10 @@ pub const Ui = struct {
             .dict_layer = dict_layer,
             .dict_build_layer = dict_build_layer,
             .dict_title_scale = conf.dictionary_title_scale,
+            .ocr_scale = conf.ocr_text_scale,
+            .ai_confirmed = !conf.ai_confirm_before_send,
+            .config_dir = start.config_dir,
+            .ai_api_key = start.ai_api_key,
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .page = @min(start.page, book.count() -| 1),
@@ -473,6 +558,10 @@ pub const Ui = struct {
 
         if (self.ocr) |*o| o.deinit(alloc);
         self.clearLookup();
+        // Cancels a request still in flight: the job must be finished
+        // before it is freed, and nobody is left to read its answer.
+        self.clearAi();
+        if (self.ai_cache) |*cch| cch.close();
         if (self.dict) |*d| d.deinit();
         // A quit mid-build: abandon it rather than let it finish
         // unobserved -- there is no reader left to hand the result to.
@@ -519,22 +608,30 @@ pub const Ui = struct {
                     self.dict_build = null;
                 }
             }
+            self.pollAi();
             if (self.page_dirty) try self.renderPage();
             // Both after the page: `renderPage` recomputes the layout the
             // marks and the dialog are placed against, and marks them
             // dirty when it does.
             if (self.hints_dirty) try self.renderHints();
-            if (self.dialog_dirty) try self.renderDialog();
-            if (self.lookup_dirty) try self.renderLookup();
+            if (self.dialog_dirty) {
+                try self.renderDialog();
+                // The side panel is placed against the dialog's rect,
+                // which may just have moved or resized.
+                if (self.lookup != null or self.ai != null) self.side_dirty = true;
+            }
+            if (self.side_dirty) try self.renderSide();
             if (self.dict_build_dirty) try self.renderDictBuild();
             if (self.status_dirty) try self.renderStatus();
             if (self.quit) break;
 
             // Every notification wakes this, so with nothing to do in the
-            // background it blocks outright; only a dictionary build needs
-            // the timeout, to keep stepping. Then everything already
-            // queued is handled in arrival order before the next frame.
-            const timeout: std.Io.Timeout = if (self.dict_build != null)
+            // background it blocks outright; only a dictionary build (to
+            // keep stepping) and an AI request (to notice it finishing and
+            // tick the elapsed counter) need the timeout. Then everything
+            // already queued is handled in arrival order before the next
+            // frame.
+            const timeout: std.Io.Timeout = if (self.dict_build != null or self.aiSending())
                 .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }
             else
                 .none;
@@ -574,6 +671,10 @@ pub const Ui = struct {
                     const other = if (so.layer == self.page_layer) self.hint_layer else self.page_layer;
                     self.client.setLayerScrollOffset(other, so.row, so.col) catch {};
                     self.status_dirty = true;
+                } else if (so.layer == self.dict_layer) {
+                    // The wheel over a side panel taller than its slot.
+                    // Only remembered, so PgUp/PgDn continue from here.
+                    self.side_scroll = so.row;
                 }
             },
             .mouse_move => |m| try self.handleMouseMove(m),
@@ -669,7 +770,10 @@ pub const Ui = struct {
             self.client.clearSelection(self.dialog_layer) catch {};
             // A lookup belongs to the bubble it was clicked in; stepping
             // to a different one leaves it looking like the wrong word.
+            // Same for an AI answer, and a request still out for the old
+            // bubble is cancelled rather than left to land on the new one.
             self.clearLookup();
+            self.clearAi();
         }
 
         o.at = next;
@@ -715,6 +819,7 @@ pub const Ui = struct {
         self.client.setLayerVisible(self.dialog_layer, false) catch {};
         self.client.setLayerOpacity(self.dialog_layer, 1.0) catch {};
         self.clearLookup();
+        self.clearAi();
         self.hints_dirty = true;
         self.status_dirty = true;
     }
@@ -1092,7 +1197,11 @@ pub const Ui = struct {
         const joined = try mokuro.joinLines(self.alloc, block.lines);
         errdefer self.alloc.free(joined);
         // Two border columns and a one-column pad inside each of them.
-        const inner_max = self.conf.ocr_dialog_cols -| 4;
+        // `ocr_dialog_cols` is the wrap width at 1x: a scaled dialog wraps
+        // to the same characters a line and is `pitch` times wider --
+        // unless that would run off the window, when it wraps sooner.
+        const pitch = glyphwire.scaledPitch(self.ocr_scale);
+        const inner_max = @max(@min(self.conf.ocr_dialog_cols -| 4, (self.win.cols -| 4) / pitch), 2);
         const rows = try mokuro.wrap(self.alloc, joined, inner_max);
         errdefer self.alloc.free(rows);
         if (rows.len == 0) {
@@ -1107,19 +1216,31 @@ pub const Ui = struct {
         // render above never leaves `o.text` pointing at freed memory.
         o.freeText(self.alloc);
         o.text = .{ .joined = joined, .rows = rows };
+        o.pitch = pitch;
 
         // The widest row decides the panel's width, capped at the wrap
-        // width it was produced against.
-        var inner: usize = 1;
-        for (rows) |r| inner = @max(inner, mokuro.displayWidth(r));
-        inner = @min(inner, inner_max);
+        // width it was produced against -- in display columns, then
+        // scaled to cells.
+        var text_cols: usize = 1;
+        for (rows) |r| text_cols = @max(text_cols, mokuro.displayWidth(r));
+        text_cols = @min(text_cols, inner_max);
+        // Wide enough for the AI tag when there is one: a one-word bubble
+        // still needs somewhere to click.
+        const tag_cols = mokuro.displayWidth(ai_tag);
+        var inner = text_cols * pitch;
+        if (self.conf.ai_lookup) inner = @max(inner, tag_cols + 2);
         // One pad column each side of the text, plus the two border cells.
         const interior = inner + 2;
         const box_cols = interior + 2;
-        const box_rows = rows.len + 2;
+        // A scaled row is `pitch` cells tall: the glyph draws down into
+        // the rows below its own (see `core.TextScale`).
+        const box_rows = rows.len * pitch + 2;
 
         const at = self.placeDialog(page, block.box, box_rows, box_cols);
         o.rect = .{ .row = at.row, .col = at.col, .rows = box_rows, .cols = box_cols };
+        // Right-aligned on the bottom border, one border cell in from the
+        // corner.
+        o.ai_tag = if (self.conf.ai_lookup) .{ .col = box_cols - 2 - tag_cols, .cols = tag_cols } else null;
 
         var b = c.batch();
         defer b.deinit();
@@ -1128,10 +1249,10 @@ pub const Ui = struct {
         try b.setLayerCellPosition(self.dialog_layer, at.row, at.col);
         try b.clearOn(self.dialog_layer, 0, 0, null, null);
 
-        // Sized for the widest panel `ocr_dialog_cols` can be clamped to,
-        // so the runtime width never overruns it.
-        var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
-        const h_line = repeatInto(&h_buf, box_h, interior);
+        // Allocated rather than a fixed buffer: a scaled dialog is up to
+        // the window's width, which has no fixed ceiling.
+        const h_line = try repeatAlloc(self.alloc, box_h, interior);
+        defer self.alloc.free(h_line);
 
         try textAt(&b, self.dialog_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
@@ -1142,20 +1263,34 @@ pub const Ui = struct {
         // the row is opaque from edge to edge however short the text is.
         // The pad is measured in *display* columns because Japanese sets
         // two cells per character (`mokuro.displayWidth`).
-        var pad_buf: [config_mod.ocr_dialog_cols_max]u8 = undefined;
-        @memset(&pad_buf, ' ');
+        // The text is clipped and padded to the interior by the host
+        // (`max_cols` + `pad`, in display columns, so CJK can't overrun
+        // the border). A scaled row's extra rows below carry only their
+        // border cells: the glyph's own fill already paints the rest.
         for (rows, 0..) |line, i| {
-            const used = @min(mokuro.displayWidth(line), inner);
-            try textAt(&b, self.dialog_layer, i + 1, 0, box_v, fg_dialog_border, bg_dialog);
-            try textOn(&b, self.dialog_layer, pad_buf[0..1], fg_dialog, bg_dialog);
-            try textOn(&b, self.dialog_layer, line, fg_dialog, bg_dialog);
-            try textOn(&b, self.dialog_layer, pad_buf[0 .. inner - used + 1], fg_dialog, bg_dialog);
-            try textOn(&b, self.dialog_layer, box_v, fg_dialog_border, bg_dialog);
+            const row = 1 + i * pitch;
+            try textAt(&b, self.dialog_layer, row, 0, box_v, fg_dialog_border, bg_dialog);
+            try b.writeTextOpts(line, .{
+                .layer = self.dialog_layer,
+                .row = row,
+                .col = 2,
+                .fg = fg_dialog,
+                .bg = bg_dialog,
+                .scale = self.ocr_scale,
+                .max_cols = inner,
+                .pad = true,
+            });
+            try textAt(&b, self.dialog_layer, row, inner + 3, box_v, fg_dialog_border, bg_dialog);
+            for (1..pitch) |k| {
+                try textAt(&b, self.dialog_layer, row + k, 0, box_v, fg_dialog_border, bg_dialog);
+                try textAt(&b, self.dialog_layer, row + k, inner + 3, box_v, fg_dialog_border, bg_dialog);
+            }
         }
 
         try textAt(&b, self.dialog_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
+        if (o.ai_tag) |tag| try textAt(&b, self.dialog_layer, box_rows - 1, tag.col, ai_tag, fg_lookup_term, bg_dialog);
 
         // Both in the same batch, so the layer's first visible frame is
         // already the finished panel -- see `setHelp` for the same trick.
@@ -1164,6 +1299,10 @@ pub const Ui = struct {
 
         var results = try b.send();
         results.deinit();
+
+        // The lookup's highlight is in panel cells, which a re-wrap or a
+        // new text scale (`S`) just moved.
+        if (self.lookup != null) self.highlightLookup();
     }
 
     /// Where the dialog goes: below the bubble it came from when there is
@@ -1193,175 +1332,278 @@ pub const Ui = struct {
         };
     }
 
+    /// One row of a side panel before it is laid out. A `scale`d row is
+    /// `scaledPitch(scale)` cells tall and each of its display columns
+    /// that many cells wide (see `core.TextScale`).
+    const PanelLine = struct {
+        text: []const u8,
+        fg: glyphwire.Color = fg_dialog,
+        scale: glyphwire.TextScale = .x1,
+    };
+
+    /// Widest an AI answer's panel wraps to. Wider than the dictionary
+    /// panel's `ocr_dialog_cols`: the answer is English prose, which reads
+    /// badly in a 36-column ribbon.
+    const ai_panel_cols: usize = 64;
+
+    /// Shortest a side panel is squeezed to before it gives up on staying
+    /// clear of the OCR dialog and covers it instead (`placeSide`).
+    const side_min_rows: usize = 5;
+
+    /// Draws whichever side panel is up -- the AI panel if there is one,
+    /// else the dictionary lookup -- or hides the slot.
+    fn renderSide(self: *Ui) !void {
+        self.side_dirty = false;
+        if (self.ai != null) return self.renderAi();
+        return self.renderLookup();
+    }
+
+    fn hideSide(self: *Ui) !void {
+        self.side_rect = .{};
+        self.side_max_scroll = 0;
+        try self.client.setLayerVisible(self.dict_layer, false);
+    }
+
+    /// The wrap cap for a side panel's text: `cap` display columns, but
+    /// never wider than the window leaves room for.
+    fn sideInnerMax(self: *const Ui, cap: usize) usize {
+        return @max(@min(cap, self.win.cols -| 4), 8);
+    }
+
     /// Draws the dictionary lookup panel for `self.lookup`, or hides it
-    /// when there's nothing to show. Same box-drawing shape as
-    /// `renderDialog`, anchored below (or above) the OCR dialog rather
-    /// than a page bubble -- it's answering a click made *on* that
-    /// dialog, not on the artwork.
+    /// when there's nothing to show.
     ///
-    /// Follows the OCR dialog's own peek/hide state (`o.peeking`,
-    /// `o.hidden`): the panel is answering something *on* the dialog, so
-    /// it has no business staying on screen, full-opacity, after the
-    /// thing it's annotating has faded or gone.
+    /// Follows the OCR dialog's own hide state (`o.hidden`): the panel is
+    /// answering something *on* the dialog, so it has no business staying
+    /// on screen after the thing it's annotating has gone.
     fn renderLookup(self: *Ui) !void {
-        self.lookup_dirty = false;
-        const c = self.client;
-        if (self.ocr) |o| if (o.hidden) {
-            try c.setLayerVisible(self.dict_layer, false);
-            return;
-        };
-        const lk = self.lookup orelse {
-            try c.setLayerVisible(self.dict_layer, false);
-            return;
-        };
+        if (self.ocr) |o| if (o.hidden) return self.hideSide();
+        const lk = self.lookup orelse return self.hideSide();
         const shown = lk.current();
         const entry = shown.entry;
-        if (entry.term.len == 0) {
-            try c.setLayerVisible(self.dict_layer, false);
-            return;
-        }
+        if (entry.term.len == 0) return self.hideSide();
+
+        // Every wrapped row points into a buffer built here, so one arena
+        // holds the lot until the panel has been sent.
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
 
         // Subheader: the reading when that differs from the term itself
         // (kana-only entries have the same string in both), the
         // deinflection reason when this wasn't the dictionary form, and
         // -- when the lookup found more than one hit -- a "[hit/total]"
-        // position, cycled with `]`/`[` (`Ui.cycleLookupHit`). The term
-        // itself is drawn separately, at `dict_title_scale`, by
-        // `writeScaledTermRow` below -- see decisions.md's Text scale
-        // section for why it needs its own row(s) rather than sharing
-        // this wrapped block the way it used to.
+        // position, cycled with `]`/`[` (`Ui.cycleLookupHit`).
         var sub_buf: std.ArrayList(u8) = .empty;
-        defer sub_buf.deinit(self.alloc);
         if (entry.reading.len > 0 and !std.mem.eql(u8, entry.reading, entry.term)) {
-            try sub_buf.appendSlice(self.alloc, "\u{3010}");
-            try sub_buf.appendSlice(self.alloc, entry.reading);
-            try sub_buf.appendSlice(self.alloc, "\u{3011}");
+            try sub_buf.appendSlice(a, "\u{3010}");
+            try sub_buf.appendSlice(a, entry.reading);
+            try sub_buf.appendSlice(a, "\u{3011}");
         }
         if (shown.reason) |r| {
-            if (sub_buf.items.len > 0) try sub_buf.append(self.alloc, ' ');
-            try sub_buf.append(self.alloc, '(');
-            try sub_buf.appendSlice(self.alloc, r);
-            try sub_buf.append(self.alloc, ')');
+            if (sub_buf.items.len > 0) try sub_buf.append(a, ' ');
+            try sub_buf.append(a, '(');
+            try sub_buf.appendSlice(a, r);
+            try sub_buf.append(a, ')');
         }
         if (lk.count() > 1) {
-            if (sub_buf.items.len > 0) try sub_buf.append(self.alloc, ' ');
-            const pos = try std.fmt.allocPrint(self.alloc, "[{d}/{d}]", .{ lk.hit + 1, lk.count() });
-            defer self.alloc.free(pos);
-            try sub_buf.appendSlice(self.alloc, pos);
+            if (sub_buf.items.len > 0) try sub_buf.append(a, ' ');
+            try sub_buf.print(a, "[{d}/{d}]", .{ lk.hit + 1, lk.count() });
         }
 
         // Body: every sense joined onto one ribbon before wrapping, not
         // one row per sense -- a homograph can carry a dozen, and this
         // panel is meant to answer "what does this word mean", not
-        // replace the dictionary.
+        // replace the dictionary. A long one scrolls (`drawSidePanel`).
         var body_buf: std.ArrayList(u8) = .empty;
-        defer body_buf.deinit(self.alloc);
         for (entry.glossary, 0..) |g, i| {
-            if (i > 0) try body_buf.appendSlice(self.alloc, "; ");
-            try body_buf.appendSlice(self.alloc, g);
+            if (i > 0) try body_buf.appendSlice(a, "; ");
+            try body_buf.appendSlice(a, g);
         }
 
-        const inner_max = self.conf.ocr_dialog_cols -| 4;
-        const sub_rows = try mokuro.wrap(self.alloc, sub_buf.items, inner_max);
-        defer self.alloc.free(sub_rows);
-        const body_rows = try mokuro.wrap(self.alloc, body_buf.items, inner_max);
-        defer self.alloc.free(body_rows);
+        const inner_max = self.sideInnerMax(self.conf.ocr_dialog_cols -| 4);
+        const sub_rows = try mokuro.wrap(a, sub_buf.items, inner_max);
+        const body_rows = try mokuro.wrap(a, body_buf.items, inner_max);
 
-        // The term's own row(s): `scale_cells` rows tall (2 for
-        // `.x1_5`/`.x2`, reserving room below for the vertical overflow
-        // a scaled glyph draws past its own cell) and `term_cols` wide
-        // (its normal display width times that same multiplier -- the
-        // host advances a scaled glyph by exactly that pitch) -- see
-        // decisions.md's Text scale section.
-        const scale = self.dict_title_scale;
-        const scale_cells: usize = glyphwire.scaledPitch(scale);
-        const term_cols = mokuro.displayWidth(entry.term) * scale_cells;
-        const term_rows = scale_cells;
-
-        var inner: usize = term_cols;
-        for (sub_rows) |r| inner = @max(inner, mokuro.displayWidth(r));
-        for (body_rows) |r| inner = @max(inner, mokuro.displayWidth(r));
-        inner = @max(inner, 1);
-        inner = @min(inner, inner_max);
-        const interior = inner + 2;
-        const box_cols = interior + 2;
+        // The term gets its own row at `dict_title_scale`: a scaled glyph
+        // draws down into the rows below its own, so it can't share a row
+        // with the subheader. `drawSidePanel` reserves those rows -- all
+        // of them, which is what 3x used to overrun.
+        var lines: std.ArrayList(PanelLine) = .empty;
+        try lines.append(a, .{ .text = entry.term, .fg = fg_lookup_term, .scale = self.dict_title_scale });
+        for (sub_rows) |r| try lines.append(a, .{ .text = r });
         // A blank separator row before the body, but only when there is
         // one -- the term (plus its subheader) is always shown.
-        const sep_rows: usize = if (body_rows.len > 0) 1 else 0;
-        const box_rows = term_rows + sub_rows.len + sep_rows + body_rows.len + 2;
+        if (body_rows.len > 0) try lines.append(a, .{ .text = "" });
+        for (body_rows) |r| try lines.append(a, .{ .text = r });
 
-        const at = self.placeLookup(box_rows, box_cols);
-        if (self.lookup) |*ptr| ptr.rect = .{ .row = at.row, .col = at.col, .rows = box_rows, .cols = box_cols };
+        try self.drawSidePanel(lines.items, inner_max);
+    }
 
-        var b = c.batch();
+    /// Draws the AI panel for `self.ai` in the side slot: the first-send
+    /// confirmation, the "sending" notice, the answer, or why there isn't
+    /// one.
+    fn renderAi(self: *Ui) !void {
+        if (self.ocr) |o| if (o.hidden) return self.hideSide();
+        const panel = self.ai orelse return self.hideSide();
+
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const inner_max = self.sideInnerMax(@max(self.conf.ocr_dialog_cols, ai_panel_cols) -| 4);
+        const provider = self.conf.ai_provider;
+        const model = self.conf.aiModel();
+        var lines: std.ArrayList(PanelLine) = .empty;
+
+        switch (panel.phase) {
+            .confirm => {
+                try lines.append(a, .{ .text = try std.fmt.allocPrint(a, "Send this bubble to {s}?", .{provider.label()}), .fg = fg_lookup_term });
+                try lines.append(a, .{ .text = "" });
+                // Spelled out, once a session: this is the moment text
+                // leaves the machine.
+                const neighbours = self.conf.ai_include_neighbor_dialog;
+                const book_info = self.conf.ai_include_book_info;
+                const what = try std.fmt.allocPrint(a, "This bubble's OCR text{s}{s} will be sent to {s} ({s}). No images are sent.", .{
+                    if (neighbours and book_info) ", the bubbles either side of it" else if (neighbours) " and the bubbles either side of it" else "",
+                    if (book_info) " and the book's title and page number" else "",
+                    self.conf.aiEndpoint(),
+                    model,
+                });
+                try appendWrapped(a, &lines, what, inner_max, fg_dialog);
+                try lines.append(a, .{ .text = "" });
+                try lines.append(a, .{ .text = "Enter  send        Esc  cancel", .fg = fg_dim });
+            },
+            .sending => |s| {
+                try lines.append(a, .{ .text = try std.fmt.allocPrint(a, "Asking {s} ({s})...", .{ model, provider.label() }), .fg = fg_lookup_term });
+                const secs = s.started.durationTo(std.Io.Clock.awake.now(self.client.io)).toSeconds();
+                try lines.append(a, .{ .text = try std.fmt.allocPrint(a, "{d}s        Esc  cancel", .{secs}), .fg = fg_dim });
+            },
+            .answer => |text| {
+                try lines.append(a, .{ .text = try std.fmt.allocPrint(a, "AI  {s}", .{model}), .fg = fg_lookup_term });
+                try lines.append(a, .{ .text = "" });
+                try appendWrapped(a, &lines, text, inner_max, fg_dialog);
+            },
+            .failure => |msg| {
+                try lines.append(a, .{ .text = "AI lookup failed", .fg = fg_warn });
+                try appendWrapped(a, &lines, msg, inner_max, fg_dialog);
+            },
+        }
+
+        try self.drawSidePanel(lines.items, inner_max);
+    }
+
+    /// Wraps `text` paragraph by paragraph -- `mokuro.wrap` knows nothing
+    /// of newlines -- keeping a blank line wherever the text has one.
+    fn appendWrapped(a: std.mem.Allocator, lines: *std.ArrayList(PanelLine), text: []const u8, width: usize, fg: glyphwire.Color) !void {
+        var paras = std.mem.splitScalar(u8, text, '\n');
+        while (paras.next()) |para| {
+            const rows = try mokuro.wrap(a, para, width);
+            if (rows.len == 0) {
+                try lines.append(a, .{ .text = "", .fg = fg });
+                continue;
+            }
+            for (rows) |r| try lines.append(a, .{ .text = r, .fg = fg });
+        }
+    }
+
+    /// Lays `lines` out as a bordered panel on `dict_layer`, placed by
+    /// `placeSide`. The layer's grid holds the whole panel; when that is
+    /// taller than the slot it gets, the *viewport* is the slot and the
+    /// panel scrolls in the host's own scroll mode -- a grid bigger than
+    /// its viewport is all it takes for the host to route the wheel to it
+    /// and draw its scrollbar, exactly as for the page layer.
+    ///
+    /// `inner_cap` bounds the interior width; the panel is otherwise sized
+    /// to its widest line.
+    fn drawSidePanel(self: *Ui, lines: []const PanelLine, inner_cap: usize) !void {
+        var inner: usize = 1;
+        var content_rows: usize = 0;
+        for (lines) |l| {
+            const p = glyphwire.scaledPitch(l.scale);
+            inner = @max(inner, mokuro.displayWidth(l.text) * p);
+            content_rows += p;
+        }
+        inner = @min(inner, inner_cap);
+        const interior = inner + 2;
+        const box_cols = interior + 2;
+        const box_rows = content_rows + 2;
+
+        const slot = self.placeSide(box_rows, box_cols);
+        self.side_max_scroll = box_rows - slot.rows;
+        if (self.side_reset_scroll) {
+            self.side_scroll = 0;
+            self.side_reset_scroll = false;
+        }
+        self.side_scroll = @min(self.side_scroll, self.side_max_scroll);
+        self.side_rect = .{ .row = slot.row, .col = slot.col, .rows = slot.rows, .cols = box_cols };
+
+        const layer = self.dict_layer;
+        var b = self.client.batch();
         defer b.deinit();
 
-        try b.setLayerSize(self.dict_layer, box_cols, box_rows);
-        try b.setLayerCellPosition(self.dict_layer, at.row, at.col);
-        try b.clearOn(self.dict_layer, 0, 0, null, null);
+        try b.setLayerSize(layer, box_cols, box_rows);
+        try b.setLayerViewport(layer, box_cols, slot.rows);
+        try b.setLayerScrollbars(layer, self.side_max_scroll > 0, false);
+        try b.setLayerScrollOffset(layer, self.side_scroll, 0);
+        try b.setLayerCellPosition(layer, slot.row, slot.col);
+        try b.clearOn(layer, 0, 0, null, null);
 
-        var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
-        const h_line = repeatInto(&h_buf, box_h, interior);
+        const h_line = try repeatAlloc(self.alloc, box_h, interior);
+        defer self.alloc.free(h_line);
 
-        try textAt(&b, self.dict_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
-        try textOn(&b, self.dict_layer, h_line, fg_dialog_border, bg_dialog);
-        try textOn(&b, self.dict_layer, box_tr, fg_dialog_border, bg_dialog);
+        try textAt(&b, layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
+        try textOn(&b, layer, h_line, fg_dialog_border, bg_dialog);
+        try textOn(&b, layer, box_tr, fg_dialog_border, bg_dialog);
 
-        var pad_buf: [config_mod.ocr_dialog_cols_max]u8 = undefined;
-        @memset(&pad_buf, ' ');
-        var row_i: usize = 1;
-        try writeScaledTermRow(&b, self.dict_layer, row_i, entry.term, scale, inner, &pad_buf, fg_lookup_term);
-        row_i += 1;
-        if (scale_cells > 1) {
-            try writeLookupRow(&b, self.dict_layer, row_i, "", inner, &pad_buf, fg_lookup_term);
-            row_i += 1;
-        }
-        for (sub_rows) |line| {
-            try writeLookupRow(&b, self.dict_layer, row_i, line, inner, &pad_buf, fg_dialog);
-            row_i += 1;
-        }
-        if (sep_rows > 0) {
-            try writeLookupRow(&b, self.dict_layer, row_i, "", inner, &pad_buf, fg_dialog);
-            row_i += 1;
-        }
-        for (body_rows) |line| {
-            try writeLookupRow(&b, self.dict_layer, row_i, line, inner, &pad_buf, fg_dialog);
-            row_i += 1;
+        var row: usize = 1;
+        for (lines) |l| {
+            const p = glyphwire.scaledPitch(l.scale);
+            try writePanelRow(&b, layer, row, l.text, inner, l.fg, l.scale);
+            // The rows a scaled glyph draws down into carry only their
+            // border cells; its own fill paints the rest.
+            for (1..p) |k| {
+                try textAt(&b, layer, row + k, 0, box_v, fg_dialog_border, bg_dialog);
+                try textAt(&b, layer, row + k, inner + 3, box_v, fg_dialog_border, bg_dialog);
+            }
+            row += p;
         }
 
-        try textAt(&b, self.dict_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
-        try textOn(&b, self.dict_layer, h_line, fg_dialog_border, bg_dialog);
-        try textOn(&b, self.dict_layer, box_br, fg_dialog_border, bg_dialog);
+        try textAt(&b, layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
+        try textOn(&b, layer, h_line, fg_dialog_border, bg_dialog);
+        try textOn(&b, layer, box_br, fg_dialog_border, bg_dialog);
 
-        try b.setLayerOpacity(self.dict_layer, if (self.ocr) |o| (if (o.peeking) self.conf.ocr_peek else 1.0) else 1.0);
-        try b.setLayerVisible(self.dict_layer, true);
+        try b.setLayerOpacity(layer, if (self.ocr) |o| (if (o.peeking) self.conf.ocr_peek else 1.0) else 1.0);
+        try b.setLayerVisible(layer, true);
 
         var results = try b.send();
         results.deinit();
     }
 
-    /// Below the OCR dialog when that fits, above it when it doesn't,
-    /// left-aligned with it and always wholly on screen -- the same
-    /// placement rule `placeDialog` applies to the dialog itself, just
-    /// anchored to `ocr.rect` instead of a page bubble's box.
-    fn placeLookup(self: *const Ui, rows: usize, cols: usize) glyphwire.CellPos {
+    /// Where a side panel `rows` x `cols` goes, and how many rows of it
+    /// are visible: below the OCR dialog when it fits, above when that
+    /// fits instead, left-aligned with the dialog and always wholly on
+    /// screen. A panel that fits neither side takes whichever side is
+    /// bigger and scrolls; only when neither side has even
+    /// `side_min_rows` does it give up and cover the dialog.
+    fn placeSide(self: *const Ui, rows: usize, cols: usize) struct { row: usize, col: usize, rows: usize } {
         const view = self.pageView();
-        const max_row: i64 = @as(i64, @intCast(view.rows)) - @as(i64, @intCast(rows));
-        const max_col: i64 = @as(i64, @intCast(view.cols)) - @as(i64, @intCast(cols));
-
         const anchor_row: usize = if (self.ocr) |o| o.rect.row else 0;
         const anchor_col: usize = if (self.ocr) |o| o.rect.col else 0;
         const anchor_rows: usize = if (self.ocr) |o| o.rect.rows else 0;
 
-        var row: i64 = @as(i64, @intCast(anchor_row)) + @as(i64, @intCast(anchor_rows));
-        if (row > max_row) {
-            const above = @as(i64, @intCast(anchor_row)) - @as(i64, @intCast(rows));
-            if (above >= 0) row = above;
-        }
-        return .{
-            .row = @intCast(std.math.clamp(row, 0, @max(max_row, 0))),
-            .col = @intCast(std.math.clamp(@as(i64, @intCast(anchor_col)), 0, @max(max_col, 0))),
-        };
+        const col = @min(anchor_col, view.cols -| cols);
+        const below = anchor_row + anchor_rows;
+        const below_space = view.rows -| below;
+        const above_space = @min(anchor_row, view.rows);
+
+        if (rows <= below_space) return .{ .row = below, .col = col, .rows = rows };
+        if (rows <= above_space) return .{ .row = anchor_row - rows, .col = col, .rows = rows };
+        if (below_space >= above_space and below_space >= side_min_rows)
+            return .{ .row = below, .col = col, .rows = below_space };
+        if (above_space >= side_min_rows) return .{ .row = 0, .col = col, .rows = above_space };
+        const fit = @max(@min(rows, view.rows), 1);
+        return .{ .row = view.rows -| fit, .col = col, .rows = fit };
     }
 
     /// Draws (or hides) the "building dictionary index" panel for
@@ -1406,10 +1648,8 @@ pub const Ui = struct {
         try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
         try textOn(&batch, self.dict_build_layer, box_tr, fg_dialog_border, bg_dialog);
 
-        var pad_buf: [config_mod.ocr_dialog_cols_max]u8 = undefined;
-        @memset(&pad_buf, ' ');
-        try writeLookupRow(&batch, self.dict_build_layer, 1, line1, inner, &pad_buf, fg_dialog);
-        try writeLookupRow(&batch, self.dict_build_layer, 2, line2, inner, &pad_buf, fg_dialog);
+        try writePanelRow(&batch, self.dict_build_layer, 1, line1, inner, fg_dialog, .x1);
+        try writePanelRow(&batch, self.dict_build_layer, 2, line2, inner, fg_dialog, .x1);
 
         try textAt(&batch, self.dict_build_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
         try textOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
@@ -1521,6 +1761,12 @@ pub const Ui = struct {
         "  o                    outline every text region",
         "  z (hold)             fade the dialog to see the page",
         "  \\                    hide the dialog",
+        "  S                    cycle the dialog's text size",
+        "  click a word         dictionary lookup",
+        "  ] / [                other matches of the lookup",
+        "  s                    cycle the lookup title size",
+        "  a                    AI translation of the bubble",
+        "  page_up / page_down  scroll a long lookup / answer",
         "  escape               close the dialog",
         "",
         "  ? toggle this   q quit",
@@ -1542,6 +1788,18 @@ pub const Ui = struct {
         return buf[0 .. n * s.len];
     }
 
+    /// `repeatInto`, into a caller-freed allocation -- for a border whose
+    /// width follows the window rather than a config cap.
+    fn repeatAlloc(alloc: std.mem.Allocator, s: []const u8, n: usize) ![]u8 {
+        const buf = try alloc.alloc(u8, n * s.len);
+        _ = repeatInto(buf, s, n);
+        return buf;
+    }
+
+    /// The OCR dialog's clickable AI tag, drawn into its bottom border
+    /// when `ai_lookup` is on. Names the key that does the same thing.
+    const ai_tag = " a:AI ";
+
     /// `write_text` on `layer` at `(row, col)`, queued on `b`.
     fn textAt(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, col: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
         try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg });
@@ -1553,47 +1811,25 @@ pub const Ui = struct {
         try b.writeTextOpts(text, .{ .layer = layer, .fg = fg, .bg = bg });
     }
 
-    /// One panel row -- border, pad, text, pad-to-width, border -- the
-    /// piece `renderDialog` and `renderLookup` both repeat once per line.
-    /// `pad_buf` is scratch, spaces already `@memset`, at least `inner`
-    /// long.
-    fn writeLookupRow(
+    /// One panel row -- border, text, border -- the piece every bordered
+    /// panel repeats once per line. The text is clipped and padded to the
+    /// interior by the host (`max_cols` + `pad`, in display columns, so a
+    /// CJK line can't overrun the border); the one-cell gutter either side
+    /// is the layer background. A `scale`d row is still one write: the
+    /// host advances each glyph by its scaled width and fills the cells
+    /// it steps over, the rows below included (`core.TextScale`) -- the
+    /// caller leaves those rows alone apart from their borders.
+    fn writePanelRow(
         b: *glyphwire.Client.Batch,
         layer: glyphwire.LayerHandle,
         row: usize,
         text: []const u8,
         inner: usize,
-        pad_buf: []u8,
         fg: glyphwire.Color,
-    ) !void {
-        _ = pad_buf;
-        // Border, then the text clipped and padded to the interior by the
-        // host (display columns, so CJK lines can't overrun the border),
-        // then the right border. The one-cell gutter either side is the
-        // layer background.
-        try textAt(b, layer, row, 0, box_v, fg_dialog_border, bg_dialog);
-        try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = 2, .fg = fg, .bg = bg_dialog, .max_cols = inner, .pad = true });
-        try textAt(b, layer, row, inner + 3, box_v, fg_dialog_border, bg_dialog);
-    }
-
-    /// The lookup panel's title row: `term` drawn via `write_text`'s
-    /// `scale` -- see decisions.md's Text scale section. The same shape as
-    /// `writeLookupRow`: the host advances each scaled glyph by its scaled
-    /// width and fills the cells it steps over with `bg_dialog`, so the
-    /// term is one write rather than a positioned write per character.
-    fn writeScaledTermRow(
-        b: *glyphwire.Client.Batch,
-        layer: glyphwire.LayerHandle,
-        row: usize,
-        term: []const u8,
         scale: glyphwire.TextScale,
-        inner: usize,
-        pad_buf: []u8,
-        fg: glyphwire.Color,
     ) !void {
-        _ = pad_buf;
         try textAt(b, layer, row, 0, box_v, fg_dialog_border, bg_dialog);
-        try b.writeTextOpts(term, .{
+        try b.writeTextOpts(text, .{
             .layer = layer,
             .row = row,
             .col = 2,
@@ -1725,6 +1961,32 @@ pub const Ui = struct {
         // Off the event, as it was pressed -- not the live down-set.
         const shift = k.shift();
 
+        // ── AI panel ──
+        // The first-send confirmation takes Enter (or `a` again) and
+        // Escape; a request in flight takes Escape as "cancel". Both before
+        // the quit block, so that Escape doesn't close the dialog instead.
+        if (self.ai) |panel| switch (panel.phase) {
+            .confirm => {
+                if (eq(u8, key, "enter") or eq(u8, key, "kp_enter") or eq(u8, key, "a")) return self.confirmAi();
+                if (eq(u8, key, "escape")) return self.clearAi();
+            },
+            .sending => if (eq(u8, key, "escape")) {
+                self.clearAi();
+                try self.setMessage("AI request cancelled", .{});
+                self.status_dirty = true;
+                return;
+            },
+            else => {},
+        };
+        if (eq(u8, key, "a")) return self.startAi();
+        // A side panel taller than its slot captures the page keys for as
+        // long as it has somewhere to scroll -- the same "capture while
+        // there's something to do" rule `]`/`[` follow for lookup hits.
+        if (self.side_max_scroll > 0) {
+            if (eq(u8, key, "page_down")) return self.scrollSide(.down);
+            if (eq(u8, key, "page_up")) return self.scrollSide(.up);
+        }
+
         // ── quit / overlay ──
         if (eq(u8, key, "q") or eq(u8, key, "escape")) {
             if (self.help_visible) {
@@ -1787,7 +2049,7 @@ pub const Ui = struct {
         if (eq(u8, key, "w")) return self.setMode(.fit_width);
         if (eq(u8, key, "t")) return self.setMode(.fit_height);
         if (eq(u8, key, "one")) return self.setMode(.natural);
-        if (eq(u8, key, "s")) return self.cycleDictTitleScale();
+        if (eq(u8, key, "s")) return if (shift) self.cycleOcrScale() else self.cycleDictTitleScale();
 
         // ── direction ──
         if (eq(u8, key, "d")) return self.flipDirection();
@@ -1808,12 +2070,12 @@ pub const Ui = struct {
         if (o.at == null or o.peeking == on) return;
         o.peeking = on;
         // Straight to the wire rather than through `dialog_dirty` /
-        // `lookup_dirty`: the panels' contents haven't changed, only how
+        // `side_dirty`: the panels' contents haven't changed, only how
         // they composite, and a full redraw per keypress would be a lot
         // of writes for a fade.
         const opacity: f32 = if (on) self.conf.ocr_peek else 1.0;
         self.client.setLayerOpacity(self.dialog_layer, opacity) catch {};
-        if (self.lookup != null) self.client.setLayerOpacity(self.dict_layer, opacity) catch {};
+        if (self.lookup != null or self.ai != null) self.client.setLayerOpacity(self.dict_layer, opacity) catch {};
     }
 
     /// `\`: hide the dialog -- and the lookup panel, when one is open --
@@ -1825,7 +2087,7 @@ pub const Ui = struct {
         if (o.at == null) return;
         o.hidden = !o.hidden;
         self.dialog_dirty = true;
-        if (self.lookup != null) self.lookup_dirty = true;
+        if (self.lookup != null or self.ai != null) self.side_dirty = true;
     }
 
     /// `o`: outline every OCR region on the page.
@@ -2009,6 +2271,11 @@ pub const Ui = struct {
                 self.client.setSelection(self.dialog_layer, p, p) catch {};
                 return;
             }
+            // A press on the side panel is reading it (or reaching for
+            // its scrollbar), not a click on the page behind it -- which
+            // would pan, turn the page, or close the dialog the panel
+            // belongs to.
+            if (self.onSidePanel(ev.cell)) return;
             self.drag = .{
                 .cell = ev.cell,
                 .pan_row = self.pan.row,
@@ -2025,6 +2292,12 @@ pub const Ui = struct {
                 // rather than guessing a word boundary, and leave the
                 // selection as drawn so Ctrl+Shift+C still copies it.
                 self.lookupSelection(td.anchor, td.active);
+            } else if (self.onAiTag(td.anchor)) {
+                // The ` a:AI ` tag: the same as pressing `a`. The zero-
+                // width selection goes, but a highlighted lookup word
+                // stays selected -- it is part of what gets asked about.
+                if (self.lookup == null) self.client.clearSelection(self.dialog_layer) catch {};
+                self.startAi();
             } else {
                 // A click inside the dialog that never moved isn't a
                 // selection; drop the zero-width one so it doesn't sit
@@ -2087,6 +2360,34 @@ pub const Ui = struct {
         return .{ .above = -@as(i64, @intCast(cell.row - r.row)), .col = cell.col - r.col };
     }
 
+    fn onSidePanel(self: *const Ui, cell: glyphwire.CellPos) bool {
+        if (self.lookup == null and self.ai == null) return false;
+        const r = self.side_rect;
+        if (r.rows == 0 or r.cols == 0) return false;
+        return cell.row >= r.row and cell.row < r.row + r.rows and cell.col >= r.col and cell.col < r.col + r.cols;
+    }
+
+    /// Whether dialog-local point `p` is on the ` a:AI ` tag in the
+    /// dialog's bottom border.
+    fn onAiTag(self: *const Ui, p: glyphwire.SelectionPoint) bool {
+        const o = &(self.ocr orelse return false);
+        const tag = o.ai_tag orelse return false;
+        if (-p.above != @as(i64, @intCast(o.rect.rows -| 1))) return false;
+        return p.col >= tag.col and p.col < tag.col + tag.cols;
+    }
+
+    /// Text row and display column under dialog-local point `p`, or null
+    /// on the border/pad or past the last row. Row 0 is the border and
+    /// column 0/1 the border and pad, so text starts at (1, 2); a scaled
+    /// dialog's rows and columns are `o.pitch` cells each.
+    fn dialogTextPos(o: *const Ocr, p: glyphwire.SelectionPoint) ?struct { row_idx: usize, col: usize } {
+        const panel_row = -p.above;
+        if (panel_row < 1 or p.col < 2) return null;
+        const row_idx: usize = @intCast(@divTrunc(panel_row - 1, @as(i64, @intCast(o.pitch))));
+        if (row_idx >= o.text.rows.len) return null;
+        return .{ .row_idx = row_idx, .col = (p.col - 2) / o.pitch };
+    }
+
     /// Resolves a stationary click at dialog-local point `p` (see
     /// `dialogPoint`) to a word and looks it up, replacing -- or, on no
     /// match, clearing -- `self.lookup`. A no-op with no dictionary
@@ -2105,18 +2406,9 @@ pub const Ui = struct {
         const d = &(self.dict orelse return);
         const o = &(self.ocr orelse return);
 
-        // `above` is `-(panel row)`, and row 0 is the border -- text rows
-        // are 1-based, matching how `renderDialog` writes them.
-        const panel_row = -p.above;
-        if (panel_row < 1) return self.clearLookup();
-        const row_idx: usize = @intCast(panel_row - 1);
-        if (row_idx >= o.text.rows.len) return self.clearLookup();
-        // Column 0 is the border, column 1 the pad -- text starts at 2.
-        if (p.col < 2) return self.clearLookup();
-        const text_col = p.col - 2;
-
-        const row = o.text.rows[row_idx];
-        const byte_off = mokuro.columnToByte(row, text_col);
+        const pos = dialogTextPos(o, p) orelse return self.clearLookup();
+        const row = o.text.rows[pos.row_idx];
+        const byte_off = mokuro.columnToByte(row, pos.col);
         if (byte_off >= row.len) return self.clearLookup();
 
         const start = mokuro.rowOffset(o.text.joined, row) + byte_off;
@@ -2174,11 +2466,12 @@ pub const Ui = struct {
     /// plain click's exact point -- can legitimately land on the border
     /// or the pad when a drag overshoots the panel.
     fn clampToText(o: *const Ocr, p: glyphwire.SelectionPoint) struct { row_idx: usize, byte_off: usize } {
+        const pitch: i64 = @intCast(o.pitch);
         const panel_row = -p.above;
         const max_idx: i64 = @intCast(o.text.rows.len - 1);
-        const row_idx: usize = @intCast(std.math.clamp(panel_row - 1, 0, max_idx));
+        const row_idx: usize = @intCast(std.math.clamp(@divFloor(panel_row - 1, pitch), 0, max_idx));
         const row = o.text.rows[row_idx];
-        const text_col: usize = if (p.col < 2) 0 else p.col - 2;
+        const text_col: usize = if (p.col < 2) 0 else (p.col - 2) / o.pitch;
         return .{ .row_idx = row_idx, .byte_off = mokuro.columnToByte(row, text_col) };
     }
 
@@ -2190,8 +2483,12 @@ pub const Ui = struct {
     fn setLookupFromMatch(self: *Ui, m: ?dict_mod.Match, source_start: usize) void {
         const match = m orelse return self.clearLookup();
         self.clearLookup();
+        // The two share a slot: a dictionary click replaces an AI answer
+        // (and cancels a request still out).
+        self.clearAi();
         self.lookup = .{ .match = match, .source_start = source_start };
-        self.lookup_dirty = true;
+        self.side_dirty = true;
+        self.side_reset_scroll = true;
         self.highlightLookup();
     }
 
@@ -2206,9 +2503,14 @@ pub const Ui = struct {
         const start = lk.source_start;
         const span = mokuro.spanCells(o.text.joined, o.text.rows, start, start + lk.current().source_len) orelse return;
         // Text rows are 1-based on the panel (row 0 is the border) and
-        // text columns start at 2 (border, then pad) -- see `wordLookupAt`.
-        const first: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.first.row + 1)), .col = span.first.col + 2 };
-        const last: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.last.row + 1)), .col = span.last.col + 2 };
+        // text columns start at 2 (border, then pad) -- see
+        // `dialogTextPos`. At scale each display column is `pitch` cells,
+        // and the inclusive end runs to the last of them. The highlight
+        // sits on the glyph row only: a selection is a stream, so it
+        // can't also cover the rows a scaled glyph draws down into.
+        const pitch = o.pitch;
+        const first: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.first.row * pitch + 1)), .col = span.first.col * pitch + 2 };
+        const last: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.last.row * pitch + 1)), .col = span.last.col * pitch + pitch - 1 + 2 };
         self.client.setSelection(self.dialog_layer, first, last) catch {};
     }
 
@@ -2216,7 +2518,7 @@ pub const Ui = struct {
         const lk = self.lookup orelse return;
         lk.match.deinit(self.alloc);
         self.lookup = null;
-        self.lookup_dirty = true;
+        self.side_dirty = true;
     }
 
     /// `]`/`[` while the lookup panel is showing more than one hit --
@@ -2228,7 +2530,8 @@ pub const Ui = struct {
         if (n <= 1) return;
         const idx = @mod(@as(i64, @intCast(self.lookup.?.hit)) + delta, n);
         self.lookup.?.hit = @intCast(idx);
-        self.lookup_dirty = true;
+        self.side_dirty = true;
+        self.side_reset_scroll = true;
         self.highlightLookup();
     }
 
@@ -2242,7 +2545,276 @@ pub const Ui = struct {
             .x2 => .x3,
             .x3 => .x1,
         };
-        if (self.lookup != null) self.lookup_dirty = true;
+        if (self.lookup != null) self.side_dirty = true;
+    }
+
+    /// `S` -- cycles the OCR dialog's text size for the rest of the
+    /// session (`conf.ocr_text_scale` is only the starting value).
+    fn cycleOcrScale(self: *Ui) void {
+        self.ocr_scale = nextScale(self.ocr_scale);
+        const o = &(self.ocr orelse return);
+        // A drag in progress was measured against the old layout.
+        self.text_drag = null;
+        if (o.at != null) self.dialog_dirty = true;
+    }
+
+    fn nextScale(s: glyphwire.TextScale) glyphwire.TextScale {
+        return switch (s) {
+            .x1 => .x1_5,
+            .x1_5 => .x2,
+            .x2 => .x3,
+            .x3 => .x1,
+        };
+    }
+
+    /// PgUp/PgDn over a side panel taller than its slot: a slot's worth
+    /// at a time, less one row so the reader keeps their place.
+    fn scrollSide(self: *Ui, dir: enum { up, down }) void {
+        const step = @max(self.side_rect.rows -| 1, 1);
+        self.side_scroll = switch (dir) {
+            .up => self.side_scroll -| step,
+            .down => @min(self.side_scroll + step, self.side_max_scroll),
+        };
+        self.client.setLayerScrollOffset(self.dict_layer, self.side_scroll, 0) catch {};
+    }
+
+    // -- AI lookup --------------------------------------------------------
+
+    fn aiSending(self: *const Ui) bool {
+        const panel = self.ai orelse return false;
+        return panel.phase == .sending;
+    }
+
+    /// `a`, or a click on the dialog's ` a:AI ` tag: ask about the open
+    /// bubble. Opens the AI panel in the side slot and, in order: answers
+    /// from the cache when it can (no confirm, nothing sent), reports a
+    /// missing API key, waits on the first-send confirmation, or sends.
+    fn startAi(self: *Ui) void {
+        if (!self.conf.ai_lookup) {
+            self.setMessage("AI lookup is off -- set ai_lookup = true in read.conf.lua", .{}) catch {};
+            self.status_dirty = true;
+            return;
+        }
+        const o = &(self.ocr orelse return);
+        if (o.current() == null or o.hidden) return;
+        // One request at a time; `a` again while it's out is a no-op
+        // rather than a second bill.
+        if (self.aiSending()) return;
+        self.openAi(o) catch |err| {
+            self.setMessage("AI lookup failed ({t})", .{err}) catch {};
+            self.status_dirty = true;
+        };
+    }
+
+    fn openAi(self: *Ui, o: *Ocr) !void {
+        const alloc = self.alloc;
+        const page = o.page orelse return;
+        const at = o.at orelse return;
+        const block = o.current() orelse return;
+
+        const dialog = try mokuro.joinLines(alloc, block.lines);
+        defer alloc.free(dialog);
+
+        // The bubbles either side in reading order, when asked for --
+        // context for a line that only makes sense as a reply.
+        var previous: ?[]u8 = null;
+        defer if (previous) |p| alloc.free(p);
+        var next: ?[]u8 = null;
+        defer if (next) |n| alloc.free(n);
+        if (self.conf.ai_include_neighbor_dialog) {
+            if (at > 0) previous = try mokuro.joinLines(alloc, page.blocks[o.order.items[at - 1]].lines);
+            if (at + 1 < o.order.items.len) next = try mokuro.joinLines(alloc, page.blocks[o.order.items[at + 1]].lines);
+        }
+
+        // The word the dictionary panel is showing, when there is one --
+        // read out before `clearLookup` below drops it.
+        const highlight = try alloc.dupe(u8, if (self.lookup) |lk| blk: {
+            const end = @min(lk.source_start + lk.current().source_len, o.text.joined.len);
+            break :blk o.text.joined[@min(lk.source_start, end)..end];
+        } else "");
+        errdefer alloc.free(highlight);
+
+        const prompt = try ai.buildPrompt(alloc, self.conf.ai_prompt, .{
+            .dialog = dialog,
+            .highlight = if (highlight.len > 0) highlight else null,
+            .previous = previous,
+            .next = next,
+            .title = if (self.conf.ai_include_book_info) ai.bookTitle(self.book.path) else null,
+            .page = if (self.conf.ai_include_book_info) self.page + 1 else null,
+        });
+        errdefer prompt.deinit(alloc);
+
+        self.clearLookup();
+        self.clearAi();
+        self.ai = .{
+            .phase = .confirm,
+            .prompt = prompt,
+            .key = ai_cache.key(self.conf.ai_provider, self.conf.aiModel(), prompt),
+            .page = self.page + 1,
+            .block = at,
+            .highlight = highlight,
+        };
+        self.side_dirty = true;
+        self.side_reset_scroll = true;
+        const panel = &self.ai.?;
+
+        if (self.cacheGet(panel.key)) |text| {
+            panel.phase = .{ .answer = text };
+            return;
+        }
+        if (self.conf.ai_provider.needsKey() and self.ai_api_key == null) {
+            panel.phase = .{ .failure = try std.fmt.allocPrint(
+                alloc,
+                "No API key: ${s} is not set. Export it before starting gw-read, or point ai_api_key_env at the variable that holds it.",
+                .{self.conf.ai_api_key_env},
+            ) };
+            return;
+        }
+        // Stays on `.confirm` until Enter.
+        if (!self.ai_confirmed) return;
+        self.sendAi();
+    }
+
+    /// Enter on the confirmation: send, and don't ask again this session.
+    fn confirmAi(self: *Ui) void {
+        self.ai_confirmed = true;
+        self.sendAi();
+    }
+
+    /// Starts the request for `self.ai`'s prompt on a background task.
+    fn sendAi(self: *Ui) void {
+        const panel = &(self.ai orelse return);
+        const alloc = self.alloc;
+        const io = self.client.io;
+        const provider = self.conf.ai_provider;
+
+        const body = ai.buildBody(alloc, provider, self.conf.aiModel(), panel.prompt) catch
+            return self.failAi("out of memory building the request");
+        const job = ai.Job.create(
+            alloc,
+            io,
+            provider,
+            self.conf.aiEndpoint(),
+            if (provider.needsKey()) self.ai_api_key else null,
+            body,
+        ) catch {
+            alloc.free(body);
+            return self.failAi("out of memory building the request");
+        };
+        const future = io.concurrent(ai.Job.run, .{job}) catch |err| {
+            job.destroy();
+            const msg = std.fmt.allocPrint(alloc, "couldn't start the request ({t})", .{err}) catch return;
+            panel.phase = .{ .failure = msg };
+            self.side_dirty = true;
+            return;
+        };
+        panel.phase = .{ .sending = .{ .job = job, .future = future, .started = std.Io.Clock.awake.now(io) } };
+        panel.shown_secs = 0;
+        self.side_dirty = true;
+    }
+
+    fn failAi(self: *Ui, msg: []const u8) void {
+        const panel = &(self.ai orelse return);
+        const copy = self.alloc.dupe(u8, msg) catch return;
+        panel.phase = .{ .failure = copy };
+        self.side_dirty = true;
+    }
+
+    /// Once a tick while a request is out: collect it when it's done,
+    /// otherwise keep the elapsed counter on the panel current.
+    fn pollAi(self: *Ui) void {
+        const panel = &(self.ai orelse return);
+        const sending = switch (panel.phase) {
+            .sending => |s| s,
+            else => return,
+        };
+        const io = self.client.io;
+        if (!sending.job.done.load(.acquire)) {
+            const secs: u64 = @intCast(@max(sending.started.durationTo(std.Io.Clock.awake.now(io)).toSeconds(), 0));
+            if (secs != panel.shown_secs) {
+                panel.shown_secs = secs;
+                self.side_dirty = true;
+            }
+            return;
+        }
+
+        var future = sending.future;
+        future.await(io);
+        const result = sending.job.takeResult();
+        sending.job.destroy();
+
+        self.side_dirty = true;
+        self.side_reset_scroll = true;
+        const answer = result orelse return self.failAi("the request produced no result");
+        switch (answer) {
+            .failure => |msg| panel.phase = .{ .failure = msg },
+            .text => |raw| {
+                defer self.alloc.free(raw);
+                const text = ai.plainText(self.alloc, raw) catch return self.failAi("out of memory");
+                panel.phase = .{ .answer = text };
+                self.cachePut(panel);
+            },
+        }
+    }
+
+    /// Drops the AI panel. A request still out is cancelled -- the
+    /// future is cancelled and awaited before its job is freed, so the
+    /// background task never touches freed memory.
+    fn clearAi(self: *Ui) void {
+        const panel = &(self.ai orelse return);
+        switch (panel.phase) {
+            .sending => |s| {
+                var future = s.future;
+                future.cancel(self.client.io);
+                s.job.destroy();
+            },
+            .answer, .failure => |text| self.alloc.free(text),
+            .confirm => {},
+        }
+        panel.prompt.deinit(self.alloc);
+        self.alloc.free(panel.highlight);
+        self.ai = null;
+        self.side_dirty = true;
+    }
+
+    /// The cache, opened on first use. Null when caching is off, there's
+    /// no config directory to keep it in, or it failed to open once
+    /// already this session.
+    fn aiCache(self: *Ui) ?*ai_cache.Cache {
+        if (!self.conf.ai_cache or self.ai_cache_failed) return null;
+        if (self.ai_cache) |*cch| return cch;
+        const dir = self.config_dir orelse return null;
+        const path = std.fs.path.joinZ(self.alloc, &.{ dir, ai_cache.file_name }) catch return null;
+        defer self.alloc.free(path);
+        // SQLite does its own file I/O and won't create the directory.
+        std.Io.Dir.cwd().createDirPath(self.client.io, dir) catch {};
+        self.ai_cache = ai_cache.Cache.open(path) catch |err| {
+            std.log.warn("gw-read: couldn't open the AI cache '{s}' ({t}); answers won't be kept", .{ path, err });
+            self.ai_cache_failed = true;
+            return null;
+        };
+        return &self.ai_cache.?;
+    }
+
+    fn cacheGet(self: *Ui, key: ai_cache.Key) ?[]u8 {
+        const cch = self.aiCache() orelse return null;
+        return cch.get(self.alloc, key) catch null;
+    }
+
+    fn cachePut(self: *Ui, panel: *const AiPanel) void {
+        const text = switch (panel.phase) {
+            .answer => |t| t,
+            else => return,
+        };
+        const cch = self.aiCache() orelse return;
+        cch.put(panel.key, text, .{
+            .title = ai.bookTitle(self.book.path),
+            .page = panel.page,
+            .block = panel.block,
+            .highlight = panel.highlight,
+            .provider = self.conf.ai_provider,
+            .model = self.conf.aiModel(),
+        }) catch |err| std.log.warn("gw-read: couldn't cache the AI answer ({t})", .{err});
     }
 
     fn handleMouseMove(self: *Ui, ev: glyphwire.MouseMoveEvent) !void {

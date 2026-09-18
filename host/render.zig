@@ -1417,12 +1417,13 @@ pub const Renderer = struct {
         }
 
         // Chrome: its own begin/end so these GL draws sit over every
-        // layer, text included. Divider bands first, then the panes' own
-        // scrollbars (which sit inside a pane and so must not be painted
-        // over by its neighbour's divider), then the window scrollbar.
+        // layer, text included. Divider bands, then the window scrollbar.
+        // A layer's own scrollbars are not chrome -- they are drawn with
+        // the layer (`drawLayerScrollbars`), so a later layer covers them.
+        // Bands sit in their own cells between split layers, never inside
+        // a viewport, so the bars drawn earlier can't be painted over.
         eng.renderer.begin(eng.projMat);
         self.renderDividers(eng);
-        self.renderPaneScrollbars(eng);
         self.renderScrollbar(eng);
         eng.renderer.end();
 
@@ -1476,6 +1477,10 @@ pub const Renderer = struct {
             const layer = ctx.layers.getPtr(handle) orelse continue;
             if (!layer.visible) continue;
             self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = handle });
+            // Right after the layer's own content, not in the chrome pass:
+            // a popup created later has to cover the bars of whatever it
+            // floats over, the same as it covers that layer's cells.
+            drawLayerScrollbars(eng, layer, origin);
             if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin);
         }
     }
@@ -1822,39 +1827,31 @@ pub const Renderer = struct {
         }
     }
 
-    /// Each visible layer's own scrollbars, drawn inside its viewport
+    /// One visible layer's own scrollbars, drawn inside its viewport
     /// bounds -- distinct from `renderScrollbar`, which is the window's
     /// bar for the root layer's scrollback. Opt-in per axis
     /// (`core.PropertyName.scrollbars`) and skipped entirely on an axis
     /// with nothing to scroll, so this is a no-op for every session that
-    /// isn't running a TUI.
-    fn renderPaneScrollbars(self: *Renderer, eng: *Engine) void {
-        const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+    /// isn't running a TUI. Called from `drawOneContext` straight after
+    /// the layer's batches (under `ctx_mutex`), so it composites in layer
+    /// order: gw-read's page bars used to show through the OCR dialog
+    /// floating over them when this was a final pass over everything.
+    fn drawLayerScrollbars(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin) void {
+        const state = layer.scrollbarState();
+        if (!state.vertical and !state.horizontal) return;
 
-        var pane_it = server.session.panes.valueIterator();
-        while (pane_it.next()) |pane| {
-            if (!pane.mapped) continue;
-            const ctx = server.session.contextPtr(pane.top()) orelse continue;
-            const origin = geometry.contextOrigin(ctx);
-            for (ctx.layer_order.items) |handle| {
-                const layer = ctx.layers.getPtr(handle) orelse continue;
-                if (!layer.visible) continue;
-                const state = layer.scrollbarState();
-                if (!state.vertical and !state.horizontal) continue;
-
-                const rect = geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows());
-                const bars = geometry.paneScrollbars(
-                    rect,
-                    state,
-                    layer.viewportCols(),
-                    layer.viewportRows(),
-                );
-                if (bars.vertical) |v| drawBar(eng, v);
-                if (bars.horizontal) |h| drawBar(eng, h);
-            }
-        }
+        const rect = geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows());
+        const bars = geometry.paneScrollbars(
+            rect,
+            state,
+            layer.viewportCols(),
+            layer.viewportRows(),
+        );
+        if (bars.vertical == null and bars.horizontal == null) return;
+        eng.renderer.begin(eng.projMat);
+        defer eng.renderer.end();
+        if (bars.vertical) |v| drawBar(eng, v);
+        if (bars.horizontal) |h| drawBar(eng, h);
     }
 
     fn drawBar(eng: *Engine, bar: geometry.PaneScrollbarGeom) void {

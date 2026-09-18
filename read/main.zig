@@ -89,11 +89,15 @@ pub fn main(init: std.process.Init) !void {
     const path = args.positional.items[0];
 
     // The config first: everything below reads defaults out of it.
-    const conf = conf: {
+    var conf = conf: {
         const dir = glyphwire.configDirPath(alloc, init.environ_map) catch break :conf read.ReadConfig{};
         defer alloc.free(dir);
         break :conf read.config.loadFromDir(alloc, io, dir);
     };
+    // Owns the strings it duped out of read.conf.lua (the dictionary path,
+    // the AI settings). `Ui` holds a by-value copy that only reads them,
+    // so this one deinit is the only free.
+    defer conf.deinit(alloc);
 
     const book = read.archive.open(alloc, io, path) catch |err| {
         var buf: [512]u8 = undefined;
@@ -188,6 +192,10 @@ pub fn main(init: std.process.Init) !void {
         .page = start_page,
         .mode = mode,
         .direction = direction,
+        .config_dir = config_dir,
+        // Read here, where the environment is, rather than threading the
+        // whole environ map into the UI. Only ever sent to the endpoint.
+        .ai_api_key = if (conf.ai_lookup) init.environ_map.get(conf.ai_api_key_env) else null,
     });
     defer ui.deinit();
 

@@ -129,4 +129,59 @@
 --     -- rest of the session once a book is open; this only picks where
 --     -- a freshly opened book starts.
 --     dictionary_title_scale = "1x",
+--
+--     -- Size of the OCR dialog's text: "1x" (default), "1.5x", "2x" or
+--     -- "3x". `S` cycles it for the session. `ocr_dialog_cols` stays
+--     -- the wrap width at 1x, so a scaled dialog shows the same
+--     -- characters per line and grows wider (it wraps sooner only when
+--     -- the window is too narrow).
+--     ocr_text_scale = "1x",
+--
+--     -- AI translation of the whole OCR bubble: `a` (or the ` a:AI `
+--     -- tag on the dialog's border) asks about the open bubble and
+--     -- shows the answer where the dictionary panel goes. The bubble's
+--     -- OCR text leaves this machine when this is on -- never images,
+--     -- never the book's path -- so it is off until you turn it on.
+--     ai_lookup = false,
+--
+--     -- "openai" (the Responses API) or "ollama" (a local /api/chat).
+--     ai_provider = "openai",
+--
+--     -- Empty means the provider's default: "gpt-5" for openai,
+--     -- "qwen2.5" for ollama.
+--     ai_model = "",
+--
+--     -- Empty means the provider's default URL:
+--     -- https://api.openai.com/v1/responses or
+--     -- http://localhost:11434/api/chat. Set it for an Ollama on another
+--     -- host or an OpenAI-compatible proxy.
+--     ai_endpoint = "",
+--
+--     -- The *name* of the environment variable holding the API key (not
+--     -- the key), so this file can be shared. Ollama ignores it.
+--     ai_api_key_env = "OPENAI_API_KEY",
+--
+--     -- Your reading level and the style you want, appended to gw-read's
+--     -- fixed rules (plain short text, translation first, no tables, no
+--     -- romanization). For example:
+--     --   "Explain the highlighted word in context. Mention grammar only
+--     --    if it changes the meaning."
+--     ai_prompt = "Translate this for an intermediate (around JLPT N3) Japanese learner. Keep the explanations brief.",
+--
+--     -- Also send the bubbles before and after this one (reading order)
+--     -- as context.
+--     ai_include_neighbor_dialog = true,
+--
+--     -- Also send the book's file name (never its path) and the page
+--     -- number.
+--     ai_include_book_info = false,
+--
+--     -- Ask before the first send of each session, naming where the text
+--     -- is going. Cached answers never ask.
+--     ai_confirm_before_send = true,
+--
+--     -- Keep answers in read.ai-cache.sqlite3 in this directory, keyed by
+--     -- the provider, model and exact text sent, so reopening a bubble is
+--     -- instant and costs nothing. Delete the file to clear it.
+--     ai_cache = true,
 -- }

@@ -16,6 +16,8 @@ const mokuro = @import("read_support").mokuro;
 const archive = @import("read_support").archive;
 const dict = @import("read_support").dict;
 const kana = @import("read_support").kana;
+const ai = @import("read_support").ai;
+const ai_cache = @import("read_support").ai_cache;
 
 // ─── pages.isPage ───────────────────────────────────────────────────────
 
@@ -470,11 +472,237 @@ pub fn configReadsDictionaryTitleScaleTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectTrue(result.config.dictionary_title_scale == .x2);
 }
 
+pub fn configOwnsTheDictionaryPathAndFreesItTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The leak gw-read reported on exit: the duped path was never freed.
+    // `deinit` on the result now frees it; the testing allocator fails
+    // the test if anything is left.
+    var result = rconfig.load(alloc,
+        \\config = { dictionary = "/dicts/jitendex", ai_model = "gpt-5-mini" }
+    );
+    defer result.deinit(alloc);
+    try testz.expectEqualStr(result.config.dictionary, "/dicts/jitendex");
+    try testz.expectEqualStr(result.config.ai_model, "gpt-5-mini");
+}
+
+pub fn configTakeConfigHandsOwnershipOutTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc,
+        \\config = { dictionary = "/dicts/jitendex" }
+    );
+    var conf = result.takeConfig();
+    // Nothing left for the result to free twice.
+    result.deinit(alloc);
+    defer conf.deinit(alloc);
+    try testz.expectEqualStr(conf.dictionary, "/dicts/jitendex");
+}
+
+pub fn configReadsOcrTextScaleTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc,
+        \\config = { ocr_text_scale = "2x" }
+    );
+    defer result.deinit(alloc);
+    try testz.expectTrue(result.config.ocr_text_scale == .x2);
+}
+
+pub fn configAiDefaultsAreOffAndCautiousTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc, "");
+    defer result.deinit(alloc);
+    const c = result.config;
+    try testz.expectFalse(c.ai_lookup);
+    try testz.expectTrue(c.ai_provider == .openai);
+    try testz.expectEqualStr(c.aiModel(), "gpt-5");
+    try testz.expectEqualStr(c.aiEndpoint(), "https://api.openai.com/v1/responses");
+    try testz.expectEqualStr(c.ai_api_key_env, "OPENAI_API_KEY");
+    try testz.expectTrue(c.ai_include_neighbor_dialog);
+    try testz.expectFalse(c.ai_include_book_info);
+    try testz.expectTrue(c.ai_confirm_before_send);
+    try testz.expectTrue(c.ai_cache);
+}
+
+pub fn configReadsAiSettingsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc,
+        \\config = {
+        \\  ai_lookup = true,
+        \\  ai_provider = "ollama",
+        \\  ai_prompt = "N3 learner, brief.",
+        \\  ai_include_neighbor_dialog = false,
+        \\  ai_confirm_before_send = false,
+        \\}
+    );
+    defer result.deinit(alloc);
+    const c = result.config;
+    try testz.expectTrue(c.ai_lookup);
+    try testz.expectTrue(c.ai_provider == .ollama);
+    // No model/endpoint set: the provider's own defaults.
+    try testz.expectEqualStr(c.aiModel(), "qwen2.5");
+    try testz.expectEqualStr(c.aiEndpoint(), "http://localhost:11434/api/chat");
+    try testz.expectEqualStr(c.ai_prompt, "N3 learner, brief.");
+    try testz.expectFalse(c.ai_include_neighbor_dialog);
+    try testz.expectFalse(c.ai_confirm_before_send);
+}
+
+pub fn configIgnoresAnUnknownAiProviderTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc,
+        \\config = { ai_provider = "carrier-pigeon" }
+    );
+    defer result.deinit(alloc);
+    try testz.expectTrue(result.config.ai_provider == .openai);
+}
+
 pub fn directionParsesAndRoundTripsThroughItsNameTest(_: std.Io, _: std.mem.Allocator) !void {
     // state.zig stores the name, so the pair has to be inverse.
     try testz.expectTrue(rconfig.Direction.parse(rconfig.Direction.rtl.name()).? == .rtl);
     try testz.expectTrue(rconfig.Direction.parse(rconfig.Direction.ltr.name()).? == .ltr);
     try testz.expectTrue(rconfig.Direction.parse("sideways") == null);
+}
+
+// ─── ai: prompt, request and response ───────────────────────────────────
+
+pub fn aiPromptLabelsTheBubbleAndItsContextTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try ai.buildPrompt(alloc, "Brief, N3.", .{
+        .dialog = "何だと？",
+        .highlight = "何",
+        .previous = "お前が犯人だ",
+        .next = "証拠はある",
+        .title = "Dragon Ball v01",
+        .page = 12,
+    });
+    defer p.deinit(alloc);
+    try testz.expectEqualStr(p.user,
+        \\Book: Dragon Ball v01, page 12
+        \\Previous bubble: お前が犯人だ
+        \\Current bubble: 何だと？
+        \\Next bubble: 証拠はある
+        \\Highlighted: 何
+        \\
+    );
+    // The fixed rules first, then the user's style.
+    try testz.expectTrue(std.mem.startsWith(u8, p.instructions, ai.app_rules));
+    try testz.expectTrue(std.mem.endsWith(u8, p.instructions, "\n\nBrief, N3."));
+}
+
+pub fn aiPromptLeavesOutWhatWasNotAskedForTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try ai.buildPrompt(alloc, "", .{ .dialog = "よし" });
+    defer p.deinit(alloc);
+    try testz.expectEqualStr(p.user, "Current bubble: よし\n");
+    try testz.expectEqualStr(p.instructions, ai.app_rules);
+}
+
+pub fn aiBookTitleIsTheFileNameNeverThePathTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(ai.bookTitle("/home/me/manga/Narutaru v01-05.cbz"), "Narutaru v01-05");
+    try testz.expectEqualStr(ai.bookTitle("/home/me/manga/Dragon Ball v01-05/"), "Dragon Ball v01-05");
+    // Only archive extensions are dropped.
+    try testz.expectEqualStr(ai.bookTitle("/x/Vol 1.5"), "Vol 1.5");
+    try testz.expectEqualStr(ai.bookTitle("Book.CBR"), "Book");
+}
+
+pub fn aiOpenAiBodyIsAResponsesRequestTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try ai.buildPrompt(alloc, "", .{ .dialog = "やあ" });
+    defer p.deinit(alloc);
+    const body = try ai.buildBody(alloc, .openai, "gpt-5", p);
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const o = parsed.value.object;
+    try testz.expectEqualStr(o.get("model").?.string, "gpt-5");
+    try testz.expectEqualStr(o.get("instructions").?.string, p.instructions);
+    try testz.expectEqualStr(o.get("input").?.string, p.user);
+}
+
+pub fn aiOllamaBodyIsANonStreamingChatTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const p = try ai.buildPrompt(alloc, "", .{ .dialog = "やあ" });
+    defer p.deinit(alloc);
+    const body = try ai.buildBody(alloc, .ollama, "qwen2.5", p);
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const o = parsed.value.object;
+    try testz.expectEqualStr(o.get("model").?.string, "qwen2.5");
+    try testz.expectFalse(o.get("stream").?.bool);
+    const msgs = o.get("messages").?.array.items;
+    try testz.expectEqual(msgs.len, 2);
+    try testz.expectEqualStr(msgs[0].object.get("role").?.string, "system");
+    try testz.expectEqualStr(msgs[1].object.get("content").?.string, p.user);
+}
+
+pub fn aiParsesAnOpenAiResponsesAnswerTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Reasoning models put a `reasoning` item before the message; only
+    // `output_text` parts are the answer.
+    const body =
+        \\{"id":"resp_1","output":[
+        \\  {"type":"reasoning","summary":[]},
+        \\  {"type":"message","role":"assistant","content":[
+        \\    {"type":"output_text","text":"\"What?!\"\n","annotations":[]}
+        \\  ]}
+        \\]}
+    ;
+    const ans = try ai.parseAnswer(alloc, .openai, 200, body);
+    defer ans.deinit(alloc);
+    try testz.expectEqualStr(ans.text, "\"What?!\"");
+}
+
+pub fn aiParsesAnOllamaAnswerAndDropsThinkingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const body =
+        \\{"model":"qwen","message":{"role":"assistant","content":"<think>hmm</think>\n\nWhat?!"},"done":true}
+    ;
+    const ans = try ai.parseAnswer(alloc, .ollama, 200, body);
+    defer ans.deinit(alloc);
+    try testz.expectEqualStr(ans.text, "What?!");
+}
+
+pub fn aiReportsTheProvidersErrorMessageTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const openai_err = try ai.parseAnswer(alloc, .openai, 401,
+        \\{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}
+    );
+    defer openai_err.deinit(alloc);
+    try testz.expectEqualStr(openai_err.failure, "HTTP 401: Incorrect API key provided");
+
+    const ollama_err = try ai.parseAnswer(alloc, .ollama, 404,
+        \\{"error":"model 'qwen2.5' not found"}
+    );
+    defer ollama_err.deinit(alloc);
+    try testz.expectEqualStr(ollama_err.failure, "HTTP 404: model 'qwen2.5' not found");
+
+    const not_json = try ai.parseAnswer(alloc, .openai, 502, "<html>Bad Gateway</html>");
+    defer not_json.deinit(alloc);
+    try testz.expectEqualStr(not_json.failure, "HTTP 502: response was not JSON");
+}
+
+pub fn aiPlainTextStripsMarkdownTheModelSentAnywayTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try ai.plainText(alloc, "## Translation\n**What?!**\n\n\n\nNotes: `何` = what");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "Translation\nWhat?!\n\nNotes: 何 = what");
+}
+
+// ─── ai_cache: the answer cache ─────────────────────────────────────────
+
+pub fn aiCacheKeyFollowsModelAndPromptTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const a = try ai.buildPrompt(alloc, "brief", .{ .dialog = "よし" });
+    defer a.deinit(alloc);
+    const b = try ai.buildPrompt(alloc, "verbose", .{ .dialog = "よし" });
+    defer b.deinit(alloc);
+
+    const k1 = ai_cache.key(.openai, "gpt-5", a);
+    try testz.expectEqualStr(&k1, &ai_cache.key(.openai, "gpt-5", a));
+    // A different style, model or provider is a different answer.
+    try testz.expectFalse(std.mem.eql(u8, &k1, &ai_cache.key(.openai, "gpt-5", b)));
+    try testz.expectFalse(std.mem.eql(u8, &k1, &ai_cache.key(.openai, "gpt-5-mini", a)));
+    try testz.expectFalse(std.mem.eql(u8, &k1, &ai_cache.key(.ollama, "gpt-5", a)));
+}
+
+pub fn aiCacheRoundTripsAnAnswerTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var c = try ai_cache.Cache.open(":memory:");
+    defer c.close();
+    const p = try ai.buildPrompt(alloc, "", .{ .dialog = "よし" });
+    defer p.deinit(alloc);
+    const k = ai_cache.key(.openai, "gpt-5", p);
+
+    try testz.expectTrue((try c.get(alloc, k)) == null);
+    try c.put(k, "\"All right!\"", .{ .title = "Book", .page = 3, .block = 1, .provider = .openai, .model = "gpt-5" });
+    const got = (try c.get(alloc, k)).?;
+    defer alloc.free(got);
+    try testz.expectEqualStr(got, "\"All right!\"");
 }
 
 // ─── mokuro: parsing ────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ const Lua = ziglua.Lua;
 const zoom = @import("zoom.zig");
 const cache = @import("cache.zig");
 const glyphwire = @import("glyphwire");
+const ai = @import("ai.zig");
 
 const conf_name = "read.conf.lua";
 
@@ -107,6 +108,63 @@ pub const ReadConfig = struct {
     /// runtime for the session; this is only the size a freshly opened
     /// book's lookup panel starts at.
     dictionary_title_scale: glyphwire.TextScale = .x1,
+    /// Size of the OCR dialog's text -- same spellings and same
+    /// `write_text` `scale` as `dictionary_title_scale`. `S` cycles it at
+    /// runtime for the session. `ocr_dialog_cols` keeps meaning the wrap
+    /// width at 1x, so a scaled dialog wraps to the same number of
+    /// characters a line and grows wider rather than wrapping sooner.
+    ocr_text_scale: glyphwire.TextScale = .x1,
+
+    /// AI translation lookup of the whole OCR bubble (`a` in the open
+    /// dialog). Off by default: turning it on is what makes OCR text
+    /// leave the machine, so it has to be asked for. See ai.zig.
+    ai_lookup: bool = false,
+    ai_provider: ai.Provider = .openai,
+    /// Empty means the provider's own default (`ai.Provider.defaultModel`).
+    ai_model: []const u8 = "",
+    /// Empty means the provider's own default URL
+    /// (`ai.Provider.defaultEndpoint`) -- set it to reach an Ollama on
+    /// another host, or an OpenAI-compatible proxy.
+    ai_endpoint: []const u8 = "",
+    /// The *name* of the environment variable holding the API key, never
+    /// the key itself, so a config file can be shared or committed.
+    /// Ollama doesn't use one.
+    ai_api_key_env: []const u8 = "OPENAI_API_KEY",
+    /// The user's reading-level/style instruction, appended to the fixed
+    /// app rules in the request's instructions (`ai.buildPrompt`).
+    ai_prompt: []const u8 = ai.default_style,
+    /// Send the previous and next bubble in reading order as context.
+    ai_include_neighbor_dialog: bool = true,
+    /// Send the book's title (its file name, never the path) and the page
+    /// number.
+    ai_include_book_info: bool = false,
+    /// Ask before the first send of a session, naming where the text is
+    /// going. Cache hits never ask -- nothing leaves the machine.
+    ai_confirm_before_send: bool = true,
+    /// Keep answers in `read.ai-cache.sqlite3` next to the config, so
+    /// reopening a bubble is instant and costs no tokens.
+    ai_cache: bool = true,
+
+    /// Every string field above that `load` duped out of the Lua state,
+    /// freed by `deinit`. Tracked as a list rather than by comparing each
+    /// field against its default, so a default can stay a string literal.
+    owned: std.ArrayList([]const u8) = .empty,
+
+    pub fn deinit(self: *ReadConfig, alloc: std.mem.Allocator) void {
+        for (self.owned.items) |s| alloc.free(s);
+        self.owned.deinit(alloc);
+        self.* = .{};
+    }
+
+    /// The model actually sent: `ai_model`, or the provider's default.
+    pub fn aiModel(self: *const ReadConfig) []const u8 {
+        return if (self.ai_model.len > 0) self.ai_model else self.ai_provider.defaultModel();
+    }
+
+    /// The URL actually posted to: `ai_endpoint`, or the provider's default.
+    pub fn aiEndpoint(self: *const ReadConfig) []const u8 {
+        return if (self.ai_endpoint.len > 0) self.ai_endpoint else self.ai_provider.defaultEndpoint();
+    }
 
     /// The zoom limits this config implies, handed to every `zoom.layout`
     /// call.
@@ -132,12 +190,23 @@ pub const prefetch_max: usize = 8;
 /// an owned diagnostic string. `config` still holds whatever ran before
 /// the error (Lua stops at the failing line), so a caller can use the
 /// partial result and surface `err`.
+///
+/// `deinit` frees both. A caller keeping the config past the result
+/// takes it with `takeConfig`, which leaves nothing behind for `deinit`
+/// to free a second time.
 pub const LoadResult = struct {
     config: ReadConfig = .{},
     err: ?[]const u8 = null,
 
+    pub fn takeConfig(self: *LoadResult) ReadConfig {
+        const conf = self.config;
+        self.config = .{};
+        return conf;
+    }
+
     pub fn deinit(self: *LoadResult, alloc: std.mem.Allocator) void {
         if (self.err) |e| alloc.free(e);
+        self.config.deinit(alloc);
     }
 };
 
@@ -201,13 +270,39 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     // Duped immediately, unlike `mode`/`direction`: `stringField`'s
     // result points into Lua's own string and doesn't outlive `load`.
     if (stringField(lua, "dictionary")) |v|
-        result.config.dictionary = alloc.dupe(u8, v) catch "";
+        result.config.dictionary = ownString(alloc, &result.config, v, "");
     if (stringField(lua, "dictionary_title_scale")) |v| {
         if (parseTitleScale(v)) |s| result.config.dictionary_title_scale = s else std.log.warn(
-            "gw-read: {s} `dictionary_title_scale` = '{s}' is not '1x'/'1.5x'/'2x'; ignored",
+            "gw-read: {s} `dictionary_title_scale` = '{s}' is not '1x'/'1.5x'/'2x'/'3x'; ignored",
             .{ conf_name, v },
         );
     }
+    if (stringField(lua, "ocr_text_scale")) |v| {
+        if (parseTitleScale(v)) |s| result.config.ocr_text_scale = s else std.log.warn(
+            "gw-read: {s} `ocr_text_scale` = '{s}' is not '1x'/'1.5x'/'2x'/'3x'; ignored",
+            .{ conf_name, v },
+        );
+    }
+
+    if (boolField(lua, "ai_lookup")) |v| result.config.ai_lookup = v;
+    if (stringField(lua, "ai_provider")) |v| {
+        if (ai.Provider.parse(v)) |p| result.config.ai_provider = p else std.log.warn(
+            "gw-read: {s} `ai_provider` = '{s}' is not 'openai' or 'ollama'; ignored",
+            .{ conf_name, v },
+        );
+    }
+    if (stringField(lua, "ai_model")) |v|
+        result.config.ai_model = ownString(alloc, &result.config, v, "");
+    if (stringField(lua, "ai_endpoint")) |v|
+        result.config.ai_endpoint = ownString(alloc, &result.config, v, "");
+    if (stringField(lua, "ai_api_key_env")) |v|
+        result.config.ai_api_key_env = ownString(alloc, &result.config, v, result.config.ai_api_key_env);
+    if (stringField(lua, "ai_prompt")) |v|
+        result.config.ai_prompt = ownString(alloc, &result.config, v, result.config.ai_prompt);
+    if (boolField(lua, "ai_include_neighbor_dialog")) |v| result.config.ai_include_neighbor_dialog = v;
+    if (boolField(lua, "ai_include_book_info")) |v| result.config.ai_include_book_info = v;
+    if (boolField(lua, "ai_confirm_before_send")) |v| result.config.ai_confirm_before_send = v;
+    if (boolField(lua, "ai_cache")) |v| result.config.ai_cache = v;
 
     // A `cache_pages` smaller than what the prefetch wants resident means
     // every prefetched page evicts the one being read. Nudge rather than
@@ -268,7 +363,18 @@ pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, config_dir: []const u8)
     defer result.deinit(alloc);
     if (result.err) |e|
         std.log.warn("gw-read: {s}: {s}; using what parsed", .{ conf_name, e });
-    return result.config;
+    return result.takeConfig();
+}
+
+/// Dupes `v` and records it in `conf.owned` so `ReadConfig.deinit` frees
+/// it. Out of memory keeps `fallback` rather than failing the whole load.
+fn ownString(alloc: std.mem.Allocator, conf: *ReadConfig, v: []const u8, fallback: []const u8) []const u8 {
+    const copy = alloc.dupe(u8, v) catch return fallback;
+    conf.owned.append(alloc, copy) catch {
+        alloc.free(copy);
+        return fallback;
+    };
+    return copy;
 }
 
 /// Reads `config.<key>` as a non-negative whole number. Assumes the
