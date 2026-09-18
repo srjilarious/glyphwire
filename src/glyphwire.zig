@@ -15,6 +15,7 @@ pub const client = @import("client.zig");
 pub const pty = @import("pty.zig");
 pub const pipeexec = @import("pipeexec.zig");
 pub const key_encode = @import("key_encode.zig");
+pub const keybind = @import("keybind.zig");
 pub const profiler = @import("profiler.zig");
 pub const Profiler = profiler.Profiler;
 

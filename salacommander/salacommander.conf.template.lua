@@ -1,0 +1,81 @@
+-- salacommander configuration template.
+--
+-- This is the full reference for `salacommander.conf.lua`, the file
+-- salacommander runs once at startup (see salacommander/config.zig
+-- `load`). Copy it to one of:
+--
+--   $GLYPHWIRE_CONFIG_DIR/salacommander.conf.lua
+--   $XDG_CONFIG_HOME/glyphwire/salacommander.conf.lua
+--   ~/.config/glyphwire/salacommander.conf.lua          (the usual location)
+--
+-- Every key is listed below at its built-in default, with every line
+-- commented out -- so copying this file verbatim changes nothing.
+-- Uncomment and edit only the keys you want to override.
+--
+-- Syntax: a plain Lua script (standard libraries open). Assign a single
+-- global table named `config`. Unknown keys are ignored; a key of the
+-- wrong type is logged and the default stands. Any parse error is logged
+-- and whatever parsed before it is kept. `-L`/`-S`/`-a` on the command
+-- line beat `view`/`show_hidden` here.
+
+-- config = {
+--
+--     ---- Listing ---------------------------------------------------
+--
+--     -- "small": one row per entry with a one-row icon.
+--     -- "large": two rows per entry, a tall icon, and the permissions
+--     -- and owner under the name. Ctrl+1 / Ctrl+2 switch per pane.
+--     view = "small",
+--
+--     -- Show dotfiles. Ctrl+H toggles it per pane.
+--     show_hidden = false,
+--
+--     -- Icon height caps in pixels (8..128), as in ls.conf.lua. The
+--     -- rows a view has still bound them: one cell tall in "small",
+--     -- two in "large".
+--     small_icon_px = 16,
+--     large_icon_px = 32,
+--
+--     ---- Keys ------------------------------------------------------
+--
+--     -- Rebind actions by name. Each entry maps a chord to an action,
+--     -- or to false to unbind that chord. Entries apply over the
+--     -- built-in bindings, so list only what you change.
+--     --
+--     -- Chords are "mod+mod+key", case-insensitive: ctrl, alt, shift,
+--     -- super; keys are glyphwire key names (up, page_down, insert,
+--     -- F5, kp_add, a, one, ...) or the aliases esc, pgup, pgdn, del,
+--     -- ins, bs and the digits 0-9.
+--     --
+--     -- Actions and their default chords:
+--     --   cursorUp            up
+--     --   cursorDown          down
+--     --   pageUp              page_up
+--     --   pageDown            page_down
+--     --   cursorHome          home
+--     --   cursorEnd           end
+--     --   activate            enter, kp_enter
+--     --   upToParentDir       alt+up, backspace
+--     --   switchPane          tab
+--     --   otherPaneToSameDir  alt+o
+--     --   swapPanes           ctrl+u
+--     --   toggleMark          space
+--     --   toggleMarkAndDown   insert
+--     --   markAll             kp_add, ctrl+a
+--     --   unmarkAll           kp_subtract, ctrl+d
+--     --   invertMarks         kp_multiply
+--     --   copy                F5
+--     --   move                F6
+--     --   makeDir             F7
+--     --   delete              F8, delete
+--     --   viewSmall           ctrl+1
+--     --   viewLarge           ctrl+2
+--     --   toggleView          ctrl+v
+--     --   toggleHidden        ctrl+h
+--     --   refresh             ctrl+r
+--     --   quit                F10, ctrl+q
+--     keys = {
+--         -- ["ctrl+up"] = "upToParentDir",
+--         -- ["delete"] = false,
+--     },
+-- }

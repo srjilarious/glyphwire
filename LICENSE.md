@@ -10,7 +10,7 @@ stay free, and the *protocol* stays open for anyone to implement.
 |---|---|---|
 | The wire protocol specification | Creative Commons Attribution 4.0 International | `CC-BY-4.0` |
 | Protocol core, host, engine backend, server, client library, tooling | Mozilla Public License 2.0 | `MPL-2.0` |
-| The end-user applications (`gw-shell`, `gmux`, `gw-ls`, `gw-view`, `gw-read`, `gwmd`, `zoe`) | GNU General Public License v3.0 or later | `GPL-3.0-or-later` |
+| The end-user applications (`gw-shell`, `gmux`, `gw-ls`, `gw-view`, `gw-read`, `gwmd`, `zoe`, `salacommander`) | GNU General Public License v3.0 or later | `GPL-3.0-or-later` |
 
 Full texts live in [`LICENSES/`](LICENSES/). Every source file carries an
 `SPDX-License-Identifier` line, so a single directory can be vendored
@@ -85,7 +85,7 @@ glyphwire SPDX header.
 ## Notes for people combining these
 
 **MPL and GPL mix here on purpose.** `zoe`, `gw-ls`, `gw-view`, `gw-read`,
-`gwmd`, `gw-shell` and `gmux` are GPL programs that link the MPL `src/` module. That is
+`gwmd`, `gw-shell`, `gmux` and `salacommander` are GPL programs that link the MPL `src/` module. That is
 explicitly permitted: MPL-2.0 §3.3 allows an MPL file to be distributed as
 part of a Larger Work under the GPL, because none of glyphwire's MPL files
 carry the Exhibit B "Incompatible With Secondary Licenses" notice, and none

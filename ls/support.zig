@@ -6,9 +6,11 @@
 //! Zig module can't reach across directories with a relative `@import`,
 //! the same reason `shell_support` exists. `gridlayout` / `format` /
 //! `icons` are pure; `config` pulls in `ziglua` to parse `ls.conf.lua`
-//! (same as `shell_support`'s `shell/config.zig`).
+//! (same as `shell_support`'s `shell/config.zig`). `entries` is the
+//! directory scanner, shared with salacommander.
 
 pub const gridlayout = @import("gridlayout.zig");
 pub const format = @import("format.zig");
 pub const icons = @import("icons.zig");
 pub const config = @import("config.zig");
+pub const entries = @import("entries.zig");
