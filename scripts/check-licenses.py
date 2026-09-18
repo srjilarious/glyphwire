@@ -39,12 +39,12 @@ CCBY = "CC-BY-4.0"
 ZONES = {
     MPL: ["src", "host", "host_eng", "server", "client", "agent",
           "notify", "debug", "demo", "table-demo"],
-    GPL: ["shell", "gmux", "ls", "view", "read", "zoe", "tests"],
+    GPL: ["shell", "gmux", "ls", "view", "read", "md", "zoe", "tests"],
 }
 
 # Third-party trees, including ones nested inside our own directories.
 # Never headed, never checked.
-THIRD_PARTY = ("host_eng/libs/", "read/libs/", "libs/", "vendor/", "zig-pkg/",
+THIRD_PARTY = ("host_eng/libs/", "read/libs/", "md/libs/", "libs/", "vendor/", "zig-pkg/",
                ".zig-cache/", "zig-out/", ".provision-dist/", ".git/")
 
 # Build files live with the MPL plumbing.

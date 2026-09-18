@@ -238,12 +238,13 @@ pub fn parseMode(name: []const u8) ?zoom.Mode {
 }
 
 /// The `dictionary_title_scale` key's accepted spellings -- config-file
-/// friendly ("1x"/"1.5x"/"2x"), not necessarily `core.TextScale`'s wire
-/// tag names (`x1`/`x1_5`/`x2`).
+/// friendly ("1x"/"1.5x"/"2x"/"3x"), not necessarily `core.TextScale`'s wire
+/// tag names (`x1`/`x1_5`/`x2`/`x3`).
 pub fn parseTitleScale(text: []const u8) ?glyphwire.TextScale {
     if (std.mem.eql(u8, text, "1x")) return .x1;
     if (std.mem.eql(u8, text, "1.5x")) return .x1_5;
     if (std.mem.eql(u8, text, "2x")) return .x2;
+    if (std.mem.eql(u8, text, "3x")) return .x3;
     return null;
 }
 

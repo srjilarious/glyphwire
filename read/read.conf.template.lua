@@ -124,7 +124,7 @@
 --     dictionary = "",
 --
 --     -- Starting size of the lookup panel's title (the looked-up term)
---     -- -- "1x" (normal, the default), "1.5x", or "2x", drawn larger via
+--     -- -- "1x" (normal, the default), "1.5x", "2x", or "3x", drawn larger via
 --     -- the wire protocol's text-scale support. `s` cycles it for the
 --     -- rest of the session once a book is open; this only picks where
 --     -- a freshly opened book starts.

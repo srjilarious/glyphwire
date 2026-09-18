@@ -2318,6 +2318,21 @@ pub fn writeTextTaggedScaledSetsCellTextScaleTest(io: std.Io, alloc: std.mem.All
     try testz.expectEqual(layer.cell(0, 1).text_scale, glyphwire.TextScale.x1);
 }
 
+/// A 3x glyph advances three cells, the two after it blank but carrying
+/// the run's metadata so a click anywhere under the glyph hit-tests.
+pub fn writeTextScaledX3AdvancesThreeCellsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
+    defer layer.deinit();
+
+    try layer.writeTextTaggedScaled("AB", glyphwire.default_style.fg, glyphwire.default_style.bg, 7, .x3);
+    try testz.expectEqual(layer.cursor.col, @as(usize, 6));
+    try testz.expectEqual(layer.cell(0, 0).text_scale, glyphwire.TextScale.x3);
+    try testz.expectEqualStr(" ", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cell(0, 2).metadata_id, @as(?glyphwire.MetadataHandle, 7));
+    try testz.expectEqualStr("B", layer.cell(0, 3).grapheme());
+}
+
 pub fn writeTextWideCharWrapsWhenItWontFitTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 2, 2, 0);

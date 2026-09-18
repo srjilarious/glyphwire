@@ -2221,7 +2221,8 @@ pub const Ui = struct {
         self.dict_title_scale = switch (self.dict_title_scale) {
             .x1 => .x1_5,
             .x1_5 => .x2,
-            .x2 => .x1,
+            .x2 => .x3,
+            .x3 => .x1,
         };
         if (self.lookup != null) self.lookup_dirty = true;
     }

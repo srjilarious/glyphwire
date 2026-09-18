@@ -19,7 +19,8 @@ Fetched by the Zig package manager (see `build.zig.zon`) or vendored under
 | [ziglua](https://github.com/natecraddock/ziglua) — `libs/ziglua` | MIT | `gw-shell`, `gmux`, `gw-ls`, `zoe` |
 | [Lua 5.3](https://www.lua.org/) | MIT | as above, via ziglua |
 | [zig-tree-sitter + libtree-sitter](https://github.com/tree-sitter/tree-sitter) | MIT | `zoe` |
-| [zargunaught](https://github.com/srjilarious/zargunaught) | MIT | `gw-ls`, `gw-view` |
+| [zargunaught](https://github.com/srjilarious/zargunaught) | MIT | `gw-ls`, `gw-view`, `gw-read`, `gwmd` |
+| `md/libs/zmd` ([zmd](https://github.com/jetzig-framework/zmd), via zkdocs's fork) | MIT | `gwmd` — modified; see `md/libs/zmd/README.md` |
 | [testz](https://github.com/srjilarious/testz) | MIT | test runner |
 
 All are permissive and compatible with both MPL-2.0 and GPL-3.0-or-later.

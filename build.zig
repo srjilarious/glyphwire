@@ -122,6 +122,20 @@ pub fn build(b: *std.Build) void {
     });
     read_support_mod.addIncludePath(b.path("read/libs/sqlite"));
 
+    // gwmd's layout, link handling and client UI, shared by the `gwmd`
+    // binary and its test runner -- same cross-directory-module reason as
+    // the ones above. The Markdown parser is the vendored zmd fork under
+    // `md/libs/zmd/` (MIT, third-party; see its README for what glyphwire
+    // added to it).
+    const zmd_mod = b.addModule("zmd", .{
+        .root_source_file = b.path("md/libs/zmd/zmd.zig"),
+    });
+    const md_support_mod = b.addModule("md_support", .{
+        .root_source_file = b.path("md/support.zig"),
+    });
+    md_support_mod.addImport("glyphwire", glyphwire_mod);
+    md_support_mod.addImport("zmd", zmd_mod);
+
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const zopengl = b.dependency("zopengl", .{ .target = target });
     const zmath = b.dependency("zmath", .{ .target = target });
@@ -220,6 +234,7 @@ pub fn build(b: *std.Build) void {
     tests_exe.root_module.addImport("zoe_support", zoe_support_mod);
     tests_exe.root_module.addImport("gmux_support", gmux_support_mod);
     tests_exe.root_module.addImport("read_support", read_support_mod);
+    tests_exe.root_module.addImport("md_support", md_support_mod);
     // `host_eng_tests` exercises the SDL3 backend's Keyboard/Mouse state
     // machines and its two wire-visible enums. They need no window and no
     // GL context -- but the module does drag libSDL3.a into the test
@@ -506,6 +521,26 @@ pub fn build(b: *std.Build) void {
     const read_step = b.step("gw-read", "Run the glyphwire comic reader (cbz/cbr/cb7 or a directory of images)");
     read_step.dependOn(&run_read.step);
 
+    const md_exe = b.addExecutable(.{
+        .name = "gwmd",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("md/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    md_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    md_exe.root_module.addImport("zargunaught", zargunaught_mod);
+    md_exe.root_module.addImport("md_support", md_support_mod);
+    b.installArtifact(md_exe);
+
+    const run_md = b.addRunArtifact(md_exe);
+    run_md.step.dependOn(b.getInstallStep());
+    run_md.addPassthruArgs();
+
+    const md_step = b.step("gwmd", "Run the glyphwire Markdown reader (gwmd <file.md>)");
+    md_step.dependOn(&run_md.step);
+
     const view_exe = b.addExecutable(.{
         .name = "gw-view",
         .root_module = b.createModule(.{
@@ -567,7 +602,7 @@ pub fn build(b: *std.Build) void {
 
     // `zig build package` installs just the user-facing programs and
     // bundled assets that ship in the Linux release tarball -- glyphwire,
-    // gw-shell, notify, demo, gw-view, gw-read, gw-ls, zoe, gmux, the bundled
+    // gw-shell, notify, demo, gw-view, gw-read, gwmd, gw-ls, zoe, gmux, the bundled
     // tree-sitter grammars, and assets -- without also building the test
     // runner or the internal server/client tools that plain `zig build`
     // Verifies the three-way licence split in LICENSE.md still holds:
@@ -594,7 +629,7 @@ pub fn build(b: *std.Build) void {
     // pulls in. The CI packaging job
     // (.github/workflows/linux-package.yml) drives this step.
     const package_step = b.step("package", "Install the shipped programs and assets into zig-out");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, read_exe, ls_exe, hist_exe, zoe_exe, agent_exe, gmux_exe }) |exe| {
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, read_exe, md_exe, ls_exe, hist_exe, zoe_exe, agent_exe, gmux_exe }) |exe| {
         package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     package_step.dependOn(&installed_assets_step.step);
@@ -605,8 +640,8 @@ pub fn build(b: *std.Build) void {
     // runtime, so the packaged tree has to carry them alongside the binary.
     package_step.dependOn(grammars_step);
 
-    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-agent, gw-view, gw-read, gw-ls, gw-hist, zoe, gmux, grammars, and assets under the selected prefix");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, agent_exe, view_exe, read_exe, ls_exe, hist_exe, zoe_exe, gmux_exe }) |exe| {
+    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-agent, gw-view, gw-read, gwmd, gw-ls, gw-hist, zoe, gmux, grammars, and assets under the selected prefix");
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, agent_exe, view_exe, read_exe, md_exe, ls_exe, hist_exe, zoe_exe, gmux_exe }) |exe| {
         install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     install_local_step.dependOn(&installed_assets_step.step);

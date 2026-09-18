@@ -160,26 +160,26 @@ zig build package         # build just the shipped programs, zoe's
                           #   zig-out/share/glyphwire/
 zig build install-local --prefix /usr/local
                           # install glyphwire, gw-shell, gw-view, gw-read,
-                          #   gw-ls, zoe, the grammars, and assets under
+                          #   gwmd, gw-ls, zoe, the grammars, and assets under
                           #   the prefix
 ```
 
 Individual run steps: `zig build gw-shell`, `zig build gw-ls`, `zig build demo`,
 `zig build table_demo`, `zig build gw-view`, `zig build gw-read`,
-`zig build notify`, `zig build server`, `zig build client`,
+`zig build gwmd`, `zig build notify`, `zig build server`, `zig build client`,
 `zig build zoe`.
 
 The `.github/workflows/linux-package.yml` workflow runs `zig build package`
 in ReleaseSafe on every push and pull request, uploading a
 `glyphwire-linux-x86_64.tar.gz` (the binaries — `glyphwire`, `gw-shell`,
-`gw-ls`, `gw-view`, `gw-read`, `glyphwire-demo`, `glyphwire-notify`,
+`gw-ls`, `gw-view`, `gw-read`, `gwmd`, `glyphwire-demo`, `glyphwire-notify`,
 `zoe`, `gmux` — plus `assets/` and zoe's `grammars/`) as a run artifact; on a
 `vX.Y.Z` tag push it also attaches that tarball to the GitHub Release.
 Windows packaging is not wired up yet.
 
 Once `glyphwire` is running, its shell prompt launches the client
 programs (`gw-ls`, `glyphwire-demo`, `gw-view <img.png>`,
-`gw-read <book.cbz>`, `glyphwire-notify <msg>`) with discovery already set up, so they draw onto
+`gw-read <book.cbz>`, `gwmd <file.md>`, `glyphwire-notify <msg>`) with discovery already set up, so they draw onto
 the grid.
 
 ### Host options (screenshots / smoke runs)
@@ -280,9 +280,10 @@ name and its shell command there to capture a new one.
 | `shell/` | `gw-shell` — line editor, command launcher, PTY, Lua startup config, history. |
 | `ls/`, `view/`, `notify/`, `demo/`, `table-demo/`, `client/` | Client programs. |
 | `read/` | `gw-read` — a comic/manga reader: `.cbz`/`.cbr`/`.cb7` or a directory of images, full-screen, right-to-left by default, with an image-handle LRU, zoom modes and pan. See `docs/decisions.md`'s `gw-read` section. |
+| `md/` | `gwmd` — a Markdown reader: headings at 3x/2x/1.5x text scale, GFM tables as native glyphwire tables, local images inline, clickable links (local `.md` files open in place with back/forward, `#anchors` scroll, everything else goes to `xdg-open`), Tab to cycle links. The parser is a vendored, extended zmd fork in `md/libs/zmd/`. `--dump` prints the layout as text without a window. |
 | `zoe/` | `zoe` — a vim-like modal editor, glyphwire's first multi-layer TUI: split panes, a file tree, tree-sitter syntax highlighting, its own context. See `docs/investigations/zoe-editor.md`. |
 | `server/` | Standalone socket server (host embeds its own; this is for testing). |
-| `tests/` | testz suite — `core`, `wire`, `dispatch`, `table`, `server`, `client`, `shell`, `ls`, `read`, `zoe`, `e2e`, ... |
+| `tests/` | testz suite — `core`, `wire`, `dispatch`, `table`, `server`, `client`, `shell`, `ls`, `read`, `md`, `zoe`, `e2e`, ... |
 | `docs/` | `protocol.md` (the specification), `decisions.md`, `api.md`, `roadmap.md`, `investigations/`. |
 
 ## License
@@ -294,7 +295,7 @@ bundled third-party code and assets in [`THIRD-PARTY.md`](THIRD-PARTY.md).
 |---|---|---|
 | **The protocol** — [`docs/protocol.md`](docs/protocol.md) and the rest of `docs/` | `CC-BY-4.0` | Implement it in any language, under any license. Attribution is the only obligation, and it does not reach your code. |
 | **The plumbing** — `src/`, `host/`, `host_eng/`, `server/`, `client/`, `agent/`, and the demo and debug tools | `MPL-2.0` | File-level copyleft: embed and ship these unmodified in anything, and owe source only for MPL files you change. |
-| **The applications** — `gw-shell`, `gmux`, `gw-ls`, `gw-view`, `gw-read`, `zoe` | `GPL-3.0-or-later` | Programs people run, not components people embed. |
+| **The applications** — `gw-shell`, `gmux`, `gw-ls`, `gw-view`, `gw-read`, `gwmd`, `zoe` | `GPL-3.0-or-later` | Programs people run, not components people embed. |
 
 Every source file carries an `SPDX-License-Identifier`, so a single
 directory can be vendored without consulting the table. The GPL programs

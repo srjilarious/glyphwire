@@ -316,12 +316,13 @@ pub const Renderer = struct {
     /// Crisp, dedicated atlases for `write_text`'s `scale` -- see
     /// `atlasForScale` and decisions.md's Text scale section. Lazily
     /// (re)built by cloning the default atlas (`FontAtlas.cloneAtSize`)
-    /// the first time a session actually uses `.x1_5`/`.x2`, so a session
-    /// that never does never allocates either. Null again whenever the
+    /// the first time a session actually uses `.x1_5`/`.x2`/`.x3`, so a session
+    /// that never does never allocates any. Null again whenever the
     /// default atlas's own `font_size` changes underneath them (a
     /// Ctrl+/- resize) -- see `invalidateScaledAtlasesIfStale`.
     scaled_atlas_1_5x: ?host_eng.renderer.FontAtlas = null,
     scaled_atlas_2x: ?host_eng.renderer.FontAtlas = null,
+    scaled_atlas_3x: ?host_eng.renderer.FontAtlas = null,
     /// The default atlas's `font_size` the two atlases above were last
     /// (re)built against. Starts at a value no real font size will ever
     /// equal, so the first `syncBatches` with a live default atlas always
@@ -371,6 +372,7 @@ pub const Renderer = struct {
         self.deferred_scaled_text.deinit(alloc);
         if (self.scaled_atlas_1_5x) |*a| a.deinit();
         if (self.scaled_atlas_2x) |*a| a.deinit();
+        if (self.scaled_atlas_3x) |*a| a.deinit();
         self.image_textures.deinit();
         self.icon_uv.deinit();
         var it = self.layer_batches.valueIterator();
@@ -900,6 +902,11 @@ pub const Renderer = struct {
                 a.commitTexture();
                 if (grew_s) self.text_epoch +%= 1;
             }
+            if (self.scaled_atlas_3x) |*a| {
+                const grew_s = a.grew_since_upload;
+                a.commitTexture();
+                if (grew_s) self.text_epoch +%= 1;
+            }
         }
 
         self.deferred_icons.clearRetainingCapacity();
@@ -1100,7 +1107,7 @@ pub const Renderer = struct {
     }
 
     /// `texBatchFor`, but for a layer's `scaled_text` list -- keyed by
-    /// `TextScale` (at most 2 entries, `.x1_5`/`.x2`) instead of a handle,
+    /// `TextScale` (at most 3 entries, `.x1_5`/`.x2`/`.x3`) instead of a handle,
     /// and building a `GlyphBatch` (with a colour channel) instead of a
     /// plain `SpriteBatch`. `rebuildLayer` empties `lb.scaled_text` at the
     /// start of every rebuild, so "found existing" only ever means
@@ -1277,8 +1284,8 @@ pub const Renderer = struct {
     }
 
     /// `Cell.text_scale`'s pixel multiplier against the default atlas's
-    /// own `font_size` -- `1.5`/`2.0` for `.x1_5`/`.x2`, matching the
-    /// "1.5x"/"2x" naming exactly (see `TextScale`'s doc comment). Only
+    /// own `font_size` -- `1.5`/`2.0`/`3.0` for `.x1_5`/`.x2`/`.x3`, matching the
+    /// "1.5x"/"2x"/"3x" naming exactly (see `TextScale`'s doc comment). Only
     /// used to pick the target size for `atlasForScale`'s clone -- glyphs
     /// themselves are drawn 1:1 out of whichever atlas that resolves to,
     /// see `emitGlyphs`.
@@ -1287,14 +1294,15 @@ pub const Renderer = struct {
             .x1 => 1.0,
             .x1_5 => 1.5,
             .x2 => 2.0,
+            .x3 => 3.0,
         };
     }
 
-    /// Drops both scaled-text atlases when the default atlas's
+    /// Drops every scaled-text atlas when the default atlas's
     /// `font_size` has moved since they were last built (a Ctrl+/-
     /// resize) -- `atlasForScale` lazily rebuilds whichever one(s) a
     /// layer's rebuild actually needs next, so a session that never uses
-    /// `.x1_5`/`.x2` never pays for either. Bumps `text_epoch` so every
+    /// `.x1_5`/`.x2`/`.x3` never pays for any of them. Bumps `text_epoch` so every
     /// layer with previously-baked scaled-glyph UVs (now pointing at a
     /// just-destroyed texture) rebuilds this frame -- the same contract
     /// a plain atlas grow already has.
@@ -1302,8 +1310,10 @@ pub const Renderer = struct {
         if (self.scaled_atlas_base_size == default.font_size) return;
         if (self.scaled_atlas_1_5x) |*a| a.deinit();
         if (self.scaled_atlas_2x) |*a| a.deinit();
+        if (self.scaled_atlas_3x) |*a| a.deinit();
         self.scaled_atlas_1_5x = null;
         self.scaled_atlas_2x = null;
+        self.scaled_atlas_3x = null;
         self.scaled_atlas_base_size = default.font_size;
         self.text_epoch +%= 1;
     }
@@ -1322,6 +1332,7 @@ pub const Renderer = struct {
             .x1 => return default,
             .x1_5 => &self.scaled_atlas_1_5x,
             .x2 => &self.scaled_atlas_2x,
+            .x3 => &self.scaled_atlas_3x,
         };
         if (slot.* == null) {
             slot.* = default.cloneAtSize(default.font_size * textScaleFactor(scale), self.app.alloc) catch return null;

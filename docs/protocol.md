@@ -546,7 +546,7 @@ the message's value, and `max_cols`/`pad` apply to the write as a whole.
 Sending both `text` and `spans`, or neither, reports `InvalidSpans`.
 
 A `scale` of `"x1_5"` or `"x2"` advances two cells per display column,
-filling the cells after each enlarged glyph with blanks in the run's
+and `"x3"` three, filling the cells after each enlarged glyph with blanks in the run's
 background and `metadata_id`. `transparent_bg` leaves whatever
 background is already in the cell — an image, an icon, a panel gradient —
 instead of resetting it. `metadata_id` tags every cell written.

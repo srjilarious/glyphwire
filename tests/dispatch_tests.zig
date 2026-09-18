@@ -1157,6 +1157,20 @@ pub fn writeTextScaleSetsCellTextScaleTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqual(ctx.root.cell(0, 0).text_scale, glyphwire.TextScale.x1_5);
 }
 
+/// `"x3"` parses like the other scales and lands on the cell.
+pub fn writeTextScaleX3SetsCellTextScaleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const write_message =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"a","scale":"x3"}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, write_message)).response == null);
+    try testz.expectEqual(ctx.root.cell(0, 0).text_scale, glyphwire.TextScale.x3);
+}
+
 /// An unrecognized `scale` value is rejected rather than silently falling
 /// back to `.x1` -- same convention `draw_icon`'s `scale` already follows.
 pub fn writeTextBadScaleIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {

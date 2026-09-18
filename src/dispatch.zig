@@ -45,7 +45,7 @@ pub const DispatchError = error{
     /// need the still-unbuilt error-response path (roadmap Milestone 0).
     LayerPermissionDenied,
     InvalidIconOption,
-    /// `write_text`'s `scale` wasn't `"x1"`, `"x1_5"`, or `"x2"`.
+    /// `write_text`'s `scale` wasn't `"x1"`, `"x1_5"`, `"x2"`, or `"x3"`.
     InvalidTextScale,
     /// `move_content`'s `direction` wasn't `"up"` or `"down"`.
     InvalidMoveDirection,
@@ -150,7 +150,7 @@ const WriteTextParams = struct {
     /// fill -- that needs to stay visible through it rather than being
     /// approximated with a matching flat color.
     transparent_bg: bool = false,
-    /// `"x1"` (default), `"x1_5"`, or `"x2"` -- see `core.TextScale`'s
+    /// `"x1"` (default), `"x1_5"`, `"x2"`, or `"x3"` -- see `core.TextScale`'s
     /// doc comment. Wire strings match the enum's tag names exactly, the
     /// same convention `draw_icon`'s `scale` already uses.
     scale: ?[]const u8 = null,

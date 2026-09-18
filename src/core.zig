@@ -784,7 +784,7 @@ pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 
 /// A per-cell hint that the cell's glyph should be drawn larger than one
 /// cell's normal pixel size -- `write_text`'s optional `scale` (`x1_5` is
-/// "1.5x", `x2` is "2x"; wire strings match the tag names exactly, see
+/// "1.5x", `x2` is "2x", `x3` is "3x"; wire strings match the tag names exactly, see
 /// `write_text` in docs/api.md). The enlarged glyph still renders from the
 /// one cell that holds the grapheme and carries `text_scale`, but the
 /// write **advances the cursor by the scaled width** (`scaledPitch` cells
@@ -794,14 +794,15 @@ pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 /// run's background, and a click anywhere under the glyph hit-tests as
 /// part of the run. Vertical overflow is still the caller's to plan for.
 /// See decisions.md's Text scale section.
-pub const TextScale = enum { x1, x1_5, x2 };
+pub const TextScale = enum { x1, x1_5, x2, x3 };
 
 /// Cells a `scale` glyph advances per display column: its size rounded up
-/// to whole cells, so 1.5x and 2x both step two.
+/// to whole cells, so 1.5x and 2x both step two and 3x steps three.
 pub fn scaledPitch(scale: TextScale) usize {
     return switch (scale) {
         .x1 => 1,
         .x1_5, .x2 => 2,
+        .x3 => 3,
     };
 }
 
