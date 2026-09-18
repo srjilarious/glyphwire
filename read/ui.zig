@@ -132,27 +132,29 @@ const Ocr = struct {
     }
 };
 
-/// A dictionary lookup result shown in `Ui.dict_layer`. `dict_mod.lookup`
-/// now queries a SQLite file rather than holding the whole dictionary in
-/// memory, so its `Entry` results are heap-allocated per call. `entries`
-/// is every homograph the search matched (owned by `Ui.alloc`, freed via
-/// `dict_mod.freeEntries`) -- `hit` picks which one is currently shown,
-/// cycled with `]`/`[` while the panel is up (`Ui.cycleLookupHit`) instead
-/// of the older "keep the first, drop the rest" behavior. `reason` is
-/// heap-allocated too (`dict_mod.Match.reason`'s chained-deinflection
-/// join, e.g. "causative, negative"), null for a direct dictionary-form
-/// match -- `Ui.clearLookup` frees both before every replacement and on
-/// shutdown.
+/// A dictionary lookup result shown in `Ui.dict_layer`. `match` holds
+/// every ranked hit (owned by `Ui.alloc`; `Ui.clearLookup` frees it
+/// before every replacement and on shutdown) -- not only homographs of
+/// one word but shorter words off the same start, since
+/// `dict_mod.lookup` collects every length the way Yomitan does. `hit`
+/// picks which one is shown, cycled with `]`/`[` while the panel is up
+/// (`Ui.cycleLookupHit`).
 const Lookup = struct {
-    entries: []const dict_mod.Entry,
+    match: dict_mod.Match,
     hit: usize = 0,
-    /// The deinflection reason, or null for a direct dictionary-form
-    /// match.
-    reason: ?[]const u8,
+    /// Where the looked-up text began, as a byte offset into
+    /// `Ocr.text.joined`. Every hit's span starts here and runs its own
+    /// `source_len`, which is what the dialog's highlight follows as the
+    /// shown hit changes (`Ui.highlightLookup`).
+    source_start: usize,
     rect: struct { row: usize = 0, col: usize = 0, rows: usize = 0, cols: usize = 0 } = .{},
 
-    fn current(self: Lookup) dict_mod.Entry {
-        return self.entries[self.hit];
+    fn current(self: Lookup) dict_mod.Hit {
+        return self.match.hits[self.hit];
+    }
+
+    fn count(self: Lookup) usize {
+        return self.match.hits.len;
     }
 };
 
@@ -1212,7 +1214,8 @@ pub const Ui = struct {
             try c.setLayerVisible(self.dict_layer, false);
             return;
         };
-        const entry = lk.current();
+        const shown = lk.current();
+        const entry = shown.entry;
         if (entry.term.len == 0) {
             try c.setLayerVisible(self.dict_layer, false);
             return;
@@ -1221,7 +1224,7 @@ pub const Ui = struct {
         // Subheader: the reading when that differs from the term itself
         // (kana-only entries have the same string in both), the
         // deinflection reason when this wasn't the dictionary form, and
-        // -- when more than one homograph matched -- a "[hit/total]"
+        // -- when the lookup found more than one hit -- a "[hit/total]"
         // position, cycled with `]`/`[` (`Ui.cycleLookupHit`). The term
         // itself is drawn separately, at `dict_title_scale`, by
         // `writeScaledTermRow` below -- see decisions.md's Text scale
@@ -1234,15 +1237,15 @@ pub const Ui = struct {
             try sub_buf.appendSlice(self.alloc, entry.reading);
             try sub_buf.appendSlice(self.alloc, "\u{3011}");
         }
-        if (lk.reason) |r| {
+        if (shown.reason) |r| {
             if (sub_buf.items.len > 0) try sub_buf.append(self.alloc, ' ');
             try sub_buf.append(self.alloc, '(');
             try sub_buf.appendSlice(self.alloc, r);
             try sub_buf.append(self.alloc, ')');
         }
-        if (lk.entries.len > 1) {
+        if (lk.count() > 1) {
             if (sub_buf.items.len > 0) try sub_buf.append(self.alloc, ' ');
-            const pos = try std.fmt.allocPrint(self.alloc, "[{d}/{d}]", .{ lk.hit + 1, lk.entries.len });
+            const pos = try std.fmt.allocPrint(self.alloc, "[{d}/{d}]", .{ lk.hit + 1, lk.count() });
             defer self.alloc.free(pos);
             try sub_buf.appendSlice(self.alloc, pos);
         }
@@ -1872,7 +1875,7 @@ pub const Ui = struct {
         // `]`/`[` cycle through them instead of jumping pages -- the
         // panel "captures" the keys for as long as there's something to
         // cycle, same as `goto_prompt` captures every key above.
-        if (self.lookup) |lk| if (lk.entries.len > 1) {
+        if (self.lookup) |lk| if (lk.count() > 1) {
             if (eq(u8, text, "]")) return self.cycleLookupHit(1);
             if (eq(u8, text, "[")) return self.cycleLookupHit(-1);
         };
@@ -2092,12 +2095,12 @@ pub const Ui = struct {
     /// word either.
     ///
     /// No tokenizing happens here: `dict.lookup` is handed everything
-    /// from the click point to the end of the row and tries decreasing
-    /// substrings itself, the same trick Yomitan uses since Japanese has
-    /// no spaces to split words on. On a match, the span it settled on
-    /// (`Match.len`) is selected on the dialog layer -- same as dragging
-    /// it by hand -- so it's visible which word the panel is answering
-    /// for, and Ctrl+Shift+C copies exactly that without a separate drag.
+    /// from the click point to the end of the *bubble* (`Ocr.text.joined`,
+    /// not just the wrapped row, so a word split across a wrap is still
+    /// found whole) and tries every prefix itself, the same trick Yomitan
+    /// uses since Japanese has no spaces to split words on. The span of
+    /// the hit being shown is then selected on the dialog layer
+    /// (`highlightLookup`).
     fn wordLookupAt(self: *Ui, p: glyphwire.SelectionPoint) void {
         const d = &(self.dict orelse return);
         const o = &(self.ocr orelse return);
@@ -2116,26 +2119,22 @@ pub const Ui = struct {
         const byte_off = mokuro.columnToByte(row, text_col);
         if (byte_off >= row.len) return self.clearLookup();
 
-        const m = dict_mod.lookup(self.alloc, d, row[byte_off..]) catch null;
-        self.setLookupFromMatch(m);
-        if (self.lookup != null) {
-            // From the matched character's own first column, not the
-            // clicked one -- a click on a wide character's right half
-            // would otherwise start the span mid-glyph -- to its last
-            // column, since a selection's end is inclusive.
-            const start_col = 2 + mokuro.displayWidth(row[0..byte_off]);
-            const end_col = start_col + mokuro.displayWidth(row[byte_off .. byte_off + m.?.len]) - 1;
-            self.client.setSelection(self.dialog_layer, .{ .above = p.above, .col = start_col }, .{ .above = p.above, .col = end_col }) catch {};
-        }
+        const start = mokuro.rowOffset(o.text.joined, row) + byte_off;
+        const m = dict_mod.lookup(self.alloc, d, o.text.joined[start..]) catch null;
+        self.setLookupFromMatch(m, start);
     }
 
     /// Resolves a completed drag inside the dialog (`a`/`b`, the anchor
     /// and release point, in either order) to source text and looks it
-    /// up -- the same substring-and-deinflect search `wordLookupAt` uses,
-    /// but bounded to exactly what was dragged over instead of "click to
-    /// end of row". The selection itself is left alone: it already shows
-    /// what was dragged, so there's nothing to add the way `wordLookupAt`
-    /// adds one for a plain click.
+    /// up. The dragged text is the longest thing `dict.lookup` tries, so
+    /// an exact match on it ranks first; shorter prefixes of it follow
+    /// only as fallbacks, for a drag that overshot the word.
+    ///
+    /// The selection's end is inclusive -- the character under the
+    /// release cell is part of it -- so the byte range runs to the end
+    /// of that character (`mokuro.charEnd`), not to its start. (Treating
+    /// it as exclusive used to drop the last character, so dragging over
+    /// 面白い looked up 面白 and landed on 面.)
     ///
     /// `a` and `b` are clamped into the text region rather than rejected
     /// outright (`clampToText`) -- a drag that overshoots the border or
@@ -2159,14 +2158,13 @@ pub const Ui = struct {
         const second = if (a_first) pb else pa;
 
         const joined = o.text.joined;
-        const row_first = o.text.rows[first.row_idx];
         const row_second = o.text.rows[second.row_idx];
-        const abs_start = (@intFromPtr(row_first.ptr) - @intFromPtr(joined.ptr)) + first.byte_off;
-        const abs_end = (@intFromPtr(row_second.ptr) - @intFromPtr(joined.ptr)) + second.byte_off;
+        const abs_start = mokuro.rowOffset(joined, o.text.rows[first.row_idx]) + first.byte_off;
+        const abs_end = mokuro.rowOffset(joined, row_second) + mokuro.charEnd(row_second, second.byte_off);
         if (abs_end <= abs_start) return self.clearLookup();
 
         const m = dict_mod.lookup(self.alloc, d, joined[abs_start..abs_end]) catch null;
-        self.setLookupFromMatch(m);
+        self.setLookupFromMatch(m, abs_start);
     }
 
     /// Clamps dialog-local point `p` to the nearest text cell: rows above
@@ -2184,42 +2182,54 @@ pub const Ui = struct {
         return .{ .row_idx = row_idx, .byte_off = mokuro.columnToByte(row, text_col) };
     }
 
-    /// Common tail of `wordLookupAt` and `lookupSelection`: takes a
-    /// `dict_mod.lookup` result and keeps every homograph as
-    /// `self.lookup.entries`, shown one at a time via `hit` -- `]`/`[`
-    /// cycle through them (`cycleLookupHit`) instead of the older
-    /// "keep the first, drop the rest" behavior. A no-op (clearing any
-    /// open lookup) on no match, same as before this was shared.
-    fn setLookupFromMatch(self: *Ui, m: ?dict_mod.Match) void {
+    /// Common tail of `wordLookupAt` and `lookupSelection`: keeps every
+    /// ranked hit as `self.lookup`, shown one at a time via `hit` (`]`/`[`
+    /// cycle through them, `cycleLookupHit`), and highlights the best
+    /// one's span. `source_start` is where the looked-up text began in
+    /// `Ocr.text.joined`. Clears any open lookup on no match.
+    fn setLookupFromMatch(self: *Ui, m: ?dict_mod.Match, source_start: usize) void {
         const match = m orelse return self.clearLookup();
-        if (match.entries.len == 0) {
-            dict_mod.freeEntries(self.alloc, match.entries);
-            return self.clearLookup();
-        }
-
         self.clearLookup();
-        self.lookup = .{ .entries = match.entries, .reason = match.reason };
+        self.lookup = .{ .match = match, .source_start = source_start };
         self.lookup_dirty = true;
+        self.highlightLookup();
+    }
+
+    /// Selects the shown hit's span on the dialog layer -- the same as
+    /// dragging it by hand -- so it's visible which word the panel is
+    /// answering for, and Ctrl+Shift+C copies exactly that. Hits cover
+    /// different lengths (食べ物, then 食べる, then 食), so this runs again
+    /// on every `]`/`[` and the highlight resizes to match.
+    fn highlightLookup(self: *Ui) void {
+        const lk = self.lookup orelse return;
+        const o = &(self.ocr orelse return);
+        const start = lk.source_start;
+        const span = mokuro.spanCells(o.text.joined, o.text.rows, start, start + lk.current().source_len) orelse return;
+        // Text rows are 1-based on the panel (row 0 is the border) and
+        // text columns start at 2 (border, then pad) -- see `wordLookupAt`.
+        const first: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.first.row + 1)), .col = span.first.col + 2 };
+        const last: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.last.row + 1)), .col = span.last.col + 2 };
+        self.client.setSelection(self.dialog_layer, first, last) catch {};
     }
 
     fn clearLookup(self: *Ui) void {
         const lk = self.lookup orelse return;
-        dict_mod.freeEntries(self.alloc, lk.entries);
-        if (lk.reason) |r| self.alloc.free(r);
+        lk.match.deinit(self.alloc);
         self.lookup = null;
         self.lookup_dirty = true;
     }
 
-    /// `]`/`[` while the lookup panel is showing more than one homograph
-    /// -- see `Ui.handleText`, which only routes here instead of its own
+    /// `]`/`[` while the lookup panel is showing more than one hit --
+    /// see `Ui.handleText`, which only routes here instead of its own
     /// page-jump binding when that condition holds. Wraps at both ends.
     fn cycleLookupHit(self: *Ui, delta: i64) void {
         if (self.lookup == null) return;
-        const n: i64 = @intCast(self.lookup.?.entries.len);
+        const n: i64 = @intCast(self.lookup.?.count());
         if (n <= 1) return;
         const idx = @mod(@as(i64, @intCast(self.lookup.?.hit)) + delta, n);
         self.lookup.?.hit = @intCast(idx);
         self.lookup_dirty = true;
+        self.highlightLookup();
     }
 
     /// `s` -- cycles the lookup panel's title size for the rest of the

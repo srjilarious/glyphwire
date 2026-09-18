@@ -15,6 +15,7 @@ const rconfig = @import("read_support").config;
 const mokuro = @import("read_support").mokuro;
 const archive = @import("read_support").archive;
 const dict = @import("read_support").dict;
+const kana = @import("read_support").kana;
 
 // ─── pages.isPage ───────────────────────────────────────────────────────
 
@@ -784,6 +785,123 @@ pub fn mokuroColumnToByteClampsPastTheEndTest(_: std.Io, _: std.mem.Allocator) !
     try testz.expectEqual(mokuro.columnToByte("", 0), 0);
 }
 
+// ─── mokuro: byte spans back to wrapped cells ───────────────────────────
+//
+// `charEnd` and `spanCells` are what turn a selection's inclusive end
+// into a byte range and a lookup hit's byte range back into a highlight.
+
+pub fn mokuroCharEndSkipsAWholeCodepointTest(_: std.Io, _: std.mem.Allocator) !void {
+    const text = "猫a";
+    try testz.expectEqual(mokuro.charEnd(text, 0), 3);
+    try testz.expectEqual(mokuro.charEnd(text, 3), 4);
+    try testz.expectEqual(mokuro.charEnd(text, 4), 4);
+}
+
+pub fn mokuroSpanCellsCoversTheLastWideCharacterTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const joined = "面白いね";
+    const rows = try mokuro.wrap(alloc, joined, 100);
+    defer alloc.free(rows);
+    // 白い: bytes 3..9, columns 2..5 -- the last column is い's right half.
+    const span = mokuro.spanCells(joined, rows, 3, 9).?;
+    try testz.expectEqual(span.first.row, 0);
+    try testz.expectEqual(span.first.col, 2);
+    try testz.expectEqual(span.last.row, 0);
+    try testz.expectEqual(span.last.col, 5);
+}
+
+pub fn mokuroSpanCellsCrossesAWrapTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Two wide characters per row: 面白 / いね.
+    const joined = "面白いね";
+    const rows = try mokuro.wrap(alloc, joined, 4);
+    defer alloc.free(rows);
+    try testz.expectEqual(rows.len, 2);
+    const span = mokuro.spanCells(joined, rows, 3, 9).?;
+    try testz.expectEqual(span.first.row, 0);
+    try testz.expectEqual(span.first.col, 2);
+    try testz.expectEqual(span.last.row, 1);
+    try testz.expectEqual(span.last.col, 1);
+}
+
+pub fn mokuroSpanCellsRejectsAnEmptySpanTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const joined = "猫";
+    const rows = try mokuro.wrap(alloc, joined, 10);
+    defer alloc.free(rows);
+    try testz.expectTrue(mokuro.spanCells(joined, rows, 0, 0) == null);
+}
+
+// ─── kana: Yomitan's text variants ──────────────────────────────────────
+
+pub fn kanaToHiraganaTurnsTheLongVowelMarkIntoItsVowelTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try kana.toHiragana(alloc, "スーパー");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "すうぱあ");
+    // An o-row kana lengthens with う, the way a long o is spelled.
+    const o = try kana.toHiragana(alloc, "コーヒー");
+    defer alloc.free(o);
+    try testz.expectEqualStr(o, "こうひい");
+}
+
+pub fn kanaToHiraganaLeavesCounterKeAloneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try kana.toHiragana(alloc, "一ヶ月");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "一ヶ月");
+}
+
+pub fn kanaToKatakanaConvertsOnlyHiraganaTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try kana.toKatakana(alloc, "猫すごいA");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "猫スゴイA");
+}
+
+pub fn kanaCollapseEmphaticPartialAndFullTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const partial = try kana.collapseEmphatic(alloc, "すっっごーーい", false);
+    defer alloc.free(partial);
+    try testz.expectEqualStr(partial, "すっごーい");
+    const full = try kana.collapseEmphatic(alloc, "すっっごーーい", true);
+    defer alloc.free(full);
+    try testz.expectEqualStr(full, "すごい");
+}
+
+pub fn kanaCollapseEmphaticKeepsLeadingAndTrailingRunsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try kana.collapseEmphatic(alloc, "ーあっー", true);
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "ーあっー");
+    const all = try kana.collapseEmphatic(alloc, "っっ", true);
+    defer alloc.free(all);
+    try testz.expectEqualStr(all, "っっ");
+}
+
+pub fn kanaVariantsPutTheOriginalFirstAndCountStepsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const vs = try kana.variants(arena.allocator(), "スッゴイ");
+    try testz.expectEqualStr(vs[0].text, "スッゴイ");
+    try testz.expectEqual(vs[0].steps, 0);
+
+    var found_full = false;
+    for (vs) |v| {
+        // Script change plus full collapse: two steps.
+        if (std.mem.eql(u8, v.text, "すごい")) {
+            found_full = true;
+            try testz.expectEqual(v.steps, 2);
+        }
+        // Distinct spellings only.
+        var n: usize = 0;
+        for (vs) |w| if (std.mem.eql(u8, v.text, w.text)) {
+            n += 1;
+        };
+        try testz.expectEqual(n, 1);
+    }
+    try testz.expectTrue(found_full);
+}
+
+pub fn kanaVariantsOfPlainKanjiIsJustTheOriginalTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const vs = try kana.variants(arena.allocator(), "猫");
+    try testz.expectEqual(vs.len, 1);
+}
+
 // ─── archive: recognising the sidecar's name ────────────────────────────
 
 pub fn mokuroSidecarNameIsRecognisedCaseInsensitivelyTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -808,14 +926,14 @@ pub fn dictParsesTermBankRowsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     }, null);
     defer d.deinit();
     const m = (try dict.lookup(alloc, &d, "食べる")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "食べる");
-    try testz.expectEqualStr(m.entries[0].reading, "たべる");
-    try testz.expectEqualStr(m.entries[0].rules, "v1");
-    try testz.expectEqual(m.entries[0].glossary.len, 1);
-    try testz.expectEqualStr(m.entries[0].glossary[0], "to eat");
-    try testz.expectEqual(m.entries[0].sequence, 1);
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].entry.reading, "たべる");
+    try testz.expectEqualStr(m.hits[0].entry.rules, "v1");
+    try testz.expectEqual(m.hits[0].entry.glossary.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.glossary[0], "to eat");
+    try testz.expectEqual(m.hits[0].entry.sequence, 1);
 }
 
 pub fn dictDropsRowsShorterThanEightFieldsTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -835,9 +953,9 @@ pub fn dictFlattensStructuredContentGlossaryTest(_: std.Io, alloc: std.mem.Alloc
     }, null);
     defer d.deinit();
     const m = (try dict.lookup(alloc, &d, "優しい")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    try testz.expectEqual(m.entries[0].glossary.len, 1);
-    try testz.expectEqualStr(m.entries[0].glossary[0], "kind, gentle");
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits[0].entry.glossary.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.glossary[0], "kind, gentle");
 }
 
 pub fn dictTreatsGarbageAsAnEmptyBankTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -862,23 +980,22 @@ pub fn dictLookupFindsExactDictionaryFormTest(_: std.Io, alloc: std.mem.Allocato
     var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
     defer d.deinit();
     const m = (try dict.lookup(alloc, &d, "猫が好き")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    try testz.expectTrue(m.reason == null);
-    try testz.expectEqualStr("猫が好き"[0..m.len], "猫");
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "猫");
+    defer m.deinit(alloc);
+    try testz.expectTrue(m.hits[0].reason == null);
+    try testz.expectEqualStr("猫が好き"[0..m.len()], "猫");
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "猫");
 }
 
 pub fn dictLookupDeinflectsIchidanTeFormTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
     defer d.deinit();
     const m = (try dict.lookup(alloc, &d, "食べてすぐ")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    defer alloc.free(m.reason.?);
-    try testz.expectEqualStr(m.reason.?, "te-form");
-    try testz.expectEqualStr("食べてすぐ"[0..m.len], "食べて");
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "食べる");
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].reason.?, "te-form");
+    try testz.expectEqualStr("食べてすぐ"[0..m.len()], "食べて");
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
 }
 
 pub fn dictLookupDeinflectsGodanRuVerbPastTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -887,11 +1004,10 @@ pub fn dictLookupDeinflectsGodanRuVerbPastTest(_: std.Io, alloc: std.mem.Allocat
     // 分かった -- past of 分かる (godan, not ichidan -- the ambiguous
     // -る class `rules_out` filtering exists to resolve).
     const m = (try dict.lookup(alloc, &d, "分かった")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    defer alloc.free(m.reason.?);
-    try testz.expectEqualStr(m.reason.?, "past");
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "分かる");
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].reason.?, "past");
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "分かる");
 }
 
 // ─── dict: chained deinflection ─────────────────────────────────────────
@@ -909,12 +1025,11 @@ pub fn dictLookupChainsProgressiveThroughTeFormTest(_: std.Io, alloc: std.mem.Al
     // to "食べる". Two chained rule applications, neither of which
     // resolves anything alone.
     const m = (try dict.lookup(alloc, &d, "食べている")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    defer alloc.free(m.reason.?);
-    try testz.expectEqualStr("食べている"[0..m.len], "食べている");
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "食べる");
-    try testz.expectEqualStr(m.reason.?, "te-form, progressive");
+    defer m.deinit(alloc);
+    try testz.expectEqualStr("食べている"[0..m.len()], "食べている");
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "te-form, progressive");
 }
 
 pub fn dictLookupChainsNegativePastThroughNegativeTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -928,11 +1043,10 @@ pub fn dictLookupChainsNegativePastThroughNegativeTest(_: std.Io, alloc: std.mem
     // which would also match "ない" as a bare suffix but is rejected
     // since 分かる isn't tagged v1). Two chained rule applications.
     const m = (try dict.lookup(alloc, &d, "分からなかった")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    defer alloc.free(m.reason.?);
-    try testz.expectEqualStr("分からなかった"[0..m.len], "分からなかった");
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "分かる");
+    defer m.deinit(alloc);
+    try testz.expectEqualStr("分からなかった"[0..m.len()], "分からなかった");
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "分かる");
 }
 
 pub fn dictLookupChainsCausativeThroughNegativeTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -948,12 +1062,11 @@ pub fn dictLookupChainsCausativeThroughNegativeTest(_: std.Io, alloc: std.mem.Al
     // because a bare causative form is rarely written alone, not because
     // stripping causative itself leaves something non-terminal.
     const m = (try dict.lookup(alloc, &d, "食べさせない")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    defer alloc.free(m.reason.?);
-    try testz.expectEqualStr("食べさせない"[0..m.len], "食べさせない");
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "食べる");
-    try testz.expectEqualStr(m.reason.?, "causative, negative");
+    defer m.deinit(alloc);
+    try testz.expectEqualStr("食べさせない"[0..m.len()], "食べさせない");
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "causative, negative");
 }
 
 pub fn dictLookupResolvesBareCausativeInOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -963,11 +1076,10 @@ pub fn dictLookupResolvesBareCausativeInOneStepTest(_: std.Io, alloc: std.mem.Al
     // terminal, so this resolves in exactly one rule application, same
     // shape as the polite-past test below.
     const m = (try dict.lookup(alloc, &d, "食べさせる")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    defer alloc.free(m.reason.?);
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "食べる");
-    try testz.expectEqualStr(m.reason.?, "causative");
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "causative");
 }
 
 pub fn dictLookupResolvesPolitePastInOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -977,12 +1089,11 @@ pub fn dictLookupResolvesPolitePastInOneStepTest(_: std.Io, alloc: std.mem.Alloc
     // single terminal rule application: the conjunctive stem directly
     // matches the "v1" headword's rules, with nothing further to unwind.
     const m = (try dict.lookup(alloc, &d, "食べました")).?;
-    defer dict.freeEntries(alloc, m.entries);
-    defer alloc.free(m.reason.?);
-    try testz.expectEqualStr("食べました"[0..m.len], "食べました");
-    try testz.expectEqual(m.entries.len, 1);
-    try testz.expectEqualStr(m.entries[0].term, "食べる");
-    try testz.expectEqualStr(m.reason.?, "polite past");
+    defer m.deinit(alloc);
+    try testz.expectEqualStr("食べました"[0..m.len()], "食べました");
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "polite past");
 }
 
 pub fn dictLookupRejectsADeinflectionWhoseTargetHasTheWrongRuleTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -1000,6 +1111,126 @@ pub fn dictLookupReturnsNullWhenNothingMatchesTest(_: std.Io, alloc: std.mem.All
     defer d.deinit();
     const m = try dict.lookup(alloc, &d, "xyz123");
     try testz.expectTrue(m == null);
+}
+
+// ─── dict: Yomitan parity (reading column, all lengths, ranking) ────────
+
+/// Shaped like Jitendex: kana-written words are filed under their kanji
+/// headword, with the kana only in the reading.
+const parity_dict_json =
+    \\[
+    \\  ["面白い","おもしろい","","adj-i",0,["interesting"],10,""],
+    \\  ["お","","","",0,["o (interjection)"],11,""],
+    \\  ["御","お","","",0,["honorific prefix"],12,""],
+    \\  ["凄い","すごい","","adj-i",0,["amazing"],13,""],
+    \\  ["猫","ねこ","","n",0,["cat"],14,""],
+    \\  ["猫舌","ねこじた","","n",0,["sensitive to hot food"],15,""],
+    \\  ["橋","はし","","n",5,["bridge"],16,""],
+    \\  ["箸","はし","","n",9,["chopsticks"],17,""],
+    \\  ["はし","","","n",0,["edge (kana)"],18,""]
+    \\]
+;
+
+pub fn dictLookupMatchesTheReadingColumnTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    // The whole point: おもしろい is only a reading, and a term-only
+    // search used to fall all the way back to the interjection お.
+    const m = (try dict.lookup(alloc, &d, "おもしろいね")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "面白い");
+    try testz.expectEqual(m.len(), "おもしろい".len);
+    try testz.expectFalse(m.hits[0].exact);
+}
+
+pub fn dictLookupReadingMatchDeinflectsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "おもしろくない")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "面白い");
+    try testz.expectEqualStr(m.hits[0].reason.?, "negative");
+}
+
+pub fn dictLookupKeepsShorterLengthsBelowTheLongestTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "猫舌だ")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits.len, 2);
+    try testz.expectEqualStr(m.hits[0].entry.term, "猫舌");
+    try testz.expectEqual(m.hits[0].source_len, "猫舌".len);
+    try testz.expectEqualStr(m.hits[1].entry.term, "猫");
+    try testz.expectEqual(m.hits[1].source_len, "猫".len);
+}
+
+pub fn dictLookupRanksShortPrefixesBelowTheLongMatchTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "おもしろい")).?;
+    defer m.deinit(alloc);
+    // 面白い first, then the one-character お entries after it -- the
+    // exact-term お (the interjection) ahead of 御, which only reads お.
+    try testz.expectEqualStr(m.hits[0].entry.term, "面白い");
+    try testz.expectEqualStr(m.hits[1].entry.term, "お");
+    try testz.expectTrue(m.hits[1].exact);
+    try testz.expectEqualStr(m.hits[2].entry.term, "御");
+}
+
+pub fn dictLookupRanksExactTermThenScoreTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "はし")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits.len, 3);
+    // Kana headword that *is* the text first, then the reading-only
+    // matches by the dictionary's own score, higher first.
+    try testz.expectEqualStr(m.hits[0].entry.term, "はし");
+    try testz.expectEqualStr(m.hits[1].entry.term, "箸");
+    try testz.expectEqual(m.hits[1].entry.score, 9);
+    try testz.expectEqualStr(m.hits[2].entry.term, "橋");
+}
+
+pub fn dictLookupEmptyReadingIsStoredAsTheTermTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "はし")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.reading, "はし");
+}
+
+pub fn dictLookupFindsKatakanaSpellingOfAHiraganaReadingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "スゴイ!")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "凄い");
+    try testz.expectEqual(m.len(), "スゴイ".len);
+    try testz.expectEqual(m.hits[0].variant_steps, 1);
+}
+
+pub fn dictLookupCollapsesEmphaticSequencesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "すっっごーーい")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "凄い");
+    try testz.expectEqual(m.len(), "すっっごーーい".len);
+}
+
+pub fn dictLookupKeepsEachEntryOnceFromItsBestRouteTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{parity_dict_json}, null);
+    defer d.deinit();
+    // ねこ reaches 猫 at its own length, and 猫 again as a prefix of
+    // ねこじた -- only once, from the longer route.
+    const m = (try dict.lookup(alloc, &d, "ねこじた")).?;
+    defer m.deinit(alloc);
+    var cats: usize = 0;
+    for (m.hits) |h| {
+        if (std.mem.eql(u8, h.entry.term, "猫")) cats += 1;
+    }
+    try testz.expectEqual(cats, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "猫舌");
 }
 
 pub fn dictOpenMemoryReadsTitleFromIndexJsonTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -1032,8 +1263,8 @@ pub fn dictLoadFromDirBuildsThenReusesTheSqliteIndexTest(io: std.Io, alloc: std.
     var d = try dict.loadFromDir(alloc, io, dir_path);
     try testz.expectEqualStr(d.title, "Test Dict");
     const m = (try dict.lookup(alloc, &d, "猫")).?;
-    try testz.expectEqualStr(m.entries[0].term, "猫");
-    dict.freeEntries(alloc, m.entries);
+    try testz.expectEqualStr(m.hits[0].entry.term, "猫");
+    m.deinit(alloc);
     d.deinit();
 
     // A second open must find `index.sqlite3` already built and reuse it
@@ -1044,8 +1275,8 @@ pub fn dictLoadFromDirBuildsThenReusesTheSqliteIndexTest(io: std.Io, alloc: std.
     var d2 = try dict.loadFromDir(alloc, io, dir_path);
     defer d2.deinit();
     const m2 = (try dict.lookup(alloc, &d2, "猫")).?;
-    defer dict.freeEntries(alloc, m2.entries);
-    try testz.expectEqualStr(m2.entries[0].term, "猫");
+    defer m2.deinit(alloc);
+    try testz.expectEqualStr(m2.hits[0].entry.term, "猫");
 }
 
 // ─── dict: incremental Builder (progress panel's backing state) ─────────
@@ -1096,9 +1327,9 @@ pub fn dictBuilderStepsOneFileAtATimeThenOpensReadyTest(io: std.Io, alloc: std.m
     defer d.deinit();
 
     const m1 = (try dict.lookup(alloc, &d, "食べる")).?;
-    dict.freeEntries(alloc, m1.entries);
+    m1.deinit(alloc);
     const m2 = (try dict.lookup(alloc, &d, "猫")).?;
-    dict.freeEntries(alloc, m2.entries);
+    m2.deinit(alloc);
 
     // A dictionary `finish`'d once is a dictionary `isBuilt` from here
     // on -- a second open must not start another build.

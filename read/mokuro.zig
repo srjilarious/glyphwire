@@ -499,6 +499,84 @@ pub fn columnToByte(text: []const u8, col: usize) usize {
     return text.len;
 }
 
+/// The byte just past the codepoint starting at `byte_off` -- turns the
+/// inclusive end of a selection (the character under its last cell) into
+/// the exclusive end of a byte range. `text.len` when `byte_off` is
+/// already at or past the end.
+pub fn charEnd(text: []const u8, byte_off: usize) usize {
+    if (byte_off >= text.len) return text.len;
+    const len = std.unicode.utf8ByteSequenceLength(text[byte_off]) catch 1;
+    return @min(byte_off + len, text.len);
+}
+
+/// Byte offset of `row` inside `joined`, for rows `wrap` returned (which
+/// are slices into the text it was given).
+pub fn rowOffset(joined: []const u8, row: []const u8) usize {
+    return @intFromPtr(row.ptr) - @intFromPtr(joined.ptr);
+}
+
+/// A cell in wrapped text: which row, and which display column within it.
+pub const TextCell = struct { row: usize, col: usize };
+
+/// The first and last cells `joined[start..end]` covers once wrapped
+/// into `rows` (as `wrap` produced them from `joined`). `last` is the
+/// *last column* of the last character -- inclusive, the way a selection
+/// end is -- so a span ending on a wide character covers both its cells.
+/// Null for an empty span or one that lies past every row.
+///
+/// A byte `wrap` dropped at a row break (the space an ASCII row broke
+/// at) belongs to no row; a span starting on one starts at the next row,
+/// and one ending on one ends at the end of the row before.
+pub fn spanCells(
+    joined: []const u8,
+    rows: []const []const u8,
+    start: usize,
+    end: usize,
+) ?struct { first: TextCell, last: TextCell } {
+    if (end <= start or rows.len == 0) return null;
+
+    // The last codepoint that starts inside the span.
+    var last_char = start;
+    var i = start;
+    while (i < end) {
+        last_char = i;
+        i = charEnd(joined, i);
+    }
+
+    var first: ?TextCell = null;
+    for (rows, 0..) |row, r| {
+        const rs = rowOffset(joined, row);
+        if (start < rs + row.len) {
+            const off = if (start > rs) start - rs else 0;
+            first = .{ .row = r, .col = displayWidth(row[0..off]) };
+            break;
+        }
+    }
+
+    var last: ?TextCell = null;
+    var r = rows.len;
+    while (r > 0) {
+        r -= 1;
+        const row = rows[r];
+        const rs = rowOffset(joined, row);
+        if (last_char < rs) continue;
+        if (row.len == 0) continue;
+        if (last_char < rs + row.len) {
+            const off = last_char - rs;
+            const w = @max(displayWidth(joined[last_char..charEnd(joined, last_char)]), 1);
+            last = .{ .row = r, .col = displayWidth(row[0..off]) + w - 1 };
+        } else {
+            last = .{ .row = r, .col = displayWidth(row) -| 1 };
+        }
+        break;
+    }
+
+    const f = first orelse return null;
+    const l = last orelse return null;
+    if (l.row < f.row or (l.row == f.row and l.col < f.col)) return null;
+    return .{ .first = f, .last = l };
+}
+
 /// Wraps `text` to `cols` display columns, returning the rows. The rows
 /// are slices *into* `text`, so they live exactly as long as it does; the
 /// slice holding them is the caller's to free.

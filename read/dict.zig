@@ -23,7 +23,7 @@
 //! **Term data lives in a SQLite file next to the term banks, not in
 //! memory.** The first time a dictionary directory is opened, every
 //! `term_bank_*.json` is parsed once and its rows inserted into
-//! `<dictionary>/index.sqlite3`, indexed by `term`; every load after that
+//! `<dictionary>/index.sqlite3`, indexed by `term` and `reading`; every load after that
 //! just opens the existing file and queries it. This replaced an
 //! in-memory `StringHashMap` of every entry (see git history for that
 //! version): the JSON parse itself was slow enough on a real Jitendex
@@ -38,12 +38,13 @@
 //!
 //! Lookup does not tokenize the page's text up front. Japanese has no
 //! spaces, so -- the same trick Yomitan itself uses -- a click just picks
-//! a starting byte offset, and `lookup` tries decreasing-length candidate
-//! substrings from there, deinflecting each one against a small rule
-//! table before giving up on it. The longest substring with any match,
-//! inflected or not, wins. Each candidate is one indexed `SELECT ... WHERE
-//! term = ?`, so the scan costs at most `max_scan_codepoints` queries,
-//! not a walk over every entry.
+//! a starting byte offset, and `lookup` tries every prefix from there (up
+//! to `max_scan_codepoints`), in every spelling `kana.zig` normalizes it
+//! to, deinflected through a small rule table. Every candidate is one
+//! indexed `SELECT ... WHERE term = ? OR reading = ?`, cached per call.
+//! Like Yomitan, it collects every hit at every length and ranks them
+//! afterward (longest source first) rather than stopping at the longest
+//! length that matched anything -- see `lookup` and `rankBefore`.
 //!
 //! **Parsing keeps the JSON tree off the entries it extracts.**
 //! `std.json.Value` is a generic tree -- a hashmap per object, an
@@ -72,12 +73,12 @@
 //! in-memory (`:memory:`) database without a dictionary directory on
 //! disk.
 //!
-//! **Deinflection now chains, up to `max_deinflect_depth` rule
-//! applications.** `lookup` tries each candidate substring at increasing
-//! depth (0 = a direct dictionary-form hit, 1 = one rule, 2 = two rules
-//! chained, ...) and takes the shallowest depth that resolves to a real
-//! dictionary row -- the same "simplest explanation wins" preference the
-//! old single-step version had, generalized to N steps. A rule's
+//! **Deinflection chains, up to `max_deinflect_depth` rule
+//! applications.** `lookup` follows every chain from each candidate
+//! substring (0 = a direct dictionary-form hit, 1 = one rule, 2 = two
+//! rules chained, ...); when one entry is reachable several ways the
+//! shortest chain is the one kept, and between entries fewer rules ranks
+//! higher -- the "simplest explanation wins" preference. A rule's
 //! `rules_out` can be empty (`&.{}`), meaning the form it produces is
 //! never itself accepted as a final match -- only a dictionary row's
 //! `rules` column can end a chain, so an empty `rules_out` forces at
@@ -108,6 +109,7 @@
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const kana = @import("kana.zig");
 
 /// One dictionary row, always fully owned by whatever allocator produced
 /// it (`lookup`'s caller-supplied `alloc`, or a test's) -- unlike the
@@ -117,11 +119,17 @@ const sqlite = @import("sqlite.zig");
 /// tags (`v1`, `v5`, `vk`, `vs`, `adj-i`, ...) -- empty for anything that
 /// doesn't conjugate. `glossary` is one flattened string per sense.
 pub const Entry = struct {
+    /// The row's id in `entries` -- identifies one entry across the
+    /// several routes a lookup can reach it by.
+    id: i64 = 0,
     term: []const u8 = "",
     reading: []const u8 = "",
     rules: []const u8 = "",
     glossary: []const []const u8 = &.{},
     sequence: i64 = 0,
+    /// The dictionary's own ranking score for the row (field 4 of a term
+    /// bank row); higher ranks first between otherwise equal hits.
+    score: i64 = 0,
 
     pub fn deinit(self: Entry, alloc: std.mem.Allocator) void {
         alloc.free(self.term);
@@ -133,10 +141,8 @@ pub const Entry = struct {
 };
 
 /// Frees every entry in `entries` and the slice itself -- the whole
-/// result of one `lookup` call or `queryTerm`, not a sub-slice of one
-/// (freeing part of a slice that wasn't its own allocation is undefined
-/// behavior; see `ui.zig`'s `wordLookupAt` for the "keep one, drop the
-/// rest" case, which frees each dropped `Entry` individually instead).
+/// result of one `queryTerm`, not a sub-slice of one (freeing part of a
+/// slice that wasn't its own allocation is undefined behavior).
 pub fn freeEntries(alloc: std.mem.Allocator, entries: []const Entry) void {
     for (entries) |e| e.deinit(alloc);
     alloc.free(entries);
@@ -176,7 +182,7 @@ pub const Dict = struct {
 /// must apply at least one more rule before it can succeed.
 /// `hasAnyRule(rules, &.{})` always returns `false`, so this falls out
 /// of the existing filter with no special casing -- see
-/// `tryDeinflectAtDepth`. Causative and passive/potential, despite also
+/// `Search.collect`. Causative and passive/potential, despite also
 /// being "productive derivations", do *not* use this -- they collapse
 /// straight to the real headword, so they carry that headword's own
 /// `v1`/`v5` tag instead (see the rule table below).
@@ -186,7 +192,7 @@ pub const DeinflectRule = struct {
     rules_out: []const []const u8,
     /// Shown next to a deinflected match so it doesn't read as a typo of
     /// the dictionary form. Joined with other reasons along the same
-    /// chain into `Match.reason` -- see that field's doc comment for the
+    /// chain into `Hit.reason` -- see that field's doc comment for the
     /// join order.
     reason: []const u8,
 };
@@ -357,46 +363,96 @@ pub const deinflect_rules = [_]DeinflectRule{
 };
 
 /// Ceiling on how many deinflection rules may be chained for one
-/// candidate substring -- see `tryDeinflectAtDepth`. 4 covers every
+/// candidate substring -- see `Search.collect`. 4 covers every
 /// example in this module's doc comment (a causative-passive-negative
 /// chain is 3 rule applications) with one step of headroom.
 pub const max_deinflect_depth: usize = 4;
 
-/// A successful lookup: how many bytes of the source text it covers, the
-/// deinflection reason chain, and every matching entry.
-///
-/// `reason` is `null` for a direct dictionary-form hit (no rules
-/// applied) -- exactly as before chaining existed. Otherwise it is a
-/// **heap-allocated** string owned by the same `alloc` passed to
-/// `lookup`, joining every rule reason applied along the winning chain
-/// with ", " -- the caller must free it (`alloc.free(match.reason.?)`)
-/// alongside `entries`; unlike the single-step version this replaced,
-/// `reason` no longer points into static rule-table data.
-///
-/// `entries` (and each entry within it) is owned by the caller's
-/// allocator -- free it with `freeEntries`, or see `ui.zig`'s
-/// `wordLookupAt` for keeping just one entry and dropping the rest.
-pub const Match = struct {
-    len: usize,
+/// One entry a lookup found, with how it was found. `dict.lookup` ranks
+/// hits on these fields the way Yomitan's `_sortTermDictionaryEntries`
+/// does -- see `rankBefore`.
+pub const Hit = struct {
+    entry: Entry,
+    /// How many bytes of the looked-up text this hit covers. Different
+    /// hits in one `Match` can cover different lengths (食べ物, then 食べる
+    /// off its first two characters, then 食 alone).
+    source_len: usize,
+    /// Every rule reason applied along the chain that reached `entry`,
+    /// innermost (closest to the dictionary form) first, joined with
+    /// ", " -- e.g. "causative, negative". Null for a direct hit. Owned by
+    /// the allocator `lookup` was given.
     reason: ?[]const u8 = null,
-    entries: []const Entry,
+    /// How many deinflection rules were applied (0 = direct hit).
+    depth: u8 = 0,
+    /// How many text normalization steps (`kana.variants`) the looked-up
+    /// text needed before it matched (0 = matched as written).
+    variant_steps: u8 = 0,
+    /// True when the entry's own `term` (not just its `reading`) is the
+    /// string that matched -- a kana-written headword ranks above a
+    /// kanji one that merely reads the same.
+    exact: bool = false,
+
+    pub fn deinit(self: Hit, alloc: std.mem.Allocator) void {
+        self.entry.deinit(alloc);
+        if (self.reason) |r| alloc.free(r);
+    }
 };
 
-/// How many codepoints of `text` a click may resolve to. 16 covers every
-/// realistic single-word span (this table's longest suffix plus a
-/// multi-kanji stem) without the scan costing more than a glance.
+/// A successful lookup: every hit, best first. Never empty -- `lookup`
+/// returns null instead. Owned by the allocator `lookup` was given; free
+/// with `deinit`.
+pub const Match = struct {
+    hits: []Hit,
+
+    /// Bytes covered by the best hit -- the longest match, since that is
+    /// the first thing hits are ranked on.
+    pub fn len(self: Match) usize {
+        return self.hits[0].source_len;
+    }
+
+    pub fn deinit(self: Match, alloc: std.mem.Allocator) void {
+        for (self.hits) |h| h.deinit(alloc);
+        alloc.free(self.hits);
+    }
+};
+
+/// How many codepoints of `text` a lookup considers -- Yomitan's default
+/// scan length. Covers every realistic single-word span (this table's
+/// longest suffix plus a multi-kanji stem).
 pub const max_scan_codepoints: usize = 16;
 
-/// Tries `text[0..L]` for decreasing `L`, longest first: for each length,
-/// searches increasing deinflection depths via `tryDeinflectAtDepth` (0 =
-/// direct dictionary-form hit, 1 = one rule applied, 2 = two rules
-/// chained, ... up to `max_deinflect_depth`) and takes the shallowest
-/// depth that resolves to a real dictionary row. Returns the first
-/// (longest) length with any hit at any depth, or null if nothing in
-/// `text`'s first `max_scan_codepoints` codepoints matches at all. Each
-/// candidate tried costs one indexed SQLite query against
-/// `dict.lookup_stmt`.
+/// Ceiling on how many hits one `Match` keeps -- Yomitan's default
+/// `maxResults`. A short kana prefix like お can match a dozen entries
+/// by reading, and they all rank below anything longer anyway.
+pub const max_results: usize = 32;
+
+/// Looks up everything `text` could start with, the way Yomitan does:
+/// every prefix of up to `max_scan_codepoints` codepoints, each tried in
+/// every `kana.variants` spelling, each of those deinflected through
+/// every chain of up to `max_deinflect_depth` rules -- and every
+/// resulting form queried against both the `term` and the `reading`
+/// column. All of it is collected, not just the longest length that hit
+/// something, then ranked (`rankBefore`) and capped at `max_results`.
+///
+/// Querying `reading` is what makes kana-written words work at all: a
+/// dictionary like Jitendex files おもしろい under its kanji headword
+/// 面白い, so a term-only search misses it at every length and falls all
+/// the way back to the interjection お.
+///
+/// An entry reachable more than one way (at several lengths, or through
+/// several spellings or chains) is kept once, from its best route --
+/// longest source, then fewest normalization steps, then fewest rules.
+///
+/// A dragged selection goes through here too: its full text is simply
+/// the longest prefix, so an exact match on the selection ranks first
+/// and shorter prefixes follow only as fallbacks.
 pub fn lookup(alloc: std.mem.Allocator, dict: *Dict, text: []const u8) !?Match {
+    // Every query result, variant string and chain lives here until the
+    // winners are copied out into `alloc` at the end.
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    var search: Search = .{ .scratch = arena.allocator(), .dict = dict };
+
     var bounds: [max_scan_codepoints + 1]usize = undefined;
     var n_bounds: usize = 0;
     var i: usize = 0;
@@ -411,119 +467,180 @@ pub fn lookup(alloc: std.mem.Allocator, dict: *Dict, text: []const u8) !?Match {
     var li = n_bounds;
     while (li > 1) {
         li -= 1;
-        const L = bounds[li];
-        const candidate = text[0..L];
-
-        var depth: usize = 0;
-        while (depth <= max_deinflect_depth) : (depth += 1) {
-            if (try tryDeinflectAtDepth(alloc, dict, candidate, depth, null, &.{})) |m| {
-                var found = m;
-                found.len = L;
-                return found;
-            }
+        search.source_len = bounds[li];
+        for (try kana.variants(search.scratch, text[0..bounds[li]])) |v| {
+            search.variant_steps = v.steps;
+            try search.collect(v.text, null, &.{});
         }
     }
-    return null;
+
+    const found = search.best.values();
+    if (found.len == 0) return null;
+    std.mem.sort(Candidate, found, {}, rankBefore);
+
+    const n = @min(found.len, max_results);
+    var hits: std.ArrayList(Hit) = .empty;
+    errdefer {
+        for (hits.items) |h| h.deinit(alloc);
+        hits.deinit(alloc);
+    }
+    for (found[0..n]) |c| {
+        const entry = try dupeEntry(alloc, c.entry);
+        errdefer entry.deinit(alloc);
+        const reason = if (c.chain.len == 0) null else try joinChainReasons(alloc, c.chain);
+        try hits.append(alloc, .{
+            .entry = entry,
+            .source_len = c.source_len,
+            .reason = reason,
+            .depth = @intCast(c.chain.len),
+            .variant_steps = c.variant_steps,
+            .exact = c.exact,
+        });
+    }
+    return .{ .hits = try hits.toOwnedSlice(alloc) };
 }
 
-/// One level of the iterative-deepening search `lookup` runs per
-/// candidate substring.
-///
-/// `depth == 0` is the base case: query `candidate` directly.
-/// `filter == null` means `candidate` is the original, undeinflected
-/// text (`chain.len == 0`, the very first call for this length) -- every
-/// row returned is accepted, exactly like a direct dictionary-form hit
-/// always has been. `filter != null` means at least one rule has already
-/// been applied to get here -- only rows whose `rules` column contains
-/// one of `filter`'s tags are kept (`hasAnyRule`); if none survive, this
-/// call reports no match. A rule with `rules_out = &.{}` can never pass
-/// this filter (`hasAnyRule` against an empty list is always false), so
-/// a chain that bottoms out on a non-terminal rule is correctly rejected
-/// and the caller's next-`depth` (or next-`L`) attempt takes over.
-///
-/// `depth > 0` tries every rule (in table order) whose `kana_in` suffixes
-/// `candidate`, strips it, appends `kana_out`, and recurses at
-/// `depth - 1` with `filter = rule.rules_out` and `rule.reason` appended
-/// to `chain`. The first rule whose recursive call succeeds wins;
-/// `next_chain` is a fresh array per rule attempted so trying one rule
-/// can never leak into a sibling rule's chain in the same loop.
-///
-/// `chain` accumulates in application order: `chain[0]` is the outermost
-/// suffix stripped (the grammatical layer closest to the surface text),
-/// `chain[1]` the next layer in, and so on. `Match.reason` joins them in
-/// the *reverse* of that order -- innermost (closest to the dictionary
-/// form) first -- with ", " between, so it reads as "what happened to
-/// the text" starting from the headword outward (e.g. "食べさせない"
-/// strips the outer negative first, landing on the causative form
-/// "食べさせる", which the causative rule then reduces to "食べる" --
-/// `chain = .{"negative", "causative"}`, joined as `"causative,
-/// negative"`).
-fn tryDeinflectAtDepth(
-    alloc: std.mem.Allocator,
-    dict: *Dict,
-    candidate: []const u8,
-    depth: usize,
-    filter: ?[]const []const u8,
+/// One way of reaching a dictionary row, before ranking. Everything in it
+/// lives in `Search.scratch`.
+const Candidate = struct {
+    entry: Entry,
+    source_len: usize,
+    variant_steps: u8,
+    exact: bool,
+    /// Rule reasons in application order, outermost first -- see
+    /// `joinChainReasons`.
     chain: []const []const u8,
-) !?Match {
-    if (depth == 0) {
-        const all = (try queryTerm(alloc, dict, candidate)) orelse return null;
-        var entries: []const Entry = all;
-        if (filter) |f| {
-            var kept: std.ArrayList(Entry) = .empty;
-            errdefer freeEntries(alloc, kept.items);
-            for (all) |e| {
-                if (hasAnyRule(e.rules, f)) {
-                    try kept.append(alloc, e);
-                } else {
-                    e.deinit(alloc);
-                }
-            }
-            alloc.free(all);
-            if (kept.items.len == 0) {
-                kept.deinit(alloc);
-                return null;
-            }
-            entries = try kept.toOwnedSlice(alloc);
-        }
-        const reason = if (chain.len == 0) null else try joinChainReasons(alloc, chain);
-        return .{ .len = 0, .reason = reason, .entries = entries };
+
+    /// Whether `self` is a better route to the *same* entry than
+    /// `other`: the dedup rule in `Search.offer`.
+    fn betterRouteThan(self: Candidate, other: Candidate) bool {
+        if (self.source_len != other.source_len) return self.source_len > other.source_len;
+        if (self.variant_steps != other.variant_steps) return self.variant_steps < other.variant_steps;
+        return self.chain.len < other.chain.len;
     }
+};
 
-    for (deinflect_rules) |rule| {
-        if (!std.mem.endsWith(u8, candidate, rule.kana_in)) continue;
-        var buf: [128]u8 = undefined;
-        const stem = candidate[0 .. candidate.len - rule.kana_in.len];
-        const form = std.fmt.bufPrint(&buf, "{s}{s}", .{ stem, rule.kana_out }) catch continue;
-
-        var next_chain: [max_deinflect_depth][]const u8 = undefined;
-        std.mem.copyForwards([]const u8, next_chain[0..chain.len], chain);
-        next_chain[chain.len] = rule.reason;
-
-        if (try tryDeinflectAtDepth(
-            alloc,
-            dict,
-            form,
-            depth - 1,
-            rule.rules_out,
-            next_chain[0 .. chain.len + 1],
-        )) |m| return m;
+/// Yomitan's result order, minus the parts that need data this reader
+/// doesn't have (frequency dictionaries, several dictionaries at once):
+/// longest source text, fewest normalization steps, fewest deinflection
+/// rules, an exact term match over a reading-only one, higher dictionary
+/// score, longer headword, headword text, more senses -- and the row id
+/// last, so the order is total and repeatable.
+fn rankBefore(_: void, a: Candidate, b: Candidate) bool {
+    if (a.source_len != b.source_len) return a.source_len > b.source_len;
+    if (a.variant_steps != b.variant_steps) return a.variant_steps < b.variant_steps;
+    if (a.chain.len != b.chain.len) return a.chain.len < b.chain.len;
+    if (a.exact != b.exact) return a.exact;
+    if (a.entry.score != b.entry.score) return a.entry.score > b.entry.score;
+    if (a.entry.term.len != b.entry.term.len) return a.entry.term.len > b.entry.term.len;
+    switch (std.mem.order(u8, a.entry.term, b.entry.term)) {
+        .lt => return true,
+        .gt => return false,
+        .eq => {},
     }
-    return null;
+    if (a.entry.glossary.len != b.entry.glossary.len) return a.entry.glossary.len > b.entry.glossary.len;
+    return a.entry.id < b.entry.id;
 }
+
+/// The state of one `lookup` call: the scratch arena, a per-call query
+/// cache (the same form comes up again and again across lengths,
+/// variants and chains), and the best route found so far to each entry.
+const Search = struct {
+    scratch: std.mem.Allocator,
+    dict: *Dict,
+    /// The prefix length and variant currently being searched.
+    source_len: usize = 0,
+    variant_steps: u8 = 0,
+    queried: std.StringHashMapUnmanaged([]const Entry) = .empty,
+    /// Keyed by the row's `id`. Insertion-ordered, which doesn't matter
+    /// -- `lookup` sorts the values afterward.
+    best: std.AutoArrayHashMapUnmanaged(i64, Candidate) = .empty,
+
+    fn query(self: *Search, form: []const u8) ![]const Entry {
+        if (self.queried.get(form)) |rows| return rows;
+        const rows: []const Entry = (try queryTerm(self.scratch, self.dict, form)) orelse &.{};
+        try self.queried.put(self.scratch, try self.scratch.dupe(u8, form), rows);
+        return rows;
+    }
+
+    /// Queries `form`, offers every row that passes `filter` (null for
+    /// the undeinflected text, which accepts every row), then tries
+    /// every rule that strips a suffix off `form`, recursing up to
+    /// `max_deinflect_depth` rules deep.
+    ///
+    /// `filter` is the *last* applied rule's `rules_out`: only that rule
+    /// constrains which rows count. An empty `rules_out` (`&.{}`) can
+    /// never pass (`hasAnyRule` against an empty list is always false),
+    /// which is how a non-terminal rule forces at least one more step --
+    /// see `DeinflectRule`.
+    fn collect(self: *Search, form: []const u8, filter: ?[]const []const u8, chain: []const []const u8) !void {
+        for (try self.query(form)) |row| {
+            if (filter) |f| if (!hasAnyRule(row.rules, f)) continue;
+            try self.offer(.{
+                .entry = row,
+                .source_len = self.source_len,
+                .variant_steps = self.variant_steps,
+                .exact = std.mem.eql(u8, row.term, form),
+                .chain = chain,
+            });
+        }
+        if (chain.len == max_deinflect_depth) return;
+
+        for (deinflect_rules) |rule| {
+            if (!std.mem.endsWith(u8, form, rule.kana_in)) continue;
+            const stem = form[0 .. form.len - rule.kana_in.len];
+            const next = try std.mem.concat(self.scratch, u8, &.{ stem, rule.kana_out });
+            const next_chain = try self.scratch.alloc([]const u8, chain.len + 1);
+            @memcpy(next_chain[0..chain.len], chain);
+            next_chain[chain.len] = rule.reason;
+            try self.collect(next, rule.rules_out, next_chain);
+        }
+    }
+
+    fn offer(self: *Search, c: Candidate) !void {
+        const gop = try self.best.getOrPut(self.scratch, c.entry.id);
+        if (!gop.found_existing or c.betterRouteThan(gop.value_ptr.*)) gop.value_ptr.* = c;
+    }
+};
 
 /// Joins `chain`'s reasons into one display string, innermost reason
 /// first (the reverse of `chain`'s own outermost-first accumulation
-/// order) -- see `tryDeinflectAtDepth`'s doc comment. Never called with
-/// an empty `chain` (that case returns `reason = null` directly).
+/// order): "食べさせない" strips the outer negative first, landing on the
+/// causative form "食べさせる", which the causative rule then reduces to
+/// "食べる" -- `chain = .{"negative", "causative"}`, shown as
+/// "causative, negative". Never called with an empty `chain`.
 fn joinChainReasons(alloc: std.mem.Allocator, chain: []const []const u8) ![]const u8 {
     var reversed: [max_deinflect_depth][]const u8 = undefined;
     for (chain, 0..) |r, idx| reversed[chain.len - 1 - idx] = r;
     return std.mem.join(alloc, ", ", reversed[0..chain.len]);
 }
 
-/// Every entry whose `term` is exactly `term`, or null when there are
-/// none. Reuses (and always resets) `dict.lookup_stmt`.
+fn dupeEntry(alloc: std.mem.Allocator, e: Entry) !Entry {
+    const term = try alloc.dupe(u8, e.term);
+    errdefer alloc.free(term);
+    const reading = try alloc.dupe(u8, e.reading);
+    errdefer alloc.free(reading);
+    const rules = try alloc.dupe(u8, e.rules);
+    errdefer alloc.free(rules);
+    var glossary: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (glossary.items) |g| alloc.free(g);
+        glossary.deinit(alloc);
+    }
+    for (e.glossary) |g| try glossary.append(alloc, try alloc.dupe(u8, g));
+    return .{
+        .id = e.id,
+        .term = term,
+        .reading = reading,
+        .rules = rules,
+        .glossary = try glossary.toOwnedSlice(alloc),
+        .sequence = e.sequence,
+        .score = e.score,
+    };
+}
+
+/// Every entry whose `term` or `reading` is exactly `term`, or null when
+/// there are none. Reuses (and always resets) `dict.lookup_stmt`.
 fn queryTerm(alloc: std.mem.Allocator, dict: *Dict, term: []const u8) !?[]Entry {
     dict.lookup_stmt.reset();
     try dict.lookup_stmt.bindText(1, term);
@@ -532,11 +649,13 @@ fn queryTerm(alloc: std.mem.Allocator, dict: *Dict, term: []const u8) !?[]Entry 
     errdefer freeEntries(alloc, out.items);
     while (try dict.lookup_stmt.step()) {
         try out.append(alloc, .{
-            .term = try alloc.dupe(u8, dict.lookup_stmt.columnText(0)),
-            .reading = try alloc.dupe(u8, dict.lookup_stmt.columnText(1)),
-            .rules = try alloc.dupe(u8, dict.lookup_stmt.columnText(2)),
-            .glossary = try splitGlossary(alloc, dict.lookup_stmt.columnText(3)),
-            .sequence = dict.lookup_stmt.columnInt64(4),
+            .id = dict.lookup_stmt.columnInt64(0),
+            .term = try alloc.dupe(u8, dict.lookup_stmt.columnText(1)),
+            .reading = try alloc.dupe(u8, dict.lookup_stmt.columnText(2)),
+            .rules = try alloc.dupe(u8, dict.lookup_stmt.columnText(3)),
+            .glossary = try splitGlossary(alloc, dict.lookup_stmt.columnText(4)),
+            .sequence = dict.lookup_stmt.columnInt64(5),
+            .score = dict.lookup_stmt.columnInt64(6),
         });
     }
     if (out.items.len == 0) {
@@ -575,9 +694,7 @@ fn splitGlossary(a: std.mem.Allocator, blob: []const u8) std.mem.Allocator.Error
 }
 
 /// Parses one `term_bank_N.json`'s rows and inserts each into `entries`
-/// via `insert_stmt` (`INSERT INTO entries (term, reading, rules,
-/// glossary, sequence) VALUES (?, ?, ?, ?, ?)`, already prepared by the
-/// caller). Returns how many rows were actually inserted -- `Builder`
+/// via `insert_stmt` (`insert_sql`, already prepared by the caller). Returns how many rows were actually inserted -- `Builder`
 /// uses it to run a "N terms indexed" counter while building. Same
 /// drop-don't-fail error policy as the parse this replaced: a row that
 /// doesn't fit the shape, or that SQLite itself rejects, is dropped,
@@ -611,14 +728,19 @@ fn insertTermBank(
         const term = jsonString(row.items[0]) orelse continue;
         const glossary = try parseGlossary(sa, row.items[5]);
         const joined = try joinGlossary(sa, glossary);
+        // An empty reading means "reads as written" -- stored as the term
+        // itself, the same as Yomitan's importer, so the `reading` index
+        // covers kana-only headwords too.
+        const reading = jsonString(row.items[1]) orelse "";
 
         insertRow(
             insert_stmt,
             term,
-            jsonString(row.items[1]) orelse "",
+            if (reading.len == 0) term else reading,
             jsonString(row.items[3]) orelse "",
             joined,
             jsonInt(row.items[6]) orelse 0,
+            jsonInt(row.items[4]) orelse 0,
         ) catch {
             insert_stmt.reset();
             continue;
@@ -636,12 +758,14 @@ fn insertRow(
     rules: []const u8,
     glossary: []const u8,
     sequence: i64,
+    score: i64,
 ) sqlite.Error!void {
     try stmt.bindText(1, term);
     try stmt.bindText(2, reading);
     try stmt.bindText(3, rules);
     try stmt.bindText(4, glossary);
     try stmt.bindInt64(5, sequence);
+    try stmt.bindInt64(6, score);
     _ = try stmt.step();
 }
 
@@ -745,20 +869,63 @@ const schema_sql =
     \\  reading TEXT NOT NULL,
     \\  rules TEXT NOT NULL,
     \\  glossary TEXT NOT NULL,
-    \\  sequence INTEGER NOT NULL
+    \\  sequence INTEGER NOT NULL,
+    \\  score INTEGER NOT NULL
     \\);
     \\CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ;
+
+/// Bumped whenever `schema_sql` or what gets stored in it changes, so an
+/// index built by an older gw-read is rebuilt rather than queried with
+/// columns it doesn't have. 2 added `score`, the `reading` index, and
+/// empty readings stored as the term.
+pub const schema_version = "2";
+
+const insert_sql = "INSERT INTO entries (term, reading, rules, glossary, sequence, score) VALUES (?, ?, ?, ?, ?, ?)";
+
+/// Matches on the headword *or* its reading -- see `lookup` for why the
+/// reading half is essential.
+const lookup_sql = "SELECT id, term, reading, rules, glossary, sequence, score FROM entries WHERE term = ?1 OR reading = ?1";
+
+const index_sql =
+    \\CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term);
+    \\CREATE INDEX IF NOT EXISTS idx_entries_reading ON entries(reading);
+;
+
+/// Writes the `meta` rows, `complete` last -- see `isBuilt`.
+fn writeMeta(db: *sqlite.Db, title: []const u8) !void {
+    var meta_stmt = try db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+    defer meta_stmt.finalize();
+    const rows = [_][2][]const u8{
+        .{ "title", title },
+        .{ "schema", schema_version },
+        .{ "complete", "1" },
+    };
+    for (rows) |row| {
+        try meta_stmt.bindText(1, row[0]);
+        try meta_stmt.bindText(2, row[1]);
+        _ = try meta_stmt.step();
+        meta_stmt.reset();
+    }
+}
 
 /// True once `build` has committed a full index -- the `meta` row it
 /// writes last, after the data and the index both exist, so a build
 /// interrupted partway through (crash, killed process) is never mistaken
 /// for a finished one. `prepare` itself fails on a brand new database
 /// (no `meta` table yet), which this treats the same as "not built".
+///
+/// An index from an older `schema_version` counts as not built, which
+/// sends it through the same drop-and-rebuild an interrupted build gets.
 fn isBuilt(db: *sqlite.Db) bool {
-    var stmt = db.prepare("SELECT value FROM meta WHERE key = 'complete'") catch return false;
-    defer stmt.finalize();
-    return stmt.step() catch false;
+    var complete = db.prepare("SELECT value FROM meta WHERE key = 'complete'") catch return false;
+    defer complete.finalize();
+    if (!(complete.step() catch false)) return false;
+
+    var schema = db.prepare("SELECT value FROM meta WHERE key = 'schema'") catch return false;
+    defer schema.finalize();
+    if (!(schema.step() catch false)) return false;
+    return std.mem.eql(u8, schema.columnText(0), schema_version);
 }
 
 /// An in-progress build, one `term_bank_*.json` file at a time --
@@ -811,27 +978,15 @@ pub const Builder = struct {
     pub fn finish(self: *Builder) !Dict {
         self.insert_stmt.finalize();
         try self.db.exec("COMMIT");
-        try self.db.exec("CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term)");
-
-        var meta_stmt = try self.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
-        defer meta_stmt.finalize();
-        try meta_stmt.bindText(1, "title");
-        try meta_stmt.bindText(2, self.title_buf.items);
-        _ = try meta_stmt.step();
-        meta_stmt.reset();
-        // Written last, on purpose -- see `isBuilt`.
-        try meta_stmt.bindText(1, "complete");
-        try meta_stmt.bindText(2, "1");
-        _ = try meta_stmt.step();
+        try self.db.exec(index_sql);
+        try writeMeta(&self.db, self.title_buf.items);
 
         self.dir.close(self.io);
         for (self.files.items) |f| self.alloc.free(f);
         self.files.deinit(self.alloc);
         self.title_buf.deinit(self.alloc);
 
-        const lookup_stmt = try self.db.prepare(
-            "SELECT term, reading, rules, glossary, sequence FROM entries WHERE term = ?",
-        );
+        const lookup_stmt = try self.db.prepare(lookup_sql);
         var title_arena: std.heap.ArenaAllocator = .init(self.alloc);
         const title = readTitle(title_arena.allocator(), &self.db) catch "";
         return .{ .db = self.db, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
@@ -868,9 +1023,7 @@ fn beginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Builder {
 
     try db.exec(schema_sql);
     try db.exec("BEGIN");
-    const insert_stmt = try db.prepare(
-        "INSERT INTO entries (term, reading, rules, glossary, sequence) VALUES (?, ?, ?, ?, ?)",
-    );
+    const insert_stmt = try db.prepare(insert_sql);
     errdefer insert_stmt.finalize();
 
     var files: std.ArrayList([]u8) = .empty;
@@ -927,7 +1080,7 @@ pub fn isEmpty(dict: *Dict) bool {
 fn openExisting(alloc: std.mem.Allocator, db: sqlite.Db) !Dict {
     var d = db;
     errdefer d.close();
-    const lookup_stmt = try d.prepare("SELECT term, reading, rules, glossary, sequence FROM entries WHERE term = ?");
+    const lookup_stmt = try d.prepare(lookup_sql);
     errdefer lookup_stmt.finalize();
 
     var title_arena: std.heap.ArenaAllocator = .init(alloc);
@@ -992,29 +1145,19 @@ pub fn openMemory(alloc: std.mem.Allocator, term_bank_jsons: []const []const u8,
 
     try db.exec(schema_sql);
     try db.exec("BEGIN");
-    const insert_stmt = try db.prepare(
-        "INSERT INTO entries (term, reading, rules, glossary, sequence) VALUES (?, ?, ?, ?, ?)",
-    );
+    const insert_stmt = try db.prepare(insert_sql);
     for (term_bank_jsons) |j| _ = try insertTermBank(insert_stmt, alloc, j);
     insert_stmt.finalize();
     try db.exec("COMMIT");
-    try db.exec("CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term)");
+    try db.exec(index_sql);
 
     var title_buf: std.ArrayList(u8) = .empty;
     defer title_buf.deinit(alloc);
     if (index_json) |j| try readTitleInto(alloc, &title_buf, alloc, j);
 
-    var meta_stmt = try db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
-    try meta_stmt.bindText(1, "title");
-    try meta_stmt.bindText(2, title_buf.items);
-    _ = try meta_stmt.step();
-    meta_stmt.reset();
-    try meta_stmt.bindText(1, "complete");
-    try meta_stmt.bindText(2, "1");
-    _ = try meta_stmt.step();
-    meta_stmt.finalize();
+    try writeMeta(&db, title_buf.items);
 
-    const lookup_stmt = try db.prepare("SELECT term, reading, rules, glossary, sequence FROM entries WHERE term = ?");
+    const lookup_stmt = try db.prepare(lookup_sql);
     var title_arena: std.heap.ArenaAllocator = .init(alloc);
     const title = readTitle(title_arena.allocator(), &db) catch "";
 
