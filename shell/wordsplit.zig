@@ -177,6 +177,14 @@ fn isPlainWord(s: []const u8) bool {
 /// backslash, a glob metacharacter, or an operator byte like `|`/`&`/`;`.
 /// E.g. `My File (1).txt` -> `My\ File\ \(1\).txt`.
 ///
+/// Non-ASCII bytes pass through untouched: none of them is special to the
+/// splitter, and escaping byte by byte would put a `\` between a UTF-8
+/// lead byte and its continuation bytes. The splitter would still strip
+/// those back out, so the command ran, but the line editor's buffer (and
+/// the history entry recorded from it) was no longer valid UTF-8 and
+/// drew as nothing -- a Tab-completed `週刊少年ジャンプ.cbz` vanished from
+/// the prompt.
+///
 /// Unlike `quoteArg`/`quoteArgIfNeeded`, this never wraps the result in
 /// quotes, so it's safe to append onto a prefix the user already typed
 /// unescaped -- Tab completion's job (`complete.candidateSuffix`,
@@ -187,7 +195,7 @@ pub fn escapeSpecial(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
     for (s) |c| {
-        if (!isPlainByte(c)) try out.append(alloc, '\\');
+        if (c < 0x80 and !isPlainByte(c)) try out.append(alloc, '\\');
         try out.append(alloc, c);
     }
     return out.toOwnedSlice(alloc);

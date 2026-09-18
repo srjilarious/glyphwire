@@ -190,6 +190,22 @@ pub fn escapeSpecialEscapesSpacesAndMetacharactersTest(_: std.Io, alloc: std.mem
     try testz.expectEqualStr("My\\ File\\ \\(1\\)\\*.txt", got);
 }
 
+/// The user's Tab-completed manga path: only the ASCII specials get a
+/// backslash, and the result stays valid UTF-8 -- escaping each byte of
+/// 週 put `\` between its UTF-8 bytes, and the prompt drew nothing.
+pub fn escapeSpecialKeepsUtf8IntactTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const got = try wordsplit.escapeSpecial(alloc, "週刊少年ジャンプ 2020年1号 [aKraa].cbz");
+    defer alloc.free(got);
+    try testz.expectEqualStr("週刊少年ジャンプ\\ 2020年1号\\ \\[aKraa\\].cbz", got);
+    try testz.expectTrue(std.unicode.utf8ValidateSlice(got));
+
+    // And it still splits back to the one original word.
+    const toks = try wordsplit.split(alloc, got);
+    defer wordsplit.freeTokens(alloc, toks);
+    try testz.expectEqual(toks.len, 1);
+    try testz.expectEqualStr(toks[0], "週刊少年ジャンプ 2020年1号 [aKraa].cbz");
+}
+
 /// The whole point: appending the escaped text onto an unescaped prefix
 /// the user already typed must re-split back to one token.
 pub fn escapeSpecialRoundTripsOntoPrefixTest(_: std.Io, alloc: std.mem.Allocator) !void {
