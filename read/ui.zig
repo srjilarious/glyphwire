@@ -1429,15 +1429,27 @@ pub const Ui = struct {
         // draws down into the rows below its own, so it can't share a row
         // with the subheader. `drawSidePanel` reserves those rows -- all
         // of them, which is what 3x used to overrun.
+        //
+        // At scale the term is `pitch` times wider, so it is measured
+        // against the window rather than `inner_max` (the configured
+        // dialog width): the panel widens to fit it, and only a term too
+        // wide even for the window wraps onto further scaled rows. Sizing
+        // it against `inner_max` clipped a long 3x term mid-word.
+        const pitch = glyphwire.scaledPitch(self.dict_title_scale);
+        const title_cap = self.sideInnerMax(std.math.maxInt(usize));
+        const term_rows = try mokuro.wrap(a, entry.term, @max(title_cap / pitch, 1));
+        var panel_cap = inner_max;
+        for (term_rows) |r| panel_cap = @max(panel_cap, mokuro.displayWidth(r) * pitch);
+
         var lines: std.ArrayList(PanelLine) = .empty;
-        try lines.append(a, .{ .text = entry.term, .fg = fg_lookup_term, .scale = self.dict_title_scale });
+        for (term_rows) |r| try lines.append(a, .{ .text = r, .fg = fg_lookup_term, .scale = self.dict_title_scale });
         for (sub_rows) |r| try lines.append(a, .{ .text = r });
         // A blank separator row before the body, but only when there is
         // one -- the term (plus its subheader) is always shown.
         if (body_rows.len > 0) try lines.append(a, .{ .text = "" });
         for (body_rows) |r| try lines.append(a, .{ .text = r });
 
-        try self.drawSidePanel(lines.items, inner_max);
+        try self.drawSidePanel(lines.items, panel_cap);
     }
 
     /// Draws the AI panel for `self.ai` in the side slot: the first-send
@@ -1569,8 +1581,8 @@ pub const Ui = struct {
             // The rows a scaled glyph draws down into carry only their
             // border cells; its own fill paints the rest.
             for (1..p) |k| {
-                try chromeAt(&b, layer, row + k, 0, box_v, fg_dialog_border, bg_dialog);
-                try chromeAt(&b, layer, row + k, inner + 3, box_v, fg_dialog_border, bg_dialog);
+                try chromeAt(&b, layer, row + k, 0, box_v_pad, fg_dialog_border, bg_dialog);
+                try chromeAt(&b, layer, row + k, inner + 2, pad_box_v, fg_dialog_border, bg_dialog);
             }
             row += p;
         }
