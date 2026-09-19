@@ -1680,3 +1680,339 @@ pub fn dictBuilderStepsOneFileAtATimeThenOpensReadyTest(io: std.Io, alloc: std.m
         .building => return error.TestExpectedTheIndexToAlreadyBeBuilt,
     }
 }
+
+// ─── anki ───────────────────────────────────────────────────────────────
+
+const anki = @import("read_support").anki;
+const crop = @import("read_support").crop;
+
+fn expectFurigana(alloc: std.mem.Allocator, term: []const u8, reading: []const u8, want: []const u8) !void {
+    const got = try anki.furigana(alloc, term, reading);
+    defer alloc.free(got);
+    try testz.expectEqualStr(got, want);
+}
+
+pub fn ankiFuriganaKeepsOkuriganaOutsideTheBracketTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectFurigana(alloc, "見張る", "みはる", "見張[みは]る");
+    try expectFurigana(alloc, "食べ物", "たべもの", "食[た]べ 物[もの]");
+    try expectFurigana(alloc, "大人しい", "おとなしい", "大人[おとな]しい");
+}
+
+pub fn ankiFuriganaSpacesAKanjiRunAfterKanaTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Without the space Anki would take お as part of the ruby base.
+    try expectFurigana(alloc, "お茶", "おちゃ", "お 茶[ちゃ]");
+}
+
+pub fn ankiFuriganaWholeWordAndKanaOnlyCasesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // One kanji run: the whole reading, however irregular.
+    try expectFurigana(alloc, "犯罪集団", "はんざいしゅうだん", "犯罪集団[はんざいしゅうだん]");
+    try expectFurigana(alloc, "今日", "きょう", "今日[きょう]");
+    // Kana only, or no reading: nothing to bracket.
+    try expectFurigana(alloc, "すごい", "すごい", "すごい");
+    try expectFurigana(alloc, "テレビ", "てれび", "テレビ");
+    try expectFurigana(alloc, "尊敬", "", "尊敬");
+}
+
+pub fn ankiFuriganaFallsBackWhenTheKanaDisagreeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The term's own る isn't in the reading: bracket the whole word.
+    try expectFurigana(alloc, "見張る", "みはった", "見張る[みはった]");
+}
+
+pub fn ankiSourceParsesEveryTagNameTest(_: std.Io, _: std.mem.Allocator) !void {
+    for (anki.Source.all) |s| try testz.expectTrue(anki.Source.parse(@tagName(s)).? == s);
+    try testz.expectTrue(anki.Source.parse("definition") == null);
+}
+
+pub fn ankiAudioUrlPercentEncodesTermAndReadingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const url = try anki.audioUrl(alloc, anki.jpod_audio_url, "尊敬", "そんけい");
+    defer alloc.free(url);
+    try testz.expectEqualStr(url, "https://assets.languagepod101.com/dictionary/japanese/audiomp3.php?kanji=%E5%B0%8A%E6%95%AC&kana=%E3%81%9D%E3%82%93%E3%81%91%E3%81%84");
+    try testz.expectTrue(anki.isJpodUrl(url));
+
+    // No reading: the term stands in for it.
+    const kana_only = try anki.audioUrl(alloc, "x?k={term}&r={reading}", "すごい", "");
+    defer alloc.free(kana_only);
+    try testz.expectEqualStr(kana_only, "x?k=%E3%81%99%E3%81%94%E3%81%84&r=%E3%81%99%E3%81%94%E3%81%84");
+}
+
+fn testNote(alloc: std.mem.Allocator) !anki.Note {
+    return anki.Note.create(alloc, .{
+        .term = "見張る",
+        .reading = "みはる",
+        .sentence = "変なコトしないか見張ってんのよ",
+        // 見張っ
+        .span_start = "変なコトしないか".len,
+        .span_end = "変なコトしないか見張っ".len,
+        .glossary = &.{ "to stand watch", "to keep an eye on <someone>" },
+        .ai = "Line one\nLine two",
+        .book = "Souten no Ken v01",
+        .page = 12,
+        .audio_template = anki.jpod_audio_url,
+    });
+}
+
+pub fn ankiNoteSplitsTheClozeAroundTheWordTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var note = try testNote(alloc);
+    defer note.deinit(alloc);
+    try testz.expectEqualStr(note.cloze_before, "変なコトしないか");
+    try testz.expectEqualStr(note.cloze_inside, "見張っ");
+    try testz.expectEqualStr(note.cloze_after, "てんのよ");
+    try testz.expectTrue(note.audio == .unknown);
+}
+
+pub fn ankiFieldValuesAreHtmlTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var note = try testNote(alloc);
+    defer note.deinit(alloc);
+
+    const meaning = try anki.fieldValue(alloc, &note, .meaning);
+    defer alloc.free(meaning);
+    try testz.expectEqualStr(meaning, "\u{25e6}  to stand watch<br>\u{25e6}  to keep an eye on &lt;someone&gt;");
+
+    const notes = try anki.fieldValue(alloc, &note, .ai);
+    defer alloc.free(notes);
+    try testz.expectEqualStr(notes, "Line one<br>Line two");
+
+    const page_no = try anki.fieldValue(alloc, &note, .page);
+    defer alloc.free(page_no);
+    try testz.expectEqualStr(page_no, "12");
+}
+
+pub fn ankiSentenceCardPutsTheAnswerInMeaningOnlyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var note = try anki.Note.create(alloc, .{
+        .kind = .sentence,
+        .term = "すごいなぁ",
+        .sentence = "すごいなぁ",
+        .ai = "Wow.",
+        .audio_template = anki.jpod_audio_url,
+    });
+    defer note.deinit(alloc);
+    // No single word, so no audio.
+    try testz.expectTrue(note.audio == .off);
+
+    const meaning = try anki.fieldValue(alloc, &note, .meaning);
+    defer alloc.free(meaning);
+    try testz.expectEqualStr(meaning, "Wow.");
+    const notes = try anki.fieldValue(alloc, &note, .ai);
+    defer alloc.free(notes);
+    try testz.expectEqualStr(notes, "");
+}
+
+pub fn ankiAddNoteCarriesFieldsAndMediaTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var note = try testNote(alloc);
+    defer note.deinit(alloc);
+    note.setImage(alloc, .{ .jpeg = try alloc.dupe(u8, "JPEG"), .width = 4, .height = 2 });
+
+    const body = try anki.buildAddNote(alloc, &note, .{
+        .deck = "NihingoMine",
+        .model = anki.default_model,
+        .fields = &anki.default_fields,
+        .tags = "gw-read manga",
+        .stamp = "1234",
+    });
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testz.expectEqualStr(root.get("action").?.string, "addNote");
+    const n = root.get("params").?.object.get("note").?.object;
+    try testz.expectEqualStr(n.get("deckName").?.string, "NihingoMine");
+    const fields = n.get("fields").?.object;
+    try testz.expectEqualStr(fields.get("Term").?.string, "見張る");
+    try testz.expectEqualStr(fields.get("Furigana").?.string, "見張[みは]る");
+    try testz.expectEqualStr(fields.get("Cloze Inside").?.string, "見張っ");
+    try testz.expectEqualStr(fields.get("Context").?.string, "Souten no Ken v01");
+    // Media fields are filled by AnkiConnect, not sent as text.
+    try testz.expectTrue(fields.get("Image") == null);
+    try testz.expectTrue(fields.get("Term Audio") == null);
+    try testz.expectEqual(n.get("tags").?.array.items.len, 2);
+
+    const pic = n.get("picture").?.array.items[0].object;
+    try testz.expectEqualStr(pic.get("data").?.string, "SlBFRw==");
+    try testz.expectEqualStr(pic.get("filename").?.string, "gw-read-1234.jpg");
+    try testz.expectEqualStr(pic.get("fields").?.array.items[0].string, "Image");
+
+    const audio = n.get("audio").?.array.items[0].object;
+    try testz.expectEqualStr(audio.get("skipHash").?.string, anki.jpod_missing_md5);
+    try testz.expectEqualStr(audio.get("fields").?.array.items[0].string, "Term Audio");
+}
+
+pub fn ankiAddNoteLeavesOutMissingMediaTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var note = try testNote(alloc);
+    defer note.deinit(alloc);
+    // The probe said there's no clip, and no image was taken.
+    note.audio = .missing;
+
+    const body = try anki.buildAddNote(alloc, &note, .{
+        .deck = "d",
+        .model = "m",
+        .fields = &anki.default_fields,
+        .stamp = "1",
+    });
+    defer alloc.free(body);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"picture\"") == null);
+    try testz.expectTrue(std.mem.indexOf(u8, body, "\"audio\"") == null);
+}
+
+pub fn ankiParseReplyReadsResultAndErrorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const ok = try anki.parseReply(alloc, 200, "{\"result\": 1496198395707, \"error\": null}");
+    try testz.expectTrue(ok == .ok and ok.ok == 1496198395707);
+
+    const dup = try anki.parseReply(alloc, 200, "{\"result\": null, \"error\": \"cannot create note because it is a duplicate\"}");
+    defer alloc.free(dup.failure);
+    try testz.expectEqualStr(dup.failure, "cannot create note because it is a duplicate");
+
+    const junk = try anki.parseReply(alloc, 200, "<html>");
+    defer alloc.free(junk.failure);
+    try testz.expectTrue(junk == .failure);
+}
+
+// ─── crop ───────────────────────────────────────────────────────────────
+
+const page_size: crop.Size = .{ .w = 1000, .h = 1500 };
+
+pub fn cropInitialFramesTheBubbleOnThePageTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A bubble in the middle grows by its longer side each way.
+    const r = crop.initial(.{ .x = 400, .y = 600, .w = 100, .h = 200 }, page_size);
+    try testz.expectEqual(r.x, 200);
+    try testz.expectEqual(r.y, 400);
+    try testz.expectEqual(r.w, 500);
+    try testz.expectEqual(r.h, 600);
+
+    // Near a corner it is slid back on, not cut down.
+    const corner = crop.initial(.{ .x = 950, .y = 10, .w = 40, .h = 40 }, page_size);
+    try testz.expectTrue(corner.x >= 0 and corner.right() <= page_size.w);
+    try testz.expectTrue(corner.y >= 0 and corner.bottom() <= page_size.h);
+    // ...and never smaller than a third of the page's width.
+    try testz.expectTrue(corner.w >= @divTrunc(page_size.w, 3));
+}
+
+pub fn cropDragMovesAndStopsAtThePageEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
+    const start: crop.Rect = .{ .x = 100, .y = 100, .w = 200, .h = 200 };
+    const moved = crop.dragged(start, .move, 50, -20, page_size);
+    try testz.expectEqual(moved.x, 150);
+    try testz.expectEqual(moved.y, 80);
+    try testz.expectEqual(moved.w, 200);
+
+    const pinned = crop.dragged(start, .move, -500, 0, page_size);
+    try testz.expectEqual(pinned.x, 0);
+    try testz.expectEqual(pinned.w, 200);
+}
+
+pub fn cropEdgePullStopsAtTheMinimumSizeTest(_: std.Io, _: std.mem.Allocator) !void {
+    const start: crop.Rect = .{ .x = 100, .y = 100, .w = 200, .h = 200 };
+    const wider = crop.dragged(start, .se, 40, 60, page_size);
+    try testz.expectEqual(wider.x, 100);
+    try testz.expectEqual(wider.w, 240);
+    try testz.expectEqual(wider.h, 260);
+
+    // Pulled past the opposite edge: pinned at min_side, not flipped.
+    const crushed = crop.dragged(start, .w, 1000, 0, page_size);
+    try testz.expectEqual(crushed.w, crop.min_side);
+    try testz.expectEqual(crushed.right(), start.right());
+}
+
+pub fn cropHandleAtPicksEdgesCornersAndMoveTest(_: std.Io, _: std.mem.Allocator) !void {
+    const r: crop.Rect = .{ .x = 100, .y = 100, .w = 200, .h = 200 };
+    try testz.expectTrue(crop.handleAt(r, 200, 200, 8, 16) == .move);
+    try testz.expectTrue(crop.handleAt(r, 102, 200, 8, 16) == .w);
+    try testz.expectTrue(crop.handleAt(r, 298, 305, 8, 16) == .se);
+    try testz.expectTrue(crop.handleAt(r, 200, 90, 8, 16) == .n);
+    // Outside the box: its nearest corner.
+    try testz.expectTrue(crop.handleAt(r, 20, 20, 8, 16) == .nw);
+    try testz.expectTrue(crop.handleAt(r, 900, 20, 8, 16) == .ne);
+}
+
+pub fn cropScaledGrowsAboutTheCentreTest(_: std.Io, _: std.mem.Allocator) !void {
+    const r: crop.Rect = .{ .x = 400, .y = 400, .w = 200, .h = 100 };
+    const big = crop.scaled(r, 2.0, page_size);
+    try testz.expectEqual(big.w, 400);
+    try testz.expectEqual(big.h, 200);
+    try testz.expectEqual(big.x + @divTrunc(big.w, 2), 500);
+}
+
+pub fn cropOutputSizeOnlyShrinksTest(_: std.Io, _: std.mem.Allocator) !void {
+    const s = crop.outputSize(.{ .x = 0, .y = 0, .w = 1600, .h = 400 }, 800, 800);
+    try testz.expectEqual(s.w, 800);
+    try testz.expectEqual(s.h, 200);
+    const small = crop.outputSize(.{ .x = 0, .y = 0, .w = 300, .h = 200 }, 800, 800);
+    try testz.expectEqual(small.w, 300);
+    try testz.expectEqual(small.h, 200);
+}
+
+/// A 24-bit BMP, left half red and right half blue -- the simplest image
+/// format to write by hand, and one stb_image reads.
+fn testBmp(alloc: std.mem.Allocator, w: u32, h: u32) ![]u8 {
+    const row = (w * 3 + 3) / 4 * 4;
+    const size = 54 + row * h;
+    const buf = try alloc.alloc(u8, size);
+    @memset(buf, 0);
+    buf[0] = 'B';
+    buf[1] = 'M';
+    std.mem.writeInt(u32, buf[2..6], size, .little);
+    std.mem.writeInt(u32, buf[10..14], 54, .little);
+    std.mem.writeInt(u32, buf[14..18], 40, .little);
+    std.mem.writeInt(i32, buf[18..22], @intCast(w), .little);
+    std.mem.writeInt(i32, buf[22..26], @intCast(h), .little);
+    std.mem.writeInt(u16, buf[26..28], 1, .little);
+    std.mem.writeInt(u16, buf[28..30], 24, .little);
+    for (0..h) |y| for (0..w) |x| {
+        const p = 54 + y * row + x * 3;
+        // BGR.
+        if (x < w / 2) buf[p + 2] = 255 else buf[p] = 255;
+    };
+    return buf;
+}
+
+pub fn cropEncodeJpegCutsAndShrinksTheBoxTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const bmp = try testBmp(alloc, 64, 32);
+    defer alloc.free(bmp);
+    const out = try crop.encodeJpeg(alloc, bmp, .{ .x = 0, .y = 0, .w = 60, .h = 30 }, .{ .max_w = 30, .max_h = 30 });
+    defer alloc.free(out.jpeg);
+    try testz.expectEqual(out.width, 30);
+    try testz.expectEqual(out.height, 15);
+    // A real JPEG: SOI marker up front.
+    try testz.expectTrue(out.jpeg.len > 100);
+    try testz.expectTrue(out.jpeg[0] == 0xFF and out.jpeg[1] == 0xD8);
+}
+
+pub fn cropEncodeJpegRejectsNonImagesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try testz.expectTrue(crop.encodeJpeg(alloc, "not an image", .{ .x = 0, .y = 0, .w = 10, .h = 10 }, .{}) == error.ImageDecodeFailed);
+}
+
+// ─── config: anki ───────────────────────────────────────────────────────
+
+pub fn configAnkiDefaultsToJidoujishoLayoutTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc, "");
+    defer result.deinit(alloc);
+    try testz.expectTrue(result.config.anki_cards);
+    try testz.expectEqualStr(result.config.anki_model, "jidoujisho Kinomoto");
+    try testz.expectEqual(result.config.anki_fields.len, anki.default_fields.len);
+}
+
+pub fn configAnkiFieldsMapsAndSortsBySourceTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc,
+        \\config = {
+        \\  anki_deck = "NihingoMine",
+        \\  anki_sync_after_add = true,
+        \\  anki_image_quality = 500,
+        \\  anki_fields = {
+        \\    Picture = "image",
+        \\    Word = "term",
+        \\    Bogus = "nonsense",
+        \\    Dropped = false,
+        \\    Gloss = "meaning",
+        \\  },
+        \\}
+    );
+    defer result.deinit(alloc);
+    const c = result.config;
+    try testz.expectEqualStr(c.anki_deck, "NihingoMine");
+    try testz.expectTrue(c.anki_sync_after_add);
+    try testz.expectEqual(c.anki_image_quality, 100);
+    // `Bogus` and `Dropped` are skipped; the rest in `Source` order.
+    try testz.expectEqual(c.anki_fields.len, 3);
+    try testz.expectEqualStr(c.anki_fields[0].field, "Word");
+    try testz.expectEqualStr(c.anki_fields[1].field, "Gloss");
+    try testz.expectEqualStr(c.anki_fields[2].field, "Picture");
+}

@@ -48,6 +48,8 @@ const mokuro = @import("mokuro.zig");
 const dict_mod = @import("dict.zig");
 const ai = @import("ai.zig");
 const ai_cache = @import("ai_cache.zig");
+const anki = @import("anki.zig");
+const crop = @import("crop.zig");
 const state_mod = @import("state.zig");
 const zoom = @import("zoom.zig");
 
@@ -81,6 +83,10 @@ const fg_hint = glyphwire.Color{ .r = 120, .g = 200, .b = 235 };
 /// The block currently in the dialog, outlined whether hints are on or
 /// not -- it is the answer to "which bubble am I reading".
 const fg_hint_current = glyphwire.Color{ .r = 250, .g = 205, .b = 90 };
+/// The Anki crop overlay: everything outside the box is shaded with a
+/// translucent black, so the part that goes on the card is the part
+/// still at full brightness.
+const bg_crop_shade = glyphwire.Color{ .r = 0, .g = 0, .b = 0, .a = 150 };
 
 /// Everything the mokuro overlay needs, present only for a book that
 /// came with OCR (`archive.Archive.mokuro`) and `ocr` left on in the
@@ -197,6 +203,34 @@ const AiPanel = struct {
     shown_secs: u64 = 0,
 };
 
+/// An Anki card being made (`c`, see anki.zig): the captured note, then
+/// three steps -- pick the image, look over the preview, send.
+const Card = struct {
+    note: anki.Note,
+    phase: union(enum) {
+        /// Choosing the context image on `Ui.crop_layer`. `drag` is a
+        /// pointer drag in progress: where it started and the box as it
+        /// was then, so each move is applied from the start rather than
+        /// accumulated (cell-granular motion would otherwise drift).
+        crop: struct { drag: ?CropDrag = null },
+        /// The read-only field list in the side slot, waiting for Enter.
+        preview,
+        /// `addNote` is out.
+        sending: Pending,
+        /// Owned: why the note wasn't added. Enter retries.
+        failure: []u8,
+    },
+    /// The crop box in page-image pixels. Kept when the image is skipped,
+    /// so `r` from the preview comes back to the same box.
+    box: crop.Rect,
+    /// The JapanesePod101 "is there a clip" HEAD, started with the card
+    /// so its answer is usually in by the time the preview shows.
+    probe: ?Pending = null,
+
+    const Pending = struct { job: *anki.Job, future: std.Io.Future(void) };
+    const CropDrag = struct { cell: glyphwire.CellPos, start: crop.Rect, handle: crop.Handle };
+};
+
 pub const Ui = struct {
     alloc: std.mem.Allocator,
     client: *glyphwire.Client,
@@ -215,6 +249,10 @@ pub const Ui = struct {
     /// whole scaled page (`draw_image` has no source offset, so there is
     /// no way to repaint just the cells a mark covered).
     hint_layer: glyphwire.LayerHandle,
+    /// The Anki crop box and its shading. Same geometry as `hint_layer`
+    /// (a window onto the whole scaled page), shown only while a card's
+    /// image is being picked.
+    crop_layer: glyphwire.LayerHandle,
     status_layer: glyphwire.LayerHandle,
     help_layer: glyphwire.LayerHandle,
     /// The mokuro text panel. Created for every session (a layer costs
@@ -327,6 +365,11 @@ pub const Ui = struct {
     /// from the environment map.
     ai_api_key: ?[]const u8 = null,
 
+    /// The Anki card in progress, if any. See `Card`. While it is set it
+    /// owns the keyboard (`handleCardKey`) and the left button.
+    card: ?Card = null,
+    crop_dirty: bool = false,
+
     /// Set for as long as `conf.dictionary` is being indexed for the
     /// first time -- `run` steps it one `term_bank_*.json` file per tick
     /// rather than blocking on `dict_mod.loadFromDir` up front, so the
@@ -388,6 +431,8 @@ pub const Ui = struct {
         // it past that, and a book with OCR resizes it every frame the
         // page layout moves anyway.
         const hint_layer = try client.createLayer(1, 1, 0);
+        // Over the marks, under the statusline and every panel.
+        const crop_layer = try client.createLayer(1, 1, 0);
         const status_layer = try client.createLayer(size.cols, status_rows, 0);
         const help_layer = try client.createLayer(help_cols, help_rows, 0);
         // Created last so it composites above the page and the help box:
@@ -418,6 +463,7 @@ pub const Ui = struct {
         try client.setLayerVisible(dict_layer, false);
         try client.setLayerVisible(dict_build_layer, false);
         try client.setLayerVisible(hint_layer, false);
+        try client.setLayerVisible(crop_layer, false);
 
         self.* = .{
             .alloc = alloc,
@@ -429,6 +475,7 @@ pub const Ui = struct {
             .context = context,
             .page_layer = page_layer,
             .hint_layer = hint_layer,
+            .crop_layer = crop_layer,
             .status_layer = status_layer,
             .help_layer = help_layer,
             .dialog_layer = dialog_layer,
@@ -561,6 +608,7 @@ pub const Ui = struct {
         // Cancels a request still in flight: the job must be finished
         // before it is freed, and nobody is left to read its answer.
         self.clearAi();
+        self.clearCard();
         if (self.ai_cache) |*cch| cch.close();
         if (self.dict) |*d| d.deinit();
         // A quit mid-build: abandon it rather than let it finish
@@ -609,11 +657,13 @@ pub const Ui = struct {
                 }
             }
             self.pollAi();
+            self.pollCard();
             if (self.page_dirty) try self.renderPage();
             // Both after the page: `renderPage` recomputes the layout the
             // marks and the dialog are placed against, and marks them
             // dirty when it does.
             if (self.hints_dirty) try self.renderHints();
+            if (self.crop_dirty) try self.renderCrop();
             if (self.dialog_dirty) {
                 try self.renderDialog();
                 // The side panel is placed against the dialog's rect,
@@ -631,7 +681,7 @@ pub const Ui = struct {
             // tick the elapsed counter) need the timeout. Then everything
             // already queued is handled in arrival order before the next
             // frame.
-            const timeout: std.Io.Timeout = if (self.dict_build != null or self.aiSending())
+            const timeout: std.Io.Timeout = if (self.dict_build != null or self.aiSending() or self.cardBusy())
                 .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }
             else
                 .none;
@@ -666,11 +716,14 @@ pub const Ui = struct {
                 // only moved the one under the pointer. That can be the marks
                 // layer: it covers the page exactly and, while visible, is the
                 // topmost thing `scrollablePaneAt` finds there.
-                if (so.layer == self.page_layer or so.layer == self.hint_layer) {
+                if (so.layer == self.page_layer or so.layer == self.hint_layer or so.layer == self.crop_layer) {
                     self.pan = .{ .row = so.row, .col = so.col };
-                    const other = if (so.layer == self.page_layer) self.hint_layer else self.page_layer;
-                    self.client.setLayerScrollOffset(other, so.row, so.col) catch {};
+                    for ([_]glyphwire.LayerHandle{ self.page_layer, self.hint_layer, self.crop_layer }) |other| {
+                        if (other != so.layer) self.client.setLayerScrollOffset(other, so.row, so.col) catch {};
+                    }
                     self.status_dirty = true;
+                    // The crop overlay only draws the rows in view.
+                    if (self.cropping()) self.crop_dirty = true;
                 } else if (so.layer == self.dict_layer) {
                     // The wheel over a side panel taller than its slot.
                     // Only remembered, so PgUp/PgDn continue from here.
@@ -945,6 +998,8 @@ pub const Ui = struct {
             self.hints_dirty = true;
         }
 
+        if (self.cropping()) self.crop_dirty = true;
+
         self.prefetch();
         self.status_dirty = true;
         // The layout the dialog is placed against just moved.
@@ -1063,6 +1118,9 @@ pub const Ui = struct {
     fn renderHints(self: *Ui) !void {
         self.hints_dirty = false;
         const o = &(self.ocr orelse return);
+        // The bubble outline would sit inside the crop box, looking like
+        // part of the picture.
+        if (self.cropping()) return self.hideHints();
 
         const page = o.page orelse return self.hideHints();
         if (page.blocks.len == 0) return self.hideHints();
@@ -1186,7 +1244,9 @@ pub const Ui = struct {
             try c.setLayerVisible(self.dialog_layer, false);
             return;
         };
-        if (o.hidden) {
+        // Out of the way of the artwork being cropped; `leaveCrop` marks
+        // the dialog dirty again to bring it back.
+        if (o.hidden or self.cropping()) {
             try c.setLayerVisible(self.dialog_layer, false);
             return;
         }
@@ -1354,6 +1414,10 @@ pub const Ui = struct {
     /// else the dictionary lookup -- or hides the slot.
     fn renderSide(self: *Ui) !void {
         self.side_dirty = false;
+        if (self.card) |cd| {
+            if (cd.phase == .crop) return self.hideSide();
+            return self.renderCard();
+        }
         if (self.ai != null) return self.renderAi();
         return self.renderLookup();
     }
@@ -1715,7 +1779,9 @@ pub const Ui = struct {
                 const text = std.fmt.bufPrint(&buf, ":{s}_ ", .{prompt.items}) catch ":";
                 try c.writeTextOn(self.status_layer, text, fg_warn, bg_status);
             },
-            else => if (self.message) |m| {
+            else => if (self.cropping()) {
+                try c.writeTextOn(self.status_layer, crop_hint, fg_warn, bg_status);
+            } else if (self.message) |m| {
                 try c.writeTextOn(self.status_layer, m, fg_warn, bg_status);
             } else {
                 const name = self.book.pages.items[@min(self.page, self.book.count() -| 1)].name;
@@ -1784,6 +1850,7 @@ pub const Ui = struct {
         "  ] / [                other matches of the lookup",
         "  s                    cycle the lookup title size",
         "  a                    AI translation of the bubble",
+        "  c                    Anki card from the lookup / AI",
         "  page_up / page_down  scroll a long lookup / answer",
         "  escape               close the dialog",
         "",
@@ -1921,6 +1988,10 @@ pub const Ui = struct {
         self.pan = .{ .row = row, .col = col };
         self.client.setLayerScrollOffset(self.page_layer, row, col) catch {};
         self.client.setLayerScrollOffset(self.hint_layer, row, col) catch {};
+        if (self.cropping()) {
+            self.client.setLayerScrollOffset(self.crop_layer, row, col) catch {};
+            self.crop_dirty = true;
+        }
     }
 
     fn clampPan(self: *Ui) void {
@@ -1987,6 +2058,11 @@ pub const Ui = struct {
 
         // Off the event, as it was pressed -- not the live down-set.
         const shift = k.shift();
+
+        // An Anki card in progress takes every key: a page turn or a
+        // closed dialog mid-card would pull the page out from under it.
+        if (self.card != null) return self.handleCardKey(key);
+        if (eq(u8, key, "c")) return self.startCard();
 
         // ── AI panel ──
         // The first-send confirmation takes Enter (or `a` again) and
@@ -2140,6 +2216,14 @@ pub const Ui = struct {
     /// everywhere. Letters and named keys stay on `handleKey`, where the
     /// physical position *is* what's wanted (vim-style, same as zoe).
     fn handleText(self: *Ui, text: []const u8) !void {
+        if (self.card) |cd| {
+            // `+`/`-` size the crop box; nothing else types into a card.
+            if (cd.phase == .crop) {
+                if (std.mem.eql(u8, text, "+") or std.mem.eql(u8, text, "=")) self.scaleCrop(1.15);
+                if (std.mem.eql(u8, text, "-")) self.scaleCrop(1.0 / 1.15);
+            }
+            return;
+        }
         if (self.pending == .goto_prompt) {
             var prompt = &self.pending.goto_prompt;
             for (text) |ch| {
@@ -2285,6 +2369,10 @@ pub const Ui = struct {
 
     fn handleMouseButton(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
         if (!std.mem.eql(u8, ev.button, "left")) return;
+        // A card owns the button: the crop box takes the drag, and in the
+        // preview a click on the page must not turn it or close the
+        // dialog the card came from.
+        if (self.card != null) return self.handleCropButton(ev);
 
         if (ev.pressed) {
             // A press inside the open dialog selects its text rather than
@@ -2388,7 +2476,7 @@ pub const Ui = struct {
     }
 
     fn onSidePanel(self: *const Ui, cell: glyphwire.CellPos) bool {
-        if (self.lookup == null and self.ai == null) return false;
+        if (self.lookup == null and self.ai == null and self.card == null) return false;
         const r = self.side_rect;
         if (r.rows == 0 or r.cols == 0) return false;
         return cell.row >= r.row and cell.row < r.row + r.rows and cell.col >= r.col and cell.col < r.col + r.cols;
@@ -2635,23 +2723,8 @@ pub const Ui = struct {
 
     fn openAi(self: *Ui, o: *Ocr) !void {
         const alloc = self.alloc;
-        const page = o.page orelse return;
         const at = o.at orelse return;
-        const block = o.current() orelse return;
-
-        const dialog = try mokuro.joinLines(alloc, block.lines);
-        defer alloc.free(dialog);
-
-        // The bubbles either side in reading order, when asked for --
-        // context for a line that only makes sense as a reply.
-        var previous: ?[]u8 = null;
-        defer if (previous) |p| alloc.free(p);
-        var next: ?[]u8 = null;
-        defer if (next) |n| alloc.free(n);
-        if (self.conf.ai_include_neighbor_dialog) {
-            if (at > 0) previous = try mokuro.joinLines(alloc, page.blocks[o.order.items[at - 1]].lines);
-            if (at + 1 < o.order.items.len) next = try mokuro.joinLines(alloc, page.blocks[o.order.items[at + 1]].lines);
-        }
+        if (o.current() == null) return;
 
         // The word the dictionary panel is showing, when there is one --
         // read out before `clearLookup` below drops it.
@@ -2661,14 +2734,7 @@ pub const Ui = struct {
         } else "");
         errdefer alloc.free(highlight);
 
-        const prompt = try ai.buildPrompt(alloc, self.conf.ai_prompt, .{
-            .dialog = dialog,
-            .highlight = if (highlight.len > 0) highlight else null,
-            .previous = previous,
-            .next = next,
-            .title = if (self.conf.ai_include_book_info) ai.bookTitle(self.book.path) else null,
-            .page = if (self.conf.ai_include_book_info) self.page + 1 else null,
-        });
+        const prompt = try self.buildAiPrompt(o, highlight);
         errdefer prompt.deinit(alloc);
 
         self.clearLookup();
@@ -2700,6 +2766,40 @@ pub const Ui = struct {
         // Stays on `.confirm` until Enter.
         if (!self.ai_confirmed) return;
         self.sendAi();
+    }
+
+    /// The AI request for the open bubble, asking about `highlight` when
+    /// it isn't empty. Shared by `openAi` and the card's cache check
+    /// (`cachedAiAnswer`), which has to rebuild the exact prompt to find
+    /// the answer it was cached under.
+    fn buildAiPrompt(self: *Ui, o: *Ocr, highlight: []const u8) !ai.Prompt {
+        const alloc = self.alloc;
+        const page = o.page orelse return error.NoOcrPage;
+        const at = o.at orelse return error.NoOcrBlock;
+        const block = o.current() orelse return error.NoOcrBlock;
+
+        const dialog = try mokuro.joinLines(alloc, block.lines);
+        defer alloc.free(dialog);
+
+        // The bubbles either side in reading order, when asked for --
+        // context for a line that only makes sense as a reply.
+        var previous: ?[]u8 = null;
+        defer if (previous) |p| alloc.free(p);
+        var next: ?[]u8 = null;
+        defer if (next) |n| alloc.free(n);
+        if (self.conf.ai_include_neighbor_dialog) {
+            if (at > 0) previous = try mokuro.joinLines(alloc, page.blocks[o.order.items[at - 1]].lines);
+            if (at + 1 < o.order.items.len) next = try mokuro.joinLines(alloc, page.blocks[o.order.items[at + 1]].lines);
+        }
+
+        return ai.buildPrompt(alloc, self.conf.ai_prompt, .{
+            .dialog = dialog,
+            .highlight = if (highlight.len > 0) highlight else null,
+            .previous = previous,
+            .next = next,
+            .title = if (self.conf.ai_include_book_info) ai.bookTitle(self.book.path) else null,
+            .page = if (self.conf.ai_include_book_info) self.page + 1 else null,
+        });
     }
 
     /// Enter on the confirmation: send, and don't ask again this session.
@@ -2838,7 +2938,572 @@ pub const Ui = struct {
         }) catch |err| std.log.warn("gw-read: couldn't cache the AI answer ({t})", .{err});
     }
 
+    // -- Anki cards -------------------------------------------------------
+
+    /// The statusline's middle while the crop box is up: the whole
+    /// control set, since nothing else on screen says what the box does.
+    const crop_hint = "card image: drag move / edge or alt+drag resize / + - size / enter use / esc none";
+
+    fn cropping(self: *const Ui) bool {
+        const cd = self.card orelse return false;
+        return cd.phase == .crop;
+    }
+
+    /// Whether a card has a request out, so `run` keeps ticking to
+    /// notice it finish.
+    fn cardBusy(self: *const Ui) bool {
+        const cd = self.card orelse return false;
+        return cd.probe != null or cd.phase == .sending;
+    }
+
+    fn cardMessage(self: *Ui, comptime fmt: []const u8, args: anytype) void {
+        self.setMessage(fmt, args) catch {};
+        self.status_dirty = true;
+    }
+
+    /// `c`: start a card from whatever the side panel is showing -- a
+    /// dictionary lookup (a word card), or an AI answer (a word card
+    /// around its highlighted word, else a sentence card). Captures the
+    /// note, starts the audio probe and puts the crop box up.
+    fn startCard(self: *Ui) void {
+        if (!self.conf.anki_cards) return self.cardMessage("Anki cards are off -- set anki_cards = true in read.conf.lua", .{});
+        const o = &(self.ocr orelse return self.cardMessage("Anki cards need a book with mokuro OCR", .{}));
+        const page = o.page orelse return;
+        const block = o.current() orelse return self.cardMessage("open a bubble and click a word first", .{});
+
+        const note = self.captureNote(o) catch |err| return self.cardMessage("couldn't start the card ({t})", .{err});
+        const captured = note orelse return self.cardMessage("click a word to look it up, or ask the AI (a), then press c", .{});
+
+        const bounds: crop.Size = .{ .w = self.page_px.w, .h = self.page_px.h };
+        self.card = .{
+            .note = captured,
+            .phase = .{ .crop = .{} },
+            .box = crop.initial(self.ocrImageRect(page, block.box), bounds),
+        };
+        self.startAudioProbe();
+        self.enterCrop();
+    }
+
+    /// The note for the open bubble, or null when neither side panel has
+    /// anything to make a card from.
+    fn captureNote(self: *Ui, o: *Ocr) !?anki.Note {
+        const alloc = self.alloc;
+        const sentence = o.text.joined;
+        const book = ai.bookTitle(self.book.path);
+        const audio = self.conf.anki_audio_url;
+
+        if (self.lookup) |lk| {
+            const hit = lk.current();
+            const start = @min(lk.source_start, sentence.len);
+            const end = @min(start + hit.source_len, sentence.len);
+            const answer = self.cachedAiAnswer(o, sentence[start..end]);
+            defer if (answer) |a| alloc.free(a);
+            return try anki.Note.create(alloc, .{
+                .term = hit.entry.term,
+                .reading = hit.entry.reading,
+                .sentence = sentence,
+                .span_start = start,
+                .span_end = end,
+                .glossary = hit.entry.glossary,
+                .ai = answer orelse "",
+                .book = book,
+                .page = self.page + 1,
+                .audio_template = audio,
+            });
+        }
+
+        const panel = self.ai orelse return null;
+        const answer = switch (panel.phase) {
+            .answer => |text| text,
+            else => return null,
+        };
+        // A word was highlighted when the AI was asked: the card is about
+        // that word, with the answer as its notes.
+        if (panel.highlight.len > 0) if (self.dict) |*d| if (std.mem.indexOf(u8, sentence, panel.highlight)) |start| {
+            const end = start + panel.highlight.len;
+            if (dict_mod.lookup(alloc, d, sentence[start..end]) catch null) |m| {
+                defer m.deinit(alloc);
+                const hit = m.hits[0];
+                return try anki.Note.create(alloc, .{
+                    .term = hit.entry.term,
+                    .reading = hit.entry.reading,
+                    .sentence = sentence,
+                    .span_start = start,
+                    .span_end = start + hit.source_len,
+                    .glossary = hit.entry.glossary,
+                    .ai = answer,
+                    .book = book,
+                    .page = self.page + 1,
+                    .audio_template = audio,
+                });
+            }
+        };
+        // No word: a sentence card, the bubble as its term and the
+        // translation as its meaning.
+        return try anki.Note.create(alloc, .{
+            .kind = .sentence,
+            .term = sentence,
+            .sentence = sentence,
+            .ai = answer,
+            .book = book,
+            .page = self.page + 1,
+        });
+    }
+
+    /// An AI answer for the open bubble from the cache, if the bubble has
+    /// been asked about -- about `word` first, then about the bubble with
+    /// no word highlighted. Never sends anything. Owned.
+    fn cachedAiAnswer(self: *Ui, o: *Ocr, word: []const u8) ?[]u8 {
+        if (!self.conf.ai_lookup) return null;
+        for ([_][]const u8{ word, "" }) |highlight| {
+            const prompt = self.buildAiPrompt(o, highlight) catch return null;
+            defer prompt.deinit(self.alloc);
+            if (self.cacheGet(ai_cache.key(self.conf.ai_provider, self.conf.aiModel(), prompt))) |text| return text;
+        }
+        return null;
+    }
+
+    /// A mokuro box in page-image pixels -- `ocrScale` without the zoom.
+    fn ocrImageRect(self: *const Ui, page: *const mokuro.Page, box: mokuro.Box) crop.Rect {
+        const k = self.ocrScale(page);
+        const sx = k.x / self.layout.scale;
+        const sy = k.y / self.layout.scale;
+        const x: i64 = @intFromFloat(@as(f32, @floatFromInt(box.x1)) * sx);
+        const y: i64 = @intFromFloat(@as(f32, @floatFromInt(box.y1)) * sy);
+        return .{
+            .x = x,
+            .y = y,
+            .w = @as(i64, @intFromFloat(@as(f32, @floatFromInt(box.x2)) * sx)) - x,
+            .h = @as(i64, @intFromFloat(@as(f32, @floatFromInt(box.y2)) * sy)) - y,
+        };
+    }
+
+    fn startAudioProbe(self: *Ui) void {
+        const cd = &(self.card orelse return);
+        if (cd.note.audio != .unknown or !anki.isJpodUrl(cd.note.audio_url)) return;
+        const io = self.client.io;
+        const job = anki.Job.create(self.alloc, io, .probe, cd.note.audio_url, "") catch return;
+        const future = io.concurrent(anki.Job.run, .{job}) catch {
+            job.destroy();
+            return;
+        };
+        cd.probe = .{ .job = job, .future = future };
+    }
+
+    fn enterCrop(self: *Ui) void {
+        const cd = &(self.card orelse return);
+        cd.phase = .{ .crop = .{} };
+        self.crop_dirty = true;
+        self.dialog_dirty = true;
+        self.hints_dirty = true;
+        self.side_dirty = true;
+        self.status_dirty = true;
+    }
+
+    /// Crop done (with or without an image): on to the preview, and the
+    /// dialog and marks come back.
+    fn leaveCrop(self: *Ui) void {
+        const cd = &(self.card orelse return);
+        cd.phase = .preview;
+        self.crop_dirty = true;
+        self.dialog_dirty = true;
+        self.hints_dirty = true;
+        self.side_dirty = true;
+        self.side_reset_scroll = true;
+        self.status_dirty = true;
+    }
+
+    /// Enter on the crop: cut the box out of the page and keep it as the
+    /// card's image. A page that won't re-read or re-decode costs the
+    /// image, not the card.
+    fn acceptCrop(self: *Ui) void {
+        const cd = &(self.card orelse return);
+        const bytes = self.book.readPage(self.alloc, self.page) catch |err| {
+            self.cardMessage("couldn't re-read the page for the image ({t}); card has no image", .{err});
+            return self.leaveCrop();
+        };
+        defer self.alloc.free(bytes);
+        const encoded = crop.encodeJpeg(self.alloc, bytes, cd.box, .{
+            .max_w = @intCast(self.conf.anki_image_max_width),
+            .max_h = @intCast(self.conf.anki_image_max_height),
+            .quality = @intCast(self.conf.anki_image_quality),
+        }) catch |err| {
+            self.cardMessage("couldn't make the image ({t}); card has no image", .{err});
+            return self.leaveCrop();
+        };
+        cd.note.setImage(self.alloc, .{ .jpeg = encoded.jpeg, .width = encoded.width, .height = encoded.height });
+        self.leaveCrop();
+    }
+
+    fn skipImage(self: *Ui) void {
+        const cd = &(self.card orelse return);
+        cd.note.setImage(self.alloc, null);
+        self.leaveCrop();
+    }
+
+    /// Drops the card, cancelling anything it has out -- each future is
+    /// cancelled and awaited before its job is freed.
+    fn clearCard(self: *Ui) void {
+        const cd = &(self.card orelse return);
+        const io = self.client.io;
+        if (cd.probe) |p| {
+            var future = p.future;
+            future.cancel(io);
+            p.job.destroy();
+        }
+        switch (cd.phase) {
+            .sending => |p| {
+                var future = p.future;
+                future.cancel(io);
+                p.job.destroy();
+            },
+            .failure => |msg| self.alloc.free(msg),
+            .crop, .preview => {},
+        }
+        cd.note.deinit(self.alloc);
+        self.card = null;
+        self.crop_dirty = true;
+        self.dialog_dirty = true;
+        self.hints_dirty = true;
+        self.side_dirty = true;
+        self.side_reset_scroll = true;
+        self.status_dirty = true;
+    }
+
+    fn handleCardKey(self: *Ui, key: []const u8) !void {
+        const eq = std.mem.eql;
+        const enter = eq(u8, key, "enter") or eq(u8, key, "kp_enter");
+        const cd = &self.card.?;
+        switch (cd.phase) {
+            .crop => {
+                if (enter) return self.acceptCrop();
+                if (eq(u8, key, "escape")) return self.skipImage();
+                // Nudge one cell's worth, for the last bit of framing.
+                const step_x: i64 = @max(@as(i64, @intFromFloat(@as(f32, @floatFromInt(self.cell.w)) / self.layout.scale)), 1);
+                const step_y: i64 = @max(@as(i64, @intFromFloat(@as(f32, @floatFromInt(self.cell.h)) / self.layout.scale)), 1);
+                if (eq(u8, key, "left") or eq(u8, key, "h")) return self.nudgeCrop(-step_x, 0);
+                if (eq(u8, key, "right") or eq(u8, key, "l")) return self.nudgeCrop(step_x, 0);
+                if (eq(u8, key, "up") or eq(u8, key, "k")) return self.nudgeCrop(0, -step_y);
+                if (eq(u8, key, "down") or eq(u8, key, "j")) return self.nudgeCrop(0, step_y);
+            },
+            .preview => {
+                if (enter) return self.sendCard();
+                if (eq(u8, key, "escape")) {
+                    self.clearCard();
+                    return self.cardMessage("card discarded", .{});
+                }
+                if (eq(u8, key, "r")) return self.enterCrop();
+                if (eq(u8, key, "page_down")) return self.scrollSide(.down);
+                if (eq(u8, key, "page_up")) return self.scrollSide(.up);
+            },
+            .sending => |p| if (eq(u8, key, "escape")) {
+                var future = p.future;
+                future.cancel(self.client.io);
+                p.job.destroy();
+                cd.phase = .preview;
+                self.side_dirty = true;
+                return self.cardMessage("send cancelled -- the card may still have reached Anki", .{});
+            },
+            .failure => |msg| {
+                if (enter) {
+                    self.alloc.free(msg);
+                    cd.phase = .preview;
+                    return self.sendCard();
+                }
+                if (eq(u8, key, "escape")) return self.clearCard();
+                if (eq(u8, key, "r")) {
+                    self.alloc.free(msg);
+                    return self.enterCrop();
+                }
+            },
+        }
+    }
+
+    fn nudgeCrop(self: *Ui, dx: i64, dy: i64) void {
+        const cd = &(self.card orelse return);
+        cd.box = crop.dragged(cd.box, .move, dx, dy, .{ .w = self.page_px.w, .h = self.page_px.h });
+        self.crop_dirty = true;
+    }
+
+    fn scaleCrop(self: *Ui, factor: f32) void {
+        const cd = &(self.card orelse return);
+        cd.box = crop.scaled(cd.box, factor, .{ .w = self.page_px.w, .h = self.page_px.h });
+        self.crop_dirty = true;
+    }
+
+    /// The page-image pixel under the centre of window cell `cell`. Not
+    /// clipped to the page: a press beside it still names a point the
+    /// box's nearest corner can be pulled towards.
+    fn cellImagePx(self: *const Ui, cell: glyphwire.CellPos) struct { x: i64, y: i64 } {
+        const layer_col = @as(f32, @floatFromInt(@as(i64, @intCast(cell.col)) + @as(i64, @intCast(self.pan.col)) - @as(i64, @intCast(self.layout.col))));
+        const layer_row = @as(f32, @floatFromInt(@as(i64, @intCast(cell.row)) + @as(i64, @intCast(self.pan.row)) - @as(i64, @intCast(self.layout.row))));
+        const k = @max(self.layout.scale, 0.0001);
+        return .{
+            .x = @intFromFloat((layer_col + 0.5) * @as(f32, @floatFromInt(self.cell.w)) / k),
+            .y = @intFromFloat((layer_row + 0.5) * @as(f32, @floatFromInt(self.cell.h)) / k),
+        };
+    }
+
+    /// Image pixels per cell step, per axis -- how far one cell of pointer
+    /// motion moves the box, and the edge-grab tolerance.
+    fn cellImageStep(self: *const Ui) struct { x: i64, y: i64 } {
+        const k = @max(self.layout.scale, 0.0001);
+        return .{
+            .x = @max(@as(i64, @intFromFloat(@as(f32, @floatFromInt(self.cell.w)) / k)), 1),
+            .y = @max(@as(i64, @intFromFloat(@as(f32, @floatFromInt(self.cell.h)) / k)), 1),
+        };
+    }
+
+    /// The left button while a card is up. In the crop step: a press
+    /// picks a handle (`crop.handleAt`, or with Alt held the nearest
+    /// corner, from anywhere) and a press outside the box pulls that
+    /// corner straight to the pointer. Otherwise a press is swallowed so
+    /// the page underneath stays put.
+    fn handleCropButton(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
+        const cd = &self.card.?;
+        const st = switch (cd.phase) {
+            .crop => |*c| c,
+            else => return,
+        };
+        if (!ev.pressed) {
+            st.drag = null;
+            return;
+        }
+        const bounds: crop.Size = .{ .w = self.page_px.w, .h = self.page_px.h };
+        const p = self.cellImagePx(ev.cell);
+        const step = self.cellImageStep();
+        const handle = if (ev.mods.alt)
+            crop.nearestCorner(cd.box, p.x, p.y)
+        else
+            crop.handleAt(cd.box, p.x, p.y, step.x, step.y);
+
+        if (!ev.mods.alt and handle != .move and !cd.box.contains(p.x, p.y)) {
+            const corner_x = if (handle == .nw or handle == .sw) cd.box.x else cd.box.right();
+            const corner_y = if (handle == .nw or handle == .ne) cd.box.y else cd.box.bottom();
+            cd.box = crop.dragged(cd.box, handle, p.x - corner_x, p.y - corner_y, bounds);
+            self.crop_dirty = true;
+        }
+        st.drag = .{ .cell = ev.cell, .start = cd.box, .handle = handle };
+    }
+
+    fn handleCropMove(self: *Ui, ev: glyphwire.MouseMoveEvent) !void {
+        const cd = &self.card.?;
+        const st = switch (cd.phase) {
+            .crop => |*c| c,
+            else => return,
+        };
+        const drag = st.drag orelse return;
+        const step = self.cellImageStep();
+        const dx = (@as(i64, @intCast(ev.cell.col)) - @as(i64, @intCast(drag.cell.col))) * step.x;
+        const dy = (@as(i64, @intCast(ev.cell.row)) - @as(i64, @intCast(drag.cell.row))) * step.y;
+        const next = crop.dragged(drag.start, drag.handle, dx, dy, .{ .w = self.page_px.w, .h = self.page_px.h });
+        if (std.meta.eql(next, cd.box)) return;
+        cd.box = next;
+        self.crop_dirty = true;
+    }
+
+    /// Draws the crop box on `crop_layer`, or hides the layer when no
+    /// card is cropping. The layer mirrors the page's geometry exactly
+    /// (the same arrangement as `hint_layer`), and the box is snapped out
+    /// to the cells its pixels touch.
+    ///
+    /// Only the rows in the viewport are written -- at 8x zoom the layer
+    /// is over a thousand rows, and every pointer move redraws -- so a
+    /// pan marks this dirty again (`applyPan`, the `scroll_offset`
+    /// handler). Each row is at most three writes: shade to the left of
+    /// the box, the box's own run (edge glyphs with a transparent
+    /// interior, like the OCR marks), shade to the right; a row outside
+    /// the box is one padded write of shade.
+    fn renderCrop(self: *Ui) !void {
+        self.crop_dirty = false;
+        const c = self.client;
+        const cd = self.card orelse return c.setLayerVisible(self.crop_layer, false);
+        if (cd.phase != .crop) return c.setLayerVisible(self.crop_layer, false);
+
+        const view = self.pageView();
+        const cols = self.layout.cols;
+        const rows = self.layout.rows;
+        const cw: f32 = @floatFromInt(@max(self.cell.w, 1));
+        const ch: f32 = @floatFromInt(@max(self.cell.h, 1));
+        const k = self.layout.scale;
+        const box = cd.box;
+        const c0: usize = @intFromFloat(@max(@floor(@as(f32, @floatFromInt(box.x)) * k / cw), 0));
+        const r0: usize = @intFromFloat(@max(@floor(@as(f32, @floatFromInt(box.y)) * k / ch), 0));
+        const c1: usize = @min(@as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(box.right())) * k / cw))), cols);
+        const r1: usize = @min(@as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(box.bottom())) * k / ch))), rows);
+        const box_cols = @max(c1 -| c0, 2);
+        const box_rows = @max(r1 -| r0, 2);
+
+        var b = c.batch();
+        defer b.deinit();
+        try b.setLayerSize(self.crop_layer, cols, rows);
+        try b.setLayerViewport(self.crop_layer, @min(cols, view.cols), @min(rows, view.rows));
+        try b.setLayerCellPosition(self.crop_layer, self.layout.row, self.layout.col);
+        try b.setLayerScrollOffset(self.crop_layer, self.pan.row, self.pan.col);
+        try b.clearOn(self.crop_layer, 0, 0, null, null);
+
+        const interior = box_cols - 2;
+        const top = try self.alloc.alloc(u8, box_cols * mark_h.len);
+        defer self.alloc.free(top);
+        const mid = try self.alloc.alloc(u8, box_cols * mark_h.len);
+        defer self.alloc.free(mid);
+        const bot = try self.alloc.alloc(u8, box_cols * mark_h.len);
+        defer self.alloc.free(bot);
+        const top_run = markRow(top, mark_tl, mark_h, mark_tr, interior);
+        const mid_run = markRow(mid, mark_v, " ", mark_v, interior);
+        const bot_run = markRow(bot, mark_bl, mark_h, mark_br, interior);
+
+        const first = @min(self.pan.row, rows);
+        const last = @min(self.pan.row + view.rows, rows);
+        for (first..last) |row| {
+            if (row < r0 or row >= r0 + box_rows) {
+                try b.writeTextOpts(" ", .{ .layer = self.crop_layer, .row = row, .col = 0, .bg = bg_crop_shade, .max_cols = cols, .pad = true });
+                continue;
+            }
+            if (c0 > 0) try b.writeTextOpts(" ", .{ .layer = self.crop_layer, .row = row, .col = 0, .bg = bg_crop_shade, .max_cols = c0, .pad = true });
+            const edge = if (row == r0) top_run else if (row == r0 + box_rows - 1) bot_run else mid_run;
+            try b.writeTextOpts(edge, .{ .layer = self.crop_layer, .row = row, .col = c0, .fg = fg_hint_current, .transparent_bg = true });
+            const after = c0 + box_cols;
+            if (after < cols) try b.writeTextOpts(" ", .{ .layer = self.crop_layer, .row = row, .col = after, .bg = bg_crop_shade, .max_cols = cols - after, .pad = true });
+        }
+        try b.setLayerVisible(self.crop_layer, true);
+        var results = try b.send();
+        results.deinit();
+    }
+
+    /// Enter on the preview: post the note to AnkiConnect in the
+    /// background.
+    fn sendCard(self: *Ui) void {
+        const cd = &(self.card orelse return);
+        const alloc = self.alloc;
+        const io = self.client.io;
+
+        // Media file names must be unique in Anki's flat media folder.
+        var stamp_buf: [32]u8 = undefined;
+        const now_ms = @divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms);
+        const stamp = std.fmt.bufPrint(&stamp_buf, "{d}", .{now_ms}) catch "0";
+
+        const body = anki.buildAddNote(alloc, &cd.note, .{
+            .deck = self.conf.anki_deck,
+            .model = self.conf.anki_model,
+            .fields = self.conf.anki_fields,
+            .tags = self.conf.anki_tags,
+            .allow_duplicates = self.conf.anki_allow_duplicates,
+            .stamp = stamp,
+        }) catch return self.failCard("out of memory building the request");
+        defer alloc.free(body);
+        const job = anki.Job.create(alloc, io, .{ .add = .{ .sync = self.conf.anki_sync_after_add } }, self.conf.anki_url, body) catch
+            return self.failCard("out of memory building the request");
+        const future = io.concurrent(anki.Job.run, .{job}) catch {
+            job.destroy();
+            return self.failCard("couldn't start the request");
+        };
+        cd.phase = .{ .sending = .{ .job = job, .future = future } };
+        self.side_dirty = true;
+    }
+
+    fn failCard(self: *Ui, msg: []const u8) void {
+        const cd = &(self.card orelse return);
+        cd.phase = .{ .failure = self.alloc.dupe(u8, msg) catch return };
+        self.side_dirty = true;
+    }
+
+    /// Once a tick: collect the audio probe and the send when they finish.
+    fn pollCard(self: *Ui) void {
+        const cd = &(self.card orelse return);
+        const io = self.client.io;
+
+        if (cd.probe) |p| if (p.job.done.load(.acquire)) {
+            var future = p.future;
+            future.await(io);
+            if (p.job.takeResult()) |r| switch (r) {
+                .audio => |state| cd.note.audio = state,
+                else => r.deinit(self.alloc),
+            };
+            p.job.destroy();
+            cd.probe = null;
+            self.side_dirty = true;
+        };
+
+        const sending = switch (cd.phase) {
+            .sending => |p| p,
+            else => return,
+        };
+        if (!sending.job.done.load(.acquire)) return;
+        var future = sending.future;
+        future.await(io);
+        const result = sending.job.takeResult();
+        sending.job.destroy();
+
+        const r = result orelse return self.failCard("the request produced no result");
+        switch (r) {
+            .added => |added| {
+                defer if (added.sync_failure) |f| self.alloc.free(f);
+                const deck = self.conf.anki_deck;
+                self.clearCard();
+                if (added.sync_failure) |f| {
+                    self.cardMessage("added to {s}, but the AnkiWeb sync failed: {s}", .{ deck, f });
+                } else if (self.conf.anki_sync_after_add) {
+                    self.cardMessage("added to {s} and synced", .{deck});
+                } else {
+                    self.cardMessage("added to {s}", .{deck});
+                }
+            },
+            .failure => |msg| cd.phase = .{ .failure = msg },
+            .audio => self.failCard("unexpected reply"),
+        }
+        self.side_dirty = true;
+    }
+
+    /// The card preview in the side slot: where it is going, every mapped
+    /// field with what will fill it, and the keys.
+    fn renderCard(self: *Ui) !void {
+        const cd = self.card orelse return self.hideSide();
+
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const inner_max = self.sideInnerMax(ai_panel_cols -| 4);
+        var lines: std.ArrayList(PanelLine) = .empty;
+
+        const title = try std.fmt.allocPrint(a, "Anki card -> {s}", .{self.conf.anki_deck});
+        try lines.append(a, .{ .text = title, .fg = fg_lookup_term });
+        try lines.append(a, .{ .text = try std.fmt.allocPrint(a, "{s}{s}", .{
+            self.conf.anki_model,
+            if (cd.note.kind == .sentence) "  (sentence card)" else "",
+        }), .fg = fg_dim });
+        try lines.append(a, .{ .text = "" });
+
+        var label_w: usize = 0;
+        for (self.conf.anki_fields) |f| label_w = @max(label_w, mokuro.displayWidth(f.field));
+        for (self.conf.anki_fields) |f| {
+            const value = try anki.previewValue(a, &cd.note, f.source);
+            var row: std.ArrayList(u8) = .empty;
+            try row.appendSlice(a, f.field);
+            for (mokuro.displayWidth(f.field)..label_w + 2) |_| try row.append(a, ' ');
+            try row.appendSlice(a, if (value.len > 0) value else "-");
+            try lines.append(a, .{ .text = row.items, .fg = if (value.len > 0) fg_dialog else fg_dim });
+        }
+        try lines.append(a, .{ .text = "" });
+
+        switch (cd.phase) {
+            .crop => {},
+            .preview => try lines.append(a, .{ .text = "Enter  add        r  re-crop        Esc  discard", .fg = fg_dim }),
+            .sending => try lines.append(a, .{ .text = "Sending to Anki...        Esc  stop waiting", .fg = fg_lookup_term }),
+            .failure => |msg| {
+                try lines.append(a, .{ .text = "Couldn't add the card", .fg = fg_warn });
+                try appendWrapped(a, &lines, msg, inner_max, fg_dialog);
+                try lines.append(a, .{ .text = "" });
+                try lines.append(a, .{ .text = "Enter  retry        r  re-crop        Esc  discard", .fg = fg_dim });
+            },
+        }
+
+        try self.drawSidePanel(lines.items, inner_max);
+    }
+
     fn handleMouseMove(self: *Ui, ev: glyphwire.MouseMoveEvent) !void {
+        if (self.card != null) return self.handleCropMove(ev);
         if (self.text_drag) |*td| {
             // Clamped to the panel: dragging off its edge extends the
             // selection to the nearest cell inside rather than stopping.

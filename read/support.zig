@@ -24,6 +24,8 @@ pub const dict = @import("dict.zig");
 pub const kana = @import("kana.zig");
 pub const ai = @import("ai.zig");
 pub const ai_cache = @import("ai_cache.zig");
+pub const anki = @import("anki.zig");
+pub const crop = @import("crop.zig");
 pub const ui = @import("ui.zig");
 
 pub const Archive = archive.Archive;

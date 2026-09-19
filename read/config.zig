@@ -18,6 +18,7 @@ const zoom = @import("zoom.zig");
 const cache = @import("cache.zig");
 const glyphwire = @import("glyphwire");
 const ai = @import("ai.zig");
+const anki = @import("anki.zig");
 
 const conf_name = "read.conf.lua";
 
@@ -147,6 +148,42 @@ pub const ReadConfig = struct {
     /// reopening a bubble is instant and costs no tokens.
     ai_cache: bool = true,
 
+    /// Anki card mining (`c` with a lookup or AI answer showing). On by
+    /// default: nothing is sent anywhere until a card is confirmed, and
+    /// then only to the AnkiConnect at `anki_url`. See anki.zig.
+    anki_cards: bool = true,
+    /// AnkiConnect's address -- desktop Anki with the add-on running.
+    anki_url: []const u8 = anki.default_url,
+    anki_deck: []const u8 = anki.default_deck,
+    /// The note type. Its field names are what `anki_fields` maps.
+    anki_model: []const u8 = anki.default_model,
+    /// Which note field each piece of card data goes to. The default is
+    /// jidoujisho's `jidoujisho Kinomoto` note type (`anki.default_fields`).
+    /// Kept in `anki.Source` order, whatever order the Lua table had, so
+    /// the preview lists fields the same way every time.
+    anki_fields: []const anki.FieldMap = &anki.default_fields,
+    /// Space-separated tags added to every card.
+    anki_tags: []const u8 = "gw-read",
+    /// Let a card whose first field matches an existing note in the deck
+    /// through. Off: Anki's duplicate check stops it, and the preview
+    /// reports why.
+    anki_allow_duplicates: bool = false,
+    /// Ask Anki to sync to AnkiWeb after every added card.
+    anki_sync_after_add: bool = false,
+    /// Where the word's audio comes from: `{term}` and `{reading}` are
+    /// filled in. Empty turns audio off. JapanesePod101 by default, the
+    /// source jidoujisho uses.
+    anki_audio_url: []const u8 = anki.jpod_audio_url,
+    /// The cropped image is scaled down (never up) to fit these, in
+    /// pixels, and saved as a JPEG at `anki_image_quality` (1..100).
+    anki_image_max_width: usize = 800,
+    anki_image_max_height: usize = 800,
+    anki_image_quality: usize = 85,
+
+    /// `anki_fields` when it came from the Lua file; freed by `deinit`
+    /// (the field names themselves are in `owned`).
+    owned_fields: ?[]anki.FieldMap = null,
+
     /// Every string field above that `load` duped out of the Lua state,
     /// freed by `deinit`. Tracked as a list rather than by comparing each
     /// field against its default, so a default can stay a string literal.
@@ -155,6 +192,7 @@ pub const ReadConfig = struct {
     pub fn deinit(self: *ReadConfig, alloc: std.mem.Allocator) void {
         for (self.owned.items) |s| alloc.free(s);
         self.owned.deinit(alloc);
+        if (self.owned_fields) |f| alloc.free(f);
         self.* = .{};
     }
 
@@ -194,6 +232,7 @@ pub const ocr_dialog_cols_max: usize = 200;
 pub const pan_step_max: usize = 64;
 pub const jump_pages_max: usize = 1000;
 pub const prefetch_max: usize = 8;
+pub const anki_image_side_max: usize = 4096;
 
 /// Outcome of `load`: the parsed config plus, on a Lua load/run failure,
 /// an owned diagnostic string. `config` still holds whatever ran before
@@ -313,6 +352,27 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     if (boolField(lua, "ai_confirm_before_send")) |v| result.config.ai_confirm_before_send = v;
     if (boolField(lua, "ai_cache")) |v| result.config.ai_cache = v;
 
+    if (boolField(lua, "anki_cards")) |v| result.config.anki_cards = v;
+    if (stringField(lua, "anki_url")) |v|
+        result.config.anki_url = ownString(alloc, &result.config, v, result.config.anki_url);
+    if (stringField(lua, "anki_deck")) |v|
+        result.config.anki_deck = ownString(alloc, &result.config, v, result.config.anki_deck);
+    if (stringField(lua, "anki_model")) |v|
+        result.config.anki_model = ownString(alloc, &result.config, v, result.config.anki_model);
+    if (stringField(lua, "anki_tags")) |v|
+        result.config.anki_tags = ownString(alloc, &result.config, v, result.config.anki_tags);
+    if (boolField(lua, "anki_allow_duplicates")) |v| result.config.anki_allow_duplicates = v;
+    if (boolField(lua, "anki_sync_after_add")) |v| result.config.anki_sync_after_add = v;
+    if (stringField(lua, "anki_audio_url")) |v|
+        result.config.anki_audio_url = ownString(alloc, &result.config, v, result.config.anki_audio_url);
+    if (uintField(lua, "anki_image_max_width")) |v|
+        result.config.anki_image_max_width = clampUint("anki_image_max_width", v, 64, anki_image_side_max);
+    if (uintField(lua, "anki_image_max_height")) |v|
+        result.config.anki_image_max_height = clampUint("anki_image_max_height", v, 64, anki_image_side_max);
+    if (uintField(lua, "anki_image_quality")) |v|
+        result.config.anki_image_quality = clampUint("anki_image_quality", v, 1, 100);
+    loadAnkiFields(alloc, lua, &result.config);
+
     // A `cache_pages` smaller than what the prefetch wants resident means
     // every prefetched page evicts the one being read. Nudge rather than
     // reject: the intent ("keep a small cache") is still honoured.
@@ -326,6 +386,60 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     }
 
     return result;
+}
+
+/// `anki_fields = { ["Note field"] = "source", ... }`. A source name
+/// that isn't an `anki.Source` is warned about and skipped; `false`
+/// leaves a field out, which is how a default mapping is trimmed without
+/// retyping it. An empty result keeps the default.
+fn loadAnkiFields(alloc: std.mem.Allocator, lua: *Lua, conf: *ReadConfig) void {
+    _ = lua.getField(-1, "anki_fields");
+    defer lua.pop(1);
+    if (!lua.isTable(-1)) {
+        if (!lua.isNil(-1))
+            std.log.warn("gw-read: {s} `anki_fields` is not a table; ignored", .{conf_name});
+        return;
+    }
+
+    var out: std.ArrayList(anki.FieldMap) = .empty;
+    defer out.deinit(alloc);
+    lua.pushNil();
+    while (lua.next(-2)) {
+        // Key at -2, value at -1. `toString` only on a real string key:
+        // it would convert a number key in place and break `next`.
+        defer lua.pop(1);
+        if (lua.typeOf(-2) != .string) {
+            std.log.warn("gw-read: {s} `anki_fields` entry with a non-string key; ignored", .{conf_name});
+            continue;
+        }
+        const field = lua.toString(-2) catch continue;
+        if (lua.typeOf(-1) == .boolean and !lua.toBoolean(-1)) continue;
+        if (lua.typeOf(-1) != .string) {
+            std.log.warn("gw-read: {s} anki_fields[\"{s}\"] must be a source name; ignored", .{ conf_name, field });
+            continue;
+        }
+        const name = lua.toString(-1) catch continue;
+        const source = anki.Source.parse(name) orelse {
+            std.log.warn("gw-read: {s} anki_fields[\"{s}\"] = '{s}' is not a card source; ignored", .{ conf_name, field, name });
+            continue;
+        };
+        const owned = ownString(alloc, conf, field, "");
+        if (owned.len == 0) continue;
+        out.append(alloc, .{ .field = owned, .source = source }) catch return;
+    }
+    if (out.items.len == 0) {
+        std.log.warn("gw-read: {s} `anki_fields` maps nothing; keeping the default", .{conf_name});
+        return;
+    }
+    std.mem.sort(anki.FieldMap, out.items, {}, struct {
+        fn lessThan(_: void, a: anki.FieldMap, b: anki.FieldMap) bool {
+            if (a.source != b.source) return @intFromEnum(a.source) < @intFromEnum(b.source);
+            return std.mem.lessThan(u8, a.field, b.field);
+        }
+    }.lessThan);
+    const fields = out.toOwnedSlice(alloc) catch return;
+    conf.owned_fields = fields;
+    conf.anki_fields = fields;
 }
 
 /// The `mode` key's accepted spellings. Hyphenated because that's how the

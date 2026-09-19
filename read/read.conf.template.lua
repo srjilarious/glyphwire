@@ -198,4 +198,63 @@
 --     -- the provider, model and exact text sent, so reopening a bubble is
 --     -- instant and costs nothing. Delete the file to clear it.
 --     ai_cache = true,
+--
+--     ---- Anki cards ------------------------------------------------
+--
+--     -- `c` with a dictionary lookup (or an AI answer) showing makes an
+--     -- Anki card from it, jidoujisho-style: pick a crop of the page for
+--     -- context (drag moves it, dragging an edge / Alt+drag resizes, +/-
+--     -- size it, Enter keeps it, Esc means no image), check the preview,
+--     -- Enter sends it. Needs desktop Anki running with the AnkiConnect
+--     -- add-on (code 2055492159); Anki's own sync carries the card to
+--     -- AnkiWeb. An AI answer with no word looked up makes a sentence
+--     -- card: the bubble as the term, the translation as the meaning.
+--     anki_cards = true,
+--
+--     -- Where AnkiConnect listens, and where the card goes.
+--     anki_url = "http://127.0.0.1:8765",
+--     anki_deck = "Default",
+--     anki_model = "jidoujisho Kinomoto",
+--
+--     -- Which note field each piece of the card fills. Sources: term,
+--     -- reading, furigana ("見張[みは]る"), sentence, cloze_before,
+--     -- cloze_inside, cloze_after, meaning (dictionary senses), ai (the
+--     -- AI explanation, when the bubble has one open or cached), book,
+--     -- page, image, audio. A field mapped to false is left out. The
+--     -- default is jidoujisho's own note type:
+--     anki_fields = {
+--         ["Term"] = "term",
+--         ["Reading"] = "reading",
+--         ["Furigana"] = "furigana",
+--         ["Sentence"] = "sentence",
+--         ["Cloze Before"] = "cloze_before",
+--         ["Cloze Inside"] = "cloze_inside",
+--         ["Cloze After"] = "cloze_after",
+--         ["Meaning"] = "meaning",
+--         ["Notes"] = "ai",
+--         ["Context"] = "book",
+--         ["Image"] = "image",
+--         ["Term Audio"] = "audio",
+--     },
+--
+--     -- Space-separated tags on every card.
+--     anki_tags = "gw-read",
+--
+--     -- Let a card through when the deck already has a note with the
+--     -- same first field. Off, Anki refuses it and the preview says so.
+--     anki_allow_duplicates = false,
+--
+--     -- Ask Anki to sync to AnkiWeb after every card.
+--     anki_sync_after_add = false,
+--
+--     -- The word's audio: {term} and {reading} are filled in. Empty turns
+--     -- audio off. JapanesePod101's "no recording" placeholder is
+--     -- detected and never attached.
+--     anki_audio_url = "https://assets.languagepod101.com/dictionary/japanese/audiomp3.php?kanji={term}&kana={reading}",
+--
+--     -- The crop is scaled down (never up) to fit these, and saved as a
+--     -- JPEG at this quality (1..100).
+--     anki_image_max_width = 800,
+--     anki_image_max_height = 800,
+--     anki_image_quality = 85,
 -- }

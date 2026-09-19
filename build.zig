@@ -122,6 +122,17 @@ pub fn build(b: *std.Build) void {
     });
     read_support_mod.addIncludePath(b.path("read/libs/sqlite"));
 
+    // stb_image + stb_image_write for the Anki card crop (`read/crop.zig`),
+    // compiled `static` in gw-read's own C unit rather than through zstbi's
+    // module -- see the comment in `read/libs/stb/image_io.c` for why. The
+    // headers are borrowed from the zstbi package the host already fetches.
+    const read_stb_dep = b.dependency("zstbi", .{ .target = target });
+    read_support_mod.addCSourceFile(.{
+        .file = b.path("read/libs/stb/image_io.c"),
+        .flags = &.{"-fno-sanitize=undefined"},
+    });
+    read_support_mod.addIncludePath(read_stb_dep.path("libs/stbi"));
+
     // gwmd's layout, link handling and client UI, shared by the `gwmd`
     // binary and its test runner -- same cross-directory-module reason as
     // the ones above. The Markdown parser is the vendored zmd fork under
