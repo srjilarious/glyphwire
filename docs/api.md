@@ -378,7 +378,12 @@ A first-class overlay primitive: a plain coloured box (filled or
 outlined), positioned in pixel space on a layer rather than the cell
 grid. A component of the layer it's drawn on, like Table — see
 decisions.md's Rect section for the rationale (driven by gw-read's mokuro
-highlight boxes, which today draw a box out of character cells instead).
+highlight boxes). gw-read now draws its OCR region marks and its Anki crop
+box (four translucent filled rects shading the page around an outline) as
+rects on the page layer itself, so they pan with `scroll_offset` for free.
+All three messages are batchable; `Client.Batch.createRect` returns a slot
+resolved with `BatchResults.rectHandle`, so a page's worth of rects costs
+one round trip.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|

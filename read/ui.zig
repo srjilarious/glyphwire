@@ -208,7 +208,7 @@ const AiPanel = struct {
 const Card = struct {
     note: anki.Note,
     phase: union(enum) {
-        /// Choosing the context image on `Ui.crop_layer`. `drag` is a
+        /// Choosing the context image (`Ui.crop_rects`). `drag` is a
         /// pointer drag in progress: where it started and the box as it
         /// was then, so each move is applied from the start rather than
         /// accumulated (cell-granular motion would otherwise drift).
@@ -242,17 +242,16 @@ pub const Ui = struct {
 
     context: glyphwire.ContextHandle,
     page_layer: glyphwire.LayerHandle,
-    /// The OCR region marks. Geometry mirrors `page_layer` exactly -- same
-    /// size, viewport, placement and scroll offset -- so the marks pan
-    /// with the artwork. Its own layer rather than glyphs written into the
-    /// page because moving one mark would otherwise mean redrawing the
-    /// whole scaled page (`draw_image` has no source offset, so there is
-    /// no way to repaint just the cells a mark covered).
-    hint_layer: glyphwire.LayerHandle,
-    /// The Anki crop box and its shading. Same geometry as `hint_layer`
-    /// (a window onto the whole scaled page), shown only while a card's
-    /// image is being picked.
-    crop_layer: glyphwire.LayerHandle,
+    /// The OCR region marks: overlay rects (`create_rect`) on `page_layer`
+    /// itself, in the scaled page's own pixels, so they pan with the
+    /// artwork for free and land on the bubble's real edges rather than
+    /// the cells around it. `renderHints` replaces the whole set.
+    hint_rects: std.ArrayList(glyphwire.RectHandle) = .empty,
+    /// The Anki crop box while it is up: four translucent shades around
+    /// the box and its outline, rects on `page_layer` like the marks.
+    /// Created on entering the crop step, moved by `update_rect` on every
+    /// drag, destroyed on leaving it.
+    crop_rects: ?[5]glyphwire.RectHandle = null,
     status_layer: glyphwire.LayerHandle,
     help_layer: glyphwire.LayerHandle,
     /// The mokuro text panel. Created for every session (a layer costs
@@ -425,14 +424,6 @@ pub const Ui = struct {
         // Provisional sizes: `applyLayout` resizes the page layer on the
         // first frame, and every resize after.
         const page_layer = try client.createLayer(size.cols, size.rows, 0);
-        // Right after the page: `layer_order` is creation order, so this
-        // composites over the artwork and under the statusline.
-        // 1x1 until `renderPage` sizes it: a book with no OCR never grows
-        // it past that, and a book with OCR resizes it every frame the
-        // page layout moves anyway.
-        const hint_layer = try client.createLayer(1, 1, 0);
-        // Over the marks, under the statusline and every panel.
-        const crop_layer = try client.createLayer(1, 1, 0);
         const status_layer = try client.createLayer(size.cols, status_rows, 0);
         const help_layer = try client.createLayer(help_cols, help_rows, 0);
         // Created last so it composites above the page and the help box:
@@ -443,9 +434,9 @@ pub const Ui = struct {
         // -- it's answering a click made *on* the dialog.
         const dict_layer = try client.createLayer(conf.ocr_dialog_cols, 3, 0);
         // Created last: whenever it's up, nothing else should be able to
-        // cover it. 1x1 until `renderDictBuild` sizes it, same as
-        // `hint_layer` -- most sessions never touch a dictionary at all,
-        // let alone one that still needs building.
+        // cover it. 1x1 until `renderDictBuild` sizes it -- most sessions
+        // never touch a dictionary at all, let alone one that still needs
+        // building.
         const dict_build_layer = try client.createLayer(1, 1, 0);
 
         // The letterbox around a fitted page: the root layer's background
@@ -462,8 +453,6 @@ pub const Ui = struct {
         try client.setLayerVisible(dialog_layer, false);
         try client.setLayerVisible(dict_layer, false);
         try client.setLayerVisible(dict_build_layer, false);
-        try client.setLayerVisible(hint_layer, false);
-        try client.setLayerVisible(crop_layer, false);
 
         self.* = .{
             .alloc = alloc,
@@ -474,8 +463,6 @@ pub const Ui = struct {
             .cache = .init(conf.cache_pages),
             .context = context,
             .page_layer = page_layer,
-            .hint_layer = hint_layer,
-            .crop_layer = crop_layer,
             .status_layer = status_layer,
             .help_layer = help_layer,
             .dialog_layer = dialog_layer,
@@ -604,6 +591,8 @@ pub const Ui = struct {
         self.cache.deinit(alloc);
 
         if (self.ocr) |*o| o.deinit(alloc);
+        // The rects themselves go with the context below.
+        self.hint_rects.deinit(alloc);
         self.clearLookup();
         // Cancels a request still in flight: the job must be finished
         // before it is freed, and nobody is left to read its answer.
@@ -711,19 +700,12 @@ pub const Ui = struct {
             .scroll_offset => |so| {
                 // The wheel or a scrollbar thumb over the page: the host has
                 // already moved the viewport and is telling us where it
-                // landed. Follow it rather than pushing our own value back --
-                // but the *other* layer still has to be told, since the host
-                // only moved the one under the pointer. That can be the marks
-                // layer: it covers the page exactly and, while visible, is the
-                // topmost thing `scrollablePaneAt` finds there.
-                if (so.layer == self.page_layer or so.layer == self.hint_layer or so.layer == self.crop_layer) {
+                // landed. Follow it rather than pushing our own value back.
+                // The marks and the crop box are rects on this same layer,
+                // so they have already moved with it.
+                if (so.layer == self.page_layer) {
                     self.pan = .{ .row = so.row, .col = so.col };
-                    for ([_]glyphwire.LayerHandle{ self.page_layer, self.hint_layer, self.crop_layer }) |other| {
-                        if (other != so.layer) self.client.setLayerScrollOffset(other, so.row, so.col) catch {};
-                    }
                     self.status_dirty = true;
-                    // The crop overlay only draws the rows in view.
-                    if (self.cropping()) self.crop_dirty = true;
                 } else if (so.layer == self.dict_layer) {
                     // The wheel over a side panel taller than its slot.
                     // Only remembered, so PgUp/PgDn continue from here.
@@ -833,9 +815,9 @@ pub const Ui = struct {
         o.hidden = false;
         self.dialog_dirty = true;
         // The current block is marked whether the hints are on or not, so
-        // the marks move with it -- but only the marks: they have their
-        // own layer precisely so stepping through a page's bubbles doesn't
-        // redraw the scaled page once per `Tab`.
+        // the marks move with it -- but only the marks: they are rects,
+        // not part of the page image, so stepping through a page's
+        // bubbles doesn't redraw the scaled page once per `Tab`.
         self.hints_dirty = true;
         self.status_dirty = true;
     }
@@ -985,19 +967,9 @@ pub const Ui = struct {
         );
         try c.setLayerScrollOffset(self.page_layer, self.pan.row, self.pan.col);
 
-        // The marks layer sits exactly on top of the page, so every piece
-        // of the geometry just computed applies to it too. Only for a book
-        // that has OCR: the layer is the size of the *whole scaled page*,
-        // which at 4x is a few hundred thousand server-side cells, and a
-        // book with no sidecar will never write one of them.
-        if (self.ocr != null) {
-            try c.setLayerSize(self.hint_layer, self.layout.cols, self.layout.rows);
-            try c.setLayerViewport(self.hint_layer, @min(self.layout.cols, view.cols), @min(self.layout.rows, view.rows));
-            try c.setLayerCellPosition(self.hint_layer, self.layout.row, self.layout.col);
-            try c.setLayerScrollOffset(self.hint_layer, self.pan.row, self.pan.col);
-            self.hints_dirty = true;
-        }
-
+        // The marks and the crop box are in the scaled page's pixels, and
+        // the scale may just have changed.
+        if (self.ocr != null) self.hints_dirty = true;
         if (self.cropping()) self.crop_dirty = true;
 
         self.prefetch();
@@ -1033,7 +1005,8 @@ pub const Ui = struct {
     const CellRect = struct { row: i64, col: i64, rows: i64, cols: i64 };
 
     /// A block's box in **page-layer** cells -- the grid the artwork is
-    /// drawn on, which is what the region marks are written into.
+    /// drawn on. Only for placing the dialog, which lives on the cell
+    /// grid; the marks themselves are pixel rects (`blockPixelRect`).
     fn blockLayerRect(self: *const Ui, page: *const mokuro.Page, box: mokuro.Box) CellRect {
         const k = self.ocrScale(page);
         const cw: f32 = @floatFromInt(@max(self.cell.w, 1));
@@ -1078,142 +1051,93 @@ pub const Ui = struct {
 
     // -- OCR rendering ----------------------------------------------------
 
-    /// The marks are the **heavy** box-drawing set, not the light one the
-    /// dialog's own border uses. A light vertical is a one-pixel stroke in
-    /// the middle of a cell, and over busy artwork at a small font size it
-    /// disappears -- the heavy set is the only "thicker" a character grid
-    /// offers. See the note on `renderHints` for why this is characters at
-    /// all, and what it costs.
-    const mark_tl = "\u{250f}";
-    const mark_tr = "\u{2513}";
-    const mark_bl = "\u{2517}";
-    const mark_br = "\u{251b}";
-    const mark_h = "\u{2501}";
-    const mark_v = "\u{2503}";
+    /// Outline widths in pixels. The current bubble's is heavier so it
+    /// reads as "this one" among the other marks.
+    const mark_line_width: u32 = 2;
+    const mark_current_line_width: u32 = 3;
 
-    /// Widest and tallest mark drawn, in cells. A bubble bigger than this
-    /// is drawn clipped rather than skipped: at 4x zoom a mark can be
-    /// hundreds of cells across, and the cap bounds both the scratch
-    /// buffer and the per-render message count without ever making a
-    /// bubble unmarked.
-    const mark_max_cols: usize = 400;
-    const mark_max_rows: usize = 400;
+    /// A mokuro box as a rect in `page_layer` pixels, clipped to the
+    /// scaled page. Null when nothing of it is on the page.
+    fn blockPixelRect(self: *const Ui, page: *const mokuro.Page, box: mokuro.Box) ?PixelRect {
+        const k = self.ocrScale(page);
+        return self.pagePixelRect(
+            @as(f32, @floatFromInt(box.x1)) * k.x,
+            @as(f32, @floatFromInt(box.y1)) * k.y,
+            @as(f32, @floatFromInt(box.x2)) * k.x,
+            @as(f32, @floatFromInt(box.y2)) * k.y,
+        );
+    }
+
+    /// A rect in `page_layer` pixels -- the frame `create_rect` takes.
+    const PixelRect = struct { x: u32, y: u32, w: u32, h: u32 };
+
+    /// The span `left..right` x `top..bottom` (in page-layer pixels, any
+    /// order-preserving floats) rounded outward to whole pixels and
+    /// clipped to the scaled page. Null when that leaves nothing.
+    fn pagePixelRect(self: *const Ui, left: f32, top: f32, right: f32, bottom: f32) ?PixelRect {
+        const page_w: f32 = @as(f32, @floatFromInt(self.page_px.w)) * self.layout.scale;
+        const page_h: f32 = @as(f32, @floatFromInt(self.page_px.h)) * self.layout.scale;
+        const l = std.math.clamp(@floor(left), 0, page_w);
+        const t = std.math.clamp(@floor(top), 0, page_h);
+        const r = std.math.clamp(@ceil(right), 0, page_w);
+        const b = std.math.clamp(@ceil(bottom), 0, page_h);
+        if (r <= l or b <= t) return null;
+        return .{
+            .x = @intFromFloat(l),
+            .y = @intFromFloat(t),
+            .w = @intFromFloat(r - l),
+            .h = @intFromFloat(b - t),
+        };
+    }
 
     /// Marks every OCR region on the page (when hints are on) plus the one
-    /// the dialog is showing (always).
+    /// the dialog is showing (always), as outline rects on `page_layer`.
     ///
-    /// **A full rectangle, drawn as one `write_text` per row.** The sides
-    /// matter: two horizontal rules alone read as two unrelated lines
-    /// rather than as a box around a bubble. Each row of the box is a
-    /// single run -- `┃`, interior spaces, `┃` -- written with
-    /// `transparent_bg`, so it costs one cursor move and one write per row
-    /// regardless of width, and the interior spaces are *not* a fill: on
-    /// this layer every cell starts transparent and a space glyph draws
-    /// nothing, so the artwork on the page layer below shows straight
-    /// through the middle of every mark.
-    ///
-    /// That is the cheap version of a shape the cell grid is not really
-    /// the right tool for -- see docs/decisions.md on why a pixel-space
-    /// `draw_rect` would suit OCR boxes better than characters do.
+    /// The whole set is replaced each time -- destroys and creates in one
+    /// batch, so one round trip whatever the page holds. A mark moves only
+    /// when the page, the zoom or the current bubble changes, and a page
+    /// has tens of bubbles at most, so diffing the set isn't worth its
+    /// bookkeeping.
     fn renderHints(self: *Ui) !void {
         self.hints_dirty = false;
-        const o = &(self.ocr orelse return);
-        // The bubble outline would sit inside the crop box, looking like
-        // part of the picture.
-        if (self.cropping()) return self.hideHints();
-
-        const page = o.page orelse return self.hideHints();
-        if (page.blocks.len == 0) return self.hideHints();
-
-        const current: ?usize = blk: {
-            const at = o.at orelse break :blk null;
-            if (at >= o.order.items.len) break :blk null;
-            break :blk o.order.items[at];
-        };
-        // Nothing to mark: hide the layer rather than leave an empty one
-        // on top of the page, so it stops taking the wheel as well.
-        if (!o.hints and current == null) return self.hideHints();
-
-        try self.client.clearOn(self.hint_layer, 0, 0, null, null);
-
-        // Three scratch runs, each built once per render and sliced per
-        // block: the top edge, the bottom edge, and a middle row. Sized
-        // for `mark_max_cols` cells of 3-byte box glyphs.
-        var top_buf: [mark_max_cols * 3]u8 = undefined;
-        var bot_buf: [mark_max_cols * 3]u8 = undefined;
-        var mid_buf: [mark_max_cols * 3]u8 = undefined;
+        const alloc = self.alloc;
 
         var b = self.client.batch();
         defer b.deinit();
-        var any = false;
+        for (self.hint_rects.items) |h| try b.destroyRect(self.page_layer, h);
+        self.hint_rects.clearRetainingCapacity();
 
-        for (page.blocks, 0..) |blk, i| {
-            const is_current = current != null and current.? == i;
-            if (!o.hints and !is_current) continue;
-
-            const r = self.blockLayerRect(page, blk.box);
-            if (r.row < 0 or r.col < 0) continue;
-            const row0: usize = @intCast(r.row);
-            const col0: usize = @intCast(r.col);
-            if (row0 >= self.layout.rows or col0 >= self.layout.cols) continue;
-
-            // Clipped to the layer and to the mark caps, so a box running
-            // off the page draws the part that is on it.
-            const cols = @min(@min(@as(usize, @intCast(r.cols)), self.layout.cols - col0), mark_max_cols);
-            const rows = @min(@min(@as(usize, @intCast(r.rows)), self.layout.rows - row0), mark_max_rows);
-            if (cols < 2 or rows < 1) continue;
-
-            const fg = if (is_current) fg_hint_current else fg_hint;
-            const interior = cols - 2;
-
-            const top = markRow(&top_buf, mark_tl, mark_h, mark_tr, interior);
-            try self.emitMarkRow(&b, row0, col0, top, fg);
-
-            // A one-row box is just its top edge; a two-row box has no
-            // interior. Both are common for a small sound-effect bubble.
-            if (rows >= 3) {
-                const mid = markRow(&mid_buf, mark_v, " ", mark_v, interior);
-                for (row0 + 1..row0 + rows - 1) |row| {
-                    try self.emitMarkRow(&b, row, col0, mid, fg);
-                }
+        var slots: std.ArrayList(glyphwire.Client.Batch.Slot) = .empty;
+        defer slots.deinit(alloc);
+        // The bubble outline would sit inside the crop box, looking like
+        // part of the picture.
+        if (!self.cropping()) if (self.ocr) |*o| if (o.page) |page| {
+            const current: ?usize = blk: {
+                const at = o.at orelse break :blk null;
+                if (at >= o.order.items.len) break :blk null;
+                break :blk o.order.items[at];
+            };
+            for (page.blocks, 0..) |blk, i| {
+                const is_current = current != null and current.? == i;
+                if (!o.hints and !is_current) continue;
+                const r = self.blockPixelRect(page, blk.box) orelse continue;
+                try slots.append(alloc, try b.createRect(self.page_layer, .{
+                    .x = r.x,
+                    .y = r.y,
+                    .w = r.w,
+                    .h = r.h,
+                    .color = if (is_current) fg_hint_current else fg_hint,
+                    .line_width = if (is_current) mark_current_line_width else mark_line_width,
+                }));
             }
-            if (rows >= 2) {
-                const bot = markRow(&bot_buf, mark_bl, mark_h, mark_br, interior);
-                try self.emitMarkRow(&b, row0 + rows - 1, col0, bot, fg);
-            }
-            any = true;
-        }
-        if (!any) return self.hideHints();
+        };
 
         var results = try b.send();
-        results.deinit();
-        try self.client.setLayerVisible(self.hint_layer, true);
-    }
-
-    /// `left` + `interior` copies of `mid` + `right`, into `buf`. The
-    /// caller sizes `buf` for the widest run it will ask for.
-    fn markRow(buf: []u8, left: []const u8, mid: []const u8, right: []const u8, interior: usize) []const u8 {
-        var n: usize = 0;
-        @memcpy(buf[n..][0..left.len], left);
-        n += left.len;
-        for (0..interior) |_| {
-            @memcpy(buf[n..][0..mid.len], mid);
-            n += mid.len;
+        defer results.deinit();
+        try self.hint_rects.ensureTotalCapacity(alloc, slots.items.len);
+        for (slots.items) |slot| {
+            self.hint_rects.appendAssumeCapacity(try results.rectHandle(slot));
         }
-        @memcpy(buf[n..][0..right.len], right);
-        n += right.len;
-        return buf[0..n];
-    }
-
-    fn hideHints(self: *Ui) void {
-        self.client.setLayerVisible(self.hint_layer, false) catch {};
-    }
-
-    /// One row of a mark on the marks layer. Transparent-backgrounded, and
-    /// the layer's cells start blank, so the page shows through both the
-    /// box's interior and the gaps around the glyphs themselves.
-    fn emitMarkRow(self: *Ui, b: *glyphwire.Client.Batch, row: usize, col: usize, text: []const u8, fg: glyphwire.Color) !void {
-        try b.writeTextOpts(text, .{ .layer = self.hint_layer, .row = row, .col = col, .fg = fg, .transparent_bg = true });
     }
 
     /// Draws (and places) the OCR text panel for the block the dialog is
@@ -1981,17 +1905,11 @@ pub const Ui = struct {
         results.deinit();
     }
 
-    /// Moves the viewport over the page. Both layers, always: the marks
-    /// layer is a second window onto the same geometry, and letting the
-    /// two offsets drift would slide every mark off its bubble.
+    /// Moves the viewport over the page. The marks and the crop box are
+    /// rects on the page layer, so they move with it.
     fn applyPan(self: *Ui, row: usize, col: usize) void {
         self.pan = .{ .row = row, .col = col };
         self.client.setLayerScrollOffset(self.page_layer, row, col) catch {};
-        self.client.setLayerScrollOffset(self.hint_layer, row, col) catch {};
-        if (self.cropping()) {
-            self.client.setLayerScrollOffset(self.crop_layer, row, col) catch {};
-            self.crop_dirty = true;
-        }
     }
 
     fn clampPan(self: *Ui) void {
@@ -3302,71 +3220,79 @@ pub const Ui = struct {
         self.crop_dirty = true;
     }
 
-    /// Draws the crop box on `crop_layer`, or hides the layer when no
-    /// card is cropping. The layer mirrors the page's geometry exactly
-    /// (the same arrangement as `hint_layer`), and the box is snapped out
-    /// to the cells its pixels touch.
+    /// Outline width of the crop box, in pixels.
+    const crop_line_width: u32 = 2;
+
+    /// Draws the crop box as rects on `page_layer` -- four filled,
+    /// translucent shades covering the page around the box, and the box's
+    /// outline -- or removes them when no card is cropping. In the scaled
+    /// page's own pixels, so the box sits exactly on the pixels that will
+    /// be cut and pans with the page by itself.
     ///
-    /// Only the rows in the viewport are written -- at 8x zoom the layer
-    /// is over a thousand rows, and every pointer move redraws -- so a
-    /// pan marks this dirty again (`applyPan`, the `scroll_offset`
-    /// handler). Each row is at most three writes: shade to the left of
-    /// the box, the box's own run (edge glyphs with a transparent
-    /// interior, like the OCR marks), shade to the right; a row outside
-    /// the box is one padded write of shade.
+    /// The rects are created once on entering the crop step (one round
+    /// trip) and only `update_rect`-ed after that: a drag redraws on every
+    /// cell of pointer motion, which is then one small notification batch.
     fn renderCrop(self: *Ui) !void {
         self.crop_dirty = false;
-        const c = self.client;
-        const cd = self.card orelse return c.setLayerVisible(self.crop_layer, false);
-        if (cd.phase != .crop) return c.setLayerVisible(self.crop_layer, false);
-
-        const view = self.pageView();
-        const cols = self.layout.cols;
-        const rows = self.layout.rows;
-        const cw: f32 = @floatFromInt(@max(self.cell.w, 1));
-        const ch: f32 = @floatFromInt(@max(self.cell.h, 1));
-        const k = self.layout.scale;
-        const box = cd.box;
-        const c0: usize = @intFromFloat(@max(@floor(@as(f32, @floatFromInt(box.x)) * k / cw), 0));
-        const r0: usize = @intFromFloat(@max(@floor(@as(f32, @floatFromInt(box.y)) * k / ch), 0));
-        const c1: usize = @min(@as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(box.right())) * k / cw))), cols);
-        const r1: usize = @min(@as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(box.bottom())) * k / ch))), rows);
-        const box_cols = @max(c1 -| c0, 2);
-        const box_rows = @max(r1 -| r0, 2);
-
-        var b = c.batch();
+        const layer = self.page_layer;
+        var b = self.client.batch();
         defer b.deinit();
-        try b.setLayerSize(self.crop_layer, cols, rows);
-        try b.setLayerViewport(self.crop_layer, @min(cols, view.cols), @min(rows, view.rows));
-        try b.setLayerCellPosition(self.crop_layer, self.layout.row, self.layout.col);
-        try b.setLayerScrollOffset(self.crop_layer, self.pan.row, self.pan.col);
-        try b.clearOn(self.crop_layer, 0, 0, null, null);
 
-        const interior = box_cols - 2;
-        const top = try self.alloc.alloc(u8, box_cols * mark_h.len);
-        defer self.alloc.free(top);
-        const mid = try self.alloc.alloc(u8, box_cols * mark_h.len);
-        defer self.alloc.free(mid);
-        const bot = try self.alloc.alloc(u8, box_cols * mark_h.len);
-        defer self.alloc.free(bot);
-        const top_run = markRow(top, mark_tl, mark_h, mark_tr, interior);
-        const mid_run = markRow(mid, mark_v, " ", mark_v, interior);
-        const bot_run = markRow(bot, mark_bl, mark_h, mark_br, interior);
+        const cd = self.card orelse return self.destroyCropRects(&b);
+        if (cd.phase != .crop) return self.destroyCropRects(&b);
 
-        const first = @min(self.pan.row, rows);
-        const last = @min(self.pan.row + view.rows, rows);
-        for (first..last) |row| {
-            if (row < r0 or row >= r0 + box_rows) {
-                try b.writeTextOpts(" ", .{ .layer = self.crop_layer, .row = row, .col = 0, .bg = bg_crop_shade, .max_cols = cols, .pad = true });
-                continue;
+        const k = self.layout.scale;
+        const page_w: f32 = @as(f32, @floatFromInt(self.page_px.w)) * k;
+        const page_h: f32 = @as(f32, @floatFromInt(self.page_px.h)) * k;
+        const left: f32 = @as(f32, @floatFromInt(cd.box.x)) * k;
+        const top: f32 = @as(f32, @floatFromInt(cd.box.y)) * k;
+        const right: f32 = @as(f32, @floatFromInt(cd.box.right())) * k;
+        const bottom: f32 = @as(f32, @floatFromInt(cd.box.bottom())) * k;
+
+        // Above, below, left of and right of the box; an empty band (the
+        // box touching that page edge) is a zero-size rect, which paints
+        // nothing but keeps its handle for the next move.
+        const empty: PixelRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        const shapes = [5]struct { r: PixelRect, filled: bool, color: glyphwire.Color }{
+            .{ .r = self.pagePixelRect(0, 0, page_w, top) orelse empty, .filled = true, .color = bg_crop_shade },
+            .{ .r = self.pagePixelRect(0, bottom, page_w, page_h) orelse empty, .filled = true, .color = bg_crop_shade },
+            .{ .r = self.pagePixelRect(0, top, left, bottom) orelse empty, .filled = true, .color = bg_crop_shade },
+            .{ .r = self.pagePixelRect(right, top, page_w, bottom) orelse empty, .filled = true, .color = bg_crop_shade },
+            .{ .r = self.pagePixelRect(left, top, right, bottom) orelse empty, .filled = false, .color = fg_hint_current },
+        };
+
+        if (self.crop_rects) |handles| {
+            for (shapes, handles) |s, h| {
+                try b.updateRect(layer, h, .{ .x = s.r.x, .y = s.r.y, .w = s.r.w, .h = s.r.h });
             }
-            if (c0 > 0) try b.writeTextOpts(" ", .{ .layer = self.crop_layer, .row = row, .col = 0, .bg = bg_crop_shade, .max_cols = c0, .pad = true });
-            const edge = if (row == r0) top_run else if (row == r0 + box_rows - 1) bot_run else mid_run;
-            try b.writeTextOpts(edge, .{ .layer = self.crop_layer, .row = row, .col = c0, .fg = fg_hint_current, .transparent_bg = true });
-            const after = c0 + box_cols;
-            if (after < cols) try b.writeTextOpts(" ", .{ .layer = self.crop_layer, .row = row, .col = after, .bg = bg_crop_shade, .max_cols = cols - after, .pad = true });
+            var results = try b.send();
+            results.deinit();
+            return;
         }
-        try b.setLayerVisible(self.crop_layer, true);
+
+        var slots: [5]glyphwire.Client.Batch.Slot = undefined;
+        for (shapes, &slots) |s, *slot| {
+            slot.* = try b.createRect(layer, .{
+                .x = s.r.x,
+                .y = s.r.y,
+                .w = s.r.w,
+                .h = s.r.h,
+                .color = s.color,
+                .filled = s.filled,
+                .line_width = crop_line_width,
+            });
+        }
+        var results = try b.send();
+        defer results.deinit();
+        var handles: [5]glyphwire.RectHandle = undefined;
+        for (slots, &handles) |slot, *h| h.* = try results.rectHandle(slot);
+        self.crop_rects = handles;
+    }
+
+    fn destroyCropRects(self: *Ui, b: *glyphwire.Client.Batch) !void {
+        const handles = self.crop_rects orelse return;
+        self.crop_rects = null;
+        for (handles) |h| try b.destroyRect(self.page_layer, h);
         var results = try b.send();
         results.deinit();
     }

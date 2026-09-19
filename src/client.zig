@@ -1701,7 +1701,14 @@ pub const Client = struct {
     /// handle for `updateRect`/`destroyRect`. Position/size are in the
     /// layer's own content pixel space -- see `core.Rect`'s doc comment.
     pub fn createRect(self: *Client, layer: ?core.LayerHandle, rect: core.Rect) !core.RectHandle {
-        var parsed = try self.request(struct { handle: core.RectHandle }, "create_rect", .{
+        var parsed = try self.request(struct { handle: core.RectHandle }, "create_rect", rectParams(layer, rect));
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    /// `create_rect`'s wire params. Shared with `Batch.createRect`.
+    fn rectParams(layer: ?core.LayerHandle, rect: core.Rect) RectWire {
+        return .{
             .layer = layer,
             .x = rect.x,
             .y = rect.y,
@@ -1710,16 +1717,30 @@ pub const Client = struct {
             .color = protocol.Color{ .r = rect.color.r, .g = rect.color.g, .b = rect.color.b, .a = rect.color.a },
             .line_width = rect.line_width,
             .filled = rect.filled,
-        });
-        defer parsed.deinit();
-        return parsed.value.result.handle;
+        };
     }
+
+    const RectWire = struct {
+        layer: ?core.LayerHandle,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        color: protocol.Color,
+        line_width: u32,
+        filled: bool,
+    };
 
     /// `update_rect(layer?, rect, ...)` -- a notification. Merges `patch`'s
     /// non-null fields into the existing rect; a field left `null` keeps
     /// its current value -- see `core.RectUpdate`'s doc comment.
     pub fn updateRect(self: *Client, layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) !void {
-        try self.notify("update_rect", .{
+        try self.notify("update_rect", rectUpdateParams(layer, handle, patch));
+    }
+
+    /// `update_rect`'s wire params. Shared with `Batch.updateRect`.
+    fn rectUpdateParams(layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) RectUpdateWire {
+        return .{
             .layer = layer,
             .rect = handle,
             .x = patch.x,
@@ -1729,8 +1750,20 @@ pub const Client = struct {
             .color = Client.colorToJson(patch.color),
             .line_width = patch.line_width,
             .filled = patch.filled,
-        });
+        };
     }
+
+    const RectUpdateWire = struct {
+        layer: ?core.LayerHandle,
+        rect: core.RectHandle,
+        x: ?u32,
+        y: ?u32,
+        w: ?u32,
+        h: ?u32,
+        color: ?protocol.Color,
+        line_width: ?u32,
+        filled: ?bool,
+    };
 
     /// `destroy_rect(layer?, rect)` -- a notification. Removes the rect;
     /// it stops painting immediately.
@@ -2306,6 +2339,23 @@ pub const Client = struct {
             try self.notify("lower_layer", .{ .layer = layer, .below = below });
         }
 
+        /// Batched `create_rect` -- see `Client.createRect`. Resolve the
+        /// returned slot with `BatchResults.rectHandle`: a page's worth of
+        /// rects is then one round trip rather than one per rect.
+        pub fn createRect(self: *Batch, layer: ?core.LayerHandle, rect: core.Rect) !Slot {
+            return self.request("create_rect", Client.rectParams(layer, rect));
+        }
+
+        /// Batched `update_rect` -- see `Client.updateRect`.
+        pub fn updateRect(self: *Batch, layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) !void {
+            try self.notify("update_rect", Client.rectUpdateParams(layer, handle, patch));
+        }
+
+        /// Batched `destroy_rect` -- see `Client.destroyRect`.
+        pub fn destroyRect(self: *Batch, layer: ?core.LayerHandle, handle: core.RectHandle) !void {
+            try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
+        }
+
         /// Batched `create_metadata` -- see `Client.createMetadata`.
         /// Resolve the returned slot with `BatchResults.metadataHandle`.
         pub fn createMetadata(self: *Batch, json: []const u8) !Slot {
@@ -2442,6 +2492,12 @@ pub const BatchResults = struct {
     /// the `MetadataHandle`.
     pub fn metadataHandle(self: *BatchResults, slot: Client.Batch.Slot) !core.MetadataHandle {
         const r = try self.get(struct { handle: core.MetadataHandle }, slot);
+        return r.handle;
+    }
+
+    /// The rect handle a batched `create_rect` returned.
+    pub fn rectHandle(self: *BatchResults, slot: Client.Batch.Slot) !core.RectHandle {
+        const r = try self.get(struct { handle: core.RectHandle }, slot);
         return r.handle;
     }
 };

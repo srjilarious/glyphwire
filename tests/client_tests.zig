@@ -560,6 +560,51 @@ pub fn clientBatchRequestFormReturnsSlottedResultsTest(io: std.Io, alloc: std.me
     try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
 }
 
+/// Batched `create_rect`/`update_rect`/`destroy_rect`: several rects in
+/// one round trip, each handle resolved from its slot, and the updates
+/// and destroys applied by the next batch.
+pub fn clientBatchCreatesUpdatesAndDestroysRectsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const red: glyphwire.Color = .{ .r = 255, .g = 0, .b = 0 };
+    var b = client.batch();
+    defer b.deinit();
+    const slot_a = try b.createRect(null, .{ .x = 1, .y = 2, .w = 30, .h = 40, .color = red });
+    const slot_b = try b.createRect(null, .{ .x = 5, .y = 6, .w = 7, .h = 8, .color = red, .filled = true });
+    var results = try b.send();
+    defer results.deinit();
+    const a = try results.rectHandle(slot_a);
+    const b_handle = try results.rectHandle(slot_b);
+    try testz.expectTrue(a != b_handle);
+    try testz.expectEqual(ctx.root.rects.count(), 2);
+
+    var b2 = client.batch();
+    defer b2.deinit();
+    try b2.updateRect(null, a, .{ .x = 11 });
+    try b2.destroyRect(null, b_handle);
+    var results2 = try b2.send();
+    results2.deinit();
+
+    // A request after the notification batch, so it has been applied.
+    _ = try client.getCursor();
+    try testz.expectEqual(ctx.root.rects.count(), 1);
+    try testz.expectEqual(ctx.root.rects.get(a).?.x, 11);
+    try testz.expectEqual(ctx.root.rects.get(a).?.w, 30);
+}
+
 /// A notification-form `Client.Batch` (no request adders) sends one
 /// frame and returns immediately -- no response is read -- with every
 /// sub-message applied in order.
