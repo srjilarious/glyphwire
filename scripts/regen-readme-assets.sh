@@ -35,15 +35,21 @@ fi
 # ls-table uses -S (compact one-line rows) so the whole table fits the
 # frame without scrolling the header off; it still exercises the table
 # widget (columns, alt-row stripes, magnitude-coloured sizes).
+# gw-read has no scene: a good shot needs a book with a mokuro sidecar and
+# a word selected in the OCR dialog, so docs/images/gw-read.png is taken by
+# hand.
 declare -A scenes=(
     [ls-grid]='ls'
     [ls-table]='ls -l -S'
     [demo]='glyphwire-demo'
+    [zoe]='zoe src/client.zig'
+    [salacommander]='salacommander . docs'
+    [gwmd]='gwmd docs/protocol.md'
 )
 
 wanted=("$@")
 if [[ ${#wanted[@]} -eq 0 ]]; then
-    wanted=(ls-grid ls-table demo)
+    wanted=(ls-grid ls-table demo zoe salacommander gwmd)
 fi
 
 echo "==> building (zig build)"
@@ -74,6 +80,9 @@ for scene in "${wanted[@]}"; do
     pkill -f 'zig-out/bin/gw-shell' 2>/dev/null || true
     pkill -f 'zig-out/bin/glyphwire-demo' 2>/dev/null || true
     pkill -f 'zig-out/bin/gw-ls' 2>/dev/null || true
+    pkill -f 'zig-out/bin/zoe' 2>/dev/null || true
+    pkill -f 'zig-out/bin/salacommander' 2>/dev/null || true
+    pkill -f 'zig-out/bin/gwmd' 2>/dev/null || true
 
     if [[ -f "$png" ]]; then
         echo "    wrote $(du -h "$png" | cut -f1)  $png"
