@@ -1734,7 +1734,11 @@ pub const Renderer = struct {
             // with a pane tree installed, one pane's cursor says nothing
             // about how far down the window has content, so capture the
             // whole grid.
-            if (server.session.root_pane_split != null) {
+            //
+            // The same goes for a full-screen program (zoe, gwmd,
+            // salacommander) that has put its own context on screen: the
+            // shell's cursor is hidden behind it, so crop nothing.
+            if (server.session.root_pane_split != null or self.showsOtherContext()) {
                 used_rows = geometry.grid_rows;
             } else {
                 used_rows = @max(geometry.min_grid_rows, server.ctx.root.cursor.row + 2);
@@ -1793,6 +1797,18 @@ pub const Renderer = struct {
             return;
         };
         std.log.info("glyphwire-host: wrote screenshot {s} ({d}x{d})", .{ path, uw, uh });
+    }
+
+    /// Whether some mapped pane has a program's context stacked over its
+    /// base (shell) context. `server.ctx` can't answer this: it follows
+    /// focus, so it *is* the full-screen program's context by then.
+    /// Caller holds `ctx_mutex`.
+    fn showsOtherContext(self: *Renderer) bool {
+        var it = self.app.server.session.panes.valueIterator();
+        while (it.next()) |pane| {
+            if (pane.mapped and pane.stack.items.len > 1) return true;
+        }
+        return false;
     }
 
     /// The bands between split children, drawn as a flat separator. Their

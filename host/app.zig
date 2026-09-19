@@ -407,6 +407,12 @@ pub const App = struct {
         // The HUD shows live numbers, so it repaints continuously while
         // visible -- `idleTimeoutMs` bounds that to ~10 Hz.
         if (self.profiler.hud_visible) return true;
+        // A pending `--screenshot` is taken inside `render`, so once its
+        // delay has passed the frame must be drawn even if nothing on
+        // screen changed -- a static full-screen program (gwmd,
+        // salacommander) would otherwise never be captured.
+        if (self.screenshot.path != null and !self.screenshot.done and
+            self.screenshot.elapsed_ms >= self.screenshot.delay_ms) return true;
 
         const need = if (self.redraw_prev) |prev| !std.meta.eql(prev, cur) else true;
         if (!need) self.profiler.markSkipped();
