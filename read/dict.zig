@@ -804,12 +804,21 @@ fn jsonInt(v: std.json.Value) ?i64 {
     };
 }
 
-/// Flattens one glossary entry to plain text. A v3 term bank's glossary
-/// items are plain strings; Jitendex and other structured-content
-/// dictionaries nest tagged objects instead -- `{"tag": "...", "content":
-/// [...]}`  and similar -- so every string leaf under `v` is collected in
-/// document order, space-separated, rather than any of it being rendered
-/// (headings, emphasis, the term-tag badges) as anything but text.
+/// Flattens one entry's glossary to plain text, one string per sense. A
+/// v3 term bank's glossary items are plain strings, one sense each.
+/// Jitendex and other structured-content dictionaries nest tagged
+/// objects instead -- `{"tag": "...", "content": [...]}` -- and mark each
+/// sense's glosses as a list with `data.content = "glossary"`; each such
+/// list becomes one string, its items joined with "; ". Everything
+/// around the lists (part-of-speech badges, notes, example sentences,
+/// the forms table, the JMdict credit) is left out: the lookup panel and
+/// an Anki card's Meaning both want what the word means, and the rest
+/// flattened into one line read as noise ("exp kana everybody ... 正 しょう
+/// 直 じき ... JMdict | Tatoeba").
+///
+/// A structured entry with no glossary lists falls back to every text
+/// leaf in document order, minus the same badges, ruby readings and
+/// credit (`flattenText`).
 fn parseGlossary(a: std.mem.Allocator, v: std.json.Value) std.mem.Allocator.Error![]const []const u8 {
     const arr = switch (v) {
         .array => |arr| arr,
@@ -817,6 +826,10 @@ fn parseGlossary(a: std.mem.Allocator, v: std.json.Value) std.mem.Allocator.Erro
     };
     var out: std.ArrayList([]const u8) = .empty;
     for (arr.items) |item| {
+        const before = out.items.len;
+        try collectGlossaryLists(a, item, &out);
+        if (out.items.len > before) continue;
+
         var buf: std.ArrayList(u8) = .empty;
         try flattenText(a, item, &buf);
         if (buf.items.len == 0) {
@@ -828,6 +841,50 @@ fn parseGlossary(a: std.mem.Allocator, v: std.json.Value) std.mem.Allocator.Erro
     return out.toOwnedSlice(a);
 }
 
+/// `data.content` of a structured-content node, or "".
+fn dataContent(obj: std.json.ObjectMap) []const u8 {
+    const data = obj.get("data") orelse return "";
+    if (data != .object) return "";
+    const c = data.object.get("content") orelse return "";
+    return if (c == .string) c.string else "";
+}
+
+/// Appends one string per `data.content = "glossary"` list under `v`,
+/// each item flattened and joined with "; ".
+fn collectGlossaryLists(a: std.mem.Allocator, v: std.json.Value, out: *std.ArrayList([]const u8)) std.mem.Allocator.Error!void {
+    switch (v) {
+        .array => |arr| for (arr.items) |item| try collectGlossaryLists(a, item, out),
+        .object => |obj| {
+            const content = obj.get("content") orelse return;
+            if (!std.mem.eql(u8, dataContent(obj), "glossary")) return collectGlossaryLists(a, content, out);
+
+            var buf: std.ArrayList(u8) = .empty;
+            const items: []const std.json.Value = switch (content) {
+                .array => |arr| arr.items,
+                else => &.{content},
+            };
+            for (items) |item| {
+                var gloss: std.ArrayList(u8) = .empty;
+                defer gloss.deinit(a);
+                try flattenText(a, item, &gloss);
+                if (gloss.items.len == 0) continue;
+                if (buf.items.len > 0) try buf.appendSlice(a, "; ");
+                try buf.appendSlice(a, gloss.items);
+            }
+            if (buf.items.len == 0) {
+                buf.deinit(a);
+                return;
+            }
+            try out.append(a, try buf.toOwnedSlice(a));
+        },
+        else => {},
+    }
+}
+
+/// Every text leaf under `v`, space-separated, in document order --
+/// except ruby readings (`rt`, which would put 正 しょう side by side),
+/// tag badges (`data.class = "tag"`), and the forms table and credit
+/// line, none of which are part of what the entry says.
 fn flattenText(a: std.mem.Allocator, v: std.json.Value, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
     switch (v) {
         .string => |s| {
@@ -836,7 +893,15 @@ fn flattenText(a: std.mem.Allocator, v: std.json.Value, out: *std.ArrayList(u8))
             try out.appendSlice(a, s);
         },
         .array => |arr| for (arr.items) |item| try flattenText(a, item, out),
-        .object => |obj| if (obj.get("content")) |c| try flattenText(a, c, out),
+        .object => |obj| {
+            if (obj.get("tag")) |t| if (t == .string and std.mem.eql(u8, t.string, "rt")) return;
+            if (obj.get("data")) |data| if (data == .object) {
+                if (data.object.get("class")) |cls| if (cls == .string and std.mem.eql(u8, cls.string, "tag")) return;
+            };
+            const role = dataContent(obj);
+            if (std.mem.eql(u8, role, "forms") or std.mem.eql(u8, role, "attribution")) return;
+            if (obj.get("content")) |c| try flattenText(a, c, out);
+        },
         else => {},
     }
 }
@@ -878,8 +943,9 @@ const schema_sql =
 /// Bumped whenever `schema_sql` or what gets stored in it changes, so an
 /// index built by an older gw-read is rebuilt rather than queried with
 /// columns it doesn't have. 2 added `score`, the `reading` index, and
-/// empty readings stored as the term.
-pub const schema_version = "2";
+/// empty readings stored as the term. 3 stores structured glossaries as
+/// one string per sense list, without badges, examples or credits.
+pub const schema_version = "3";
 
 const insert_sql = "INSERT INTO entries (term, reading, rules, glossary, sequence, score) VALUES (?, ?, ?, ?, ?, ?)";
 

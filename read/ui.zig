@@ -3434,6 +3434,11 @@ pub const Ui = struct {
         future.await(io);
         const result = sending.job.takeResult();
         sending.job.destroy();
+        // Off `.sending` before anything else looks at the phase: the job
+        // is gone, and `clearCard` on the success path below would
+        // otherwise cancel and free it a second time (the crash on every
+        // successfully added card).
+        cd.phase = .preview;
 
         const r = result orelse return self.failCard("the request produced no result");
         switch (r) {

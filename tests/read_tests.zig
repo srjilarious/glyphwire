@@ -1296,6 +1296,47 @@ pub fn dictFlattensStructuredContentGlossaryTest(_: std.Io, alloc: std.mem.Alloc
     try testz.expectEqualStr(m.hits[0].entry.glossary[0], "kind, gentle");
 }
 
+pub fn dictKeepsOnlyTheGlossesOfJitendexSensesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Trimmed from Jitendex's 何奴も此奴も: badges, a glossary list, a
+    // note, an example with ruby, the forms table and the credit line.
+    var d = try dict.openMemory(alloc, &.{
+        \\[["何奴も此奴も","どいつもこいつも","","exp",0,[{"type":"structured-content","content":[
+        \\ {"tag":"div","data":{"content":"sense-group"},"content":[
+        \\  {"tag":"span","data":{"class":"tag","content":"part-of-speech-info"},"content":"exp"},
+        \\  {"tag":"span","data":{"class":"tag","content":"misc-info"},"content":"kana"},
+        \\  {"tag":"div","data":{"content":"sense"},"content":[
+        \\   {"tag":"ul","data":{"content":"glossary"},"content":[{"tag":"li","content":"everybody"},{"tag":"li","content":"all"}]},
+        \\   {"tag":"div","data":{"content":"extra-info"},"content":[
+        \\    {"tag":"div","data":{"content":"sense-note"},"content":"usu. negative nuance"},
+        \\    {"tag":"span","content":[{"tag":"ruby","content":["正",{"tag":"rt","content":"しょう"}]}]}]}]}]},
+        \\ {"tag":"ul","data":{"content":"glossary"},"content":{"tag":"li","content":"one and all"}},
+        \\ {"tag":"div","data":{"content":"forms"},"content":"forms 何奴も此奴も"},
+        \\ {"tag":"div","data":{"content":"attribution"},"content":["JMdict"," | ","Tatoeba"]}]}],1,""]]
+    }, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "何奴も此奴も")).?;
+    defer m.deinit(alloc);
+    const g = m.hits[0].entry.glossary;
+    try testz.expectEqual(g.len, 2);
+    try testz.expectEqualStr(g[0], "everybody; all");
+    // A second list -- a second sense -- is a second string.
+    try testz.expectEqualStr(g[1], "one and all");
+}
+
+pub fn dictFallbackFlattenSkipsRubyAndBadgesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // No glossary lists: every text leaf, minus readings and badges.
+    var d = try dict.openMemory(alloc, &.{
+        \\[["正直","しょうじき","","n",0,[{"type":"structured-content","content":[
+        \\ {"tag":"span","data":{"class":"tag"},"content":"n"},
+        \\ {"tag":"ruby","content":["正",{"tag":"rt","content":"しょう"}]},
+        \\ "honesty"]}],1,""]]
+    }, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "正直")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.glossary[0], "正 honesty");
+}
+
 pub fn dictTreatsGarbageAsAnEmptyBankTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var d = try dict.openMemory(alloc, &.{ "", "not json", "{}", "[1,2,3]" }, null);
     defer d.deinit();
@@ -1707,10 +1748,12 @@ pub fn ankiFuriganaWholeWordAndKanaOnlyCasesTest(_: std.Io, alloc: std.mem.Alloc
     // One kanji run: the whole reading, however irregular.
     try expectFurigana(alloc, "犯罪集団", "はんざいしゅうだん", "犯罪集団[はんざいしゅうだん]");
     try expectFurigana(alloc, "今日", "きょう", "今日[きょう]");
-    // Kana only, or no reading: nothing to bracket.
-    try expectFurigana(alloc, "すごい", "すごい", "すごい");
-    try expectFurigana(alloc, "テレビ", "てれび", "テレビ");
-    try expectFurigana(alloc, "尊敬", "", "尊敬");
+    // Kana only, or no reading: no furigana at all, rather than the
+    // Term field over again.
+    try expectFurigana(alloc, "すごい", "すごい", "");
+    try expectFurigana(alloc, "どいつもこいつも", "どいつもこいつも", "");
+    try expectFurigana(alloc, "テレビ", "てれび", "");
+    try expectFurigana(alloc, "尊敬", "", "");
 }
 
 pub fn ankiFuriganaFallsBackWhenTheKanaDisagreeTest(_: std.Io, alloc: std.mem.Allocator) !void {

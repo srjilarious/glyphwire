@@ -361,13 +361,17 @@ pub fn writeHtml(w: *std.Io.Writer, text: []const u8) !void {
 /// off when a later kana run doesn't line up. A term that won't align --
 /// irregular readings like 今日/きょう are fine, but a reading that
 /// disagrees with the term's own kana isn't -- falls back to one bracket
-/// over the whole term. A kana-only term, or no reading, is the term
-/// alone.
+/// over the whole term. A term with nothing to read -- kana only, or no
+/// reading given -- has no furigana at all and comes back empty, so the
+/// card's Furigana field doesn't just repeat the Term field.
 pub fn furigana(alloc: std.mem.Allocator, term: []const u8, reading: []const u8) ![]u8 {
-    if (reading.len == 0 or std.mem.eql(u8, term, reading)) return alloc.dupe(u8, term);
-
     const t = try codepoints(alloc, term);
     defer alloc.free(t);
+    var any_kanji = false;
+    for (t) |cp| {
+        if (isKanji(cp)) any_kanji = true;
+    }
+    if (!any_kanji or reading.len == 0 or std.mem.eql(u8, term, reading)) return alloc.alloc(u8, 0);
     const r = try codepoints(alloc, reading);
     defer alloc.free(r);
 
@@ -434,6 +438,12 @@ fn align_(t: []const u21, r: []const u21, runs: []const Run, k: usize, pos: usiz
         if (align_(t, r, runs, k + 1, pos + take, shares)) return true;
     }
     return false;
+}
+
+/// CJK ideographs (the main block, extension A, compatibility) and 々,
+/// the repeat mark that stands in for one.
+fn isKanji(cp: u21) bool {
+    return (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0x3400 and cp <= 0x4DBF) or (cp >= 0xF900 and cp <= 0xFAFF) or cp == 0x3005;
 }
 
 fn isKana(cp: u21) bool {
