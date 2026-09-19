@@ -55,11 +55,14 @@ pub fn build(b: *std.Build) void {
     });
     ls_support_mod.addImport("glyphwire", glyphwire_mod);
 
-    // Pure, engine-free pieces of glyphwire (pixel/cell geometry,
-    // scrollbar math, `host.conf.lua` value clamps, the key-repeat timer) so
-    // the test runner can exercise them without an SDL/OpenGL link. Same
-    // cross-directory-module reason as `shell_support` / `ls_support`;
-    // imports `glyphwire` only for `CellPos` in `geometry.cellFromPixel`.
+    // Windowless pieces of glyphwire-host (pixel/cell geometry, scrollbar
+    // math, `host.conf.lua` value clamps, the key-repeat policy) so the
+    // test runner can exercise them without standing up a window or a GL
+    // context. Same cross-directory-module reason as `shell_support` /
+    // `ls_support`; imports `glyphwire` for `CellPos` in
+    // `geometry.cellFromPixel` and `host_eng` for the `Key` enum
+    // `key_repeat.repeatsKey` classifies (added below, once the engine
+    // module exists).
     const host_support_mod = b.addModule("host_support", .{
         .root_source_file = b.path("host/support.zig"),
     });
@@ -139,6 +142,10 @@ pub fn build(b: *std.Build) void {
     host_eng_mod.addImport("ziglua", ziglua_mod);
     host_eng_mod.addImport("stb_truetype", stbtt_mod);
     host_eng_mod.addImport("c_time", time_c_translate.createModule());
+    // `host/key_repeat.zig` classifies the engine's `Key` enum and hands
+    // back its `KeyRepeat` timing, so the windowless host module needs
+    // the engine's types (not a window or a GL context).
+    host_support_mod.addImport("host_eng", host_eng_mod);
 
     // shell/config.zig lives in this module and imports ziglua; both
     // gw-shell and the test runner pull it in transitively.

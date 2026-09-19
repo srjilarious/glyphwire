@@ -181,3 +181,95 @@ pub fn modifiersFollowPhysicalKeysTest(_: std.Io, _: std.mem.Allocator) !void {
     kb.set(.right_control, false);
     try testz.expectFalse(kb.ctrl());
 }
+
+// ─── typematic repeat ─────────────────────────────────────────────────
+
+/// One tick of the engine loop's key handling: the press/hold state is
+/// already in `curr`, `tickRepeats` republishes this tick's repeat bits,
+/// then `finishTick` rolls `curr` into `prev` for the next tick's edge
+/// comparison.
+fn repeatTick(kb: *host_eng.input.Keyboard, delta_ms: f64) void {
+    kb.tickRepeats(delta_ms);
+    kb.finishTick();
+}
+
+pub fn keyRepeatWaitsOutInitialDelayTest(_: std.Io, _: std.mem.Allocator) !void {
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 100, .interval_ms = 20 };
+
+    // The press edge is `pressed`'s to report, never a repeat.
+    kb.set(.page_down, true);
+    kb.tickRepeats(16);
+    try testz.expectFalse(kb.repeated(.page_down));
+    kb.finishTick();
+
+    // Still inside the initial hold.
+    repeatTick(&kb, 80);
+    try testz.expectFalse(kb.repeated(.page_down));
+
+    // Crossing the delay fires the first repeat, then one per interval.
+    kb.tickRepeats(20);
+    try testz.expectTrue(kb.repeated(.page_down));
+    kb.finishTick();
+    repeatTick(&kb, 10);
+    try testz.expectFalse(kb.repeated(.page_down));
+    kb.tickRepeats(10);
+    try testz.expectTrue(kb.repeated(.page_down));
+}
+
+pub fn keyRepeatEqualDelayAndIntervalHasNoHoldTest(_: std.Io, _: std.mem.Allocator) !void {
+    // zoe's setting: `delay_ms == interval_ms`, so the first repeat lands
+    // one interval after the press rather than after a longer hold.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 30, .interval_ms = 30 };
+
+    kb.set(.down, true);
+    repeatTick(&kb, 16);
+    kb.tickRepeats(30);
+    try testz.expectTrue(kb.repeated(.down));
+}
+
+pub fn keyRepeatReleaseResetsHoldTest(_: std.Io, _: std.mem.Allocator) !void {
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 100, .interval_ms = 20 };
+
+    kb.set(.left, true);
+    repeatTick(&kb, 16);
+    repeatTick(&kb, 200); // repeating by now
+    kb.set(.left, false);
+    repeatTick(&kb, 16);
+
+    // A fresh press waits out the whole initial delay again rather than
+    // picking up where the last hold left off.
+    kb.set(.left, true);
+    repeatTick(&kb, 16);
+    kb.tickRepeats(90);
+    try testz.expectFalse(kb.repeated(.left));
+}
+
+pub fn keyRepeatDisabledNeverFiresTest(_: std.Io, _: std.mem.Allocator) !void {
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 10, .interval_ms = 10, .enabled = false };
+
+    kb.set(.backspace, true);
+    repeatTick(&kb, 16);
+    kb.tickRepeats(1000);
+    try testz.expectFalse(kb.repeated(.backspace));
+}
+
+pub fn keyRepeatClearDropsPendingRepeatTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Focus loss drops the hold along with the key itself, so a key held
+    // as the window went away can't keep repeating into the next focus.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 10, .interval_ms = 10 };
+
+    kb.set(.up, true);
+    repeatTick(&kb, 16);
+    kb.tickRepeats(100);
+    try testz.expectTrue(kb.repeated(.up));
+
+    kb.clear();
+    try testz.expectFalse(kb.repeated(.up));
+    kb.tickRepeats(1000);
+    try testz.expectFalse(kb.repeated(.up));
+}

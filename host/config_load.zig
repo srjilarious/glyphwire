@@ -7,6 +7,7 @@ const host_eng = @import("host_eng");
 
 const config = @import("config.zig");
 const geometry = @import("geometry.zig");
+const key_repeat = @import("key_repeat.zig");
 
 const HostConfig = config.HostConfig;
 
@@ -87,9 +88,10 @@ fn runConfigScript(lua: *Lua, code: [:0]const u8) !void {
 /// the `*_default` constants and overlays whatever the global `config`
 /// table in `~/.config/glyphwire/host.conf.lua` (see `configDirPath`)
 /// sets -- font fields (`font_face`, `font_face_name`, `font_fallback`,
-/// `font_size`),
-/// caret fields (`cursor_shape`, `cursor_blink`, `cursor_blink_ms`), and
-/// grid fields (`grid_cols`, `grid_rows`, `scrollback_rows`), any subset.
+/// `font_size`), caret fields (`cursor_shape`, `cursor_blink`,
+/// `cursor_blink_ms`), key repeat (`key_repeat_delay_ms`,
+/// `key_repeat_interval_ms`), and grid fields (`grid_cols`, `grid_rows`,
+/// `scrollback_rows`), any subset.
 /// A missing file (or no config home at all) is the normal case and is
 /// silent; a file that fails to read/parse, or a `config` that isn't a
 /// table, logs a warning and the defaults stand.
@@ -173,6 +175,19 @@ pub fn loadConfig(
         cfg.cursor.blink_ms = config.clampBlinkMs(@as(f64, v));
         if (cfg.cursor.blink_ms != v)
             std.log.warn("glyphwire-host: host.conf.lua cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
+    }
+
+    if (luaNumField(lua, "key_repeat_delay_ms")) |v| {
+        const c = key_repeat.clampDelayMs(@as(f64, v));
+        if (c != @as(f64, v))
+            std.log.warn("glyphwire-host: host.conf key_repeat_delay_ms {d} out of range; clamped to {d}", .{ v, c });
+        cfg.key_repeat.delay_ms = c;
+    }
+    if (luaNumField(lua, "key_repeat_interval_ms")) |v| {
+        const c = key_repeat.clampIntervalMs(@as(f64, v));
+        if (c != @as(f64, v))
+            std.log.warn("glyphwire-host: host.conf key_repeat_interval_ms {d} out of range; clamped to {d}", .{ v, c });
+        cfg.key_repeat.interval_ms = c;
     }
 
     if (luaBoolField(lua, "profile")) |v| cfg.profile.enabled = v;

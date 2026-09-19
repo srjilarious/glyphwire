@@ -751,6 +751,18 @@ pub const Client = struct {
         try self.notify("set_caret_layer", .{ .layer = layer });
     }
 
+    /// `set_key_repeat(delay_ms, interval_ms)` -- a notification. Retimes
+    /// the typematic key repeat glyphwire-host synthesizes while this
+    /// connection's active context is focused: `delay_ms` is how long a
+    /// key must be held before repeating, `interval_ms` how often it
+    /// repeats after that (see `core.KeyRepeat`). Equal values mean no
+    /// distinct initial hold, which is what an editor wants and a shell
+    /// does not. Both `null` clears the override and goes back to the
+    /// host's default.
+    pub fn setKeyRepeat(self: *Client, delay_ms: ?f64, interval_ms: ?f64) !void {
+        try self.notify("set_key_repeat", .{ .delay_ms = delay_ms, .interval_ms = interval_ms });
+    }
+
     /// `destroy_context(context)` -- a notification. Frees a context
     /// created by `createContext` and everything in it, and (if it was
     /// visible) drops visibility back to whatever context was under it --

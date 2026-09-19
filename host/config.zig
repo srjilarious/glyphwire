@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const geometry = @import("geometry.zig");
+const key_repeat = @import("key_repeat.zig");
 
 // Font defaults. `host.conf.lua` (a global `config` table with
 // `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
@@ -146,6 +147,11 @@ pub const HostConfig = struct {
     cursor: CursorConfig = .{},
     grid: GridConfig = .{},
     profile: ProfileConfig = .{},
+    /// Session-wide typematic key-repeat timing (`key_repeat_delay_ms` /
+    /// `key_repeat_interval_ms`), already clamped. This is the default a
+    /// program runs at; one that wants its own cadence sends
+    /// `set_key_repeat` (see `host/key_repeat.zig`).
+    key_repeat: key_repeat.Timing = .{},
     /// Which bundled file-type icon set (`<asset-dir>/icons/filetype/<name>/`)
     /// backs the canonical `file/*` names glyphwire-ls draws with -- one
     /// of `oxygen` (default), `papirus`, `material`. An unknown value

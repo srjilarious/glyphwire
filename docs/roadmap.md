@@ -31,9 +31,12 @@ of it. `docs/decisions.md` stays the place for *why*.
 - Input is wired end to end: `report_key` / `report_mouse_button` /
   `report_mouse_move` (client→server), `key_down` / `key_up` /
   `mouse_button` (server→subscribed clients), `subscribe`,
-  `get_input_state`. Held-key typematic repeat exists for arrow keys
-  (`Server.reportKeyRepeat` re-broadcasts `key_down` on a timer without
-  touching the down-set, so it doesn't get deduped away). `resize` is
+  `get_input_state`. Held-key typematic repeat covers every named key
+  (arrows, page/home/end, the editing keys, Escape/Tab/Enter, F1–F24)
+  plus any Ctrl/Alt chord, timed by the engine and retimeable per
+  program with `set_key_repeat` (`Server.reportKeyRepeat` re-broadcasts
+  `key_down` without touching the down-set, so it doesn't get deduped
+  away). `resize` is
   wired too: the host window is resizable, `Server.reportResize` resizes
   the root layer bottom-anchored and broadcasts `{cols, rows}` to
   `"resize"` subscribers, `get_property("size")` reads it back.

@@ -945,16 +945,40 @@ surface.
   to the live tail, so a keypress brings the cursor back into view) or by
   the client itself moving the cursor / scrolling back to the pin point
   (`reconcileCaretPin`, no view change — the client is driving).
-- **Typematic key repeat extended (host-local):** the engine's
-  `Keyboard` only edge-detects, so `glyphwire-host` already synthesized held-key
-  repeat for the four arrows (`App.key_repeat`, `Server.reportKeyRepeat`
-  → another `key_down`). That set now also covers **Backspace**,
-  **Delete** and **Ctrl+U** — the editing keys glyphwire-shell's line
-  editor acts on that ride the key stream rather than the `text` stream
-  (where character-key repeats already arrive as fresh text events).
-  Ctrl+left/right word motion already repeated through the arrow path;
-  Enter and Tab stay single-shot. No wire change — a repeat is just an
-  extra `key_down`, same as before.
+- **Typematic key repeat lives in the engine, its policy in the host,
+  and its timing is the focused program's to choose.** The mechanism —
+  a per-key hold timer, `repeated(key)` alongside `pressed`/`released`,
+  ticked once per update step — is `host_eng`'s
+  (`Keyboard.tickRepeats`), not glyphwire's: it is the same kind of
+  input state as an edge, every key gets one, and nothing about "how
+  long has this been held" is terminal-specific. Repeats are
+  synthesized rather than passed through from the OS precisely so the
+  cadence can be *retimed at runtime*, which the OS's own repeat can't
+  be.
+  What stays host-side is the policy (`host/key_repeat.zig`): **named
+  keys always repeat** — the arrows, PageUp/PageDown, Home/End,
+  Backspace, Delete, Tab, Enter, Escape, F1–F24 — because nothing types
+  them, so the key stream is the only place a hold can show up. **Text
+  keys don't**, because a held letter already repeats down the separate
+  `text` stream; repeating them here as well would deliver a held `j`
+  twice. The exception is a text key held as a **Ctrl/Alt chord**
+  (Ctrl+U), which fires no text event. This replaced a hand-maintained
+  list of seven keys, which is why PageUp/PageDown — which zoe pages
+  with — never repeated at all. Enter and Tab, previously single-shot
+  for want of an entry on that list, now repeat like the rest: that is
+  what the OS does with them, and a rule with no exceptions is the
+  thing that stopped the list going stale in the first place.
+  Timing is a context property (`core.Context.key_repeat`,
+  `set_key_repeat`): the host runs the **focused** context's cadence,
+  falling back to `host.conf`'s `key_repeat_delay_ms` /
+  `key_repeat_interval_ms`. A shell wants the OS-typical long hold —
+  a repeat there may re-run a command. zoe wants none at all (it asks
+  for `delay == interval`), because every repeat there is a cursor
+  motion. Which means the cadence follows focus: the same held arrow
+  behaves differently in two panes of one window, which is the point.
+  A retime applies from the next press, never mid-hold, so it can't
+  fire a burst of catch-up repeats. No wire change to the repeat
+  itself — it is still just another `key_down`.
 
 **Cell**
 - As decided under Text & Styling below: a grapheme cluster plus inline

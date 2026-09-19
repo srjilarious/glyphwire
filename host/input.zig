@@ -10,31 +10,21 @@ const key_repeat = @import("key_repeat.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
-const KeyRepeatState = key_repeat.KeyRepeatState;
 
 /// Forwards keyboard / text / mouse events from the engine's per-frame input
 /// state to the in-process `Server`, and synthesizes the typematic key
 /// repeats the OS repeat doesn't reach the host as fresh events. Owns the
-/// per-key hold timers and the last-forwarded modifier / mouse state.
+/// last-forwarded modifier / mouse state; the hold timers themselves
+/// belong to the engine's `Keyboard` (see `handleRepeatKeys`).
 pub const KeyInput = struct {
     app: *App,
 
     last_mouse_px: host_eng.Vec2F = .{ .x = -1, .y = -1 },
 
-    /// Per-key hold timers for the keys glyphwire-host synthesizes
-    /// typematic repeats for -- the four arrows (which also move the root
-    /// cursor), plus Backspace, Delete and Ctrl+U, whose repeats are just
-    /// re-broadcast for glyphwire-shell's line editor to act on. See
-    /// `handleRepeatKeys`.
-    key_repeat: struct {
-        up: KeyRepeatState = .{},
-        down: KeyRepeatState = .{},
-        left: KeyRepeatState = .{},
-        right: KeyRepeatState = .{},
-        backspace: KeyRepeatState = .{},
-        delete: KeyRepeatState = .{},
-        ctrl_u: KeyRepeatState = .{},
-    } = .{},
+    /// Session-wide repeat timing from `host.conf`, used for every
+    /// context that hasn't asked for its own with `set_key_repeat`. See
+    /// `syncRepeatTiming`.
+    repeat_default: key_repeat.Timing = .{},
 
     /// Last-forwarded down/up state of each modifier, indexed
     /// `[ctrl, alt, shift, super]` -- see `reportModifier`. glyphwire-host
@@ -74,32 +64,15 @@ pub const KeyInput = struct {
         // forced every-frame redraw, but only when `host.conf.lua` enabled
         // profiling at all. Handled once here (not per-key in the loop)
         // and swallowed below so the shell / grid never see them.
-        const profile_toggle = self.app.profiler.active() and kb.ctrl() and kb.shift();
+        const profile_toggle = self.profileToggleArmed(kb);
         if (profile_toggle and kb.pressed(.p)) _ = self.app.profiler.toggleHud();
         if (profile_toggle and kb.pressed(.r)) _ = self.app.profiler.toggleForceRedraw();
 
         var any_pressed = false;
-        const ctrl_held = kb.ctrl();
         const field_names = @typeInfo(app_mod.Key).@"enum".field_names;
         inline for (field_names) |field_name| {
             const key = @field(app_mod.Key, field_name);
-            const skip_static = switch (key) {
-                // Forwarded by reportModifier above, not per physical key.
-                .left_control, .right_control, .left_alt, .right_alt, .left_shift, .right_shift, .left_super, .right_super => true,
-                // Ctrl + these are `window_sizing`'s font-zoom shortcuts;
-                // swallow them here so the shell/grid never sees the
-                // keystroke.
-                .minus, .equal, .zero, .kp_subtract, .kp_add, .kp_0 => ctrl_held,
-                // Ctrl+Shift+P / Ctrl+Shift+R are profiler toggles (see above).
-                .p, .r => profile_toggle,
-                else => false,
-            };
-            // Selection / clipboard shortcuts (Ctrl+Shift+C/V/Space) and,
-            // in keyboard selection mode, the motion keys are consumed by
-            // `selection.Selection.handleKeys` -- keep them off the wire
-            // too.
-            const skip = skip_static or self.app.selection.swallows(key, kb);
-            if (skip) {
+            if (self.swallowsKey(key, kb, profile_toggle)) {
                 // Consumed elsewhere; don't forward it.
             } else if (kb.pressed(key)) {
                 any_pressed = true;
@@ -113,6 +86,36 @@ pub const KeyInput = struct {
             }
         }
         return any_pressed;
+    }
+
+    /// Whether Ctrl+Shift is held with profiling enabled, i.e. whether
+    /// the Ctrl+Shift+P / Ctrl+Shift+R host shortcuts are live this
+    /// frame. Both `reportKeyEvents` and `handleRepeatKeys` need it, so
+    /// the condition lives in one place.
+    fn profileToggleArmed(self: *KeyInput, kb: *const host_eng.input.Keyboard) bool {
+        return self.app.profiler.active() and kb.ctrl() and kb.shift();
+    }
+
+    /// Whether `key` is consumed by the host itself this frame and so
+    /// must not reach the wire at all -- neither as a press/release
+    /// (`reportKeyEvents`) nor as a typematic repeat
+    /// (`handleRepeatKeys`), which is why both route through here.
+    fn swallowsKey(self: *KeyInput, key: app_mod.Key, kb: *const host_eng.input.Keyboard, profile_toggle: bool) bool {
+        const skip_static = switch (key) {
+            // Forwarded by reportModifier, not per physical key.
+            .left_control, .right_control, .left_alt, .right_alt, .left_shift, .right_shift, .left_super, .right_super => true,
+            // Ctrl + these are `window_sizing`'s font-zoom shortcuts;
+            // swallow them here so the shell/grid never sees the
+            // keystroke.
+            .minus, .equal, .zero, .kp_subtract, .kp_add, .kp_0 => kb.ctrl(),
+            // Ctrl+Shift+P / Ctrl+Shift+R are profiler toggles.
+            .p, .r => profile_toggle,
+            else => false,
+        };
+        // Selection / clipboard shortcuts (Ctrl+Shift+C/V/Space) and, in
+        // keyboard selection mode, the motion keys are consumed by
+        // `selection.Selection.handleKeys` -- keep them off the wire too.
+        return skip_static or self.app.selection.swallows(key, kb);
     }
 
     /// Forwards one modifier's down/up state under `name`, edge-detected
@@ -218,17 +221,19 @@ pub const KeyInput = struct {
         }
     }
 
-    /// Drives typematic repeat for the keys the OS repeat doesn't reach us
-    /// as fresh events: the four arrows (which also move the root grid
-    /// cursor -- generic terminal-style cursor addressing, independent of
-    /// glyphwire-shell's line editor), plus Backspace, Delete and Ctrl+U.
-    /// The initial press already reached `ctx.input`'s down-set and got
-    /// broadcast via `reportKeyEvents`; held-down repeats are re-broadcast
-    /// here via `reportKeyRepeat`, since `reportKey`/`setKey` would see no
-    /// state change on a key that's already down and drop it. (Character
-    /// keys repeat fine already -- their repeats come in on the `text`
-    /// stream as fresh `SDL_EVENT_TEXT_INPUT` events.)
-    pub fn handleRepeatKeys(self: *KeyInput, eng: *Engine, delta_ms: f64) void {
+    /// Puts this tick's typematic key repeats on the wire.
+    ///
+    /// The hold timers are the engine's (`Keyboard.tickRepeats`, which
+    /// runs for every key), so what's left here is glyphwire's policy:
+    /// `key_repeat.repeatsKey` decides which repeats are meaningful --
+    /// the named keys always, a text key only as a Ctrl/Alt chord, since
+    /// a held `j` already repeats down the `text` stream -- and
+    /// `swallowsKey` keeps back the ones the host itself consumed.
+    ///
+    /// A repeat goes out as `reportKeyRepeat` rather than `reportKey`,
+    /// because `reportKey`/`setKey` would see no state change on a key
+    /// that is already down and drop it.
+    pub fn handleRepeatKeys(self: *KeyInput, eng: *Engine) void {
         // In keyboard selection mode the arrows/edit keys are swallowed
         // (they move the selection, not the shell's line) -- don't
         // synthesize repeats the shell would act on.
@@ -249,72 +254,44 @@ pub const KeyInput = struct {
         // redraw, e.g. Up at the oldest history entry). Horizontal
         // arrows keep the preview: it hides the round-trip latency while
         // moving through the live input line.
-        const preview_caret = !self.app.scroll.screenOwnedByProgram();
-        self.handleArrowRepeat(eng, .up, "up", &self.key_repeat.up, 0, -1, delta_ms, false);
-        self.handleArrowRepeat(eng, .down, "down", &self.key_repeat.down, 0, 1, delta_ms, false);
-        self.handleArrowRepeat(eng, .left, "left", &self.key_repeat.left, -1, 0, delta_ms, preview_caret);
-        self.handleArrowRepeat(eng, .right, "right", &self.key_repeat.right, 1, 0, delta_ms, preview_caret);
-
-        // Editing keys glyphwire-shell's line editor acts on directly.
-        // No root-cursor move -- just the re-broadcast the held key needs
-        // to keep deleting. Ctrl+U is gated on Ctrl actually being held
-        // (a bare held `u` types through the `text` stream instead).
-        self.handleEditRepeat(eng, .backspace, "backspace", &self.key_repeat.backspace, false, delta_ms);
-        self.handleEditRepeat(eng, .delete, "delete", &self.key_repeat.delete, false, delta_ms);
-        self.handleEditRepeat(eng, .u, "u", &self.key_repeat.ctrl_u, true, delta_ms);
-    }
-
-    fn handleArrowRepeat(
-        self: *KeyInput,
-        eng: *Engine,
-        key: app_mod.Key,
-        name: []const u8,
-        state: *KeyRepeatState,
-        dcol: i32,
-        drow: i32,
-        delta_ms: f64,
-        preview_caret: bool,
-    ) void {
-        if (eng.inputs.keyboard.pressed(key)) {
-            state.reset();
-            if (preview_caret) self.moveCursor(dcol, drow);
-        } else if (eng.inputs.keyboard.down(key)) {
-            if (state.tick(delta_ms)) {
-                if (preview_caret) self.moveCursor(dcol, drow);
-                self.app.server.reportKeyRepeat(self.app.alloc, name) catch |err| {
-                    std.log.err("reportKeyRepeat({s}) failed: {t}", .{ name, err });
-                };
-            }
-        } else {
-            state.reset();
-        }
-    }
-
-    /// Like `handleArrowRepeat` but for an editing key with no root-cursor
-    /// side effect: only the held repeat is synthesized (the press edge
-    /// already went out via `reportKeyEvents`). `require_ctrl` limits the
-    /// repeat to when Ctrl is also held.
-    fn handleEditRepeat(
-        self: *KeyInput,
-        eng: *Engine,
-        key: app_mod.Key,
-        name: []const u8,
-        state: *KeyRepeatState,
-        require_ctrl: bool,
-        delta_ms: f64,
-    ) void {
         const kb = &eng.inputs.keyboard;
-        if (kb.pressed(key)) {
-            state.reset();
-        } else if (kb.down(key) and (!require_ctrl or kb.ctrl())) {
-            if (state.tick(delta_ms)) {
-                self.app.server.reportKeyRepeat(self.app.alloc, name) catch |err| {
-                    std.log.err("reportKeyRepeat({s}) failed: {t}", .{ name, err });
+        const preview_caret = !self.app.scroll.screenOwnedByProgram();
+        if (preview_caret) {
+            if (kb.pressed(.left) or kb.repeated(.left)) self.moveCursor(-1, 0);
+            if (kb.pressed(.right) or kb.repeated(.right)) self.moveCursor(1, 0);
+        }
+
+        const profile_toggle = self.profileToggleArmed(kb);
+        const ctrl = kb.ctrl();
+        const alt = kb.alt();
+        const field_names = @typeInfo(app_mod.Key).@"enum".field_names;
+        inline for (field_names) |field_name| {
+            const key = @field(app_mod.Key, field_name);
+            if (kb.repeated(key) and
+                key_repeat.repeatsKey(key, ctrl, alt) and
+                !self.swallowsKey(key, kb, profile_toggle))
+            {
+                self.app.server.reportKeyRepeat(self.app.alloc, field_name) catch |err| {
+                    std.log.err("reportKeyRepeat({s}) failed: {t}", .{ field_name, err });
                 };
             }
-        } else {
-            state.reset();
         }
+    }
+
+    /// Hands the engine the repeat timing the focused program asked for
+    /// with `set_key_repeat`, or the `host.conf` default when it asked
+    /// for nothing (see `key_repeat.resolve`). Run once per tick, before
+    /// the repeats themselves: a pane switch between the shell and zoe
+    /// changes the cadence with it, and the change takes effect from the
+    /// next press -- a key already held keeps the schedule it started on.
+    pub fn syncRepeatTiming(self: *KeyInput, eng: *Engine) void {
+        const server = self.app.server;
+        const override = blk: {
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            break :blk server.session.focusedContext().key_repeat;
+        };
+        eng.inputs.keyboard.repeat = key_repeat.resolve(self.repeat_default, override);
     }
 
     /// Moves `ctx.root`'s cursor by one cell, clamped to the grid.

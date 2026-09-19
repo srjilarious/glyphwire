@@ -4292,6 +4292,27 @@ pub const max_split_depth: usize = 16;
 /// this a pane can't show anything and can't be grabbed back.
 pub const min_pane_cells: usize = 1;
 
+/// Typematic key-repeat timing a program asks the host for, in ms:
+/// `delay_ms` is how long one of its keys must be held before it starts
+/// repeating, `interval_ms` how often it repeats after that. Equal
+/// values mean "no distinct initial hold" -- the first repeat lands one
+/// interval after the press, which is what a modal editor wants and what
+/// a shell (where an over-eager repeat re-runs a command) does not. The
+/// host clamps both into its own range; see `host/key_repeat.zig`.
+pub const KeyRepeat = struct {
+    delay_ms: f64 = default_delay_ms,
+    interval_ms: f64 = default_interval_ms,
+
+    /// The timing a session runs at when nobody has asked for anything
+    /// else -- typical OS keyboard-repeat values. `host.conf` can move
+    /// the host's own default off these, but a `set_key_repeat` that
+    /// names only one of the two fields fills the other from here, not
+    /// from the user's `host.conf`: the protocol's default is the one
+    /// both ends can agree on without asking.
+    pub const default_delay_ms: f64 = 500;
+    pub const default_interval_ms: f64 = 40;
+};
+
 pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
@@ -4342,6 +4363,13 @@ pub const Context = struct {
     /// unknown or destroyed handle falls back to the root cursor rather
     /// than showing nothing.
     caret_layer: ?LayerHandle = null,
+    /// The typematic key-repeat timing this context's program asked for
+    /// with `set_key_repeat`, or null to run at the host's own default
+    /// (`host.conf`'s `key_repeat_delay_ms` / `key_repeat_interval_ms`).
+    /// Only the *focused* context's value is in effect -- the host reads
+    /// it each tick and retimes the engine's repeat clock, so switching
+    /// panes between the shell and zoe switches cadence with it.
+    key_repeat: ?KeyRepeat = null,
     /// Bumped whenever the split tree or the context size changes, i.e.
     /// whenever a previously computed layout (and its divider rects) went
     /// stale. glyphwire-host caches the divider geometry it hit-tests

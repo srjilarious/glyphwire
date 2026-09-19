@@ -199,32 +199,61 @@ pub fn resizeSettleDebouncesADragTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(geometry.resizeSettleStep(committed, committed, b, 200), .settled);
 }
 
-// ─── key_repeat.KeyRepeatState ───────────────────────────────────────
+// ─── key_repeat: which keys repeat, and at what timing ───────────────
 
-pub fn keyRepeatStartsAtDelayTest(_: std.Io, _: std.mem.Allocator) !void {
-    const st: key_repeat.KeyRepeatState = .{};
-    try testz.expectEqual(st.held_ms, 0.0);
-    try testz.expectEqual(st.next_repeat_ms, key_repeat.key_repeat_delay_ms);
+pub fn keyRepeatNamedKeysRepeatUnmodifiedTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Nothing types these, so a held one has to repeat on the key stream
+    // -- page_up/page_down included, which is what zoe needs.
+    try testz.expectTrue(key_repeat.repeatsKey(.page_up, false, false));
+    try testz.expectTrue(key_repeat.repeatsKey(.page_down, false, false));
+    try testz.expectTrue(key_repeat.repeatsKey(.up, false, false));
+    try testz.expectTrue(key_repeat.repeatsKey(.backspace, false, false));
+    try testz.expectTrue(key_repeat.repeatsKey(.home, false, false));
+    try testz.expectTrue(key_repeat.repeatsKey(.F5, false, false));
 }
 
-pub fn keyRepeatFiresAfterDelayThenAtIntervalTest(_: std.Io, _: std.mem.Allocator) !void {
-    var st: key_repeat.KeyRepeatState = .{};
-    // Held less than the initial delay: no repeat yet.
-    try testz.expectFalse(st.tick(key_repeat.key_repeat_delay_ms - 1));
-    // Crossing the delay threshold: one repeat.
-    try testz.expectTrue(st.tick(1));
-    // Next threshold is one interval further out.
-    try testz.expectFalse(st.tick(key_repeat.key_repeat_interval_ms - 1));
-    try testz.expectTrue(st.tick(1));
+pub fn keyRepeatTextKeysRepeatOnlyAsChordTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A bare held `u` types through the `text` stream; Ctrl+U is a chord
+    // no text event fires for, so that one repeats here.
+    try testz.expectFalse(key_repeat.repeatsKey(.u, false, false));
+    try testz.expectTrue(key_repeat.repeatsKey(.u, true, false));
+    try testz.expectTrue(key_repeat.repeatsKey(.u, false, true));
+    try testz.expectFalse(key_repeat.repeatsKey(.space, false, false));
+    try testz.expectFalse(key_repeat.repeatsKey(.five, false, false));
 }
 
-pub fn keyRepeatResetReturnsToDelayTest(_: std.Io, _: std.mem.Allocator) !void {
-    var st: key_repeat.KeyRepeatState = .{};
-    _ = st.tick(key_repeat.key_repeat_delay_ms + 100);
-    st.reset();
-    try testz.expectEqual(st.held_ms, 0.0);
-    try testz.expectEqual(st.next_repeat_ms, key_repeat.key_repeat_delay_ms);
-    try testz.expectFalse(st.tick(key_repeat.key_repeat_delay_ms - 1));
+pub fn keyRepeatModifiersAndLocksNeverRepeatTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectFalse(key_repeat.repeatsKey(.left_control, true, false));
+    try testz.expectFalse(key_repeat.repeatsKey(.right_alt, false, true));
+    try testz.expectFalse(key_repeat.repeatsKey(.caps_lock, true, true));
+    try testz.expectFalse(key_repeat.repeatsKey(.unknown, true, true));
+}
+
+pub fn keyRepeatResolveUsesDefaultWithoutOverrideTest(_: std.Io, _: std.mem.Allocator) !void {
+    const default: key_repeat.Timing = .{ .delay_ms = 400, .interval_ms = 30 };
+    const r = key_repeat.resolve(default, null);
+    try testz.expectEqual(r.delay_ms, 400.0);
+    try testz.expectEqual(r.interval_ms, 30.0);
+    try testz.expectTrue(r.enabled);
+}
+
+pub fn keyRepeatResolvePrefersOverrideTest(_: std.Io, _: std.mem.Allocator) !void {
+    // zoe's ask: no initial hold at all, so the first repeat lands one
+    // interval after the press.
+    const r = key_repeat.resolve(.{}, .{ .delay_ms = 30, .interval_ms = 30 });
+    try testz.expectEqual(r.delay_ms, 30.0);
+    try testz.expectEqual(r.interval_ms, 30.0);
+}
+
+pub fn keyRepeatResolveClampsOverrideTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A client can't hand the engine a cadence outside the host's range.
+    const r = key_repeat.resolve(.{}, .{ .delay_ms = -100, .interval_ms = 0 });
+    try testz.expectEqual(r.delay_ms, key_repeat.delay_ms_min);
+    try testz.expectEqual(r.interval_ms, key_repeat.interval_ms_min);
+
+    const hi = key_repeat.resolve(.{}, .{ .delay_ms = 99_000, .interval_ms = 99_000 });
+    try testz.expectEqual(hi.delay_ms, key_repeat.delay_ms_max);
+    try testz.expectEqual(hi.interval_ms, key_repeat.interval_ms_max);
 }
 
 // ─── geometry.paneScrollbars ──────────────────────────────────────────

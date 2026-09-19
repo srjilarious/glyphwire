@@ -7,11 +7,9 @@ const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
-const key_repeat = @import("key_repeat.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
-const KeyRepeatState = key_repeat.KeyRepeatState;
 
 /// A translucent tint drawn over the selected cells in the `color_bg`
 /// render pass, so text painted afterward stays readable on top of it.
@@ -52,19 +50,6 @@ pub const Selection = struct {
     mouse_anchor: glyphwire.SelectionPoint = .{ .above = 0, .col = 0 },
     mouse_last_cell: glyphwire.CellPos = .{},
 
-    /// Hold timers for the keyboard-selection-mode arrow keys, so a held
-    /// arrow keeps extending the selection at the same typematic cadence
-    /// (`key_repeat_delay_ms` / `key_repeat_interval_ms`) the shell's own
-    /// keys repeat at. Separate from `input.KeyInput.key_repeat` (which
-    /// drives the shell-bound repeats `handleRepeatKeys` skips entirely
-    /// while `mode` is set).
-    repeat: struct {
-        left: KeyRepeatState = .{},
-        right: KeyRepeatState = .{},
-        up: KeyRepeatState = .{},
-        down: KeyRepeatState = .{},
-    } = .{},
-
     /// Whether `input.KeyInput.reportKeyEvents` should hold this key back
     /// from the wire because `handleKeys` owns it this frame: Ctrl+Shift+
     /// C/V/Space always, and the motion/commit keys while keyboard
@@ -102,7 +87,7 @@ pub const Selection = struct {
     /// Ctrl+Shift+C / +V / +Space, plus the keyboard-selection-mode
     /// motion keys. Runs before `input.KeyInput.reportKeyEvents` (which
     /// swallows the same keys).
-    pub fn handleKeys(self: *Selection, eng: *Engine, delta_ms: f64) void {
+    pub fn handleKeys(self: *Selection, eng: *Engine) void {
         const kb = &eng.inputs.keyboard;
         const cs = kb.ctrl() and kb.shift();
 
@@ -141,35 +126,28 @@ pub const Selection = struct {
         }
 
         // Arrows extend on the initial press and then repeat while held,
-        // at the same cadence the shell's own keys repeat at.
-        self.selectArrowRepeat(eng, .left, &self.repeat.left, -1, 0, delta_ms);
-        self.selectArrowRepeat(eng, .right, &self.repeat.right, 1, 0, delta_ms);
-        self.selectArrowRepeat(eng, .up, &self.repeat.up, 0, -1, delta_ms);
-        self.selectArrowRepeat(eng, .down, &self.repeat.down, 0, 1, delta_ms);
+        // off the engine's own hold timers -- so selection motion runs at
+        // whatever cadence the focused program set, same as every other
+        // repeating key.
+        self.selectArrowRepeat(eng, .left, -1, 0);
+        self.selectArrowRepeat(eng, .right, 1, 0);
+        self.selectArrowRepeat(eng, .up, 0, -1);
+        self.selectArrowRepeat(eng, .down, 0, 1);
     }
 
-    /// One selection-mode arrow: move the active end once on the press
-    /// edge, then again each time its hold timer crosses a repeat
-    /// threshold (mirrors `input.KeyInput.handleArrowRepeat`, but drives
-    /// the selection instead of the root cursor / a shell key broadcast).
+    /// One selection-mode arrow: move the active end on the press edge
+    /// and on each typematic repeat (`Keyboard.repeated`), driving the
+    /// selection instead of the root cursor / a shell key broadcast the
+    /// way `input.KeyInput.handleRepeatKeys` does.
     fn selectArrowRepeat(
         self: *Selection,
         eng: *Engine,
         key: app_mod.Key,
-        state: *KeyRepeatState,
         dcol: i64,
         drow: i64,
-        delta_ms: f64,
     ) void {
         const kb = &eng.inputs.keyboard;
-        if (kb.pressed(key)) {
-            state.reset();
-            self.moveActive(dcol, drow, 0);
-        } else if (kb.down(key)) {
-            if (state.tick(delta_ms)) self.moveActive(dcol, drow, 0);
-        } else {
-            state.reset();
-        }
+        if (kb.pressed(key) or kb.repeated(key)) self.moveActive(dcol, drow, 0);
     }
 
     /// Enters keyboard selection mode with a zero-width selection at the
@@ -205,10 +183,6 @@ pub const Selection = struct {
 
     fn endMode(self: *Selection, clear: bool) void {
         self.mode = false;
-        self.repeat.left.reset();
-        self.repeat.right.reset();
-        self.repeat.up.reset();
-        self.repeat.down.reset();
         if (clear) self.app.server.clearSelection(self.app.alloc, null) catch |err| {
             std.log.err("glyphwire-host: clearSelection failed: {t}", .{err});
         };

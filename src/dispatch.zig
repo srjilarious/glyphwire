@@ -242,6 +242,15 @@ const SetWindowScrollbarParams = struct { visible: bool };
 /// `set_caret_layer`: which layer glyphwire-host draws its caret for, or
 /// `null` for the root cursor. See `core.Context.caret_layer`.
 const SetCaretLayerParams = struct { layer: ?core.LayerHandle = null };
+/// `set_key_repeat`: the typematic key-repeat timing this context's
+/// program wants while it is focused. Both fields absent clears the
+/// override and puts the context back on the host's default; one alone
+/// keeps whatever the other was (the default's value when there was no
+/// override yet). See `core.Context.key_repeat`.
+const SetKeyRepeatParams = struct {
+    delay_ms: ?f64 = null,
+    interval_ms: ?f64 = null,
+};
 
 // ─── Pane params ───────────────────────────────────────────────────────
 //
@@ -1338,6 +1347,7 @@ pub const Dispatcher = struct {
         .{ "adopt_context", catVoid(handleAdoptContext) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
+        .{ "set_key_repeat", catVoid(handleSetKeyRepeat) },
         .{ "request_role", catBytesId(handleRequestRole) },
         .{ "join_role", catVoid(handleJoinRole) },
         .{ "attach_pane", catVoid(handleAttachPane) },
@@ -2327,6 +2337,35 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         self.ctx.setCaretLayer(parsed.value.layer) catch |err| return switch (err) {
             error.UnknownLayer => DispatchError.UnknownLayer,
+        };
+    }
+
+    /// `set_key_repeat`: retimes the typematic key repeat glyphwire-host
+    /// synthesizes while this connection's active context is focused (see
+    /// `core.Context.key_repeat`). A shell wants the OS-typical long hold
+    /// before a held key starts repeating; zoe, where every repeat is a
+    /// cursor motion rather than a command, asks for no hold at all.
+    ///
+    /// Both fields absent clears the override, putting the context back
+    /// on the host's own default. One field alone keeps the other from
+    /// the current override, or from `core.KeyRepeat`'s defaults when
+    /// there is none. Changes nothing else: the host reads the focused
+    /// context's value on its next tick and hands it to the engine.
+    fn handleSetKeyRepeat(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetKeyRepeatParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        if (p.delay_ms == null and p.interval_ms == null) {
+            self.ctx.key_repeat = null;
+            return;
+        }
+        const current = self.ctx.key_repeat orelse core.KeyRepeat{};
+        self.ctx.key_repeat = .{
+            .delay_ms = p.delay_ms orelse current.delay_ms,
+            .interval_ms = p.interval_ms orelse current.interval_ms,
         };
     }
 

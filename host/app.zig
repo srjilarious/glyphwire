@@ -9,6 +9,7 @@ const config = @import("config.zig");
 const geometry = @import("geometry.zig");
 const caret_mod = @import("caret.zig");
 const input_mod = @import("input.zig");
+const key_repeat_mod = @import("key_repeat.zig");
 const selection_mod = @import("selection.zig");
 const scroll_mod = @import("scroll.zig");
 const table_sort_mod = @import("table_sort.zig");
@@ -184,6 +185,7 @@ pub const App = struct {
         font: FontRuntime,
         cursor: CursorConfig,
         profile: config.ProfileConfig,
+        key_repeat: key_repeat_mod.Timing,
     ) !*App {
         const app = try alloc.create(App);
         app.* = .{
@@ -199,7 +201,7 @@ pub const App = struct {
                 .blink = cursor.blink,
                 .blink_ms = cursor.blink_ms,
             },
-            .keys = .{ .app = undefined },
+            .keys = .{ .app = undefined, .repeat_default = key_repeat },
             .preedit = .{ .app = undefined },
             .selection = .{ .app = undefined },
             .scroll = .{ .app = undefined },
@@ -272,7 +274,7 @@ pub const App = struct {
         // arrow/Home/End/Escape/Enter motions. Runs before
         // `reportKeyEvents`, which swallows the same keys so the shell
         // never sees them (see `Selection.swallows`).
-        self.selection.handleKeys(eng, deltaTimeMs);
+        self.selection.handleKeys(eng);
         // Push the session clipboard buffer to the OS clipboard if it
         // changed (a client's `set_clipboard`, or a selection copy just
         // above). Main-thread SDL call.
@@ -300,7 +302,11 @@ pub const App = struct {
         const took_left = chrome_or_bar_took_left or table_took_left;
         const select_took_left = self.selection.handleMouseSelection(eng, took_left);
         self.keys.reportMouseEvents(eng, took_left or select_took_left);
-        self.keys.handleRepeatKeys(eng, deltaTimeMs);
+        self.keys.handleRepeatKeys(eng);
+        // Last of the key handling: the timing the *next* tick's repeats
+        // run at, from the focused program's `set_key_repeat` (or the
+        // `host.conf` default). Cheap -- one short locked read.
+        self.keys.syncRepeatTiming(eng);
         self.scroll.handleScroll(eng);
         // When a full-screen program takes the screen, drop any scrollback
         // view the user had scrolled to -- its content is about to be

@@ -115,6 +115,7 @@ pub const ConnId = core.ConnId;
 pub const root_layer_handle = core.root_layer_handle;
 pub const default_context_id = core.default_context_id;
 pub const Context = core.Context;
+pub const KeyRepeat = core.KeyRepeat;
 pub const Session = core.Session;
 pub const ContextHandle = core.ContextHandle;
 pub const ContextError = core.ContextError;

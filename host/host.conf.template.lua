@@ -74,6 +74,23 @@
 --     -- long, then hidden for this long. Clamped to 100..5000.
 --     cursor_blink_ms = 530.0,
 --
+--     ---- Key repeat --------------------------------------------------
+--
+--     -- Typematic repeat for held keys: how long a key must be held
+--     -- before it starts repeating, and how often it repeats after that.
+--     -- Named keys (arrows, PageUp/PageDown, Home/End, Backspace,
+--     -- Delete, Tab, Enter, Escape, F1..F24) repeat on the key stream;
+--     -- ordinary typing repeats through the OS text stream instead, so
+--     -- these only reach a letter/digit key as a Ctrl/Alt chord (a held
+--     -- Ctrl+U, say). Clamped to 0..5000 and 10..2000.
+--     --
+--     -- This is the session default. A program can ask for its own
+--     -- cadence with the `set_key_repeat` message and gets it while it is
+--     -- focused: zoe does, with no initial hold at all, since every
+--     -- repeat there is a cursor motion rather than a command.
+--     key_repeat_delay_ms = 500.0,
+--     key_repeat_interval_ms = 40.0,
+--
 --     ---- Grid --------------------------------------------------------
 --
 --     -- Initial grid size in cells. The window opens this many cells

@@ -83,6 +83,19 @@
 --     -- else is ignored.
 --     page_lines = 10,
 --
+--     -- Typematic key repeat, in milliseconds: how long a key is held
+--     -- before it starts repeating, then how often it repeats. zoe asks
+--     -- glyphwire-host for these while it is focused, so they apply to
+--     -- the editor without changing what the shell does. Equal values
+--     -- (the default) mean no initial hold at all: a held arrow,
+--     -- PageDown or Backspace starts moving on the next tick. Raise the
+--     -- delay for a more terminal-like feel. The host clamps the delay
+--     -- to 0..5000 and the interval to 10..2000. (A held letter key --
+--     -- j/k in normal mode -- repeats through the OS text stream at the
+--     -- OS's own rate instead, which these don't reach.)
+--     key_repeat_delay_ms = 30,
+--     key_repeat_interval_ms = 30,
+--
 --     -- The buffer-pane line-number gutter:
 --     --   false        -- no gutter
 --     --   true         -- same as "absolute"

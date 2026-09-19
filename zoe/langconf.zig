@@ -27,6 +27,13 @@ const Color = glyphwire.Color;
 
 const conf_name = "zoe.conf.lua";
 
+// zoe's own typematic repeat cadence, asked for with `set_key_repeat`
+// once the editor's context exists (see `ui.Ui.applyKeyRepeat`). Equal
+// values mean no initial hold: a held key starts moving the cursor on
+// the next tick instead of after a shell-length pause.
+pub const key_repeat_delay_ms_default: f64 = 30;
+pub const key_repeat_interval_ms_default: f64 = 30;
+
 /// The parsed config. Everything it points at is owned by `arena`.
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
@@ -46,6 +53,16 @@ pub const Config = struct {
     /// Ctrl-U) moves the cursor. Default 10; a non-positive or
     /// non-number value is ignored.
     page_lines: usize = 10,
+    /// `config.key_repeat_delay_ms` / `config.key_repeat_interval_ms` --
+    /// the typematic repeat cadence zoe asks glyphwire-host for while it
+    /// is focused (`Client.setKeyRepeat`). The defaults are equal, which
+    /// means no initial hold at all: a held arrow or PageDown starts
+    /// moving on the very next tick, where a shell deliberately waits
+    /// half a second before repeating a key that might be a command.
+    /// A negative delay, a non-positive interval, or a non-number is
+    /// ignored; the host clamps whatever does get through.
+    key_repeat_delay_ms: f64 = key_repeat_delay_ms_default,
+    key_repeat_interval_ms: f64 = key_repeat_interval_ms_default,
     /// `config.line_numbers` -- the buffer-pane line-number gutter.
     /// Absent or `true` means `.absolute` (the gutter is on); `false`
     /// turns it off; `"absolute"` / `"relative"` pick the style, where
@@ -119,11 +136,26 @@ pub fn load(
     cfg.langs = readLangs(lua, a);
     cfg.injections = readInjections(lua);
     cfg.page_lines = readPageLines(lua, cfg.page_lines);
+    cfg.key_repeat_delay_ms = readMs(lua, "key_repeat_delay_ms", 0, cfg.key_repeat_delay_ms);
+    cfg.key_repeat_interval_ms = readMs(lua, "key_repeat_interval_ms", 1, cfg.key_repeat_interval_ms);
     cfg.line_numbers = readLineNumbers(lua, cfg.line_numbers);
     cfg.tab_width = readTabWidth(lua, cfg.tab_width);
     cfg.expand_tab = readFlag(lua, "expand_tab", cfg.expand_tab);
     cfg.show_whitespace = readFlag(lua, "show_whitespace", cfg.show_whitespace);
     return cfg;
+}
+
+/// One millisecond-valued config field: a number >= `min` replaces
+/// `current`, anything else (absent, out of range, non-number) leaves it.
+/// `min` is 0 for the repeat delay, where zero is a meaningful setting
+/// ("no initial hold"), and 1 for the interval, where it isn't.
+fn readMs(lua: *Lua, comptime name: [:0]const u8, min: f64, current: f64) f64 {
+    const t = lua.getField(-1, name);
+    defer lua.pop(1);
+    if (t != .number) return current;
+    const n = lua.toNumber(-1) catch return current;
+    if (n < min) return current;
+    return n;
 }
 
 /// `config.page_lines = 15`. A number >= 1 replaces the default;

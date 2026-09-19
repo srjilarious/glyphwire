@@ -18,6 +18,13 @@ config = {
     -- "line" (default) / "block" / "box" / "underline".
     cursor_shape = "underline",
 
+    -- Typematic repeat for held named keys (arrows, PageUp/PageDown,
+    -- Backspace, ...): the hold before the first repeat, then the cadence
+    -- after it. Programs that ask for their own -- zoe does -- override
+    -- this while focused.
+    key_repeat_delay_ms = 500.0,
+    key_repeat_interval_ms = 40.0,
+
     -- Initial window size in cells; after open it tracks the live window.
     grid_cols = 150,
     grid_rows = 30,

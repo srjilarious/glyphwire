@@ -1997,6 +1997,50 @@ pub fn setCaretLayerPointsAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(ctx.caret_layer, null);
 }
 
+pub fn setKeyRepeatSetsAndClearsOverrideTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // Nothing asked for: the host's own default stands.
+    try testz.expectEqual(ctx.key_repeat, null);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_key_repeat","params":{"delay_ms":30,"interval_ms":30}}
+    );
+    try testz.expectEqual(ctx.key_repeat.?.delay_ms, 30.0);
+    try testz.expectEqual(ctx.key_repeat.?.interval_ms, 30.0);
+
+    // Empty params clear the override.
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_key_repeat","params":{}}
+    );
+    try testz.expectEqual(ctx.key_repeat, null);
+}
+
+pub fn setKeyRepeatPartialParamsKeepTheOtherFieldTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // With no override yet, the unnamed field comes from the protocol's
+    // own default, not from whatever the host was running at.
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_key_repeat","params":{"interval_ms":25}}
+    );
+    try testz.expectEqual(ctx.key_repeat.?.delay_ms, glyphwire.KeyRepeat.default_delay_ms);
+    try testz.expectEqual(ctx.key_repeat.?.interval_ms, 25.0);
+
+    // A second call naming only the delay keeps the interval just set.
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_key_repeat","params":{"delay_ms":0}}
+    );
+    try testz.expectEqual(ctx.key_repeat.?.delay_ms, 0.0);
+    try testz.expectEqual(ctx.key_repeat.?.interval_ms, 25.0);
+}
+
 pub fn setCaretLayerRejectsUnknownHandleTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

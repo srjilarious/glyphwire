@@ -339,6 +339,23 @@ fn mapMouseButton(button: u8) ?MouseButton {
     };
 }
 
+/// Typematic key-repeat timing: how long a key must be held before it
+/// starts repeating, and how often it repeats after that. `Keyboard`
+/// synthesizes the repeats itself rather than passing the OS's through,
+/// because the cadence has to be retimeable at runtime -- glyphwire lets
+/// the focused program pick its own (see `host/key_repeat.zig`), and an
+/// editor wants a far shorter initial hold than a shell does.
+///
+/// `delay_ms` equal to `interval_ms` means "no distinct initial hold":
+/// the first repeat lands one interval after the press, same as every
+/// one after it. `enabled = false` turns repeats off entirely, and
+/// `repeated` then never reports true.
+pub const KeyRepeat = struct {
+    delay_ms: f64 = 500,
+    interval_ms: f64 = 40,
+    enabled: bool = true,
+};
+
 pub const Keyboard = struct {
     curr: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
     prev: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
@@ -362,6 +379,21 @@ pub const Keyboard = struct {
     /// composition; nothing here draws that, so it isn't kept.)
     preedit_cursor: i32 = -1,
 
+    /// Typematic repeat timing. Applies from the next press onward: a key
+    /// already held when this changes keeps the schedule its press
+    /// started, so a mid-hold retime can't fire a burst of catch-up
+    /// repeats.
+    repeat: KeyRepeat = .{},
+    /// Per-key hold time, and the hold time its next repeat is due at,
+    /// both in ms and both only meaningful while the key is down. Every
+    /// key is tracked; which keys a repeat actually *means* something for
+    /// is the application's call -- `repeated` is only a query.
+    held_ms: [NumKeys]f64 = @splat(0),
+    next_repeat_ms: [NumKeys]f64 = @splat(0),
+    /// Keys whose repeat fired during this tick's `tickRepeats`. Cleared
+    /// at the start of each tick, like `pressed`/`released`'s edges.
+    repeat_bits: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
+
     pub fn set(self: *Keyboard, key: Key, down_value: bool) void {
         if (down_value) {
             self.curr.set(keyIndex(key));
@@ -382,6 +414,45 @@ pub const Keyboard = struct {
     pub fn released(self: *const Keyboard, key: Key) bool {
         const idx = keyIndex(key);
         return !self.curr.isSet(idx) and self.prev.isSet(idx);
+    }
+
+    /// Whether `key`'s typematic repeat fired this tick -- the held-key
+    /// counterpart of `pressed`. False on the press itself (that edge is
+    /// `pressed`'s to report) and false for a key that is up. Driven by
+    /// `tickRepeats`, which `InputManager.update` runs once per tick.
+    pub fn repeated(self: *const Keyboard, key: Key) bool {
+        return self.repeat_bits.isSet(keyIndex(key));
+    }
+
+    /// Advances every held key's hold timer by `delta_ms` and republishes
+    /// `repeat_bits` for this tick. A key pressed this tick starts its
+    /// schedule over at `repeat.delay_ms`; a key that is up has its timer
+    /// cleared, so a re-press always waits the full initial hold again.
+    ///
+    /// At most one repeat per key per tick: an `interval_ms` shorter than
+    /// the update step then repeats every tick rather than firing a burst
+    /// to catch up, which is what a held key should feel like when the
+    /// loop is busy.
+    pub fn tickRepeats(self: *Keyboard, delta_ms: f64) void {
+        self.repeat_bits = std.StaticBitSet(NumKeys).empty;
+        for (0..NumKeys) |idx| {
+            if (!self.curr.isSet(idx)) {
+                self.held_ms[idx] = 0;
+                self.next_repeat_ms[idx] = 0;
+                continue;
+            }
+            if (!self.prev.isSet(idx)) {
+                // The press edge itself -- start the hold schedule.
+                self.held_ms[idx] = 0;
+                self.next_repeat_ms[idx] = self.repeat.delay_ms;
+                continue;
+            }
+            if (!self.repeat.enabled) continue;
+            self.held_ms[idx] += delta_ms;
+            if (self.held_ms[idx] < self.next_repeat_ms[idx]) continue;
+            self.repeat_bits.set(idx);
+            self.next_repeat_ms[idx] = self.held_ms[idx] + self.repeat.interval_ms;
+        }
     }
 
     pub fn ctrl(self: *const Keyboard) bool {
@@ -474,6 +545,9 @@ pub const Keyboard = struct {
         self.mods = 0;
         self.text_buf.clear();
         self.clearPreedit();
+        self.repeat_bits = std.StaticBitSet(NumKeys).empty;
+        self.held_ms = @splat(0);
+        self.next_repeat_ms = @splat(0);
     }
 };
 
@@ -611,13 +685,21 @@ pub const InputManager = struct {
         }
     }
 
+    /// Per-tick input refresh, run before the app's own update: resolves
+    /// the mouse position into logical space and advances the keyboard's
+    /// typematic repeat timers by `delta_ms` (the loop's fixed update
+    /// step). Repeats are ticked here, ahead of `app.update`, so
+    /// `keyboard.repeated` answers for the same tick the app reads
+    /// `pressed`/`released` on.
     pub fn update(
         self: *InputManager,
         window: *@import("platform_sdl.zig").Window,
         scale_factor: core.Vec2F,
         viewport: *const core.Viewport,
+        delta_ms: f64,
     ) void {
         _ = window;
+        self.keyboard.tickRepeats(delta_ms);
         if (self.mouse_enabled) {
             const raw = self.mouse.rawPos();
             const fb = core.Vec2F{ .x = raw.x * scale_factor.x, .y = raw.y * scale_factor.y };

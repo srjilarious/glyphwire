@@ -46,6 +46,7 @@ pub const input = struct {
     pub const Key = input_mod.Key;
     pub const MouseButton = input_mod.MouseButton;
     pub const Keyboard = input_mod.Keyboard;
+    pub const KeyRepeat = input_mod.KeyRepeat;
     pub const Mouse = input_mod.Mouse;
     pub const InputManager = input_mod.InputManager;
 };
@@ -142,7 +143,7 @@ pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
 
             while (self.lag > UpdateStepMs) {
                 self.lag -= UpdateStepMs;
-                self.engine.inputs.update(self.engine.window, self.engine.window_state.scale_factor, &self.engine.viewport);
+                self.engine.inputs.update(self.engine.window, self.engine.window_state.scale_factor, &self.engine.viewport, UpdateStepMs);
                 const keep_running = app.update(self.engine, UpdateStepMs);
                 self.engine.inputs.finishTick();
                 if (!keep_running) return false;

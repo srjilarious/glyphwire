@@ -403,6 +403,7 @@ pub const Ui = struct {
         // to fail bringing the editor up. Done before the first buffer,
         // which builds its own highlighter against what this leaves.
         self.loadConfig(environ);
+        self.applyKeyRepeat();
 
         const first = try self.newSlot(initial_path);
         errdefer first.deinit(alloc);
@@ -447,6 +448,29 @@ pub const Ui = struct {
         self.hl_search_dirs = dirs;
         self.grammars = syntax.Registry.init(self.alloc, self.io, dirs, cfg.langs);
         self.hl_config = cfg;
+    }
+
+    /// Asks glyphwire-host to repeat held keys at zoe's own cadence while
+    /// this context is focused (`zoe.conf`'s `key_repeat_delay_ms` /
+    /// `key_repeat_interval_ms`, equal by default). In an editor every
+    /// repeat is a cursor motion, so waiting out a shell-length initial
+    /// hold before a held arrow or PageDown starts moving is exactly
+    /// wrong; at a shell prompt, where a repeat may re-run a command, it
+    /// is exactly right. Best-effort: a failure here just leaves the
+    /// session on the host's default cadence.
+    fn applyKeyRepeat(self: *Ui) void {
+        // `hl_config` is null when the config load failed outright, which
+        // is not a reason to give up the cadence -- fall back to the same
+        // defaults `zoe.conf` would have left in place.
+        var delay = langconf.key_repeat_delay_ms_default;
+        var interval = langconf.key_repeat_interval_ms_default;
+        if (self.hl_config) |cfg| {
+            delay = cfg.key_repeat_delay_ms;
+            interval = cfg.key_repeat_interval_ms;
+        }
+        self.client.setKeyRepeat(delay, interval) catch |err| {
+            std.log.warn("zoe: set_key_repeat failed ({t}); keeping the host default", .{err});
+        };
     }
 
     /// Opens `path` -- or an empty scratch buffer when null -- as a new,

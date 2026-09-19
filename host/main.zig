@@ -423,7 +423,7 @@ pub fn main(init: std.process.Init) !void {
         .path = font_cfg.face,
         .face_index = font_face_index,
         .size = font_cfg.size,
-    }, host_cfg.cursor, host_cfg.profile);
+    }, host_cfg.cursor, host_cfg.profile, host_cfg.key_repeat);
 
     // `spawn_in_pane`: a window manager asks the *host* to start programs,
     // because only the host knows what env a child needs in order to find

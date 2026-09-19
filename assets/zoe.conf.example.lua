@@ -21,6 +21,15 @@ config = {
     -- Lines a PageDown / PageUp (or Ctrl-D / Ctrl-U) moves. Default 10.
     page_lines = 10,
 
+    -- Typematic key repeat for the editor, in ms: a held `j` or arrow
+    -- starts moving well before a terminal would repeat it. Insert and
+    -- command mode are a separate pair, so typing can keep a longer hold
+    -- than navigating if you want one.
+    key_repeat_delay_ms = 300,
+    key_repeat_interval_ms = 30,
+    key_repeat_insert_delay_ms = 300,
+    key_repeat_insert_interval_ms = 30,
+
     -- Line-number gutter: false / "absolute" / "relative".
     -- `:set lineno=off|absolute|relative` changes it live.
     line_numbers = "absolute",
