@@ -146,7 +146,7 @@ per-message status markers (✅ implemented / 🔶 planned / ⬜ open).
 
 ## Build and run
 
-Requires a recent Zig (0.17.0-dev — see `build.zig.zon`). Every
+Requires Zig 0.17.0-dev.1857+3c46da14d (see `build.zig.zon`). Every
 dependency is fetched or vendored in-tree; the host needs a working
 OpenGL setup at runtime, but SDL3 is built from source and loads X11 /
 Wayland at runtime, so no system dev packages are needed to compile.
