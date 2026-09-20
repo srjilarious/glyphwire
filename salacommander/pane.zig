@@ -8,9 +8,10 @@
 //! directory without a window.
 //!
 //! Rows are the listing as shown: a `..` row first (except at `/`), then
-//! directories, then everything else, each group name-sorted the way
-//! `gw-ls` sorts. `cursor` and `top` index rows, not `entries`; the `..`
-//! row has no entry and can't be marked.
+//! directories, then everything else, each group ordered by the pane's
+//! own `Sort` -- by name the way `gw-ls` sorts, to start with.
+//! `cursor` and `top` index rows, not `entries`; the `..` row has no
+//! entry and can't be marked.
 //!
 //! Marks follow Total Commander: Space toggles the mark on the cursor row,
 //! Insert toggles it and steps down. An operation acts on the marked
@@ -44,6 +45,41 @@ pub const Options = struct {
     view: ViewMode = .small,
 };
 
+/// What a pane orders its listing by. `ext` has no column of its own --
+/// it is the Total Commander Ctrl+F4 order, and it falls back to the name
+/// for two files sharing an extension.
+pub const SortKey = enum { name, ext, size, time };
+
+pub const SortDir = enum {
+    ascending,
+    descending,
+
+    pub fn flipped(self: SortDir) SortDir {
+        return switch (self) {
+            .ascending => .descending,
+            .descending => .ascending,
+        };
+    }
+};
+
+/// A pane's ordering. Directories come first whatever this says -- that
+/// is the file-manager convention, and it is what makes a listing
+/// navigable rather than merely ordered -- so this only ever orders
+/// within the two groups.
+pub const Sort = struct {
+    key: SortKey = .name,
+    dir: SortDir = .ascending,
+
+    /// Clicking a header: the same column flips direction, a different
+    /// one starts ascending. Deliberately no "unsorted" third state the
+    /// way `core.Table` has -- a directory listing has no meaningful
+    /// natural order to fall back to.
+    pub fn cycled(self: Sort, key: SortKey) Sort {
+        if (self.key == key) return .{ .key = key, .dir = self.dir.flipped() };
+        return .{ .key = key, .dir = .ascending };
+    }
+};
+
 /// What activating the cursor row did.
 pub const EnterResult = union(enum) {
     /// Nothing to do (an empty listing).
@@ -66,6 +102,7 @@ pub const Pane = struct {
     top: usize = 0,
     view: ViewMode = .small,
     show_hidden: bool = false,
+    sort: Sort = .{},
 
     /// Opens `path` (absolute or relative to the cwd). Fails if it can't
     /// be listed.
@@ -204,7 +241,7 @@ pub const Pane = struct {
             .show_hidden = self.show_hidden,
             .stat = true,
         });
-        sortDirsFirst(entries);
+        sortEntries(entries, self.sort);
         return entries;
     }
 
@@ -212,6 +249,23 @@ pub const Pane = struct {
         if (self.show_hidden == show) return;
         self.show_hidden = show;
         try self.reload();
+    }
+
+    /// Re-orders the listing in place and leaves the cursor on the entry
+    /// it was on -- the point of a sort is to find something, and having
+    /// the cursor jump to whatever slid under its row index is the
+    /// opposite of that. Marks travel with their entries (they are
+    /// reordered alongside), so a half-built selection survives a sort.
+    /// No re-read: nothing on disk changed.
+    pub fn setSort(self: *Pane, sort: Sort) void {
+        if (std.meta.eql(self.sort, sort)) return;
+        self.sort = sort;
+        const name: ?[]const u8 = if (self.current()) |e| e.name else null;
+        sortMarkedEntries(self.entries, self.marked, sort);
+        if (name) |n| {
+            if (self.rowOf(n)) |row| self.cursor = row;
+        }
+        self.clampCursor();
     }
 
     // ── Cursor ──────────────────────────────────────────────────────────
@@ -364,17 +418,75 @@ pub const Pane = struct {
 };
 
 /// Directories (and links to them) first, then everything else; each
-/// group in `gw-ls`'s name order.
-pub fn sortDirsFirst(entries: []FileEntry) void {
-    std.mem.sort(FileEntry, entries, {}, struct {
-        fn isDir(e: FileEntry) bool {
-            return (e.link_target_kind orelse e.kind) == .directory;
+/// group ordered by `sort`.
+pub fn sortEntries(entries: []FileEntry, sort: Sort) void {
+    std.mem.sort(FileEntry, entries, sort, lessThan);
+}
+
+/// `sortEntries`, keeping a parallel `marked` array in step so a mark
+/// stays on the entry it was put on rather than on a row index.
+/// `std.mem.sort` can't carry a second slice, so this sorts an index
+/// permutation and permutes both through it.
+fn sortMarkedEntries(entries: []FileEntry, marked: []bool, sort: Sort) void {
+    std.debug.assert(entries.len == marked.len);
+    // Insertion sort over the (already near-ordered) slices, moving both
+    // together. A directory listing is small and this runs on a header
+    // click, so the simple form beats allocating a permutation.
+    var i: usize = 1;
+    while (i < entries.len) : (i += 1) {
+        const e = entries[i];
+        const m = marked[i];
+        var j = i;
+        while (j > 0 and lessThan(sort, e, entries[j - 1])) : (j -= 1) {
+            entries[j] = entries[j - 1];
+            marked[j] = marked[j - 1];
         }
-        fn lessThan(_: void, a: FileEntry, b: FileEntry) bool {
-            const ad = isDir(a);
-            const bd = isDir(b);
-            if (ad != bd) return ad;
-            return lsentries.nameLessThan(a.name, b.name);
-        }
-    }.lessThan);
+        entries[j] = e;
+        marked[j] = m;
+    }
+}
+
+fn isDir(e: FileEntry) bool {
+    return (e.link_target_kind orelse e.kind) == .directory;
+}
+
+/// The extension of `name`: what follows its last dot, empty when there
+/// isn't one or the name is a dotfile with nothing after the dot (a
+/// leading dot is the hidden marker, not an extension).
+fn extOf(name: []const u8) []const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return "";
+    if (dot == 0) return "";
+    return name[dot + 1 ..];
+}
+
+/// Directories always lead, whichever way the rest is pointing; past
+/// that, descending is simply the ascending comparison with the pair
+/// swapped, which keeps the comparator consistent for free (two entries
+/// that tie compare `false` both ways, as `std.mem.sort` requires).
+fn lessThan(sort: Sort, a: FileEntry, b: FileEntry) bool {
+    const ad = isDir(a);
+    const bd = isDir(b);
+    if (ad != bd) return ad;
+    return switch (sort.dir) {
+        .ascending => orderedBefore(sort.key, a, b),
+        .descending => orderedBefore(sort.key, b, a),
+    };
+}
+
+fn orderedBefore(key: SortKey, a: FileEntry, b: FileEntry) bool {
+    return switch (key) {
+        .name => lsentries.nameLessThan(a.name, b.name),
+        .ext => blk: {
+            const ae = extOf(a.name);
+            const be = extOf(b.name);
+            if (!std.ascii.eqlIgnoreCase(ae, be)) break :blk lsentries.nameLessThan(ae, be);
+            break :blk lsentries.nameLessThan(a.name, b.name);
+        },
+        // Size and time tie constantly -- every directory reports the
+        // same size, a build writes a hundred files in the same second --
+        // so both fall back to the name, or the order within a tie would
+        // depend on the sort's internals.
+        .size => if (a.size != b.size) a.size < b.size else lsentries.nameLessThan(a.name, b.name),
+        .time => if (a.mtime_sec != b.mtime_sec) a.mtime_sec < b.mtime_sec else lsentries.nameLessThan(a.name, b.name),
+    };
 }

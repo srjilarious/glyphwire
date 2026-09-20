@@ -10,7 +10,8 @@
 //!     row 0        the pane's directory (highlighted on the active side),
 //!                  or a text field holding it once Alt+D or a click on
 //!                  the row has opened one
-//!     row 1        column headers
+//!     row 1        column headers -- clicking one re-orders the pane by
+//!                  that column, clicking the active one flips it
 //!     rows 2..     the listing, one row per entry (small view) or two
 //!                  (large view: tall icon, name, then perms/owner)
 //!     last row     a summary: what's marked (or the cursor entry) on the
@@ -27,6 +28,10 @@
 //! directory of any size costs one screenful per redraw. The pane layers
 //! are in `client` scroll mode with a `content_extent`, which gets a host
 //! scrollbar and turns the wheel into `scroll_offset` events we follow.
+//!
+//! Directories always lead whatever the order is, and the sort is the
+//! pane's, not the window's -- the two sides sort independently, which is
+//! the point of having two of them. See `pane.Sort`.
 //!
 //! Keys go through the `Keymap` (`actions.zig`); every command is an
 //! `Action` handled in `perform`. Typed text isn't a binding: with no
@@ -105,6 +110,9 @@ const fg_dialog = rgb(220, 223, 228);
 
 /// Rows every pane spends on chrome: title, column header, footer.
 const chrome_rows = 3;
+/// The column-header row, between the title and the listing. Clicking it
+/// re-orders the pane -- see `sortKeyForColumn`.
+const header_row = 1;
 const list_top = 2;
 const size_w = 8;
 const date_w = 16;
@@ -132,6 +140,32 @@ const Columns = struct {
     size_col: ?usize,
     date_col: ?usize,
 };
+
+/// Which column a click at pane-local column `col` on the header row
+/// belongs to, or null for the gutter left of the Name column (the icon
+/// column, which sorts nothing). The columns run left to right with no
+/// gaps worth caring about, so each one claims everything up to the next.
+fn sortKeyForColumn(cols: Columns, col: usize) ?pane_mod.SortKey {
+    if (col < cols.name_col) return null;
+    if (cols.date_col) |d| {
+        if (col >= d) return .time;
+    }
+    if (cols.size_col) |sz| {
+        if (col >= sz) return .size;
+    }
+    return .name;
+}
+
+/// A header label with the sort arrow on the column currently in force,
+/// matching `core.Table`'s `▴`/`▾`. Returns a slice of `buf`.
+fn headerLabel(buf: []u8, text: []const u8, sort: pane_mod.Sort, key: pane_mod.SortKey) []const u8 {
+    if (sort.key != key) return text;
+    const arrow = switch (sort.dir) {
+        .ascending => "\u{25B4}", // ▴
+        .descending => "\u{25BE}", // ▾
+    };
+    return std.fmt.bufPrint(buf, "{s} {s}", .{ text, arrow }) catch text;
+}
 
 pub const Ui = struct {
     alloc: std.mem.Allocator,
@@ -251,6 +285,12 @@ pub const Ui = struct {
         // command that printed more than the panel holds can be scrolled
         // back to with the wheel or the thumb.
         try client.setLayerScrollbars(shell_layer, true, false);
+        // The one layer here the host may run its own drag-to-select on.
+        // A click in a file pane is ours (it moves that pane's cursor),
+        // but the panel holds terminal output -- a command's result the
+        // user wants to copy -- and `gw-shell --embed` has no use for the
+        // press. See `core.Layer.mouse_select`.
+        try client.setLayerMouseSelect(shell_layer, true);
         try client.setLayerVisible(shell_layer, false);
         try client.setLayerBackground(dialog_layer, bg_dialog);
         try client.setLayerVisible(dialog_layer, false);
@@ -472,6 +512,11 @@ pub const Ui = struct {
             .delete => try self.deleteSelection(),
 
             .toggleShell => try self.toggleShell(),
+
+            .sortByName => p.setSort(p.sort.cycled(.name)),
+            .sortByExt => p.setSort(p.sort.cycled(.ext)),
+            .sortBySize => p.setSort(p.sort.cycled(.size)),
+            .sortByTime => p.setSort(p.sort.cycled(.time)),
 
             .viewSmall => p.view = .small,
             .viewLarge => p.view = .large,
@@ -697,6 +742,16 @@ pub const Ui = struct {
         self.clearFind();
 
         const p = &self.panes[i];
+        // The column header row: a click re-orders the pane by that
+        // column, the same cycle `sortByName` and friends run.
+        if (m.cell.row == header_row and left) {
+            const cols = self.columns(self.paneWidth(i), p.view);
+            if (sortKeyForColumn(cols, m.cell.col -| self.paneCol(i))) |key| {
+                p.setSort(p.sort.cycled(key));
+                self.pane_dirty[i] = true;
+            }
+            return;
+        }
         if (m.cell.row < list_top) return;
         const slot = (m.cell.row - list_top) / p.view.rowHeight();
         if (slot >= self.visibleRows(i)) return;
@@ -1134,11 +1189,18 @@ pub const Ui = struct {
             }
         }
 
-        // Column headers.
-        try b.clearArea(.{ .layer = layer, .row = 1, .rows = 1, .bg = bg_header });
-        try b.writeTextOpts("Name", .{ .layer = layer, .row = 1, .col = cols.name_col, .fg = fg_header, .bg = bg_header });
-        if (cols.size_col) |c| try b.writeTextOpts("    Size", .{ .layer = layer, .row = 1, .col = c, .fg = fg_header, .bg = bg_header });
-        if (cols.date_col) |c| try b.writeTextOpts("Modified", .{ .layer = layer, .row = 1, .col = c, .fg = fg_header, .bg = bg_header });
+        // Column headers, the one in force carrying the sort arrow. The
+        // Size label is right-aligned in its column the way the sizes
+        // under it are, so the arrow sits against the numbers.
+        var head_buf: [32]u8 = undefined;
+        try b.clearArea(.{ .layer = layer, .row = header_row, .rows = 1, .bg = bg_header });
+        try b.writeTextOpts(headerLabel(&head_buf, "Name", p.sort, .name), .{ .layer = layer, .row = header_row, .col = cols.name_col, .fg = fg_header, .bg = bg_header });
+        if (cols.size_col) |c| {
+            const label = headerLabel(&head_buf, "Size", p.sort, .size);
+            const pad = size_w -| gridlayout.displayWidth(label);
+            try b.writeTextOpts(label, .{ .layer = layer, .row = header_row, .col = c + pad, .fg = fg_header, .bg = bg_header });
+        }
+        if (cols.date_col) |c| try b.writeTextOpts(headerLabel(&head_buf, "Modified", p.sort, .time), .{ .layer = layer, .row = header_row, .col = c, .fg = fg_header, .bg = bg_header });
 
         // Rows: text first, icons last -- a text write clears a cell's
         // foreground icon, and a tall icon spills into the row below.

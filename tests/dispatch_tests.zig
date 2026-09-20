@@ -2295,6 +2295,44 @@ pub fn ptyModePropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectTrue(parsed.value.result.enabled);
 }
 
+pub fn mouseSelectPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const panel = try ctx.createLayer(20, 20, 0);
+
+    // Off until a client asks for it: the host only selects on a
+    // client-owned context's layer that opted in.
+    try testz.expectFalse(ctx.layerPtr(panel).?.mouse_select);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"mouse_select","enabled":true}}
+    );
+    try testz.expectTrue(ctx.layerPtr(panel).?.mouse_select);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":9,"method":"get_property","params":{"layer":1,"property":"mouse_select"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+
+    const Response = struct { id: i64, result: struct { enabled: bool } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.id, 9);
+    try testz.expectTrue(parsed.value.result.enabled);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"mouse_select","enabled":false}}
+    );
+    try testz.expectFalse(ctx.layerPtr(panel).?.mouse_select);
+}
+
 pub fn setCaretLayerPointsAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

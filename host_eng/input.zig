@@ -197,6 +197,32 @@ pub const MouseButton = enum {
     x2,
 };
 
+/// One line per raw key event when `InputManager.key_debug` is on.
+///
+/// Both SDL identities are printed because they answer different
+/// questions: the **keycode** is the symbol the layout produces (what
+/// `mapKey` switches on, and what a laptop's Fn layer rewrites), the
+/// **scancode** is the physical key. A key that reports `unknown` here
+/// never reaches glyphwire at all; a key that maps but does nothing is a
+/// binding problem further up.
+fn logKeyEvent(ev: sdl.SDL_KeyboardEvent, mapped: Key) void {
+    const key_name = sdl.SDL_GetKeyName(ev.key);
+    const scan_name = sdl.SDL_GetScancodeName(ev.scancode);
+    std.log.info(
+        "key {s}: keycode=0x{X} ({s}) scancode={d} ({s}) mods=0x{X} repeat={} -> {t}",
+        .{
+            if (ev.down) "down" else "up",
+            ev.key,
+            if (key_name) |n| std.mem.span(n) else "",
+            ev.scancode,
+            if (scan_name) |n| std.mem.span(n) else "",
+            ev.mod,
+            ev.repeat,
+            mapped,
+        },
+    );
+}
+
 fn keyIndex(key: Key) usize {
     return @intFromEnum(key);
 }
@@ -771,6 +797,18 @@ pub const InputManager = struct {
     mouse_enabled: bool,
     keyboard: Keyboard = .{},
     mouse: Mouse = .{},
+    /// Log every raw SDL key event, mapped or not. Set at startup from
+    /// `GLYPHWIRE_KEY_DEBUG` (see `host/main.zig`); off by default,
+    /// because this is one log line per press *and* release.
+    ///
+    /// It exists because a key `mapKey` doesn't recognise is dropped in
+    /// silence, which makes "this key does nothing" impossible to tell
+    /// apart from "this key arrives and the binding is wrong" -- the
+    /// question an Insert that works on an external keyboard but not on a
+    /// laptop's Fn layer raises. The line carries the keycode, the
+    /// scancode and both of SDL's names, so a keyboard whose Fn layer
+    /// reports something unexpected shows exactly what it reports.
+    key_debug: bool = false,
 
     /// `opts.numGamepads` is rejected at compile time by `Engine.init`
     /// rather than silently ignored here -- host_eng carries no gamepad
@@ -803,6 +841,7 @@ pub const InputManager = struct {
         switch (event.type) {
             sdl.SDL_EVENT_KEY_DOWN, sdl.SDL_EVENT_KEY_UP => {
                 const key = mapKey(event.key.key);
+                if (self.key_debug) logKeyEvent(event.key, key);
                 if (key != .unknown) self.keyboard.set(key, event.key.down);
                 self.keyboard.mods = event.key.mod;
                 // The down/up bitset alone can't say which key typed the

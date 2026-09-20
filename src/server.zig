@@ -510,17 +510,27 @@ pub const Server = struct {
         return self.session.visible_gen.load(.monotonic);
     }
 
-    /// Whether the currently-visible context belongs to a connected
-    /// client (created over the wire with `create_context`) rather than
-    /// being the root/shell context. glyphwire-host uses this to stand
-    /// down its own grid selection: a client that owns its context (zoe)
-    /// paints its own panes and runs its own mouse/keyboard selection, so
-    /// the host forwards raw mouse events into it instead of consuming
-    /// drags for a root-layer selection the client never asked for.
-    pub fn visibleContextClientOwned(self: *Server) bool {
+    /// Whether glyphwire-host may start one of its own mouse text
+    /// selections on `layer` of the currently-visible context (`null` =
+    /// the root layer).
+    ///
+    /// A context the host itself owns -- the root/shell one -- selects
+    /// everywhere, which is what a terminal does. A context a client
+    /// created over the wire (`create_context`: zoe, salacommander,
+    /// gw-read) paints its own panes and is listening for
+    /// `mouse_button`, so the host stands down and forwards the drag
+    /// instead of consuming it for a selection the client never asked
+    /// for -- *except* on a layer that client has opted in with
+    /// `set_property "mouse_select"`, which is how salacommander gets a
+    /// selectable embedded shell panel without giving up clicks in its
+    /// file panes. See `core.Layer.mouse_select`.
+    pub fn mouseSelectAllowed(self: *Server, layer: ?core.LayerHandle) bool {
         self.ctx_mutex.lockUncancelable(self.io);
         defer self.ctx_mutex.unlock(self.io);
-        return self.ctx.connection_owned;
+        if (!self.ctx.connection_owned) return true;
+        const handle = layer orelse return false;
+        const l = self.ctx.layers.getPtr(handle) orelse return false;
+        return l.mouse_select;
     }
 
     /// Fans a `context` notification (`{context, cols, rows}` -- the

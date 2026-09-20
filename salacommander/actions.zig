@@ -51,6 +51,13 @@ pub const Action = enum {
     /// `shellpanel.zig`). Closing it leaves the shell running.
     toggleShell,
 
+    /// Re-order the active pane. Directories still lead; picking the
+    /// order already in force flips it, the way a header click does.
+    sortByName,
+    sortByExt,
+    sortBySize,
+    sortByTime,
+
     viewSmall,
     viewLarge,
     toggleView,
@@ -93,6 +100,12 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "delete", .action = .delete },
 
     .{ .chord = "ctrl+`", .action = .toggleShell },
+
+    // Total Commander's sort keys.
+    .{ .chord = "ctrl+F3", .action = .sortByName },
+    .{ .chord = "ctrl+F4", .action = .sortByExt },
+    .{ .chord = "ctrl+F5", .action = .sortBySize },
+    .{ .chord = "ctrl+F6", .action = .sortByTime },
 
     .{ .chord = "ctrl+1", .action = .viewSmall },
     .{ .chord = "ctrl+2", .action = .viewLarge },

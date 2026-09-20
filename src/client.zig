@@ -1446,6 +1446,24 @@ pub const Client = struct {
         return parsed.value.result.enabled;
     }
 
+    /// `set_property(layer, "mouse_select", {enabled})` -- a
+    /// notification. Lets glyphwire-host run its own drag-to-select on
+    /// this layer even though this client owns the context, for a layer
+    /// whose content is terminal output the user will want to copy (the
+    /// embedded shell panel). Off by default, because on a layer the
+    /// client draws itself the left button is the client's -- see
+    /// `core.Layer.mouse_select`.
+    pub fn setLayerMouseSelect(self: *Client, layer: core.LayerHandle, enabled: bool) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "mouse_select", .enabled = enabled });
+    }
+
+    /// `get_property(layer?, "mouse_select")`.
+    pub fn getLayerMouseSelect(self: *Client, layer: ?core.LayerHandle) !bool {
+        var parsed = try self.request(struct { enabled: bool }, "get_property", .{ .layer = layer, .property = "mouse_select" });
+        defer parsed.deinit();
+        return parsed.value.result.enabled;
+    }
+
     /// `set_property(layer, "scrollbars", {vertical, horizontal})` -- a
     /// notification. Opt in per axis; the host draws the bars inside the
     /// layer's own bounds and drives `scroll_offset` from them.

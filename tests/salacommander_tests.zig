@@ -194,6 +194,93 @@ pub fn paneReloadKeepsCursorAndMarksByNameTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(p.markedCount(), 1);
 }
 
+pub fn paneSortBySizeKeepsDirectoriesFirstTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "sortsize");
+    defer s.deinit();
+    try s.mkdir("adir");
+    try s.file("big", "1234567890");
+    try s.file("mid", "12345");
+    try s.file("small", "1");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    p.setSort(.{ .key = .size, .dir = .ascending });
+    // The `..` row, then the directory -- a sort orders within the two
+    // groups, it never lifts a file above a directory.
+    try testz.expectEqualStr(rowName(&p, 0), "..");
+    try testz.expectEqualStr(rowName(&p, 1), "adir");
+    try testz.expectEqualStr(rowName(&p, 2), "small");
+    try testz.expectEqualStr(rowName(&p, 3), "mid");
+    try testz.expectEqualStr(rowName(&p, 4), "big");
+
+    p.setSort(p.sort.cycled(.size)); // same column: flip
+    try testz.expectEqualStr(rowName(&p, 1), "adir");
+    try testz.expectEqualStr(rowName(&p, 2), "big");
+    try testz.expectEqualStr(rowName(&p, 4), "small");
+
+    p.setSort(p.sort.cycled(.name)); // a different column starts ascending
+    try testz.expectEqualStr(rowName(&p, 2), "big");
+    try testz.expectEqualStr(rowName(&p, 3), "mid");
+    try testz.expectEqualStr(rowName(&p, 4), "small");
+}
+
+pub fn paneSortKeepsCursorAndMarksOnTheirEntriesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "sortmarks");
+    defer s.deinit();
+    try s.file("a", "1234567890");
+    try s.file("b", "1");
+    try s.file("c", "12345");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    p.setCursor(p.rowOf("a").?);
+    p.toggleMark(p.rowOf("c").?);
+
+    p.setSort(.{ .key = .size, .dir = .ascending });
+    try testz.expectEqualStr(rowName(&p, 1), "b");
+    // Both followed their entry rather than staying on a row index.
+    try testz.expectEqualStr(rowName(&p, p.cursor), "a");
+    try testz.expectTrue(p.isMarked(p.rowOf("c").?));
+    try testz.expectEqual(p.markedCount(), 1);
+}
+
+pub fn paneSortByExtGroupsBySuffixTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "sortext");
+    defer s.deinit();
+    try s.file("b.txt", "");
+    try s.file("a.zig", "");
+    try s.file("c.txt", "");
+    try s.file("plain", "");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    p.setSort(.{ .key = .ext, .dir = .ascending });
+    // No extension sorts before every extension, then `.txt` (by name
+    // within the group), then `.zig`.
+    try testz.expectEqualStr(rowName(&p, 1), "plain");
+    try testz.expectEqualStr(rowName(&p, 2), "b.txt");
+    try testz.expectEqualStr(rowName(&p, 3), "c.txt");
+    try testz.expectEqualStr(rowName(&p, 4), "a.zig");
+}
+
+pub fn paneSortSurvivesAReloadTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "sortreload");
+    defer s.deinit();
+    try s.file("a", "1234567890");
+    try s.file("b", "1");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    p.setSort(.{ .key = .size, .dir = .descending });
+    try testz.expectEqualStr(rowName(&p, 1), "a");
+
+    try s.file("c", "12345");
+    try p.reload();
+    try testz.expectEqualStr(rowName(&p, 1), "a");
+    try testz.expectEqualStr(rowName(&p, 2), "c");
+    try testz.expectEqualStr(rowName(&p, 3), "b");
+}
+
 pub fn paneScrollKeepsCursorVisibleTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var s = try Scratch.init(io, alloc, "scroll");
     defer s.deinit();

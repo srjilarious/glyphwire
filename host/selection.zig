@@ -432,14 +432,6 @@ pub const Selection = struct {
     pub fn handleMouseSelection(self: *Selection, eng: *Engine, skip_left: bool) bool {
         if (!eng.inputs.mouse_enabled) return false;
         const server = self.app.server;
-        // A client that owns the visible context (zoe) draws its own panes
-        // and runs its own selection. Chrome -- dividers, scrollbars --
-        // already got first refusal via `skip_left`, so anything left is a
-        // press into the client's content: let it through to the wire
-        // rather than starting a host grid selection that would fight it.
-        // An in-flight drag still finishes (the visible context can't
-        // change mid-drag without the button coming up first).
-        if (!self.mouse_selecting and server.visibleContextClientOwned()) return false;
         const m = &eng.inputs.mouse;
         const pos = m.pos();
         const fb = eng.window_state.framebuffer_size;
@@ -449,12 +441,26 @@ pub const Selection = struct {
         if (!self.mouse_selecting) {
             if (skip_left or on_scrollbar) return false;
             if (m.pressed(.left)) {
+                // Which grid this drag is over, decided once at press
+                // time; null falls through to root, exactly as before.
+                const handle: ?glyphwire.LayerHandle =
+                    if (self.layerAt(pos.x, pos.y)) |hit| hit.handle else null;
+                // A client that owns the visible context (zoe,
+                // salacommander) draws its own panes and is listening for
+                // `mouse_button`, so a press into its content goes to the
+                // wire rather than starting a host selection that would
+                // fight it. The exception is a layer the client opted in
+                // with `set_property "mouse_select"` -- salacommander's
+                // embedded shell panel, whose content is terminal output
+                // the user wants to copy. Chrome (dividers, scrollbars)
+                // already got first refusal via `skip_left`. An in-flight
+                // drag is never re-checked: the visible context can't
+                // change mid-drag without the button coming up first.
+                if (!server.mouseSelectAllowed(handle)) return false;
                 self.mouse_selecting = true;
                 self.mouse_moved = false;
                 self.mouse_last_cell = cell;
-                // Which grid this drag is over, decided once at press
-                // time; null falls through to root, exactly as before.
-                self.layer = if (self.layerAt(pos.x, pos.y)) |hit| hit.handle else null;
+                self.layer = handle;
                 self.mouse_anchor = self.pointAtPixel(pos.x, pos.y);
                 return true;
             }

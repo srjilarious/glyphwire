@@ -1203,6 +1203,10 @@ pub const PropertyName = enum {
     /// Setting it -- to either value -- also clears that transient state,
     /// so it doubles as the "a foreground program just exited" re-arm.
     pty_mode,
+    /// Whether glyphwire-host may start one of its own mouse text
+    /// selections on this layer (`{enabled: bool}`, default off). See
+    /// `Layer.mouse_select`.
+    mouse_select,
 };
 
 pub const PropertyValue = union(PropertyName) {
@@ -1221,6 +1225,7 @@ pub const PropertyValue = union(PropertyName) {
     scroll_mode: ScrollMode,
     background: ?Color,
     pty_mode: bool,
+    mouse_select: bool,
 };
 
 /// See `PropertyName.scroll_mode`.
@@ -1449,6 +1454,24 @@ pub const Layer = struct {
     /// state above -- a clean re-arm point for when a foreground program
     /// exits.
     pty_mode: bool = false,
+    /// Whether glyphwire-host may start one of *its own* mouse text
+    /// selections (drag to select, copy to the clipboard) on this layer.
+    ///
+    /// Off by default, because a client that draws its own layers is
+    /// usually also listening for `mouse_button` and would have the host
+    /// fighting it for the left button: in `salacommander` a click in a
+    /// file pane moves that pane's cursor, and a host selection drawn
+    /// over it would mean nothing. The exception is a layer holding
+    /// *terminal output* -- the embedded `gw-shell --embed` panel -- where
+    /// the text on the layer is the thing the user wants to copy and the
+    /// program underneath has no use for the click. Such a client opts
+    /// that one layer in with `set_property "mouse_select"`.
+    ///
+    /// The root layer is the other way round: it is a terminal by
+    /// definition, so the host selects on it unless a client has taken
+    /// the whole context (`Context.connection_owned`). See
+    /// `host/selection.zig`.
+    mouse_select: bool = false,
     /// --- B1 screen model (see `execCsi` / decisions.md's VT fallback) ---
     /// Alternate-screen buffer (xterm `?1049` / `?47` / `?1047`): a
     /// lazily-allocated `width * height` cell array, row-major, with **no
@@ -3425,6 +3448,7 @@ pub const Layer = struct {
             .scroll_mode => .{ .scroll_mode = self.scroll_mode },
             .background => .{ .background = self.background },
             .pty_mode => .{ .pty_mode = self.pty_mode },
+            .mouse_select => .{ .mouse_select = self.mouse_select },
         };
     }
 
@@ -3471,6 +3495,7 @@ pub const Layer = struct {
                 self.g1_line_drawing = false;
                 self.pen = .{};
             },
+            .mouse_select => |v| self.mouse_select = v,
         }
         // `.position` moves where the layer composites; `.cursor` can scroll
         // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
@@ -5532,7 +5557,7 @@ pub const Context = struct {
                 if (layer.scroll_mode != .client) return PropertyError.WrongScrollMode;
                 layer.setProperty(value);
             },
-            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode => layer.setProperty(value),
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select => layer.setProperty(value),
         }
     }
 

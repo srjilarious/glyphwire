@@ -207,8 +207,9 @@ const PropertyParams = struct {
     visible: bool = true,
     vertical: bool = false,
     horizontal: bool = false,
-    /// `"pty_mode"`'s bool -- kept off `visible` so a client setting one
-    /// property doesn't have to think about the other's default.
+    /// `"pty_mode"`'s and `"mouse_select"`'s bool -- kept off `visible`
+    /// so a client setting one property doesn't have to think about the
+    /// other's default.
     enabled: bool = false,
     /// `"opacity"`'s 0.0..1.0 factor. Defaults to fully opaque, so a
     /// client that names the property and forgets the field gets the
@@ -1884,6 +1885,8 @@ pub const Dispatcher = struct {
             .{ .background = if (p.color) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else null }
         else if (std.mem.eql(u8, p.property, "pty_mode"))
             .{ .pty_mode = p.enabled }
+        else if (std.mem.eql(u8, p.property, "mouse_select"))
+            .{ .mouse_select = p.enabled }
         else
             return DispatchError.UnknownProperty;
 
@@ -1997,6 +2000,9 @@ pub const Dispatcher = struct {
             return try rpc.response(alloc, id, BackgroundResult{ .color = bg });
         } else if (std.mem.eql(u8, p.property, "pty_mode")) {
             const on = layer.getProperty(.pty_mode).pty_mode;
+            return try rpc.response(alloc, id, PtyModeResult{ .enabled = on });
+        } else if (std.mem.eql(u8, p.property, "mouse_select")) {
+            const on = layer.getProperty(.mouse_select).mouse_select;
             return try rpc.response(alloc, id, PtyModeResult{ .enabled = on });
         } else if (std.mem.eql(u8, p.property, "opacity")) {
             const v = layer.getProperty(.opacity).opacity;

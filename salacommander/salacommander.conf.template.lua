@@ -113,6 +113,10 @@
 --     --   move                F6
 --     --   makeDir             F7
 --     --   delete              F8, delete
+--     --   sortByName          ctrl+F3
+--     --   sortByExt           ctrl+F4
+--     --   sortBySize          ctrl+F5
+--     --   sortByTime          ctrl+F6
 --     --   viewSmall           ctrl+1
 --     --   viewLarge           ctrl+2
 --     --   toggleView          ctrl+v

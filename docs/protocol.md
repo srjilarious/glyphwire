@@ -506,6 +506,7 @@ takes the value as **flat sibling fields**, not a nested `value` object —
 | `background` | `{color?}` — fill under unwritten cells; omitted = none | get / set |
 | `visibility` | `{visible}` | get; set on non-root layers only |
 | `pty_mode` | `{enabled}` | get / set |
+| `mouse_select` | `{enabled}` — let the host drag-select on this layer | get / set |
 | `profile` | profiler state | get |
 
 `size` on the **root** layer is what answers "how big is my window": a

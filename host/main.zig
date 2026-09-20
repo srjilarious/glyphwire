@@ -419,6 +419,13 @@ pub fn main(init: std.process.Init) !void {
         std.log.warn("could not add powerline symbols font '{s}': {t}", .{ powerline_symbols_path, err });
     };
 
+    // `GLYPHWIRE_KEY_DEBUG=1`: log every raw SDL key event, mapped or
+    // not. For working out what a keyboard actually reports -- an Insert
+    // on a laptop's Fn layer, a key that seems to do nothing -- since an
+    // unrecognised keycode is otherwise dropped without a trace. See
+    // `host_eng.input.logKeyEvent`.
+    appRunner.engine.inputs.key_debug = init.environ_map.get("GLYPHWIRE_KEY_DEBUG") != null;
+
     const app = try app_mod.App.init(alloc, appRunner.engine, &srv, &shell_exited, screenshot_path, screenshot_delay_ms, .{
         .path = font_cfg.face,
         .face_index = font_face_index,
