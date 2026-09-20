@@ -286,6 +286,20 @@ pub const Pane = struct {
         return total;
     }
 
+    /// Total size of everything listed, for the footer. Directories are
+    /// left out: their own inode size says nothing about what they hold,
+    /// and walking the tree would stall the pane on every directory
+    /// change. Hidden entries count only when they're shown, since this
+    /// is the size of the listing, not of the directory on disk.
+    pub fn totalBytes(self: *const Pane) u64 {
+        var total: u64 = 0;
+        for (self.entries) |e| {
+            if ((e.link_target_kind orelse e.kind) == .directory) continue;
+            total +|= e.size;
+        }
+        return total;
+    }
+
     /// What an operation should act on: the marked entries, or else the
     /// cursor's entry. Empty when nothing is marked and the cursor is on
     /// `..`. The paths are borrowed from the pane; the caller frees only

@@ -9,13 +9,15 @@
 //! `keys` rebinds actions by name (see `actions.zig`): each entry maps a
 //! chord to an action name, or to `false` to unbind that chord. Entries
 //! are applied over the built-in defaults, so a config only lists what it
-//! changes.
+//! changes. `open_actions` works the same way over
+//! `openaction.defaults`, keyed by file extension.
 
 const std = @import("std");
 const ziglua = @import("ziglua");
 const Lua = ziglua.Lua;
 const pane_mod = @import("pane.zig");
 const actions = @import("actions.zig");
+const openaction = @import("openaction.zig");
 
 const conf_name = "salacommander.conf.lua";
 
@@ -26,6 +28,14 @@ pub const KeyOverride = struct {
     action: ?[]u8,
 };
 
+/// One `open_actions` entry, owned: the extension key (lowercased,
+/// no leading dot) and the command template, or null for the `false`
+/// spelling that puts the extension back on the desktop opener.
+pub const OpenAction = struct {
+    ext: []u8,
+    command: ?[]u8,
+};
+
 pub const Config = struct {
     view: pane_mod.ViewMode = .small,
     show_hidden: bool = false,
@@ -33,6 +43,9 @@ pub const Config = struct {
     large_icon_px: u32 = 32,
     small_icon_px: u32 = 16,
     keys: []KeyOverride = &.{},
+    /// Applied over `openaction.defaults`; a later entry for the same
+    /// extension wins, as `openaction.resolve` scans last-match.
+    open_actions: []OpenAction = &.{},
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         for (self.keys) |k| {
@@ -41,6 +54,20 @@ pub const Config = struct {
         }
         alloc.free(self.keys);
         self.keys = &.{};
+        for (self.open_actions) |o| {
+            alloc.free(o.ext);
+            if (o.command) |c| alloc.free(c);
+        }
+        alloc.free(self.open_actions);
+        self.open_actions = &.{};
+    }
+
+    /// `open_actions` as `openaction.resolve` wants it. Borrowed from the
+    /// config; the caller frees only the slice.
+    pub fn openActions(self: *const Config, alloc: std.mem.Allocator) ![]openaction.Action {
+        const out = try alloc.alloc(openaction.Action, self.open_actions.len);
+        for (self.open_actions, out) |o, *a| a.* = .{ .ext = o.ext, .command = o.command };
+        return out;
     }
 };
 
@@ -95,6 +122,7 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     if (uintField(lua, "large_icon_px")) |v| result.config.large_icon_px = std.math.clamp(v, icon_px_min, icon_px_max);
     if (uintField(lua, "small_icon_px")) |v| result.config.small_icon_px = std.math.clamp(v, icon_px_min, icon_px_max);
     result.config.keys = readKeys(alloc, lua) catch &.{};
+    result.config.open_actions = readOpenActions(alloc, lua) catch &.{};
 
     return result;
 }
@@ -198,6 +226,81 @@ fn readKeys(alloc: std.mem.Allocator, lua: *Lua) ![]KeyOverride {
         }
     }.lessThan);
     return out.toOwnedSlice(alloc);
+}
+
+/// Reads `config.open_actions`, a table of extension -> command template
+/// / false. Assumes the `config` table is on top of the stack. Keys are
+/// normalized the way `openaction.extensionKey` normalizes a file's
+/// extension, so `".MD"`, `"*.md"` and `"md"` are one key.
+fn readOpenActions(alloc: std.mem.Allocator, lua: *Lua) ![]OpenAction {
+    _ = lua.getField(-1, "open_actions");
+    defer lua.pop(1);
+    if (!lua.isTable(-1)) {
+        if (!lua.isNil(-1)) std.log.warn("salacommander: {s} `open_actions` is not a table; ignored", .{conf_name});
+        return &.{};
+    }
+
+    var out: std.ArrayList(OpenAction) = .empty;
+    errdefer {
+        for (out.items) |o| {
+            alloc.free(o.ext);
+            if (o.command) |c| alloc.free(c);
+        }
+        out.deinit(alloc);
+    }
+
+    lua.pushNil();
+    while (lua.next(-2)) {
+        // Key at -2, value at -1; only `toString` an actual string key --
+        // see `readKeys` on why a number key would break `next`.
+        defer lua.pop(1);
+        if (lua.typeOf(-2) != .string) {
+            std.log.warn("salacommander: {s} `open_actions` entry with a non-string key; ignored", .{conf_name});
+            continue;
+        }
+        const raw = lua.toString(-2) catch continue;
+        const command: ?[]const u8 = switch (lua.typeOf(-1)) {
+            .string => lua.toString(-1) catch continue,
+            .boolean => if (lua.toBoolean(-1)) {
+                std.log.warn("salacommander: {s} open_actions[\"{s}\"] = true means nothing; use a command or false", .{ conf_name, raw });
+                continue;
+            } else null,
+            else => {
+                std.log.warn("salacommander: {s} open_actions[\"{s}\"] must be a command or false; ignored", .{ conf_name, raw });
+                continue;
+            },
+        };
+        const ext = (normalizeExt(alloc, raw) catch continue) orelse {
+            std.log.warn("salacommander: {s} open_actions[\"{s}\"] is not a file extension; ignored", .{ conf_name, raw });
+            continue;
+        };
+        errdefer alloc.free(ext);
+        const command_copy: ?[]u8 = if (command) |c| try alloc.dupe(u8, c) else null;
+        try out.append(alloc, .{ .ext = ext, .command = command_copy });
+    }
+    // Lua's table order is unspecified and a later entry for the same
+    // extension wins, so sort for a stable outcome, as `readKeys` does.
+    std.mem.sort(OpenAction, out.items, {}, struct {
+        fn lessThan(_: void, a: OpenAction, b: OpenAction) bool {
+            return std.mem.lessThan(u8, a.ext, b.ext);
+        }
+    }.lessThan);
+    return out.toOwnedSlice(alloc);
+}
+
+/// An `open_actions` key as an extension: lowercased, with a leading dot
+/// (`".md"`) or a whole glob (`"*.md"`) accepted and stripped. Null when
+/// nothing is left, or when what remains still holds a dot, a separator
+/// or a `*` -- those aren't extensions and would never match.
+fn normalizeExt(alloc: std.mem.Allocator, raw: []const u8) !?[]u8 {
+    var key = std.mem.trim(u8, raw, " ");
+    if (std.mem.startsWith(u8, key, "*")) key = key[1..];
+    if (std.mem.startsWith(u8, key, ".")) key = key[1..];
+    if (key.len == 0) return null;
+    if (std.mem.indexOfAny(u8, key, "./\\*") != null) return null;
+    const out = try alloc.alloc(u8, key.len);
+    for (key, out) |c, *o| o.* = std.ascii.toLower(c);
+    return out;
 }
 
 fn stringField(lua: *Lua, key: [:0]const u8) ?[]const u8 {

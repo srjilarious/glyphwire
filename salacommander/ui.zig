@@ -11,7 +11,8 @@
 //!     row 1        column headers
 //!     rows 2..     the listing, one row per entry (small view) or two
 //!                  (large view: tall icon, name, then perms/owner)
-//!     last row     a summary: what's marked, or the cursor entry's link
+//!     last row     a summary: what's marked (or the cursor entry) on the
+//!                  left, the directory's item count and total on the right
 //!
 //! A server-side `Table` would sort and paint for us, but it paints every
 //! row and scrolls its layer the way terminal output does; a file pane
@@ -35,6 +36,7 @@ const actions = @import("actions.zig");
 const fileops = @import("fileops.zig");
 const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
+const openaction = @import("openaction.zig");
 
 const Pane = pane_mod.Pane;
 const FileEntry = pane_mod.FileEntry;
@@ -52,6 +54,10 @@ fn rgb(r: u8, g: u8, b: u8) Color {
 }
 
 const bg_pane = rgb(24, 26, 31);
+/// Every other listing row, a shade up from `bg_pane` so a wide pane's
+/// name and size columns stay on one line for the eye. Kept below the
+/// header/footer shade: a stripe shouldn't read as chrome.
+const bg_row_alt = rgb(28, 30, 36);
 const bg_header = rgb(30, 33, 39);
 const bg_footer = rgb(30, 33, 39);
 const bg_title_active = rgb(52, 101, 164);
@@ -297,6 +303,7 @@ pub const Ui = struct {
             .upToParentDir => {
                 _ = p.upToParentDir() catch |err| try self.setMessage("can't go up: {t}", .{err});
             },
+            .editPath => try self.editPath(),
             .switchPane => {
                 self.active = 1 - i;
                 self.pane_dirty = .{ true, true };
@@ -345,8 +352,75 @@ pub const Ui = struct {
         };
         switch (result) {
             .none, .changed_dir => {},
-            .file => |path| try self.openExternal(path),
+            // `enter` borrows the path from the pane's listing, and
+            // opening reloads it -- copy before anything can free it.
+            .file => |path| {
+                const owned = try self.alloc.dupe(u8, path);
+                defer self.alloc.free(owned);
+                try self.openFile(owned);
+            },
         }
+    }
+
+    /// Opens a file with whatever `open_actions` says (see
+    /// `openaction.zig`): a glyphwire client runs here in the session,
+    /// anything unclaimed goes to the desktop opener.
+    fn openFile(self: *Ui, path: []const u8) !void {
+        const user = try self.cfg.openActions(self.alloc);
+        defer self.alloc.free(user);
+        const template = openaction.resolve(user, path) orelse return self.openExternal(path);
+
+        var argv_buf: [openaction.max_args][]const u8 = undefined;
+        const argv = openaction.buildArgv(&argv_buf, template, path) catch |err| {
+            try self.setMessage("open_actions \"{s}\": {t}", .{ template, err });
+            return;
+        };
+        try self.runInSession(argv);
+    }
+
+    /// Runs a glyphwire client and waits for it. The child inherits
+    /// `GLYPHWIRE_SOCK`, so it opens its own context, which the host
+    /// stacks over ours and hands the keyboard to; we're just blocked
+    /// until it exits. Its stdio is dropped -- this pane's stdout is the
+    /// shell's screen, sitting under our context, and writing there would
+    /// show up as damage once we're gone.
+    fn runInSession(self: *Ui, argv: []const []const u8) !void {
+        var child = std.process.spawn(self.io, .{
+            .argv = argv,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch |err| {
+            try self.setMessage("{s}: {t}", .{ argv[0], err });
+            return;
+        };
+        const term = child.wait(self.io) catch |err| {
+            try self.setMessage("{s}: {t}", .{ argv[0], err });
+            try self.resync();
+            return;
+        };
+        try self.resync();
+        switch (term) {
+            .exited => |code| if (code != 0) try self.setMessage("{s} exited with {d}", .{ argv[0], code }),
+            else => try self.setMessage("{s} was killed", .{argv[0]}),
+        }
+    }
+
+    /// Takes the screen back after a child had it. A resize that happened
+    /// while we weren't drawing may have arrived as an event we haven't
+    /// read yet, so re-read the size instead of trusting what we last
+    /// saw, and reread both directories: the child may well have changed
+    /// what's in them.
+    fn resync(self: *Ui) !void {
+        if (self.client.getSize()) |size| {
+            self.win = .{ .cols = size.cols, .rows = size.rows };
+        } else |_| {}
+        if (self.client.getCellMetrics()) |m| {
+            self.cell = .{ .w = m.w, .h = m.h };
+        } else |_| {}
+        try self.placeLayers();
+        try self.reloadBoth();
+        self.markAllDirty();
     }
 
     /// Hands a file to the desktop's opener, detached (`setsid -f`) so
@@ -459,6 +533,23 @@ pub const Ui = struct {
         const result = self.runOperation(.{ .kind = .delete, .sources = sel });
         try self.reloadBoth();
         try self.reportResult(.delete, result);
+    }
+
+    /// Alt+D: type where the active pane should look, starting from the
+    /// directory it shows. `~` and a relative path resolve the way a copy
+    /// destination does, and a path that can't be listed leaves the pane
+    /// where it was with the reason in the bar.
+    fn editPath(self: *Ui) !void {
+        const p = &self.panes[self.active];
+        var d = try Dialog.init(self.alloc, "Change directory", "Directory to show:", &dialog_mod.ok_cancel, .{ .input = p.path });
+        defer d.deinit(self.alloc);
+        if (try self.runDialog(&d) != .ok) return;
+        const typed = std.mem.trim(u8, d.inputText(), " ");
+        if (typed.len == 0) return;
+
+        const path = try self.resolveTyped(p.path, typed);
+        defer self.alloc.free(path);
+        p.load(path) catch |err| try self.setMessage("{s}: {t}", .{ typed, err });
     }
 
     /// F7: make a directory (and any missing parents) in the active pane,
@@ -835,8 +926,13 @@ pub const Ui = struct {
         const rh = p.view.rowHeight();
         const on_cursor = row == p.cursor;
         const marked = p.isMarked(row);
-        const bg = if (on_cursor) (if (active_pane) bg_cursor else bg_cursor_inactive) else bg_pane;
-        if (on_cursor) try b.clearArea(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .bg = bg });
+        // Striped by the row's place in the listing, not by where it
+        // landed on screen, so the pattern doesn't crawl as the pane
+        // scrolls. A two-row entry is one stripe.
+        const bg = if (on_cursor)
+            (if (active_pane) bg_cursor else bg_cursor_inactive)
+        else if (row % 2 == 1) bg_row_alt else bg_pane;
+        try b.clearArea(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .bg = bg });
 
         const entry = p.entryAt(row);
         const name = if (entry) |e| e.name else "..";
@@ -879,6 +975,10 @@ pub const Ui = struct {
         }
     }
 
+    /// The last row of a pane: what's marked (or the cursor's entry) on
+    /// the left, and the directory's own total on the right -- how many
+    /// entries are listed and what they add up to (`Pane.totalBytes`,
+    /// this directory only).
     fn writeFooter(b: *Batch, layer: glyphwire.LayerHandle, p: *const Pane, row: usize, w: usize) !void {
         try b.clearArea(.{ .layer = layer, .row = row, .rows = 1, .bg = bg_footer });
         var buf: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
@@ -890,8 +990,24 @@ pub const Ui = struct {
         } else if (p.current()) |e| blk: {
             if (e.link_target) |t| break :blk std.fmt.bufPrint(&buf, "{s} -> {s}", .{ e.name, t }) catch "";
             break :blk std.fmt.bufPrint(&buf, "{s}", .{e.name}) catch "";
-        } else std.fmt.bufPrint(&buf, "{d} items", .{p.entries.len}) catch "";
-        try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = 1, .fg = if (marked > 0) fg_marked else fg_footer, .bg = bg_footer, .max_cols = w -| 2 });
+        } else "";
+
+        var total_buf: [64]u8 = undefined;
+        var tsize_buf: [24]u8 = undefined;
+        const total_size = std.mem.trim(u8, lsfmt.formatSize(&tsize_buf, p.totalBytes(), false), " ");
+        const total = std.fmt.bufPrint(&total_buf, "{d} items, {s}", .{ p.entries.len, total_size }) catch "";
+        const total_w = glyphwire.stringWidth(total);
+
+        // The total owns the right end; the left text gets what's left,
+        // with a gap, and is cut to it rather than running underneath.
+        var left_max = w -| 2;
+        if (total_w > 0 and w >= total_w + 3) {
+            try b.writeTextOpts(total, .{ .layer = layer, .row = row, .col = w - 1 - total_w, .fg = fg_detail, .bg = bg_footer });
+            left_max = w -| (total_w + 3);
+        }
+        if (text.len > 0 and left_max > 0) {
+            try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = 1, .fg = if (marked > 0) fg_marked else fg_footer, .bg = bg_footer, .max_cols = left_max });
+        }
     }
 
     /// The bottom bar: a message if there is one, else the function keys

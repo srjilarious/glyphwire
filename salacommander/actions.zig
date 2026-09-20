@@ -27,6 +27,9 @@ pub const Action = enum {
     /// desktop's opener.
     activate,
     upToParentDir,
+    /// Type a directory for the active pane, starting from the one it
+    /// shows.
+    editPath,
     switchPane,
     /// Point the other pane at this pane's directory.
     otherPaneToSameDir,
@@ -66,6 +69,7 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "kp_enter", .action = .activate },
     .{ .chord = "alt+up", .action = .upToParentDir },
     .{ .chord = "backspace", .action = .upToParentDir },
+    .{ .chord = "alt+d", .action = .editPath },
     .{ .chord = "tab", .action = .switchPane },
     .{ .chord = "alt+o", .action = .otherPaneToSameDir },
     .{ .chord = "ctrl+u", .action = .swapPanes },

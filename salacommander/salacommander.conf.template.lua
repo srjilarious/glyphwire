@@ -36,6 +36,34 @@
 --     small_icon_px = 16,
 --     large_icon_px = 32,
 --
+--     ---- Opening files ---------------------------------------------
+--
+--     -- What runs when a file is activated (Enter, double-click),
+--     -- keyed by its extension: lowercased, with or without a leading
+--     -- dot ("md", ".md" and "*.md" are the same key). The value is a
+--     -- command, split on spaces -- there is no shell here, so no
+--     -- pipes, no quoting, no globs. The word {sel} becomes the file's
+--     -- absolute path; a command without one gets the path appended.
+--     --
+--     -- A glyphwire client named here runs in this session: it opens
+--     -- its own context over salacommander, takes the keyboard, and
+--     -- salacommander comes back (and rereads both panes) when it
+--     -- exits. Anything with no entry goes to xdg-open, detached, as
+--     -- every file did before this table.
+--     --
+--     -- These entries apply over the built-in defaults below; set one
+--     -- to false to put that extension back on xdg-open.
+--     open_actions = {
+--         md   = "gwmd {sel}",
+--         cbz  = "gw-read {sel}",
+--         cbr  = "gw-read {sel}",
+--         png  = "gw-view {sel}",
+--         jpg  = "gw-view {sel}",
+--         jpeg = "gw-view {sel}",
+--         -- ["pdf"] = "zathura",   -- {sel} appended
+--         -- ["png"] = false,       -- back to xdg-open
+--     },
+--
 --     ---- Keys ------------------------------------------------------
 --
 --     -- Rebind actions by name. Each entry maps a chord to an action,
@@ -56,6 +84,7 @@
 --     --   cursorEnd           end
 --     --   activate            enter, kp_enter
 --     --   upToParentDir       alt+up, backspace
+--     --   editPath            alt+d
 --     --   switchPane          tab
 --     --   otherPaneToSameDir  alt+o
 --     --   swapPanes           ctrl+u

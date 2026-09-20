@@ -7,9 +7,11 @@
 //! Launched from a glyphwire-aware shell it opens a full-screen context
 //! with a directory listing on each side: F5 copies, F6 moves or renames,
 //! F7 makes a directory, F8 deletes, Space/Insert mark, Alt+Up goes to the
-//! parent directory, Tab switches sides. Every key is an action that
-//! `salacommander.conf.lua` can rebind (see `actions.zig`). It needs a
-//! glyphwire session; there is no text-mode fallback.
+//! parent directory, Alt+D types one, Tab switches sides. Every key is an
+//! action that `salacommander.conf.lua` can rebind (see `actions.zig`),
+//! and what Enter opens a file with is its `open_actions` table (see
+//! `openaction.zig`). It needs a glyphwire session; there is no text-mode
+//! fallback.
 //!
 //! `salacommander [LEFT [RIGHT]]` -- both sides default to the current
 //! directory.

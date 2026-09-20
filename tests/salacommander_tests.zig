@@ -12,6 +12,7 @@ const Pane = sala.pane.Pane;
 const fileops = sala.fileops;
 const dialog = sala.dialog;
 const actions = sala.actions;
+const openaction = sala.openaction;
 const config = sala.config;
 
 /// A scratch directory under the cwd, removed by `deinit`. `label` keeps
@@ -532,6 +533,7 @@ pub fn defaultBindingsCoverTheBasicsTest(_: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(km.lookup("F8", .{}).?, actions.Action.delete);
     try testz.expectEqual(km.lookup("space", .{}).?, actions.Action.toggleMark);
     try testz.expectEqual(km.lookup("insert", .{}).?, actions.Action.toggleMarkAndDown);
+    try testz.expectEqual(km.lookup("d", .{ .alt = true }).?, actions.Action.editPath);
     // Every function-key-bar action has a key to show.
     for (actions.bar_actions) |a| try testz.expectTrue(km.chordFor(a) != null);
 }
@@ -569,4 +571,103 @@ pub fn configSyntaxErrorKeepsDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !
     defer r.deinit(alloc);
     try testz.expectTrue(r.err != null);
     try testz.expectEqual(r.config.view, sala.pane.ViewMode.small);
+}
+
+pub fn paneTotalBytesCountsListedFilesOnlyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "total");
+    defer s.deinit();
+    try s.file("a", "12345");
+    try s.file("b", "123");
+    try s.mkdir("sub");
+    try s.file(".hidden", "1234567890");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    // The directory's own inode size is left out, and a hidden file only
+    // counts once it's listed.
+    try testz.expectEqual(p.totalBytes(), 8);
+    try p.setShowHidden(true);
+    try testz.expectEqual(p.totalBytes(), 18);
+}
+
+// ─── Open actions ───────────────────────────────────────────────────────
+
+pub fn openActionResolvesByExtensionTest(_: std.Io, _: std.mem.Allocator) !void {
+    const none: []const openaction.Action = &.{};
+    try testz.expectEqualStr(openaction.resolve(none, "/tmp/notes.md").?, "gwmd {sel}");
+    // The key is case-folded, so a shouty extension still matches.
+    try testz.expectEqualStr(openaction.resolve(none, "/tmp/Book.CBZ").?, "gw-read {sel}");
+    try testz.expectEqualStr(openaction.resolve(none, "/tmp/shot.jpeg").?, "gw-view {sel}");
+    // Nothing claims these: the caller falls back to xdg-open.
+    try testz.expectTrue(openaction.resolve(none, "/tmp/notes.txt") == null);
+    try testz.expectTrue(openaction.resolve(none, "/tmp/README") == null);
+    try testz.expectTrue(openaction.resolve(none, "/tmp/.bashrc") == null);
+    // A dot in a parent directory isn't the file's extension.
+    try testz.expectTrue(openaction.resolve(none, "/tmp/v1.2/README") == null);
+}
+
+pub fn openActionUserEntriesBeatDefaultsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const user = [_]openaction.Action{
+        .{ .ext = "md", .command = "zoe {sel}" },
+        .{ .ext = "png", .command = null },
+        .{ .ext = "md", .command = "gwmd -x {sel}" },
+    };
+    // The last entry for a key wins, as `resolve` scans last-match.
+    try testz.expectEqualStr(openaction.resolve(&user, "/tmp/notes.md").?, "gwmd -x {sel}");
+    // `false` shadows the built-in and lands back on the desktop opener.
+    try testz.expectTrue(openaction.resolve(&user, "/tmp/shot.png") == null);
+    // An extension the table doesn't mention keeps its default.
+    try testz.expectEqualStr(openaction.resolve(&user, "/tmp/shot.jpg").?, "gw-view {sel}");
+}
+
+pub fn openActionBuildsArgvTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [openaction.max_args][]const u8 = undefined;
+    const argv = try openaction.buildArgv(&buf, "gw-read {sel}", "/tmp/a b.cbz");
+    try testz.expectEqual(argv.len, 2);
+    try testz.expectEqualStr(argv[0], "gw-read");
+    // The path is one argument, spaces and all: there is no shell to
+    // word-split it again.
+    try testz.expectEqualStr(argv[1], "/tmp/a b.cbz");
+
+    // A template that never says {sel} gets the path appended.
+    const appended = try openaction.buildArgv(&buf, "zathura --mode fullscreen", "/tmp/x.pdf");
+    try testz.expectEqual(appended.len, 4);
+    try testz.expectEqualStr(appended[3], "/tmp/x.pdf");
+
+    // {sel} can sit anywhere; the rest of the words keep their order.
+    const middle = try openaction.buildArgv(&buf, "gw-view {sel} --loop", "/tmp/x.png");
+    try testz.expectEqual(middle.len, 3);
+    try testz.expectEqualStr(middle[1], "/tmp/x.png");
+    try testz.expectEqualStr(middle[2], "--loop");
+
+    try testz.expectError(openaction.buildArgv(&buf, "   ", "/tmp/x.png"), error.EmptyCommand);
+}
+
+pub fn configReadsOpenActionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var r = config.load(alloc,
+        \\config = {
+        \\  open_actions = {
+        \\    md = "zoe {sel}",
+        \\    [".CBZ"] = "gw-read {sel}",
+        \\    ["*.pdf"] = "zathura",
+        \\    png = false,
+        \\    ["a/b"] = "nope",
+        \\    [""] = "nope",
+        \\  },
+        \\}
+    );
+    defer r.deinit(alloc);
+    try testz.expectTrue(r.err == null);
+    // The two unusable keys are dropped; the rest normalize to bare
+    // lowercase extensions.
+    try testz.expectEqual(r.config.open_actions.len, 4);
+
+    const user = try r.config.openActions(alloc);
+    defer alloc.free(user);
+    try testz.expectEqualStr(openaction.resolve(user, "/tmp/x.md").?, "zoe {sel}");
+    try testz.expectEqualStr(openaction.resolve(user, "/tmp/x.cbz").?, "gw-read {sel}");
+    try testz.expectEqualStr(openaction.resolve(user, "/tmp/x.pdf").?, "zathura");
+    try testz.expectTrue(openaction.resolve(user, "/tmp/x.png") == null);
+    // An extension the table doesn't touch keeps its default.
+    try testz.expectEqualStr(openaction.resolve(user, "/tmp/x.jpg").?, "gw-view {sel}");
 }
