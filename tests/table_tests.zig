@@ -1224,3 +1224,97 @@ pub fn tableFocusColumnMarksItsBodyCellTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqual(back.col, @as(usize, 5));
     try testz.expectEqual(back.id, meta_a);
 }
+
+fn expectWrap(text: []const u8, width: usize, want: []const []const u8) !void {
+    var it = glyphwire.WrapIterator.init(text, width);
+    for (want) |w| try testz.expectEqualStr(w, it.next() orelse return error.TooFewLines);
+    try testz.expectTrue(it.next() == null);
+    try testz.expectEqual(glyphwire.wrapLineCount(text, width), want.len);
+}
+
+/// `WrapIterator` is the one wrap rule a `.wrap` column paints by and a
+/// client sizes the table by: break at spaces, hard-break a word longer
+/// than the line, never split a wide character, `\n` forces a break.
+pub fn wrapIteratorBreaksAtWordsTest(_: std.Io, _: std.mem.Allocator) !void {
+    try expectWrap("one two three", 7, &.{ "one two", "three" });
+    // Runs of spaces at a break are dropped from both lines.
+    try expectWrap("one   two", 4, &.{ "one", "two" });
+    // A word longer than the line is hard-broken.
+    try expectWrap("abcdefgh ij", 3, &.{ "abc", "def", "gh", "ij" });
+    // Wide characters count 2 and never split.
+    try expectWrap("日本語です", 5, &.{ "日本", "語で", "す" });
+    // A glyph wider than the whole line still goes out, alone.
+    try expectWrap("日a", 1, &.{ "日", "a" });
+    try expectWrap("a\nb c", 10, &.{ "a", "b c" });
+    try expectWrap("fits", 10, &.{"fits"});
+    try expectWrap("", 10, &.{});
+    try expectWrap("   ", 10, &.{});
+    try expectWrap("anything", 0, &.{});
+}
+
+/// A `.wrap` column word-wraps a too-wide cell onto extra lines, making
+/// its row taller and pushing the next row down, while an `.ellipsis`
+/// column (the default) still cuts its cell off with "…". The wrapped
+/// height is part of the table's footprint, and re-sorting on the wrap
+/// column (which widens it for the arrow) keeps the same height, since
+/// wrapping uses the nominal width.
+pub fn tableWrapColumnGrowsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    // Name = cols 0..3, gap 4, Desc = cols 5..11.
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "Name", .width = 4 },
+        .{ .name = "Desc", .width = 7, .overflow = .wrap, .sortable = true },
+    }, .{ .borders = false, .header_separator = false });
+
+    try client.tableSetRows(null, table, &.{
+        &.{ .{ .display = "alphabet" }, .{ .display = "one two three" } },
+        &.{ .{ .display = "b" }, .{ .display = "x" } },
+    });
+
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        // Row 1: the ellipsis column is cut off, Desc's first line.
+        try testz.expectEqualStr("a", snap.cellAt(1, 0).grapheme);
+        try testz.expectEqualStr("\u{2026}", snap.cellAt(1, 3).grapheme);
+        try testz.expectEqualStr("o", snap.cellAt(1, 5).grapheme);
+        try testz.expectEqualStr("o", snap.cellAt(1, 11).grapheme);
+        // Row 2: Desc's second line, nothing under Name.
+        try testz.expectEqualStr("", snap.cellAt(2, 0).grapheme);
+        try testz.expectEqualStr("t", snap.cellAt(2, 5).grapheme);
+        try testz.expectEqualStr("e", snap.cellAt(2, 9).grapheme);
+        // The next row was pushed down to row 3.
+        try testz.expectEqualStr("b", snap.cellAt(3, 0).grapheme);
+        try testz.expectEqualStr("x", snap.cellAt(3, 5).grapheme);
+    }
+    const state = try client.tableGetState(null, table);
+    try testz.expectEqual(state.painted.rows, 4);
+
+    try client.tableSetSort(null, table, 1, .descending);
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        try testz.expectEqualStr("b", snap.cellAt(1, 0).grapheme);
+        // The sorted column is two cells wider now but wraps the same.
+        try testz.expectEqualStr("a", snap.cellAt(2, 0).grapheme);
+        try testz.expectEqualStr("o", snap.cellAt(2, 11).grapheme);
+        try testz.expectEqualStr("t", snap.cellAt(3, 5).grapheme);
+    }
+    const sorted = try client.tableGetState(null, table);
+    try testz.expectEqual(sorted.painted.rows, 4);
+}

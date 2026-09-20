@@ -3242,6 +3242,7 @@ pub const Dispatcher = struct {
                 .width = cj.width,
                 .min_width = cj.min_width,
                 .h_align = try parseTableOption(core.HAlign, cj.h_align, .start),
+                .overflow = try parseTableOption(core.TableOverflow, cj.overflow, .ellipsis),
             };
             built = i + 1;
         }
@@ -3479,6 +3480,7 @@ pub const Dispatcher = struct {
                 .width = c.width,
                 .min_width = c.min_width,
                 .h_align = @tagName(c.h_align),
+                .overflow = @tagName(c.overflow),
             };
         }
 

@@ -1498,6 +1498,9 @@ pub const Client = struct {
         width: usize,
         min_width: usize = 1,
         h_align: core.HAlign = .start,
+        /// `.wrap` word-wraps a too-wide body cell onto extra lines
+        /// instead of ending it in "…" -- see `core.TableOverflow`.
+        overflow: core.TableOverflow = .ellipsis,
     };
 
     pub const TableStyleInput = struct {
@@ -1560,6 +1563,7 @@ pub const Client = struct {
                 .width = c.width,
                 .min_width = c.min_width,
                 .h_align = @tagName(c.h_align),
+                .overflow = @tagName(c.overflow),
             };
         }
 

@@ -536,7 +536,7 @@ pub const Ui = struct {
         const c = self.client;
         const cols = try self.alloc.alloc(glyphwire.Client.TableColumnInput, t.columns.len);
         defer self.alloc.free(cols);
-        for (t.columns, cols) |src, *dst| dst.* = .{ .name = src.name, .width = src.width, .h_align = src.h_align };
+        for (t.columns, cols) |src, *dst| dst.* = .{ .name = src.name, .width = src.width, .h_align = src.h_align, .overflow = src.overflow };
 
         const handle = try c.createTable(self.page_layer, t.row, t.col, cols, .{
             .alt_row_bg = bg_table_alt,

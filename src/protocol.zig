@@ -123,6 +123,8 @@ pub const TableColumn = struct {
     min_width: usize = 1,
     /// "start" (default), "center", or "end".
     h_align: ?[]const u8 = null,
+    /// "ellipsis" (default) or "wrap" -- see `core.TableOverflow`.
+    overflow: ?[]const u8 = null,
 };
 
 /// A table's style, shared by `create_table`'s `style`, `table_set_style`'s,
@@ -170,6 +172,7 @@ pub const ColumnState = struct {
     width: usize,
     min_width: usize,
     h_align: []const u8,
+    overflow: []const u8,
 };
 
 /// Where a table last painted (`core.Table.painted`) -- a client that

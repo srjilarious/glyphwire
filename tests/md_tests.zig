@@ -285,8 +285,41 @@ pub fn tableColumnsShrinkToFitTest(_: std.Io, alloc: std.mem.Allocator) !void {
     // 30 columns of text less 3 border/separator cells.
     try testz.expectEqual(t.columns[0].width + t.columns[1].width, 27);
     try testz.expectEqual(t.columns[0].width, 4);
-    // Header, separator, one row, two borders.
-    try testz.expectEqual(lay.rows, 1 + 5 + 1);
+    // Only the shrunk column wraps.
+    try testz.expectEqual(t.columns[0].overflow, .ellipsis);
+    try testz.expectEqual(t.columns[1].overflow, .wrap);
+    // Header, separator, one row wrapped onto two lines, two borders.
+    try testz.expectEqual(lay.rows, 1 + 6 + 1);
+}
+
+/// A shrunk column's cells wrap instead of being cut off, a row grows to
+/// its tallest cell, and whatever follows the table (and a link in a row
+/// under a wrapped one) moves down to match.
+pub fn tableShrunkColumnWrapsCellsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src = "| K | Description |\n|---|---|\n| a | one two three four |\n| [b](x) | ok |\n\nafter\n";
+    const out = try dumpOf(alloc, src, 20);
+    defer alloc.free(out);
+    try testz.expectEqualStr(
+        \\
+        \\ +---+------------+
+        \\ |K  |Description |
+        \\ +---+------------+
+        \\ |a  |one two     |
+        \\ |   |three four  |
+        \\ |b  |ok          |
+        \\ +---+------------+
+        \\
+        \\ after
+        \\
+        \\
+    , out);
+
+    var doc = try parse(alloc, src);
+    defer doc.deinit();
+    var lay = try layout.layout(alloc, &doc, .{ .width = 20 });
+    defer lay.deinit();
+    // Top border at row 1, header, separator, a two-line row, then b's.
+    try testz.expectEqual(lay.link_pos[0].?.row, 1 + 3 + 2);
 }
 
 pub fn linkPositionsAndTabOrderFollowReadingOrderTest(_: std.Io, alloc: std.mem.Allocator) !void {

@@ -775,6 +775,82 @@ pub fn stringWidth(text: []const u8) usize {
     return w;
 }
 
+/// Word-wraps `text` into lines at most `width` display cells wide,
+/// yielding slices of `text` (no allocation). Breaks at spaces; a word
+/// wider than `width` is hard-broken at a codepoint boundary, so a wide
+/// character never splits. `\n` forces a break. Leading spaces of a
+/// line and trailing spaces at a break are dropped. A single glyph wider
+/// than `width` (a wide character in a 1-cell column) is still yielded on
+/// its own line so the walk always makes progress. `width == 0` yields
+/// nothing.
+///
+/// This is the one wrap rule for a `.wrap` table column: `Table` paints
+/// with it and a client that lays out content below a table (gwmd) sizes
+/// the table with it, so the two can't disagree on a row's height.
+pub const WrapIterator = struct {
+    text: []const u8,
+    width: usize,
+    pos: usize = 0,
+
+    pub fn init(text: []const u8, width: usize) WrapIterator {
+        return .{ .text = text, .width = width };
+    }
+
+    pub fn next(self: *WrapIterator) ?[]const u8 {
+        const text = self.text;
+        if (self.width == 0) return null;
+        while (self.pos < text.len and text[self.pos] == ' ') self.pos += 1;
+        if (self.pos >= text.len) return null;
+
+        const start = self.pos;
+        var i = start;
+        var w: usize = 0;
+        // Byte index of the last space whose prefix fits: the soft break.
+        var soft_break: ?usize = null;
+        while (i < text.len) {
+            if (text[i] == '\n') {
+                self.pos = i + 1;
+                return trimTrailingSpaces(text[start..i]);
+            }
+            const cp_len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+            const end = @min(i + cp_len, text.len);
+            const cw: usize = codepointWidth(std.unicode.utf8Decode(text[i..end]) catch 0xFFFD);
+            if (w + cw > self.width) {
+                if (text[i] == ' ') {
+                    self.pos = i;
+                    return trimTrailingSpaces(text[start..i]);
+                }
+                if (soft_break) |b| {
+                    self.pos = b;
+                    return trimTrailingSpaces(text[start..b]);
+                }
+                // One word longer than the line: hard-break it. A glyph
+                // wider than the whole line goes out alone.
+                const cut = if (i == start) end else i;
+                self.pos = cut;
+                return text[start..cut];
+            }
+            if (text[i] == ' ') soft_break = i;
+            w += cw;
+            i = end;
+        }
+        self.pos = text.len;
+        return trimTrailingSpaces(text[start..]);
+    }
+
+    fn trimTrailingSpaces(s: []const u8) []const u8 {
+        return std.mem.trimEnd(u8, s, " ");
+    }
+};
+
+/// How many lines `WrapIterator` breaks `text` into at `width`.
+pub fn wrapLineCount(text: []const u8, width: usize) usize {
+    var it = WrapIterator.init(text, width);
+    var n: usize = 0;
+    while (it.next()) |_| n += 1;
+    return n;
+}
+
 /// A cell's role in East Asian Width terms: an ordinary 1-cell character,
 /// the left ("primary") cell of a 2-cell wide character that holds the
 /// grapheme, or the right cell of such a pair which renders nothing of
@@ -3545,6 +3621,12 @@ pub const TableError = error{
 /// of lexically ("1" before "9").
 pub const ColumnKind = enum { text, number };
 
+/// What a body cell does with text wider than its column: `.ellipsis`
+/// (the default) keeps one line and ends it in "…"; `.wrap` word-wraps it
+/// (`WrapIterator`) onto as many lines as it needs, making its row taller.
+/// Headers always ellipsize.
+pub const TableOverflow = enum { ellipsis, wrap };
+
 pub const SortDirection = enum { none, ascending, descending };
 
 /// The glyph drawn after the active sort column's header name -- a small
@@ -3613,6 +3695,7 @@ pub const TableColumn = struct {
     width: usize,
     min_width: usize = 1,
     h_align: HAlign = .start,
+    overflow: TableOverflow = .ellipsis,
 
     pub fn deinit(self: TableColumn, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
@@ -3986,15 +4069,16 @@ pub const Table = struct {
         defer self.alloc.free(indices);
 
         for (indices, 0..) |row_idx, display_i| {
-            tableMakeRoom(layer, &cur_row, &scrolled, row_height);
+            const rh = self.bodyRowHeight(ctx, self.rows[row_idx]);
+            tableMakeRoom(layer, &cur_row, &scrolled, rh);
             const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
-            if (row_bg) |bg| fillRowBg(layer, @intCast(cur_row), content_start_col, content_width, row_height, bg);
+            if (row_bg) |bg| fillRowBg(layer, @intCast(cur_row), content_start_col, content_width, rh, bg);
             if (self.style.borders) {
                 var line: usize = 0;
-                while (line < row_height) : (line += 1) self.drawSideBorders(layer, ctx, @intCast(cur_row + line), content_width);
+                while (line < rh) : (line += 1) self.drawSideBorders(layer, ctx, @intCast(cur_row + line), content_width);
             }
             self.writeBodyRow(layer, ctx, self.rows[row_idx], @intCast(cur_row), content_start_col, row_height, row_bg);
-            cur_row += row_height;
+            cur_row += rh;
         }
 
         if (self.style.borders) {
@@ -4115,12 +4199,13 @@ pub const Table = struct {
         const indices = try self.sortedIndices(self.alloc);
         defer self.alloc.free(indices);
 
-        const rh_i: i64 = @intCast(row_height);
         for (indices, 0..) |row_idx, display_i| {
+            const rh = self.bodyRowHeight(ctx, self.rows[row_idx]);
+            const rh_i: i64 = @intCast(rh);
             var line: i64 = 0;
             while (line < rh_i) : (line += 1) blankRow(layer, cur + line, self.col, clear_cols);
             const row_bg = if (self.style.alt_row_bg != null and display_i % 2 == 1) self.style.alt_row_bg else null;
-            if (row_bg) |bg| fillRowBg(layer, cur, content_start_col, content_width, row_height, bg);
+            if (row_bg) |bg| fillRowBg(layer, cur, content_start_col, content_width, rh, bg);
             if (self.style.borders) {
                 line = 0;
                 while (line < rh_i) : (line += 1) self.drawSideBorders(layer, ctx, cur + line, content_width);
@@ -4207,23 +4292,12 @@ pub const Table = struct {
             // flush under the arrow).
             const width = self.headerColWidth(i);
             const cell = row.cells[i];
-            var icon_reserve: usize = 0;
+            const icon_reserve = self.iconReserve(ctx, cell);
 
             if (cell.icon) |icon_handle| {
                 if (ctx.cell_px_w > 0 and ctx.cell_px_h > 0) {
-                    const info = ctx.imageInfo(icon_handle) orelse ImageInfo{ .width = 0, .height = 0 };
-                    // Row height bounds the icon; `style.max_icon_px` (if
-                    // set) bounds it further, so a tall row still renders a
-                    // modest icon.
-                    const max_h: u32 = @min(
-                        @as(u32, @intCast(row_height * ctx.cell_px_h)),
-                        self.style.max_icon_px orelse std.math.maxInt(u32),
-                    );
-                    const render_px = @min(info.width, max_h);
-                    icon_reserve = (render_px + ctx.cell_px_w - 1) / ctx.cell_px_w + 1;
-                    setCellIconOver(layer, mid_row, col, icon_handle, .natural, .start, .center, max_h, cell.metadata_id);
+                    setCellIconOver(layer, mid_row, col, icon_handle, .natural, .start, .center, self.iconMaxH(ctx), cell.metadata_id);
                 } else {
-                    icon_reserve = 1;
                     setCellIconOver(layer, mid_row, col, icon_handle, .fit, .center, .center, null, cell.metadata_id);
                 }
             }
@@ -4231,10 +4305,72 @@ pub const Table = struct {
             const text_col = col + icon_reserve;
             const text_width = width -| icon_reserve;
             const fg = cell.fg orelse default_style.fg;
-            writeCellRun(layer, mid_row, text_col, cell.display, text_width, column.h_align, fg, row_bg, cell.metadata_id, column.focus);
+            switch (column.overflow) {
+                .ellipsis => writeCellRun(layer, mid_row, text_col, cell.display, text_width, column.h_align, fg, row_bg, cell.metadata_id, column.focus),
+                .wrap => {
+                    // Wrapped at the nominal width (see `wrapWidth`), each
+                    // line padded out to the header's. The first line sits
+                    // where an unwrapped cell's text would; the rest run
+                    // down into the rows `bodyRowHeight` added.
+                    var it = WrapIterator.init(cell.display, self.wrapWidth(ctx, i, cell));
+                    var line: i64 = 0;
+                    while (it.next()) |text| : (line += 1) {
+                        writeCellRun(layer, mid_row + line, text_col, text, text_width, column.h_align, fg, row_bg, cell.metadata_id, column.focus and line == 0);
+                    }
+                    if (line == 0) writeCellRun(layer, mid_row, text_col, "", text_width, column.h_align, fg, row_bg, cell.metadata_id, column.focus);
+                },
+            }
 
             col += width + 1;
         }
+    }
+
+    /// How many lines body row `row` takes: `style.row_height`, or more
+    /// when a `.wrap` cell needs them. A wrapped cell's first line is the
+    /// band's middle line (`row_height / 2`, where every cell's text
+    /// sits), so it needs `row_height / 2 + lines` rows in all.
+    fn bodyRowHeight(self: *const Table, ctx: *const Context, row: TableRow) usize {
+        const band = @max(self.style.row_height, 1);
+        var h = band;
+        for (self.columns, 0..) |column, i| {
+            if (column.overflow != .wrap) continue;
+            const cell = row.cells[i];
+            h = @max(h, band / 2 + wrapLineCount(cell.display, self.wrapWidth(ctx, i, cell)));
+        }
+        return h;
+    }
+
+    /// The width a `.wrap` cell's text wraps at: the column's *nominal*
+    /// width less its icon, not `headerColWidth`. Sorting on a column
+    /// widens it by the arrow; if that re-wrapped its cells, a re-sort
+    /// would change the table's height, and `repaint` (which redraws in
+    /// place) would overrun whatever sits below the table.
+    fn wrapWidth(self: *const Table, ctx: *const Context, i: usize, cell: TableCell) usize {
+        return self.columns[i].width -| self.iconReserve(ctx, cell);
+    }
+
+    /// The pixel cap on a body icon's height: the style's `row_height`
+    /// band, and `style.max_icon_px` (if set) further, so a tall row
+    /// still renders a modest icon. Never the extra lines a wrapped cell
+    /// adds -- an icon doesn't swell with its row's text.
+    fn iconMaxH(self: *const Table, ctx: *const Context) u32 {
+        const band = @max(self.style.row_height, 1);
+        return @min(
+            @as(u32, @intCast(band * ctx.cell_px_h)),
+            self.style.max_icon_px orelse std.math.maxInt(u32),
+        );
+    }
+
+    /// Leading cells `cell`'s icon takes before its text: its rendered
+    /// pixel width rounded up to whole cells plus a one-cell gap, or a
+    /// single `.fit` cell without the session's cell pixel metrics. 0 for
+    /// a cell with no icon.
+    fn iconReserve(self: *const Table, ctx: *const Context, cell: TableCell) usize {
+        const icon_handle = cell.icon orelse return 0;
+        if (ctx.cell_px_w == 0 or ctx.cell_px_h == 0) return 1;
+        const info = ctx.imageInfo(icon_handle) orelse ImageInfo{ .width = 0, .height = 0 };
+        const render_px = @min(info.width, self.iconMaxH(ctx));
+        return (render_px + ctx.cell_px_w - 1) / ctx.cell_px_w + 1;
     }
 
     fn drawBorderEdge(self: *const Table, layer: *Layer, ctx: *const Context, row: i64, content_width: usize, edge: enum { top, bottom }) void {

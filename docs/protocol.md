@@ -669,10 +669,20 @@ when the id was destroyed but is still referenced.
 | `table_set_style` | notification | `layer?`, `table`, `style` | — |
 | `table_get_state` | request | `layer?`, `table` | see below |
 
-**Column** — `{name, kind?, sortable?, case_insensitive?, width, min_width?, h_align?}`.
+**Column** — `{name, kind?, sortable?, case_insensitive?, width, min_width?, h_align?, overflow?}`.
 `kind` is `"text"` (default) or `"number"`; `h_align` is `"start"`
 (default), `"center"` or `"end"`. `case_insensitive` folds ASCII case when
 sorting a text column.
+
+`overflow` decides what a body cell wider than its column does:
+`"ellipsis"` (default) keeps one line ending in `…`; `"wrap"` word-wraps
+it. Wrapping breaks at spaces, hard-breaks a word longer than the line at
+a character boundary (a wide character never splits), and treats `\n` as
+a break. A row is as tall as its tallest wrapped cell (at least
+`row_height`); other cells stay on the row's first text line. Wrapping
+uses the column's nominal `width`, not the extra width a sort arrow adds,
+so re-sorting never changes the table's height. Headers always
+ellipsize.
 
 **Style** — every field optional:
 `{borders?=true, header_separator?=true, box_style?="box", alt_row_bg?, header_fg?, header_bg?, row_height?=1, max_icon_px?}`.
@@ -692,7 +702,7 @@ message reports `InvalidTableOption`.
 
 `table_get_state` returns
 `{columns, row_count, sort_column, sort_direction, style, painted, revision}`,
-where `columns` reports `kind` and `h_align` resolved to concrete strings
+where `columns` reports `kind`, `h_align` and `overflow` resolved to concrete strings
 and `painted` is `{row, col, rows, cols}` — where the table last drew. A
 client placing something below a table **SHOULD** read `painted` rather
 than recomputing the layout, which would drift the moment the host's

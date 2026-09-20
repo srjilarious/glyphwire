@@ -68,6 +68,9 @@ pub const TableColumn = struct {
     name: []const u8,
     width: usize,
     h_align: glyphwire.HAlign = .start,
+    /// `.wrap` when the table had to be shrunk to fit and this column
+    /// ended up narrower than its widest cell -- see `Builder.table`.
+    overflow: glyphwire.TableOverflow = .ellipsis,
 };
 
 pub const TableOp = struct {
@@ -76,6 +79,18 @@ pub const TableOp = struct {
     columns: []TableColumn,
     rows: [][]TableCell,
 };
+
+/// How many screen rows one body row takes: 1, or as many lines as its
+/// tallest `.wrap` cell breaks into. The same rule the server's
+/// `core.Table` paints by (a gwmd table has no icons and a `row_height`
+/// of 1), since both wrap with `glyphwire.WrapIterator`.
+pub fn tableRowHeight(columns: []const TableColumn, cells: []const TableCell) usize {
+    var h: usize = 1;
+    for (columns, cells) |c, cell| {
+        if (c.overflow == .wrap) h = @max(h, glyphwire.wrapLineCount(cell.text, c.width));
+    }
+    return h;
+}
 
 pub const Op = union(enum) {
     text: TextOp,
@@ -194,10 +209,20 @@ pub const Layout = struct {
                 try pieces.append(alloc, .{ .row = r, .col = tb.col, .text = try tableRule(a, tb.columns) });
                 r += 1;
                 for (tb.rows) |row| {
-                    var cells: std.ArrayList([]const u8) = .empty;
-                    for (row) |c| try cells.append(a, c.text);
-                    try pieces.append(alloc, .{ .row = r, .col = tb.col, .text = try tableRow(a, tb.columns, cells.items) });
-                    r += 1;
+                    // One iterator per `.wrap` cell, stepped a line per
+                    // screen row; an unwrapped cell shows on the first.
+                    const wraps = try a.alloc(glyphwire.WrapIterator, row.len);
+                    for (wraps, row, tb.columns) |*w, c, col| w.* = .init(c.text, col.width);
+                    const h = tableRowHeight(tb.columns, row);
+                    const cells = try a.alloc([]const u8, row.len);
+                    for (0..h) |line| {
+                        for (cells, row, tb.columns, wraps) |*out, c, col, *w| out.* = switch (col.overflow) {
+                            .ellipsis => if (line == 0) c.text else "",
+                            .wrap => w.next() orelse "",
+                        };
+                        try pieces.append(alloc, .{ .row = r, .col = tb.col, .text = try tableRow(a, tb.columns, cells) });
+                        r += 1;
+                    }
                 }
                 try pieces.append(alloc, .{ .row = r, .col = tb.col, .text = try tableRule(a, tb.columns) });
             },
@@ -486,19 +511,31 @@ const Builder = struct {
             columns[widest].width -= 1;
         }
 
+        // A column the shrink left narrower than one of its cells wraps
+        // rather than cutting the cell off with "…" (a header still
+        // ellipsizes). One that kept its full width stays on one line.
+        for (columns, 0..) |*c, i| {
+            for (rows) |row| {
+                if (glyphwire.stringWidth(row[i].text) > c.width) c.overflow = .wrap;
+            }
+        }
+
         const top = self.row;
         try self.ops.append(self.a, .{ .table = .{ .row = top, .col = col, .columns = columns, .rows = rows } });
 
-        // Record link positions: body row `r` is drawn at `top + 3 + r`
-        // (top border, header, separator).
-        for (rows, 0..) |row, r| {
+        // Record link positions on each cell's first line. Body rows
+        // start at `top + 3` (top border, header, separator), each as
+        // tall as `tableRowHeight` says.
+        var r = top + 3;
+        for (rows) |row| {
             var c = col + 1;
             for (row, columns) |cell, column| {
-                if (cell.link) |li| self.notePos(li, top + 3 + r, c);
+                if (cell.link) |li| self.notePos(li, r, c);
                 c += column.width + 1;
             }
+            r += tableRowHeight(columns, row);
         }
-        self.row = top + rows.len + 4;
+        self.row = r + 1;
     }
 
     fn tableCell(self: *Builder, runs: []const Run) !TableCell {
