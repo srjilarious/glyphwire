@@ -437,7 +437,14 @@ pub const Client = struct {
 
     /// `get_property(layer, "cursor")` -- a request.
     pub fn getCursor(self: *Client) !core.Cursor {
-        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .property = "cursor" });
+        return self.getCursorOn(null);
+    }
+
+    /// `get_property(layer, "cursor")` for a named layer -- the read half
+    /// of `setCursorOn`, for a client drawing terminal-style output onto
+    /// a layer that isn't its root (`gw-shell --embed`).
+    pub fn getCursorOn(self: *Client, layer: ?core.LayerHandle) !core.Cursor {
+        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .layer = layer, .property = "cursor" });
         defer parsed.deinit();
         return .{ .row = parsed.value.result.row, .col = parsed.value.result.col };
     }
@@ -486,7 +493,13 @@ pub const Client = struct {
     /// of history (see `core.Layer.viewRow`). `view_offset == 0` is
     /// identical to `getCells`.
     pub fn getCellsView(self: *Client, view_offset: usize) !CellsSnapshot {
-        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .view_offset = view_offset });
+        return self.getCellsViewOn(null, view_offset);
+    }
+
+    /// `get_cells(layer, view_offset)` -- `getCellsView` for a named
+    /// layer, for a client whose scrollback lives on one of its own.
+    pub fn getCellsViewOn(self: *Client, layer: ?core.LayerHandle, view_offset: usize) !CellsSnapshot {
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = layer, .view_offset = view_offset });
         return .{ .parsed = parsed };
     }
 
@@ -497,7 +510,13 @@ pub const Client = struct {
     /// how a client moves it; `InputListener` subscribed to `"scroll"` is
     /// the live-updating counterpart.
     pub fn getScroll(self: *Client) !core.LayerScroll {
-        var parsed = try self.request(struct { offset: usize, max: usize }, "get_property", .{ .property = "scroll" });
+        return self.getScrollOn(null);
+    }
+
+    /// `get_property(layer, "scroll")` for a named layer -- the
+    /// scrollback view of a layer created with `scrollback_rows`.
+    pub fn getScrollOn(self: *Client, layer: ?core.LayerHandle) !core.LayerScroll {
+        var parsed = try self.request(struct { offset: usize, max: usize }, "get_property", .{ .layer = layer, .property = "scroll" });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
@@ -510,7 +529,13 @@ pub const Client = struct {
     /// pure query. The server also broadcasts a `scroll` notification to
     /// other `"scroll"` subscribers.
     pub fn scrollView(self: *Client, offset: ?usize, delta: ?i64) !core.LayerScroll {
-        var parsed = try self.request(struct { offset: usize, max: usize }, "scroll_view", .{ .offset = offset, .delta = delta });
+        return self.scrollViewOn(null, offset, delta);
+    }
+
+    /// `scroll_view(layer, offset?, delta?)` -- `scrollView` aimed at a
+    /// named layer.
+    pub fn scrollViewOn(self: *Client, layer: ?core.LayerHandle, offset: ?usize, delta: ?i64) !core.LayerScroll {
+        var parsed = try self.request(struct { offset: usize, max: usize }, "scroll_view", .{ .layer = layer, .offset = offset, .delta = delta });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }

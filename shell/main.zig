@@ -1122,12 +1122,19 @@ const Prompt = struct {
     /// mirroring a real shell's "go back to what I was typing" behavior.
     /// Only meaningful while `history_index != null`.
     scratch: std.ArrayList(u8) = .empty,
-    /// The root layer's size -- fetched once at startup (`runPrompt`) to
-    /// clamp browse-mode horizontal movement (`browseLeft`/`browseRight`)
+    /// The drawing surface's size -- fetched once at startup (`runPrompt`)
+    /// to clamp browse-mode horizontal movement (`browseLeft`/`browseRight`)
     /// and to keep the prompt from `setCursor`ing off the bottom row after
     /// a command's output scrolled the layer.
     grid_cols: usize = 0,
     grid_rows: usize = 0,
+    /// The layer the prompt draws on. Null is this shell's own context's
+    /// root layer -- the normal case, and what every `draw*` helper below
+    /// falls back to. `--embed` sets it to a layer another client created
+    /// in a context of its own (salacommander's popup), and from then on
+    /// the shell is a panel inside somebody else's window: same prompt,
+    /// same pty loop, a different surface. See `Embed`.
+    layer: ?glyphwire.LayerHandle = null,
     /// A window resize that hasn't been applied yet -- the prompt redraw
     /// is held off until the size settles (see `resize_settle_ms` and the
     /// resize handling in `runPrompt`). Only the latest size in a burst is
@@ -1523,13 +1530,13 @@ const Prompt = struct {
         var prefix_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
         const prefix = std.fmt.bufPrint(&prefix_buf, "{s} > ", .{cwd}) catch "> ";
 
-        const start = try self.client.getCursor();
+        const start = try self.drawGetCursor();
 
         var local = self.client.batch();
         defer local.deinit();
         const b: *glyphwire.Client.Batch = sink orelse &local;
-        try b.setCursor(start.row, start.col);
-        try b.writeText(prefix, null, null);
+        try self.batchSetCursor(b, start.row, start.col);
+        try self.batchText(b, prefix, null, null);
         if (sink == null) {
             var res = try local.send();
             res.deinit();
@@ -1707,7 +1714,7 @@ const Prompt = struct {
         var bufs: PromptDataBufs = .{};
         const data = self.buildPromptData(&bufs, p);
 
-        const start = try self.client.getCursor();
+        const start = try self.drawGetCursor();
 
         var local = self.client.batch();
         defer local.deinit();
@@ -1799,16 +1806,113 @@ const Prompt = struct {
     const ChainSink = ?*glyphwire.Client.Batch;
 
     fn sinkSetCursor(self: *Prompt, sink: ChainSink, row: usize, col: usize) !void {
-        if (sink) |b| try b.setCursor(row, col) else try self.client.setCursor(row, col);
+        if (sink) |b| try self.batchSetCursor(b, row, col) else try self.drawSetCursor(row, col);
     }
     fn sinkWriteText(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
-        if (sink) |b| try b.writeText(text, fg, bg) else try self.client.writeText(text, fg, bg);
+        if (sink) |b| try self.batchText(b, text, fg, bg) else try self.drawText(text, fg, bg);
     }
     fn sinkWriteTextTransparent(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color) !void {
-        if (sink) |b| try b.writeTextTransparent(text, fg) else try self.client.writeTextTransparent(text, fg);
+        if (sink) |b| try b.writeTextOpts(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true }) else try self.drawTextTransparent(text, fg);
     }
     fn sinkDrawIconStyled(self: *Prompt, sink: ChainSink, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
-        if (sink) |b| try b.drawIconStyled(row, col, name, opts) else try self.client.drawIconStyled(row, col, name, opts);
+        if (sink) |b| {
+            if (self.layer) |l| try b.drawIconOnStyled(l, row, col, name, opts) else try b.drawIconStyled(row, col, name, opts);
+        } else try self.drawIconStyled(row, col, name, opts);
+    }
+
+    // ── The drawing surface ─────────────────────────────────────────────
+    //
+    // Every draw the prompt makes goes through one of these rather than
+    // straight at `client`, so that `layer` decides where it lands. With
+    // no `--embed` the layer is null and each of them is the plain
+    // root-layer call it replaced; embedded, the same prompt paints a
+    // panel in someone else's context. The batch forms take the frame to
+    // add to, since a `Batch` mirrors `Client` message for message.
+
+    fn drawText(self: *Prompt, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
+        try self.client.writeTextOpts(text, .{ .layer = self.layer, .fg = fg, .bg = bg });
+    }
+
+    fn drawTextTransparent(self: *Prompt, text: []const u8, fg: ?glyphwire.Color) !void {
+        try self.client.writeTextOpts(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true });
+    }
+
+    fn batchText(self: *Prompt, b: *glyphwire.Client.Batch, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
+        try b.writeTextOpts(text, .{ .layer = self.layer, .fg = fg, .bg = bg });
+    }
+
+    fn drawSetCursor(self: *Prompt, row: usize, col: usize) !void {
+        if (self.layer) |l| return self.client.setCursorOn(l, row, col);
+        try self.client.setCursor(row, col);
+    }
+
+    fn batchSetCursor(self: *Prompt, b: *glyphwire.Client.Batch, row: usize, col: usize) !void {
+        if (self.layer) |l| return b.setCursorOn(l, row, col);
+        try b.setCursor(row, col);
+    }
+
+    fn batchClear(self: *Prompt, b: *glyphwire.Client.Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+        try b.clearOn(self.layer, row, col, rows, cols);
+    }
+
+    fn drawGetCursor(self: *Prompt) !glyphwire.Cursor {
+        return self.client.getCursorOn(self.layer);
+    }
+
+    fn drawClear(self: *Prompt, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+        try self.client.clearOn(self.layer, row, col, rows, cols);
+    }
+
+    fn drawScrollView(self: *Prompt, offset: ?usize, delta: ?i64) !glyphwire.LayerScroll {
+        return self.client.scrollViewOn(self.layer, offset, delta);
+    }
+
+    fn drawGetScroll(self: *Prompt) !glyphwire.LayerScroll {
+        return self.client.getScrollOn(self.layer);
+    }
+
+    fn drawGetCells(self: *Prompt) !glyphwire.CellsSnapshot {
+        if (self.layer) |l| return self.client.getCellsOn(l);
+        return self.client.getCells();
+    }
+
+    fn drawGetCellsView(self: *Prompt, view_offset: usize) !glyphwire.CellsSnapshot {
+        return self.client.getCellsViewOn(self.layer, view_offset);
+    }
+
+    fn drawGetMetadata(self: *Prompt, row: usize, col: usize, view_offset: usize) @TypeOf(self.client.getMetadata(null, 0, 0, 0)) {
+        return self.client.getMetadata(self.layer, row, col, view_offset);
+    }
+
+    fn drawFindMetadata(self: *Prompt, above: i64, col: usize, dir: glyphwire.MetadataSpanDir) !?glyphwire.MetadataSpanHit {
+        return self.client.findMetadata(self.layer, above, col, dir);
+    }
+
+    fn drawToggleHighlight(self: *Prompt, row: usize, col: usize, view_offset: usize) !glyphwire.HighlightSnapshot {
+        return self.client.toggleHighlight(self.layer, row, col, view_offset);
+    }
+
+    fn drawClearHighlight(self: *Prompt) !glyphwire.HighlightSnapshot {
+        return self.client.clearHighlight(self.layer);
+    }
+
+    fn drawIconStyled(self: *Prompt, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
+        if (self.layer) |l| return self.client.drawIconOnStyled(l, row, col, name, opts);
+        try self.client.drawIconStyled(row, col, name, opts);
+    }
+
+    /// The surface's cell size: the window when the shell owns its
+    /// context, the popup's layer when embedded.
+    fn drawGetSize(self: *Prompt) !glyphwire.LayerSize {
+        if (self.layer) |l| return self.client.getLayerSize(l);
+        return self.client.getSize();
+    }
+
+    /// The escape-sequence machine a foreground child's byte stream needs
+    /// kept across `write_text` calls, on whichever layer that stream is
+    /// being written to.
+    fn drawSetPtyMode(self: *Prompt, enabled: bool) !void {
+        try self.client.setLayerPtyMode(self.layer orelse glyphwire.root_layer_handle, enabled);
     }
 
     /// Draws a rendered chain left to right starting at `(row, start_col)`:
@@ -1908,7 +2012,7 @@ const Prompt = struct {
         // the input line: the idle-tick caller gates on `browse_pos == null`
         // and `renderInputLine` only runs for the live line.
         const caret_row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
-        try b.setCursor(caret_row, self.line_start_col + self.caretCol());
+        try self.batchSetCursor(&b, caret_row, self.line_start_col + self.caretCol());
         var res = try b.send();
         res.deinit();
         self.profiler.add(.batch_sends, 1);
@@ -1940,13 +2044,13 @@ const Prompt = struct {
         // below works with an on-grid `top` and the recorded
         // `line_start_row` can't end up one past the last row (which made
         // every later `renderInputLine` / idle refresh scroll again).
-        const start = try self.client.getCursor();
+        const start = try self.drawGetCursor();
         var top = start.row;
         if (self.grid_rows > 0 and top + self.prompt_lines > self.grid_rows) {
             const overshoot = top + self.prompt_lines - self.grid_rows;
-            try b.setCursor(self.grid_rows - 1, 0);
+            try self.batchSetCursor(b, self.grid_rows - 1, 0);
             var k: usize = 0;
-            while (k < overshoot) : (k += 1) try b.writeText("\n", null, null);
+            while (k < overshoot) : (k += 1) try self.batchText(b, "\n", null, null);
             top -= overshoot;
         }
         self.pl_top_row = top;
@@ -1982,16 +2086,16 @@ const Prompt = struct {
         if (self.prompt_lines >= 2) {
             // `top + prompt_lines <= grid_rows` now, so this row is on-grid.
             const irow = top + self.prompt_lines - 1;
-            try b.setCursor(irow, 0);
-            if (input_prefix.len > 0) try b.writeText(input_prefix, null, null);
+            try self.batchSetCursor(b, irow, 0);
+            if (input_prefix.len > 0) try self.batchText(b, input_prefix, null, null);
             self.line_start_row = irow;
             self.line_start_col = prompt_template.displayWidth(input_prefix);
             self.input_max_col = self.grid_cols;
         } else {
             var col = left_end;
-            try b.setCursor(top, col);
+            try self.batchSetCursor(b, top, col);
             if (input_prefix.len > 0) {
-                try b.writeText(input_prefix, null, null);
+                try self.batchText(b, input_prefix, null, null);
                 col += prompt_template.displayWidth(input_prefix);
             }
             self.line_start_row = top;
@@ -2052,7 +2156,7 @@ const Prompt = struct {
                     try self.sinkWriteText(sink, t, opts.fg, null);
                 }
                 if (sink == null) {
-                    const cur = try self.client.getCursor();
+                    const cur = try self.drawGetCursor();
                     cur_row = cur.row;
                     cur_col = cur.col;
                 } else {
@@ -2158,7 +2262,7 @@ const Prompt = struct {
         const right = if (self.input_max_col > left + 1) self.input_max_col else self.grid_cols;
         const box_w = right -| left;
         if (box_w == 0) {
-            try b.setCursor(row, @min(left, self.grid_cols -| 1));
+            try self.batchSetCursor(b, row, @min(left, self.grid_cols -| 1));
             return;
         }
 
@@ -2206,11 +2310,11 @@ const Prompt = struct {
         const fill = @min(fill_w, spaces.len);
         @memset(spaces[0..fill], ' ');
 
-        try b.setCursor(row, left);
-        if (visible.len > 0) try b.writeText(visible, null, null);
-        if (hint_end > 0) try b.writeText(self.completion_hint.items[0..hint_end], autocomplete_hint_color, null);
-        if (fill > 0) try b.writeText(spaces[0..fill], null, null);
-        try b.setCursor(row, self.line_start_col + self.caretCol());
+        try self.batchSetCursor(b, row, left);
+        if (visible.len > 0) try self.batchText(b, visible, null, null);
+        if (hint_end > 0) try self.batchText(b, self.completion_hint.items[0..hint_end], autocomplete_hint_color, null);
+        if (fill > 0) try self.batchText(b, spaces[0..fill], null, null);
+        try self.batchSetCursor(b, row, self.line_start_col + self.caretCol());
     }
 
     /// Puts the server cursor at the caret's screen cell -- `line_start_col`
@@ -2220,7 +2324,7 @@ const Prompt = struct {
     /// cursor while redrawing).
     fn placeInputCursor(self: *Prompt) !void {
         const row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
-        try self.client.setCursor(row, self.line_start_col + self.caretCol());
+        try self.drawSetCursor(row, self.line_start_col + self.caretCol());
     }
 
     /// A fresh prompt: writes the prefix, resets the line, repaints the
@@ -2351,7 +2455,7 @@ const Prompt = struct {
         // case (the next redraw overwrites it), not worth chasing.
         self.completion_picker = null;
         if (self.view_scroll != 0) {
-            const res = try self.client.scrollView(0, null);
+            const res = try self.drawScrollView(0, null);
             self.view_scroll = res.offset;
         }
 
@@ -2362,7 +2466,7 @@ const Prompt = struct {
         const shifted: isize = @as(isize, @intCast(cur_top)) + delta;
         const top: usize = if (shifted < 0) 0 else @min(@as(usize, @intCast(shifted)), rows -| 1);
 
-        try self.client.setCursor(top, 0);
+        try self.drawSetCursor(top, 0);
 
         var b = self.client.batch();
         defer b.deinit();
@@ -2372,7 +2476,7 @@ const Prompt = struct {
         // `prompt_lines` is stable across a resize (it comes from config),
         // so it still describes how many rows the pre-resize prompt used.
         const span = @min(self.prompt_lines, rows -| top);
-        if (span > 0) try b.clear(top, 0, span, null);
+        if (span > 0) try self.batchClear(&b, top, 0, span, null);
 
         const start = try self.writePromptPrefix(&b);
         self.line_start_row = start.row;
@@ -2389,8 +2493,8 @@ const Prompt = struct {
     /// whatever's already typed. Unlike `showPrompt`, doesn't touch
     /// `buffer`/`cursor`.
     fn clearScreen(self: *Prompt) !void {
-        try self.client.clear(0, 0, null, null);
-        try self.client.setCursor(0, 0);
+        try self.drawClear(0, 0, null, null);
+        try self.drawSetCursor(0, 0);
 
         const cur = try self.writePromptPrefix(null);
         self.line_start_row = cur.row;
@@ -2406,7 +2510,7 @@ const Prompt = struct {
     fn setLine(self: *Prompt, text: []const u8) !void {
         self.browse_pos = null;
         if (self.view_scroll != 0) {
-            const res = try self.client.scrollView(0, null);
+            const res = try self.drawScrollView(0, null);
             self.view_scroll = res.offset;
         }
         self.buffer.clearRetainingCapacity();
@@ -2528,7 +2632,7 @@ const Prompt = struct {
     /// "scroll the window along" half of browsing: `browseUp`/`browseDown`
     /// compute the target with `browsescroll` and apply it here.
     fn scrollWindow(self: *Prompt, offset: usize) !void {
-        const res = try self.client.scrollView(offset, null);
+        const res = try self.drawScrollView(offset, null);
         self.view_scroll = res.offset;
         self.view_max = res.max;
     }
@@ -2538,7 +2642,7 @@ const Prompt = struct {
     /// broadcast). Called when entering browse so `browsescroll.up` starts
     /// from a current scrollback size.
     fn syncScrollState(self: *Prompt) !void {
-        const res = try self.client.getScroll();
+        const res = try self.drawGetScroll();
         self.view_scroll = res.offset;
         self.view_max = res.max;
     }
@@ -2579,7 +2683,7 @@ const Prompt = struct {
         bp.row = plan.bp_row;
         if (plan.view_scroll != self.view_scroll) try self.scrollWindow(plan.view_scroll);
         self.browse_pos = bp;
-        try self.client.setCursor(bp.row, bp.col);
+        try self.drawSetCursor(bp.row, bp.col);
     }
 
     /// Plain Down (`count == 1`) while browsing moves the browse cursor
@@ -2611,7 +2715,7 @@ const Prompt = struct {
         if (plan.view_scroll != self.view_scroll) try self.scrollWindow(plan.view_scroll);
         bp.row = plan.bp_row;
         self.browse_pos = bp;
-        try self.client.setCursor(bp.row, bp.col);
+        try self.drawSetCursor(bp.row, bp.col);
     }
 
     /// Left/Right while browsing: move `count` columns within whatever row
@@ -2626,14 +2730,14 @@ const Prompt = struct {
         var bp = self.browse_pos orelse return;
         bp.col -|= count;
         self.browse_pos = bp;
-        try self.client.setCursor(bp.row, bp.col);
+        try self.drawSetCursor(bp.row, bp.col);
     }
 
     fn browseRight(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
         bp.col = @min(bp.col + count, self.grid_cols -| 1);
         self.browse_pos = bp;
-        try self.client.setCursor(bp.row, bp.col);
+        try self.drawSetCursor(bp.row, bp.col);
     }
 
     /// Home while browsing: move the browse cursor to column 0 of the row
@@ -2642,7 +2746,7 @@ const Prompt = struct {
         var bp = self.browse_pos orelse return;
         bp.col = 0;
         self.browse_pos = bp;
-        try self.client.setCursor(bp.row, bp.col);
+        try self.drawSetCursor(bp.row, bp.col);
     }
 
     /// End while browsing: move the browse cursor just past the last
@@ -2655,14 +2759,14 @@ const Prompt = struct {
         var bp = self.browse_pos orelse return;
         bp.col = self.rowContentEnd(bp.row) catch bp.col;
         self.browse_pos = bp;
-        try self.client.setCursor(bp.row, bp.col);
+        try self.drawSetCursor(bp.row, bp.col);
     }
 
     /// The column just past the last non-blank cell of window row `row`
     /// as the view currently sits (`view_scroll`), clamped to
     /// `grid_cols - 1`. A blank row returns 0. Used by `browseEnd`.
     fn rowContentEnd(self: *Prompt, row: usize) !usize {
-        var snap = try self.client.getCellsView(self.view_scroll);
+        var snap = try self.drawGetCellsView(self.view_scroll);
         defer snap.deinit();
         if (row >= snap.rows()) return 0;
 
@@ -2710,7 +2814,7 @@ const Prompt = struct {
         const from_above: i64 =
             @as(i64, @intCast(self.view_scroll)) - @as(i64, @intCast(from_row));
 
-        const hit = (try self.client.findMetadata(null, from_above, from_col, dir)) orelse return;
+        const hit = (try self.drawFindMetadata(from_above, from_col, dir)) orelse return;
 
         const plan = browsescroll.locate(
             hit.above,
@@ -2725,7 +2829,7 @@ const Prompt = struct {
             .col = @min(hit.col, self.grid_cols -| 1),
         };
         self.browse_pos = bp;
-        try self.client.setCursor(bp.row, bp.col);
+        try self.drawSetCursor(bp.row, bp.col);
     }
 
     /// Enter while browsing: looks up whatever cell the browse cursor is
@@ -2756,7 +2860,7 @@ const Prompt = struct {
         parsed: std.json.Parsed(MetaEntry),
     } {
         const alloc = self.client.alloc;
-        const lookup = self.client.getMetadata(null, row, col, view_offset) catch return null;
+        const lookup = self.drawGetMetadata(row, col, view_offset) catch return null;
         const json = lookup.json orelse return null;
         const parsed = std.json.parseFromSlice(MetaEntry, alloc, json, .{ .ignore_unknown_fields = true }) catch {
             alloc.free(json);
@@ -2825,7 +2929,7 @@ const Prompt = struct {
         return openaction.expand(alloc, action.commands[0], paths) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NeedsSingle => {
-                try self.client.writeText(
+                try self.drawText(
                     "glyphwire-shell: that action opens one file at a time\n",
                     .{ .r = 255, .g = 85, .b = 85 },
                     null,
@@ -2882,7 +2986,7 @@ const Prompt = struct {
     /// hands back every highlighted id with its blob -- the shell does no
     /// grid scanning of its own.
     fn toggleHighlightAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !void {
-        var snap = try self.client.toggleHighlight(null, row, col, view_offset);
+        var snap = try self.drawToggleHighlight(row, col, view_offset);
         defer snap.deinit();
         try self.applyHighlight(&snap);
     }
@@ -2892,7 +2996,7 @@ const Prompt = struct {
     /// marked.
     fn resetMarks(self: *Prompt) !void {
         if (self.marks.items.len == 0) return;
-        var snap = try self.client.clearHighlight(null);
+        var snap = try self.drawClearHighlight();
         defer snap.deinit();
         try self.applyHighlight(&snap);
     }
@@ -2969,7 +3073,7 @@ const Prompt = struct {
     fn setCursorAt(self: *Prompt, offset: usize) !void {
         self.browse_pos = null;
         if (self.view_scroll != 0) {
-            const res = try self.client.scrollView(0, null);
+            const res = try self.drawScrollView(0, null);
             self.view_scroll = res.offset;
         }
         self.cursor = std.math.clamp(offset, 0, self.buffer.items.len);
@@ -3009,8 +3113,8 @@ const Prompt = struct {
             try self.renderInputLine();
         }
 
-        try self.client.setCursor(self.line_start_row, self.line_start_col);
-        if (self.buffer.items.len > 0) try self.client.writeText(self.buffer.items, null, null);
+        try self.drawSetCursor(self.line_start_row, self.line_start_col);
+        if (self.buffer.items.len > 0) try self.drawText(self.buffer.items, null, null);
         // Drop to the row the re-echo actually ended on, read back from
         // the server rather than assumed: a command line longer than the
         // grid wraps onto further rows here, and `line_start_row + 1`
@@ -3021,9 +3125,9 @@ const Prompt = struct {
         // pre-repaint editor this rule was written for, where the line
         // had wrapped on screen already and the command's own output was
         // expected to draw over the tail.
-        const echoed = self.client.getCursor() catch
+        const echoed = self.drawGetCursor() catch
             glyphwire.Cursor{ .row = self.line_start_row, .col = self.line_start_col };
-        try self.client.setCursor(promptrow.next(echoed.row, echoed.col), 0);
+        try self.drawSetCursor(promptrow.next(echoed.row, echoed.col), 0);
 
         const alloc = self.client.alloc;
 
@@ -3074,8 +3178,8 @@ const Prompt = struct {
         // it before anything below reads `grid_*` or `line_start_row`.
         self.adoptPendingResize();
 
-        const cur = self.client.getCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
-        try self.client.setCursor(promptrow.afterCommand(cur.row, cur.col), 0);
+        const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
+        try self.drawSetCursor(promptrow.afterCommand(cur.row, cur.col), 0);
         try self.showPrompt();
     }
 
@@ -3154,7 +3258,7 @@ const Prompt = struct {
         switch (try parse.parse(alloc, text)) {
             .err => |msg| {
                 defer alloc.free(msg);
-                try self.client.writeText(msg, err_color, null);
+                try self.drawText(msg, err_color, null);
                 self.last_status = 2;
                 self.last_dur_ms = 0;
                 self.have_status = true;
@@ -3297,14 +3401,14 @@ const Prompt = struct {
         for (pl.commands, 0..) |cmd, i| {
             argvs[i] = try self.resolveArgv(cmd);
             if (argvs[i].len == 0) {
-                try self.client.writeText("pipeline: empty command", err_color, null);
+                try self.drawText("pipeline: empty command", err_color, null);
                 return 2;
             }
             if (self.isBuiltinName(argvs[i][0])) {
                 var buf: [160]u8 = undefined;
                 const m = std.fmt.bufPrint(&buf, "{s}: not supported inside a pipeline", .{argvs[i][0]}) catch
                     "builtin not supported inside a pipeline";
-                try self.client.writeText(m, err_color, null);
+                try self.drawText(m, err_color, null);
                 return 2;
             }
         }
@@ -3365,7 +3469,7 @@ const Prompt = struct {
             return self.doGwssh(argv[1..]);
         }
         if (std.mem.eql(u8, argv[0], "alias")) {
-            try self.client.writeText("alias: only supported as a standalone command", err_color, null);
+            try self.drawText("alias: only supported as a standalone command", err_color, null);
             return 2;
         }
         if (self.script_engine) |eng| {
@@ -3456,7 +3560,7 @@ const Prompt = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => "pipeline: could not start",
             };
-            try self.client.writeText(m, err_color, null);
+            try self.drawText(m, err_color, null);
             return 127;
         };
         if (devnull_fd >= 0) _ = c.close(devnull_fd); // the child dup'd it
@@ -3492,7 +3596,7 @@ const Prompt = struct {
             const m = try self.expandGlobs(&one);
             matched = m;
             if (m.len > 1) {
-                try self.client.writeText("ambiguous redirect", err_color, null);
+                try self.drawText("ambiguous redirect", err_color, null);
                 return null;
             }
             if (m.len == 1) chosen = m[0];
@@ -3628,7 +3732,7 @@ const Prompt = struct {
                     const dst = if (which == 2) cap.err_buf else cap.out;
                     dst.appendSlice(self.client.alloc, chunk) catch {};
                 },
-                else => self.client.writeText(chunk, null, null) catch {},
+                else => self.drawText(chunk, null, null) catch {},
             }
         }
         return read_any;
@@ -3773,7 +3877,7 @@ const Prompt = struct {
         }
         for (argv) |arg| {
             const exp = self.expandTilde(arg) catch {
-                try self.client.writeText("~: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
+                try self.drawText("~: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
                 return;
             };
             try expanded.append(alloc, exp);
@@ -3791,7 +3895,7 @@ const Prompt = struct {
         for (argv_bufs.items, 0..) |b, i| argv_z[i] = b.ptr;
 
         // Size the pty from the grid so a curses-ish child lays out right.
-        const size = self.client.getSize() catch glyphwire.LayerSize{ .cols = self.grid_cols, .rows = 24 };
+        const size = self.drawGetSize() catch glyphwire.LayerSize{ .cols = self.grid_cols, .rows = 24 };
 
         // Monotonic start time of the whole run, for `{dur}` on the next
         // prompt (this reduced std has no `std.time.Timer`).
@@ -3821,7 +3925,7 @@ const Prompt = struct {
                 error.CommandNotFound => std.fmt.bufPrint(&buf, "{s}: command not found", .{argv[0]}) catch "command not found",
                 else => std.fmt.bufPrint(&buf, "{s}: {t}", .{ argv[0], err }) catch "failed to start command",
             };
-            try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+            try self.drawText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
             // Couldn't start it: record a status so `{exit}` reflects the
             // failure, but no duration (it never ran).
             self.last_status = if (err == error.CommandNotFound) 127 else 1;
@@ -3850,7 +3954,7 @@ const Prompt = struct {
         // reset (which exists for exactly the opposite reason: interleaved
         // prompt/echo writes on this same layer). Best-effort -- a failure
         // here just means this run keeps the old call-scoped behaviour.
-        self.client.setLayerPtyMode(glyphwire.root_layer_handle, true) catch {};
+        self.drawSetPtyMode(true) catch {};
 
         // Record the run's outcome for the next prompt's `{exit}` / `{dur}`.
         // Runs before `pty.deinit` (defers are LIFO) so `pty` is still
@@ -4029,7 +4133,7 @@ const Prompt = struct {
         // also clears whatever the child left half-open or un-reset, the
         // re-arm `core.Layer.pty_mode`'s doc comment describes) before the
         // reset write below and the next prompt redraw.
-        self.client.setLayerPtyMode(glyphwire.root_layer_handle, false) catch {};
+        self.drawSetPtyMode(false) catch {};
 
         // Undo the screen state a program that died without cleaning up
         // could leave behind: `?1049l` exits the alt screen, then `! p`
@@ -4040,7 +4144,7 @@ const Prompt = struct {
         // set a bottom-margin scroll region on the *primary* screen (no
         // alt screen) and would otherwise leave `regionActive()` stuck,
         // freezing scrollback and making the host wheel page the shell.
-        self.client.writeText("\x1b[?1049l\x1b[!p", null, null) catch {};
+        self.drawText("\x1b[?1049l\x1b[!p", null, null) catch {};
     }
 
     /// Drains `read_fd` (the result pipe's read end) to EOF and returns
@@ -4160,7 +4264,7 @@ const Prompt = struct {
             real_out.interface.writeAll(bytes) catch {};
             real_out.interface.flush() catch {};
         } else {
-            self.client.writeText(bytes, null, null) catch {};
+            self.drawText(bytes, null, null) catch {};
         }
     }
 
@@ -4175,7 +4279,7 @@ const Prompt = struct {
         const raw_target: []const u8 = if (args.len > 0) args[0] else "~";
 
         const target = self.expandTilde(raw_target) catch {
-            try self.client.writeText("cd: HOME not set", err_color, null);
+            try self.drawText("cd: HOME not set", err_color, null);
             return;
         };
         defer if (target.ptr != raw_target.ptr) alloc.free(target);
@@ -4298,19 +4402,19 @@ const Prompt = struct {
     /// hand over its own pane binding, not ours.
     fn doGwssh(self: *Prompt, args: []const []const u8) !u8 {
         const spec = remotecmd.parse(args) catch |err| {
-            try self.client.writeText(remotecmd.errorText(err), err_color, null);
+            try self.drawText(remotecmd.errorText(err), err_color, null);
             return 2;
         };
 
         const listener = self.listener orelse {
-            try self.client.writeText("gwssh: no interactive session", err_color, null);
+            try self.drawText("gwssh: no interactive session", err_color, null);
             return 1;
         };
 
         const session = self.client.startRemote(spec.dest, spec.ssh_args, self.remoteAgentCommand(spec)) catch |err| {
             var buf: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "gwssh: {s}: {t}", .{ spec.dest, err }) catch "gwssh: could not start remote session";
-            try self.client.writeText(msg, err_color, null);
+            try self.drawText(msg, err_color, null);
             return 1;
         };
 
@@ -4365,7 +4469,7 @@ const Prompt = struct {
         else
             std.fmt.bufPrint(&buf, "gwssh: {s}: could not connect (ssh exited {d})", .{ spec.dest, status }) catch
                 "gwssh: could not connect";
-        try self.client.writeText(msg, err_color, null);
+        try self.drawText(msg, err_color, null);
     }
 
     /// Parks until the remote session `session` ends, keeping this
@@ -4444,13 +4548,13 @@ const Prompt = struct {
         const alloc = self.client.alloc;
 
         if (self.zdb == null) {
-            try self.client.writeText("zj: directory database unavailable", err_color, null);
+            try self.drawText("zj: directory database unavailable", err_color, null);
             return;
         }
 
         if (args.len == 0) {
             const home = self.environ_map.get("HOME") orelse {
-                try self.client.writeText("zj: HOME not set", err_color, null);
+                try self.drawText("zj: HOME not set", err_color, null);
                 return;
             };
             self.chdir(home) catch |err| try self.reportZjError(home, err);
@@ -4479,7 +4583,7 @@ const Prompt = struct {
             defer alloc.free(joined);
             var msg: [320]u8 = undefined;
             const line = std.fmt.bufPrint(&msg, "zj: no match for '{s}'", .{joined}) catch "zj: no match";
-            try self.client.writeText(line, err_color, null);
+            try self.drawText(line, err_color, null);
             return;
         };
 
@@ -4500,7 +4604,7 @@ const Prompt = struct {
     fn reportZjError(self: *Prompt, target: []const u8, err: anyerror) !void {
         var buf: [320]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "zj: {s}: {t}", .{ target, err }) catch "zj: jump failed";
-        try self.client.writeText(msg, err_color, null);
+        try self.drawText(msg, err_color, null);
     }
 
     /// Whether `path` opens as a directory. Used by `zj`'s "single
@@ -4529,7 +4633,7 @@ const Prompt = struct {
     fn reportCdError(self: *Prompt, target: []const u8, err: anyerror) !void {
         var buf: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "cd: {s}: {t}", .{ target, err }) catch "cd: failed";
-        try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+        try self.drawText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
     }
 
     /// `alias` builtin. Given a `NAME=VALUE` argument
@@ -4564,7 +4668,7 @@ const Prompt = struct {
             const value = self.aliases.get(name).?;
             var buf: [1024]u8 = undefined;
             const rendered = std.fmt.bufPrint(&buf, "alias {s}='{s}'\n", .{ name, value }) catch continue;
-            try self.client.writeText(rendered, null, null);
+            try self.drawText(rendered, null, null);
         }
     }
 
@@ -4577,7 +4681,7 @@ const Prompt = struct {
             if (!self.aliases.remove(alloc, name)) {
                 var buf: [160]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "unalias: {s}: not found", .{name}) catch "unalias: not found";
-                try self.client.writeText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+                try self.drawText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
             }
         }
     }
@@ -4668,7 +4772,7 @@ const Prompt = struct {
         var buf: [200]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, builtin ++ ": `{s}`: not a valid variable name", .{name}) catch
             builtin ++ ": not a valid variable name";
-        try self.client.writeText(msg, err_color, null);
+        try self.drawText(msg, err_color, null);
     }
 
     /// Writes the whole environment to the grid, one `NAME=VALUE` per
@@ -4696,7 +4800,7 @@ const Prompt = struct {
             }
         }.lessThan);
 
-        for (lines.items) |l| try self.client.writeText(l, null, null);
+        for (lines.items) |l| try self.drawText(l, null, null);
     }
 
     /// The `NAME=VALUE cmd ...` / bare `NAME=VALUE` path. `assignments`
@@ -4827,7 +4931,7 @@ const Prompt = struct {
         if (eng.conf_err) |msg| {
             var buf: [512]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "shell.conf.lua: {s}\n", .{msg}) catch "shell.conf.lua: error\n";
-            try self.client.writeText(line, .{ .r = 255, .g = 85, .b = 85 }, null);
+            try self.drawText(line, .{ .r = 255, .g = 85, .b = 85 }, null);
         }
 
         // The engine owns the parsed config for the session --
@@ -5504,7 +5608,7 @@ const Prompt = struct {
 
         var b = self.client.batch();
         defer b.deinit();
-        try b.clear(self.line_start_row + 1, 0, @max(st.drawn_rows, visible), self.grid_cols);
+        try self.batchClear(&b, self.line_start_row + 1, 0, @max(st.drawn_rows, visible), self.grid_cols);
 
         var i: usize = 0;
         while (i < visible) : (i += 1) {
@@ -5513,13 +5617,13 @@ const Prompt = struct {
             const selected = idx == st.selected;
             const dim: ?glyphwire.Color = if (selected) null else autocomplete_hint_color;
 
-            try b.setCursor(self.line_start_row + 1 + i, 0);
-            try b.writeText(if (selected) "> " else "  ", dim, null);
-            try b.writeText(cand.name, dim, null);
-            if (cand.source == .dir) try b.writeText("/", dim, null);
-            try b.writeText("  [", autocomplete_hint_color, null);
-            try b.writeText(completionSourceTag(cand.source), autocomplete_hint_color, null);
-            try b.writeText("]", autocomplete_hint_color, null);
+            try self.batchSetCursor(&b, self.line_start_row + 1 + i, 0);
+            try self.batchText(&b, if (selected) "> " else "  ", dim, null);
+            try self.batchText(&b, cand.name, dim, null);
+            if (cand.source == .dir) try self.batchText(&b, "/", dim, null);
+            try self.batchText(&b, "  [", autocomplete_hint_color, null);
+            try self.batchText(&b, completionSourceTag(cand.source), autocomplete_hint_color, null);
+            try self.batchText(&b, "]", autocomplete_hint_color, null);
         }
 
         try self.appendInputLine(&b); // restores the caret to the live line
@@ -5542,9 +5646,9 @@ const Prompt = struct {
         const overshoot = need_bottom - self.grid_rows + 1;
         var b = self.client.batch();
         defer b.deinit();
-        try b.setCursor(self.grid_rows - 1, 0);
+        try self.batchSetCursor(&b, self.grid_rows - 1, 0);
         var k: usize = 0;
-        while (k < overshoot) : (k += 1) try b.writeText("\n", null, null);
+        while (k < overshoot) : (k += 1) try self.batchText(&b, "\n", null, null);
         var res = try b.send();
         res.deinit();
         self.line_start_row -= overshoot;
@@ -5604,7 +5708,7 @@ const Prompt = struct {
 
         var b = self.client.batch();
         defer b.deinit();
-        try b.clear(self.line_start_row + 1, 0, st.drawn_rows, self.grid_cols);
+        try self.batchClear(&b, self.line_start_row + 1, 0, st.drawn_rows, self.grid_cols);
         try self.appendInputLine(&b);
         var res = try b.send();
         res.deinit();
@@ -5672,7 +5776,7 @@ fn hookRealpath(ctx: *anyopaque, path: [:0]const u8, buf: []u8) ?[]const u8 {
 /// Grid sink for a script's `print` / `io.write`.
 fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
     const self: *Prompt = @ptrCast(@alignCast(ctx));
-    self.client.writeText(bytes, null, null) catch {};
+    self.drawText(bytes, null, null) catch {};
 }
 
 /// Polled from the interrupt hook while a script runs: drains pending
@@ -5727,7 +5831,7 @@ fn hookRunLine(
             if (capture) {
                 err_buf.appendSlice(alloc, msg) catch {};
             } else {
-                self.client.writeText(msg, err_color, null) catch {};
+                self.drawText(msg, err_color, null) catch {};
             }
             return 2;
         },
