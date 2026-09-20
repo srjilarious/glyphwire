@@ -3364,6 +3364,49 @@ pub fn scrollbarStateReportsDerivedMaximaTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqual(st.max_col, 30);
 }
 
+/// A terminal-style layer -- viewport exactly its grid, output scrolling
+/// off into the ring -- has no viewport slack, so its bar has to come
+/// from the scrollback or it never appears at all. This is `gmux`'s panes
+/// and `gw-shell --embed`'s panel.
+pub fn scrollbarStateReportsTheRingWhenThereIsNoViewportSlackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 4, 100);
+    defer layer.deinit();
+    layer.setProperty(.{ .scrollbars = .{
+        .vertical = true,
+        .horizontal = false,
+        .row = 0,
+        .col = 0,
+        .max_row = 0,
+        .max_col = 0,
+    } });
+
+    // Nothing written yet: no history, so nothing to draw either.
+    try testz.expectEqual(layer.scrollbarState().max_row, 0);
+
+    // Output past the bottom of a four-row layer becomes history.
+    for (0..14) |_| try layer.writeText("x\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    const history = layer.history_len;
+    try testz.expectTrue(history > 0);
+
+    // Live at the tail: the thumb is at the bottom of its travel.
+    var st = layer.scrollbarState();
+    try testz.expectTrue(st.vertical);
+    try testz.expectEqual(st.max_row, history);
+    try testz.expectEqual(st.row, history);
+
+    // Scrolled all the way back: the top.
+    _ = layer.scrollView(history, null);
+    st = layer.scrollbarState();
+    try testz.expectEqual(st.row, 0);
+
+    // ...and partway back is partway along, in the same sense a viewport
+    // offset uses, which is what lets the bar's drag arithmetic stay as
+    // it was.
+    _ = layer.scrollView(4, null);
+    try testz.expectEqual(layer.scrollbarState().row, history - 4);
+}
+
 // ─── Split layout ───────────────────────────────────────────────────────
 
 /// The pane arrangement zoe uses: a tree beside a buffer, with a

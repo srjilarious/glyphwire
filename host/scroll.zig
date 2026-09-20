@@ -66,6 +66,11 @@ pub const Scroll = struct {
         layer: glyphwire.LayerHandle,
         state: glyphwire.ScrollbarState,
         bars: geometry.PaneScrollbars,
+        /// Which scroll model the bar drives: a viewport over a larger
+        /// content grid, or -- for a terminal-style layer whose bar shows
+        /// its scrollback (`Layer.scrollbarState`) -- the ring. Same
+        /// split the wheel already makes in `handleScroll`.
+        scrolls_viewport: bool,
     };
 
     /// The pane whose scrollbar (either axis) contains `(px, py)`.
@@ -97,11 +102,12 @@ pub const Scroll = struct {
                 layer.viewportCols(),
                 layer.viewportRows(),
             );
+            const scrolls_viewport = layer.scrollsAnywhere();
             if (bars.vertical) |v| {
-                if (v.track.contains(px, py)) return .{ .context = hit.context, .layer = handle, .state = state, .bars = bars };
+                if (v.track.contains(px, py)) return .{ .context = hit.context, .layer = handle, .state = state, .bars = bars, .scrolls_viewport = scrolls_viewport };
             }
             if (bars.horizontal) |h| {
-                if (h.track.contains(px, py)) return .{ .context = hit.context, .layer = handle, .state = state, .bars = bars };
+                if (h.track.contains(px, py)) return .{ .context = hit.context, .layer = handle, .state = state, .bars = bars, .scrolls_viewport = scrolls_viewport };
             }
         }
         return null;
@@ -130,6 +136,7 @@ pub const Scroll = struct {
                 layer.viewportCols(),
                 layer.viewportRows(),
             ),
+            .scrolls_viewport = layer.scrollsAnywhere(),
         };
     }
 
@@ -191,6 +198,13 @@ pub const Scroll = struct {
         if (drag.vertical) {
             const v = live.bars.vertical orelse return true;
             const offset = offsetFromThumb(pos.y - drag.grab, v.track.y, v.track.h, v.thumb.h, live.state.max_row);
+            if (!live.scrolls_viewport) {
+                // The bar is showing the ring, so the thumb's position is
+                // how far *forward* the view is; the scrollback offset is
+                // the history left behind it.
+                self.moveRing(drag.context, drag.layer, live.state.max_row - @min(offset, live.state.max_row));
+                return true;
+            }
             self.movePane(drag.context, drag.layer, .{ .row = offset, .col = live.state.col });
         } else {
             const h = live.bars.horizontal orelse return true;
@@ -212,12 +226,24 @@ pub const Scroll = struct {
             break :page @intCast(@max(n, 2) - 1);
         };
         const step: i64 = if (backward) -page else page;
+        if (vertical and !hit.scrolls_viewport) {
+            // A ring's sense is the opposite of a viewport's: paging
+            // *back* is a bigger scrollback offset.
+            server.reportLayerScrollIn(self.app.alloc, hit.context, hit.layer, null, -step) catch {};
+            return;
+        }
         const delta: glyphwire.CellPos.Delta = if (vertical) .{ .row = step } else .{ .col = step };
         server.reportScrollOffsetIn(self.app.alloc, hit.context, hit.layer, null, delta) catch {};
     }
 
     fn movePane(self: *Scroll, context: glyphwire.ContextHandle, handle: glyphwire.LayerHandle, off: glyphwire.CellPos) void {
         self.app.server.reportScrollOffsetIn(self.app.alloc, context, handle, off, null) catch {};
+    }
+
+    /// The scrollback counterpart of `movePane`, for a bar showing a
+    /// terminal-style layer's ring.
+    fn moveRing(self: *Scroll, context: glyphwire.ContextHandle, handle: glyphwire.LayerHandle, offset: usize) void {
+        self.app.server.reportLayerScrollIn(self.app.alloc, context, handle, offset, null) catch {};
     }
 
     /// True while a full-screen program owns the root layer's display.

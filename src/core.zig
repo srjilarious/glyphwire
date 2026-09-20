@@ -1749,6 +1749,26 @@ pub const Layer = struct {
     pub fn scrollbarState(self: *const Layer) ScrollbarState {
         const max = self.maxScroll();
         const off = self.effectiveScrollOffset();
+        // A terminal-style layer -- viewport exactly its grid, output
+        // scrolling off the top into the ring -- has no viewport slack at
+        // all, but it is scrollable: what its bar should show is the
+        // scrollback, the way the window's own bar shows the root layer's
+        // (`geometry.scrollbarGeom`). Reported in the same sense as a
+        // viewport offset, so the thumb is at the top when the view is
+        // furthest back and at the bottom when it's live -- which is also
+        // what makes the bar's own drag and page arithmetic work
+        // unchanged. A `gmux` pane and `gw-shell --embed`'s panel are
+        // both this shape.
+        if (max.row == 0 and self.history_len > 0) {
+            return .{
+                .vertical = self.scrollbars.vertical,
+                .horizontal = self.scrollbars.horizontal,
+                .row = self.history_len - @min(self.view_scroll, self.history_len),
+                .col = off.col,
+                .max_row = self.history_len,
+                .max_col = max.col,
+            };
+        }
         return .{
             .vertical = self.scrollbars.vertical,
             .horizontal = self.scrollbars.horizontal,

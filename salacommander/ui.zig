@@ -247,6 +247,10 @@ pub const Ui = struct {
         // the cells they don't touch transparent, and a prompt with a
         // file listing showing through it is unreadable.
         try client.setLayerBackground(shell_layer, bg_shell);
+        // A bar down its right edge for the shell's scrollback, so a
+        // command that printed more than the panel holds can be scrolled
+        // back to with the wheel or the thumb.
+        try client.setLayerScrollbars(shell_layer, true, false);
         try client.setLayerVisible(shell_layer, false);
         try client.setLayerBackground(dialog_layer, bg_dialog);
         try client.setLayerVisible(dialog_layer, false);
