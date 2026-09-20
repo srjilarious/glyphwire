@@ -740,7 +740,13 @@ pub const Renderer = struct {
                 .x = @as(i32, @intFromFloat(@round(layer.pos.x))) + origin.x,
                 .y = @as(i32, @intFromFloat(@round(layer.pos.y))) + origin.y,
             };
-            self.syncOneLayer(eng, fa, .{ .context = ctx_handle, .layer = handle }, layer, layer_origin, 0);
+            // Its own scrollback view, not zero: a layer with a ring can
+            // be scrolled back into it (the wheel and its bar both do
+            // that -- see `Layer.scrollbarState`), and drawing it from
+            // the live tail regardless is a bar that moves over content
+            // that doesn't. The root layer two lines up has always been
+            // drawn this way; this is the same thing per layer.
+            self.syncOneLayer(eng, fa, .{ .context = ctx_handle, .layer = handle }, layer, layer_origin, layer.view_scroll);
         }
     }
 

@@ -646,7 +646,11 @@ fn runPrompt(
                 // Keep `prompt.view_scroll` current with any host-driven
                 // scroll (mouse wheel, scrollbar) so browse-down and the
                 // type-to-snap-back in `setCursorAt` know the real offset.
-                .scroll => |sev| prompt.view_scroll = sev.offset,
+                // Only for the surface this prompt draws on: embedded,
+                // the context has other layers with rings of their own.
+                .scroll => |sev| if (sev.layer == prompt.layer) {
+                    prompt.view_scroll = sev.offset;
+                },
                 // A window resize rebuilt the grid (bottom-anchored) and
                 // changed its dimensions. The re-layout is debounced
                 // (`Prompt.noteResize` / `applyPendingResize`).

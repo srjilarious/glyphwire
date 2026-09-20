@@ -51,6 +51,50 @@ pub fn scrollbarGeomDeepHistoryClampsThumbToMinTest(_: std.Io, _: std.mem.Alloca
     try testz.expectEqual(g.thumb_top, 376.0); // track_h - thumb_h
 }
 
+pub fn paneScrollbarFromARingSitsAtTheTailTest(_: std.Io, _: std.mem.Allocator) !void {
+    // What `Layer.scrollbarState` now reports for a terminal-style layer
+    // (a `gmux` pane, `gw-shell --embed`'s panel): its scrollback, in a
+    // viewport offset's sense. 30 rows of history under a 10-row pane,
+    // viewing the live tail -- so the thumb is a quarter of the track and
+    // pinned to the bottom, exactly as the window's own bar shows the
+    // root layer's ring.
+    const rect: geometry.RectPx = .{ .x = 0, .y = 0, .w = 200, .h = 400 };
+    const live = geometry.paneScrollbars(rect, .{
+        .vertical = true,
+        .horizontal = false,
+        .row = 30,
+        .col = 0,
+        .max_row = 30,
+        .max_col = 0,
+    }, 20, 10);
+    const v = live.vertical.?;
+    try testz.expectEqual(v.thumb.h, 100.0);
+    try testz.expectEqual(v.thumb.y, 300.0);
+
+    // Scrolled all the way back: flush to the top.
+    const back = geometry.paneScrollbars(rect, .{
+        .vertical = true,
+        .horizontal = false,
+        .row = 0,
+        .col = 0,
+        .max_row = 30,
+        .max_col = 0,
+    }, 20, 10);
+    try testz.expectEqual(back.vertical.?.thumb.y, 0.0);
+
+    // An empty ring draws no bar at all, the same as a pane with no
+    // viewport slack.
+    const empty = geometry.paneScrollbars(rect, .{
+        .vertical = true,
+        .horizontal = false,
+        .row = 0,
+        .col = 0,
+        .max_row = 0,
+        .max_col = 0,
+    }, 20, 10);
+    try testz.expectTrue(empty.vertical == null);
+}
+
 // ─── geometry.cellFromPixel ──────────────────────────────────────────
 
 /// `cellFromPixel` reads the module-level cell/grid globals; set a known
