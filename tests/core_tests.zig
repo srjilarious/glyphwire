@@ -3329,6 +3329,44 @@ pub fn clearFillPaintsAnOpaqueBackgroundTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(layer.cell(1, 3).style.bg.color.a, 0);
 }
 
+/// `fillBg` is `clearFill` with the content left alone -- the primitive a
+/// client moves a highlight with. Everything that isn't the background
+/// has to survive it, or a list row would lose its name and its icon
+/// every time the cursor passed over it.
+pub fn fillBgRepaintsOnlyTheBackgroundTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
+    defer layer.deinit();
+    try layer.writeRuns(&.{.{
+        .text = "hello",
+        .fg = .{ .r = 7, .g = 8, .b = 9 },
+        .bg = .{ .color = .{ .r = 1, .g = 1, .b = 1 } },
+        .metadata_id = 3,
+    }}, .{ .selectable = false });
+    layer.drawIconOver(1, 0, 0, .{});
+
+    layer.fillBg(0, 0, 1, 5, .{ .r = 30, .g = 40, .b = 50 });
+    try testz.expectEqual(layer.cell(0, 0).style.bg.color.g, 40);
+    try testz.expectEqual(layer.cell(0, 4).style.bg.color.b, 50);
+    // The content is untouched: grapheme, foreground, metadata id, the
+    // `selectable` flag and the foreground icon.
+    try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("o", layer.cell(0, 4).grapheme());
+    try testz.expectEqual(layer.cell(0, 2).style.fg.r, 7);
+    try testz.expectEqual(layer.cell(0, 2).metadata_id.?, 3);
+    try testz.expectFalse(layer.cell(0, 2).selectable);
+    try testz.expectEqual(layer.cell(0, 0).fg_icon.?.handle, 1);
+
+    // Clamped and bounds-checked exactly like `clearFill`: a region past
+    // an edge is trimmed, one wholly past it (or empty) is a no-op.
+    layer.fillBg(4, 8, 3, 9, .{ .r = 60, .g = 60, .b = 60 });
+    try testz.expectEqual(layer.cell(4, 9).style.bg.color.r, 60);
+    const before = layer.revision;
+    layer.fillBg(5, 0, 1, 1, .{ .r = 99, .g = 0, .b = 0 });
+    layer.fillBg(0, 0, 0, 5, .{ .r = 99, .g = 0, .b = 0 });
+    try testz.expectEqual(layer.revision, before);
+}
+
 pub fn sgrInverseOnTheDefaultBackgroundStaysVisibleTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 2, 0);

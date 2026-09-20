@@ -638,15 +638,20 @@ pub fn dialogEscapeAndFocusTest(_: std.Io, alloc: std.mem.Allocator) !void {
 
 pub fn navigationKeysTakeTheCheapRepaintTest(_: std.Io, _: std.mem.Allocator) !void {
     // A full pane repaint is a ~54 KB frame; over a remote session that
-    // is what made moving the cursor lag. Everything that can only have
-    // changed the row the cursor left and the row it landed on has to
-    // stay on the cheap path, or the lag comes straight back.
-    const cheap = [_]sala.ui.Action{
-        .cursorUp,     .cursorDown,     .pageUp, .pageDown,
-        .cursorHome,   .cursorEnd,      .toggleMark,
-        .toggleMarkAndDown,
+    // is what made moving the cursor lag. A navigation key moves nothing
+    // but the highlight, so it owes two `set_bg` messages and no text at
+    // all -- the cheapest level there is, and the lag comes straight back
+    // if one of these slips off it.
+    const bg_only = [_]sala.ui.Action{
+        .cursorUp,   .cursorDown, .pageUp,
+        .pageDown,   .cursorHome, .cursorEnd,
     };
-    for (cheap) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .rows);
+    for (bg_only) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .bg);
+
+    // A mark changes its row's foreground and puts a `*` in column 0, so
+    // the two toggles still need the rows themselves -- but not the pane.
+    const rows = [_]sala.ui.Action{ .toggleMark, .toggleMarkAndDown };
+    for (rows) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .rows);
 }
 
 pub fn ListingChangesTakeTheFullRepaintTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -703,6 +708,30 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectEqual(km.lookup("up", .{ .alt = true }).?, actions.Action.upToParentDir);
     try testz.expectTrue(km.lookup("F10", .{}) == null);
     try testz.expectTrue(km.lookup("F2", .{}) == null);
+}
+
+/// `page_lines` is how far PageUp/PageDown move, defaulting to 6. A
+/// number >= 1 replaces it; 0 is nothing, not "a screenful", so it keeps
+/// the default -- the rule zoe's `page_lines` already follows.
+pub fn configReadsPageLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var def = config.load(alloc, "config = {}");
+    defer def.deinit(alloc);
+    try testz.expectEqual(def.config.page_lines, 6);
+
+    var set = config.load(alloc, "config = { page_lines = 20 }");
+    defer set.deinit(alloc);
+    try testz.expectEqual(set.config.page_lines, 20);
+
+    for ([_][:0]const u8{
+        "config = { page_lines = 0 }",
+        "config = { page_lines = -3 }",
+        "config = { page_lines = 1.5 }",
+        "config = { page_lines = \"lots\" }",
+    }) |src| {
+        var bad = config.load(alloc, src);
+        defer bad.deinit(alloc);
+        try testz.expectEqual(bad.config.page_lines, 6);
+    }
 }
 
 pub fn configSyntaxErrorKeepsDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {

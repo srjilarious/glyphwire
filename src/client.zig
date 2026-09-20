@@ -461,6 +461,47 @@ pub const Client = struct {
         bg: ?protocol.Color,
     };
 
+    /// `set_bg`'s options: `ClearOpts`' region, with `bg` required --
+    /// the call is "paint this background". Shared by `Client.setBg` and
+    /// `Batch.setBg`.
+    pub const SetBgOpts = struct {
+        /// null = the root layer.
+        layer: ?core.LayerHandle = null,
+        row: usize = 0,
+        col: usize = 0,
+        /// null = to the layer's edge.
+        rows: ?usize = null,
+        cols: ?usize = null,
+        bg: core.Color,
+    };
+
+    /// `set_bg` -- repaints a region's background and nothing else, so a
+    /// client that moves a highlight sends two of these instead of two
+    /// rows of text. A notification.
+    pub fn setBg(self: *Client, opts: SetBgOpts) !void {
+        try self.notify("set_bg", setBgParams(opts));
+    }
+
+    fn setBgParams(opts: SetBgOpts) SetBgWire {
+        return .{
+            .layer = opts.layer,
+            .row = opts.row,
+            .col = opts.col,
+            .rows = opts.rows,
+            .cols = opts.cols,
+            .bg = colorToJson(opts.bg).?,
+        };
+    }
+
+    const SetBgWire = struct {
+        layer: ?core.LayerHandle,
+        row: usize,
+        col: usize,
+        rows: ?usize,
+        cols: ?usize,
+        bg: protocol.Color,
+    };
+
     /// `set_property(layer, "cursor", {row, col})` -- a notification.
     pub fn setCursor(self: *Client, row: usize, col: usize) !void {
         try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
@@ -2271,6 +2312,13 @@ pub const Client = struct {
         /// Batched `Client.clearOn`.
         pub fn clearOn(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
             try self.notify("clear", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols });
+        }
+
+        /// Batched `set_bg` -- see `Client.SetBgOpts`. This is the one
+        /// that matters batched: the two rows a highlight moves between
+        /// go out together, in one frame.
+        pub fn setBg(self: *Batch, opts: SetBgOpts) !void {
+            try self.notify("set_bg", setBgParams(opts));
         }
 
         /// Batched `set_property(cursor)` on the root layer -- see

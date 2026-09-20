@@ -815,6 +815,19 @@ const ClearParams = struct {
     bg: ?protocol.Color = null,
 };
 
+/// `set_bg` params: `ClearParams`' region, but `bg` is required -- the
+/// call means "paint this background", so there's no sense in omitting
+/// it. Defaults match `clear`'s, so a bare `set_bg` with just a colour
+/// repaints the whole layer's background without touching its text.
+const SetBgParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: usize = 0,
+    col: usize = 0,
+    rows: ?usize = null,
+    cols: ?usize = null,
+    bg: protocol.Color,
+};
+
 /// `batch` params: an ordered list of sub-messages, each a normal
 /// JSON-RPC object (`{method, params, id?}`) -- the same shape `handle`
 /// parses from a standalone frame. See `handleBatch` for how they're
@@ -1522,6 +1535,7 @@ pub const Dispatcher = struct {
         .{ "tag_metadata", catVoid(handleTagMetadata) },
         .{ "draw_box", catVoid(handleDrawBox) },
         .{ "clear", catVoid(handleClear) },
+        .{ "set_bg", catVoid(handleSetBg) },
         .{ "get_cell_metrics", catBytesIdNoParams(handleGetCellMetrics) },
         .{ "create_metadata", catBytesId(handleCreateMetadata) },
         .{ "destroy_metadata", catVoid(handleDestroyMetadata) },
@@ -3263,6 +3277,22 @@ pub const Dispatcher = struct {
         const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
         const bg: ?core.Color = if (p.bg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else null;
         layer.clearFill(p.row, p.col, rows, cols, bg);
+    }
+
+    /// `set_bg`: `clear`'s region with only the background repainted, so
+    /// moving a highlight costs a message instead of a row of text. Same
+    /// region defaulting `handleClear` does.
+    fn handleSetBg(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetBgParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const layer = try self.resolveLayer(p.layer);
+        const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
+        const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
+        layer.fillBg(p.row, p.col, rows, cols, colorFromJson(p.bg));
     }
 
     /// A client-side convenience for aspect-ratio-aware placement

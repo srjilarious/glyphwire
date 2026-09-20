@@ -36,6 +36,12 @@
 --     small_icon_px = 16,
 --     large_icon_px = 32,
 --
+--     -- Listing rows PageUp / PageDown move the cursor. Not a
+--     -- screenful: 6 is 6 whatever the window is or whether the shell
+--     -- panel is open, so a page is a jump you can predict. Must be at
+--     -- least 1; 0 is ignored and the default stands.
+--     page_lines = 6,
+--
 --     ---- Opening files ---------------------------------------------
 --
 --     -- What runs when a file is activated (Enter, double-click),

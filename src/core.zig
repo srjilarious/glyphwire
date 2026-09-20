@@ -3428,6 +3428,36 @@ pub const Layer = struct {
         self.render_gen +%= 1;
     }
 
+    /// Repaints only the *background* of the cells in
+    /// `[row, row+rows) x [col, col+cols)` (clamped like `clearFill`),
+    /// leaving each cell's grapheme, foreground colour, metadata id,
+    /// `selectable` flag, text scale and foreground icon exactly as they
+    /// were -- `set_bg`, the "move a highlight" primitive. A client that
+    /// draws a list with one highlighted row repaints the row it left and
+    /// the row it landed on with two of these instead of redrawing their
+    /// text; see docs/investigations/salacommander-remote-lag.md for what
+    /// the difference costs on a remote session.
+    ///
+    /// The background is one slot (`Background` is a union), so a cell
+    /// whose background was an image or an icon takes the colour like any
+    /// other -- this overwrites rather than merging, the way `write_text`
+    /// already does with `grapheme`/`style`. Foreground icons
+    /// (`drawIconOver`) are a separate field and survive, which is what
+    /// makes a listing row's icon stay put.
+    pub fn fillBg(self: *Layer, row: usize, col: usize, rows: usize, cols: usize, bg: Color) void {
+        if (row >= self.height or col >= self.width or rows == 0 or cols == 0) return;
+
+        const row_end = @min(row + rows, self.height);
+        const col_end = @min(col + cols, self.width);
+
+        var r = row;
+        while (r < row_end) : (r += 1) {
+            for (self.liveRow(r)[col..col_end]) |*cell_ptr| cell_ptr.style.bg = .{ .color = bg };
+        }
+        self.revision += 1;
+        self.render_gen +%= 1;
+    }
+
     pub fn getProperty(self: *const Layer, name: PropertyName) PropertyValue {
         return switch (name) {
             .cursor => .{ .cursor = self.cursor },

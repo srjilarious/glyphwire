@@ -48,7 +48,7 @@ multi-script text:
 | **Panes** | `create_pane`, `spawn_in_pane`, `focus_pane`, `set_window_prefix` | Window-level split tree of panes, each running its own program on a host-managed PTY. What `gmux` is built on. |
 | **Splits** | `create_split`, `set_split_children`, `move_divider` | Layout tree of layers inside a context, with weighted or fixed children and draggable dividers. Re-lays itself on window resize. |
 | **Layers** | `create_layer`, `raise_layer`, `get_property` / `set_property` | Addressable surfaces with position, size, visibility, opacity and background. A viewport over a larger content grid scrolls host-side, with opt-in scrollbars. |
-| **Text** | `write_text`, `insert_cells`, `delete_cells`, `move_content`, `clear` | Truecolor styled runs or spans, text scale (1.5x, 2x, 3x) from re-rasterized font atlases, in-place cell editing, and row shifting without a repaint. |
+| **Text** | `write_text`, `insert_cells`, `delete_cells`, `move_content`, `clear`, `set_bg` | Truecolor styled runs or spans, text scale (1.5x, 2x, 3x) from re-rasterized font atlases, in-place cell editing, row shifting without a repaint, and background-only repaints for moving a highlight. |
 | **Images** | `load_image`, `update_image`, `draw_image` | Real bitmaps (PNG, JPEG, BMP, GIF) placed in the grid, with source cropping. Bytes ride a binary side channel, never base64. |
 | **Icons and boxes** | `draw_icon`, `draw_box` | A bundled icon catalog (file types, Devicon logos, distro logos) and 9-slice panels from tile sets. |
 | **Rects** | `create_rect`, `update_rect`, `destroy_rect` | Pixel-space outlines and fills on a layer, independent of the cell grid. Good for marks, crop boxes and focus rings. |

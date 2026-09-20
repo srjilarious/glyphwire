@@ -69,9 +69,9 @@ assuming a primitive is missing.
 
 The remaining fallbacks to a full repaint are deliberate: an open Alt+D
 path field (the title row is a live text field), and a jump of a
-screenful or more (`Home`, `End`, `PgUp`/`PgDn` past the edge), where no
-row survives the shift and moving the content first would only add a
-message to a full redraw.
+screenful or more (`Home`, `End`; `PgUp`/`PgDn` only if `page_lines` is
+set past the pane's height), where no row survives the shift and moving
+the content first would only add a message to a full redraw.
 
 ## What it costs now
 
@@ -90,12 +90,55 @@ filenames with the footer naming the cursor's entry, and after 55 Ups
 the same, so the incrementally-scrolled grid matches what a full repaint
 would have produced.
 
+## Follow-up: `set_bg`, the highlight-only repaint
+
+The paragraph that used to close this file said a way to restyle a row's
+background without disturbing its icons would roughly halve what was
+left, and that it was not worth a protocol addition at 3 KB. It was
+added anyway, because the shape is right rather than because 3 KB hurt:
+"move a highlight" is a thing clients do, and it should not cost a row
+of text.
+
+`set_bg` (Text & Styling in api.md) takes `clear`'s region and repaints
+only each cell's background. The grapheme, foreground colour,
+`metadata_id`, `selectable` flag and *foreground* icon all survive it,
+which is exactly the set a listing row needs: its name, its colour and
+its icon are already on the host and still correct, because nothing but
+the highlight moved.
+
+`PaneDirty` grew a level below `rows` for it. `dirtyFor` now gives every
+navigation key `.bg`, and the two mark toggles keep `.rows` -- a mark
+changes the row's foreground and puts a `*` in column 0, so those rows
+really do owe their text. `renderPaneRows` takes the level and decides
+per cursor row whether to send a `set_bg` or redraw it.
+
+Re-measured the same way, same 200-file directory at 160x50:
+
+```
+sala: pane 0 redraw rows=2 bytes=947  frames=1   # a move inside the band
+sala: pane 0 redraw rows=2 bytes=2149 frames=1   # a move that scrolls
+```
+
+Over 60 consecutive Down presses through the scroll boundary: 45 moves
+inside the band at ~945 bytes (**3.2 KB -> 0.95 KB, ~3.4x**, and 57x off
+the original full repaint), and 16 that scrolled at ~2149 bytes. The
+scrolling ones are higher because `move_content` exposes a row whose
+text has genuinely never been sent -- one real row write, and only the
+*other* cursor row rides the cheap path. There is no way around that one
+short of the host knowing the listing.
+
+Correctness was checked against the server's grid again rather than by
+eye: after 60 Downs the pane held alternating stripes with exactly one
+cursor-coloured row, the filenames intact on every row including the
+highlighted one, and `page_down` landed the highlight `page_lines` rows
+down (6 by default, 15 with `page_lines = 15` in
+`salacommander.conf.lua`).
+
 ## What is left on the table
 
-~3.2 KB for two rows and a footer is around 230 bytes per JSON message,
-which is the floor for this representation, not a salacommander problem.
-Two rows cost more than they look because a cursor move changes each
-row's *background*, so `writeRow` clears the row, which wipes the
-foreground icon, which then has to be resent. A way to restyle a row's
-background without disturbing its icons would roughly halve what is
-left. Not worth a protocol addition on its own at 3 KB.
+~945 bytes for two `set_bg`s and a footer is around 230 bytes per JSON
+message, which is the floor for this representation, not a
+salacommander problem. The footer is now most of it: it is a `clear` plus
+two `write_text`s that go out on every cursor move because the summary
+names the entry under the cursor. Making that cheaper means sending less
+text, not fewer messages.

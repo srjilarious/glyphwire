@@ -42,6 +42,11 @@ pub const Config = struct {
     /// Icon height caps in pixels, as `gw-ls` has them.
     large_icon_px: u32 = 32,
     small_icon_px: u32 = 16,
+    /// Listing rows a PageUp / PageDown moves the cursor, the same
+    /// `page_lines` name zoe's config uses. Deliberately *not* clamped to
+    /// the pane's height: 6 means 6 whatever the window is, so a page is
+    /// a predictable jump rather than one that changes with the layout.
+    page_lines: usize = 6,
     keys: []KeyOverride = &.{},
     /// Applied over `openaction.defaults`; a later entry for the same
     /// extension wins, as `openaction.resolve` scans last-match.
@@ -121,6 +126,16 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     if (boolField(lua, "show_hidden")) |v| result.config.show_hidden = v;
     if (uintField(lua, "large_icon_px")) |v| result.config.large_icon_px = std.math.clamp(v, icon_px_min, icon_px_max);
     if (uintField(lua, "small_icon_px")) |v| result.config.small_icon_px = std.math.clamp(v, icon_px_min, icon_px_max);
+    if (uintField(lua, "page_lines")) |v| {
+        // A number >= 1 replaces the default; 0 is not "a screenful", it
+        // is nothing, so it keeps the default -- the rule zoe's
+        // `page_lines` already follows.
+        if (v >= 1) {
+            result.config.page_lines = v;
+        } else {
+            std.log.warn("salacommander: {s} `page_lines` must be at least 1; ignored", .{conf_name});
+        }
+    }
     result.config.keys = readKeys(alloc, lua) catch &.{};
     result.config.open_actions = readOpenActions(alloc, lua) catch &.{};
 

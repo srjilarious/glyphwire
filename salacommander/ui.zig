@@ -464,10 +464,10 @@ pub const Ui = struct {
             p.setCursor(row);
         }
         if (self.find_len == 0) return;
-        // Type-to-find only ever moves the cursor, so it is the cheap
+        // Type-to-find only ever moves the cursor, so it is the cheapest
         // repaint too -- and it is one per keystroke, which is exactly
         // where a full one hurts.
-        self.markDirty(self.active, .rows);
+        self.markDirty(self.active, .bg);
         try self.setMessage("find: {s}", .{self.find_buf[0..self.find_len]});
     }
 
@@ -478,7 +478,7 @@ pub const Ui = struct {
         if (self.find_len == 0) return self.clearFind();
         const p = &self.panes[self.active];
         if (p.rowStartingWith(self.find_buf[0..self.find_len])) |row| p.setCursor(row);
-        self.markDirty(self.active, .rows);
+        self.markDirty(self.active, .bg);
         self.setMessage("find: {s}", .{self.find_buf[0..self.find_len]}) catch {};
     }
 
@@ -492,7 +492,7 @@ pub const Ui = struct {
         // The prefix itself lives in the bar, not the pane; the pane is
         // marked only because the cursor may have been left somewhere
         // the caller is about to move it from.
-        self.markDirty(self.active, .rows);
+        self.markDirty(self.active, .bg);
     }
 
     /// Carries out one action on the active pane. Every command, whatever
@@ -500,12 +500,14 @@ pub const Ui = struct {
     pub fn perform(self: *Ui, action: Action) !void {
         const i = self.active;
         const p = &self.panes[i];
-        const visible = self.visibleRows(i);
         switch (action) {
             .cursorUp => p.moveCursor(-1),
             .cursorDown => p.moveCursor(1),
-            .pageUp => p.moveCursor(-@as(i64, @intCast(@max(visible -| 1, 1)))),
-            .pageDown => p.moveCursor(@intCast(@max(visible -| 1, 1))),
+            // `page_lines` rows, not a screenful: a page is the same
+            // jump whatever the window is or whether the shell panel is
+            // open. `Pane.moveCursor` clamps at the ends.
+            .pageUp => p.moveCursor(-@as(i64, @intCast(self.cfg.page_lines))),
+            .pageDown => p.moveCursor(@intCast(self.cfg.page_lines)),
             .cursorHome => p.cursorHome(),
             .cursorEnd => p.cursorEnd(),
             .activate => try self.activate(i),
@@ -563,13 +565,16 @@ pub const Ui = struct {
         self.shell.setCwd(self.panes[self.active].path);
     }
 
-    /// How much of the pane an action can have changed. The cheap answer
-    /// is for the ones that touch nothing but the row the cursor left and
-    /// the row it landed on -- which is every navigation key, and the two
-    /// mark toggles (a mark is drawn on its own row, and the footer's
-    /// summary is redrawn either way). A navigation key that *scrolls* is
-    /// still correct here: `renderPaneRows` notices `top` moved and does
-    /// the full repaint after all.
+    /// How much of the pane an action can have changed. The cheap answers
+    /// are for the ones that touch nothing but the row the cursor left
+    /// and the row it landed on.
+    ///
+    /// A navigation key only moves the highlight, so it earns `.bg` --
+    /// two backgrounds and the footer. The two mark toggles also change
+    /// the rows' text (the foreground colour, and a `*` in column 0), so
+    /// they earn `.rows`. Either way a move that *scrolls* is still
+    /// correct: `renderPaneRows` notices `top` moved and shifts the band,
+    /// or gives up and repaints the pane.
     pub fn dirtyFor(action: Action) PaneDirty {
         return switch (action) {
             .cursorUp,
@@ -578,6 +583,7 @@ pub const Ui = struct {
             .pageDown,
             .cursorHome,
             .cursorEnd,
+            => .bg,
             .toggleMark,
             .toggleMarkAndDown,
             => .rows,
@@ -1213,7 +1219,7 @@ pub const Ui = struct {
         for (0..2) |i| {
             switch (self.pane_dirty[i]) {
                 .none => {},
-                .rows => try self.renderPaneRows(i),
+                .bg, .rows => |level| try self.renderPaneRows(i, level),
                 .full => try self.renderPane(i),
             }
         }
@@ -1230,11 +1236,17 @@ pub const Ui = struct {
     /// per keystroke either way, and this one is a couple of KB. See
     /// docs/investigations/salacommander-remote-lag.md.
     ///
+    /// `level` says what the two cursor rows owe. At `.bg` -- every plain
+    /// cursor move -- only the highlight moved, so each is one `set_bg`
+    /// over its band and its text is never resent. At `.rows` they are
+    /// redrawn outright, which is what a mark toggle needs: a mark
+    /// changes the row's foreground and puts a `*` in column 0.
+    ///
     /// Falls back to `renderPane` when the small diff isn't valid: an open
     /// path field (the title row is a live text field), or a jump of a
     /// screenful or more, where no row survives the shift and moving the
     /// content first would only add a message to a full redraw.
-    fn renderPaneRows(self: *Ui, i: usize) !void {
+    fn renderPaneRows(self: *Ui, i: usize, level: PaneDirty) !void {
         const p = &self.panes[i];
         const visible = self.visibleRows(i);
         p.scrollIntoView(visible);
@@ -1298,7 +1310,11 @@ pub const Ui = struct {
             if (n == 1 and cursor_rows[0] == cursor_rows[1]) break;
             if (r < p.top or r >= end) continue;
             if (r >= exposed_from and r < exposed_to) continue; // already drawn
-            try self.writeListRow(&b, i, r, w, cols);
+            if (level == .bg) {
+                try self.setRowBg(&b, i, r);
+            } else {
+                try self.writeListRow(&b, i, r, w, cols);
+            }
             drawn += 1;
         }
 
@@ -1449,16 +1465,39 @@ pub const Ui = struct {
         w.interface.flush() catch {};
     }
 
+    /// A listing row's background: the cursor highlight, or the stripe.
+    /// Striped by the row's place in the listing, not by where it landed
+    /// on screen, so the pattern doesn't crawl as the pane scrolls. A
+    /// two-row entry is one stripe.
+    ///
+    /// Split out of `writeRow` because `setRowBg` needs the same answer
+    /// without the text -- the two have to agree or a highlight move
+    /// would leave the wrong stripe behind.
+    fn rowBg(p: *const Pane, row: usize, active_pane: bool) glyphwire.Color {
+        if (row == p.cursor) return if (active_pane) bg_cursor else bg_cursor_inactive;
+        return if (row % 2 == 1) bg_row_alt else bg_pane;
+    }
+
+    /// One listing row's background and nothing else -- a single `set_bg`
+    /// over the row's band. This is the whole point of the `.bg` dirty
+    /// level: the row's text, colours and icon are already on the host
+    /// and correct, because nothing but the highlight moved.
+    fn setRowBg(self: *Ui, b: *Batch, i: usize, row: usize) !void {
+        const p = &self.panes[i];
+        const rh = p.view.rowHeight();
+        try b.setBg(.{
+            .layer = self.pane_layers[i],
+            .row = list_top + (row - p.top) * rh,
+            .rows = rh,
+            .cols = self.paneWidth(i),
+            .bg = rowBg(p, row, i == self.active),
+        });
+    }
+
     fn writeRow(b: *Batch, layer: glyphwire.LayerHandle, p: *const Pane, row: usize, y: usize, w: usize, cols: Columns, active_pane: bool) !void {
         const rh = p.view.rowHeight();
-        const on_cursor = row == p.cursor;
         const marked = p.isMarked(row);
-        // Striped by the row's place in the listing, not by where it
-        // landed on screen, so the pattern doesn't crawl as the pane
-        // scrolls. A two-row entry is one stripe.
-        const bg = if (on_cursor)
-            (if (active_pane) bg_cursor else bg_cursor_inactive)
-        else if (row % 2 == 1) bg_row_alt else bg_pane;
+        const bg = rowBg(p, row, active_pane);
         try b.clearArea(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .bg = bg });
 
         const entry = p.entryAt(row);
@@ -1653,8 +1692,15 @@ fn errorText(err: anyerror) []const u8 {
 pub const PaneDirty = enum {
     /// Nothing changed; nothing is sent.
     none,
-    /// Only the row the cursor left and the row it landed on, plus the
-    /// footer (its selection summary follows the cursor).
+    /// Only the *background* of the row the cursor left and the row it
+    /// landed on, plus the footer: the highlight moved and nothing else
+    /// did, so their text is already right on the host. Two `set_bg`
+    /// messages, a few hundred bytes -- the cheapest a cursor move can
+    /// be, and what every navigation key earns.
+    bg,
+    /// The row the cursor left and the row it landed on redrawn in full,
+    /// plus the footer (its selection summary follows the cursor). What a
+    /// mark toggle needs, since a mark changes a row's text too.
     rows,
     /// Everything: a reload, a sort, a scroll, a resize, a view switch,
     /// a mark-all, an open path field.

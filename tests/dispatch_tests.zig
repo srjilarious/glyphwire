@@ -482,6 +482,41 @@ pub fn writeTextSpansInheritTheMessageDefaultsTest(io: std.Io, alloc: std.mem.Al
     ), dispatch.DispatchError.InvalidTextScale);
 }
 
+/// `set_bg` takes `clear`'s region and repaints only the background, so
+/// a client moving a highlight never resends the row's text.
+pub fn setBgOverWireKeepsTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"row":2,"col":0,"text":"row two","fg":{"r":9,"g":9,"b":9}}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_bg","params":{"row":2,"rows":1,"cols":8,"bg":{"r":1,"g":2,"b":3}}}
+    );
+    try testz.expectEqualStr("r", ctx.root.cell(2, 0).grapheme());
+    try testz.expectEqual(ctx.root.cell(2, 0).style.fg.r, 9);
+    try testz.expectEqual(ctx.root.cell(2, 0).style.bg.color.b, 3);
+    try testz.expectEqual(ctx.root.cell(2, 7).style.bg.color.b, 3);
+    // `cols` stopped it: column 8 and the next row are untouched.
+    try testz.expectEqual(ctx.root.cell(2, 8).style.bg.color.a, 0);
+    try testz.expectEqual(ctx.root.cell(3, 0).style.bg.color.a, 0);
+
+    // `rows`/`cols` default to the rest of the layer, as `clear`'s do.
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_bg","params":{"bg":{"r":4,"g":5,"b":6}}}
+    );
+    try testz.expectEqual(ctx.root.cell(9, 39).style.bg.color.g, 5);
+    try testz.expectEqualStr("w", ctx.root.cell(2, 2).grapheme());
+
+    // `bg` is required -- the call means "paint this background".
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_bg","params":{"row":1}}
+    ), error.MissingField);
+}
+
 pub fn clearBgAndLayerBackgroundOverWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);

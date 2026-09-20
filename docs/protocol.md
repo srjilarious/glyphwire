@@ -554,6 +554,7 @@ default style); any explicit colour, black included, is opaque.
 | `delete_cells` | notification | `layer?`, `count` | — |
 | `move_content` | notification | `layer?`, `top?`, `bot?`, `count?` = 1, `direction?` | — |
 | `clear` | notification | `layer?`, `row?` = 0, `col?` = 0, `rows?`, `cols?`, `bg?` | — |
+| `set_bg` | notification | `layer?`, `row?` = 0, `col?` = 0, `rows?`, `cols?`, `bg` | — |
 | `get_cells` | request | `layer?`, `view_offset?` = 0 | `{cols, rows, revision, cells}` |
 | `scroll_view` | request | `layer?`, `offset?`, `delta?` | `{offset, max}` |
 
@@ -589,6 +590,18 @@ DECRQM) produces a `terminal_reply` notification (section 7) rather than a
 grid change.
 
 `clear` with `bg` leaves the region blank but opaque in that colour.
+
+`set_bg` takes the same region, with the same defaulting, and repaints
+only each cell's background: the grapheme, foreground colour,
+`metadata_id`, `selectable` flag, text scale and foreground icon are all
+left as they were. `bg` is required. A cell's background is a single slot,
+so one holding an image or an icon background takes the colour like any
+other; a *foreground* icon (`draw_icon` with `foreground: true`) is a
+separate field and survives. This exists so that a client drawing a list
+with a highlighted row can move that highlight with two messages rather
+than redrawing two rows of text — the difference between a few hundred
+bytes and a few kilobytes per keystroke, which matters over a remote
+session.
 
 `move_content` scrolls a row range: `direction` is `"up"` or `"down"`;
 anything else reports `InvalidMoveDirection`.
