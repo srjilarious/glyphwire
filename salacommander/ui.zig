@@ -7,7 +7,8 @@
 //!
 //! Each pane layer is drawn client-side, a window of rows at a time:
 //!
-//!     row 0        the pane's directory (highlighted on the active side)
+//!     row 0        the pane's directory (highlighted on the active side),
+//!                  or a text field holding it while Alt+D is editing it
 //!     row 1        column headers
 //!     rows 2..     the listing, one row per entry (small view) or two
 //!                  (large view: tall icon, name, then perms/owner)
@@ -43,6 +44,7 @@ const FileEntry = pane_mod.FileEntry;
 const Action = actions.Action;
 const Dialog = dialog_mod.Dialog;
 const Button = dialog_mod.Button;
+const LineEdit = dialog_mod.LineEdit;
 const Color = glyphwire.Color;
 const Batch = glyphwire.Client.Batch;
 const lsfmt = ls.format;
@@ -96,6 +98,13 @@ const size_w = 8;
 const date_w = 16;
 const double_click_ms = 400;
 
+/// A pane's directory being edited where it's shown: which side, and the
+/// field holding it.
+const PathEdit = struct {
+    pane: usize,
+    line: LineEdit,
+};
+
 /// Where one pane's columns fall, for its current width and view.
 const Columns = struct {
     icon_col: usize,
@@ -128,6 +137,10 @@ pub const Ui = struct {
 
     /// The dialog on screen, while `runDialog` has one up.
     dialog: ?*Dialog = null,
+    /// Alt+D: a pane's title row turned into a text field. While one is
+    /// open its pane draws the field instead of its directory, and keys
+    /// go there rather than through the keymap.
+    path_edit: ?PathEdit = null,
     /// Where each dialog button was drawn: its row and column span, in
     /// dialog-layer cells, for a click to hit.
     button_spans: [8]struct { row: usize, col: usize, w: usize } = undefined,
@@ -222,6 +235,7 @@ pub const Ui = struct {
 
     pub fn deinit(self: *Ui) void {
         const alloc = self.alloc;
+        self.endPathEdit();
         for (&self.panes) |*p| p.deinit();
         self.keymap.deinit(alloc);
         self.cfg.deinit(alloc);
@@ -259,6 +273,12 @@ pub const Ui = struct {
             },
             .mouse_button => |m| try self.handleMouseButton(m),
             .key => |k| if (k.pressed) try self.handleKey(k),
+            // Only the title-row field takes text; the panes' own keys
+            // arrive as `key` events.
+            .text, .paste => |t| if (self.path_edit) |*e| {
+                try e.line.insert(self.alloc, t.text);
+                self.pane_dirty[e.pane] = true;
+            },
             .shutdown => self.quit = true,
             else => {},
         }
@@ -282,6 +302,7 @@ pub const Ui = struct {
 
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
         self.clearMessage();
+        if (self.path_edit != null) return self.pathEditKey(k);
         const action = self.keymap.lookup(k.key, k.mods) orelse return;
         try self.perform(action);
     }
@@ -303,7 +324,7 @@ pub const Ui = struct {
             .upToParentDir => {
                 _ = p.upToParentDir() catch |err| try self.setMessage("can't go up: {t}", .{err});
             },
-            .editPath => try self.editPath(),
+            .editPath => try self.beginPathEdit(),
             .switchPane => {
                 self.active = 1 - i;
                 self.pane_dirty = .{ true, true };
@@ -439,6 +460,54 @@ pub const Ui = struct {
         try self.setMessage("opening {s}", .{std.fs.path.basename(path)});
     }
 
+    // ── Editing a pane's path ───────────────────────────────────────────
+
+    /// Alt+D: turn the active pane's title row into a text field holding
+    /// its directory. There's no dialog -- the path is edited where it's
+    /// shown, and until Enter or Escape every key goes to the field.
+    fn beginPathEdit(self: *Ui) !void {
+        self.endPathEdit(); // Alt+D on the other side moves the field.
+        const p = &self.panes[self.active];
+        self.path_edit = .{ .pane = self.active, .line = try LineEdit.init(self.alloc, p.path) };
+        self.pane_dirty[self.active] = true;
+    }
+
+    /// Closes the field and puts the title back, keeping nothing typed.
+    fn endPathEdit(self: *Ui) void {
+        if (self.path_edit) |*e| {
+            e.line.deinit(self.alloc);
+            self.pane_dirty[e.pane] = true;
+        }
+        self.path_edit = null;
+    }
+
+    /// Keys while a title row is a field: Enter goes where it says,
+    /// Escape puts the directory back, and the rest are the same editing
+    /// keys a dialog's field has. Nothing falls through to the keymap --
+    /// a `d` typed into a path isn't a command.
+    fn pathEditKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        const e = if (self.path_edit) |*pe| pe else return;
+        if (std.mem.eql(u8, k.key, "escape")) return self.endPathEdit();
+        if (std.mem.eql(u8, k.key, "enter") or std.mem.eql(u8, k.key, "kp_enter")) {
+            const i = e.pane;
+            // Copied: closing the field frees the text it's read from.
+            const typed = try self.alloc.dupe(u8, std.mem.trim(u8, e.line.text(), " "));
+            defer self.alloc.free(typed);
+            self.endPathEdit();
+            if (typed.len == 0) return;
+
+            const p = &self.panes[i];
+            const path = try self.resolveTyped(p.path, typed);
+            defer self.alloc.free(path);
+            p.load(path) catch |err| try self.setMessage("{s}: {t}", .{ typed, err });
+            self.pane_dirty[i] = true;
+            self.bar_dirty = true;
+            return;
+        }
+        _ = e.line.handleKey(k.key, k.ctrl());
+        self.pane_dirty[e.pane] = true;
+    }
+
     fn reloadBoth(self: *Ui) !void {
         for (&self.panes, 0..) |*p, i| {
             p.reload() catch |err| try self.setMessage("{s}: {t}", .{ p.path, err });
@@ -450,6 +519,8 @@ pub const Ui = struct {
 
     fn handleMouseButton(self: *Ui, m: glyphwire.MouseButtonEvent) !void {
         if (!m.pressed) return;
+        // Clicking somewhere is leaving the field, not typing in it.
+        self.endPathEdit();
         const left = std.mem.eql(u8, m.button, "left");
         const right = std.mem.eql(u8, m.button, "right");
         if (!left and !right) return;
@@ -533,23 +604,6 @@ pub const Ui = struct {
         const result = self.runOperation(.{ .kind = .delete, .sources = sel });
         try self.reloadBoth();
         try self.reportResult(.delete, result);
-    }
-
-    /// Alt+D: type where the active pane should look, starting from the
-    /// directory it shows. `~` and a relative path resolve the way a copy
-    /// destination does, and a path that can't be listed leaves the pane
-    /// where it was with the reason in the bar.
-    fn editPath(self: *Ui) !void {
-        const p = &self.panes[self.active];
-        var d = try Dialog.init(self.alloc, "Change directory", "Directory to show:", &dialog_mod.ok_cancel, .{ .input = p.path });
-        defer d.deinit(self.alloc);
-        if (try self.runDialog(&d) != .ok) return;
-        const typed = std.mem.trim(u8, d.inputText(), " ");
-        if (typed.len == 0) return;
-
-        const path = try self.resolveTyped(p.path, typed);
-        defer self.alloc.free(path);
-        p.load(path) catch |err| try self.setMessage("{s}: {t}", .{ typed, err });
     }
 
     /// F7: make a directory (and any missing parents) in the active pane,
@@ -804,6 +858,14 @@ pub const Ui = struct {
         return if (i == 0) self.leftWidth() else self.win.cols - self.leftWidth();
     }
 
+    /// The field open on pane `i`'s title row, if that's where it is.
+    fn pathEditFor(self: *const Ui, i: usize) ?*const LineEdit {
+        if (self.path_edit) |*e| {
+            if (e.pane == i) return &e.line;
+        }
+        return null;
+    }
+
     /// How many entries fit in pane `i`'s list area.
     fn visibleRows(self: *const Ui, i: usize) usize {
         const list_rows = self.paneHeight() -| chrome_rows;
@@ -876,14 +938,26 @@ pub const Ui = struct {
         try b.clearArea(.{ .layer = layer, .bg = bg_pane });
 
         // Title: the directory, `~`-shortened and cut from the left so the
-        // end of a long path (the part that changes) stays visible.
+        // end of a long path (the part that changes) stays visible --
+        // unless Alt+D has made this row a field, which takes the whole
+        // row and shows the path in full, from the caret back.
         {
             const bg = if (active) bg_title_active else bg_title_inactive;
             const fg = if (active) fg_title_active else fg_title_inactive;
-            var pbuf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-            const shown = self.displayPath(&pbuf, p.path, w -| 2);
             try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = bg });
-            try b.writeTextOpts(shown, .{ .layer = layer, .row = 0, .col = 1, .fg = fg, .bg = bg, .max_cols = w -| 2 });
+            if (self.pathEditFor(i)) |in| {
+                const field_w = w -| 2;
+                const view = fieldView(in.text(), in.caret, field_w);
+                try b.writeTextOpts(in.text()[view.start..], .{ .layer = layer, .row = 0, .col = 1, .fg = fg_dialog, .bg = bg_input, .max_cols = field_w, .pad = true });
+                // The caret: the character under it (or a blank past the
+                // end) in reverse, as a dialog's field draws it.
+                const under = if (in.caret < in.text().len) in.text()[in.caret..nextCodepoint(in.text(), in.caret)] else " ";
+                try b.writeTextOpts(under, .{ .layer = layer, .row = 0, .col = 1 + view.caret_col, .fg = bg_input, .bg = fg_dialog });
+            } else {
+                var pbuf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+                const shown = self.displayPath(&pbuf, p.path, w -| 2);
+                try b.writeTextOpts(shown, .{ .layer = layer, .row = 0, .col = 1, .fg = fg, .bg = bg, .max_cols = w -| 2 });
+            }
         }
 
         // Column headers.

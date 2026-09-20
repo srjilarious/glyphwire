@@ -27,8 +27,8 @@ pub const Action = enum {
     /// desktop's opener.
     activate,
     upToParentDir,
-    /// Type a directory for the active pane, starting from the one it
-    /// shows.
+    /// Turn the active pane's title row into a text field holding its
+    /// directory: Enter goes there, Escape puts the title back.
     editPath,
     switchPane,
     /// Point the other pane at this pane's directory.

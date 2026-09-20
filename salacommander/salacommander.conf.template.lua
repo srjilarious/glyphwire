@@ -84,7 +84,7 @@
 --     --   cursorEnd           end
 --     --   activate            enter, kp_enter
 --     --   upToParentDir       alt+up, backspace
---     --   editPath            alt+d
+--     --   editPath            alt+d   (edits the pane's path in place)
 --     --   switchPane          tab
 --     --   otherPaneToSameDir  alt+o
 --     --   swapPanes           ctrl+u

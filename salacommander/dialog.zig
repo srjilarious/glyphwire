@@ -125,6 +125,32 @@ pub const LineEdit = struct {
         self.caret = 0;
     }
 
+    /// One editing key, by glyphwire key name. True when it was one of
+    /// the field's -- the caller decides what the rest mean (a dialog
+    /// button, or the pane's own keys). Letters aren't handled here: they
+    /// arrive again as `text` and go through `insert`.
+    pub fn handleKey(self: *LineEdit, key: []const u8, ctrl: bool) bool {
+        const eq = std.mem.eql;
+        if (eq(u8, key, "backspace")) {
+            self.backspace();
+        } else if (eq(u8, key, "delete")) {
+            self.deleteForward();
+        } else if (eq(u8, key, "left")) {
+            self.left();
+        } else if (eq(u8, key, "right")) {
+            self.right();
+        } else if (eq(u8, key, "home")) {
+            self.home();
+        } else if (eq(u8, key, "end")) {
+            self.end();
+        } else if (ctrl and eq(u8, key, "u")) {
+            self.clear();
+        } else {
+            return false;
+        }
+        return true;
+    }
+
     fn prevBoundary(s: []const u8, from: usize) usize {
         var i = from;
         while (i > 0) {
@@ -200,21 +226,7 @@ pub const Dialog = struct {
         }
 
         if (self.input) |*in| {
-            if (eq(u8, key, "backspace")) {
-                in.backspace();
-            } else if (eq(u8, key, "delete")) {
-                in.deleteForward();
-            } else if (eq(u8, key, "left")) {
-                in.left();
-            } else if (eq(u8, key, "right")) {
-                in.right();
-            } else if (eq(u8, key, "home")) {
-                in.home();
-            } else if (eq(u8, key, "end")) {
-                in.end();
-            } else if (ctrl and eq(u8, key, "u")) {
-                in.clear();
-            }
+            _ = in.handleKey(key, ctrl);
             // Letters are typing (they arrive again as `text`), not
             // button hotkeys.
             return null;

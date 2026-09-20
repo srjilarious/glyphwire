@@ -497,6 +497,24 @@ pub fn lineEditHandlesUtf8Test(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqualStr(e.text(), "af!");
 }
 
+pub fn lineEditHandlesEditingKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The same field the dialogs use and Alt+D puts on a pane's title
+    // row, driven by key name.
+    var e = try dialog.LineEdit.init(alloc, "/home/me/code");
+    defer e.deinit(alloc);
+    try testz.expectTrue(e.handleKey("backspace", false));
+    try testz.expectEqualStr(e.text(), "/home/me/cod");
+    try testz.expectTrue(e.handleKey("home", false));
+    try testz.expectTrue(e.handleKey("delete", false));
+    try testz.expectEqualStr(e.text(), "home/me/cod");
+    try testz.expectTrue(e.handleKey("u", true));
+    try testz.expectEqualStr(e.text(), "");
+    // Not the field's: the caller decides what they mean.
+    try testz.expectFalse(e.handleKey("enter", false));
+    try testz.expectFalse(e.handleKey("d", true));
+    try testz.expectFalse(e.handleKey("u", false));
+}
+
 pub fn dialogHotkeysOnlyWithoutATextFieldTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var conflict = try dialog.Dialog.init(alloc, "t", "m", &dialog.conflict_buttons, .{});
     defer conflict.deinit(alloc);
