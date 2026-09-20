@@ -45,10 +45,10 @@ const pan_step: i64 = 3;
 pub const Options = struct {
     /// The file being shown, for the status row. Borrowed.
     path: []const u8,
-    /// Its pixels, from `get_image_info`.
-    image: zoom.Size,
-    /// A loaded image handle -- `Ui` draws it but doesn't own it.
-    handle: glyphwire.ImageHandle,
+    /// Its container format, as `load_image` names it ("png", ...).
+    format: []const u8,
+    /// The file's bytes, borrowed for the length of `init`.
+    bytes: []const u8,
     mode: zoom.Mode = .fit_screen,
 };
 
@@ -102,6 +102,14 @@ pub const Ui = struct {
         // Nothing here takes typed text at a caret.
         try client.setCaretVisible(false);
 
+        // Load *after* the context exists. Images (and the icon catalog)
+        // are per-context and handles restart at 1 in a new one, so a
+        // handle loaded into whatever context was visible at connect time
+        // names a different image here -- in practice one of the catalog
+        // icons, which is what an image loaded too early looks like.
+        const handle = try client.loadImage(opts.format, opts.bytes);
+        const info = try client.getImageInfo(handle);
+
         const size = try client.getSize();
         const metrics = try client.getCellMetrics();
 
@@ -123,8 +131,8 @@ pub const Ui = struct {
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .path = opts.path,
-            .handle = opts.handle,
-            .image = opts.image,
+            .handle = handle,
+            .image = .{ .w = info.width, .h = info.height },
             .mode = opts.mode,
         };
         return self;

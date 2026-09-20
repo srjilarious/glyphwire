@@ -127,12 +127,12 @@ pub fn main(init: std.process.Init) !void {
     };
     defer client.deinit();
 
-    const handle = try client.loadImage(format.name(), bytes);
-    const info = try client.getImageInfo(handle);
-
     // `--interactive` takes over from here: its own context, its own
     // event loop, and the image sized to the window rather than to the
-    // row the cursor happens to be on.
+    // row the cursor happens to be on. It loads the image itself, once
+    // that context exists -- images are per-context (`core.Context`), so
+    // loading here would hand it a handle that means something else over
+    // there.
     if (args.hasOption("interactive")) {
         const listener = glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
             "key",
@@ -149,8 +149,8 @@ pub fn main(init: std.process.Init) !void {
 
         const ui = try interactive.Ui.init(alloc, io, &client, listener, .{
             .path = path,
-            .image = .{ .w = info.width, .h = info.height },
-            .handle = handle,
+            .format = format.name(),
+            .bytes = bytes,
             // `--size full` asks for natural pixels here too; the default
             // is the whole image on screen at once.
             .mode = if (size_mode == .full) .natural else .fit_screen,
@@ -159,6 +159,8 @@ pub fn main(init: std.process.Init) !void {
         return ui.run();
     }
 
+    const handle = try client.loadImage(format.name(), bytes);
+    const info = try client.getImageInfo(handle);
     const metrics = try client.getCellMetrics();
 
     // Natural-size placement: the cell span the image needs at scale 1.0,
