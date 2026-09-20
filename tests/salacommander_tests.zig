@@ -634,6 +634,33 @@ pub fn dialogEscapeAndFocusTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(d.handleKey("escape", .{}).?, dialog.Button.no);
 }
 
+// ─── Repaint cost ───────────────────────────────────────────────────────
+
+pub fn navigationKeysTakeTheCheapRepaintTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A full pane repaint is a ~54 KB frame; over a remote session that
+    // is what made moving the cursor lag. Everything that can only have
+    // changed the row the cursor left and the row it landed on has to
+    // stay on the cheap path, or the lag comes straight back.
+    const cheap = [_]sala.ui.Action{
+        .cursorUp,     .cursorDown,     .pageUp, .pageDown,
+        .cursorHome,   .cursorEnd,      .toggleMark,
+        .toggleMarkAndDown,
+    };
+    for (cheap) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .rows);
+}
+
+pub fn ListingChangesTakeTheFullRepaintTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Anything that can reorder, refilter or replace the listing -- or
+    // turn the title row into a text field -- has to redraw all of it.
+    const full = [_]sala.ui.Action{
+        .activate,     .upToParentDir, .editPath,   .switchPane,
+        .swapPanes,    .markAll,       .unmarkAll,  .invertMarks,
+        .sortByName,   .sortBySize,    .toggleView, .toggleHidden,
+        .refresh,      .otherPaneToSameDir,
+    };
+    for (full) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .full);
+}
+
 // ─── Actions and config ─────────────────────────────────────────────────
 
 pub fn defaultBindingsCoverTheBasicsTest(_: std.Io, alloc: std.mem.Allocator) !void {

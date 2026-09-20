@@ -136,6 +136,16 @@ pub const Client = struct {
     /// the timeout fires can shorten this field after `connect`.
     read_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(30_000), .clock = .awake } },
 
+    /// Wire volume written on this connection since it was opened: total
+    /// JSON-RPC body bytes, and how many frames they were sent in. Two
+    /// adds per flush, always on -- they are what tells a client whether
+    /// a redraw that feels slow over `--ssh` is round trips (frames) or
+    /// payload (bytes), and guessing between those two from the outside
+    /// is exactly what made salacommander's remote pane lag hard to pin
+    /// down. Read-only to callers; nothing here resets them.
+    bytes_sent: u64 = 0,
+    frames_sent: u64 = 0,
+
     pub const ConnectError = std.Io.net.UnixAddress.InitError || std.Io.net.UnixAddress.ConnectError;
     pub const NoSessionError = error{NoSession};
 
@@ -2121,6 +2131,8 @@ pub const Client = struct {
         var w = self.stream.writer(self.io, &write_buf);
         try wire.writeFrame(&w.interface, body);
         try w.interface.flush();
+        self.bytes_sent += body.len;
+        self.frames_sent += 1;
     }
 
     /// Starts a `batch`: a set of sub-messages sent in one frame and

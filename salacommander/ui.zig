@@ -55,7 +55,7 @@ const shellpanel = @import("shellpanel.zig");
 
 const Pane = pane_mod.Pane;
 const FileEntry = pane_mod.FileEntry;
-const Action = actions.Action;
+pub const Action = actions.Action;
 const Dialog = dialog_mod.Dialog;
 const Button = dialog_mod.Button;
 const LineEdit = dialog_mod.LineEdit;
@@ -211,18 +211,33 @@ pub const Ui = struct {
 
     /// A transient bar message; cleared on the next key.
     message: ?[]u8 = null,
-    pane_dirty: [2]bool = .{ true, true },
+    pane_dirty: [2]PaneDirty = .{ .full, .full },
+    /// The cursor row and scroll position each pane's layer was last
+    /// drawn with. A `.rows` repaint diffs against these to know which
+    /// two rows to redraw, and falls back to a full one when `top` has
+    /// moved -- every row shifted then, so there is no small diff.
+    drawn_cursor: [2]usize = .{ 0, 0 },
+    drawn_top: [2]usize = .{ 0, 0 },
     bar_dirty: bool = true,
     /// The last `content_extent`/offset sent per pane, so an unchanged one
     /// isn't re-sent (and a host-driven scroll isn't echoed back).
     pushed_scroll: [2][2]usize = .{ .{ std.math.maxInt(usize), 0 }, .{ std.math.maxInt(usize), 0 } },
     last_click: struct { pane: usize = 0, row: usize = 0, at_ms: i64 = 0 } = .{},
+    /// `GLYPHWIRE_SALA_PROFILE=1`: print what each pane repaint cost on
+    /// the wire -- rows drawn and body bytes -- to stderr. Off by
+    /// default and read once at startup. It exists because "the remote
+    /// pane feels laggy" is unanswerable without knowing whether a
+    /// keystroke costs one 20 KB frame or a hundred small round trips,
+    /// and over `--ssh` neither is visible from the outside.
+    profile: bool = false,
     quit: bool = false,
 
     pub const InitOptions = struct {
         left: []const u8,
         right: []const u8,
         home: ?[]const u8,
+        /// See `Ui.profile`.
+        profile: bool = false,
         /// Taken over by the `Ui`.
         cfg: config_mod.Config,
     };
@@ -302,6 +317,7 @@ pub const Ui = struct {
             .client = client,
             .listener = listener,
             .home = opts.home,
+            .profile = opts.profile,
             .context = context,
             .pane_layers = .{ left_layer, right_layer },
             .bar_layer = bar_layer,
@@ -360,7 +376,7 @@ pub const Ui = struct {
                     const p = &self.panes[i];
                     p.scrollTo(so.row / p.view.rowHeight(), self.visibleRows(i));
                     self.pushed_scroll[i][1] = so.row;
-                    self.pane_dirty[i] = true;
+                    self.markDirty(i, .full);
                 }
             },
             .mouse_button => |m| try self.handleMouseButton(m),
@@ -369,7 +385,7 @@ pub const Ui = struct {
             // a line editor, and this one has type-to-find.
             .text, .paste => |t| if (self.shell.isOpen()) {} else if (self.path_edit) |*e| {
                 _ = try e.line.insert(self.alloc, t.text);
-                self.pane_dirty[e.pane] = true;
+                self.markDirty(e.pane, .full);
             } else {
                 // Nothing else takes typing, so it's type-to-find.
                 try self.typeToFind(t.text);
@@ -391,7 +407,7 @@ pub const Ui = struct {
     }
 
     fn markAllDirty(self: *Ui) void {
-        self.pane_dirty = .{ true, true };
+        self.pane_dirty = .{ .full, .full };
         self.bar_dirty = true;
     }
 
@@ -423,6 +439,13 @@ pub const Ui = struct {
         try self.perform(action);
     }
 
+    /// Raises a pane's pending repaint to at least `level`. Never lowers
+    /// it: a `.full` already owed stays owed however many cursor moves
+    /// land on top of it before the next `flush`.
+    fn markDirty(self: *Ui, i: usize, level: PaneDirty) void {
+        if (@intFromEnum(level) > @intFromEnum(self.pane_dirty[i])) self.pane_dirty[i] = level;
+    }
+
     // ── Type to find ────────────────────────────────────────────────────
 
     /// Typed text: extend the prefix and put the cursor on the first
@@ -441,7 +464,10 @@ pub const Ui = struct {
             p.setCursor(row);
         }
         if (self.find_len == 0) return;
-        self.pane_dirty[self.active] = true;
+        // Type-to-find only ever moves the cursor, so it is the cheap
+        // repaint too -- and it is one per keystroke, which is exactly
+        // where a full one hurts.
+        self.markDirty(self.active, .rows);
         try self.setMessage("find: {s}", .{self.find_buf[0..self.find_len]});
     }
 
@@ -452,7 +478,7 @@ pub const Ui = struct {
         if (self.find_len == 0) return self.clearFind();
         const p = &self.panes[self.active];
         if (p.rowStartingWith(self.find_buf[0..self.find_len])) |row| p.setCursor(row);
-        self.pane_dirty[self.active] = true;
+        self.markDirty(self.active, .rows);
         self.setMessage("find: {s}", .{self.find_buf[0..self.find_len]}) catch {};
     }
 
@@ -463,7 +489,10 @@ pub const Ui = struct {
         if (self.find_len == 0) return;
         self.find_len = 0;
         self.clearMessage();
-        self.pane_dirty[self.active] = true;
+        // The prefix itself lives in the bar, not the pane; the pane is
+        // marked only because the cursor may have been left somewhere
+        // the caller is about to move it from.
+        self.markDirty(self.active, .rows);
     }
 
     /// Carries out one action on the active pane. Every command, whatever
@@ -486,16 +515,16 @@ pub const Ui = struct {
             .editPath => try self.beginPathEdit(),
             .switchPane => {
                 self.active = 1 - i;
-                self.pane_dirty = .{ true, true };
+                self.pane_dirty = .{ .full, .full };
             },
             .otherPaneToSameDir => {
                 const other = &self.panes[1 - i];
                 other.load(p.path) catch |err| try self.setMessage("{s}: {t}", .{ p.path, err });
-                self.pane_dirty[1 - i] = true;
+                self.markDirty(1 - i, .full);
             },
             .swapPanes => {
                 std.mem.swap(Pane, &self.panes[0], &self.panes[1]);
-                self.pane_dirty = .{ true, true };
+                self.pane_dirty = .{ .full, .full };
             },
 
             .toggleMark => p.toggleMark(p.cursor),
@@ -526,12 +555,34 @@ pub const Ui = struct {
             .refresh => try self.reloadBoth(),
             .quit => self.quit = true,
         }
-        self.pane_dirty[i] = true;
+        self.markDirty(i, dirtyFor(action));
         self.bar_dirty = true;
         // Whatever just happened may have moved the active side or its
         // directory; the panel follows both, and says nothing when
         // neither changed.
         self.shell.setCwd(self.panes[self.active].path);
+    }
+
+    /// How much of the pane an action can have changed. The cheap answer
+    /// is for the ones that touch nothing but the row the cursor left and
+    /// the row it landed on -- which is every navigation key, and the two
+    /// mark toggles (a mark is drawn on its own row, and the footer's
+    /// summary is redrawn either way). A navigation key that *scrolls* is
+    /// still correct here: `renderPaneRows` notices `top` moved and does
+    /// the full repaint after all.
+    pub fn dirtyFor(action: Action) PaneDirty {
+        return switch (action) {
+            .cursorUp,
+            .cursorDown,
+            .pageUp,
+            .pageDown,
+            .cursorHome,
+            .cursorEnd,
+            .toggleMark,
+            .toggleMarkAndDown,
+            => .rows,
+            else => .full,
+        };
     }
 
     /// Ctrl+`: show the shell panel (starting it the first time) or hide
@@ -656,14 +707,14 @@ pub const Ui = struct {
         self.endPathEdit(); // Alt+D on the other side moves the field.
         const p = &self.panes[self.active];
         self.path_edit = .{ .pane = self.active, .line = try LineEdit.init(self.alloc, p.path) };
-        self.pane_dirty[self.active] = true;
+        self.markDirty(self.active, .full);
     }
 
     /// Closes the field and puts the title back, keeping nothing typed.
     fn endPathEdit(self: *Ui) void {
         if (self.path_edit) |*e| {
             e.line.deinit(self.alloc);
-            self.pane_dirty[e.pane] = true;
+            self.markDirty(e.pane, .full);
         }
         self.path_edit = null;
     }
@@ -675,7 +726,7 @@ pub const Ui = struct {
         const e = if (self.path_edit) |*pe| pe else return;
         const cells = col -| (self.paneCol(e.pane) + 1);
         e.line.caret = offsetAtCol(e.line.text(), e.view_start, cells);
-        self.pane_dirty[e.pane] = true;
+        self.markDirty(e.pane, .full);
     }
 
     /// Keys while a title row is a field: the shared `LineEdit`'s --
@@ -690,7 +741,7 @@ pub const Ui = struct {
         const e = if (self.path_edit) |*pe| pe else return;
         switch (e.line.handleKey(k.key, k.mods)) {
             .moved, .edited => {
-                self.pane_dirty[e.pane] = true;
+                self.markDirty(e.pane, .full);
                 return;
             },
             .cancel => return self.endPathEdit(),
@@ -715,7 +766,7 @@ pub const Ui = struct {
                 const path = try self.resolveTyped(p.path, typed);
                 defer self.alloc.free(path);
                 p.load(path) catch |err| try self.setMessage("{s}: {t}", .{ typed, err });
-                self.pane_dirty[i] = true;
+                self.markDirty(i, .full);
                 self.bar_dirty = true;
             },
         }
@@ -724,7 +775,7 @@ pub const Ui = struct {
     fn reloadBoth(self: *Ui) !void {
         for (&self.panes, 0..) |*p, i| {
             p.reload() catch |err| try self.setMessage("{s}: {t}", .{ p.path, err });
-            self.pane_dirty[i] = true;
+            self.markDirty(i, .full);
         }
     }
 
@@ -744,7 +795,7 @@ pub const Ui = struct {
         const i: usize = if (m.cell.col < self.leftWidth()) 0 else 1;
         if (i != self.active) {
             self.active = i;
-            self.pane_dirty = .{ true, true };
+            self.pane_dirty = .{ .full, .full };
         }
 
         // A left click on a title row is about the path: it opens the
@@ -765,7 +816,7 @@ pub const Ui = struct {
             const cols = self.columns(self.paneWidth(i), p.view);
             if (sortKeyForColumn(cols, m.cell.col -| self.paneCol(i))) |key| {
                 p.setSort(p.sort.cycled(key));
-                self.pane_dirty[i] = true;
+                self.markDirty(i, .full);
             }
             return;
         }
@@ -776,7 +827,7 @@ pub const Ui = struct {
         if (row >= p.rowCount()) return;
 
         p.setCursor(row);
-        self.pane_dirty[i] = true;
+        self.markDirty(i, .full);
         if (right or (left and m.mods.ctrl)) {
             // Total Commander's right-click select, and Ctrl+click as the
             // mouse's Space. Neither opens anything: a Ctrl+click is
@@ -1160,13 +1211,137 @@ pub const Ui = struct {
 
     fn flush(self: *Ui) !void {
         for (0..2) |i| {
-            if (self.pane_dirty[i]) try self.renderPane(i);
+            switch (self.pane_dirty[i]) {
+                .none => {},
+                .rows => try self.renderPaneRows(i),
+                .full => try self.renderPane(i),
+            }
         }
         if (self.bar_dirty) try self.renderBar();
     }
 
+    /// The cheap repaint, for a move that left the listing itself alone:
+    /// the row the cursor left, the row it landed on, and the footer --
+    /// plus, when the move scrolled, a `move_content` shift of the list
+    /// band and the band of rows that shift exposed.
+    ///
+    /// This is what makes a remote pane usable. The full repaint below is
+    /// a ~54 KB frame at 160x50; holding an arrow key sends one repaint
+    /// per keystroke either way, and this one is a couple of KB. See
+    /// docs/investigations/salacommander-remote-lag.md.
+    ///
+    /// Falls back to `renderPane` when the small diff isn't valid: an open
+    /// path field (the title row is a live text field), or a jump of a
+    /// screenful or more, where no row survives the shift and moving the
+    /// content first would only add a message to a full redraw.
+    fn renderPaneRows(self: *Ui, i: usize) !void {
+        const p = &self.panes[i];
+        const visible = self.visibleRows(i);
+        p.scrollIntoView(visible);
+        if (self.pathEditFor(i) != null) return self.renderPane(i);
+
+        const old_top = self.drawn_top[i];
+        const scrolled_down = p.top > old_top;
+        const delta = if (scrolled_down) p.top - old_top else old_top - p.top;
+        if (delta >= visible) return self.renderPane(i);
+
+        self.pane_dirty[i] = .none;
+        const layer = self.pane_layers[i];
+        const w = self.paneWidth(i);
+        const h = self.paneHeight();
+        const rh = p.view.rowHeight();
+        const cols = self.columns(w, p.view);
+        const end = @min(p.top + visible, p.rowCount());
+
+        const before = self.client.bytes_sent;
+        const frames_before = self.client.frames_sent;
+
+        var b = self.client.batch();
+        defer b.deinit();
+
+        // Shift what's already on the host rather than resending it. The
+        // band is the list area only -- the title, the header and the
+        // footer stay put.
+        var exposed_from = p.top;
+        var exposed_to = p.top;
+        if (delta > 0) {
+            try b.moveContent(
+                layer,
+                list_top,
+                list_top + visible * rh - 1,
+                delta * rh,
+                if (scrolled_down) .up else .down,
+            );
+            // Scrolling toward the end exposes the last `delta` rows;
+            // toward the start, the first `delta`.
+            if (scrolled_down) {
+                exposed_from = p.top + visible - delta;
+                exposed_to = p.top + visible;
+            } else {
+                exposed_to = p.top + delta;
+            }
+        }
+
+        // The exposed band, plus the two cursor rows: the one the cursor
+        // left needs its highlight taken off, the one it landed on needs
+        // it put on. Deduplicated against the band, and against each
+        // other -- a mark toggle without a move, or a Home already at the
+        // top, leaves the cursor where it was.
+        var drawn: usize = 0;
+        var row = exposed_from;
+        while (row < @min(exposed_to, end)) : (row += 1) {
+            try self.writeListRow(&b, i, row, w, cols);
+            drawn += 1;
+        }
+        const cursor_rows = [2]usize{ self.drawn_cursor[i], p.cursor };
+        for (cursor_rows, 0..) |r, n| {
+            if (n == 1 and cursor_rows[0] == cursor_rows[1]) break;
+            if (r < p.top or r >= end) continue;
+            if (r >= exposed_from and r < exposed_to) continue; // already drawn
+            try self.writeListRow(&b, i, r, w, cols);
+            drawn += 1;
+        }
+
+        // The footer counts marked entries and names the one under the
+        // cursor, so it follows every move.
+        try writeFooter(&b, layer, p, h -| 1, w);
+
+        // The scrollbar's position, when the move scrolled. The extent is
+        // the listing's and hasn't changed, so only the offset is sent.
+        if (delta > 0) {
+            const offset = p.top * rh;
+            if (self.pushed_scroll[i][1] != offset) try b.setLayerScrollOffset(layer, offset, 0);
+            self.pushed_scroll[i][1] = offset;
+        }
+
+        var sent = try b.send();
+        sent.deinit();
+
+        self.drawn_cursor[i] = p.cursor;
+        self.drawn_top[i] = p.top;
+        self.reportRedraw(i, drawn, self.client.bytes_sent - before, self.client.frames_sent - frames_before);
+    }
+
+    /// One listing row and its icon, at the screen position `p.top` puts
+    /// it. The icon goes last for the same reason the full repaint draws
+    /// all of them last: a text write clears a cell's foreground icon.
+    fn writeListRow(self: *Ui, b: *Batch, i: usize, row: usize, w: usize, cols: Columns) !void {
+        const p = &self.panes[i];
+        const rh = p.view.rowHeight();
+        const y = list_top + (row - p.top) * rh;
+        try writeRow(b, self.pane_layers[i], p, row, y, w, cols, i == self.active);
+        const icon = if (p.entryAt(row)) |e| lsentries.iconForEntry(e.*) else "file/folder";
+        try b.drawIconOnStyled(self.pane_layers[i], y, cols.icon_col, icon, .{
+            .scale = .natural,
+            .h_align = .start,
+            .v_align = if (rh > 1) .start else .center,
+            .max_h = self.iconPx(p.view),
+            .foreground = true,
+        });
+    }
+
     fn renderPane(self: *Ui, i: usize) !void {
-        self.pane_dirty[i] = false;
+        self.pane_dirty[i] = .none;
         const p = &self.panes[i];
         const layer = self.pane_layers[i];
         const w = self.paneWidth(i);
@@ -1245,8 +1420,29 @@ pub const Ui = struct {
         if (self.pushed_scroll[i][0] != extent or self.pushed_scroll[i][1] != offset) try b.setLayerScrollOffset(layer, offset, 0);
         self.pushed_scroll[i] = .{ extent, offset };
 
+        const before = self.client.bytes_sent;
+        const frames_before = self.client.frames_sent;
         var sent = try b.send();
         sent.deinit();
+
+        // What the next `.rows` repaint diffs against.
+        self.drawn_cursor[i] = p.cursor;
+        self.drawn_top[i] = p.top;
+        self.reportRedraw(i, end -| p.top, self.client.bytes_sent - before, self.client.frames_sent - frames_before);
+    }
+
+    /// One line per pane repaint under `GLYPHWIRE_SALA_PROFILE` -- see
+    /// `Ui.profile`. Straight to stderr rather than through `std.log`
+    /// so it can't be swallowed by a log-level default.
+    fn reportRedraw(self: *Ui, pane: usize, rows: usize, bytes: u64, frames: u64) void {
+        if (!self.profile) return;
+        var buf: [160]u8 = undefined;
+        var w = std.Io.File.stderr().writer(self.io, &buf);
+        w.interface.print(
+            "sala: pane {d} redraw rows={d} bytes={d} frames={d}\n",
+            .{ pane, rows, bytes, frames },
+        ) catch return;
+        w.interface.flush() catch {};
     }
 
     fn writeRow(b: *Batch, layer: glyphwire.LayerHandle, p: *const Pane, row: usize, y: usize, w: usize, cols: Columns, active_pane: bool) !void {
@@ -1437,6 +1633,29 @@ fn errorText(err: anyerror) []const u8 {
         else => @errorName(err),
     };
 }
+
+/// How much of a pane its layer owes on the next `flush`. Ordered, so
+/// `markDirty` can take the larger of what is pending and what just
+/// happened and never quietly downgrade a full repaint.
+///
+/// The split exists because a full repaint is *expensive on the wire*:
+/// measured at 160x50 over a 200-entry directory it is one ~54 KB frame
+/// (a `clear_area` plus a `write_text` per column per visible row plus a
+/// `draw_icon` per row). That is invisible on a local socket and the
+/// reason moving the cursor in a remote session lagged -- at key-repeat
+/// rates it is over a megabyte a second of JSON through the ssh trunk.
+/// A cursor move changes two rows, so it sends those two instead: ~2 KB.
+/// See docs/investigations/salacommander-remote-lag.md.
+pub const PaneDirty = enum {
+    /// Nothing changed; nothing is sent.
+    none,
+    /// Only the row the cursor left and the row it landed on, plus the
+    /// footer (its selection summary follows the cursor).
+    rows,
+    /// Everything: a reload, a sort, a scroll, a resize, a view switch,
+    /// a mark-all, an open path field.
+    full,
+};
 
 const nextCodepoint = lineedit.nextBoundary;
 

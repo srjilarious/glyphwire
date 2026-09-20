@@ -95,6 +95,7 @@ pub fn main(init: std.process.Init) !void {
         .left = left,
         .right = right,
         .home = init.environ_map.get("HOME"),
+        .profile = init.environ_map.get("GLYPHWIRE_SALA_PROFILE") != null,
         .cfg = cfg,
     }) catch |err| {
         var buf: [512]u8 = undefined;
