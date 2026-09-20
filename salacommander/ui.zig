@@ -76,6 +76,9 @@ const bg_title_inactive = rgb(40, 44, 52);
 const bg_cursor = rgb(52, 101, 164);
 const bg_cursor_inactive = rgb(50, 54, 62);
 const bg_bar = rgb(24, 26, 31);
+/// The Ctrl+` shell panel: darker than a pane, so it reads as a terminal
+/// dropped over the file manager rather than as part of it.
+const bg_shell = rgb(14, 15, 18);
 const bg_bar_label = rgb(56, 132, 140);
 const bg_dialog = rgb(44, 48, 58);
 const bg_dialog_title = rgb(52, 101, 164);
@@ -240,6 +243,11 @@ pub const Ui = struct {
             try client.setLayerScrollbars(l, true, false);
         }
         try client.setLayerBackground(bar_layer, bg_bar);
+        // Opaque, and darker than the panes: the shell's own writes leave
+        // the cells they don't touch transparent, and a prompt with a
+        // file listing showing through it is unreadable.
+        try client.setLayerBackground(shell_layer, bg_shell);
+        try client.setLayerVisible(shell_layer, false);
         try client.setLayerBackground(dialog_layer, bg_dialog);
         try client.setLayerVisible(dialog_layer, false);
 
@@ -312,7 +320,9 @@ pub const Ui = struct {
             },
             .mouse_button => |m| try self.handleMouseButton(m),
             .key => |k| if (k.pressed) try self.handleKey(k),
-            .text, .paste => |t| if (self.path_edit) |*e| {
+            // Typed text is the shell's while its panel is up -- it has
+            // a line editor, and this one has type-to-find.
+            .text, .paste => |t| if (self.shell.isOpen()) {} else if (self.path_edit) |*e| {
                 try e.line.insert(self.alloc, t.text);
                 self.pane_dirty[e.pane] = true;
             } else {
@@ -655,6 +665,10 @@ pub const Ui = struct {
     // ── Mouse ───────────────────────────────────────────────────────────
 
     fn handleMouseButton(self: *Ui, m: glyphwire.MouseButtonEvent) !void {
+        // The pointer follows the keyboard: with the shell panel up,
+        // clicks are its business (its own prompt handles them), not a
+        // cursor move in a pane nobody is looking at.
+        if (self.shell.isOpen()) return;
         if (!m.pressed) return;
         const left = std.mem.eql(u8, m.button, "left");
         const right = std.mem.eql(u8, m.button, "right");

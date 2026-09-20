@@ -51,6 +51,11 @@ const share_den = 3;
 const min_rows = 6;
 const max_rows = 24;
 
+/// Rows left below the panel: the function-key bar, which stays readable
+/// with the shell up -- Ctrl+` is not a mode you should have to remember
+/// your way out of.
+const bar_rows = 1;
+
 /// Rows of history the panel's layer keeps, so Ctrl+Up in the shell has
 /// something to browse.
 pub const scrollback_rows = 2000;
@@ -139,10 +144,12 @@ pub const Panel = struct {
         return true;
     }
 
-    /// Rows the panel occupies in a window `win_rows` tall.
+    /// Rows the panel occupies in a window `win_rows` tall. Always
+    /// leaves the key bar and a couple of rows of file pane above it.
     pub fn rowsFor(win_rows: usize) usize {
         const share = win_rows * share_num / share_den;
-        return @min(@max(share, min_rows), @max(@min(max_rows, win_rows -| 2), 1));
+        const room = @max(@min(max_rows, win_rows -| (bar_rows + 2)), 1);
+        return @min(@max(share, min_rows), room);
     }
 
     /// Opens the panel, starting the shell the first time. `cwd` is the
@@ -173,7 +180,8 @@ pub const Panel = struct {
     pub fn place(self: *Panel, win: WinSize) !void {
         const rows = rowsFor(win.rows);
         try self.client.setLayerSize(self.layer, win.cols, rows);
-        try self.client.setLayerCellPosition(self.layer, win.rows -| rows, 0);
+        // Above the key bar, not over it.
+        try self.client.setLayerCellPosition(self.layer, win.rows -| (rows + bar_rows), 0);
         if (self.child != null) self.send("size");
     }
 

@@ -656,9 +656,10 @@ pub fn shellPanelTakesAThirdOfTheWindowTest(_: std.Io, _: std.mem.Allocator) !vo
     // for reading a command's output, not for taking over.
     try testz.expectEqual(rowsFor(12), 6);
     try testz.expectEqual(rowsFor(200), 24);
-    // Never taller than the window it sits in: two rows of file pane are
-    // kept whatever happens.
-    try testz.expectEqual(rowsFor(5), 3);
+    // Never taller than the window it sits in: the key bar and a couple
+    // of rows of file pane survive whatever happens.
+    try testz.expectEqual(rowsFor(6), 3);
+    try testz.expectEqual(rowsFor(3), 1);
     try testz.expectEqual(rowsFor(1), 1);
 }
 
