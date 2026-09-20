@@ -69,7 +69,6 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "enter", .action = .activate },
     .{ .chord = "kp_enter", .action = .activate },
     .{ .chord = "alt+up", .action = .upToParentDir },
-    .{ .chord = "backspace", .action = .upToParentDir },
     .{ .chord = "alt+d", .action = .editPath },
     .{ .chord = "tab", .action = .switchPane },
     .{ .chord = "alt+o", .action = .otherPaneToSameDir },

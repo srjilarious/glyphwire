@@ -70,6 +70,12 @@
 --     -- or to false to unbind that chord. Entries apply over the
 --     -- built-in bindings, so list only what you change.
 --     --
+--     -- Typing a letter isn't a binding: it moves the cursor to the
+--     -- first entry starting with what's been typed, refining as you
+--     -- go. Backspace shortens that, Escape drops it, and anything
+--     -- that moves the cursor or rereads the listing ends it. That's
+--     -- why Backspace isn't bound to upToParentDir (Alt+Up is).
+--     --
 --     -- Chords are "mod+mod+key", case-insensitive: ctrl, alt, shift,
 --     -- super; keys are glyphwire key names (up, page_down, insert,
 --     -- F5, kp_add, a, one, ...) or the aliases esc, pgup, pgdn, del,
@@ -83,7 +89,7 @@
 --     --   cursorHome          home
 --     --   cursorEnd           end
 --     --   activate            enter, kp_enter
---     --   upToParentDir       alt+up, backspace
+--     --   upToParentDir       alt+up
 --     --   editPath            alt+d   (edits the pane's path in place)
 --     --   switchPane          tab
 --     --   otherPaneToSameDir  alt+o

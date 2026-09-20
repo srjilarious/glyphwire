@@ -610,6 +610,26 @@ pub fn configSyntaxErrorKeepsDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !
     try testz.expectEqual(r.config.view, sala.pane.ViewMode.small);
 }
 
+pub fn paneFindsRowsByTypedPrefixTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "find");
+    defer s.deinit();
+    try s.file("README", "");
+    try s.file("report.txt", "");
+    try s.mkdir("Recipes");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    // Directories sort first: `..`, Recipes, README, report.txt.
+    try testz.expectEqualStr(rowName(&p, p.rowStartingWith("r").?), "Recipes");
+    // ASCII case is ignored, so a typed `re` still refines.
+    try testz.expectEqualStr(rowName(&p, p.rowStartingWith("rea").?), "README");
+    try testz.expectEqualStr(rowName(&p, p.rowStartingWith("REPO").?), "report.txt");
+    try testz.expectTrue(p.rowStartingWith("z") == null);
+    // The `..` row has no name to type.
+    try testz.expectTrue(p.rowStartingWith(".") == null);
+    try testz.expectTrue(p.rowStartingWith("") == null);
+}
+
 pub fn paneTotalBytesCountsListedFilesOnlyTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var s = try Scratch.init(io, alloc, "total");
     defer s.deinit();

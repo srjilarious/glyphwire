@@ -140,6 +140,20 @@ pub const Pane = struct {
         return null;
     }
 
+    /// The first row whose name starts with `prefix`, for type-to-find.
+    /// ASCII case is ignored -- typing `r` should land on `README` --
+    /// while anything above ASCII compares byte for byte, which is what
+    /// prefix-matching an unnormalized filename can honestly promise.
+    /// The `..` row never matches: it has no name to type.
+    pub fn rowStartingWith(self: *const Pane, prefix: []const u8) ?usize {
+        if (prefix.len == 0) return null;
+        for (self.entries, 0..) |e, i| {
+            if (e.name.len < prefix.len) continue;
+            if (std.ascii.eqlIgnoreCase(e.name[0..prefix.len], prefix)) return i + self.firstEntryRow();
+        }
+        return null;
+    }
+
     // ── Loading ─────────────────────────────────────────────────────────
 
     /// Replaces the listing with `path`'s. On failure the pane is left as

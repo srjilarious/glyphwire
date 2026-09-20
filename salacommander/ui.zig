@@ -25,7 +25,10 @@
 //! scrollbar and turns the wheel into `scroll_offset` events we follow.
 //!
 //! Keys go through the `Keymap` (`actions.zig`); every command is an
-//! `Action` handled in `perform`. The dialogs run their own nested event
+//! `Action` handled in `perform`. Typed text isn't a binding: with no
+//! field open it's type-to-find, moving the cursor to the first entry
+//! starting with what's been typed. A Ctrl+click marks a row the way
+//! Space does, and never activates it. The dialogs run their own nested event
 //! loop (`runDialog`), which is also what the file operations' conflict
 //! and error hooks call -- so an operation is synchronous, and a question
 //! halfway through a copy is just a dialog opened from inside it.
@@ -98,6 +101,9 @@ const list_top = 2;
 const size_w = 8;
 const date_w = 16;
 const double_click_ms = 400;
+/// The longest type-to-find prefix. Well past the point where a listing
+/// has one match left.
+const find_max = 64;
 
 /// A pane's directory being edited where it's shown: which side, and the
 /// field holding it.
@@ -146,6 +152,11 @@ pub const Ui = struct {
     /// open its pane draws the field instead of its directory, and keys
     /// go there rather than through the keymap.
     path_edit: ?PathEdit = null,
+    /// Type-to-find: what's been typed so far, moving the cursor to the
+    /// first entry that starts with it. Cleared by anything that moves
+    /// the cursor or changes the listing -- see `clearFind`.
+    find_buf: [find_max]u8 = undefined,
+    find_len: usize = 0,
     /// Where each dialog button was drawn: its row and column span, in
     /// dialog-layer cells, for a click to hit.
     button_spans: [8]struct { row: usize, col: usize, w: usize } = undefined,
@@ -270,6 +281,7 @@ pub const Ui = struct {
             .scroll_offset => |so| {
                 for (self.pane_layers, 0..) |l, i| {
                     if (so.layer != l) continue;
+                    self.clearFind();
                     const p = &self.panes[i];
                     p.scrollTo(so.row / p.view.rowHeight(), self.visibleRows(i));
                     self.pushed_scroll[i][1] = so.row;
@@ -278,11 +290,12 @@ pub const Ui = struct {
             },
             .mouse_button => |m| try self.handleMouseButton(m),
             .key => |k| if (k.pressed) try self.handleKey(k),
-            // Only the title-row field takes text; the panes' own keys
-            // arrive as `key` events.
             .text, .paste => |t| if (self.path_edit) |*e| {
                 try e.line.insert(self.alloc, t.text);
                 self.pane_dirty[e.pane] = true;
+            } else {
+                // Nothing else takes typing, so it's type-to-find.
+                try self.typeToFind(t.text);
             },
             .shutdown => self.quit = true,
             else => {},
@@ -308,8 +321,62 @@ pub const Ui = struct {
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
         self.clearMessage();
         if (self.path_edit != null) return self.pathEditKey(k);
+
+        // Editing the find prefix comes before the keymap: with one up,
+        // Backspace takes a character back off it and Escape drops it.
+        if (self.find_len > 0) {
+            if (std.mem.eql(u8, k.key, "escape")) return self.clearFind();
+            if (std.mem.eql(u8, k.key, "backspace")) return self.findBackspace();
+        }
+
+        // An unbound key leaves the prefix alone -- only something that
+        // actually does anything counts as moving on from it.
         const action = self.keymap.lookup(k.key, k.mods) orelse return;
+        self.clearFind();
         try self.perform(action);
+    }
+
+    // ── Type to find ────────────────────────────────────────────────────
+
+    /// Typed text: extend the prefix and put the cursor on the first
+    /// entry that starts with it. Text that would match nothing is
+    /// dropped rather than added, so the prefix always describes where
+    /// the cursor is. Space is left out of it: it's the marking key.
+    fn typeToFind(self: *Ui, text: []const u8) !void {
+        const p = &self.panes[self.active];
+        for (text) |c| {
+            if (c < 0x20 or c == 0x7f or c == ' ') continue;
+            if (self.find_len == find_max) break;
+            self.find_buf[self.find_len] = c;
+            const candidate = self.find_buf[0 .. self.find_len + 1];
+            const row = p.rowStartingWith(candidate) orelse continue;
+            self.find_len += 1;
+            p.setCursor(row);
+        }
+        if (self.find_len == 0) return;
+        self.pane_dirty[self.active] = true;
+        try self.setMessage("find: {s}", .{self.find_buf[0..self.find_len]});
+    }
+
+    /// Backspace over the prefix, moving the cursor back to what the
+    /// shorter one finds. Emptying it is the same as dropping it.
+    fn findBackspace(self: *Ui) void {
+        self.find_len -= 1;
+        if (self.find_len == 0) return self.clearFind();
+        const p = &self.panes[self.active];
+        if (p.rowStartingWith(self.find_buf[0..self.find_len])) |row| p.setCursor(row);
+        self.pane_dirty[self.active] = true;
+        self.setMessage("find: {s}", .{self.find_buf[0..self.find_len]}) catch {};
+    }
+
+    /// Drops the prefix. Called by everything that moves the cursor or
+    /// changes what's listed -- any action, a click, a wheel tick -- so
+    /// the next letter typed starts a new search.
+    fn clearFind(self: *Ui) void {
+        if (self.find_len == 0) return;
+        self.find_len = 0;
+        self.clearMessage();
+        self.pane_dirty[self.active] = true;
     }
 
     /// Carries out one action on the active pane. Every command, whatever
@@ -554,6 +621,7 @@ pub const Ui = struct {
         }
         // Clicking anywhere else is leaving the field, not typing in it.
         self.endPathEdit();
+        self.clearFind();
 
         const p = &self.panes[i];
         if (m.cell.row < list_top) return;
@@ -564,9 +632,13 @@ pub const Ui = struct {
 
         p.setCursor(row);
         self.pane_dirty[i] = true;
-        if (right) {
-            // Total Commander's right-click select.
+        if (right or (left and m.mods.ctrl)) {
+            // Total Commander's right-click select, and Ctrl+click as the
+            // mouse's Space. Neither opens anything: a Ctrl+click is
+            // picking files out of a list, and two of them in a row must
+            // not turn into an activation.
             p.toggleMark(row);
+            self.last_click.at_ms = 0;
             return;
         }
 
