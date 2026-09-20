@@ -28,7 +28,8 @@ pub const Action = enum {
     activate,
     upToParentDir,
     /// Turn the active pane's title row into a text field holding its
-    /// directory: Enter goes there, Escape puts the title back.
+    /// directory: Enter goes there, Escape puts the title back. Clicking
+    /// a title row does the same without a key.
     editPath,
     switchPane,
     /// Point the other pane at this pane's directory.

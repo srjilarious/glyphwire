@@ -515,6 +515,25 @@ pub fn lineEditHandlesEditingKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectFalse(e.handleKey("u", false));
 }
 
+pub fn clickColumnFindsTheCaretOffsetTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Where a click in the open path field puts the caret.
+    const path = "/home/me";
+    try testz.expectEqual(sala.ui.offsetAtCol(path, 0, 0), 0);
+    try testz.expectEqual(sala.ui.offsetAtCol(path, 0, 5), 5);
+    // Past the end clamps there rather than running off it.
+    try testz.expectEqual(sala.ui.offsetAtCol(path, 0, 99), path.len);
+    // A field scrolled to show the tail counts from where it's drawn.
+    try testz.expectEqual(sala.ui.offsetAtCol(path, 6, 2), 8);
+
+    // Wide characters cost the cells they take, and a click on the back
+    // half of one lands before it, not inside.
+    const wide = "a日本b";
+    try testz.expectEqual(sala.ui.offsetAtCol(wide, 0, 1), 1);
+    try testz.expectEqual(sala.ui.offsetAtCol(wide, 0, 2), 1);
+    try testz.expectEqual(sala.ui.offsetAtCol(wide, 0, 3), 4);
+    try testz.expectEqual(sala.ui.offsetAtCol(wide, 0, 5), 7);
+}
+
 pub fn dialogHotkeysOnlyWithoutATextFieldTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var conflict = try dialog.Dialog.init(alloc, "t", "m", &dialog.conflict_buttons, .{});
     defer conflict.deinit(alloc);

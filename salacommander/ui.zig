@@ -8,7 +8,8 @@
 //! Each pane layer is drawn client-side, a window of rows at a time:
 //!
 //!     row 0        the pane's directory (highlighted on the active side),
-//!                  or a text field holding it while Alt+D is editing it
+//!                  or a text field holding it once Alt+D or a click on
+//!                  the row has opened one
 //!     row 1        column headers
 //!     rows 2..     the listing, one row per entry (small view) or two
 //!                  (large view: tall icon, name, then perms/owner)
@@ -103,6 +104,10 @@ const double_click_ms = 400;
 const PathEdit = struct {
     pane: usize,
     line: LineEdit,
+    /// The byte the field was last drawn from -- it scrolls with the
+    /// caret on a path wider than the pane -- so a click in the row can
+    /// be turned back into an offset in the text.
+    view_start: usize = 0,
 };
 
 /// Where one pane's columns fall, for its current width and view.
@@ -481,6 +486,16 @@ pub const Ui = struct {
         self.path_edit = null;
     }
 
+    /// Puts the caret where a click in the open field landed. `col` is a
+    /// window column; the field starts one cell into its pane, and a
+    /// click left of the text or past its end clamps to the ends.
+    fn movePathCaret(self: *Ui, col: usize) void {
+        const e = if (self.path_edit) |*pe| pe else return;
+        const cells = col -| (self.paneCol(e.pane) + 1);
+        e.line.caret = offsetAtCol(e.line.text(), e.view_start, cells);
+        self.pane_dirty[e.pane] = true;
+    }
+
     /// Keys while a title row is a field: Enter goes where it says,
     /// Escape puts the directory back, and the rest are the same editing
     /// keys a dialog's field has. Nothing falls through to the keymap --
@@ -519,8 +534,6 @@ pub const Ui = struct {
 
     fn handleMouseButton(self: *Ui, m: glyphwire.MouseButtonEvent) !void {
         if (!m.pressed) return;
-        // Clicking somewhere is leaving the field, not typing in it.
-        self.endPathEdit();
         const left = std.mem.eql(u8, m.button, "left");
         const right = std.mem.eql(u8, m.button, "right");
         if (!left and !right) return;
@@ -531,6 +544,17 @@ pub const Ui = struct {
             self.active = i;
             self.pane_dirty = .{ true, true };
         }
+
+        // A left click on a title row is about the path: it opens the
+        // field there, or moves the caret in the one already open --
+        // Alt+D with the mouse.
+        if (m.cell.row == 0 and left) {
+            if (self.pathEditFor(i)) |_| self.movePathCaret(m.cell.col) else try self.beginPathEdit();
+            return;
+        }
+        // Clicking anywhere else is leaving the field, not typing in it.
+        self.endPathEdit();
+
         const p = &self.panes[i];
         if (m.cell.row < list_top) return;
         const slot = (m.cell.row - list_top) / p.view.rowHeight();
@@ -859,9 +883,9 @@ pub const Ui = struct {
     }
 
     /// The field open on pane `i`'s title row, if that's where it is.
-    fn pathEditFor(self: *const Ui, i: usize) ?*const LineEdit {
+    fn pathEditFor(self: *Ui, i: usize) ?*PathEdit {
         if (self.path_edit) |*e| {
-            if (e.pane == i) return &e.line;
+            if (e.pane == i) return e;
         }
         return null;
     }
@@ -945,9 +969,11 @@ pub const Ui = struct {
             const bg = if (active) bg_title_active else bg_title_inactive;
             const fg = if (active) fg_title_active else fg_title_inactive;
             try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = bg });
-            if (self.pathEditFor(i)) |in| {
+            if (self.pathEditFor(i)) |e| {
+                const in = &e.line;
                 const field_w = w -| 2;
                 const view = fieldView(in.text(), in.caret, field_w);
+                e.view_start = view.start;
                 try b.writeTextOpts(in.text()[view.start..], .{ .layer = layer, .row = 0, .col = 1, .fg = fg_dialog, .bg = bg_input, .max_cols = field_w, .pad = true });
                 // The caret: the character under it (or a blank past the
                 // end) in reverse, as a dialog's field draws it.
@@ -1189,6 +1215,23 @@ fn nextCodepoint(s: []const u8, i: usize) usize {
     if (i >= s.len) return s.len;
     const len = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
     return @min(i + len, s.len);
+}
+
+/// The byte offset `cells` display columns past `start` in `text`, on a
+/// UTF-8 boundary and clamped to the end. A click that lands on the far
+/// half of a wide character puts the caret before it rather than inside
+/// it -- there is no offset inside one.
+pub fn offsetAtCol(text: []const u8, start: usize, cells: usize) usize {
+    var i = @min(start, text.len);
+    var w: usize = 0;
+    while (i < text.len) {
+        const next = nextCodepoint(text, i);
+        const cw = glyphwire.stringWidth(text[i..next]);
+        if (w + cw > cells) break;
+        w += cw;
+        i = next;
+    }
+    return i;
 }
 
 /// Which part of a text field's contents to show so the caret stays in a
