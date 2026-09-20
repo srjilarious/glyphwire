@@ -1832,6 +1832,69 @@ pub fn shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest(_: std.Io, alloc: std.
 /// launched from glyphwire-shell's prompt. Uses a throwaway temp directory
 /// with known contents rather than this repo's own tree, so the assertions
 /// don't depend on glyphwire's directory layout.
+/// The Ctrl+` panel's whole point, end to end: a program that knows
+/// nothing about layers, launched with `GLYPHWIRE_LAYER` the way the
+/// embedded shell launches its children, draws into that layer instead
+/// of the root one underneath it. Uses the real `gw-ls` binary, because
+/// what is being tested is precisely that an *unmodified* client does
+/// the right thing.
+pub fn clientDrawsIntoGlyphwireLayerOverRealSocketTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tmp_name = try std.fmt.allocPrint(alloc, "glyphwire-surface-e2e-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(tmp_name);
+    try std.Io.Dir.cwd().createDirPath(io, tmp_name);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_name) catch {};
+    var tmp_dir = try std.Io.Dir.cwd().openDir(io, tmp_name, .{ .iterate = true });
+    defer tmp_dir.close(io);
+    (try tmp_dir.createFile(io, "afile.txt", .{})).close(io);
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    // The panel: what salacommander creates for the shell it is about to
+    // start, sized like one.
+    const panel = try ctx.createLayer(80, 8, 0);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-surface-e2e-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const ls_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-ls", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(ls_path);
+
+    var environ_map = std.process.Environ.Map.init(alloc);
+    defer environ_map.deinit();
+    try environ_map.put("GLYPHWIRE_SOCK", socket_path);
+    const layer_text = try std.fmt.allocPrint(alloc, "{d}", .{panel});
+    defer alloc.free(layer_text);
+    try environ_map.put("GLYPHWIRE_LAYER", layer_text);
+
+    var child = try spawnChecked(io, .{
+        .argv = &.{ ls_path, tmp_name },
+        .environ_map = &environ_map,
+    });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| try testz.expectEqual(code, 0),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Same layout as `lsClientWritesEntriesOverRealSocketTest` -- a blank
+    // leading row, then the name `icon_cols` in -- but on the panel.
+    try testz.expectEqualStr("a", ctx.layerPtr(panel).?.cell(1, 4).grapheme());
+    // The root layer, which is what the file panes would be sitting on,
+    // never saw any of it.
+    try testz.expectEqualStr("", ctx.root.cell(1, 4).grapheme());
+}
+
 pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();

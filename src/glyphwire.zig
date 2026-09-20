@@ -55,6 +55,9 @@ pub const PaneExitEvent = client.PaneExitEvent;
 pub const RemoteExitEvent = client.RemoteExitEvent;
 pub const notePaneFromEnviron = client.notePaneFromEnviron;
 pub const processPane = client.processPane;
+pub const processSurface = client.processSurface;
+pub const noteSurface = client.noteSurface;
+pub const noteSurfaceFromEnviron = client.noteSurfaceFromEnviron;
 
 pub const Color = core.Color;
 pub const ImageHandle = core.ImageHandle;

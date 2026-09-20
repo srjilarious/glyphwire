@@ -56,10 +56,14 @@ var process_pane: ?core.PaneHandle = null;
 /// (`glyphwire-shell`) should call it once at startup, before connecting.
 /// Harmless to call more than once, and a no-op when the variable is unset
 /// or unparseable.
+/// Also picks up `GLYPHWIRE_LAYER` (see `noteSurfaceFromEnviron`), which
+/// is deliberately *not* nested behind the pane variable: the two are
+/// independent, and a program in a panel usually has no pane at all --
+/// `GLYPHWIRE_PANE` is set only by a multiplexer.
 pub fn notePaneFromEnviron(environ_map: *const std.process.Environ.Map) void {
+    noteSurfaceFromEnviron(environ_map);
     const raw = environ_map.get("GLYPHWIRE_PANE") orelse return;
     process_pane = std.fmt.parseInt(core.PaneHandle, raw, 10) catch null;
-    noteSurfaceFromEnviron(environ_map);
 }
 
 /// The layer this process was told to draw on (`GLYPHWIRE_LAYER`), or
@@ -77,7 +81,15 @@ var process_surface: ?core.LayerHandle = null;
 /// `notePaneFromEnviron`, so `connectFromEnv` picks it up too.
 pub fn noteSurfaceFromEnviron(environ_map: *const std.process.Environ.Map) void {
     const raw = environ_map.get("GLYPHWIRE_LAYER") orelse return;
-    process_surface = std.fmt.parseInt(core.LayerHandle, raw, 10) catch null;
+    noteSurface(std.fmt.parseInt(core.LayerHandle, raw, 10) catch null);
+}
+
+/// Sets the layer every later `connect` declares as its surface, for a
+/// program that knows its layer without an environment variable -- and
+/// for putting it back to null, which is what "I draw on the root layer"
+/// means.
+pub fn noteSurface(layer: ?core.LayerHandle) void {
+    process_surface = layer;
 }
 
 /// The layer this process draws on by default, if it was given one.

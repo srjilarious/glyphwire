@@ -54,6 +54,48 @@ pub fn clientWriteTextThenGetCellsRoundTripTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectEqualStr("", blank.grapheme);
 }
 
+pub fn clientDrawsOnTheSurfaceFromGlyphwireLayerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    // What a program launched inside another client's panel does without
+    // a line of layer-aware code: `connectFromEnv` turns GLYPHWIRE_LAYER
+    // into an `attach_layer`, and its writes land there instead of on
+    // the root layer underneath the panel.
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    const panel = try ctx.createLayer(10, 2, 0);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-surface-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var env = std.process.Environ.Map.init(alloc);
+    defer env.deinit();
+    // The surface is process-global (a program's connections all have to
+    // agree on it), so put it back before the next test connects.
+    defer glyphwire.noteSurface(null);
+    try env.put("GLYPHWIRE_SOCK", socket_path);
+    const layer_text = try std.fmt.allocPrint(alloc, "{d}", .{panel});
+    defer alloc.free(layer_text);
+    try env.put("GLYPHWIRE_LAYER", layer_text);
+    // Deliberately no GLYPHWIRE_PANE: a panel is not a pane, and the two
+    // variables are read independently.
+
+    var client = try glyphwire.Client.connectFromEnv(io, alloc, &env);
+    defer client.deinit();
+
+    try client.writeText("hi", null, null);
+    // A request flushes the notifications before it, so the cells are
+    // committed by the time this returns.
+    _ = try client.getRevision();
+
+    try testz.expectEqualStr(ctx.layerPtr(panel).?.cell(0, 0).grapheme(), "h");
+    try testz.expectEqualStr(ctx.root.cell(0, 0).grapheme(), "");
+}
+
 pub fn clientClearWipesTheWholeLayerByDefaultTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
     defer ctx.deinit();
