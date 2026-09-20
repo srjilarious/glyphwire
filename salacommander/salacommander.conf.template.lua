@@ -64,6 +64,16 @@
 --         -- ["png"] = false,       -- back to xdg-open
 --     },
 --
+--     ---- The shell panel -------------------------------------------
+--
+--     -- Ctrl+` opens a gw-shell across the bottom of the window and
+--     -- hands it the keyboard; Ctrl+` again puts it away, leaving the
+--     -- shell running with its history and its half-typed line intact.
+--     -- It follows the active pane: change directory or switch sides
+--     -- and the panel's shell is there before its next prompt. `exit`
+--     -- inside it closes the panel, and the next Ctrl+` starts a fresh
+--     -- one. Nothing to configure yet beyond rebinding the key below.
+--
 --     ---- Keys ------------------------------------------------------
 --
 --     -- Rebind actions by name. Each entry maps a chord to an action,
@@ -107,6 +117,7 @@
 --     --   viewLarge           ctrl+2
 --     --   toggleView          ctrl+v
 --     --   toggleHidden        ctrl+h
+--     --   toggleShell         ctrl+`   (the shell panel, below)
 --     --   refresh             ctrl+r
 --     --   quit                F10, ctrl+q
 --     keys = {

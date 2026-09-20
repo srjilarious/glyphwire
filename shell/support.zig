@@ -36,3 +36,4 @@ pub const promptrow = @import("promptrow.zig");
 pub const openaction = @import("openaction.zig");
 pub const logicalpath = @import("logicalpath.zig");
 pub const remotecmd = @import("remotecmd.zig");
+pub const embed = @import("embed.zig");

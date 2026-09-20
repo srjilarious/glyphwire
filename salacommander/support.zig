@@ -13,6 +13,7 @@ pub const fileops = @import("fileops.zig");
 pub const dialog = @import("dialog.zig");
 pub const actions = @import("actions.zig");
 pub const openaction = @import("openaction.zig");
+pub const shellpanel = @import("shellpanel.zig");
 pub const config = @import("config.zig");
 pub const ui = @import("ui.zig");
 

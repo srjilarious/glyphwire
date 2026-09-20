@@ -47,6 +47,10 @@ pub const Action = enum {
     makeDir,
     delete,
 
+    /// Open or close the shell panel across the bottom (see
+    /// `shellpanel.zig`). Closing it leaves the shell running.
+    toggleShell,
+
     viewSmall,
     viewLarge,
     toggleView,
@@ -87,6 +91,8 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "F7", .action = .makeDir },
     .{ .chord = "F8", .action = .delete },
     .{ .chord = "delete", .action = .delete },
+
+    .{ .chord = "ctrl+`", .action = .toggleShell },
 
     .{ .chord = "ctrl+1", .action = .viewSmall },
     .{ .chord = "ctrl+2", .action = .viewLarge },

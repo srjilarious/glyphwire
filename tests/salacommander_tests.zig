@@ -647,6 +647,21 @@ pub fn paneTotalBytesCountsListedFilesOnlyTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(p.totalBytes(), 18);
 }
 
+pub fn shellPanelTakesAThirdOfTheWindowTest(_: std.Io, _: std.mem.Allocator) !void {
+    const rowsFor = sala.shellpanel.Panel.rowsFor;
+    // A third of the window, once there's a third worth having.
+    try testz.expectEqual(rowsFor(45), 15);
+    try testz.expectEqual(rowsFor(30), 10);
+    // Short windows get the floor, tall ones the ceiling -- a panel is
+    // for reading a command's output, not for taking over.
+    try testz.expectEqual(rowsFor(12), 6);
+    try testz.expectEqual(rowsFor(200), 24);
+    // Never taller than the window it sits in: two rows of file pane are
+    // kept whatever happens.
+    try testz.expectEqual(rowsFor(5), 3);
+    try testz.expectEqual(rowsFor(1), 1);
+}
+
 // ─── Open actions ───────────────────────────────────────────────────────
 
 pub fn openActionResolvesByExtensionTest(_: std.Io, _: std.mem.Allocator) !void {

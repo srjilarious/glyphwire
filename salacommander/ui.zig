@@ -16,6 +16,10 @@
 //!     last row     a summary: what's marked (or the cursor entry) on the
 //!                  left, the directory's item count and total on the right
 //!
+//! Two more layers sit over those: the modal dialog layer, and the
+//! Ctrl+` shell panel -- a `gw-shell --embed` drawing its own prompt
+//! into a layer of ours across the bottom (see `shellpanel.zig`).
+//!
 //! A server-side `Table` would sort and paint for us, but it paints every
 //! row and scrolls its layer the way terminal output does; a file pane
 //! needs a fixed header, a cursor bar and marked-row colours, so the rows
@@ -42,6 +46,7 @@ const fileops = @import("fileops.zig");
 const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
+const shellpanel = @import("shellpanel.zig");
 
 const Pane = pane_mod.Pane;
 const FileEntry = pane_mod.FileEntry;
@@ -137,6 +142,10 @@ pub const Ui = struct {
     pane_layers: [2]glyphwire.LayerHandle,
     bar_layer: glyphwire.LayerHandle,
     dialog_layer: glyphwire.LayerHandle,
+    /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom. It
+    /// takes every keystroke but Ctrl+` while it's open, and follows the
+    /// active pane's directory. See `shellpanel.zig`.
+    shell: shellpanel.Panel,
 
     win: struct { cols: usize, rows: usize },
     cell: struct { w: u32, h: u32 },
@@ -216,7 +225,12 @@ pub const Ui = struct {
         const left_layer = try client.createLayer(size.cols, size.rows, 0);
         const right_layer = try client.createLayer(size.cols, size.rows, 0);
         const bar_layer = try client.createLayer(size.cols, 1, 0);
-        // Created last so it composites over everything else.
+        // The Ctrl+` shell panel. `gw-shell --embed` draws its prompt and
+        // its commands' output here, so it carries scrollback of its own
+        // for the shell's Ctrl+Up browsing -- see `shellpanel.zig`.
+        const shell_layer = try client.createLayer(size.cols, 1, shellpanel.scrollback_rows);
+        // Created last so it composites over everything else, the panel
+        // included: a modal question belongs on top of a shell.
         const dialog_layer = try client.createLayer(10, 5, 0);
 
         try client.setLayerBackground(glyphwire.root_layer_handle, bg_pane);
@@ -239,6 +253,7 @@ pub const Ui = struct {
             .pane_layers = .{ left_layer, right_layer },
             .bar_layer = bar_layer,
             .dialog_layer = dialog_layer,
+            .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .cfg = cfg,
@@ -251,6 +266,9 @@ pub const Ui = struct {
 
     pub fn deinit(self: *Ui) void {
         const alloc = self.alloc;
+        // Before the context goes: the shell draws on a layer inside it,
+        // and closing its control pipe is what tells it to leave.
+        self.shell.deinit();
         self.endPathEdit();
         for (&self.panes) |*p| p.deinit();
         self.keymap.deinit(alloc);
@@ -276,6 +294,10 @@ pub const Ui = struct {
 
     fn handleEvent(self: *Ui, ev: glyphwire.Event) !void {
         defer ev.deinit(self.alloc);
+        // `exit` typed into the shell panel (or a shell that died): the
+        // panel closes itself and this keystroke is the file manager's
+        // again.
+        if (self.shell.reapIfExited()) self.markAllDirty();
         switch (ev) {
             .resize => |r| try self.handleResize(r),
             .scroll_offset => |so| {
@@ -319,6 +341,16 @@ pub const Ui = struct {
     }
 
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        // With the shell panel open the keyboard is the shell's: both
+        // programs are sent every keystroke (one context, one input
+        // stream), so the only one taken here is the key that closes it.
+        if (self.shell.isOpen()) {
+            if (self.keymap.lookup(k.key, k.mods)) |action| {
+                if (action == .toggleShell) try self.perform(.toggleShell);
+            }
+            return;
+        }
+
         self.clearMessage();
         if (self.path_edit != null) return self.pathEditKey(k);
 
@@ -425,6 +457,8 @@ pub const Ui = struct {
             .makeDir => try self.makeDir(),
             .delete => try self.deleteSelection(),
 
+            .toggleShell => try self.toggleShell(),
+
             .viewSmall => p.view = .small,
             .viewLarge => p.view = .large,
             .toggleView => p.view = if (p.view == .small) .large else .small,
@@ -434,6 +468,27 @@ pub const Ui = struct {
         }
         self.pane_dirty[i] = true;
         self.bar_dirty = true;
+        // Whatever just happened may have moved the active side or its
+        // directory; the panel follows both, and says nothing when
+        // neither changed.
+        self.shell.setCwd(self.panes[self.active].path);
+    }
+
+    /// Ctrl+`: show the shell panel (starting it the first time) or hide
+    /// it again. Hiding leaves the shell running -- its history and its
+    /// half-typed line are still there when it comes back.
+    fn toggleShell(self: *Ui) !void {
+        if (self.shell.isOpen()) {
+            self.shell.close();
+            self.markAllDirty();
+            return;
+        }
+        self.endPathEdit();
+        self.clearFind();
+        self.shell.open(self.panes[self.active].path, .{ .cols = self.win.cols, .rows = self.win.rows }) catch |err| {
+            try self.setMessage("can't start gw-shell: {t}", .{err});
+            return;
+        };
     }
 
     fn activate(self: *Ui, i: usize) !void {
@@ -980,6 +1035,9 @@ pub const Ui = struct {
         var sent = try b.send();
         sent.deinit();
         self.pushed_scroll = .{ .{ std.math.maxInt(usize), 0 }, .{ std.math.maxInt(usize), 0 } };
+        // The panel spans the bottom of whatever the window is now, and
+        // the shell inside it re-reads its layer when told.
+        self.shell.place(.{ .cols = self.win.cols, .rows = self.win.rows }) catch {};
     }
 
     /// Icon height in pixels for `view`, capped to the rows it may use.

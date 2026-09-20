@@ -4,6 +4,7 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const wordsplit = @import("shell_support").wordsplit;
+const embed = @import("shell_support").embed;
 const parse = @import("shell_support").parse;
 const envassign = @import("shell_support").envassign;
 const pipeexec = @import("shell_support").pipeexec;
@@ -154,7 +155,10 @@ fn plColor(s: ?[]const u8) ?glyphwire.Color {
 /// gw-shell: sets up discovery, then either execs into a given
 /// command (`gw-shell <command> [args...]`, unchanged from
 /// milestone 5) or, given no command, runs the interactive prompt itself
-/// -- see decisions.md, Discovery & Connection. Deliberately has no
+/// -- see decisions.md, Discovery & Connection. The third form,
+/// `gw-shell --embed <context>,<layer>[,<control-fd>]`, runs that same
+/// prompt inside a layer another client owns (salacommander's Ctrl+`
+/// panel) -- see `shell/embed.zig`. Deliberately has no
 /// engine dependency: input arrives as wire-level key events (see
 /// src/client.zig's `InputListener`), captured by glyphwire-host and
 /// relayed through the server, not read directly.
@@ -207,7 +211,22 @@ pub fn main(init: std.process.Init) !void {
         try spawnOwnServer(init.io, arena, init.environ_map);
 
     if (args.len < 2) {
-        return runPrompt(init.io, alloc, socket_path, init.environ_map);
+        return runPrompt(init.io, alloc, socket_path, init.environ_map, null);
+    }
+
+    // `--embed <context>,<layer>[,<control-fd>]`: the prompt as a panel
+    // in another client's context (see `shell/embed.zig`). Checked before
+    // the exec path below, which takes anything else as a command to run.
+    if (std.mem.eql(u8, args[1], "--embed")) {
+        const value: []const u8 = if (args.len > 2) args[2] else {
+            std.debug.print("gw-shell: --embed needs <context>,<layer>[,<control-fd>]\n", .{});
+            return error.EmbedArgsMissing;
+        };
+        const opts = embed.parseOptions(value) catch {
+            std.debug.print("gw-shell: --embed '{s}' isn't <context>,<layer>[,<control-fd>]\n", .{value});
+            return error.EmbedArgsMalformed;
+        };
+        return runPrompt(init.io, alloc, socket_path, init.environ_map, opts);
     }
 
     const child_argv = try arena.allocSentinel(?[*:0]const u8, args.len - 1, null);
@@ -445,7 +464,13 @@ fn promptClick(prompt: *Prompt, mev: glyphwire.MouseButtonEvent) !void {
 /// insert/delete) and command dispatch. Runs forever (killed along with
 /// the rest of the process tree, same as any other long-lived child in
 /// this codebase).
-fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, environ_map: *const std.process.Environ.Map) !void {
+fn runPrompt(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    socket_path: []const u8,
+    environ_map: *const std.process.Environ.Map,
+    embed_opts: ?embed.Options,
+) !void {
     // Before either connection: if a window manager seated this shell in a
     // pane, both the drawing `Client` and the `InputListener` below have to
     // bind to it. That's all the pane-awareness the shell needs -- see
@@ -473,6 +498,28 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
 
     var prompt: Prompt = .{ .client = &client, .environ_map = environ_map, .listener = listener };
     prompt.profiler = shellProfilerFromEnv(io, environ_map);
+
+    // `--embed`: join the host's context and draw on the layer it made
+    // for us instead of on a context of our own. Both connections attach
+    // -- the drawing one so `layer?`-scoped messages resolve there, the
+    // listener so its input follows that context's visibility.
+    var control: ?embed.Control = null;
+    defer if (control) |*ctl| ctl.deinit();
+    if (embed_opts) |eo| {
+        client.attachContext(eo.context) catch |err| {
+            std.log.err("prompt: --embed: can't attach to context {d}: {t}", .{ eo.context, err });
+            return;
+        };
+        listener.attachContext(eo.context) catch |err| {
+            std.log.err("prompt: --embed: listener can't attach to context {d}: {t}", .{ eo.context, err });
+            return;
+        };
+        prompt.layer = eo.layer;
+        // The panel starts out of focus: the host opens it, then says so.
+        prompt.focused = false;
+        if (eo.control_fd) |fd| control = embed.Control.init(alloc, fd);
+        prompt.control = if (control) |*ctl| ctl else null;
+    }
     // The live environment `sh.setenv` mutates (alongside libc, for
     // children). Seeded from the *live* libc environ, not the
     // `std.process.Init` snapshot in `environ_map`: `main` prepends
@@ -503,7 +550,9 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
     defer prompt.deinit();
 
     {
-        var snapshot = try client.getCells();
+        // Embedded, the surface is the host's panel layer, not the
+        // context's root grid -- `drawGetCells` follows `prompt.layer`.
+        var snapshot = try prompt.drawGetCells();
         defer snapshot.deinit();
         prompt.grid_cols = snapshot.cols();
         prompt.grid_rows = snapshot.rows();
@@ -565,6 +614,12 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         // now; one still settling is left for the next pass.
         prompt.applyPendingResize(false) catch {};
 
+        // What the host has asked for since the last pass (`--embed`
+        // only): a directory to follow, focus changing hands, the panel
+        // resized, or the host going away.
+        prompt.drainControl();
+        if (prompt.should_exit) return;
+
         // Every notification wakes this wait -- clicks, scrolls and
         // resizes included -- so its timeout is purely the idle cadence,
         // or the settle window while a resize drag is in flight.
@@ -576,6 +631,16 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
         };
         const input_ev = any_ev.asInput() orelse {
             defer any_ev.deinit(alloc);
+            // Out of focus, the pointer and the scrollback are the host's
+            // too -- only the resize still concerns us, since the panel's
+            // layer moves with the window whether or not we're typing.
+            if (!prompt.focused) {
+                switch (any_ev) {
+                    .resize => |rev| prompt.noteResize(rev.cols, rev.rows),
+                    else => {},
+                }
+                continue;
+            }
             switch (any_ev) {
                 .mouse_button => |mev| try promptClick(&prompt, mev),
                 // Keep `prompt.view_scroll` current with any host-driven
@@ -596,6 +661,15 @@ fn runPrompt(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, envi
             }
             continue;
         };
+        // Someone else's keystroke: embedded and blurred, the host has
+        // the keyboard and this event is only here because input is
+        // delivered per context. Dropped, not queued -- what was typed
+        // elsewhere isn't owed to the panel when it comes back.
+        if (!prompt.focused) {
+            input_ev.deinit(alloc);
+            continue;
+        }
+
         // A real keystroke means the drag (if any) is over -- apply a
         // still-settling resize now so the keystroke lands on a correct
         // layout.
@@ -1128,6 +1202,20 @@ const Prompt = struct {
     /// a command's output scrolled the layer.
     grid_cols: usize = 0,
     grid_rows: usize = 0,
+    /// Whether keystrokes are ours. Always true for a shell that owns its
+    /// context; embedded, the host says (`focus` / `blur` over the
+    /// control pipe), because the input stream is delivered per context
+    /// and both programs see all of it. See `shell/embed.zig`.
+    focused: bool = true,
+    /// The host's control pipe while embedded -- `cd`, `focus`, `blur`,
+    /// `size` and `quit`, drained between keystrokes. Borrowed from
+    /// `runPrompt`.
+    control: ?*embed.Control = null,
+    /// A directory the host asked for that hasn't been taken yet: applied
+    /// before the next prompt is drawn rather than the moment it arrives,
+    /// so following the file pane never lands in the middle of a command
+    /// or a half-typed line. Owned.
+    pending_cd: ?[]u8 = null,
     /// The layer the prompt draws on. Null is this shell's own context's
     /// root layer -- the normal case, and what every `draw*` helper below
     /// falls back to. `--embed` sets it to a layer another client created
@@ -1322,6 +1410,7 @@ const Prompt = struct {
         self.history_pending.deinit(alloc);
         self.scratch.deinit(alloc);
         self.buffer.deinit(alloc);
+        if (self.pending_cd) |p| alloc.free(p);
         self.completion_hint.deinit(alloc);
         if (self.pending_result_line) |line| alloc.free(line);
         self.aliases.deinit(alloc);
@@ -1818,6 +1907,73 @@ const Prompt = struct {
         if (sink) |b| {
             if (self.layer) |l| try b.drawIconOnStyled(l, row, col, name, opts) else try b.drawIconStyled(row, col, name, opts);
         } else try self.drawIconStyled(row, col, name, opts);
+    }
+
+    // ── The host's control pipe (`--embed`) ─────────────────────────────
+
+    /// Reads whatever the host has said since the last pass and acts on
+    /// it. Called from the prompt loop rather than from a reader thread:
+    /// a directive that arrives mid-command shouldn't take effect until
+    /// the loop is somewhere it can honour it.
+    fn drainControl(self: *Prompt) void {
+        const ctl = self.control orelse return;
+        ctl.drain(self, applyDirective) catch {};
+        // Every writer closed: the host exited and took the layer we draw
+        // on with it.
+        if (ctl.host_gone) self.should_exit = true;
+    }
+
+    fn applyDirective(self: *Prompt, d: embed.Directive) void {
+        switch (d) {
+            .cd => |path| {
+                const alloc = self.client.alloc;
+                const copy = alloc.dupe(u8, path) catch return;
+                if (self.pending_cd) |old| alloc.free(old);
+                self.pending_cd = copy;
+            },
+            .focus => self.setFocused(true),
+            .blur => self.setFocused(false),
+            // The host re-placed the panel's layer. Re-laid out through
+            // the same path a window resize takes, so the prompt lands
+            // where the new size puts it.
+            .size => {
+                const size = self.drawGetSize() catch return;
+                if (size.cols == self.grid_cols and size.rows == self.grid_rows) return;
+                self.handleResize(size.cols, size.rows) catch {};
+            },
+            .quit => self.should_exit = true,
+        }
+    }
+
+    /// Takes the keyboard, or gives it back. The caret belongs to
+    /// whoever has focus: embedded, it's the host's context, so the
+    /// panel points it at its own layer while it's typing and hides it
+    /// again on the way out.
+    fn setFocused(self: *Prompt, on: bool) void {
+        if (self.focused == on) return;
+        self.focused = on;
+        if (self.layer) |l| {
+            if (on) {
+                self.client.setCaretLayer(l) catch {};
+                self.client.setCaretVisible(true) catch {};
+            } else {
+                self.client.setCaretVisible(false) catch {};
+                self.client.setCaretLayer(null) catch {};
+            }
+        }
+    }
+
+    /// Re-reads the drawing surface's size. Embedded, a `resize` reports
+    /// the *context* -- the host's whole window -- while what matters is
+    /// the panel's layer, which the host resizes on its own schedule.
+
+    /// Applies a directory the host asked for, if one is waiting. Called
+    /// where a new prompt is about to be drawn.
+    fn applyPendingCd(self: *Prompt) void {
+        const path = self.pending_cd orelse return;
+        self.pending_cd = null;
+        defer self.client.alloc.free(path);
+        self.chdir(path) catch {};
     }
 
     // ── The drawing surface ─────────────────────────────────────────────
@@ -2332,6 +2488,9 @@ const Prompt = struct {
     /// `submitLine` or at startup); see `clearScreen` for ctrl+l, which
     /// keeps whatever's already typed.
     fn showPrompt(self: *Prompt) !void {
+        // A directory the host asked for lands here, just before the
+        // prompt that will show it -- see `applyPendingCd`.
+        self.applyPendingCd();
         const cur = try self.writePromptPrefix(null);
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
@@ -2379,7 +2538,15 @@ const Prompt = struct {
         self.pending_resize = null;
         self.resize_seen_at = null;
         self.armCompletionHint();
-        try self.handleResize(rev.cols, rev.rows);
+        // A `resize` reports the *context*: the host's whole window. When
+        // this prompt is a panel inside it, what changed for us is the
+        // layer the host re-placed, so ask it rather than believe the
+        // event.
+        const size: glyphwire.LayerSize = if (self.layer != null)
+            self.drawGetSize() catch .{ .cols = rev.cols, .rows = rev.rows }
+        else
+            .{ .cols = rev.cols, .rows = rev.rows };
+        try self.handleResize(size.cols, size.rows);
     }
 
     /// Takes on a resize that landed while a foreground child owned the

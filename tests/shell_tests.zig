@@ -17,6 +17,7 @@ const pty = @import("shell_support").pty;
 const lineedit = @import("shell_support").lineedit;
 const browsescroll = @import("shell_support").browsescroll;
 const promptrow = @import("shell_support").promptrow;
+const embed = @import("shell_support").embed;
 const logicalpath = @import("shell_support").logicalpath;
 const fuzzy = @import("shell_support").fuzzy;
 
@@ -1083,4 +1084,42 @@ pub fn fuzzyScoreFindsTightestNotFirstSpanTest(_: std.Io, _: std.mem.Allocator) 
     // tight one. The tightest span wins regardless of position.
     const s = fuzzy.score("a....ab", "ab").?;
     try testz.expectEqual(s, @as(usize, 2)); // the contiguous "ab" at the end
+}
+
+// ─── --embed (the shell as another client's panel) ──────────────────────
+
+pub fn embedParsesItsHandlesTest(_: std.Io, _: std.mem.Allocator) !void {
+    const both = try embed.parseOptions("3,7");
+    try testz.expectEqual(both.context, @as(@TypeOf(both.context), 3));
+    try testz.expectEqual(both.layer, @as(@TypeOf(both.layer), 7));
+    try testz.expectTrue(both.control_fd == null);
+
+    const with_fd = try embed.parseOptions("12,4,9");
+    try testz.expectEqual(with_fd.control_fd.?, @as(i32, 9));
+    // Spaces around a handle are the host's business, not an error.
+    const spaced = try embed.parseOptions(" 12 , 4 ");
+    try testz.expectEqual(spaced.layer, @as(@TypeOf(spaced.layer), 4));
+
+    try testz.expectError(embed.parseOptions("3"), error.Malformed);
+    try testz.expectError(embed.parseOptions("3,x"), error.Malformed);
+    try testz.expectError(embed.parseOptions("3,4,5,6"), error.Malformed);
+}
+
+pub fn embedParsesControlDirectivesTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(embed.parseDirective("focus").? == .focus);
+    try testz.expectTrue(embed.parseDirective("blur").? == .blur);
+    try testz.expectTrue(embed.parseDirective("size").? == .size);
+    try testz.expectTrue(embed.parseDirective("quit").? == .quit);
+    // A trailing \r from a host writing CRLF is not a different word.
+    try testz.expectTrue(embed.parseDirective("  focus \r").? == .focus);
+    try testz.expectEqualStr(embed.parseDirective("cd /home/me/code").?.cd, "/home/me/code");
+    // A path with spaces is the rest of the line -- nothing follows it to
+    // confuse it with.
+    try testz.expectEqualStr(embed.parseDirective("cd /tmp/two words").?.cd, "/tmp/two words");
+
+    // Blank, pathless and unknown lines are ignored rather than fatal: an
+    // older shell has to survive a newer host's vocabulary.
+    try testz.expectTrue(embed.parseDirective("") == null);
+    try testz.expectTrue(embed.parseDirective("cd   ") == null);
+    try testz.expectTrue(embed.parseDirective("teleport /tmp") == null);
 }

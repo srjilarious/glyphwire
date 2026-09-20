@@ -8,7 +8,8 @@
 //! with a directory listing on each side: F5 copies, F6 moves or renames,
 //! F7 makes a directory, F8 deletes, Space/Insert mark, Alt+Up goes to the
 //! parent directory, Alt+D edits the pane's path where it's shown, Tab
-//! switches sides. Every key is an
+//! switches sides, and Ctrl+` opens a shell across the bottom that
+//! follows the active pane's directory. Every key is an
 //! action that `salacommander.conf.lua` can rebind (see `actions.zig`),
 //! and what Enter opens a file with is its `open_actions` table (see
 //! `openaction.zig`). It needs a glyphwire session; there is no text-mode
