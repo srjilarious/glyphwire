@@ -177,7 +177,7 @@ pub fn subscribedConnectionReceivesBroadcastKeyEventTest(io: std.Io, alloc: std.
 
     try testz.expectEqualStr("key_down", parsed.value.method);
     try testz.expectEqualStr("a", parsed.value.params.key);
-    try testz.expectTrue(ctx.input.isKeyDown("a"));
+    try testz.expectTrue(srv.session.input.isKeyDown("a"));
 }
 
 /// `Server.reportResize` (the in-process path glyphwire-host calls when

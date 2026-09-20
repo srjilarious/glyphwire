@@ -736,19 +736,19 @@ pub const Server = struct {
     /// (see dispatch.zig's `handleReportKey`) -- for whatever process owns
     /// this `Server` and its `Context` directly (glyphwire-host) to report
     /// input it captured itself, without a loopback connection to its own
-    /// socket. Updates `ctx.input`'s down-set and, if that's a real
+    /// socket. Updates the session's down-set and, if that's a real
     /// change, broadcasts `key_down`/`key_up` to every subscribed
     /// connection.
     pub fn reportKey(self: *Server, alloc: std.mem.Allocator, key: []const u8, pressed: bool) !void {
         const decision = decision: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            // The down-set is updated either way: a program asking
-            // `get_input_state` should see the real keyboard. It is
-            // deliberately *not* what the prefix matches against -- that
-            // set belongs to whichever context is focused right now, and
-            // goes stale the instant focus moves. See `Session.mods`.
-            const changed = try self.ctx.input.setKey(key, pressed);
+            // The down-set is updated either way, even for a key the
+            // prefix swallows: a program asking `get_input_state` should
+            // see the real keyboard, and a release must find the press it
+            // pairs with whichever context has focus by then (see
+            // `core.InputState`). The prefix itself matches `Session.mods`.
+            const changed = try self.session.input.setKey(key, pressed);
             const route = self.session.routeKey(key, pressed);
             // Read after `routeKey` has folded this key in, so a
             // modifier's own event reports itself.
@@ -804,7 +804,7 @@ pub const Server = struct {
     /// Re-broadcasts `key_down` for an already-held `key`, for a caller
     /// driving its own typematic repeat (glyphwire-host's `App`, on an
     /// arrow key held past the initial delay). Deliberately doesn't touch
-    /// `ctx.input`'s down-set: the key's already marked down from the
+    /// `session.input`'s down-set: the key's already marked down from the
     /// original press, so routing this through `reportKey`/`setKey` would
     /// see no state change and silently swallow the repeat. Every
     /// subscriber just sees another `key_down` for the same key, same as
@@ -866,9 +866,9 @@ pub const Server = struct {
         const changed, const mods = changed: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            self.ctx.input.cursor_px = px;
-            self.ctx.input.cursor_cell = cell;
-            break :changed .{ try self.ctx.input.setMouseButton(button, pressed), self.session.mods };
+            self.ctx.pointer.cursor_px = px;
+            self.ctx.pointer.cursor_cell = cell;
+            break :changed .{ try self.session.input.setMouseButton(button, pressed), self.session.mods };
         };
         if (!changed) return;
 
@@ -967,9 +967,9 @@ pub const Server = struct {
         const cell_changed, const mods = changed: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            const before = self.ctx.input.cursor_cell;
-            self.ctx.input.cursor_px = px;
-            self.ctx.input.cursor_cell = cell;
+            const before = self.ctx.pointer.cursor_cell;
+            self.ctx.pointer.cursor_px = px;
+            self.ctx.pointer.cursor_cell = cell;
             break :changed .{ before.row != cell.row or before.col != cell.col, self.session.mods };
         };
         if (!cell_changed) return;

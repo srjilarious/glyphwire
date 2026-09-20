@@ -261,28 +261,14 @@ pub const KeyInput = struct {
         // (they move the selection, not the shell's line) -- don't
         // synthesize repeats the shell would act on.
         if (self.app.selection.mode) return;
-        // While a full-screen program owns the screen, its own output
-        // drives `ctx.root.cursor` -- the host must not also nudge it on
-        // an arrow press, or a program that redraws relative to the
-        // cursor (`less`'s `:` prompt at BOF: `\r \x1b[K :`) lands a row
-        // off per keypress. The keys are still forwarded (below / via
-        // `reportKeyEvents`); only the local caret preview is skipped.
-        //
-        // Vertical arrows never get a caret preview: Up/Down at
-        // glyphwire-shell's prompt mean history recall / break-into-
-        // scrollback, not "move the raw cursor one row," and the shell
-        // repositions the caret authoritatively in its redraw -- a local
-        // row nudge here just flashes the caret off the prompt line for a
-        // frame (and stuck there entirely when the shell has nothing to
-        // redraw, e.g. Up at the oldest history entry). Horizontal
-        // arrows keep the preview: it hides the round-trip latency while
-        // moving through the live input line.
+        // The host never moves the caret itself on an arrow key: whoever
+        // has the screen positions it. There used to be a local Left/Right
+        // "preview" nudge here to hide the round trip, but the host can't
+        // know where the shell's line ends -- holding Right walked the
+        // caret past the end of the input until the shell's next redraw,
+        // and Left walked it into the prompt text. The round trip is a
+        // local socket, so there was no latency worth hiding.
         const kb = &eng.inputs.keyboard;
-        const preview_caret = !self.app.scroll.screenOwnedByProgram();
-        if (preview_caret) {
-            if (kb.pressed(.left) or kb.repeated(.left)) self.moveCursor(-1, 0);
-            if (kb.pressed(.right) or kb.repeated(.right)) self.moveCursor(1, 0);
-        }
 
         const profile_toggle = self.profileToggleArmed(kb);
         const ctrl = kb.ctrl();
@@ -337,23 +323,6 @@ pub const KeyInput = struct {
             eng.inputs.keyboard.cancelRepeats();
         }
         eng.inputs.keyboard.repeat = key_repeat.resolve(self.repeat_default, override);
-    }
-
-    /// Moves `ctx.root`'s cursor by one cell, clamped to the grid.
-    /// `ctx_mutex`-guarded like `render`'s read, since this runs on the
-    /// same thread as everything else in `update`/`render` but still
-    /// shares `ctx` with connected clients' dispatch threads (e.g.
-    /// glyphwire-shell's own `set_property cursor` calls).
-    pub fn moveCursor(self: *KeyInput, dcol: i32, drow: i32) void {
-        const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
-
-        const layer = &server.ctx.root;
-        const col: i32 = @as(i32, @intCast(layer.cursor.col)) + dcol;
-        const row: i32 = @as(i32, @intCast(layer.cursor.row)) + drow;
-        layer.cursor.col = @intCast(std.math.clamp(col, 0, @as(i32, @intCast(layer.width - 1))));
-        layer.cursor.row = @intCast(std.math.clamp(row, 0, @as(i32, @intCast(layer.height - 1))));
     }
 };
 

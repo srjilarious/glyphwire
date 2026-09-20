@@ -2860,18 +2860,20 @@ pub const Dispatcher = struct {
     }
 
     /// The modifiers to stamp on an input notification: the session's
-    /// window-global set (see `core.Session.mods`), or -- for a bare
-    /// dispatcher with no session, which only tests build -- this
-    /// context's own down-set.
+    /// window-global set (see `core.Session.mods`), or none for a bare
+    /// dispatcher with no session, which only tests build.
     fn currentMods(self: *Dispatcher) core.Mods {
         if (self.session) |session| return session.mods;
-        const in = &self.ctx.input;
-        return .{
-            .ctrl = in.isKeyDown("left_control") or in.isKeyDown("right_control"),
-            .alt = in.isKeyDown("left_alt") or in.isKeyDown("right_alt"),
-            .shift = in.isKeyDown("left_shift") or in.isKeyDown("right_shift"),
-            .super = in.isKeyDown("left_super") or in.isKeyDown("right_super"),
-        };
+        return .{};
+    }
+
+    /// The window-wide key/button down-set (`core.Session.input`), or
+    /// null for a bare dispatcher with no session -- there's no keyboard
+    /// to track then, so every report counts as a change and
+    /// `get_input_state` reports nothing held.
+    fn inputState(self: *Dispatcher) ?*core.InputState {
+        const session = self.session orelse return null;
+        return &session.input;
     }
 
     /// A notification from an input-capturing client (glyphwire-host, in
@@ -2887,15 +2889,13 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const p = parsed.value;
 
-        const changed = try self.ctx.input.setKey(p.key, p.pressed);
+        const changed = if (self.inputState()) |in| try in.setKey(p.key, p.pressed) else true;
 
         // The same routing the in-process path does (`Server.reportKey`):
         // a window manager's prefix has to work regardless of who injected
         // the keystroke, or a client-driven session behaves differently
-        // from a real keyboard. Note the modifiers come from the session,
-        // not from `self.ctx.input` -- an injecting connection's own
-        // context is not necessarily the focused one, and a per-context
-        // down-set is the wrong place to ask anyway (see `Session.mods`).
+        // from a real keyboard. The modifiers come from the session too
+        // (see `Session.mods`).
         if (self.session) |session| {
             const route = session.routeKey(p.key, p.pressed);
             switch (route) {
@@ -2949,9 +2949,9 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const p = parsed.value;
 
-        self.ctx.input.cursor_px = .{ .x = p.px.x, .y = p.px.y };
-        self.ctx.input.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
-        const changed = try self.ctx.input.setMouseButton(p.button, p.pressed);
+        self.ctx.pointer.cursor_px = .{ .x = p.px.x, .y = p.px.y };
+        self.ctx.pointer.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
+        const changed = if (self.inputState()) |in| try in.setMouseButton(p.button, p.pressed) else true;
         if (!changed) return .{};
 
         const notif_body = try rpc.mouseButtonNotification(alloc, p.button, p.pressed, p.px, p.cell, p.view_offset, self.currentMods());
@@ -2970,10 +2970,10 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const p = parsed.value;
 
-        const cell_changed = self.ctx.input.cursor_cell.row != p.cell.row or
-            self.ctx.input.cursor_cell.col != p.cell.col;
-        self.ctx.input.cursor_px = .{ .x = p.px.x, .y = p.px.y };
-        self.ctx.input.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
+        const cell_changed = self.ctx.pointer.cursor_cell.row != p.cell.row or
+            self.ctx.pointer.cursor_cell.col != p.cell.col;
+        self.ctx.pointer.cursor_px = .{ .x = p.px.x, .y = p.px.y };
+        self.ctx.pointer.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
         if (!cell_changed) return .{};
 
         const notif_body = try rpc.mouseMoveNotification(alloc, p.px, p.cell, self.currentMods());
@@ -3008,19 +3008,20 @@ pub const Dispatcher = struct {
     fn handleGetInputState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
         var keys = std.ArrayList([]const u8).empty;
         defer keys.deinit(alloc);
-        var kit = self.ctx.input.keys_down.keyIterator();
-        while (kit.next()) |k| try keys.append(alloc, k.*);
-
         var buttons = std.ArrayList([]const u8).empty;
         defer buttons.deinit(alloc);
-        var bit = self.ctx.input.mouse_buttons_down.keyIterator();
-        while (bit.next()) |k| try buttons.append(alloc, k.*);
+        if (self.inputState()) |in| {
+            var kit = in.keys_down.keyIterator();
+            while (kit.next()) |k| try keys.append(alloc, k.*);
+            var bit = in.mouse_buttons_down.keyIterator();
+            while (bit.next()) |k| try buttons.append(alloc, k.*);
+        }
 
         return try rpc.response(alloc, id, protocol.InputStateResult{
             .keys_down = keys.items,
             .mouse_buttons_down = buttons.items,
-            .cursor_px = .{ .x = self.ctx.input.cursor_px.x, .y = self.ctx.input.cursor_px.y },
-            .cursor_cell = .{ .row = self.ctx.input.cursor_cell.row, .col = self.ctx.input.cursor_cell.col },
+            .cursor_px = .{ .x = self.ctx.pointer.cursor_px.x, .y = self.ctx.pointer.cursor_px.y },
+            .cursor_cell = .{ .row = self.ctx.pointer.cursor_cell.row, .col = self.ctx.pointer.cursor_cell.col },
         });
     }
 

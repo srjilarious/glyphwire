@@ -3009,6 +3009,9 @@ pub const InputListener = struct {
     listen_thread: std.Thread,
     mutex: std.Io.Mutex = .init,
     state: core.InputState,
+    /// Last reported pointer position, mirrored from `mouse_button` /
+    /// `mouse_move` notifications.
+    pointer: core.PointerState = .{},
     /// Every queued notification, oldest first. See `Event`.
     events: std.ArrayList(Event) = .empty,
     /// Posted once per appended event (not on a coalescing replace), so
@@ -3362,13 +3365,13 @@ pub const InputListener = struct {
     pub fn cursorPixel(self: *InputListener) PxPos {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return .{ .x = self.state.cursor_px.x, .y = self.state.cursor_px.y };
+        return .{ .x = self.pointer.cursor_px.x, .y = self.pointer.cursor_px.y };
     }
 
     pub fn cursorCell(self: *InputListener) CellPos {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return .{ .row = self.state.cursor_cell.row, .col = self.state.cursor_cell.col };
+        return .{ .row = self.pointer.cursor_cell.row, .col = self.pointer.cursor_cell.col };
     }
 
     /// Sends `attach_context(context)` on this listener's own connection
@@ -3550,8 +3553,8 @@ pub const InputListener = struct {
             {
                 self.mutex.lockUncancelable(self.io);
                 defer self.mutex.unlock(self.io);
-                self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
-                self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
+                self.pointer.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
+                self.pointer.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
                 _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
             }
             try self.enqueue(.{ .mouse_button = .{
@@ -3568,8 +3571,8 @@ pub const InputListener = struct {
             {
                 self.mutex.lockUncancelable(self.io);
                 defer self.mutex.unlock(self.io);
-                self.state.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
-                self.state.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
+                self.pointer.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
+                self.pointer.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
             }
             try self.enqueue(.{ .mouse_move = .{ .px = p.value.px, .cell = p.value.cell, .mods = p.value.mods } });
         } else if (eql(u8, method, "terminal_reply")) {

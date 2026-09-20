@@ -4453,16 +4453,22 @@ pub const CellPos = struct {
 };
 
 /// Authoritative input state for a session: which keys/mouse buttons are
-/// currently down, and the last known cursor position. Belongs on
-/// `Context` rather than `Layer` since it's session-wide, not tied to any
-/// one layer's cell content -- see decisions.md's Object Model.
+/// currently down. Lives on `Session`, not on any one `Context`: there is
+/// one keyboard and one mouse, and a release has to clear the same set
+/// its press went into even when focus moved in between. It used to be
+/// per-context, and a press that launched a full-screen program (Enter on
+/// `gwmd README.md`) had its release land in the *new* context's set --
+/// the shell's set still had the key down when focus came back, so the
+/// next press there was dropped as a redundant press-while-down. Same
+/// reasoning as `Session.mods`. The pointer position, which *is*
+/// per-context (it's in that context's cell frame), is `PointerState`.
 ///
 /// Pure logic, no I/O, headless-testable like everything else in this
-/// file: the actual GLFW capture happens in glyphwire-host, which reports
-/// changes here as `report_key`/`report_mouse_button`/`report_mouse_move`
-/// notifications (see dispatch.zig, or `Server`'s in-process equivalents
-/// for a caller that owns the `Context` directly) rather than this type
-/// knowing anything about how input was captured.
+/// file: the actual capture happens in glyphwire-host, which reports
+/// changes here as `report_key`/`report_mouse_button` notifications (see
+/// dispatch.zig, or `Server`'s in-process equivalents for a caller that
+/// owns the session directly) rather than this type knowing anything
+/// about how input was captured.
 ///
 /// Key/button names are whatever string the reporter used (glyphwire-host
 /// uses `@tagName` of its engine's key/button enums, e.g. "a",
@@ -4471,8 +4477,6 @@ pub const InputState = struct {
     alloc: std.mem.Allocator,
     keys_down: std.StringHashMap(void),
     mouse_buttons_down: std.StringHashMap(void),
-    cursor_px: PxPos = .{},
-    cursor_cell: CellPos = .{},
 
     pub fn init(alloc: std.mem.Allocator) InputState {
         return .{
@@ -4528,6 +4532,16 @@ pub const InputState = struct {
     pub fn isMouseButtonDown(self: *const InputState, button: []const u8) bool {
         return self.mouse_buttons_down.contains(button);
     }
+};
+
+/// The last pointer position reported against a context, in that
+/// context's own coordinate frame -- what `get_input_state`'s
+/// `cursor_px` / `cursor_cell` return. Kept per-context, unlike the
+/// down-sets in `InputState`, because a cell position only means
+/// something relative to the context it was reported against.
+pub const PointerState = struct {
+    cursor_px: PxPos = .{},
+    cursor_cell: CellPos = .{},
 };
 
 /// String id the host/shell put in `GLYPHWIRE_CTX` for a connecting
@@ -4763,7 +4777,10 @@ pub const Context = struct {
     /// stale. glyphwire-host caches the divider geometry it hit-tests
     /// against and recomputes only when this moves.
     layout_gen: u64 = 0,
-    input: InputState,
+    /// Last pointer position reported against this context -- see
+    /// `PointerState`. The key/button down-sets are the session's
+    /// (`Session.input`).
+    pointer: PointerState = .{},
     images: std.AutoHashMap(ImageHandle, ImageEntry),
     next_image_handle: ImageHandle = 1,
     /// Sum of every stored `ImageEntry.bytes.len` in this context. What
@@ -4860,7 +4877,6 @@ pub const Context = struct {
             .root = try Layer.init(alloc, width, height, scrollback_rows),
             .layers = std.AutoHashMap(LayerHandle, Layer).init(alloc),
             .splits = std.AutoHashMap(SplitHandle, Split).init(alloc),
-            .input = InputState.init(alloc),
             .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
             .icons = std.StringHashMap(ImageHandle).init(alloc),
             .metadata = std.AutoHashMap(MetadataHandle, Metadata).init(alloc),
@@ -4878,7 +4894,6 @@ pub const Context = struct {
         var split_it = self.splits.valueIterator();
         while (split_it.next()) |sp| sp.deinit(self.alloc);
         self.splits.deinit();
-        self.input.deinit();
         var it = self.images.valueIterator();
         while (it.next()) |entry| self.alloc.free(entry.bytes);
         self.images.deinit();
@@ -6193,6 +6208,11 @@ pub const Session = struct {
     /// Also what every `key_*`/`mouse_*` notification's `mods` is stamped
     /// from, for the same reason (see `Mods`).
     mods: Mods = .{},
+    /// Which keys/mouse buttons are down, window-wide -- what
+    /// `report_key` / `report_mouse_button` dedupe against and what
+    /// `get_input_state` reports. Session-owned for the same reason as
+    /// `mods`; see `InputState`.
+    input: InputState,
 
     /// Denormalised copies of "which context is on screen in the focused
     /// pane" and a change-counter, kept so lock-free readers
@@ -6243,6 +6263,7 @@ pub const Session = struct {
             .contexts = contexts,
             .panes = panes,
             .pane_splits = std.AutoHashMap(PaneSplitHandle, PaneSplit).init(alloc),
+            .input = InputState.init(alloc),
             .window_cols = root.root.width,
             .window_rows = root.root.height,
         };
@@ -6262,6 +6283,7 @@ pub const Session = struct {
         var sit = self.pane_splits.valueIterator();
         while (sit.next()) |sp| sp.deinit(self.alloc);
         self.pane_splits.deinit();
+        self.input.deinit();
     }
 
     /// The root context -- the asset source every other context falls

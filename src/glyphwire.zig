@@ -96,6 +96,7 @@ pub const tab_width = core.tab_width;
 pub const EscState = core.EscState;
 pub const SgrPen = core.SgrPen;
 pub const InputState = core.InputState;
+pub const PointerState = core.PointerState;
 pub const PropertyName = core.PropertyName;
 pub const PropertyValue = core.PropertyValue;
 pub const PropertyError = core.PropertyError;

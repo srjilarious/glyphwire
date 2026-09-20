@@ -351,14 +351,16 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
-    var d = dispatch.Dispatcher.init(&ctx);
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     const press_msg =
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"a","pressed":true}}
     ;
     const press_result = try d.handle(alloc, press_msg);
     try testz.expectTrue(press_result.response == null);
-    try testz.expectTrue(ctx.input.isKeyDown("a"));
+    try testz.expectTrue(session.input.isKeyDown("a"));
 
     const broadcast = press_result.broadcast.?;
     defer alloc.free(broadcast.body);
@@ -374,7 +376,7 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"a","pressed":false}}
     ;
     const release_result = try d.handle(alloc, release_msg);
-    try testz.expectTrue(!ctx.input.isKeyDown("a"));
+    try testz.expectTrue(!session.input.isKeyDown("a"));
     const release_broadcast = release_result.broadcast.?;
     defer alloc.free(release_broadcast.body);
     try testz.expectTrue(std.mem.indexOf(u8, release_broadcast.body, "key_up") != null);
@@ -515,7 +517,7 @@ pub fn reportMouseMoveBroadcastsOnlyOnCellChangeTest(io: std.Io, alloc: std.mem.
     ;
     const first = try d.handle(alloc, to_2_1);
     try testz.expectTrue(first.response == null);
-    try testz.expectEqual(ctx.input.cursor_cell.row, @as(usize, 2));
+    try testz.expectEqual(ctx.pointer.cursor_cell.row, @as(usize, 2));
     const b = first.broadcast.?;
     defer alloc.free(b.body);
     try testz.expectEqualStr("mouse_move", b.event);
@@ -598,7 +600,9 @@ pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
-    var d = dispatch.Dispatcher.init(&ctx);
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     // A multi-byte codepoint (an AZERTY 'é') round-trips through JSON into
     // the broadcast body verbatim.
@@ -614,7 +618,7 @@ pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "e\u{00e9}") != null);
 
     // report_text touches no input down-set -- text is transient.
-    try testz.expectEqual(ctx.input.keys_down.count(), 0);
+    try testz.expectEqual(session.input.keys_down.count(), 0);
 
     // An empty string queues nothing.
     const empty_result = try d.handle(alloc,
@@ -627,7 +631,9 @@ pub fn subscribeThenGetInputStateReflectsReportedInputTest(io: std.Io, alloc: st
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
     defer ctx.deinit();
-    var d = dispatch.Dispatcher.init(&ctx);
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
 
     const sub_msg =
         \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key","mouse_button"]}}
@@ -3033,6 +3039,53 @@ pub fn createContextRetargetsTheConnectionAndBroadcastsTest(io: std.Io, alloc: s
     try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, 1));
     try testz.expectEqual(session.focusedContextHandle(), @as(glyphwire.ContextHandle, 1));
     try testz.expectEqual(session.contextPtr(1).?, d.ctx);
+}
+
+/// The shell's Enter launches a full-screen program, whose context takes
+/// focus before the key comes back up. The release has to clear the same
+/// down-set the press went into, or the next Enter once the program has
+/// exited is dropped as a redundant press-while-down (the "have to hit
+/// Enter twice after gwmd" bug).
+pub fn keyReleasedAfterAContextSwitchDoesNotSwallowTheNextPressTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+
+    const press =
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"enter","pressed":true}}
+    ;
+    const release =
+        \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"enter","pressed":false}}
+    ;
+
+    const first_press = try d.handle(alloc, press);
+    alloc.free(first_press.broadcast.?.body);
+
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+    try testz.expectEqual(session.focusedContextHandle(), @as(glyphwire.ContextHandle, 1));
+
+    const first_release = try d.handle(alloc, release);
+    try testz.expectTrue(first_release.broadcast != null);
+    alloc.free(first_release.broadcast.?.body);
+
+    const destroyed = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
+    );
+    if (destroyed.response) |r| alloc.free(r);
+    if (destroyed.broadcast) |b| alloc.free(b.body);
+    try testz.expectEqual(session.focusedContextHandle(), glyphwire.root_context_handle);
+
+    const second_press = try d.handle(alloc, press);
+    try testz.expectTrue(second_press.broadcast != null);
+    defer alloc.free(second_press.broadcast.?.body);
+    try testz.expectTrue(std.mem.indexOf(u8, second_press.broadcast.?.body, "key_down") != null);
 }
 
 pub fn createContextAndSetWindowScrollbarToggleTheFlagTest(io: std.Io, alloc: std.mem.Allocator) !void {
