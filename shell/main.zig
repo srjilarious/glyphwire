@@ -4081,7 +4081,23 @@ const Prompt = struct {
         if (c.pipe2(&result_pipe, 0) != 0) return error.PipeFailed;
         const result_fd_var = try std.fmt.allocPrintSentinel(alloc, "{s}={d}", .{ result_fd_env, result_pipe[1] }, 0);
         defer alloc.free(result_fd_var);
-        const envp = try glyphwire.pty.buildEnvWith(alloc, &.{result_fd_var});
+
+        // Embedded, this prompt's surface is a layer someone else owns,
+        // and a glyphwire-aware child drawing "inline" means inline
+        // *here*. `GLYPHWIRE_LAYER` is what its `Client.connect` turns
+        // into an `attach_layer`, so it lands in the panel instead of on
+        // the root layer underneath it -- the layer counterpart of
+        // `GLYPHWIRE_PANE`. Nothing is added when the shell owns its
+        // context, so an ordinary session's children see no new variable.
+        const layer_var: ?[:0]u8 = if (self.layer) |l|
+            try std.fmt.allocPrintSentinel(alloc, "GLYPHWIRE_LAYER={d}", .{l}, 0)
+        else
+            null;
+        defer if (layer_var) |v| alloc.free(v);
+        const envp = if (layer_var) |v|
+            try glyphwire.pty.buildEnvWith(alloc, &.{ result_fd_var, v })
+        else
+            try glyphwire.pty.buildEnvWith(alloc, &.{result_fd_var});
         defer alloc.free(envp);
 
         var pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows), envp) catch |err| {

@@ -40,6 +40,16 @@ every message). `GLYPHWIRE_CTX` is set by the host/shell but nothing
 parses it yet — inherit-the-visible + `attach_context` is the discovery
 path for now.
 
+Within that context, an omitted `layer` means the connection's
+**surface**: the root layer, unless it sent `attach_layer` (below). That
+is how a program launched inside someone else's panel — `gw-ls` run from
+the shell in salacommander's Ctrl+` panel — draws *in the panel* rather
+than on the root layer underneath it, with no layer-aware code of its
+own. Every client library sends it at connect time from
+`GLYPHWIRE_LAYER`, exactly as it sends `attach_pane` from
+`GLYPHWIRE_PANE`. A connection that never attaches one is unaffected:
+omitted still means root.
+
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
 | *(inherit)* | — | — | — | ✅ a new connection acts on whatever context is visible at accept time |
@@ -47,6 +57,7 @@ path for now.
 | `destroy_context` | notification | `context` | — | ✅ frees a context and every layer/split/table/image in it; if it was visible, visibility pops to whatever context was under it (the alt-screen auto-restore). **Ownership-checked** like `destroy_layer`: honored only from a connection that owns the context (created it, or `adopt_context`'d it) — a non-owner's call reports `ContextPermissionDenied` and nothing is touched. The root context reports `RootContextImmutable`; an unknown handle `UnknownContext`. An in-process caller bypasses the check |
 | `activate_context` | notification | `context` | — | ✅ makes `context` the visible one **without** changing which context the issuing connection draws on — a client backgrounds itself by activating the root context (handle `0`) and restores itself by activating its own handle again. Moves the handle to the top of the visibility stack (it's there once, wherever it was). `UnknownContext` for an unknown handle; a no-op if it's already visible |
 | `attach_context` | notification | `context` | — | ✅ retargets the issuing connection onto an *existing* context (`create_context` does this for a new one) — every later `layer?`-scoped message resolves against it, and, for a subscribed connection, the raw input streams it receives now follow that context's visibility. The primitive a paired `InputListener` uses to join the context its `Client` created. Ownership is untouched (attaching isn't adopting). `UnknownContext` for an unknown handle |
+| `attach_layer` | notification | `layer?` | — | ✅ declares the issuing connection's **surface**: the layer every later message that omits `layer` resolves to, in place of the context's root. `null` (or the root handle) restores root. Needs no role — like `attach_pane`, saying where you live is not a privilege — and is untouched by ownership: attaching is not adopting, and the layer's creator is still the one who may destroy it. Changing context (`create_context` / `attach_context`) clears it, since a layer handle only means anything inside the context that owns it, and a surface whose layer is destroyed falls back to root rather than failing every later message. `UnknownLayer` for a handle this context doesn't have. What `gw-shell --embed` passes its children as `GLYPHWIRE_LAYER`, so an unmodified client draws into the panel it was launched from |
 | `adopt_context` | notification | `context` | — | ✅ adds the issuing connection to `context`'s owner set, so it outlives its original creator disconnecting as long as this connection stays up (and this connection may then `destroy_context` it). The context-level mirror of `adopt_layer`. `UnknownContext` for an unknown or root handle |
 | `set_window_scrollbar` | notification | `visible` | — | ✅ turns glyphwire-host's always-on right-edge scrollbar on or off for the issuing connection's active context — the runtime counterpart of `create_context`'s `window_scrollbar`. Changes nothing else; the host picks it up on its next repaint |
 | `set_caret_layer` | notification | `layer?` | — | ✅ points glyphwire-host's blinking caret at a `create_layer` layer for the issuing connection's active context, instead of the root layer's live cursor (`core.Context.caret_layer`). `null` restores the root cursor. The host positions the caret through that layer's pane bounds, viewport and scroll offset, honours the layer's own DECTCEM cursor-hide, and hides it while the pane is scrolled back into its own history or the cursor is outside the visible viewport. An unknown or root handle reports `UnknownLayer` and leaves the setting unchanged; destroying the tracked layer clears it. For a multi-pane client (`gmux`) whose focused pane is a non-root layer fed by that pane's PTY — re-sent on every focus change |

@@ -1264,6 +1264,18 @@ pub const Dispatcher = struct {
     /// ordered ahead of everything else on the same stream, there is no
     /// window in which the connection is bound to the wrong pane.
     active_pane: core.PaneHandle = core.root_pane_handle,
+    /// This connection's **surface**: the layer an omitted `layer` field
+    /// resolves to. Null is the context's root layer, which is every
+    /// program that has its context to itself.
+    ///
+    /// Set by `attach_layer`, which a client sends at connect time from
+    /// `GLYPHWIRE_LAYER` the way it sends `attach_pane` from
+    /// `GLYPHWIRE_PANE` -- so a program drawing inline (`gw-ls`, `gw-view`)
+    /// lands in the panel it was launched from rather than on the root
+    /// layer underneath it, with no layer-aware code of its own. Cleared
+    /// whenever the connection changes context, since a layer handle only
+    /// means anything inside the context that owns it.
+    surface: ?core.LayerHandle = null,
     /// How `spawn_in_pane` starts a program, or null on a server that
     /// can't (see `PaneSpawner`). Injected by `Server`.
     spawner: ?*const PaneSpawner = null,
@@ -1468,6 +1480,7 @@ pub const Dispatcher = struct {
         .{ "destroy_context", catResult(handleDestroyContext) },
         .{ "activate_context", catResult(handleActivateContext) },
         .{ "attach_context", catVoid(handleAttachContext) },
+        .{ "attach_layer", catVoid(handleAttachLayer) },
         .{ "adopt_context", catVoid(handleAdoptContext) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
@@ -1687,11 +1700,31 @@ pub const Dispatcher = struct {
         try self.ctx.destroyImage(parsed.value.handle);
     }
 
-    /// Resolves a wire-level `layer` field (omitted means the root layer,
-    /// same convention `resolveAnchor` already uses for `row`/`col`) to
-    /// its `Layer` -- shared by every layer-scoped handler below.
+    /// Resolves a wire-level `layer` field to its `Layer` -- shared by
+    /// every layer-scoped handler below. An omitted `layer` means this
+    /// connection's *surface*: the root layer, unless the connection said
+    /// otherwise with `attach_layer` (see `surface`).
+    ///
+    /// A surface that no longer resolves -- the host destroyed the panel
+    /// this connection was drawing in -- falls back to root rather than
+    /// failing every message from here on. The client is still alive and
+    /// still has a context; it has simply lost its corner of it.
     fn resolveLayer(self: *Dispatcher, layer: ?core.LayerHandle) !*core.Layer {
-        return self.ctx.layerPtr(layer) orelse DispatchError.UnknownLayer;
+        return self.ctx.layerPtr(self.surfaceOr(layer)) orelse DispatchError.UnknownLayer;
+    }
+
+    /// The same substitution as a wire handle, for the handlers that hand
+    /// an optional handle to a `Context` method rather than resolving a
+    /// `*Layer` themselves (`set_property`, the table and rect calls):
+    /// an omitted `layer` is this connection's surface. A surface that
+    /// has been destroyed is forgotten here too, so one dead panel
+    /// doesn't poison every later message.
+    fn surfaceOr(self: *Dispatcher, layer: ?core.LayerHandle) ?core.LayerHandle {
+        if (layer) |explicit| return explicit;
+        const s = self.surface orelse return null;
+        if (self.ctx.layerPtr(s) != null) return s;
+        self.surface = null;
+        return null;
     }
 
     /// Validates an optional `metadata_id` param against `Context.metadata`
@@ -1856,7 +1889,7 @@ pub const Dispatcher = struct {
 
         // `Context.setLayerProperty` (not `Layer`'s own) owns the root
         // guards, the cell-metric resolution and `size`'s reallocation.
-        self.ctx.setLayerProperty(p.layer, value) catch |err| return switch (err) {
+        self.ctx.setLayerProperty(self.surfaceOr(p.layer), value) catch |err| return switch (err) {
             error.UnknownLayer => DispatchError.UnknownLayer,
             error.ReadOnlyProperty => DispatchError.ReadOnlyProperty,
             error.WrongScrollMode => DispatchError.WrongScrollMode,
@@ -1915,7 +1948,7 @@ pub const Dispatcher = struct {
             // Needs the session's cell metrics, so it goes through the
             // context rather than the resolved layer -- see
             // `core.Context.getLayerProperty`.
-            const value = self.ctx.getLayerProperty(p.layer, .cell_position) catch
+            const value = self.ctx.getLayerProperty(self.surfaceOr(p.layer), .cell_position) catch
                 return DispatchError.UnknownLayer;
             const cell = value.cell_position;
             return try rpc.response(alloc, id, CellPositionResult{ .row = cell.row, .col = cell.col });
@@ -2153,6 +2186,30 @@ pub const Dispatcher = struct {
         // joining wherever it lives, and anything this connection creates
         // afterwards belongs there too.
         self.active_pane = self.ctx.pane;
+        // A layer handle is only meaningful in the context that owns it,
+        // so the surface doesn't travel; the new context's root is where
+        // an omitted `layer` lands until this connection says otherwise.
+        self.surface = null;
+    }
+
+    /// `attach_layer`: declares this connection's surface -- the layer an
+    /// omitted `layer` field resolves to from here on (see `surface`).
+    /// Null restores the context's root layer. `UnknownLayer` for a handle
+    /// this context doesn't have, so a typo fails at the point of use
+    /// rather than silently drawing somewhere else.
+    fn handleAttachLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetCaretLayerParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const target = parsed.value.layer orelse {
+            self.surface = null;
+            return;
+        };
+        if (self.ctx.layerPtr(target) == null) return DispatchError.UnknownLayer;
+        // The root layer *is* "no surface": asking for it explicitly and
+        // clearing are the same state, so they store the same thing.
+        self.surface = if (target == core.root_layer_handle) null else target;
     }
 
     /// `adopt_context`: adds this connection to a context's owner set, so
@@ -2872,10 +2929,12 @@ pub const Dispatcher = struct {
         const resp_body = try rpc.response(alloc, id, ScrollResult{ .offset = new_offset, .max = layer.history_len });
         errdefer alloc.free(resp_body);
 
-        // `p.layer` is null for the root layer's scrollback, a handle for
-        // a non-root layer's ring -- exactly what `scroll`'s `layer` field
-        // now carries.
-        const notif_body = try rpc.scrollNotification(alloc, p.layer, new_offset, layer.history_len);
+        // Null for the root layer's scrollback, a handle for a non-root
+        // layer's ring -- exactly what `scroll`'s `layer` field carries.
+        // Through `surfaceOr`, so a connection that scrolled *its
+        // surface* by omitting the field still names that layer to
+        // everyone else listening.
+        const notif_body = try rpc.scrollNotification(alloc, self.surfaceOr(p.layer), new_offset, layer.history_len);
         return .{ .response = resp_body, .broadcast = .{ .event = "scroll", .body = notif_body } };
     }
 
@@ -3268,7 +3327,7 @@ pub const Dispatcher = struct {
         }
 
         const style = try resolveTableStyle(talloc, p.style);
-        const table_handle = try self.ctx.createTable(p.layer, anchor.row, anchor.col, columns, style);
+        const table_handle = try self.ctx.createTable(self.surfaceOr(p.layer), anchor.row, anchor.col, columns, style);
 
         return try rpc.response(alloc, id, CreateTableResult{ .handle = table_handle });
     }
@@ -3281,7 +3340,7 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
-        self.ctx.destroyTable(p.layer, p.table) catch |err| switch (err) {
+        self.ctx.destroyTable(self.surfaceOr(p.layer), p.table) catch |err| switch (err) {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             error.UnknownTable => return DispatchError.UnknownTable,
             else => return err,
@@ -3294,7 +3353,7 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
-        const rect_handle = self.ctx.createRect(p.layer, .{
+        const rect_handle = self.ctx.createRect(self.surfaceOr(p.layer), .{
             .x = p.x,
             .y = p.y,
             .w = p.w,
@@ -3315,7 +3374,7 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
-        self.ctx.updateRect(p.layer, p.rect, .{
+        self.ctx.updateRect(self.surfaceOr(p.layer), p.rect, .{
             .x = p.x,
             .y = p.y,
             .w = p.w,
@@ -3335,7 +3394,7 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         const p = parsed.value;
-        self.ctx.destroyRect(p.layer, p.rect) catch |err| switch (err) {
+        self.ctx.destroyRect(self.surfaceOr(p.layer), p.rect) catch |err| switch (err) {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             error.UnknownRect => return DispatchError.UnknownRect,
         };

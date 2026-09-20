@@ -59,6 +59,30 @@ var process_pane: ?core.PaneHandle = null;
 pub fn notePaneFromEnviron(environ_map: *const std.process.Environ.Map) void {
     const raw = environ_map.get("GLYPHWIRE_PANE") orelse return;
     process_pane = std.fmt.parseInt(core.PaneHandle, raw, 10) catch null;
+    noteSurfaceFromEnviron(environ_map);
+}
+
+/// The layer this process was told to draw on (`GLYPHWIRE_LAYER`), or
+/// null when it has its context to itself.
+///
+/// Process-global for the same reason `process_pane` is: it describes
+/// where the *program* lives, and every connection it opens has to agree.
+/// What sets it is a shell that is itself embedded in someone else's
+/// layer (`gw-shell --embed`, salacommander's Ctrl+` panel): its children
+/// draw inline, and inline means "in the panel", not on the root layer
+/// underneath it.
+var process_surface: ?core.LayerHandle = null;
+
+/// Records `GLYPHWIRE_LAYER` from an environment map -- called by
+/// `notePaneFromEnviron`, so `connectFromEnv` picks it up too.
+pub fn noteSurfaceFromEnviron(environ_map: *const std.process.Environ.Map) void {
+    const raw = environ_map.get("GLYPHWIRE_LAYER") orelse return;
+    process_surface = std.fmt.parseInt(core.LayerHandle, raw, 10) catch null;
+}
+
+/// The layer this process draws on by default, if it was given one.
+pub fn processSurface() ?core.LayerHandle {
+    return process_surface;
 }
 
 /// The pane this process is seated in, if any -- see `process_pane`.
@@ -120,6 +144,7 @@ pub const Client = struct {
         signalHandshake(io) catch {};
         var client: Client = .{ .io = io, .alloc = alloc, .stream = stream };
         client.attachPaneFromEnv();
+        client.attachSurfaceFromEnv();
         return client;
     }
 
@@ -140,6 +165,30 @@ pub const Client = struct {
         self.attachPane(pane) catch |err| {
             std.log.warn("glyphwire: attach_pane({d}) failed: {t}", .{ pane, err });
         };
+    }
+
+    /// Declares this connection's surface from `GLYPHWIRE_LAYER`, if it is
+    /// set -- the layer every later message that omits `layer` resolves
+    /// to. A no-op otherwise, which is every program that has its context
+    /// to itself.
+    ///
+    /// Sent from `connect`, right behind `attach_pane`, for the same
+    /// reason: a program launched inside someone else's panel draws there
+    /// without a line of layer-aware code, and nothing it sends can land
+    /// on the wrong layer first.
+    pub fn attachSurfaceFromEnv(self: *Client) void {
+        const layer = process_surface orelse return;
+        self.attachLayer(layer) catch |err| {
+            std.log.warn("glyphwire: attach_layer({d}) failed: {t}", .{ layer, err });
+        };
+    }
+
+    /// `attach_layer(layer?)` -- a notification. Points this connection's
+    /// omitted-`layer` messages at `layer`; null restores the context's
+    /// root layer. The layer-level counterpart of `attach_pane`: it says
+    /// where this connection lives, and needs no role to say it.
+    pub fn attachLayer(self: *Client, layer: ?core.LayerHandle) !void {
+        try self.notify("attach_layer", .{ .layer = layer });
     }
 
     /// Discovery per decisions.md: connects using `GLYPHWIRE_SOCK` from

@@ -63,6 +63,7 @@ connects.
 | `GLYPHWIRE_SOCK` | host | Absolute path of the listening socket. **Its presence is the whole discovery protocol.** |
 | `GLYPHWIRE_CTX` | host / shell | Opaque session id. Reserved; no current message consumes it. |
 | `GLYPHWIRE_PANE` | host / multiplexer | The pane handle this process was seated in. A client **SHOULD** pass it as `subscribe`'s `pane` (section 6.16). |
+| `GLYPHWIRE_LAYER` | an embedded shell | The layer this process should draw on: the surface an omitted `layer` resolves to. A client **SHOULD** send it as `attach_layer` immediately after connecting. Unset means the context's root layer. |
 | `GLYPHWIRE_REMOTE` | `gw-agent` | Set inside a remote session. |
 | `GLYPHWIRE_CONFIG_DIR` | user | Overrides the config directory. Not part of the wire protocol. |
 
@@ -308,6 +309,14 @@ the connection's current context. `create_context` and `attach_context`
 change it; it is ambient connection state, not a parameter on every
 message.
 
+**Per-connection surface.** Within that context, an omitted `layer`
+resolves to the connection's surface: the root layer, unless the
+connection sent `attach_layer`. This is how a program launched inside
+another client's panel draws there without knowing it is in one — the
+same ambient-state shape as the current context, and the layer-level
+counterpart of `attach_pane`. Changing context clears it; a surface whose
+layer is destroyed falls back to root.
+
 **Ownership and culling.** The connection that creates a context is its
 first owner; `adopt_context` adds more. A context is destroyed once every
 owning connection has disconnected, so a full-screen program that dies
@@ -400,6 +409,7 @@ Each entry gives the method, its kind, its params and its result.
 | `destroy_context` | notification | `context` | — |
 | `activate_context` | notification | `context` | — |
 | `attach_context` | notification | `context` | — |
+| `attach_layer` | notification | `layer?` | — |
 | `adopt_context` | notification | `context` | — |
 | `set_window_scrollbar` | notification | `visible` | — |
 | `set_caret_layer` | notification | `layer?` | — |
@@ -425,6 +435,12 @@ context `0` and restores itself by activating its own handle.
 `attach_context` retargets the issuing connection onto an existing
 context; ownership is untouched. This is how a paired input listener joins
 the context its drawing connection created.
+
+`attach_layer` declares the connection's surface within that context —
+the layer an omitted `layer` field resolves to. `null`, or the root
+handle, restores the root layer; an unknown handle reports
+`UnknownLayer`. A client **SHOULD** send it at connect time when
+`GLYPHWIRE_LAYER` is set (section 4).
 
 `set_caret_layer` points the host's blinking caret at a created layer
 instead of the root layer's cursor; `null` restores the root. The host

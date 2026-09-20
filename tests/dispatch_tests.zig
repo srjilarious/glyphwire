@@ -3295,6 +3295,85 @@ pub fn attachContextRetargetsWithoutOwningTest(io: std.Io, alloc: std.mem.Alloca
     ), dispatch.DispatchError.UnknownContext);
 }
 
+pub fn attachLayerMakesAnOmittedLayerMeanTheSurfaceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+
+    // The panel: what a host (salacommander's Ctrl+` layer) creates for
+    // the program it is about to launch.
+    var d = dispatch.Dispatcher.init(&root);
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"width":20,"height":4}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    // The program declares it, as `Client.connect` does from
+    // GLYPHWIRE_LAYER, and then draws with no layer of its own.
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_layer","params":{"layer":1}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"property":"cursor","row":1,"col":0}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"panel"}}
+    );
+
+    const panel = root.layerPtr(1).?;
+    try testz.expectEqualStr(panel.cell(1, 0).grapheme(), "p");
+    // ...and the root layer underneath it was never touched, which is
+    // the bug this exists to stop.
+    try testz.expectEqualStr(root.layerPtr(null).?.cell(1, 0).grapheme(), "");
+
+    // Null puts it back, and an unknown handle is refused rather than
+    // silently redirecting every later draw.
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_layer","params":{}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"property":"cursor","row":2,"col":0}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"root"}}
+    );
+    try testz.expectEqualStr(root.layerPtr(null).?.cell(2, 0).grapheme(), "r");
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_layer","params":{"layer":999}}
+    ), dispatch.DispatchError.UnknownLayer);
+}
+
+pub fn attachLayerSurvivesItsLayerBeingDestroyedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+
+    var d = dispatch.Dispatcher.init(&root);
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"width":20,"height":4}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_layer","params":{"layer":1}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
+    );
+
+    // The panel is gone -- the client keeps drawing, on the root layer,
+    // rather than failing every message from here on.
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"property":"cursor","row":0,"col":0}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"x"}}
+    );
+    try testz.expectEqualStr(root.layerPtr(null).?.cell(0, 0).grapheme(), "x");
+}
+
 pub fn adoptContextLetsASecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);
