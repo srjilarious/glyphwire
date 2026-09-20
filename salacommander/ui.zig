@@ -1433,11 +1433,15 @@ pub const Ui = struct {
 
     /// One line per pane repaint under `GLYPHWIRE_SALA_PROFILE` -- see
     /// `Ui.profile`. Straight to stderr rather than through `std.log`
-    /// so it can't be swallowed by a log-level default.
+    /// so it can't be swallowed by a log-level default, and
+    /// `writerStreaming` rather than `writer` because these lines are
+    /// written one at a time over a whole session: the positional form
+    /// starts each writer at offset 0, so redirecting the run to a file
+    /// would leave nothing but the last line.
     fn reportRedraw(self: *Ui, pane: usize, rows: usize, bytes: u64, frames: u64) void {
         if (!self.profile) return;
         var buf: [160]u8 = undefined;
-        var w = std.Io.File.stderr().writer(self.io, &buf);
+        var w = std.Io.File.stderr().writerStreaming(self.io, &buf);
         w.interface.print(
             "sala: pane {d} redraw rows={d} bytes={d} frames={d}\n",
             .{ pane, rows, bytes, frames },
