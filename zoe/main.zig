@@ -16,11 +16,14 @@ const glyphwire = @import("glyphwire");
 const zoe = @import("zoe_support");
 
 const usage =
-    \\usage: zoe [--keys <script>] [--quiet] [file]
+    \\usage: zoe [--keys <script>] [--quiet] [file|directory]
     \\
     \\  --keys <script>  Headless: replay a vim-notation key script against
     \\                   the buffer, e.g. 'ihello<esc>dd' or ':w<cr>'.
     \\  --quiet          Headless: don't print the buffer afterwards.
+    \\
+    \\A directory argument changes into it (as `:cd` would) and starts on
+    \\the file tree with an empty buffer; anything else is a file to open.
     \\
     \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
     \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
@@ -60,17 +63,38 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // A directory argument is a place to work, not a file to open, so it
+    // is resolved here rather than deeper in: change into it, and from
+    // then on it is simply the working directory -- the file tree roots
+    // on it, a relative `:w` lands in it, `:pwd` agrees. Same as `:cd`,
+    // just spelled on the command line. Everything else (including a
+    // name that doesn't exist yet) is a file.
+    var target: zoe.Target = .none;
+    if (path) |p| {
+        if (isDirectory(io, p)) {
+            std.process.setCurrentPath(io, p) catch return fail(io, "zoe: cannot change directory\n");
+            target = .directory;
+        } else {
+            target = .{ .file = p };
+        }
+    }
+
     // `--keys` always means the headless driver, even under a display
     // server: it's how the core is tested, and a script racing a live UI
-    // would be neither. The UI opens `path` itself: it owns every buffer
-    // in its tab strip, and the first one is no different.
+    // would be neither. The UI opens the target itself: it owns every
+    // buffer in its tab strip, and the first one is no different.
     if (script == null) {
-        if (try runUi(alloc, io, path, init.environ_map)) return;
+        if (try runUi(alloc, io, target, init.environ_map)) return;
     }
 
     // A missing file is a new buffer, not an error -- `zoe newfile.txt`
-    // is how you create one.
-    const text: []u8 = if (path) |p|
+    // is how you create one. A directory target has already been changed
+    // into and leaves nothing to read.
+    const file_path: ?[]const u8 = switch (target) {
+        .file => |p| p,
+        .none, .directory => null,
+    };
+    const text: []u8 = if (file_path) |p|
         std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => try alloc.dupe(u8, ""),
             else => return fail(io, "zoe: cannot read file\n"),
@@ -79,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
         try alloc.dupe(u8, "");
     defer alloc.free(text);
 
-    var ed = try zoe.Editor.initFromText(alloc, text, path);
+    var ed = try zoe.Editor.initFromText(alloc, text, file_path);
     defer ed.deinit();
 
     if (script) |s| {
@@ -88,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
             // `:pwd` a live client and a real cwd, the clipboard ones a
             // live host. The headless driver just reports what parsed.
             .none, .quit, .chdir, .pwd, .set_clipboard, .paste, .buffer_step, .buffer_close => {},
-            .write, .write_quit, .edit => |target| try headlessSave(io, &ed, target),
+            .write, .write_quit, .edit => |dest| try headlessSave(io, &ed, dest),
         }
     }
 
@@ -105,12 +129,21 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+/// Whether `path` names a directory, following symlinks -- a link to one
+/// is one for this purpose. Anything unreadable answers false and is
+/// treated as a file, which is also what gives `zoe newfile.txt` its
+/// new buffer.
+fn isDirectory(io: std.Io, path: []const u8) bool {
+    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return st.kind == .directory;
+}
+
 /// Connects and runs the UI. False when there's no display server to
 /// connect to, which is the caller's cue to fall back to headless.
 fn runUi(
     alloc: std.mem.Allocator,
     io: std.Io,
-    path: ?[]const u8,
+    target: zoe.Target,
     environ: *const std.process.Environ.Map,
 ) !bool {
     var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch return false;
@@ -136,7 +169,7 @@ fn runUi(
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
     const cwd = cwd_buf[0..cwd_len];
 
-    const ui = try zoe.Ui.init(alloc, io, &client, listener, path, cwd, environ);
+    const ui = try zoe.Ui.init(alloc, io, &client, listener, target, cwd, environ);
     defer ui.deinit();
 
     try ui.run();

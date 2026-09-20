@@ -32,3 +32,4 @@ pub const Mode = editor.Mode;
 pub const Outcome = editor.Outcome;
 pub const Tree = tree.Tree;
 pub const Ui = ui.Ui;
+pub const Target = ui.Target;

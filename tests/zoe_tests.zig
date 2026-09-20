@@ -1026,13 +1026,60 @@ pub fn commandLineEscapeAbandonsTheLineTest(_: std.Io, alloc: std.mem.Allocator)
     defer ed.deinit();
     _ = try keys.feed(&ed, ":q<esc>");
     try testz.expectEqual(ed.mode, .normal);
-    try testz.expectEqual(ed.cmdline.items.len, 0);
+    try testz.expectTrue(ed.cmdline.isEmpty());
 }
 
 pub fn commandLineBackspaceOverTheColonLeavesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, ":w<bs><bs>");
+    try testz.expectEqual(ed.mode, .normal);
+}
+
+pub fn commandLineIsARealEditableFieldTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The `:` line is glyphwire's shared `LineEdit` now, so a long path
+    // can be fixed in place instead of backspaced away. Driven through
+    // `feedKey` rather than `keys.feed`, which has no notation for a
+    // modifier chord.
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    _ = try ed.feedText(":");
+    _ = try ed.feedText("e /home/me/notes.md");
+
+    // Ctrl+Backspace drops one path segment, not the whole argument.
+    _ = try ed.feedKey("backspace", .{ .ctrl = true });
+    try testz.expectEqualStr(ed.cmdline.text(), "e /home/me/notes.");
+    // Home, then a word jump over the `e`, then more typing: movement
+    // the old append-only line simply had no key for.
+    _ = try ed.feedKey("home", .{});
+    try testz.expectEqual(ed.cmdline.caret, @as(usize, 0));
+    _ = try ed.feedKey("right", .{ .ctrl = true });
+    _ = try ed.feedText("dit");
+    try testz.expectEqualStr(ed.cmdline.text(), "edit /home/me/notes.");
+}
+
+pub fn commandLineBackspaceInTheMiddleDoesNotLeaveTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Only an *empty* line leaves command mode on Backspace; with the
+    // caret moved to the front there is still a line, so the key is the
+    // field's no-op rather than the mode's exit.
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    _ = try ed.feedText(":wq");
+    _ = try ed.feedKey("home", .{});
+    _ = try ed.feedKey("backspace", .{});
+    try testz.expectEqual(ed.mode, .command);
+    try testz.expectEqualStr(ed.cmdline.text(), "wq");
+}
+
+pub fn commandLineRunsTheWholeLineWhereverTheCaretIsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Enter runs what is on the line wherever the caret happens to be --
+    // the field reports `.submit`, it does not split the text.
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    _ = try ed.feedText(":q");
+    _ = try ed.feedKey("home", .{});
+    const out = try ed.feedKey("enter", .{});
+    try testz.expectTrue(out == .quit);
     try testz.expectEqual(ed.mode, .normal);
 }
 

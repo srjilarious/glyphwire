@@ -42,6 +42,7 @@ const tabs = @import("tabs.zig");
 
 const Editor = editor.Editor;
 const Tree = tree_mod.Tree;
+const lineedit = glyphwire.lineedit;
 const Color = glyphwire.Color;
 
 /// Cells the tree pane occupies until a divider drag says otherwise.
@@ -87,6 +88,24 @@ const Bounds = struct {
 };
 
 const Focus = enum { buffer, tree };
+
+/// What zoe's command line named, once `main` has looked at it on disk.
+/// The distinction is the whole reason it looks: `zoe build.zig` opens a
+/// buffer, but `zoe src/` is a place to work -- there is nothing to read
+/// out of a directory, and treating it as a file used to leave you in an
+/// empty buffer named after it that `:w` would then refuse.
+pub const Target = union(enum) {
+    /// No argument: an empty scratch buffer, tree on the cwd.
+    none,
+    /// A file to open -- or a name that doesn't exist yet, which is how
+    /// `zoe newfile.txt` creates one.
+    file: []const u8,
+    /// A directory. `main` has already changed into it, so it *is* the
+    /// cwd by the time the UI starts and there is nothing left to carry
+    /// here: the tree roots on it like any other cwd, and the buffer
+    /// starts empty.
+    directory,
+};
 
 /// Which way a Ctrl+direction chord moves the focus.
 pub const Direction = enum { left, right, up, down };
@@ -330,7 +349,7 @@ pub const Ui = struct {
         io: std.Io,
         client: *glyphwire.Client,
         listener: *glyphwire.InputListener,
-        initial_path: ?[]const u8,
+        target: Target,
         root_dir: []const u8,
         environ: *const std.process.Environ.Map,
     ) !*Ui {
@@ -421,11 +440,21 @@ pub const Ui = struct {
         self.loadConfig(environ);
 
 
-        const first = try self.newSlot(initial_path);
+        const first = try self.newSlot(switch (target) {
+            .file => |p| p,
+            .none, .directory => null,
+        });
         errdefer first.deinit(alloc);
         try self.buffers.append(alloc, first);
         self.buf = first;
         self.active = 0;
+
+        // `zoe <dir>` names a place to work, not a file to open: the tree
+        // is already rooted there (`root_dir` is the directory `main`
+        // changed into), so start the focus on it -- picking something
+        // out of it is the next thing that happens, and an empty scratch
+        // buffer has nothing to look at.
+        if (target == .directory) self.focus = .tree;
 
         try client.setSplitChildren(buffer_col_split, &.{
             // One row, whatever the window does -- same reasoning as the
@@ -2330,7 +2359,7 @@ pub const Ui = struct {
 
         if (self.buf.ed.mode == .command) {
             try line.append(self.alloc, ':');
-            try line.appendSlice(self.alloc, self.buf.ed.cmdline.items);
+            try line.appendSlice(self.alloc, self.buf.ed.cmdline.text());
         } else if (self.buf.ed.status.items.len > 0) {
             if (std.mem.startsWith(u8, self.buf.ed.status.items, "E")) fg = fg_error;
             try line.appendSlice(self.alloc, self.buf.ed.status.items);
@@ -2377,6 +2406,28 @@ pub const Ui = struct {
             }, opts);
         } else {
             try batch.writeTextOpts(line.items, opts);
+        }
+
+        // The `:` line's caret, as the same inverted block the buffer
+        // pane draws. Only needed now that the command line is a real
+        // field: while it was append-only the caret was always at the
+        // end, and the statusline's own trailing blank read as one.
+        if (self.buf.ed.mode == .command) {
+            const cmd = &self.buf.ed.cmdline;
+            const col = 1 + cmd.caretCol(); // past the leading `:`
+            if (col < b.cols) {
+                const under = if (cmd.caret < cmd.text().len)
+                    cmd.text()[cmd.caret..lineedit.nextBoundary(cmd.text(), cmd.caret)]
+                else
+                    " ";
+                try batch.writeTextOpts(under, .{
+                    .layer = self.status_layer,
+                    .row = 0,
+                    .col = col,
+                    .fg = bg_status,
+                    .bg = fg,
+                });
+            }
         }
     }
 

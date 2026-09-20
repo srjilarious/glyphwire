@@ -7,8 +7,11 @@
 //! relative `@import`.
 //!
 //! `wordsplit` / `envassign` / `complete` / `glob` / `handshake` /
-//! `history` / `lineedit` / `prompt_template` / `logicalpath` are pure (no
-//! libc, no IO).
+//! `history` / `prompt_template` / `logicalpath` are pure (no libc, no
+//! IO). `lineedit` is re-exported from the `glyphwire` library rather
+//! than living here: the prompt's editing keys are the same ones
+//! salacommander's path row and zoe's `:` line want, so the field itself
+//! is shared (see `src/lineedit.zig`).
 //! `config` and `script_engine` are the exceptions: they embed a Lua
 //! state (via ziglua) -- `config` for a one-shot `shell.conf.lua` parse,
 //! `script_engine` for the shell's session-long interpreter -- so this
@@ -24,7 +27,7 @@ pub const handshake = @import("handshake.zig");
 pub const history = @import("history.zig");
 pub const zjump = @import("zjump.zig");
 pub const flushgate = @import("flushgate.zig");
-pub const lineedit = @import("lineedit.zig");
+pub const lineedit = @import("glyphwire").lineedit;
 pub const config = @import("config.zig");
 pub const script_engine = @import("script_engine.zig");
 pub const keyencode = @import("glyphwire").key_encode;

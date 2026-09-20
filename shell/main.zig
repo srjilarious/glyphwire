@@ -710,15 +710,14 @@ fn runPrompt(
                 defer alloc.free(tev.text);
                 // Ctrl+Shift+V: insert the clipboard text into the live
                 // line without submitting (the user presses Enter). The
-                // editor is single-line, so newline runs are flattened to
-                // single spaces first -- a pasted file list then reads as
-                // space-separated arguments instead of one unusable blob.
-                // A paste while browsing follows the same
+                // editor is single-line, so the field's
+                // `.flatten_newlines` policy turns newline runs into
+                // single spaces on the way in -- a pasted file list then
+                // reads as space-separated arguments instead of one
+                // unusable blob. A paste while browsing follows the same
                 // `scrollback_type_exits` rule as typed text.
                 if (prompt.browse_pos == null or prompt.scrollbackTypeExits()) {
-                    const flat = try lineedit.flattenNewlines(alloc, tev.text);
-                    defer alloc.free(flat);
-                    try prompt.insertText(flat);
+                    try prompt.insertText(tev.text);
                 }
                 continue;
             },
@@ -738,7 +737,7 @@ fn runPrompt(
                         std.log.err("prompt: could not build marked-paths clipboard text: {t}", .{err});
                     }
                 } else {
-                    client.setClipboard(prompt.buffer.items) catch |err| {
+                    client.setClipboard(prompt.line.text()) catch |err| {
                         std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
                     };
                 }
@@ -800,7 +799,7 @@ fn runPrompt(
             } else if (prompt.marks.items.len > 0) {
                 try prompt.resetMarks();
             } else {
-                try prompt.setCursorAt(prompt.cursor);
+                try prompt.setCursorAt(prompt.line.caret);
             }
         } else if (std.mem.eql(u8, ev.key, "space")) {
             // Space while browsing a listing toggles the entry under the
@@ -846,9 +845,13 @@ fn runPrompt(
         } else if ((ctrl and std.mem.eql(u8, ev.key, "e")) or std.mem.eql(u8, ev.key, "end")) {
             // End mirrors ctrl+e on the live line; the browse-mode form is
             // handled above.
-            try prompt.moveCursorTo(prompt.buffer.items.len);
+            try prompt.moveCursorTo(prompt.line.text().len);
         } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
             try prompt.killToStart();
+        } else if (ctrl and std.mem.eql(u8, ev.key, "k")) {
+            // readline's kill-line, the mirror of ctrl+u -- the shared
+            // field has it, so the prompt may as well bind it.
+            try prompt.killToEnd();
         } else if (ctrl and std.mem.eql(u8, ev.key, "l")) {
             try prompt.clearScreen();
         } else if (ctrl and std.mem.eql(u8, ev.key, "r")) {
@@ -929,7 +932,7 @@ fn runPrompt(
             // Not explicitly asked for, but needed alongside ctrl+left/
             // right: without plain single-character movement too, the
             // caret (drawn by glyphwire-host wherever the raw grid cursor
-            // sits) could wander away from `prompt.cursor` -- the offset
+            // sits) could wander away from `prompt.line.caret` -- the offset
             // typing/backspace actually act on -- which would look
             // confusing (caret in one place, edits landing in another).
             // While browsing (`browse_pos != null`), Left instead moves
@@ -940,18 +943,18 @@ fn runPrompt(
             } else {
                 // Step a whole codepoint, not one byte: a CJK character is
                 // three bytes but one cursor stop (see `lineedit`).
-                try prompt.moveCursorTo(lineedit.prevBoundary(prompt.buffer.items, prompt.cursor));
+                try prompt.moveCursorTo(prompt.line.prevOffset());
             }
         } else if (std.mem.eql(u8, ev.key, "right")) {
             if (prompt.browse_pos != null) {
                 try prompt.browseRight(1);
-            } else if (prompt.completion_picker == null and prompt.cursor == prompt.buffer.items.len) {
+            } else if (prompt.completion_picker == null and prompt.line.caret == prompt.line.text().len) {
                 try prompt.acceptCompletionHintOrComplete();
             } else {
                 // While the picker is open this just moves the cursor --
                 // `moveCursorTo` closes it, same as every other explicit
                 // reposition.
-                try prompt.moveCursorTo(lineedit.nextBoundary(prompt.buffer.items, prompt.cursor));
+                try prompt.moveCursorTo(prompt.line.nextOffset());
             }
         }
         // Plain character insertion is not handled here: it comes from the
@@ -1157,10 +1160,16 @@ const Prompt = struct {
     listener: ?*glyphwire.InputListener = null,
     line_start_row: usize = 0,
     line_start_col: usize = 0,
-    buffer: std.ArrayList(u8) = std.ArrayList(u8).empty,
-    /// Offset into `buffer`, 0..=buffer.items.len, where the next
-    /// insert/delete acts and where the on-screen cursor should sit.
-    cursor: usize = 0,
+    /// The line being typed: its bytes plus the caret (a byte offset)
+    /// where the next insert/delete acts and where the on-screen cursor
+    /// should sit. The editing itself -- word jumps, Ctrl+Backspace,
+    /// Ctrl+U -- is `lineedit.LineEdit`'s, shared with salacommander's
+    /// path row and zoe's `:` line; what stays here is everything that
+    /// makes it a *shell* prompt: the incremental repaint, history
+    /// recall, completion. `.flatten_newlines` because a multi-line
+    /// paste at a prompt should become space-separated arguments rather
+    /// than lose its line breaks silently.
+    line: lineedit.LineEdit = .{ .controls = .flatten_newlines },
     /// Set by `submitLine` when the typed line was `exit` -- the caller
     /// (`runPrompt`'s key loop) checks this after every submitted line and
     /// returns instead of drawing another prompt, ending this process.
@@ -1413,7 +1422,7 @@ const Prompt = struct {
         self.clearHistoryPending();
         self.history_pending.deinit(alloc);
         self.scratch.deinit(alloc);
-        self.buffer.deinit(alloc);
+        self.line.deinit(alloc);
         if (self.pending_cd) |p| alloc.free(p);
         self.completion_hint.deinit(alloc);
         if (self.pending_result_line) |line| alloc.free(line);
@@ -2366,13 +2375,13 @@ const Prompt = struct {
     }
 
     /// The caret's column offset from `line_start_col` -- the display
-    /// width of `buffer` between `input_scroll` and `cursor` (both byte
+    /// width of `line` between `input_scroll` and its caret (both byte
     /// offsets on codepoint boundaries). Byte count and column count only
     /// coincide for ASCII; a CJK char is one codepoint, two columns.
     fn caretCol(self: *Prompt) usize {
-        const buf = self.buffer.items;
+        const buf = self.line.text();
         const from = @min(self.input_scroll, buf.len);
-        const to = @min(self.cursor, buf.len);
+        const to = @min(self.line.caret, buf.len);
         if (to <= from) return 0;
         return lineedit.displayCol(buf[from..], to - from);
     }
@@ -2413,7 +2422,7 @@ const Prompt = struct {
     /// `handleResize` can fold the input box into the same frame as its
     /// clear + prefix redraw.
     fn appendInputLine(self: *Prompt, b: *glyphwire.Client.Batch) !void {
-        const buf = self.buffer.items;
+        const buf = self.line.text();
         // Clamp to the last real row: a stale `line_start_row` past the
         // grid bottom (see `writePowerlinePrefix`) would otherwise make
         // every `setCursor` below scroll the layer.
@@ -2427,11 +2436,11 @@ const Prompt = struct {
         }
 
         // Keep the caret within the box, working in columns not bytes.
-        if (self.cursor < self.input_scroll) {
-            self.input_scroll = self.cursor;
+        if (self.line.caret < self.input_scroll) {
+            self.input_scroll = self.line.caret;
         } else {
-            while (self.input_scroll < self.cursor and
-                lineedit.displayCol(buf[self.input_scroll..], self.cursor - self.input_scroll) >= box_w)
+            while (self.input_scroll < self.line.caret and
+                lineedit.displayCol(buf[self.input_scroll..], self.line.caret - self.input_scroll) >= box_w)
             {
                 self.input_scroll = lineedit.nextBoundary(buf, self.input_scroll);
             }
@@ -2498,16 +2507,14 @@ const Prompt = struct {
         const cur = try self.writePromptPrefix(null);
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
-        self.cursor = 0;
-        self.buffer.clearRetainingCapacity();
+        self.line.clear();
         // A plain typed invocation of a result-returning program (e.g.
         // `gw-hist` run by hand rather than via its Ctrl+R binding) left
         // its pick here instead of an empty line -- see
         // `pending_result_line`.
         if (self.takePendingResultLine()) |line| {
             defer self.client.alloc.free(line);
-            try self.buffer.appendSlice(self.client.alloc, line);
-            self.cursor = self.buffer.items.len;
+            try self.line.setText(self.client.alloc, line);
         }
         self.armCompletionHint();
         try self.renderInputLine();
@@ -2684,9 +2691,7 @@ const Prompt = struct {
             const res = try self.drawScrollView(0, null);
             self.view_scroll = res.offset;
         }
-        self.buffer.clearRetainingCapacity();
-        try self.buffer.appendSlice(self.client.alloc, text);
-        self.cursor = self.buffer.items.len;
+        try self.line.setText(self.client.alloc, text);
         self.input_scroll = 0;
         self.armCompletionHint();
         try self.renderInputLine();
@@ -2705,7 +2710,7 @@ const Prompt = struct {
             self.history_index = i - 1;
         } else {
             self.scratch.clearRetainingCapacity();
-            try self.scratch.appendSlice(self.client.alloc, self.buffer.items);
+            try self.scratch.appendSlice(self.client.alloc, self.line.text());
             self.history_index = self.history.items.len - 1;
         }
         try self.setLine(self.history.items[self.history_index.?]);
@@ -2728,27 +2733,18 @@ const Prompt = struct {
         }
     }
 
-    /// Deletes the codepoint before the cursor (backspace). `buffer` /
-    /// `cursor` are mutated locally; `setCursorAt` -> `renderInputLine`
-    /// repaints the box (no `delete_cells` in the repaint model).
+    /// Deletes the codepoint before the cursor (backspace). The field
+    /// does the edit; `setCursorAt` -> `renderInputLine` repaints the box
+    /// (no `delete_cells` in the repaint model).
     fn deleteBackward(self: *Prompt) !void {
-        if (self.cursor == 0) return;
-        const start = lineedit.prevBoundary(self.buffer.items, self.cursor);
-        try self.buffer.replaceRange(self.client.alloc, start, self.cursor - start, &.{});
-        self.cursor = start;
-        self.armCompletionHint();
-        try self.setCursorAt(self.cursor);
-        try self.refreshCompletionPickerIfOpen();
+        if (!self.line.deleteBackward()) return;
+        try self.afterEdit();
     }
 
     /// Deletes the codepoint at the cursor (forward delete).
     fn deleteForward(self: *Prompt) !void {
-        if (self.cursor >= self.buffer.items.len) return;
-        const end = lineedit.nextBoundary(self.buffer.items, self.cursor);
-        try self.buffer.replaceRange(self.client.alloc, self.cursor, end - self.cursor, &.{});
-        self.armCompletionHint();
-        try self.setCursorAt(self.cursor);
-        try self.refreshCompletionPickerIfOpen();
+        if (!self.line.deleteForward()) return;
+        try self.afterEdit();
     }
 
     /// Ctrl+Backspace: deletes the word behind the cursor, the same span
@@ -2756,34 +2752,49 @@ const Prompt = struct {
     /// it stops at `/` the way Ctrl+Left/Right already do on this line
     /// editor, unlike bash's whitespace-only `unix-word-rubout`).
     fn deleteWordBackward(self: *Prompt) !void {
-        if (self.cursor == 0) return;
-        const start = self.wordLeft();
-        try self.buffer.replaceRange(self.client.alloc, start, self.cursor - start, &.{});
-        self.cursor = start;
-        self.armCompletionHint();
-        try self.setCursorAt(self.cursor);
-        try self.refreshCompletionPickerIfOpen();
+        if (!self.line.deleteWordBackward()) return;
+        try self.afterEdit();
     }
 
     /// Ctrl+Delete: deletes the word ahead of the cursor -- the mirror of
     /// `deleteWordBackward`, using `wordRight`'s span.
     fn deleteWordForward(self: *Prompt) !void {
-        if (self.cursor >= self.buffer.items.len) return;
-        const end = self.wordRight();
-        try self.buffer.replaceRange(self.client.alloc, self.cursor, end - self.cursor, &.{});
-        self.armCompletionHint();
-        try self.setCursorAt(self.cursor);
-        try self.refreshCompletionPickerIfOpen();
+        if (!self.line.deleteWordForward()) return;
+        try self.afterEdit();
     }
 
     /// ctrl+u: deletes from the start of the line through the cursor.
+    /// Unlike the other edits this closes the completion picker instead
+    /// of re-filtering it -- there is no word left under the caret for it
+    /// to have been filtering on.
     fn killToStart(self: *Prompt) !void {
-        if (self.cursor == 0) return;
+        if (self.line.caret == 0) return;
         if (self.completion_picker != null) try self.closeCompletionPicker();
-        try self.buffer.replaceRange(self.client.alloc, 0, self.cursor, &.{});
-        self.cursor = 0;
+        _ = self.line.killToStart();
         self.armCompletionHint();
         try self.setCursorAt(0);
+    }
+
+    /// ctrl+k: deletes from the cursor to the end of the line. The
+    /// mirror of `killToStart`, and picker-closing for the same reason:
+    /// the word it was filtering ends at the caret.
+    fn killToEnd(self: *Prompt) !void {
+        if (self.line.caret >= self.line.text().len) return;
+        if (self.completion_picker != null) try self.closeCompletionPicker();
+        _ = self.line.killToEnd();
+        self.armCompletionHint();
+        try self.setCursorAt(self.line.caret);
+    }
+
+    /// The tail every buffer-changing edit shares: re-arm the idle
+    /// autocomplete hint, repaint the input box at the field's new caret,
+    /// and re-filter an open completion picker against the word now under
+    /// it (an edit keeps the picker open, unlike a deliberate reposition
+    /// -- see `moveCursorTo`).
+    fn afterEdit(self: *Prompt) !void {
+        self.armCompletionHint();
+        try self.setCursorAt(self.line.caret);
+        try self.refreshCompletionPickerIfOpen();
     }
 
     /// Moves the cursor without changing the buffer -- ctrl+a/ctrl+e,
@@ -2880,7 +2891,7 @@ const Prompt = struct {
         if (plan.ended) {
             // Ran into the prompt row -- land back on the real cursor
             // (`setCursorAt` also snaps the view back to the live tail).
-            try self.setCursorAt(self.cursor);
+            try self.setCursorAt(self.line.caret);
             return;
         }
         if (plan.view_scroll != self.view_scroll) try self.scrollWindow(plan.view_scroll);
@@ -3213,17 +3224,17 @@ const Prompt = struct {
         try self.submitLine();
     }
 
-    /// The offset ctrl+right lands on -- see `lineedit.wordRight`.
+    /// The offset ctrl+right lands on -- see `lineedit.wordRightFrom`.
     fn wordRight(self: *const Prompt) usize {
-        return lineedit.wordRight(self.buffer.items, self.cursor);
+        return self.line.wordRightOffset();
     }
 
-    /// The offset ctrl+left lands on -- see `lineedit.wordLeft`.
+    /// The offset ctrl+left lands on -- see `lineedit.wordLeftFrom`.
     fn wordLeft(self: *const Prompt) usize {
-        return lineedit.wordLeft(self.buffer.items, self.cursor);
+        return self.line.wordLeftOffset();
     }
 
-    /// Clamps `self.cursor` to `offset` (a byte offset into `buffer`),
+    /// Moves the field's caret to `offset` (a byte offset into the line),
     /// ends any browse / scrollback view, and repaints the input line
     /// (`renderInputLine`) so the server cursor lands at the right screen
     /// cell -- the column is the *display width* left of the cursor, not
@@ -3247,7 +3258,7 @@ const Prompt = struct {
             const res = try self.drawScrollView(0, null);
             self.view_scroll = res.offset;
         }
-        self.cursor = std.math.clamp(offset, 0, self.buffer.items.len);
+        _ = self.line.moveTo(offset);
         try self.renderInputLine();
     }
 
@@ -3285,7 +3296,7 @@ const Prompt = struct {
         }
 
         try self.drawSetCursor(self.line_start_row, self.line_start_col);
-        if (self.buffer.items.len > 0) try self.drawText(self.buffer.items, null, null);
+        if (self.line.text().len > 0) try self.drawText(self.line.text(), null, null);
         // Drop to the row the re-echo actually ended on, read back from
         // the server rather than assumed: a command line longer than the
         // grid wraps onto further rows here, and `line_start_row + 1`
@@ -3314,13 +3325,13 @@ const Prompt = struct {
                 self.history.items[self.history.items.len - 1]
             else
                 null;
-            if (history.shouldRecord(prev, self.buffer.items)) {
-                try self.history.append(alloc, try alloc.dupe(u8, self.buffer.items));
+            if (history.shouldRecord(prev, self.line.text())) {
+                try self.history.append(alloc, try alloc.dupe(u8, self.line.text()));
                 // The same line again in `history_pending`, which is what
                 // the next flush actually appends to the file -- see that
                 // field's doc comment on why the flush can't just write
                 // `self.history` back.
-                try self.history_pending.append(alloc, try alloc.dupe(u8, self.buffer.items));
+                try self.history_pending.append(alloc, try alloc.dupe(u8, self.line.text()));
                 self.history_dirty = true;
                 self.persist_gate.note();
             }
@@ -3375,7 +3386,7 @@ const Prompt = struct {
         }
     }
 
-    /// Runs whatever the just-committed line (`self.buffer`) names.
+    /// Runs whatever the just-committed line (`self.line`) names.
     ///
     /// The line goes through `parse.parse` first (pipes, redirects,
     /// `&&` / `||` / `;`). A *bare* command -- one stage, no redirects --
@@ -3399,12 +3410,12 @@ const Prompt = struct {
     /// `&&` / `||` / `;` chain, but not as one stage of a `|` pipeline
     /// (see `runPipeline`).
     fn dispatchLine(self: *Prompt) !void {
-        return self.dispatchLineText(self.buffer.items);
+        return self.dispatchLineText(self.line.text());
     }
 
     /// The body of `dispatchLine`, split out so the `on{ chdir }`
     /// auto-listing can dispatch a command line that isn't sitting in
-    /// `self.buffer`. See `dispatchLine`'s doc comment for the rules.
+    /// `self.line`. See `dispatchLine`'s doc comment for the rules.
     fn dispatchLineText(self: *Prompt, text: []const u8) !void {
         const alloc = self.client.alloc;
         const trimmed = std.mem.trimStart(u8, text, " \t");
@@ -5506,12 +5517,8 @@ const Prompt = struct {
     /// column math in the repaint is display-width-correct so a CJK run
     /// lands right.
     fn insertText(self: *Prompt, text: []const u8) !void {
-        if (text.len == 0) return;
-        try self.buffer.insertSlice(self.client.alloc, self.cursor, text);
-        self.cursor += text.len;
-        self.armCompletionHint();
-        try self.setCursorAt(self.cursor); // -> renderInputLine repaints the box
-        try self.refreshCompletionPickerIfOpen();
+        if (!try self.line.insert(self.client.alloc, text)) return;
+        try self.afterEdit(); // -> renderInputLine repaints the box
     }
 
     /// Tab: filename completion for the word under the cursor. Reads the
@@ -5534,9 +5541,9 @@ const Prompt = struct {
     fn doComplete(self: *Prompt) !void {
         const alloc = self.client.alloc;
 
-        const line = self.buffer.items;
-        const wr = complete.wordRange(line, self.cursor);
-        const word = line[wr.start..self.cursor];
+        const line = self.line.text();
+        const wr = complete.wordRange(line, self.line.caret);
+        const word = line[wr.start..self.line.caret];
         const dp = complete.dirPrefix(word);
 
         var cands: std.ArrayList(CompletionCandidate) = .empty;
@@ -5672,13 +5679,13 @@ const Prompt = struct {
         const active_at = self.completion_hint_activity_at orelse return false;
         if (active_at.untilNow(self.client.io).raw.toMilliseconds() < autocomplete_idle_ms) return false;
 
-        const line = self.buffer.items;
-        if (self.cursor != line.len) return false;
+        const line = self.line.text();
+        if (self.line.caret != line.len) return false;
 
-        const wr = complete.wordRange(line, self.cursor);
-        if (wr.end != self.cursor) return false;
+        const wr = complete.wordRange(line, self.line.caret);
+        if (wr.end != self.line.caret) return false;
 
-        const word = line[wr.start..self.cursor];
+        const word = line[wr.start..self.line.caret];
         if (word.len == 0) return false;
 
         self.completion_hint_dirty = false;
@@ -5708,7 +5715,7 @@ const Prompt = struct {
     /// hint. If no hint has been drawn yet, use the same completion path
     /// as Tab so Right-at-end is still a completion gesture.
     fn acceptCompletionHintOrComplete(self: *Prompt) !void {
-        if (self.cursor != self.buffer.items.len or self.buffer.items.len == 0) return;
+        if (self.line.caret != self.line.text().len or self.line.text().len == 0) return;
         if (self.completion_hint_visible and self.completion_hint.items.len > 0) {
             try self.insertText(self.completion_hint.items);
             return;
@@ -5745,9 +5752,9 @@ const Prompt = struct {
     fn recomputeAndDrawPicker(self: *Prompt, move_delta: isize) anyerror!void {
         const alloc = self.client.alloc;
 
-        const line = self.buffer.items;
-        const wr = complete.wordRange(line, self.cursor);
-        const word = line[wr.start..self.cursor];
+        const line = self.line.text();
+        const wr = complete.wordRange(line, self.line.caret);
+        const word = line[wr.start..self.line.caret];
         const dp = complete.dirPrefix(word);
 
         var cands: std.ArrayList(CompletionCandidate) = .empty;
@@ -5863,9 +5870,9 @@ const Prompt = struct {
         const st = self.completion_picker orelse return;
         const alloc = self.client.alloc;
 
-        const line = self.buffer.items;
-        const wr = complete.wordRange(line, self.cursor);
-        const word = line[wr.start..self.cursor];
+        const line = self.line.text();
+        const wr = complete.wordRange(line, self.line.caret);
+        const word = line[wr.start..self.line.caret];
         const dp = complete.dirPrefix(word);
 
         var cands: std.ArrayList(CompletionCandidate) = .empty;

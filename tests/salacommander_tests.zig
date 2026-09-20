@@ -571,35 +571,23 @@ pub fn isWithinComparesWholeComponentsTest(_: std.Io, _: std.mem.Allocator) !voi
 
 // ─── Dialogs ────────────────────────────────────────────────────────────
 
-pub fn lineEditHandlesUtf8Test(_: std.Io, alloc: std.mem.Allocator) !void {
-    var e = try dialog.LineEdit.init(alloc, "caf");
-    defer e.deinit(alloc);
-    try e.insert(alloc, "é!");
-    try testz.expectEqualStr(e.text(), "café!");
-    e.left();
-    e.backspace(); // removes the two-byte `é` whole
-    try testz.expectEqualStr(e.text(), "caf!");
-    e.home();
-    e.deleteForward();
-    try testz.expectEqualStr(e.text(), "af!");
-}
-
-pub fn lineEditHandlesEditingKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    // The same field the dialogs use and Alt+D puts on a pane's title
-    // row, driven by key name.
+pub fn dialogFieldIsTheSharedLineEditTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `dialog.LineEdit` is glyphwire's shared field (see the `lineedit`
+    // group for its own coverage); what is pinned here is that a dialog's
+    // field really is that type, with the word jumps the shell prompt has
+    // and not the thinner set salacommander used to carry.
     var e = try dialog.LineEdit.init(alloc, "/home/me/code");
     defer e.deinit(alloc);
-    try testz.expectTrue(e.handleKey("backspace", false));
-    try testz.expectEqualStr(e.text(), "/home/me/cod");
-    try testz.expectTrue(e.handleKey("home", false));
-    try testz.expectTrue(e.handleKey("delete", false));
-    try testz.expectEqualStr(e.text(), "home/me/cod");
-    try testz.expectTrue(e.handleKey("u", true));
-    try testz.expectEqualStr(e.text(), "");
-    // Not the field's: the caller decides what they mean.
-    try testz.expectFalse(e.handleKey("enter", false));
-    try testz.expectFalse(e.handleKey("d", true));
-    try testz.expectFalse(e.handleKey("u", false));
+    _ = try e.insert(alloc, "é!");
+    try testz.expectEqualStr(e.text(), "/home/me/codeé!");
+    try testz.expectEqual(e.handleKey("backspace", .{}), .edited); // the `!`
+    try testz.expectTrue(e.deleteBackward()); // the two-byte `é`, whole
+    try testz.expectEqualStr(e.text(), "/home/me/code");
+
+    // Ctrl+Backspace takes one path segment, which the old field had no
+    // key for at all.
+    try testz.expectEqual(e.handleKey("backspace", .{ .ctrl = true }), .edited);
+    try testz.expectEqualStr(e.text(), "/home/me/");
 }
 
 pub fn clickColumnFindsTheCaretOffsetTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -624,26 +612,26 @@ pub fn clickColumnFindsTheCaretOffsetTest(_: std.Io, _: std.mem.Allocator) !void
 pub fn dialogHotkeysOnlyWithoutATextFieldTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var conflict = try dialog.Dialog.init(alloc, "t", "m", &dialog.conflict_buttons, .{});
     defer conflict.deinit(alloc);
-    try testz.expectEqual(conflict.handleKey("s", false, false).?, dialog.Button.skip);
-    try testz.expectEqual(conflict.handleKey("a", false, false).?, dialog.Button.overwrite_all);
+    try testz.expectEqual(conflict.handleKey("s", .{}).?, dialog.Button.skip);
+    try testz.expectEqual(conflict.handleKey("a", .{}).?, dialog.Button.overwrite_all);
 
     var input = try dialog.Dialog.init(alloc, "t", "m", &dialog.ok_cancel, .{ .input = "/tmp" });
     defer input.deinit(alloc);
     // `o` would be OK's hotkey; in a text field it's just typing.
-    try testz.expectTrue(input.handleKey("o", false, false) == null);
+    try testz.expectTrue(input.handleKey("o", .{}) == null);
     try input.handleText(alloc, "/x");
     try testz.expectEqualStr(input.inputText(), "/tmp/x");
-    try testz.expectEqual(input.handleKey("enter", false, false).?, dialog.Button.ok);
+    try testz.expectEqual(input.handleKey("enter", .{}).?, dialog.Button.ok);
 }
 
 pub fn dialogEscapeAndFocusTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var d = try dialog.Dialog.init(alloc, "Delete", "sure?", &dialog.yes_no, .{ .focus = 1 });
     defer d.deinit(alloc);
     // Delete starts on No, so Enter alone is safe.
-    try testz.expectEqual(d.handleKey("enter", false, false).?, dialog.Button.no);
-    try testz.expectTrue(d.handleKey("tab", false, false) == null);
-    try testz.expectEqual(d.handleKey("enter", false, false).?, dialog.Button.yes);
-    try testz.expectEqual(d.handleKey("escape", false, false).?, dialog.Button.no);
+    try testz.expectEqual(d.handleKey("enter", .{}).?, dialog.Button.no);
+    try testz.expectTrue(d.handleKey("tab", .{}) == null);
+    try testz.expectEqual(d.handleKey("enter", .{}).?, dialog.Button.yes);
+    try testz.expectEqual(d.handleKey("escape", .{}).?, dialog.Button.no);
 }
 
 // ─── Actions and config ─────────────────────────────────────────────────

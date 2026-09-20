@@ -38,6 +38,7 @@ const Tests = blk: {
         testz.Group{ .name = "Read Tests", .tag = "read", .mod = @import("./read_tests.zig") },
         testz.Group{ .name = "Markdown Tests", .tag = "md", .mod = @import("./md_tests.zig") },
         testz.Group{ .name = "Keybind Tests", .tag = "keybind", .mod = @import("./keybind_tests.zig") },
+        testz.Group{ .name = "Line Edit Tests", .tag = "lineedit", .mod = @import("./lineedit_tests.zig") },
         testz.Group{ .name = "Salacommander Tests", .tag = "salacommander", .mod = @import("./salacommander_tests.zig") },
     }, .{});
 };

@@ -23,6 +23,7 @@
 //! that runs `:w` goes through the same outcome the keystroke does.
 
 const std = @import("std");
+const glyphwire = @import("glyphwire");
 const buffer = @import("buffer.zig");
 const motion = @import("motion.zig");
 const display = @import("display.zig");
@@ -56,13 +57,9 @@ pub const max_tab_width: usize = 16;
 /// `line_numbers` overrides it after `init`, the way `page_lines` does.
 pub const LineNumbers = enum { off, absolute, relative };
 
-/// Modifier state accompanying a `feedKey` call, matching what
-/// glyphwire's `InputListener` reports.
-pub const Mods = struct {
-    ctrl: bool = false,
-    alt: bool = false,
-    shift: bool = false,
-};
+/// Modifier state accompanying a `feedKey` call -- glyphwire's own, so
+/// it can be handed straight to the shared `LineEdit` the `:` line is.
+pub const Mods = glyphwire.Mods;
 
 /// What the host must do on zoe's behalf, since the editor itself does no
 /// IO. Returned by every `feed*` call; `.none` for the overwhelming
@@ -172,8 +169,12 @@ pub const Editor = struct {
     /// somewhere to put it.
     show_whitespace: bool = false,
 
-    /// The `:` line being typed, without the leading colon.
-    cmdline: std.ArrayList(u8) = .empty,
+    /// The `:` line being typed, without the leading colon -- the same
+    /// one-line field gw-shell's prompt and salacommander's path row use,
+    /// so a long `:e some/deep/path` is editable rather than
+    /// backspace-only. `.drop` (the default) because a `:` line is one
+    /// command: a pasted newline is a mistake, not a separator.
+    cmdline: glyphwire.LineEdit = .{},
     /// The argument of the command just run, kept alive so an `Outcome`
     /// can borrow it (see `Outcome.write`).
     cmd_arg: std.ArrayList(u8) = .empty,
@@ -277,7 +278,7 @@ pub const Editor = struct {
                     return self.takeYankPending();
                 },
                 .command => {
-                    try self.cmdline.appendSlice(self.alloc, rest);
+                    _ = try self.cmdline.insert(self.alloc, rest);
                     return self.takeYankPending();
                 },
                 .normal, .visual, .visual_line => {
@@ -390,18 +391,23 @@ pub const Editor = struct {
                 return .none;
             },
             .command => {
-                if (eq(u8, key, "enter")) return self.runCommand();
-                if (eq(u8, key, "backspace")) {
-                    if (self.cmdline.items.len == 0) {
-                        // Backspacing over the `:` itself leaves the mode,
-                        // same as vim.
-                        self.mode = .normal;
-                        return .none;
-                    }
-                    const keep = prevCodepointIn(self.cmdline.items, self.cmdline.items.len);
-                    self.cmdline.shrinkRetainingCapacity(keep);
+                // Backspacing over the `:` itself leaves the mode, same
+                // as vim -- tested before the field sees the key, since
+                // to the field an empty line is simply nothing to delete.
+                if (eq(u8, key, "backspace") and self.cmdline.isEmpty()) {
+                    self.mode = .normal;
+                    return .none;
                 }
-                return .none;
+                // Everything else the shared field knows is the field's:
+                // Home/Ctrl+A, End/Ctrl+E, Ctrl+Left/Right over the path
+                // segments of a `:e`, Ctrl+Backspace, Ctrl+U, Ctrl+K.
+                switch (self.cmdline.handleKey(key, mods)) {
+                    .submit => return self.runCommand(),
+                    .moved, .edited, .ignored => return .none,
+                    // Escape is `escape`'s below, which also clears the
+                    // line; it never reaches here.
+                    .cancel => return .none,
+                }
             },
         }
     }
@@ -419,7 +425,7 @@ pub const Editor = struct {
             },
             .command => {
                 self.mode = .normal;
-                self.cmdline.clearRetainingCapacity();
+                self.cmdline.clear();
             },
             .visual, .visual_line => self.exitVisual(),
         }
@@ -592,7 +598,7 @@ pub const Editor = struct {
 
             ':' => {
                 self.mode = .command;
-                self.cmdline.clearRetainingCapacity();
+                self.cmdline.clear();
             },
             else => {},
         }
@@ -980,7 +986,7 @@ pub const Editor = struct {
             ':' => {
                 self.exitVisual();
                 self.mode = .command;
-                self.cmdline.clearRetainingCapacity();
+                self.cmdline.clear();
             },
             else => {},
         }
@@ -1099,8 +1105,8 @@ pub const Editor = struct {
     /// the host to carry out.
     fn runCommand(self: *Editor) !Outcome {
         self.mode = .normal;
-        const line = std.mem.trim(u8, self.cmdline.items, " \t");
-        defer self.cmdline.clearRetainingCapacity();
+        const line = std.mem.trim(u8, self.cmdline.text(), " \t");
+        defer self.cmdline.clear();
         if (line.len == 0) return .none;
 
         // `:42` -- jump to a line.
@@ -1327,16 +1333,6 @@ fn allDigits(s: []const u8) bool {
         if (!std.ascii.isDigit(c)) return false;
     }
     return s.len > 0;
-}
-
-/// Start of the codepoint ending at `end` in a plain byte slice -- the
-/// `cmdline` equivalent of `motion.prevCodepoint`, which needs a
-/// `Buffer`.
-fn prevCodepointIn(s: []const u8, end: usize) usize {
-    if (end == 0) return 0;
-    var i = end - 1;
-    while (i > 0 and s[i] & 0xC0 == 0x80) i -= 1;
-    return i;
 }
 
 /// `dw`'s one special case: where a bare `w` would jump to the next line,

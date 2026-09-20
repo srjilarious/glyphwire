@@ -59,6 +59,7 @@ const Action = actions.Action;
 const Dialog = dialog_mod.Dialog;
 const Button = dialog_mod.Button;
 const LineEdit = dialog_mod.LineEdit;
+const lineedit = glyphwire.lineedit;
 const Color = glyphwire.Color;
 const Batch = glyphwire.Client.Batch;
 const lsfmt = ls.format;
@@ -367,7 +368,7 @@ pub const Ui = struct {
             // Typed text is the shell's while its panel is up -- it has
             // a line editor, and this one has type-to-find.
             .text, .paste => |t| if (self.shell.isOpen()) {} else if (self.path_edit) |*e| {
-                try e.line.insert(self.alloc, t.text);
+                _ = try e.line.insert(self.alloc, t.text);
                 self.pane_dirty[e.pane] = true;
             } else {
                 // Nothing else takes typing, so it's type-to-find.
@@ -677,31 +678,47 @@ pub const Ui = struct {
         self.pane_dirty[e.pane] = true;
     }
 
-    /// Keys while a title row is a field: Enter goes where it says,
-    /// Escape puts the directory back, and the rest are the same editing
-    /// keys a dialog's field has. Nothing falls through to the keymap --
-    /// a `d` typed into a path isn't a command.
+    /// Keys while a title row is a field: the shared `LineEdit`'s --
+    /// Home/Ctrl+A, End/Ctrl+E, Ctrl+Left/Right word jumps over the path
+    /// segments, Ctrl+Backspace to drop one -- with Enter going where the
+    /// field says and Escape putting the directory back. Nothing falls
+    /// through to the keymap: a `d` typed into a path isn't a command.
+    /// An Alt or Super chord is the exception the field itself declines
+    /// (`.ignored`), so Alt+D on the *other* pane still moves the field
+    /// there rather than being swallowed.
     fn pathEditKey(self: *Ui, k: glyphwire.KeyEvent) !void {
         const e = if (self.path_edit) |*pe| pe else return;
-        if (std.mem.eql(u8, k.key, "escape")) return self.endPathEdit();
-        if (std.mem.eql(u8, k.key, "enter") or std.mem.eql(u8, k.key, "kp_enter")) {
-            const i = e.pane;
-            // Copied: closing the field frees the text it's read from.
-            const typed = try self.alloc.dupe(u8, std.mem.trim(u8, e.line.text(), " "));
-            defer self.alloc.free(typed);
-            self.endPathEdit();
-            if (typed.len == 0) return;
+        switch (e.line.handleKey(k.key, k.mods)) {
+            .moved, .edited => {
+                self.pane_dirty[e.pane] = true;
+                return;
+            },
+            .cancel => return self.endPathEdit(),
+            .ignored => {
+                if (k.mods.alt or k.mods.super) {
+                    if (self.keymap.lookup(k.key, k.mods)) |action| {
+                        self.clearMessage();
+                        return self.perform(action);
+                    }
+                }
+                return;
+            },
+            .submit => {
+                const i = e.pane;
+                // Copied: closing the field frees the text it's read from.
+                const typed = try self.alloc.dupe(u8, std.mem.trim(u8, e.line.text(), " "));
+                defer self.alloc.free(typed);
+                self.endPathEdit();
+                if (typed.len == 0) return;
 
-            const p = &self.panes[i];
-            const path = try self.resolveTyped(p.path, typed);
-            defer self.alloc.free(path);
-            p.load(path) catch |err| try self.setMessage("{s}: {t}", .{ typed, err });
-            self.pane_dirty[i] = true;
-            self.bar_dirty = true;
-            return;
+                const p = &self.panes[i];
+                const path = try self.resolveTyped(p.path, typed);
+                defer self.alloc.free(path);
+                p.load(path) catch |err| try self.setMessage("{s}: {t}", .{ typed, err });
+                self.pane_dirty[i] = true;
+                self.bar_dirty = true;
+            },
         }
-        _ = e.line.handleKey(k.key, k.ctrl());
-        self.pane_dirty[e.pane] = true;
     }
 
     fn reloadBoth(self: *Ui) !void {
@@ -945,7 +962,7 @@ pub const Ui = struct {
             defer ev.deinit(self.alloc);
             switch (ev) {
                 .key => |k| if (k.pressed) {
-                    if (d.handleKey(k.key, k.ctrl(), k.shift())) |b| return b;
+                    if (d.handleKey(k.key, k.mods)) |b| return b;
                     try self.renderDialog();
                 },
                 .text, .paste => |t| {
@@ -962,7 +979,7 @@ pub const Ui = struct {
                 },
                 .shutdown => {
                     self.quit = true;
-                    return d.handleKey("escape", false, false).?;
+                    return d.handleKey("escape", .{}).?;
                 },
                 else => {},
             }
@@ -1421,28 +1438,12 @@ fn errorText(err: anyerror) []const u8 {
     };
 }
 
-fn nextCodepoint(s: []const u8, i: usize) usize {
-    if (i >= s.len) return s.len;
-    const len = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
-    return @min(i + len, s.len);
-}
+const nextCodepoint = lineedit.nextBoundary;
 
-/// The byte offset `cells` display columns past `start` in `text`, on a
-/// UTF-8 boundary and clamped to the end. A click that lands on the far
-/// half of a wide character puts the caret before it rather than inside
-/// it -- there is no offset inside one.
-pub fn offsetAtCol(text: []const u8, start: usize, cells: usize) usize {
-    var i = @min(start, text.len);
-    var w: usize = 0;
-    while (i < text.len) {
-        const next = nextCodepoint(text, i);
-        const cw = glyphwire.stringWidth(text[i..next]);
-        if (w + cw > cells) break;
-        w += cw;
-        i = next;
-    }
-    return i;
-}
+/// The byte offset `cells` display columns past `start` in `text` -- the
+/// shared field's, re-exported because it is also what a click in the
+/// Alt+D row resolves through and the tests reach for it by name.
+pub const offsetAtCol = lineedit.offsetAtCol;
 
 /// Which part of a text field's contents to show so the caret stays in a
 /// `width`-cell field: the byte to start drawing from, and the caret's
@@ -1450,8 +1451,8 @@ pub fn offsetAtCol(text: []const u8, start: usize, cells: usize) usize {
 fn fieldView(text: []const u8, caret: usize, width: usize) struct { start: usize, caret_col: usize } {
     const w = @max(width, 2);
     var start: usize = 0;
-    while (start < caret and glyphwire.stringWidth(text[start..caret]) >= w) {
+    while (start < caret and lineedit.cellWidth(text[start..caret]) >= w) {
         start = nextCodepoint(text, start);
     }
-    return .{ .start = start, .caret_col = glyphwire.stringWidth(text[start..caret]) };
+    return .{ .start = start, .caret_col = lineedit.cellWidth(text[start..caret]) };
 }
