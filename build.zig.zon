@@ -8,8 +8,8 @@
     .minimum_zig_version = "0.17.0-dev.1857+3c46da14d",
     .dependencies = .{
         .testz = .{
-            .url = "https://github.com/srjilarious/testz/archive/refs/tags/v1.6.0.tar.gz",
-            .hash = "testz-1.6.0-abaPyQ7NAQDM8Rx5S8wsrcnp62NpDsP451Hj8haYa8ld",
+            .url = "https://github.com/srjilarious/testz/archive/refs/tags/v1.7.0.tar.gz",
+            .hash = "testz-1.7.0-abaPyV_OAQCzDtz9Yt-CAU9-4XlxkTU45ec-ChYRAO4l",
         },
         .zargunaught = .{
             .url = "https://github.com/srjilarious/zargunaught/archive/refs/tags/v1.4.0.tar.gz",
