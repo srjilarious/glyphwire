@@ -109,10 +109,18 @@ you'd notice interactively. Know your fleet is uniform, recent hardware?
 `GW_PROVISION_CPU=native provision_remote ...` (or a specific `-Dcpu`
 value) skips the safety margin.
 
-It then drops `shell.conf.lua` / `zoe.conf.lua` from this repo's templates onto
-the remote *only if it doesn't already have one*. Binaries are always
-overwritten; run it again any time you want the remote caught up with a
-local rebuild.
+What goes over is whatever `zig build install-local` installs -- gw-agent,
+gw-shell, gw-ls, gw-hist, gw-view, gw-read, gwmd, zoe, gmux and
+salacommander, plus the shared assets and zoe's tree-sitter grammars --
+so adding a program to that step is all it takes to have it provisioned
+too.
+
+It then drops each of those programs' configs (`shell.conf.lua`,
+`zoe.conf.lua`, `ls.conf.lua`, `read.conf.lua`, `gmux.conf.lua`,
+`salacommander.conf.lua`) from this repo's templates onto the remote
+*only if it doesn't already have one*. `host.conf.lua` is not among them:
+the window always runs locally. Binaries are always overwritten; run it
+again any time you want the remote caught up with a local rebuild.
 
 It needs passwordless ssh (key or agent) to the target already working --
 see the script's header comment for why. The command it prints at the

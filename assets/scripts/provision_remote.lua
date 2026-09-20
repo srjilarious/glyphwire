@@ -1,8 +1,15 @@
 -- provision_remote <user@host> [ssh options...] -- build this checkout's
--- remote-side glyphwire programs (gw-agent, gw-shell, gw-ls, gw-view,
--- zoe) and copy them to a real remote server over ssh, then drop
--- shell.conf.lua / zoe.conf.lua there from the bundled templates if the remote
--- doesn't already have one of its own.
+-- remote-side glyphwire programs and copy them to a real remote server
+-- over ssh, then drop each program's config there from the bundled
+-- templates if the remote doesn't already have one of its own.
+--
+-- What goes over is whatever `zig build install-local` installs, so the
+-- list stays in one place (build.zig) rather than being repeated here:
+-- gw-agent, gw-shell, gw-ls, gw-hist, gw-view, gw-read, gwmd, zoe, gmux
+-- and salacommander, plus the shared assets and zoe's tree-sitter
+-- grammars. The `glyphwire` host binary rides along too -- it is in the
+-- same install step and is harmless over there, since the window always
+-- runs on the local machine.
 --
 -- Install as ~/.config/glyphwire/scripts/provision_remote.lua, then from
 -- a glyphwire-shell session whose current directory is a glyphwire
@@ -22,8 +29,8 @@
 -- hung prompt is stopped the same way a hung typed command would be:
 -- Ctrl-C.
 --
--- Binaries always get overwritten (the point is "latest"); the two
--- config files are only ever created, never touched if already there.
+-- Binaries always get overwritten (the point is "latest"); the config
+-- files are only ever created, never touched if already there.
 --
 -- Built with `-Dcpu=baseline` -- a plain `zig build` tunes for *this*
 -- machine's exact CPU, and a remote box with an older or just different
@@ -132,8 +139,20 @@ if copy_code ~= 0 then
   return copy_code
 end
 
-push_config_if_missing("shell/shell.conf.template.lua", "~/.config/glyphwire/shell.conf.lua", "shell.conf.lua")
-push_config_if_missing("zoe/zoe.conf.template.lua", "~/.config/glyphwire/zoe.conf.lua", "zoe.conf.lua")
+-- One entry per program that reads a config over there. `host.conf.lua`
+-- is deliberately absent: it configures the window, which never runs on
+-- the remote side.
+local config_templates = {
+  { "shell/shell.conf.template.lua", "shell.conf.lua" },
+  { "zoe/zoe.conf.template.lua", "zoe.conf.lua" },
+  { "ls/ls.conf.template.lua", "ls.conf.lua" },
+  { "read/read.conf.template.lua", "read.conf.lua" },
+  { "gmux/gmux.conf.template.lua", "gmux.conf.lua" },
+  { "salacommander/salacommander.conf.template.lua", "salacommander.conf.lua" },
+}
+for _, entry in ipairs(config_templates) do
+  push_config_if_missing(entry[1], "~/.config/glyphwire/" .. entry[2], entry[2])
+end
 
 -- Both forms need the `--remote-command`: the binaries land in
 -- ~/.local/share/glyphwire/bin, which is not on the minimal PATH a
