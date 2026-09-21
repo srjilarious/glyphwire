@@ -82,6 +82,10 @@ pub const Align = enum { none, left, center, right };
 
 pub const Table = struct {
     aligns: []Align,
+    /// Dashes in each column's cell of the separator row, colons not
+    /// counted: `|--|:------:|` is `{2, 6}`. Pandoc's width hint -- a
+    /// renderer short on room can size columns in these proportions.
+    dashes: []usize,
     header: []Text,
     /// Every row has exactly `header.len` cells, padded or truncated.
     rows: [][]Text,
@@ -369,7 +373,12 @@ fn splitRow(a: Allocator, line: []const u8) ![][]const u8 {
     return cells.items;
 }
 
-fn separatorAligns(a: Allocator, line: []const u8) !?[]Align {
+const Separator = struct {
+    aligns: []Align,
+    dashes: []usize,
+};
+
+fn parseSeparator(a: Allocator, line: []const u8) !?Separator {
     if (std.mem.indexOfScalar(u8, line, '-') == null) return null;
     const trimmed = std.mem.trim(u8, line, " ");
     if (std.mem.indexOfScalar(u8, trimmed, '|') == null and trimmed.len > 0 and trimmed[0] != ':') {
@@ -378,7 +387,8 @@ fn separatorAligns(a: Allocator, line: []const u8) !?[]Align {
     }
     const cells = try splitRow(a, line);
     const aligns = try a.alloc(Align, cells.len);
-    for (cells, aligns) |cell, *al| {
+    const counts = try a.alloc(usize, cells.len);
+    for (cells, aligns, counts) |cell, *al, *count| {
         if (cell.len == 0) return null;
         const left = cell[0] == ':';
         const right = cell[cell.len - 1] == ':';
@@ -386,8 +396,9 @@ fn separatorAligns(a: Allocator, line: []const u8) !?[]Align {
         if (dashes.len == 0) return null;
         for (dashes) |c| if (c != '-') return null;
         al.* = if (left and right) .center else if (left) .left else if (right) .right else .none;
+        count.* = dashes.len;
     }
-    return aligns;
+    return .{ .aligns = aligns, .dashes = counts };
 }
 
 /// `[label]: destination "title"` on one line.
@@ -509,10 +520,10 @@ const BlockParser = struct {
                 continue;
             }
             if (i + 1 < lines.len and std.mem.indexOfScalar(u8, line, '|') != null) {
-                if (try separatorAligns(a, lines[i + 1])) |aligns| {
+                if (try parseSeparator(a, lines[i + 1])) |sep| {
                     const header = try splitRow(a, line);
-                    if (header.len == aligns.len) {
-                        i = try self.table(lines, i, header, aligns, &blocks);
+                    if (header.len == sep.aligns.len) {
+                        i = try self.table(lines, i, header, sep, &blocks);
                         continue;
                     }
                 }
@@ -673,7 +684,7 @@ const BlockParser = struct {
         return i;
     }
 
-    fn table(self: *BlockParser, lines: []const []const u8, start: usize, header_cells: [][]const u8, aligns: []Align, blocks: *std.ArrayList(Block)) !usize {
+    fn table(self: *BlockParser, lines: []const []const u8, start: usize, header_cells: [][]const u8, sep: Separator, blocks: *std.ArrayList(Block)) !usize {
         const a = self.arena;
         const ncols = header_cells.len;
         const header = try a.alloc(Text, ncols);
@@ -689,7 +700,7 @@ const BlockParser = struct {
             for (row, 0..) |*t, ci| t.* = .{ .raw = if (ci < cells.len) cells[ci] else "" };
             try rows.append(a, row);
         }
-        try blocks.append(a, .{ .table = .{ .aligns = aligns, .header = header, .rows = rows.items } });
+        try blocks.append(a, .{ .table = .{ .aligns = sep.aligns, .dashes = sep.dashes, .header = header, .rows = rows.items } });
         return i;
     }
 };

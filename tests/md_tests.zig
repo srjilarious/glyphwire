@@ -292,6 +292,51 @@ pub fn tableColumnsShrinkToFitTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(lay.rows, 1 + 6 + 1);
 }
 
+fn expectFit(alloc: std.mem.Allocator, want: []const usize, min: []const usize, dashes: []const usize, avail: usize, expected: []const usize) !void {
+    var out: [8]usize = undefined;
+    try layout.fitColumnWidths(alloc, want, min, dashes, avail, out[0..want.len]);
+    for (expected, out[0..want.len]) |e, o| try testz.expectEqual(o, e);
+}
+
+/// `fitColumnWidths`: everything at its natural width when it fits;
+/// otherwise every column gets its longest word and the rest of the room
+/// goes to whichever wants it most, so a column that never wraps keeps
+/// its width and the prose column takes the slack.
+pub fn fitColumnWidthsSharesRoomByWhatEachWantsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const eq = &[_]usize{ 3, 3, 3, 3 };
+    // Fits: natural widths.
+    try expectFit(alloc, &.{ 8, 25, 7, 70 }, &.{ 8, 10, 7, 12 }, eq, 200, &.{ 8, 25, 7, 70 });
+    // 55 cells: mins take 37, the 18 spare split 15:58 between the two
+    // columns that want more. Flag and Default keep their width.
+    try expectFit(alloc, &.{ 8, 25, 7, 70 }, &.{ 8, 10, 7, 12 }, eq, 55, &.{ 8, 13, 7, 27 });
+    // Not even the words fit: from the mins, shrink the widest.
+    try expectFit(alloc, &.{ 8, 25, 7, 70 }, &.{ 8, 10, 7, 12 }, eq, 30, &.{ 7, 8, 7, 8 });
+}
+
+/// Separator dash counts that differ are an author's width hint: the
+/// room left after every column's longest word is shared in those
+/// proportions, no column wider than it wants, what a capped column
+/// can't use going to the others. Equal counts (the usual `|---|---|`)
+/// are no hint at all.
+pub fn fitColumnWidthsFollowsDashHintTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // 40 cells, dashes 1:1:6. After the 15 of mins, 25 spare: 3, 3, 19.
+    try expectFit(alloc, &.{ 30, 30, 60 }, &.{ 5, 5, 5 }, &.{ 1, 1, 6 }, 40, &.{ 8, 8, 24 });
+    // Same table without a hint: the room follows `want - min` instead.
+    try expectFit(alloc, &.{ 30, 30, 60 }, &.{ 5, 5, 5 }, &.{ 3, 3, 3 }, 40, &.{ 10, 10, 20 });
+    // The hinted column wants only 12, so what it can't take goes back
+    // to the others by their dashes.
+    try expectFit(alloc, &.{ 30, 30, 12 }, &.{ 5, 5, 5 }, &.{ 1, 1, 6 }, 40, &.{ 14, 14, 12 });
+}
+
+pub fn tableSeparatorDashesAreParsedTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var doc = try parse(alloc, "| a | b | c |\n|--|:------:|---:|\n| 1 | 2 | 3 |\n");
+    defer doc.deinit();
+    const t = doc.blocks[0].table;
+    try testz.expectEqual(t.dashes[0], 2);
+    try testz.expectEqual(t.dashes[1], 6);
+    try testz.expectEqual(t.dashes[2], 3);
+}
+
 /// A shrunk column's cells wrap instead of being cut off, a row grows to
 /// its tallest cell, and whatever follows the table (and a link in a row
 /// under a wrapped one) moves down to match.

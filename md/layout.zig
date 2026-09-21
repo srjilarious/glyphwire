@@ -80,6 +80,106 @@ pub const TableOp = struct {
     rows: [][]TableCell,
 };
 
+/// No table column is sized narrower than this.
+const min_col_width = 3;
+
+/// Picks each column's width, in cells, for a table with `avail` cells of
+/// content room. `want` is a column's natural width (its header or widest
+/// cell), `min` the narrowest it can go without breaking a word (its
+/// longest word), `dashes` the separator row's dash counts.
+///
+///  1. Everything fits at `want`: use it.
+///  2. The words fit: every column gets its `min`, and the room left over
+///     goes out in proportion to what each still wants (`want - min`),
+///     the way an HTML table sizes itself. A column that never wraps
+///     (`want == min`, like a flag or a number) keeps its width, and the
+///     prose column, which wants the most, gets most of the room. If the
+///     dash counts differ (`|--|--|----------|`) the author has said how
+///     to split the room, pandoc-style, so the leftover goes in those
+///     proportions instead. Either way no column gets wider than it wants,
+///     and the hint never takes a column below its longest word.
+///  3. Not even the words fit: from `min`, shrink the widest column a
+///     cell at a time down to `min_col_width`; words break.
+pub fn fitColumnWidths(a: std.mem.Allocator, want: []const usize, min: []const usize, dashes: []const usize, avail: usize, out: []usize) !void {
+    const n = want.len;
+    var want_sum: usize = 0;
+    var min_sum: usize = 0;
+    for (want, min) |w, m| {
+        want_sum += w;
+        min_sum += m;
+    }
+    if (want_sum <= avail) {
+        @memcpy(out, want);
+        return;
+    }
+
+    const room = try a.alloc(usize, n);
+    defer a.free(room);
+    const extra = try a.alloc(usize, n);
+    defer a.free(extra);
+
+    @memcpy(out, min);
+    if (min_sum <= avail) {
+        for (room, want, min) |*r, w, m| r.* = w - m;
+        const hinted = for (dashes) |d| {
+            if (d != dashes[0]) break true;
+        } else false;
+        distribute(avail - min_sum, if (hinted) dashes else room, room, extra);
+        for (out, extra) |*o, e| o.* += e;
+        return;
+    }
+
+    var total = min_sum;
+    while (total > avail) {
+        const widest = std.mem.indexOfMax(usize, out);
+        if (out[widest] <= min_col_width) break;
+        out[widest] -= 1;
+        total -= 1;
+    }
+}
+
+/// Shares `spare` cells among columns in proportion to `weights`, none
+/// getting more than its `cap`; what a capped column can't take goes
+/// round again to the others. The last few cells, too few to split by
+/// proportion, go one at a time to the heaviest column with room. Stops
+/// early if every column with weight is full.
+fn distribute(spare: usize, weights: []const usize, caps: []const usize, out: []usize) void {
+    @memset(out, 0);
+    var left = spare;
+    while (left > 0) {
+        var weight_sum: usize = 0;
+        for (weights, caps, out) |w, c, o| {
+            if (o < c) weight_sum += w;
+        }
+        if (weight_sum == 0) return;
+
+        var given: usize = 0;
+        for (weights, caps, out) |w, c, *o| {
+            if (o.* >= c) continue;
+            const share = @min(left * w / weight_sum, c - o.*);
+            o.* += share;
+            given += share;
+        }
+        if (given == 0) {
+            var best: ?usize = null;
+            for (weights, caps, out, 0..) |w, c, o, i| {
+                if (o < c and w > 0 and (best == null or w > weights[best.?])) best = i;
+            }
+            out[best.?] += 1;
+            given = 1;
+        }
+        left -= given;
+    }
+}
+
+/// Display width of the widest space-separated word in `text`.
+fn longestWord(text: []const u8) usize {
+    var best: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, text, ' ');
+    while (it.next()) |word| best = @max(best, glyphwire.stringWidth(word));
+    return best;
+}
+
 /// How many screen rows one body row takes: 1, or as many lines as its
 /// tallest `.wrap` cell breaks into. The same rule the server's
 /// `core.Table` paints by (a gwmd table has no icons and a `row_height`
@@ -479,7 +579,7 @@ const Builder = struct {
             const name = try zmd.Inline.plainText(self.a, h.runs);
             c.* = .{
                 .name = name,
-                .width = @max(glyphwire.stringWidth(name), 3),
+                .width = @max(glyphwire.stringWidth(name), min_col_width),
                 .h_align = switch (al) {
                     .center => .center,
                     .right => .end,
@@ -487,29 +587,30 @@ const Builder = struct {
                 },
             };
         }
+        // Each column's natural width (header or widest cell) and the
+        // narrowest it can go without breaking a word -- header words
+        // included, since a header ellipsizes rather than wraps.
+        const want = try self.a.alloc(usize, n);
+        const min = try self.a.alloc(usize, n);
+        for (columns, want, min) |c, *w, *m| {
+            w.* = c.width;
+            m.* = @max(min_col_width, longestWord(c.name));
+        }
         const rows = try self.a.alloc([]TableCell, t.rows.len);
         for (t.rows, rows) |src, *dst| {
             dst.* = try self.a.alloc(TableCell, n);
-            for (src, dst.*, columns) |cell, *out, *c| {
+            for (src, dst.*, want, min) |cell, *out, *w, *m| {
                 out.* = try self.tableCell(cell.runs);
-                c.width = @max(c.width, glyphwire.stringWidth(out.text));
+                w.* = @max(w.*, glyphwire.stringWidth(out.text));
+                m.* = @max(m.*, longestWord(out.text));
             }
         }
+        for (min, want) |*m, w| m.* = @min(m.*, w);
 
-        // Borders plus one separator between each pair of columns; shrink
-        // the widest column until the table fits, a column at a time.
-        const overhead = n + 1;
-        const avail = width -| overhead;
-        while (true) {
-            var total: usize = 0;
-            var widest: usize = 0;
-            for (columns, 0..) |c, i| {
-                total += c.width;
-                if (c.width > columns[widest].width) widest = i;
-            }
-            if (total <= avail or columns[widest].width <= 3) break;
-            columns[widest].width -= 1;
-        }
+        // Borders plus one separator between each pair of columns.
+        const widths = try self.a.alloc(usize, n);
+        try fitColumnWidths(self.a, want, min, t.dashes, width -| (n + 1), widths);
+        for (columns, widths) |*c, w| c.width = w;
 
         // A column the shrink left narrower than one of its cells wraps
         // rather than cutting the cell off with "…" (a header still
