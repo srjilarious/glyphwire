@@ -2479,6 +2479,28 @@ pub fn selectionColRangeClipsEndsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectTrue(layer.selectionColRange(-3) == null); // below
 }
 
+/// A selection whose ends land mid-character covers whole wide
+/// characters: a start on a spacer moves back to its lead, an end on a
+/// lead takes in its spacer -- in the tint and the copied text alike.
+pub fn selectionSnapsToWholeWideCharactersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 0);
+    defer layer.deinit();
+
+    // "a" at 0, "日" at 1-2, "本" at 3-4, "b" at 5.
+    try layer.writeText("a日本b", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = 0, .col = 3 });
+
+    const range = layer.selectionColRange(0).?;
+    try testz.expectEqual(range.start, 1);
+    try testz.expectEqual(range.end, 5);
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("日本", text);
+    // The stored points are left as set.
+    try testz.expectEqual(layer.selection.?.anchor.col, 2);
+}
+
 /// A selection stays pinned to its content as fresh output scrolls rows
 /// into history (`scrollOne` bumps both ends' `above`), and is dropped
 /// once an end scrolls off the top of retained scrollback.
@@ -3127,6 +3149,57 @@ pub fn scaledTextAdvancesByItsScaledWidthTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr("x", layer.cell(0, 10).grapheme());
     try testz.expectEqualStr(" ", layer.cell(0, 12).grapheme());
     try testz.expectEqual(layer.cell(0, 13).grapheme().len, 0);
+}
+
+/// A scaled glyph draws down over the rows below its own, so its
+/// background and `metadata_id` fill the same span there too -- only the
+/// footprint's columns, and without moving the cursor off the glyph's row.
+pub fn scaledTextFillsRowsBelowItsGlyphTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 5, 0);
+    defer layer.deinit();
+    const bg: glyphwire.Background = .{ .color = .{ .r = 9, .g = 9, .b = 9 } };
+
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("zzzz", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.cursor = .{ .row = 0, .col = 0 };
+    try layer.writeRuns(&.{.{ .text = "a", .fg = glyphwire.default_style.fg, .bg = bg, .metadata_id = 4, .scale = .x3 }}, .{});
+
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqual(layer.cursor.col, 3);
+    var r: usize = 1;
+    while (r < 3) : (r += 1) {
+        var c: usize = 0;
+        while (c < 3) : (c += 1) {
+            try testz.expectEqualStr(" ", layer.cell(r, c).grapheme());
+            try testz.expectEqual(layer.cell(r, c).style.bg.color.r, 9);
+            try testz.expectEqual(layer.cell(r, c).metadata_id.?, 4);
+        }
+    }
+    // Outside the footprint: the column past it and the row past it.
+    try testz.expectEqualStr("z", layer.cell(1, 3).grapheme());
+    try testz.expectEqual(layer.cell(3, 0).grapheme().len, 0);
+}
+
+/// The rows below a scaled glyph clip at the layer's bottom edge rather
+/// than scrolling it, and `transparent_bg` (a null `bg`) leaves the
+/// background already under them.
+pub fn scaledTextRowsBelowClipAndKeepTransparentBgTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 5);
+    defer layer.deinit();
+
+    layer.clearFill(0, 0, 2, 10, .{ .r = 5, .g = 5, .b = 5 });
+    try layer.writeRuns(&.{.{ .text = "a", .fg = glyphwire.default_style.fg, .bg = null, .metadata_id = 2, .scale = .x2 }}, .{});
+    try testz.expectEqual(layer.cell(1, 1).metadata_id.?, 2);
+    try testz.expectEqual(layer.cell(1, 1).style.bg.color.r, 5);
+
+    // A 3x glyph on the last row: nothing below it to fill, no scroll.
+    layer.cursor = .{ .row = 1, .col = 4 };
+    try layer.writeRuns(&.{.{ .text = "b", .fg = glyphwire.default_style.fg, .bg = null, .scale = .x3 }}, .{});
+    try testz.expectEqual(layer.history_len, 0);
+    try testz.expectEqualStr("b", layer.cell(1, 4).grapheme());
+    try testz.expectEqual(layer.cursor.row, 1);
 }
 
 pub fn clearFillPaintsAnOpaqueBackgroundTest(io: std.Io, alloc: std.mem.Allocator) !void {

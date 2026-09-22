@@ -864,12 +864,16 @@ pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 /// `write_text` in docs/api.md). The enlarged glyph still renders from the
 /// one cell that holds the grapheme and carries `text_scale`, but the
 /// write **advances the cursor by the scaled width** (`scaledPitch` cells
-/// per display column), filling the cells it steps over with blanks in
-/// the run's background and `metadata_id`. So back-to-back scaled
-/// characters no longer draw on top of each other, the gaps take the
-/// run's background, and a click anywhere under the glyph hit-tests as
-/// part of the run. Vertical overflow is still the caller's to plan for.
-/// See decisions.md's Text scale section.
+/// per display column), filling the cells it steps over -- and the same
+/// span on the `scaledPitch - 1` rows below, which the glyph draws down
+/// over -- with blanks in the run's background and `metadata_id`. So
+/// back-to-back scaled characters no longer draw on top of each other,
+/// the whole block under the glyph takes the run's background, and a
+/// click anywhere under it hit-tests as part of the run. The rows below
+/// are clipped at the layer's bottom (never scrolled into), and the
+/// cursor stays on the glyph's own row: reserving those rows, so later
+/// text isn't written over the block, is still the caller's job. See
+/// decisions.md's Text scale section.
 pub const TextScale = enum { x1, x1_5, x2, x3 };
 
 /// Cells a `scale` glyph advances per display column: its size rounded up
@@ -2800,9 +2804,13 @@ pub const Layer = struct {
     }
 
     /// Places one glyph of a `write_text` run: its footprint is its display
-    /// width times `scaledPitch(scale)`, and the cells past the glyph's own
-    /// are filled with blanks in the run's style so they carry its
-    /// background and `metadata_id` (see `TextScale`). Returns false when
+    /// width times `scaledPitch(scale)` columns by `scaledPitch(scale)`
+    /// rows, and every footprint cell past the glyph's own -- the gap to
+    /// its right and the rows below it that the enlarged glyph draws over
+    /// -- is filled with blanks in the run's style so they carry its
+    /// background and `metadata_id` (see `TextScale`). The rows below are
+    /// clipped at the layer's bottom edge rather than scrolling it, and
+    /// the cursor stays on the glyph's own row. Returns false when
     /// `clip_end` stops the write: the cells of the footprint that do fit
     /// are blanked instead, never half a glyph.
     fn putRunGlyph(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale, clip_end: ?usize) bool {
@@ -2819,11 +2827,38 @@ pub const Layer = struct {
             self.cursor.row += 1;
         }
         self.putAtCursor(bytes, w, fg, bg, metadata_id, scale);
+        // Read back after the put, which may have wrapped the glyph.
+        const row = self.cursor.row;
+        const start_col = self.cursor.col - w;
         var extra = footprint - w;
         while (extra > 0 and self.cursor.col < self.width) : (extra -= 1) {
             self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1);
         }
+        const end_col = self.cursor.col;
+        const pitch = scaledPitch(scale);
+        var r = row + 1;
+        while (r < row + pitch and r < self.height) : (r += 1) {
+            var col = start_col;
+            while (col < end_col) : (col += 1) self.blankScaledCell(r, col, fg, bg, metadata_id);
+        }
         return true;
+    }
+
+    /// One cell under a scaled glyph (see `putRunGlyph`): a narrow blank
+    /// in the run's style, written in place without moving the cursor.
+    /// `bg == null` (`transparent_bg`) leaves the cell's background alone,
+    /// same as `putAtCursor`.
+    fn blankScaledCell(self: *Layer, row: usize, col: usize, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {
+        self.clearWidePartner(row, col);
+        const c = self.cell(row, col);
+        c.setGrapheme(" ");
+        c.style.fg = fg;
+        if (bg) |b| c.style.bg = b;
+        c.metadata_id = metadata_id;
+        c.meta_focus = false;
+        c.fg_icon = null;
+        c.wide = .narrow;
+        c.text_scale = .x1;
     }
 
     /// Places one grapheme cluster at the cursor. `w` is its East Asian
@@ -3477,17 +3512,38 @@ pub const Layer = struct {
     /// row `above` rows above the live viewport's top (see
     /// `SelectionPoint`), or null if that row is outside the selection.
     /// Linear model -- interior rows select their whole width, the first
-    /// and last row are clipped to the selection's start/end column.
+    /// and last row are clipped to the selection's start/end column, each
+    /// widened to cover a whole wide character (`snapWideSpan`).
     pub fn selectionColRange(self: *const Layer, above: i64) ?struct { start: usize, end: usize } {
         const sel = self.selection orelse return null;
         if (sel.isEmpty()) return null;
         const o = sel.ordered();
         if (above > o.start.above or above < o.end.above) return null;
-        const lo: usize = if (above == o.start.above) @min(o.start.col, self.width) else 0;
+        var lo: usize = if (above == o.start.above) @min(o.start.col, self.width) else 0;
         var hi: usize = if (above == o.end.above) o.end.col + 1 else self.width;
         if (hi > self.width) hi = self.width;
         if (lo >= hi) return null;
+        if (self.rowForAbove(above)) |cells| {
+            const span = snapWideSpan(cells, lo, hi);
+            lo = span.lo;
+            hi = span.hi;
+        }
         return .{ .start = lo, .end = hi };
+    }
+
+    /// Widens the selected column span `[lo, hi)` of row `cells` so it
+    /// never splits a wide character: a start on a `.wide_spacer` moves
+    /// back onto its lead, an end on a `.wide_lead` takes in its spacer.
+    /// The selection itself stays in raw cells (a drag or a client's
+    /// `set_selection` can land on either half); only what it *covers*
+    /// snaps, so the tint and the copied text always agree on whole
+    /// characters.
+    fn snapWideSpan(cells: []const Cell, lo: usize, hi: usize) struct { lo: usize, hi: usize } {
+        var out_lo = lo;
+        var out_hi = hi;
+        if (out_lo > 0 and out_lo < cells.len and cells[out_lo].wide == .wide_spacer) out_lo -= 1;
+        if (out_hi > 0 and out_hi < cells.len and cells[out_hi - 1].wide == .wide_lead) out_hi += 1;
+        return .{ .lo = out_lo, .hi = out_hi };
     }
 
     /// The selected text, or null when nothing is selected (a zero-width
@@ -3513,8 +3569,9 @@ pub const Layer = struct {
             const line_start = out.items.len;
             if (lo < hi) {
                 if (self.rowForAbove(above)) |cells| {
-                    var col = lo;
-                    while (col < hi) : (col += 1) {
+                    const span = snapWideSpan(cells, lo, hi);
+                    var col = span.lo;
+                    while (col < span.hi) : (col += 1) {
                         const c = cells[col];
                         if (c.wide == .wide_spacer) continue;
                         const g = c.grapheme();

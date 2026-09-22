@@ -2116,8 +2116,13 @@ pub const Ui = struct {
         const m = dict_mod.lookup(self.alloc, d, row[byte_off..]) catch null;
         self.setLookupFromMatch(m);
         if (self.lookup != null) {
-            const end_col = p.col + mokuro.displayWidth(row[byte_off .. byte_off + m.?.len]);
-            self.client.setSelection(self.dialog_layer, p, .{ .above = p.above, .col = end_col }) catch {};
+            // From the matched character's own first column, not the
+            // clicked one -- a click on a wide character's right half
+            // would otherwise start the span mid-glyph -- to its last
+            // column, since a selection's end is inclusive.
+            const start_col = 2 + mokuro.displayWidth(row[0..byte_off]);
+            const end_col = start_col + mokuro.displayWidth(row[byte_off .. byte_off + m.?.len]) - 1;
+            self.client.setSelection(self.dialog_layer, .{ .above = p.above, .col = start_col }, .{ .above = p.above, .col = end_col }) catch {};
         }
     }
 

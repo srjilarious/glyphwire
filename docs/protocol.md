@@ -546,8 +546,11 @@ the message's value, and `max_cols`/`pad` apply to the write as a whole.
 Sending both `text` and `spans`, or neither, reports `InvalidSpans`.
 
 A `scale` of `"x1_5"` or `"x2"` advances two cells per display column,
-and `"x3"` three, filling the cells after each enlarged glyph with blanks in the run's
-background and `metadata_id`. `transparent_bg` leaves whatever
+and `"x3"` three, filling the cells after each enlarged glyph, and the
+same span on the one or two rows below that the glyph draws down over,
+with blanks in the run's background and `metadata_id`. The rows below
+are clipped at the layer's bottom rather than scrolling it, and the
+cursor stays on the glyph's row. `transparent_bg` leaves whatever
 background is already in the cell — an image, an icon, a panel gradient —
 instead of resetting it. `metadata_id` tags every cell written.
 
@@ -723,7 +726,9 @@ layout changes.
 A **selection point** is `{above, col}`: `above` is rows above the live
 viewport's top (positive = scrollback), `col` a 0-based column. Points are
 content-anchored rather than screen-anchored, so a selection survives
-scrolling and new output.
+scrolling and new output. A point may land on either half of a wide
+character; what the selection *covers* (the tint and
+`get_selection_text`) always widens to the whole character.
 
 **Selection state** is `{active, anchor?, active_end?}`; `anchor` and
 `active_end` are absent when `active` is false.
