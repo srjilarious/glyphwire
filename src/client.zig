@@ -965,6 +965,14 @@ pub const Client = struct {
         try self.notify("set_caret_layer", .{ .layer = layer });
     }
 
+    /// `set_caret_visible(visible)` -- a notification. Shows or hides
+    /// glyphwire-host's caret for this connection's active context (see
+    /// `core.Context.caret_visible`). A program with no insertion point,
+    /// like `gw-read`, sends `false` once after `createContext`.
+    pub fn setCaretVisible(self: *Client, visible: bool) !void {
+        try self.notify("set_caret_visible", .{ .visible = visible });
+    }
+
     /// `set_key_repeat(delay_ms, interval_ms)` -- a notification. Retimes
     /// the typematic key repeat glyphwire-host synthesizes while this
     /// connection's active context is focused: `delay_ms` is how long a

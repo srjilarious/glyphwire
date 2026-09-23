@@ -175,6 +175,8 @@ pub const Ui = struct {
         const context = try client.createContext(null, null, 0, false);
         errdefer client.destroyContext(context) catch {};
         try listener.attachContext(context);
+        // A reader: nothing takes typed text, so no caret.
+        try client.setCaretVisible(false);
 
         const size = try client.getSize();
         const metrics = try client.getCellMetrics();

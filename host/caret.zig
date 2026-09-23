@@ -86,9 +86,11 @@ pub const Caret = struct {
     }
 
     /// Whether the root caret should be painted this frame: never while
-    /// the root layer has DECTCEM cursor-hide set (`CSI ? 25 l` from a
+    /// the visible context has hidden it (`set_caret_visible`) or the
+    /// root layer has DECTCEM cursor-hide set (`CSI ? 25 l` from a
     /// foregrounded program), otherwise on the blink phase.
     pub fn visible(self: *const Caret) bool {
+        if (!self.app.server.ctx.caret_visible) return false;
         if (!self.app.server.ctx.root.cursor_visible) return false;
         return self.blinkOn();
     }

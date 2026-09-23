@@ -2294,6 +2294,27 @@ pub fn setCaretLayerPointsAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(ctx.caret_layer, null);
 }
 
+/// `set_caret_visible` flips the context's caret flag and leaves the root
+/// layer's own DECTCEM flag alone.
+pub fn setCaretVisibleHidesAndShowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try testz.expectTrue(ctx.caret_visible);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_caret_visible","params":{"visible":false}}
+    );
+    try testz.expectFalse(ctx.caret_visible);
+    try testz.expectTrue(ctx.root.cursor_visible);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_caret_visible","params":{"visible":true}}
+    );
+    try testz.expectTrue(ctx.caret_visible);
+}
+
 pub fn setKeyRepeatSetsAndClearsOverrideTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

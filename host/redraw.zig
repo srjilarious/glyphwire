@@ -81,6 +81,7 @@ pub fn contextSig(ctx: *const glyphwire.Context) ContextSig {
     sig.root_view = ctx.root.view_scroll;
     if (rootScreenOwned(&ctx.root)) sig.root_view |= @as(u64, 1) << 63;
     if (ctx.window_scrollbar) sig.root_view |= @as(u64, 1) << 62;
+    if (ctx.caret_visible) sig.root_view |= @as(u64, 1) << 61;
 
     return sig;
 }

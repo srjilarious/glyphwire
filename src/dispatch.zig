@@ -291,6 +291,9 @@ const SetWindowScrollbarParams = struct { visible: bool };
 /// `set_caret_layer`: which layer glyphwire-host draws its caret for, or
 /// `null` for the root cursor. See `core.Context.caret_layer`.
 const SetCaretLayerParams = struct { layer: ?core.LayerHandle = null };
+/// `set_caret_visible`: whether glyphwire-host draws a caret for the
+/// issuing connection's active context. See `core.Context.caret_visible`.
+const SetCaretVisibleParams = struct { visible: bool };
 /// `set_key_repeat`: the typematic key-repeat timing this context's
 /// program wants while it is focused. Both fields absent clears the
 /// override and puts the context back on the host's default; one alone
@@ -1465,6 +1468,7 @@ pub const Dispatcher = struct {
         .{ "adopt_context", catVoid(handleAdoptContext) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
+        .{ "set_caret_visible", catVoid(handleSetCaretVisible) },
         .{ "set_key_repeat", catVoid(handleSetKeyRepeat) },
         .{ "request_role", catBytesId(handleRequestRole) },
         .{ "join_role", catVoid(handleJoinRole) },
@@ -2512,6 +2516,18 @@ pub const Dispatcher = struct {
         self.ctx.setCaretLayer(parsed.value.layer) catch |err| return switch (err) {
             error.UnknownLayer => DispatchError.UnknownLayer,
         };
+    }
+
+    /// `set_caret_visible`: shows or hides glyphwire-host's caret for this
+    /// connection's active context (see `core.Context.caret_visible`),
+    /// whichever layer it tracks. The host picks it up on its next repaint
+    /// (`host/redraw.zig` folds the flag into the fingerprint).
+    fn handleSetCaretVisible(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetCaretVisibleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.caret_visible = parsed.value.visible;
     }
 
     /// `set_key_repeat`: retimes the typematic key repeat glyphwire-host

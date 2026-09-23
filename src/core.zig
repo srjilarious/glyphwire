@@ -4951,6 +4951,14 @@ pub const Context = struct {
     /// unknown or destroyed handle falls back to the root cursor rather
     /// than showing nothing.
     caret_layer: ?LayerHandle = null,
+    /// Whether glyphwire-host draws a caret for this context at all, set
+    /// with `set_caret_visible`. A program with no text insertion point
+    /// (`gw-read`, a viewer) turns it off once rather than parking the
+    /// cursor somewhere out of sight. Distinct from a layer's DECTCEM
+    /// `cursor_visible`, which a PTY program drives and `ESC [ ! p`
+    /// resets; this one only changes on the wire message, and hides the
+    /// caret whichever layer `caret_layer` points it at.
+    caret_visible: bool = true,
     /// The typematic key-repeat timing this context's program asked for
     /// with `set_key_repeat`, or null to run at the host's own default
     /// (`host.conf.lua`'s `key_repeat_delay_ms` / `key_repeat_interval_ms`).

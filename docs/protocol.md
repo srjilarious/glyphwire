@@ -403,6 +403,7 @@ Each entry gives the method, its kind, its params and its result.
 | `adopt_context` | notification | `context` | — |
 | `set_window_scrollbar` | notification | `visible` | — |
 | `set_caret_layer` | notification | `layer?` | — |
+| `set_caret_visible` | notification | `visible` | — |
 
 `create_context` allocates a context, **shows it immediately**, and
 retargets the issuing connection onto it. `width`/`height` default to the
@@ -430,6 +431,11 @@ instead of the root layer's cursor; `null` restores the root. The host
 positions the caret through that layer's bounds, viewport and scroll
 offset, and hides it when the layer is scrolled out of view. Destroying
 the tracked layer clears the setting.
+
+`set_caret_visible` shows or hides the host's caret for the issuing
+connection's context, whichever layer it tracks. A program with no text
+insertion point (a reader or a viewer) sends `false` once. It is separate
+from a layer's DECTCEM cursor-hide, which a PTY program drives.
 
 **Input follows visibility.** Raw input notifications (`key_down`,
 `key_up`, `text`, `mouse_button`, `mouse_move`) are delivered **only to

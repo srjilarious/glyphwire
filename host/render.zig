@@ -1466,7 +1466,7 @@ pub const Renderer = struct {
             const l = ctx.layers.getPtr(h) orelse break :blk null;
             break :blk if (l.visible) l else null;
         };
-        if (focused and focus_caret == null)
+        if (focused and ctx.caret_visible and focus_caret == null)
             self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view);
         // IME composition, over both: it covers the cells the caret is
         // about to write into, so it has to sit above the caret too.
@@ -1476,7 +1476,7 @@ pub const Renderer = struct {
             const layer = ctx.layers.getPtr(handle) orelse continue;
             if (!layer.visible) continue;
             self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = handle });
-            if (focused and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin);
+            if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin);
         }
     }
 
