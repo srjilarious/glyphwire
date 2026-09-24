@@ -1,11 +1,14 @@
 name: Linux Package
 
 # Builds and packages the user-facing glyphwire programs for Linux
-# x86_64: glyphwire, gw-shell, glyphwire-notify, glyphwire-demo,
-# gw-view, gw-ls and zoe (via the `zig build package` step), plus zoe's
-# bundled tree-sitter grammars under share/glyphwire/grammars. The
-# server/client/table-demo tools and the test runner are deliberately left
-# out.
+# x86_64. The tarball holds exactly what `zig build package` installs:
+# glyphwire, gw-shell, glyphwire-notify, glyphwire-demo, gw-view,
+# gw-read, gwmd, gw-ls, gw-hist, zoe, gmux, salacommander and gw-agent,
+# plus the shared assets, zoe's bundled tree-sitter grammars, and the
+# desktop entry and icons. The staging step runs that step against the
+# package directory instead of hand-copying binaries, so build.zig stays
+# the single place the shipped list lives. The server/client/probe/
+# table-demo tools and the test runner are deliberately left out of it.
 #
 # Windows is intentionally not covered yet: the host needs more work
 # before it runs there, and cross-building it wants its own job. When
@@ -60,8 +63,10 @@ jobs:
         run: python3 scripts/check-licenses.py
 
       # `zig build package` (defined in build.zig) installs only the shipped
-      # programs and zoe's tree-sitter grammars, skipping the test runner
-      # and the internal server/client/table-demo tools.
+      # programs, assets, grammars and desktop files, skipping the test
+      # runner and the internal server/client/table-demo tools. This is the
+      # compile gate: the staging step below re-runs the same step with a
+      # `--prefix`, which by then is just a file copy.
       - name: Build (ReleaseSafe)
         working-directory: glyphwire
         run: zig build package -Doptimize=ReleaseSafe
@@ -73,25 +78,29 @@ jobs:
         working-directory: glyphwire
         run: zig build tests
 
-      # Layout mirrors an install prefix: bin/ for commands, and
-      # share/glyphwire/{assets,grammars}/ for runtime data. The host
-      # resolves assets through ../share/glyphwire/assets relative to its
-      # executable; zoe resolves grammars through the sibling grammars/ dir.
+      # `--prefix` aims the same `package` step at the package directory,
+      # so the tarball is what an install of this build produces and the
+      # shipped list can't drift from build.zig. The Build step above
+      # already compiled these artifacts, so this pass only copies files.
+      # Layout mirrors an install prefix: bin/ for commands,
+      # share/glyphwire/{assets,grammars}/ for runtime data, and
+      # share/{applications,icons}/ for the desktop entry and its icons.
+      # The host resolves assets through ../share/glyphwire/assets relative
+      # to its executable; zoe resolves grammars through the sibling
+      # grammars/ dir.
       - name: Stage package
         working-directory: glyphwire
         run: |
           pkg="glyphwire-linux-x86_64"
-          mkdir -p "$pkg/bin" "$pkg/share/glyphwire"
-          cp zig-out/bin/glyphwire        "$pkg/bin/"
-          cp zig-out/bin/gw-shell         "$pkg/bin/"
-          cp zig-out/bin/glyphwire-notify "$pkg/bin/"
-          cp zig-out/bin/glyphwire-demo   "$pkg/bin/"
-          cp zig-out/bin/gw-view          "$pkg/bin/"
-          cp zig-out/bin/gw-ls            "$pkg/bin/"
-          cp zig-out/bin/zoe              "$pkg/bin/"
-          cp -r zig-out/share/glyphwire/assets   "$pkg/share/glyphwire/assets"
-          cp -r zig-out/share/glyphwire/grammars "$pkg/share/glyphwire/grammars"
-          cp README.md                    "$pkg/"
+          zig build package -Doptimize=ReleaseSafe --prefix "$PWD/$pkg"
+          # The vendored ziglua reaches the Lua C headers by installing
+          # liblua.a and its headers into the prefix (libs/ziglua/build.zig
+          # hangs its translate-c step off that install), so any build that
+          # links Lua drops include/ and lib/ into the prefix. They are a
+          # build artefact, not something the shipped programs read, so the
+          # tarball drops them.
+          rm -rf "$pkg/include" "$pkg/lib"
+          cp README.md "$pkg/"
           tar czf "$pkg.tar.gz" "$pkg"
           tar tzf "$pkg.tar.gz"
 

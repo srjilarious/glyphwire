@@ -5,3 +5,7 @@ zig-pkg/
 docker/remote-test/dist/
 .provision-dist/
 .claude/
+# Staging tree and tarball the Linux packaging job builds, reproducible
+# locally with `zig build package --prefix $PWD/glyphwire-linux-x86_64`.
+glyphwire-linux-x86_64/
+glyphwire-linux-x86_64.tar.gz
