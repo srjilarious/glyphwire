@@ -51,7 +51,7 @@ const ai_cache = @import("ai_cache.zig");
 const anki = @import("anki.zig");
 const crop = @import("crop.zig");
 const state_mod = @import("state.zig");
-const zoom = @import("zoom.zig");
+const zoom = @import("glyphwire").zoom;
 
 const Direction = config_mod.Direction;
 

@@ -14,7 +14,7 @@
 //! `ls_support` has with `ls/config.zig`.
 
 pub const pages = @import("pages.zig");
-pub const zoom = @import("zoom.zig");
+pub const zoom = @import("glyphwire").zoom;
 pub const cache = @import("cache.zig");
 pub const state = @import("state.zig");
 pub const config = @import("config.zig");

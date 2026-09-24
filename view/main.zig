@@ -4,6 +4,7 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
+const interactive = @import("interactive.zig");
 
 /// gw-view: a minimal client that loads an image file (PNG, JPEG,
 /// BMP, or GIF) and draws it as a sprite spanning the cells it needs -- the
@@ -29,6 +30,12 @@ const zargs = @import("zargunaught");
 /// also plug the small `init.minimal.args.toSlice` leak the old loop left
 /// on exit.
 ///
+/// `--interactive` is the other half of this program: the image on a
+/// context of its own, fitted to the window, with the zoom and pan keys
+/// gw-read has (see `interactive.zig`, and `glyphwire.zoom` for the
+/// geometry the two share). Everything below describes the default,
+/// draw-at-the-cursor mode.
+///
 /// Draws the image and exits as soon as the pixels are on the grid -- no
 /// keypress wait. `draw_image` is a request, so by the time it returns
 /// the server has the cells and any client rendering them (glyphwire)
@@ -53,6 +60,12 @@ pub fn main(init: std.process.Init) !void {
                 .description = "Scaling mode: 'fit-width' (the default) shrinks the image to the layer's width, leaving one already narrower at its own size; 'full' draws it at natural pixel size",
                 .minNumParams = 1,
                 .maxNumParams = 1,
+            },
+            .{
+                .longName = "interactive",
+                .shortName = "i",
+                .description = "Open the image on a context of its own, with zooming and panning, instead of drawing it at the cursor and exiting",
+                .maxNumParams = 0,
             },
             .{ .longName = "help", .shortName = "h", .description = "Print this help and exit" },
         },
@@ -116,6 +129,36 @@ pub fn main(init: std.process.Init) !void {
 
     const handle = try client.loadImage(format.name(), bytes);
     const info = try client.getImageInfo(handle);
+
+    // `--interactive` takes over from here: its own context, its own
+    // event loop, and the image sized to the window rather than to the
+    // row the cursor happens to be on.
+    if (args.hasOption("interactive")) {
+        const listener = glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
+            "key",
+            "text",
+            "resize",
+            "scroll_offset",
+            "mouse_button",
+            "mouse_move",
+            "context",
+        }) catch {
+            return fallback(io, "gw-view: couldn't subscribe to input\n");
+        };
+        defer listener.deinit();
+
+        const ui = try interactive.Ui.init(alloc, io, &client, listener, .{
+            .path = path,
+            .image = .{ .w = info.width, .h = info.height },
+            .handle = handle,
+            // `--size full` asks for natural pixels here too; the default
+            // is the whole image on screen at once.
+            .mode = if (size_mode == .full) .natural else .fit_screen,
+        });
+        defer ui.deinit();
+        return ui.run();
+    }
+
     const metrics = try client.getCellMetrics();
 
     // Natural-size placement: the cell span the image needs at scale 1.0,

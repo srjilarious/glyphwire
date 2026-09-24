@@ -41,9 +41,9 @@ pub const defaults = [_]Action{
     .{ .ext = "md", .command = "gwmd {sel}" },
     .{ .ext = "cbz", .command = "gw-read {sel}" },
     .{ .ext = "cbr", .command = "gw-read {sel}" },
-    .{ .ext = "png", .command = "gw-view {sel}" },
-    .{ .ext = "jpg", .command = "gw-view {sel}" },
-    .{ .ext = "jpeg", .command = "gw-view {sel}" },
+    .{ .ext = "png", .command = "gw-view --interactive {sel}" },
+    .{ .ext = "jpg", .command = "gw-view --interactive {sel}" },
+    .{ .ext = "jpeg", .command = "gw-view --interactive {sel}" },
 };
 
 /// The most an expanded template may have. A template is a command line,

@@ -1,15 +1,18 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The page's on-screen geometry: how big it is drawn, how many cells
+//! An image's on-screen geometry: how big it is drawn, how many cells
 //! that covers, where it sits when it's smaller than the window, and how
 //! far it can be panned when it isn't.
 //!
 //! Pure -- pixels and cells in, pixels and cells out -- so
 //! `tests/read_tests.zig` can pin the fit maths down without a display
-//! server. `ui.zig` is the only caller; it turns a `Layout` into a
-//! `set_property(size)` + `draw_image` + `set_property(cell_position)`
-//! triple.
+//! server. A caller turns a `Layout` into a `set_property(size)` +
+//! `draw_image` + `set_property(cell_position)` triple; `gw-read` (a
+//! comic page) and `gw-view --interactive` (any image) both do, which is
+//! why this sits in the client library rather than in either of them.
+//! The wording below says "page" throughout: that was the first caller,
+//! and every line of it is true of any image.
 //!
 //! **Why the layer is the size of the whole scaled page.** `draw_image`
 //! samples from the image's top-left corner outward and has no source

@@ -654,7 +654,7 @@ pub fn openActionResolvesByExtensionTest(_: std.Io, _: std.mem.Allocator) !void 
     try testz.expectEqualStr(openaction.resolve(none, "/tmp/notes.md").?, "gwmd {sel}");
     // The key is case-folded, so a shouty extension still matches.
     try testz.expectEqualStr(openaction.resolve(none, "/tmp/Book.CBZ").?, "gw-read {sel}");
-    try testz.expectEqualStr(openaction.resolve(none, "/tmp/shot.jpeg").?, "gw-view {sel}");
+    try testz.expectEqualStr(openaction.resolve(none, "/tmp/shot.jpeg").?, "gw-view --interactive {sel}");
     // Nothing claims these: the caller falls back to xdg-open.
     try testz.expectTrue(openaction.resolve(none, "/tmp/notes.txt") == null);
     try testz.expectTrue(openaction.resolve(none, "/tmp/README") == null);
@@ -674,7 +674,7 @@ pub fn openActionUserEntriesBeatDefaultsTest(_: std.Io, _: std.mem.Allocator) !v
     // `false` shadows the built-in and lands back on the desktop opener.
     try testz.expectTrue(openaction.resolve(&user, "/tmp/shot.png") == null);
     // An extension the table doesn't mention keeps its default.
-    try testz.expectEqualStr(openaction.resolve(&user, "/tmp/shot.jpg").?, "gw-view {sel}");
+    try testz.expectEqualStr(openaction.resolve(&user, "/tmp/shot.jpg").?, "gw-view --interactive {sel}");
 }
 
 pub fn openActionBuildsArgvTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -726,5 +726,5 @@ pub fn configReadsOpenActionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqualStr(openaction.resolve(user, "/tmp/x.pdf").?, "zathura");
     try testz.expectTrue(openaction.resolve(user, "/tmp/x.png") == null);
     // An extension the table doesn't touch keeps its default.
-    try testz.expectEqualStr(openaction.resolve(user, "/tmp/x.jpg").?, "gw-view {sel}");
+    try testz.expectEqualStr(openaction.resolve(user, "/tmp/x.jpg").?, "gw-view --interactive {sel}");
 }

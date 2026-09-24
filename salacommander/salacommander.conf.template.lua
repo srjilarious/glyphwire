@@ -57,9 +57,9 @@
 --         md   = "gwmd {sel}",
 --         cbz  = "gw-read {sel}",
 --         cbr  = "gw-read {sel}",
---         png  = "gw-view {sel}",
---         jpg  = "gw-view {sel}",
---         jpeg = "gw-view {sel}",
+--         png  = "gw-view --interactive {sel}",
+--         jpg  = "gw-view --interactive {sel}",
+--         jpeg = "gw-view --interactive {sel}",
 --         -- ["pdf"] = "zathura",   -- {sel} appended
 --         -- ["png"] = false,       -- back to xdg-open
 --     },

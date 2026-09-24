@@ -74,7 +74,7 @@ wheel and gamepad streams.
 | **`gwmd`** | Markdown reader | Scaled headings, GFM tables as native tables, inline images, clickable links. The document is one tall layer the host scrolls. |
 | **`gw-read`** | Comic and manga reader | Pages as bitmaps with zoom and pan. Mokuro OCR text overlays, Yomitan dictionary lookup, AI bubble translation, Anki card mining. |
 | **`gw-ls`** | `ls` replacement | Icon grid, or a long listing in a table that stays sortable after `gw-ls` exits. |
-| **`gw-view`** | Image viewer | Shows an image in the grid. |
+| **`gw-view`** | Image viewer | Shows an image in the grid, or `--interactive` for a context of its own with zoom and pan. |
 
 Developer tools: `glyphwire-probe` drives and inspects a live session
 from the command line (`zig build probe`), and `glyphwire-demo`,
