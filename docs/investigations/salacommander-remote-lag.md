@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # salacommander: why moving the pane cursor lagged over `--ssh`
 
 Moving the cursor up and down in a salacommander pane felt sluggish in a

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! An image's on-screen geometry: how big it is drawn, how many cells
 //! that covers, where it sits when it's smaller than the window, and how
