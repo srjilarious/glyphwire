@@ -2092,6 +2092,164 @@ pub const Layer = struct {
         self.touchRender();
     }
 
+    /// The inverse of `scrollOne`: pulls the most recent history row back
+    /// down into the viewport, so the content moves down one row and the
+    /// bottom row leaves the viewport. Only `reflowAt` uses this -- output
+    /// never un-scrolls -- and it is a no-op once history is exhausted.
+    /// The row that ends up at the bottom is whatever the ring already
+    /// held there; every caller overwrites or blanks it.
+    fn unscrollOne(self: *Layer) void {
+        if (self.history_len == 0) return;
+        self.history_len -= 1;
+        self.viewport_start = (self.viewport_start + self.capacity() - 1) % self.capacity();
+        if (self.view_scroll > 0) self.view_scroll -= 1;
+        if (self.tables.count() > 0) {
+            var it = self.tables.valueIterator();
+            while (it.next()) |t| t.top_live += 1;
+        }
+        self.touchRender();
+    }
+
+    /// Opens (`delta > 0`) or closes (`delta < 0`) `|delta|` rows directly
+    /// below live-viewport row `at_row`, moving the content *above* the
+    /// split and leaving the content *below* it where it is. This is what
+    /// a layer component whose height changed needs -- an `Outline` node
+    /// expanding or collapsing -- and the one place in `Layer` where
+    /// content grows anywhere other than the bottom.
+    ///
+    /// **Growth goes upward, into scrollback.** The viewport's height is
+    /// fixed by the window, so `delta` extra rows of content mean `delta`
+    /// rows have to leave it, and the only exit that *preserves* them is
+    /// the top. So rows at and above `at_row` shift up by `delta` (the
+    /// topmost passing into history) and rows below it do not move at all.
+    /// On screen the component's header rises while the shell prompt under
+    /// it, a later command's output and the live prompt all stay put --
+    /// which is the same thing that happens when ordinary output arrives,
+    /// and is why this reads as natural rather than as the grid lurching.
+    /// Growing *downward* would have to push the bottom rows off the
+    /// viewport, where there is no ring to catch them, and they would
+    /// simply be lost.
+    ///
+    /// A negative `delta` is the mirror image: the `|delta|` rows below
+    /// `at_row` are dropped, the content above comes back down out of
+    /// history, and the content below stays put. Expanding at `H` by `d`
+    /// and then collapsing at `H - d` by `-d` restores the original grid,
+    /// which is what makes a toggle round-trip.
+    ///
+    /// Three things bound what this can promise:
+    ///
+    /// - Rows pushed past `scrollback_rows` are evicted, exactly as they
+    ///   are for ordinary output, and a later collapse cannot bring them
+    ///   back. A layer created with no scrollback at all therefore loses
+    ///   its top rows outright.
+    /// - A collapse needs `|delta|` rows of history to pull down. With
+    ///   less (the component sits near the oldest retained row) the
+    ///   shortfall is taken off the bottom instead: the content below
+    ///   moves *up* by the remainder and blank rows appear at the bottom.
+    ///   The gap always closes by the full `delta` either way.
+    /// - The alt screen (`alt_cells`) is a flat buffer with no scrollback,
+    ///   so there is nowhere for displaced rows to go and this is a no-op.
+    ///
+    /// The selection is dropped rather than re-pinned, the same call
+    /// `resize` makes for the same reason: the rows it referred to have
+    /// moved by two different amounts depending on which side of the split
+    /// they sat on, and a selection spanning the split has no correct
+    /// answer at all.
+    pub fn reflowAt(self: *Layer, at_row: i64, delta: i64) error{OutOfMemory}!void {
+        if (delta == 0) return;
+        if (self.on_alt) return;
+
+        const height_i: i64 = @intCast(self.height);
+        if (at_row >= height_i) return;
+
+        // How far the ring itself moves, and so how far the content
+        // *above* the split travels. Growing scrolls up by the full
+        // `delta`; shrinking can only come back down as far as history
+        // actually reaches (see the doc comment's third bullet).
+        const pull: i64 = if (delta < 0) @min(-delta, @as(i64, @intCast(self.history_len))) else 0;
+        const shift: i64 = if (delta > 0) -delta else pull;
+
+        // The first row of content that survives *below* the split. A
+        // collapse drops `-delta` rows, so its survivors start that much
+        // further down; an expansion drops nothing.
+        const removed: i64 = @max(0, -delta);
+        // Clamped to retained history so a component sitting deep in
+        // scrollback doesn't size the snapshot off the end of the ring.
+        const first_below: i64 = @max(at_row + 1 + removed, -@as(i64, @intCast(self.history_len)));
+
+        // Snapshot the rows below the split before the ring moves under
+        // us, then lay them back down afterwards at `shift + delta` from
+        // where they were. Going through a scratch buffer rather than
+        // shuffling the ring in place keeps growing and shrinking as one
+        // piece of code instead of two mirrored ones with their own
+        // overlap rules, and the cost is one screen's worth of cells on a
+        // click.
+        const below_count: usize = if (first_below >= height_i) 0 else @intCast(height_i - first_below);
+        const keep = try self.alloc.alloc(Cell, below_count * self.width);
+        defer self.alloc.free(keep);
+        for (0..below_count) |i| {
+            const dst = keep[i * self.width ..][0..self.width];
+            if (self.rowAtSigned(first_below + @as(i64, @intCast(i)))) |src| {
+                @memcpy(dst, src);
+            } else {
+                for (dst) |*c| c.* = .{};
+            }
+        }
+
+        // Move the ring. Both helpers pin every table's `top_live` to the
+        // content as they go; the tables below the split are corrected
+        // back below, once we know where the split landed.
+        if (delta > 0) {
+            var i: i64 = 0;
+            while (i < delta) : (i += 1) self.scrollOne();
+        } else {
+            var i: i64 = 0;
+            while (i < pull) : (i += 1) self.unscrollOne();
+        }
+
+        // Put the below-content back. Its new home is `shift + delta`
+        // rows from its old one, which works out to "didn't move" in
+        // every case but a history-starved collapse.
+        const below_shift = shift + delta;
+        for (0..below_count) |i| {
+            const src = keep[i * self.width ..][0..self.width];
+            const target = first_below + @as(i64, @intCast(i)) + below_shift;
+            if (self.rowAtSigned(target)) |dst| @memcpy(dst, src);
+        }
+
+        // Blank whatever is left between the two sides: the freshly opened
+        // gap on an expansion, and the rows the below-content vacated at
+        // the bottom when a collapse had to take its shortfall from there.
+        self.blankSignedRows(at_row + shift + 1, first_below + below_shift - 1);
+        self.blankSignedRows(height_i - 1 + below_shift + 1, height_i - 1);
+
+        // Tables below the split shouldn't have travelled with the ring.
+        // `scrollOne`/`unscrollOne` moved every one of them by `shift`, so
+        // undo that for the ones past the split by putting them on the
+        // below-content's `shift + delta` instead.
+        if (self.tables.count() > 0) {
+            var it = self.tables.valueIterator();
+            while (it.next()) |t| {
+                if (t.top_live - shift > at_row) t.top_live += delta;
+            }
+        }
+
+        self.selection = null;
+        self.touchRender();
+    }
+
+    /// Blanks every retained row from signed live-viewport row `from`
+    /// through `to` inclusive, skipping rows that aren't in the ring.
+    /// An empty or inverted range does nothing.
+    fn blankSignedRows(self: *Layer, from: i64, to: i64) void {
+        var r = from;
+        while (r <= to) : (r += 1) {
+            if (self.rowAtSigned(r)) |cells| {
+                for (cells) |*c| c.* = .{};
+            }
+        }
+    }
+
     /// Resolves an absolute row a caller named (an explicit
     /// `set_property(cursor)`, or `drawImage`/`drawBox`/`drawIcon`'s
     /// anchor row) against the current viewport, scrolling first if it's

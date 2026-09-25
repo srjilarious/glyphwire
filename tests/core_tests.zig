@@ -4932,3 +4932,164 @@ pub fn opacityChangeBumpsTheRenderGenerationTest(io: std.Io, alloc: std.mem.Allo
     try ctx.setLayerProperty(panel, .{ .opacity = 0.25 });
     try testz.expectTrue(ctx.layerPtr(panel).?.renderGeneration() != before);
 }
+
+// ─── Layer.reflowAt ────────────────────────────────────────────────────
+//
+// `reflowAt` opens or closes rows in the *middle* of a layer so a
+// component whose height changed (an `Outline` node toggling) can grow.
+// The contract these exercise: content above the split moves, content
+// below it does not, and an expand/collapse pair restores the grid.
+
+/// The first column's grapheme at signed live-viewport row `row` --
+/// negative rows reach up into scrollback. `"·"` for a row that isn't
+/// retained at all, so an assertion failure reads as a position rather
+/// than an error.
+fn rowHead(layer: *const glyphwire.Layer, row: i64) []const u8 {
+    if (row >= 0) return layer.cell(@intCast(row), 0).grapheme();
+    const hist = layer.scrollbackRow(@intCast(-row - 1)) orelse return "·";
+    return hist[0].grapheme();
+}
+
+/// Six single-letter rows (`a`..`f`) on a 4 x 6 layer, one per row, so
+/// every row is identifiable by its first cell.
+fn sixRowLayer(alloc: std.mem.Allocator, scrollback: usize) !glyphwire.Layer {
+    var layer = try glyphwire.Layer.init(alloc, 4, 6, scrollback);
+    errdefer layer.deinit();
+    try layer.writeText("aa\nbb\ncc\ndd\nee\nff", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    return layer;
+}
+
+pub fn reflowAtOpensGapAboveAndLeavesRowsBelowPutTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try sixRowLayer(alloc, 10);
+    defer layer.deinit();
+
+    // Expand by two rows directly below row 2 ("cc").
+    try layer.reflowAt(2, 2);
+
+    // Everything below the split is exactly where it was.
+    try testz.expectEqualStr("d", rowHead(&layer, 3));
+    try testz.expectEqualStr("e", rowHead(&layer, 4));
+    try testz.expectEqualStr("f", rowHead(&layer, 5));
+
+    // Two blank rows opened up for the body.
+    try testz.expectEqualStr("", rowHead(&layer, 1));
+    try testz.expectEqualStr("", rowHead(&layer, 2));
+
+    // The content at and above the split rose by two, the top two rows
+    // passing into scrollback rather than being lost.
+    try testz.expectEqualStr("c", rowHead(&layer, 0));
+    try testz.expectEqualStr("b", rowHead(&layer, -1));
+    try testz.expectEqualStr("a", rowHead(&layer, -2));
+    try testz.expectEqual(layer.history_len, 2);
+}
+
+pub fn reflowAtExpandThenCollapseRestoresTheGridTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try sixRowLayer(alloc, 10);
+    defer layer.deinit();
+
+    // Expand below row 2, which puts the split's own row at 0; collapsing
+    // the same two rows from there is the toggle's return trip.
+    try layer.reflowAt(2, 2);
+    try layer.reflowAt(0, -2);
+
+    try testz.expectEqualStr("a", rowHead(&layer, 0));
+    try testz.expectEqualStr("b", rowHead(&layer, 1));
+    try testz.expectEqualStr("c", rowHead(&layer, 2));
+    try testz.expectEqualStr("d", rowHead(&layer, 3));
+    try testz.expectEqualStr("e", rowHead(&layer, 4));
+    try testz.expectEqualStr("f", rowHead(&layer, 5));
+    try testz.expectEqual(layer.history_len, 0);
+}
+
+pub fn reflowAtCarriesCellStyleAcrossTheMoveTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 6, 10);
+    defer layer.deinit();
+    layer.setProperty(.{ .cursor = .{ .row = 4, .col = 0 } });
+    try layer.writeText("zz", .{ .r = 9, .g = 8, .b = 7 }, .{ .color = .{ .r = 1, .g = 2, .b = 3 } });
+
+    // Row 4 is below the split, so it is memcpy'd wholesale rather than
+    // rewritten -- colours have to survive, not just graphemes.
+    try layer.reflowAt(1, 2);
+
+    const c = layer.cell(4, 0);
+    try testz.expectEqualStr("z", c.grapheme());
+    try testz.expectEqual(c.style.fg.r, 9);
+    try testz.expectEqual(c.style.fg.g, 8);
+    try testz.expectEqual(c.style.fg.b, 7);
+    switch (c.style.bg) {
+        .color => |bg| {
+            try testz.expectEqual(bg.r, 1);
+            try testz.expectEqual(bg.g, 2);
+            try testz.expectEqual(bg.b, 3);
+        },
+        else => try testz.expectTrue(false),
+    }
+}
+
+pub fn reflowAtCollapseWithoutHistoryTakesShortfallFromTheBottomTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // No history to pull down from, so the gap can only close by moving
+    // the content below the split *up* -- the documented degenerate case.
+    var layer = try sixRowLayer(alloc, 0);
+    defer layer.deinit();
+
+    try layer.reflowAt(0, -2);
+
+    try testz.expectEqualStr("a", rowHead(&layer, 0));
+    try testz.expectEqualStr("d", rowHead(&layer, 1));
+    try testz.expectEqualStr("e", rowHead(&layer, 2));
+    try testz.expectEqualStr("f", rowHead(&layer, 3));
+    // The two rows the below-content vacated are blanked, not stale.
+    try testz.expectEqualStr("", rowHead(&layer, 4));
+    try testz.expectEqualStr("", rowHead(&layer, 5));
+}
+
+pub fn reflowAtWithoutScrollbackEvictsTheTopRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try sixRowLayer(alloc, 0);
+    defer layer.deinit();
+
+    try layer.reflowAt(2, 2);
+
+    // Same shape as the scrollback case, except "aa"/"bb" are simply gone
+    // -- there is no ring to catch them, exactly as for ordinary output.
+    try testz.expectEqualStr("c", rowHead(&layer, 0));
+    try testz.expectEqualStr("", rowHead(&layer, 1));
+    try testz.expectEqualStr("", rowHead(&layer, 2));
+    try testz.expectEqualStr("d", rowHead(&layer, 3));
+    try testz.expectEqualStr("f", rowHead(&layer, 5));
+    try testz.expectEqual(layer.history_len, 0);
+}
+
+pub fn reflowAtIsANoOpOnTheAltScreenTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try sixRowLayer(alloc, 10);
+    defer layer.deinit();
+
+    // The alt buffer has no scrollback, so there is nowhere for displaced
+    // rows to go and the whole operation stands down.
+    try layer.writeText("\x1b[?1049h", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 0 } });
+    try layer.writeText("pp\nqq\nrr", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    try layer.reflowAt(0, 2);
+
+    try testz.expectEqualStr("p", rowHead(&layer, 0));
+    try testz.expectEqualStr("q", rowHead(&layer, 1));
+    try testz.expectEqualStr("r", rowHead(&layer, 2));
+}
+
+pub fn reflowAtWithZeroDeltaChangesNothingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try sixRowLayer(alloc, 10);
+    defer layer.deinit();
+
+    try layer.reflowAt(3, 0);
+
+    try testz.expectEqualStr("a", rowHead(&layer, 0));
+    try testz.expectEqualStr("f", rowHead(&layer, 5));
+    try testz.expectEqual(layer.history_len, 0);
+}
