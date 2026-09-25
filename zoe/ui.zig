@@ -7,8 +7,11 @@
 //! The layout is a `column` split holding a `row` split (the tree beside
 //! a column of tab strip over buffer) above a one-row statusline. The
 //! host owns it: zoe describes it once at startup, and after that a
-//! window resize or a divider drag arrives as a `layout` notification
-//! saying where each pane ended up.
+//! divider drag arrives as a `layout` notification saying where each pane
+//! ended up. A *window* resize arrives as both a `resize` and a `layout`,
+//! and zoe needs the first as well as the second -- `layout` names only
+//! the layers whose bounds the split walk found different, and isn't sent
+//! at all when it finds none. See the `.resize` arm of `handleEvent`.
 //!
 //! **Every open buffer is a `Slot`**, and the tab strip lists them. A
 //! slot holds its own editor, scroll position, redraw bookkeeping and
@@ -20,9 +23,12 @@
 //! whose *content* is the whole listing -- every entry, at its full width
 //! -- shown through a viewport the size of the pane. The host scrolls it
 //! and draws its scrollbars, and zoe only rewrites it when the tree
-//! itself changes (an expand or collapse), never on a scroll tick. The
-//! buffer pane can't work that way: a 100k-line file as a cell grid is
-//! hundreds of megabytes. So its content grid is exactly pane-sized, zoe
+//! itself changes (an expand or collapse), never on a scroll tick -- and
+//! moving the cursor in it is two `set_bg`s rather than a rewrite either
+//! (`TreeDirty`).
+//!
+//! The buffer pane can't work that way: a 100k-line file as a cell grid
+//! is hundreds of megabytes. So its content grid is exactly pane-sized, zoe
 //! owns `top_line`/`left_col`, and it repaints the visible rows -- but on
 //! a pure scroll of less than a screen it shifts the rows it already drew
 //! with one `move_content` and repaints only the exposed band
@@ -50,6 +56,15 @@ const Color = glyphwire.Color;
 
 /// Cells the tree pane occupies until a divider drag says otherwise.
 const default_tree_cols: usize = 28;
+
+/// Blank rows the tree's content grid keeps below the last entry.
+///
+/// One, and it exists for the horizontal scrollbar: the host draws that
+/// bar *over* the bottom row of the pane, so a listing that ends exactly
+/// at the viewport's last row has its final entry sitting under the bar
+/// and unreadable, with nothing to scroll to that would move it. A
+/// trailing blank row is what the bar covers instead.
+const tree_trailing_rows: usize = 1;
 
 /// The most zoe will read into a buffer. Every open buffer holds its
 /// text for as long as it is open, so this is also the per-tab ceiling.
@@ -112,6 +127,66 @@ const Bounds = struct {
 };
 
 const Focus = enum { buffer, tree };
+
+/// How much of the tree pane the next frame owes, lowest first --
+/// `markTreeDirty` only ever raises it, so a full repaint already owed
+/// survives however many cursor moves land on top of it.
+///
+/// The `selection` level is the whole point: the tree layer holds the
+/// *entire* listing (the host scrolls a viewport over it), so a cursor
+/// move changes nothing but which row is highlighted. That is two
+/// `set_bg`s, which leave the text and the per-entry icons already on the
+/// layer exactly where they are -- see `renderTreeSelection`.
+const TreeDirty = enum(u2) {
+    none,
+    selection,
+    full,
+};
+
+/// Which set of names a tree-pane search is walking.
+///
+/// The two scopes answer different questions, which is why the trigger
+/// key picks one rather than the search widening on its own: `f` is "find
+/// something I can already see", `/` is "find it anywhere under the root,
+/// and open whatever folders that takes".
+const FindScope = enum {
+    /// `f`: the flattened listing -- exactly the rows on screen.
+    visible,
+    /// `/`: every path under the tree root, collapsed folders included.
+    deep,
+};
+
+/// An in-progress tree-pane search. Prefix-matched against entry names,
+/// case-insensitively, with Tab stepping through the candidates -- the
+/// same shape as salacommander's type-to-find, and deliberately not the
+/// fuzzy ranking Ctrl+P uses: a prefix says exactly where the cursor will
+/// land, which is what makes Tab predictable.
+const TreeFind = struct {
+    scope: FindScope,
+    /// What has been typed, owned. Only characters that keep at least one
+    /// candidate are kept, so the query always describes where the cursor
+    /// is (`typeToFind` in salacommander does the same).
+    query: std.ArrayList(u8) = .empty,
+    /// `.deep` only: the whole-tree listing, read when the search started.
+    deep: ?tree_mod.DeepList = null,
+    /// The current candidates -- entry indices for `.visible`, `deep`
+    /// path indices for `.deep` -- and which one the cursor is on.
+    hits: std.ArrayList(usize) = .empty,
+    pick: usize = 0,
+    /// `.visible` only: the row the cursor was on when the search
+    /// started. Candidates are ordered forward from here, so "the next
+    /// match" means the next one after where you were -- and stays
+    /// meaning that as the prefix grows, rather than re-anchoring on
+    /// whatever the last keystroke found.
+    anchor: usize = 0,
+
+    fn deinit(self: *TreeFind, alloc: std.mem.Allocator) void {
+        self.query.deinit(alloc);
+        self.hits.deinit(alloc);
+        if (self.deep) |*d| d.deinit();
+        self.* = undefined;
+    }
+};
 
 /// What zoe's command line named, once `main` has looked at it on disk.
 /// The distinction is the whole reason it looks: `zoe build.zig` opens a
@@ -315,6 +390,26 @@ pub const Ui = struct {
     /// The tree pane's scroll offset, mirrored from `scroll_offset`
     /// notifications so a click can be resolved to the right entry.
     tree_scroll: glyphwire.CellPos = .{},
+    /// A scroll offset the cursor needs the host to move to, held until
+    /// the frame it belongs to goes out. Pushing it straight from
+    /// `scrollTreeToCursor` put a notification on the wire *outside* the
+    /// render batch, so a held-down `j` interleaved scrolls and repaints
+    /// instead of sending one coherent frame per key.
+    tree_scroll_pending: ?glyphwire.CellPos = null,
+    /// The row `set_bg` last painted as the selected one, and whether it
+    /// was painted focused. `renderTreeSelection` needs both to know what
+    /// to paint back to the pane colour.
+    tree_painted: struct { row: usize = 0, focused: bool = false } = .{},
+
+    /// An in-progress tree-pane search (`f` or `/`), null the rest of the
+    /// time. See `TreeFind`.
+    find: ?TreeFind = null,
+
+    /// Every pane's bounds are stale and have to be read back from the
+    /// server before the next frame -- set by a `resize`. See the
+    /// `.resize` arm of `handleEvent` for why the `layout` notification
+    /// can't be the only thing zoe reflows on.
+    bounds_stale: bool = false,
 
     /// An in-progress left-button drag in the buffer pane. `anchor` is
     /// the buffer byte offset the press landed on; `moved` flips true the
@@ -345,7 +440,11 @@ pub const Ui = struct {
     /// file tree (a `draw_icon` per entry) on every such keystroke is
     /// what made the command line feel laggy.
     buffer_dirty: bool = true,
-    tree_dirty: bool = true,
+    /// The tree's own flag has three levels rather than two: moving the
+    /// cursor changes exactly two rows' background, and repainting the
+    /// whole listing (a `write_text` *and* a `draw_icon` per entry) for
+    /// that is what made holding `j` down heavy. See `TreeDirty`.
+    tree_dirty: TreeDirty = .full,
     tabs_dirty: bool = true,
     status_dirty: bool = true,
     finder_dirty: bool = false,
@@ -725,6 +824,7 @@ pub const Ui = struct {
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
         if (self.finder) |*f| f.deinit();
+        if (self.find) |*f| f.deinit(self.alloc);
         if (self.prev_cwd) |p| self.alloc.free(p);
 
         // Every open buffer's text and parse tree, not just the visible
@@ -820,7 +920,7 @@ pub const Ui = struct {
     /// `clampTreeScroll` pulls the offset back too, so in practice these
     /// max out at the listing; this is the half that cannot be raced.
     fn treeContentRows(self: *const Ui) usize {
-        return @max(self.tree.len(), self.tree_scroll.row + self.tree_bounds.rows);
+        return @max(self.tree.len() + tree_trailing_rows, self.tree_scroll.row + self.tree_bounds.rows);
     }
 
     fn treeContentCols(self: *const Ui) usize {
@@ -833,9 +933,13 @@ pub const Ui = struct {
     fn clampTreeScroll(self: *Ui) void {
         const rows = self.tree_bounds.rows;
         if (rows == 0) return;
-        const max_top = self.tree.len() -| rows;
+        const max_top = (self.tree.len() + tree_trailing_rows) -| rows;
         if (self.tree_scroll.row <= max_top) return;
         self.tree_scroll.row = max_top;
+        // Immediate rather than batched, unlike `scrollTreeToCursor`: the
+        // caller is about to shrink the content grid around this offset,
+        // and the host has to have pulled the viewport back first.
+        self.tree_scroll_pending = null;
         self.client.setLayerScrollOffset(self.tree_layer, max_top, self.tree_scroll.col) catch {};
     }
 
@@ -843,8 +947,9 @@ pub const Ui = struct {
 
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
-            if (self.buffer_dirty or self.tree_dirty or self.tabs_dirty or
-                self.status_dirty or self.finder_dirty)
+            if (self.buffer_dirty or self.tree_dirty != .none or self.tabs_dirty or
+                self.status_dirty or self.finder_dirty or
+                self.bounds_stale or self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
 
@@ -880,12 +985,38 @@ pub const Ui = struct {
                 // shift them -- it has to repaint. Every pane moved.
                 self.buf.full_redraw = true;
                 self.buffer_dirty = true;
-                self.tree_dirty = true;
+                self.markTreeDirty(.full);
                 self.tabs_dirty = true;
                 self.status_dirty = true;
                 // The popup is outside the split tree, so this
                 // notification never mentions it -- but it is placed
                 // against the buffer pane, which just moved.
+                self.finder_dirty = self.finder != null;
+            },
+            // The window (or this pane) changed size.
+            //
+            // `layout` alone is not enough to reflow on, which is why
+            // this arm exists at all. That notification carries only the
+            // layers whose bounds the split walk found *different*, and
+            // is not sent when it finds none -- so a resize that leaves
+            // zoe's panes at the same cell rects (a width change absorbed
+            // entirely by the fixed-width sidebar, a pane that was
+            // already clamped) delivers a `resize` and nothing else, and
+            // zoe used to sit there holding the previous frame. `resize`
+            // has no such change filter: every subscriber gets one every
+            // time. See `Server.reportContextSizes` / `reportLayout`.
+            //
+            // The bounds themselves are read back in `render` rather than
+            // here: this notification goes out *before* the server
+            // re-runs the split layout, so asking now would answer with
+            // the old rects.
+            .resize => {
+                self.bounds_stale = true;
+                self.buf.full_redraw = true;
+                self.buffer_dirty = true;
+                self.markTreeDirty(.full);
+                self.tabs_dirty = true;
+                self.status_dirty = true;
                 self.finder_dirty = self.finder != null;
             },
             .scroll_offset => |so| {
@@ -1024,7 +1155,7 @@ pub const Ui = struct {
                     }
                 }
                 if (self.focus == .tree) {
-                    try self.treeKey(k.key);
+                    try self.treeKey(k);
                     self.status_dirty = true;
                     return;
                 }
@@ -1128,13 +1259,27 @@ pub const Ui = struct {
     fn setFocus(self: *Ui, to: Focus) void {
         if (self.focus == to) return;
         self.focus = to;
-        self.tree_dirty = true;
+        // Leaving the tree abandons any search in it -- the prefix
+        // describes where the tree cursor is, and the tree cursor stops
+        // being what the keyboard drives.
+        if (to != .tree) self.cancelFind();
+        // Only the highlight appears or disappears: the listing itself is
+        // untouched by a focus change.
+        self.markTreeDirty(.selection);
         self.status_dirty = true;
     }
 
     fn toggleTree(self: *Ui) !void {
         self.tree_visible = !self.tree_visible;
-        if (!self.tree_visible and self.focus == .tree) self.focus = .buffer;
+        // Ctrl+N is also the shortest way *to* the sidebar, so showing it
+        // focuses it: opening a pane you then have to Ctrl+W into is two
+        // chords for one intention. Hiding it hands focus back.
+        if (self.tree_visible) {
+            self.focus = .tree;
+        } else if (self.focus == .tree) {
+            self.focus = .buffer;
+            self.cancelFind();
+        }
         // Dropping the layer from the split reclaims its columns but
         // leaves the layer itself mapped, and the host draws every mapped
         // layer's scrollbars in a pass of their own, over the top of
@@ -1149,53 +1294,92 @@ pub const Ui = struct {
         // re-laid-out wider or narrower.
         self.buf.full_redraw = true;
         self.buffer_dirty = true;
-        self.tree_dirty = true;
+        self.markTreeDirty(.full);
         self.tabs_dirty = true;
         self.status_dirty = true;
     }
 
     // ── Tree pane input ─────────────────────────────────────────────────
 
-    fn treeKey(self: *Ui, key: []const u8) !void {
+    fn treeKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
+        // A search owns the keyboard while it is up, the way the Ctrl+P
+        // popup does: Tab steps the candidates, Backspace shortens the
+        // prefix, Enter takes the row and Escape drops the search.
+        if (self.find != null) {
+            if (try self.findKey(ev)) return;
+            // Anything else is a plain navigation key, and moving the
+            // cursor by hand ends the search: the prefix is only ever a
+            // description of where the search put the cursor.
+            self.cancelFind();
+        }
+
         const eq = std.mem.eql;
+        const key = ev.key;
         if (eq(u8, key, "down")) self.treeMove(1);
         if (eq(u8, key, "up")) self.treeMove(-1);
+        if (eq(u8, key, "page_down")) self.treeMove(@intCast(self.treePageRows()));
+        if (eq(u8, key, "page_up")) self.treeMove(-@as(i64, @intCast(self.treePageRows())));
+        if (eq(u8, key, "home")) self.treeGoto(0);
+        if (eq(u8, key, "end")) self.treeGoto(self.tree.len() -| 1);
         if (eq(u8, key, "enter")) try self.treeActivate();
-        if (eq(u8, key, "escape")) self.focus = .buffer;
-        self.tree_dirty = true;
+        if (eq(u8, key, "escape")) self.setFocus(.buffer);
+    }
+
+    /// How far Page Up / Page Down move: a viewport, less one row of
+    /// overlap, so the entry that was at the edge is still on screen to
+    /// read from -- the same rule the buffer pane's `page_up` uses.
+    fn treePageRows(self: *const Ui) usize {
+        return @max(1, self.tree_bounds.rows -| 1);
     }
 
     /// Tree navigation reuses vim's own keys, so switching panes doesn't
-    /// switch keyboards.
+    /// switch keyboards -- which is also why type-to-find needs a trigger
+    /// rather than starting on any letter the way salacommander's does:
+    /// here the letters are already commands. `f` searches what is on
+    /// screen, `/` searches the whole tree. See `TreeFind`.
     fn treeText(self: *Ui, text: []const u8) !void {
+        if (self.find != null) return self.findText(text);
+
         var it = (std.unicode.Utf8View.init(text) catch return).iterator();
         while (it.nextCodepointSlice()) |cp| {
             if (cp.len != 1) continue;
             switch (cp[0]) {
                 'j' => self.treeMove(1),
                 'k' => self.treeMove(-1),
-                'g' => self.tree.cursor = 0,
-                'G' => self.tree.cursor = self.tree.len() -| 1,
+                'g' => self.treeGoto(0),
+                'G' => self.treeGoto(self.tree.len() -| 1),
                 ' ', 'l' => try self.treeActivate(),
                 'h' => self.treeMove(-1),
-                'q' => self.focus = .buffer,
+                'q' => self.setFocus(.buffer),
+                'f' => try self.startFind(.visible),
+                '/' => try self.startFind(.deep),
                 else => {},
             }
         }
-        self.tree_dirty = true;
     }
 
     fn treeMove(self: *Ui, delta: i64) void {
         const n = self.tree.len();
         if (n == 0) return;
         const next = @as(i64, @intCast(self.tree.cursor)) + delta;
-        self.tree.cursor = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(n - 1))));
+        self.treeGoto(@intCast(std.math.clamp(next, 0, @as(i64, @intCast(n - 1)))));
+    }
+
+    /// Puts the cursor on `index` and follows it with the viewport. The
+    /// one way the cursor moves, so the scroll and the repaint can't be
+    /// forgotten at a call site.
+    fn treeGoto(self: *Ui, index: usize) void {
+        if (self.tree.len() == 0) return;
+        self.tree.cursor = @min(index, self.tree.len() - 1);
         self.scrollTreeToCursor();
+        // Nothing but the highlight moved -- see `TreeDirty`.
+        self.markTreeDirty(.selection);
     }
 
     /// Keeps the tree's cursor inside the host-scrolled viewport by
-    /// pushing a new `scroll_offset`, since the host has no idea zoe has
-    /// a cursor.
+    /// queueing a new `scroll_offset`, since the host has no idea zoe has
+    /// a cursor. Queued rather than sent so it rides out in the same
+    /// batch as the frame it belongs to (`tree_scroll_pending`).
     fn scrollTreeToCursor(self: *Ui) void {
         const rows = self.tree_bounds.rows;
         if (rows == 0) return;
@@ -1205,7 +1389,7 @@ pub const Ui = struct {
         if (top == self.tree_scroll.row) return;
 
         self.tree_scroll.row = top;
-        self.client.setLayerScrollOffset(self.tree_layer, top, self.tree_scroll.col) catch {};
+        self.tree_scroll_pending = .{ .row = top, .col = self.tree_scroll.col };
     }
 
     /// Enter/Space on a directory expands it, on a file opens it.
@@ -1218,10 +1402,157 @@ pub const Ui = struct {
             // around it.
             self.clampTreeScroll();
             try self.syncContentSizes();
+            // The listing itself changed shape.
+            self.markTreeDirty(.full);
             return;
         }
         try self.openFile(entry.path);
-        self.focus = .buffer;
+        self.setFocus(.buffer);
+    }
+
+    // ── Tree pane search ────────────────────────────────────────────────
+
+    /// Opens a search in `scope` (see `FindScope`). A `.deep` one walks
+    /// the whole tree first, which is the only expensive thing either
+    /// scope does and is why it happens once, here, rather than per
+    /// keystroke.
+    fn startFind(self: *Ui, scope: FindScope) !void {
+        self.cancelFind();
+        var find: TreeFind = .{ .scope = scope, .anchor = self.tree.cursor };
+        errdefer find.deinit(self.alloc);
+        if (scope == .deep) find.deep = try tree_mod.deepList(self.alloc, self.io, self.tree.root);
+        self.find = find;
+        self.status_dirty = true;
+    }
+
+    fn cancelFind(self: *Ui) void {
+        if (self.find) |*f| {
+            f.deinit(self.alloc);
+            self.find = null;
+            self.status_dirty = true;
+        }
+    }
+
+    /// A named key while a search is up. Returns true when the search
+    /// consumed it, false to let the ordinary tree bindings have it.
+    fn findKey(self: *Ui, ev: glyphwire.KeyEvent) !bool {
+        const eq = std.mem.eql;
+        const f = &self.find.?;
+
+        if (eq(u8, ev.key, "escape")) {
+            // The cursor stays where the search put it, and so does any
+            // folder the search opened to get there: an abandoned search
+            // has still told you where the file is.
+            self.cancelFind();
+            return true;
+        }
+        if (eq(u8, ev.key, "enter")) {
+            self.cancelFind();
+            try self.treeActivate();
+            return true;
+        }
+        if (eq(u8, ev.key, "tab")) {
+            if (f.hits.items.len == 0) return true;
+            const n = f.hits.items.len;
+            f.pick = if (ev.shift()) (f.pick + n - 1) % n else (f.pick + 1) % n;
+            try self.applyFind();
+            return true;
+        }
+        if (eq(u8, ev.key, "backspace")) {
+            if (f.query.items.len == 0) {
+                self.cancelFind();
+                return true;
+            }
+            f.query.shrinkRetainingCapacity(lineedit.prevBoundary(f.query.items, f.query.items.len));
+            if (f.query.items.len == 0) {
+                self.cancelFind();
+                return true;
+            }
+            try self.refilterFind();
+            try self.applyFind();
+            return true;
+        }
+        return false;
+    }
+
+    /// Typed text while a search is up. A character that would leave no
+    /// candidates is dropped rather than appended, so the prefix always
+    /// describes where the cursor is -- salacommander's type-to-find
+    /// makes the same trade, and it is what stops a typo from stranding
+    /// the search on a query nothing matches.
+    fn findText(self: *Ui, text: []const u8) !void {
+        const f = &self.find.?;
+        var it = (std.unicode.Utf8View.init(text) catch return).iterator();
+        while (it.nextCodepointSlice()) |cp| {
+            const before = f.query.items.len;
+            try f.query.appendSlice(self.alloc, cp);
+            try self.refilterFind();
+            if (f.hits.items.len == 0) {
+                f.query.shrinkRetainingCapacity(before);
+                try self.refilterFind();
+                continue;
+            }
+            try self.applyFind();
+        }
+        self.status_dirty = true;
+    }
+
+    /// Rebuilds the candidate list for the current query and puts the
+    /// pick back on the first one. Prefix-matched case-insensitively
+    /// against the *name*, not the path: what is being typed is a file
+    /// name, in both scopes.
+    fn refilterFind(self: *Ui) !void {
+        const f = &self.find.?;
+        f.hits.clearRetainingCapacity();
+        f.pick = 0;
+        if (f.query.items.len == 0) return;
+
+        switch (f.scope) {
+            // Starting the walk at the row after the anchor is what makes
+            // the search read as "forward from where I was", and the wrap
+            // is why it still finds everything behind it.
+            .visible => {
+                const n = self.tree.len();
+                const from = if (n == 0) 0 else (@min(f.anchor, n - 1) + 1) % n;
+                var i: usize = 0;
+                while (i < n) : (i += 1) {
+                    const index = (from + i) % n;
+                    if (std.ascii.startsWithIgnoreCase(self.tree.entries.items[index].name, f.query.items)) {
+                        try f.hits.append(self.alloc, index);
+                    }
+                }
+            },
+            .deep => {
+                const deep = &f.deep.?;
+                for (deep.paths.items, 0..) |_, i| {
+                    if (std.ascii.startsWithIgnoreCase(deep.nameAt(i), f.query.items)) {
+                        try f.hits.append(self.alloc, i);
+                    }
+                }
+            },
+        }
+    }
+
+    /// Moves the cursor onto the picked candidate. In `.deep` scope that
+    /// means opening whatever folders stand between the root and the hit
+    /// (`Tree.reveal`), which changes the listing -- hence the full
+    /// repaint and the content resize.
+    fn applyFind(self: *Ui) !void {
+        const f = &self.find.?;
+        self.status_dirty = true;
+        if (f.hits.items.len == 0) return;
+        const hit = f.hits.items[f.pick];
+
+        switch (f.scope) {
+            .visible => self.treeGoto(hit),
+            .deep => {
+                const rel = f.deep.?.paths.items[hit];
+                const index = (try self.tree.reveal(self.io, rel)) orelse return;
+                try self.syncContentSizes();
+                self.treeGoto(index);
+                self.markTreeDirty(.full);
+            },
+        }
     }
 
     /// A left-button press or release. In the buffer pane a press moves
@@ -1355,10 +1686,12 @@ pub const Ui = struct {
 
         const index = self.tree_scroll.row + (ev.cell.row - b.row);
         if (index >= self.tree.len()) return;
-        self.tree.cursor = index;
-        self.focus = .tree;
+        // A click is a new starting point, so it drops any search the way
+        // every other cursor move does.
+        self.cancelFind();
+        self.setFocus(.tree);
+        self.treeGoto(index);
         try self.treeActivate();
-        self.tree_dirty = true;
         self.status_dirty = true;
     }
 
@@ -1462,14 +1795,18 @@ pub const Ui = struct {
         const new_root = if (new_n > 0) new_buf[0..new_n] else dest;
 
         if (Tree.init(self.alloc, self.io, new_root)) |fresh| {
+            // A search's candidates are indices into the listing that is
+            // about to be replaced.
+            self.cancelFind();
             self.tree.deinit();
             self.tree = fresh;
             self.tree_scroll = .{};
+            self.tree_scroll_pending = null;
             self.client.setLayerScrollOffset(self.tree_layer, 0, 0) catch {};
             self.syncContentSizes() catch {};
         } else |_| {}
 
-        self.tree_dirty = true;
+        self.markTreeDirty(.full);
         self.status_dirty = true;
         self.buf.ed.setStatus("{s}", .{new_root});
     }
@@ -1481,6 +1818,9 @@ pub const Ui = struct {
     /// up to date in the background -- see finder.zig.
     fn openFinder(self: *Ui) !void {
         if (self.finder) |*f| f.deinit();
+        // The popup is modal, so a tree search underneath it would have
+        // the statusline to itself with no way left to type into it.
+        self.cancelFind();
         self.finder = Finder.init(self.alloc, self.io, self.tree.root) catch |err| {
             self.finder = null;
             self.buf.ed.setStatus("E484: Can't scan {s}: {s}", .{ self.tree.root, @errorName(err) });
@@ -1956,11 +2296,33 @@ pub const Ui = struct {
     /// just the status row, leaving the buffer's syntax pass and the
     /// tree's per-entry icons untouched.
     fn render(self: *Ui) !void {
+        // A `resize` left every pane's geometry in doubt. Reading the
+        // bounds back happens here rather than in the event arm so it
+        // runs once per frame, after the whole notification burst has
+        // been folded in -- a resize arrives as a `resize` *and* a
+        // `layout`, and answering the first one with four round trips
+        // only to have the second overwrite them is wasted.
+        if (self.bounds_stale) {
+            self.bounds_stale = false;
+            try self.readBounds();
+        }
+
         var batch = self.client.batch();
         defer batch.deinit();
 
+        // Before the rows, so the host has scrolled to where the cursor
+        // is by the time the frame it belongs to lands.
+        if (self.tree_scroll_pending) |p| {
+            self.tree_scroll_pending = null;
+            try batch.setLayerScrollOffset(self.tree_layer, p.row, p.col);
+        }
+
         if (self.buffer_dirty) try self.renderBuffer(&batch);
-        if (self.tree_visible and self.tree_dirty) try self.renderTree(&batch);
+        if (self.tree_visible) switch (self.tree_dirty) {
+            .none => {},
+            .selection => try self.renderTreeSelection(&batch),
+            .full => try self.renderTree(&batch),
+        };
         if (self.tabs_dirty) try self.renderTabs(&batch);
         if (self.status_dirty) try self.renderStatus(&batch);
         // Last in the frame, as it is last in the compositing order.
@@ -1969,10 +2331,17 @@ pub const Ui = struct {
         _ = try batch.send();
 
         self.buffer_dirty = false;
-        self.tree_dirty = false;
+        self.tree_dirty = .none;
         self.tabs_dirty = false;
         self.status_dirty = false;
         self.finder_dirty = false;
+    }
+
+    /// Raises the tree pane's pending repaint to at least `level`. Never
+    /// lowers it: a full repaint already owed stays owed however many
+    /// cursor moves land on top of it before the next frame.
+    fn markTreeDirty(self: *Ui, level: TreeDirty) void {
+        if (@intFromEnum(level) > @intFromEnum(self.tree_dirty)) self.tree_dirty = level;
     }
 
     /// Writes one run at `(row, col)` on a layer -- a single positioned
@@ -2676,6 +3045,34 @@ pub const Ui = struct {
                 try batch.clearArea(.{ .layer = self.tree_layer, .row = r, .rows = 1, .cols = content_cols, .bg = bg_tree });
             }
         }
+
+        self.tree_painted = .{ .row = self.tree.cursor, .focused = self.focus == .tree };
+    }
+
+    /// The cheap half of the tree repaint: the highlight moved, and
+    /// nothing else did.
+    ///
+    /// The listing is already on the layer in full -- `renderTree` writes
+    /// every row, not just the visible ones -- so moving the cursor is
+    /// two `set_bg`s: the row that was highlighted back to the pane
+    /// colour, the row that now is to the selection colour. `set_bg`
+    /// repaints backgrounds only, so the names and the per-entry icons
+    /// (drawn `foreground: true`) survive untouched, which is the whole
+    /// reason it exists -- see docs/api.md.
+    fn renderTreeSelection(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
+        if (self.tree_bounds.cols == 0 or self.tree_bounds.rows == 0) return;
+        const focused = self.focus == .tree;
+        const cols = self.treeContentCols();
+        const was = self.tree_painted;
+        if (was.focused == focused and was.row == self.tree.cursor) return;
+
+        if (was.focused) {
+            try batch.setBg(.{ .layer = self.tree_layer, .row = was.row, .rows = 1, .cols = cols, .bg = bg_tree });
+        }
+        if (focused) {
+            try batch.setBg(.{ .layer = self.tree_layer, .row = self.tree.cursor, .rows = 1, .cols = cols, .bg = bg_selected });
+        }
+        self.tree_painted = .{ .row = self.tree.cursor, .focused = focused };
     }
 
     fn iconFor(e: tree_mod.Entry) []const u8 {
@@ -2802,7 +3199,24 @@ pub const Ui = struct {
         defer line.deinit(self.alloc);
         var fg = fg_status;
 
-        if (self.buf.ed.mode == .command) {
+        // A tree search takes the row ahead of everything else: it is the
+        // only thing on screen that says what was typed, since the prefix
+        // itself is never drawn in the pane. The `/` prompt keeps the key
+        // that started it, so the scope the search is running in stays
+        // readable while it runs.
+        if (self.find) |f| {
+            const prompt: []const u8 = if (f.scope == .deep) "/" else "find: ";
+            const n = f.hits.items.len;
+            if (n == 0) {
+                if (f.query.items.len > 0) fg = fg_error;
+                try line.print(self.alloc, " {s}{s}  (no match)", .{ prompt, f.query.items });
+            } else {
+                try line.print(self.alloc, " {s}{s}  [{d}/{d}]", .{ prompt, f.query.items, f.pick + 1, n });
+            }
+            if (f.deep) |d| {
+                if (d.truncated) try line.appendSlice(self.alloc, "  (partial)");
+            }
+        } else if (self.buf.ed.mode == .command) {
             try line.append(self.alloc, ':');
             try line.appendSlice(self.alloc, self.buf.ed.cmdline.text());
         } else if (self.buf.ed.status.items.len > 0) {
