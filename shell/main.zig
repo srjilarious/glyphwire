@@ -5318,11 +5318,19 @@ const Prompt = struct {
         };
         defer alloc.free(source);
 
+        // A `cd` earlier on this same line (`cd /tmp && reload`) queues an
+        // `on{ chdir }` listing that `submitLine` runs once dispatch
+        // finishes. That queued string belongs to the config we're about
+        // to throw away, so note that one is waiting and re-point it at
+        // the reloaded command below rather than swallowing the listing.
+        const listing_queued = self.chdir_pending_list != null;
+
         // Drop every borrow into the previous parse before the arena
         // backing it goes away: the memoised command-var values are keyed
-        // by config-owned names, a queued `on{ chdir }` listing *is* a
-        // config-owned string, and `prompt_config` itself must not be
-        // readable across the reset.
+        // by config-owned names, the queued listing *is* a config-owned
+        // string, and `prompt_config` has to read as null across the reset
+        // -- a resize arriving mid-reload then redraws the default prompt
+        // instead of following a dangling pointer.
         self.prompt_config = null;
         self.resetCmdVars();
         self.chdir_pending_list = null;
@@ -5336,6 +5344,13 @@ const Prompt = struct {
         eng.cfg.reset();
         try eng.runConf(source);
         try self.applyConfig(eng);
+
+        // The re-pointed listing (see above). An `on{ chdir }` the new conf
+        // turned off leaves it dropped, which is the reloaded config
+        // getting the last word.
+        if (listing_queued and eng.cfg.on.chdir.command.len > 0) {
+            self.chdir_pending_list = eng.cfg.on.chdir.command;
+        }
 
         // `applyConfig` has already drawn the diagnostic in red -- no
         // "reloaded" line on top of it.
