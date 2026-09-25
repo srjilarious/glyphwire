@@ -67,9 +67,27 @@ jobs:
       # runner and the internal server/client/table-demo tools. This is the
       # compile gate: the staging step below re-runs the same step with a
       # `--prefix`, which by then is just a file copy.
+      #
+      # `-Dcpu=baseline` for the same reason provision_remote.lua uses
+      # it: a plain `zig build` tunes for the *builder's* exact CPU, and
+      # here the builder is whatever machine GitHub handed this run. On
+      # an Ice Lake Xeon runner that means AVX-512 (vmovdqu64, vpternlog,
+      # kmovd, kortest all appear in the binaries), which dies with
+      # "Illegal instruction" on the first one it reaches on any consumer
+      # CPU without AVX-512 -- Intel since Alder Lake fuses it off, AMD
+      # only has it from Zen 4. Worse, the runner pool is mixed, so the
+      # same workflow produces a working tarball or a broken one
+      # depending on which machine picked up the run. A downloaded
+      # tarball has to run on whatever the downloader has, so baseline is
+      # the only safe floor; the cost is nil for the shell/RPC/PTY work
+      # and only theoretically visible in gw-view's image decode.
+      #
+      # The staging step below repeats these flags exactly: a differing
+      # set would compile a second full set of artifacts rather than
+      # reuse this one, and tar up binaries this step never gated.
       - name: Build (ReleaseSafe)
         working-directory: glyphwire
-        run: zig build package -Doptimize=ReleaseSafe
+        run: zig build package -Doptimize=ReleaseSafe -Dcpu=baseline
 
       # The test runner links `host_eng` too, so this is what catches a
       # backend change that compiles for the host but breaks its input
@@ -92,7 +110,7 @@ jobs:
         working-directory: glyphwire
         run: |
           pkg="glyphwire-linux-x86_64"
-          zig build package -Doptimize=ReleaseSafe --prefix "$PWD/$pkg"
+          zig build package -Doptimize=ReleaseSafe -Dcpu=baseline --prefix "$PWD/$pkg"
           # The vendored ziglua reaches the Lua C headers by installing
           # liblua.a and its headers into the prefix (libs/ziglua/build.zig
           # hangs its translate-c step off that install), so any build that
