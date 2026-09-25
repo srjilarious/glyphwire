@@ -66,11 +66,15 @@ omitted still means root.
 Raw input events (`key`, `text`, `mouse_button`, `mouse_move`) are
 delivered **only to connections whose current context is the visible
 one** — a backgrounded full-screen editor stops receiving keystrokes
-meant for the shell that's now on screen, and vice versa. Every other
-server→client event (`resize`, `shutdown`, `layout`, `scroll`,
-`selection`, `context`, …) still fans out to all subscribers regardless, so a
-backgrounded client can keep its panes current for when it's shown
-again.
+meant for the shell that's now on screen, and vice versa. `copy_request`
+is gated the same way: it is not raw input, but it is the direct answer
+to one keystroke and exactly one program should answer it, so it goes to
+the one on screen rather than to every `"clipboard"` subscriber (whose
+`set_clipboard` replies would otherwise overwrite each other at random).
+Every other server→client event (`resize`, `shutdown`, `layout`,
+`scroll`, `selection`, `paste`, `context`, …) still fans out to all
+subscribers regardless, so a backgrounded client can keep its panes
+current for when it's shown again.
 
 ## Layer
 
@@ -635,7 +639,7 @@ queue, and the `size()`/`scroll()`/`visibleContext()` caches are unchanged.
 | `window_text` | notification, server→client | `{text}` | — | ✅ committed text that followed the window prefix. How **every printable** prefix command arrives: while the prefix is armed, a printable key's own press is withheld and the prefix stays armed, so the command is the layout-/IME-resolved text (`"`, not `shift`+`apostrophe`) rather than a key name. A bare modifier press never consumes the armed prefix either. Delivered as `InputEvent.window_text` |
 | `context` | notification, server→client | `{context, cols, rows}` | — | ✅ the visible context changed — `create_context` / `activate_context` / `destroy_context`, or the disconnect-cull auto-restore. `context` is the now-visible context's handle, `cols`/`rows` its root layer's size. A client that manages its own context compares `context` against its own handle to tell "I'm on screen" from "I've been backgrounded (or culled)". Subscribe with `"context"`; `InputListener` (`pollContextEvent`/`waitContextEvent`/`visibleContext`) is the client-side consumer |
 | `selection` | notification, server→client | `{active, anchor?: {above, col}, active_end?: {above, col}}` | — | ✅ sent whenever a layer's selection changes (any of `set_selection`/`update_selection`/`clear_selection`, or glyphwire-host's in-process path). Subscribe with `"selection"`. See the Selection & Clipboard section |
-| `copy_request` | notification, server→client | *(none)* | — | ✅ the copy shortcut (Ctrl+Shift+C) was pressed with nothing selected — a subscriber that owns editable text (glyphwire-shell) answers with `set_clipboard`. Subscribe with `"clipboard"` |
+| `copy_request` | notification, server→client | *(none)* | — | ✅ the copy shortcut (Ctrl+Shift+C) was pressed with nothing selected — a subscriber that owns editable text or a selection of its own answers with `set_clipboard`. glyphwire-shell answers with its marked `gw-ls` paths, else its prompt line; `salacommander` with the active pane's marked files, else the file under the cursor — both as one space-separated shell-quoted line, so the answer pastes back as an argument list. Delivered only to the connection whose context is on screen (see Input above): the answer is a single clipboard write, so fanning the request out would just make the last reply win. Subscribe with `"clipboard"` |
 | `paste` | notification, server→client | `{text}` | — | ✅ committed clipboard text to insert (Ctrl+Shift+V). Distinct from `text` so a client can treat it differently — glyphwire-shell inserts it literally, newlines included, without submitting. Subscribe with `"clipboard"`; on the client it arrives on the same ordered queue as `key`/`text` (`InputEvent{paste}`), and `copy_request` as `InputEvent.copy_request` |
 | `terminal_reply` | notification, server→client | `{bytes}` | — | ✅ the bytes a `write_text` produced in answer to a terminal query (`CSI 6n` cursor position, `CSI c` / `CSI > c` device attributes, DECRQM) in the text it mirrored — see `write_text`'s ESC-sequence note above and decisions.md's B1 screen model. Subscribe with `"terminal"`; `InputListener.pollTerminalReply` is the client-side consumer. glyphwire-shell subscribes while a pty child is foregrounded and writes the bytes to the pty master |
 | *(IME preedit / composition)* | — | — | — | ⬜ only *committed* text crosses the wire today (`text`, above). glyphwire-host **does** draw the live composition, but host-locally: SDL3's `SDL_EVENT_TEXT_EDITING` feeds `host/preedit.zig`, which renders it at the caret and points the OS text-input area there so the IME's candidate window follows. Keys the IME consumes while composing never reach the key stream. A preedit/composition *notification* for other clients to draw their own is still open |

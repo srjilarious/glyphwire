@@ -875,3 +875,32 @@ pub fn configReadsOpenActionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     // An extension the table doesn't touch keeps its default.
     try testz.expectEqualStr(openaction.resolve(user, "/tmp/x.jpg").?, "gw-view --interactive {sel}");
 }
+
+/// Ctrl+Shift+C's clipboard line: space-separated, bare where it can be,
+/// quoted where it must be. The destination is the Ctrl+` shell panel
+/// (`zip shots.zip ` + paste), so a path with a space has to survive the
+/// round trip as one argument rather than two.
+pub fn copiedPathsLineQuotesOnlyWhatNeedsItTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+
+    const plain = try sala.ui.pathsLine(alloc, &.{ "/home/j/a.txt", "/home/j/b.zip" });
+    defer alloc.free(plain);
+    try testz.expectEqualStr(plain, "/home/j/a.txt /home/j/b.zip");
+
+    // A space and a shell metacharacter each force quoting; the neighbours
+    // stay bare.
+    const mixed = try sala.ui.pathsLine(alloc, &.{ "/home/j/a.txt", "/home/j/my file.txt", "/home/j/a&b" });
+    defer alloc.free(mixed);
+    try testz.expectEqualStr(mixed, "/home/j/a.txt '/home/j/my file.txt' '/home/j/a&b'");
+
+    // One path is just that path -- no separator, no wrapper.
+    const single = try sala.ui.pathsLine(alloc, &.{"/home/j/only"});
+    defer alloc.free(single);
+    try testz.expectEqualStr(single, "/home/j/only");
+
+    // Nothing selected produces nothing; `copySelectionPaths` returns
+    // before this is reached, but an empty line must not be a space.
+    const none = try sala.ui.pathsLine(alloc, &.{});
+    defer alloc.free(none);
+    try testz.expectEqualStr(none, "");
+}

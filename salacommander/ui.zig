@@ -52,6 +52,7 @@ const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
 const shellpanel = @import("shellpanel.zig");
+const wordsplit = @import("shell_support").wordsplit;
 
 const Pane = pane_mod.Pane;
 const FileEntry = pane_mod.FileEntry;
@@ -380,6 +381,7 @@ pub const Ui = struct {
                 }
             },
             .mouse_button => |m| try self.handleMouseButton(m),
+            .copy_request => try self.copySelectionPaths(),
             .key => |k| if (k.pressed) try self.handleKey(k),
             // Typed text is the shell's while its panel is up -- it has
             // a line editor, and this one has type-to-find.
@@ -851,6 +853,43 @@ pub const Ui = struct {
             self.last_click.at_ms = 0;
             try self.activate(i);
         }
+    }
+
+    // ── Clipboard ───────────────────────────────────────────────────────
+
+    /// Ctrl+Shift+C: put the active pane's selected paths on the OS
+    /// clipboard, so they can be pasted straight into a command --
+    /// `zip shots.zip ` then Ctrl+Shift+V in the Ctrl+` panel.
+    ///
+    /// There is no key binding for this: glyphwire-host swallows
+    /// Ctrl+Shift+C as its own copy shortcut, and broadcasts
+    /// `copy_request` only when its selection is empty (see
+    /// `host/selection.zig`'s `copyShortcut`). That is the behaviour we
+    /// want anyway -- text dragged out of the shell panel copies as text,
+    /// and the shortcut falls through to the paths the rest of the time.
+    ///
+    /// Marked entries, or the entry under the cursor when nothing is
+    /// marked (`Pane.selection` -- the same set F5/F6 act on), as one
+    /// space-separated line with each path quoted only if it needs it.
+    /// Byte for byte the line gw-shell answers the same request with, so
+    /// the two paste identically.
+    ///
+    /// While the shell panel is up the request is its business, not ours:
+    /// it has its own prompt line to copy, and the pointer and the
+    /// keyboard both follow it (see `handleMouseButton`).
+    fn copySelectionPaths(self: *Ui) !void {
+        if (self.shell.isOpen()) return;
+        const alloc = self.alloc;
+
+        const sel = try self.panes[self.active].selection(alloc);
+        defer alloc.free(sel);
+        if (sel.len == 0) return;
+
+        const line = try pathsLine(alloc, sel);
+        defer alloc.free(line);
+
+        try self.client.setClipboard(line);
+        try self.setMessage("copied {d} path{s}", .{ sel.len, if (sel.len == 1) "" else "s" });
     }
 
     // ── File operations ─────────────────────────────────────────────────
@@ -1724,4 +1763,26 @@ fn fieldView(text: []const u8, caret: usize, width: usize) struct { start: usize
         start = nextCodepoint(text, start);
     }
     return .{ .start = start, .caret_col = lineedit.cellWidth(text[start..caret]) };
+}
+
+/// `paths` as one clipboard line: space-separated, in the order given,
+/// each entry passed through `wordsplit.quoteArgIfNeeded` so an ordinary
+/// path stays bare and one with a space or a shell metacharacter comes
+/// back quoted.
+///
+/// Byte for byte the format gw-shell's own marked-paths copy produces
+/// (`Prompt.markedPathsText`), deliberately: both answer the same
+/// Ctrl+Shift+C, and a user who pastes one after `zip out.zip ` must not
+/// get a different kind of argument list depending on which program was
+/// on screen. Caller owns the result.
+pub fn pathsLine(alloc: std.mem.Allocator, paths: []const []const u8) ![]u8 {
+    var line: std.ArrayList(u8) = .empty;
+    errdefer line.deinit(alloc);
+    for (paths, 0..) |path, i| {
+        if (i > 0) try line.append(alloc, ' ');
+        const tok = try wordsplit.quoteArgIfNeeded(alloc, path);
+        defer alloc.free(tok);
+        try line.appendSlice(alloc, tok);
+    }
+    return line.toOwnedSlice(alloc);
 }

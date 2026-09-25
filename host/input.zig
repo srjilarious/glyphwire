@@ -12,6 +12,8 @@ const key_repeat = @import("key_repeat.zig");
 const App = app_mod.App;
 const Engine = app_mod.Engine;
 
+const mouse_button_count = @typeInfo(app_mod.MouseButton).@"enum".field_names.len;
+
 /// Forwards keyboard / text / mouse events from the engine's per-frame input
 /// state to the in-process `Server`, and synthesizes the typematic key
 /// repeats the OS repeat doesn't reach the host as fresh events. Owns the
@@ -21,6 +23,17 @@ pub const KeyInput = struct {
     app: *App,
 
     last_mouse_px: host_eng.Vec2F = .{ .x = -1, .y = -1 },
+
+    /// Buttons whose *press* this loop has put on the wire and whose
+    /// release it therefore still owes. `Session.input` dedupes a
+    /// press-while-down into nothing (`InputState.setMouseButton`), so a
+    /// dropped release wedges that button down for the rest of the
+    /// session: every later press is a no-op change and is never
+    /// broadcast, which reads exactly like "clicks stopped working"
+    /// while the keyboard carries on fine. Tracking the presses we
+    /// actually sent lets `reportMouseEvents` guarantee the pair -- see
+    /// the release branch there.
+    mouse_down: [mouse_button_count]bool = @splat(false),
 
     /// Session-wide repeat timing from `host.conf.lua`, used for every
     /// context that hasn't asked for its own with `set_key_repeat`. See
@@ -208,16 +221,19 @@ pub const KeyInput = struct {
 
         // Everything below is reported in the focused context's own frame.
         // A pointer outside the focused pane (over a neighbour, or in a
-        // divider band) reports nothing: those events are not that
-        // client's business, and a window-cell coordinate would be outside
-        // its grid entirely.
-        const cell = server.focusedCell(window_cell) orelse return;
+        // divider band) reports no *press* and no move: those events are
+        // not that client's business, and a window-cell coordinate would
+        // be outside its grid entirely. A release still goes out -- see
+        // the release branch below.
+        const cell_in_pane = server.focusedCell(window_cell);
 
-        if (pos.x != self.last_mouse_px.x or pos.y != self.last_mouse_px.y) {
-            self.last_mouse_px = pos;
-            self.app.server.reportMouseMove(self.app.alloc, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
-                std.log.err("reportMouseMove failed: {t}", .{err});
-            };
+        if (cell_in_pane) |cell| {
+            if (pos.x != self.last_mouse_px.x or pos.y != self.last_mouse_px.y) {
+                self.last_mouse_px = pos;
+                self.app.server.reportMouseMove(self.app.alloc, .{ .x = pos.x, .y = pos.y }, cell) catch |err| {
+                    std.log.err("reportMouseMove failed: {t}", .{err});
+                };
+            }
         }
 
         const view_offset = blk: {
@@ -230,12 +246,29 @@ pub const KeyInput = struct {
         inline for (field_names) |field_name| {
             const btn = @field(app_mod.MouseButton, field_name);
             const is_left = btn == .left;
-            if (!(skip_left and is_left)) {
-                if (eng.inputs.mouse.pressed(btn)) {
-                    server.reportMouseButton(self.app.alloc, field_name, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
-                        std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field_name, err });
-                    };
-                } else if (eng.inputs.mouse.released(btn)) {
+            const idx = @intFromEnum(btn);
+            if (eng.inputs.mouse.pressed(btn)) {
+                // Chrome took this press (`skip_left`), or it landed
+                // outside the focused pane: nothing goes out, and the
+                // button is not recorded as ours -- so its release is
+                // dropped below too, keeping the pair balanced.
+                if (!(skip_left and is_left)) {
+                    if (cell_in_pane) |cell| {
+                        server.reportMouseButton(self.app.alloc, field_name, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
+                            std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field_name, err });
+                        };
+                        self.mouse_down[idx] = true;
+                    }
+                }
+            } else if (eng.inputs.mouse.released(btn) and self.mouse_down[idx]) {
+                // Unconditional, once we owe it: neither `skip_left`
+                // (chrome that grabbed the button only *after* the press
+                // went out) nor a pointer that has drifted out of the
+                // pane may swallow a release, or the button stays wedged
+                // down in `Session.input` and every later press is
+                // deduped away. See `mouse_down`.
+                self.mouse_down[idx] = false;
+                if (cell_in_pane orelse server.focusedCellClamped(window_cell)) |cell| {
                     server.reportMouseButton(self.app.alloc, field_name, false, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
                         std.log.err("reportMouseButton({s}, false) failed: {t}", .{ field_name, err });
                     };

@@ -954,6 +954,16 @@ Rules:
 All are notifications; none expects a reply. A connection receives only
 the streams it subscribed to.
 
+`key_down`, `key_up`, `text`, `mouse_button`, `mouse_move` and
+`copy_request` are additionally **addressed**: they reach only the
+connection whose active context is the one on screen in the focused pane.
+The first five are raw input, which belongs to whatever the user is
+looking at. `copy_request` rides with them because it is the answer to
+one keystroke and a single clipboard write — fanned out, every
+`"clipboard"` subscriber would answer with `set_clipboard` and the last
+one to arrive would win. Every other notification fans out to all
+subscribers, so a backgrounded client can keep its content current.
+
 ### 7.1 Streams
 
 `subscribe`'s `events` takes these names. Several names map to one
@@ -971,7 +981,7 @@ flag.
 | scroll | `scroll`, `scroll_offset` | `scroll`, `scroll_offset` |
 | layout | `layout` | `layout` |
 | selection | `selection` | `selection` |
-| clipboard | `copy_request`, `paste` | `clipboard` |
+| clipboard | `copy_request`, `paste` | `clipboard`, `copy_request`, `paste` |
 | terminal | `terminal_reply` | `terminal` |
 | context | `context` | `context` |
 | panes | `pane_layout`, `pane_exit` | `panes`, `pane_layout`, `pane_exit` |

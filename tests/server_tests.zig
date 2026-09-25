@@ -931,3 +931,144 @@ pub fn selectedLayerReportsRootAsNullTest(io: std.Io, alloc: std.mem.Allocator) 
     defer alloc.free(text);
     try testz.expectEqualStr(text, "root");
 }
+
+/// A pointer that drifted out of the focused pane before the button came
+/// up is still that pane's: `focusedCellClamped` pins the cell to the
+/// nearest one inside, where `focusedCell` refuses outright.
+///
+/// The host leans on this to keep every press it sent paired with a
+/// release (`host/input.zig`'s `mouse_down`). `InputState.setMouseButton`
+/// dedupes a press-while-down into nothing, so one swallowed release
+/// wedges that button down for the rest of the session and every later
+/// click is silently a no-op -- with the keyboard still working, which is
+/// what makes it look like the mouse rather than the session.
+pub fn focusedCellClampedPinsAPointerOutsideThePaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-clamp-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // Two panes side by side; the right-hand one takes focus, so its rect
+    // has a non-zero column origin and the left pane is "outside".
+    const made = try srv.session.createPane(0, 0);
+    const split = try srv.session.createPaneSplit(.row, true);
+    try srv.session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try srv.session.setRootPaneSplit(split);
+    try srv.session.layoutPanes(null, null);
+    try srv.session.focusPane(made.pane);
+    srv.ctx = srv.session.focusedContext();
+
+    const rect = srv.session.panePtr(made.pane).?.rect;
+    try testz.expectTrue(rect.col > 0);
+
+    // Inside: both agree, and both answer in the pane's own frame.
+    const inside: glyphwire.CellPos = .{ .row = rect.row + 1, .col = rect.col + 2 };
+    const plain = srv.focusedCell(inside).?;
+    const clamped = srv.focusedCellClamped(inside).?;
+    try testz.expectEqual(plain.row, 1);
+    try testz.expectEqual(plain.col, 2);
+    try testz.expectEqual(clamped.row, plain.row);
+    try testz.expectEqual(clamped.col, plain.col);
+
+    // Dragged off the left edge, into the neighbouring pane: refused by
+    // one, pinned to the pane's first column by the other.
+    const left_of: glyphwire.CellPos = .{ .row = rect.row + 1, .col = 0 };
+    try testz.expectTrue(srv.focusedCell(left_of) == null);
+    const pinned = srv.focusedCellClamped(left_of).?;
+    try testz.expectEqual(pinned.row, 1);
+    try testz.expectEqual(pinned.col, 0);
+
+    // ...and off the bottom, which `cellFromPixel` can produce whenever
+    // the pane is shorter than the window.
+    const below: glyphwire.CellPos = .{ .row = rect.row + rect.rows + 5, .col = rect.col };
+    try testz.expectTrue(srv.focusedCell(below) == null);
+    const floored = srv.focusedCellClamped(below).?;
+    try testz.expectEqual(floored.row, rect.rows - 1);
+    try testz.expectEqual(floored.col, 0);
+}
+
+/// `copy_request` is addressed like raw input, not fanned out: Ctrl+Shift+C
+/// produces one clipboard write, so every subscriber answering it would
+/// just mean the last `set_clipboard` to arrive wins. The backgrounded
+/// shell sitting behind salacommander must not answer with its prompt
+/// line over salacommander's file paths.
+pub fn copyRequestReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-copyreq-focus-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const made = try srv.session.createPane(0, 0);
+    const split = try srv.session.createPaneSplit(.row, true);
+    try srv.session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try srv.session.setRootPaneSplit(split);
+    try srv.session.layoutPanes(null, null);
+
+    const t_a = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_a.join();
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var a = try addr.connect(io);
+    defer a.close(io);
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+
+    var a_buf: [4096]u8 = undefined;
+    var a_w = a.writer(io, &a_buf);
+    try wire.writeFrame(&a_w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["clipboard","key"],"pane":0}}
+    );
+    try a_w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &a, &a_dec));
+
+    const t_b = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_b.join();
+    var b = try addr.connect(io);
+    defer b.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+
+    var b_buf: [4096]u8 = undefined;
+    var b_w = b.writer(io, &b_buf);
+    try wire.writeFrame(&b_w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["clipboard","key"],"pane":1}}
+    );
+    try b_w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &b, &b_dec));
+
+    // Root pane has focus: only `a` is asked.
+    try srv.requestCopy(alloc);
+    const a_got = try readOneFrame(io, alloc, &a, &a_dec);
+    defer alloc.free(a_got);
+    try testz.expectTrue(std.mem.indexOf(u8, a_got, "copy_request") != null);
+
+    // Focus moves; now only `b` is. The `key` that follows proves `b`'s
+    // queue held nothing from the first request -- the next frame off it
+    // is the keystroke, not a second `copy_request`.
+    try srv.session.focusPane(made.pane);
+    srv.ctx = srv.session.focusedContext();
+    try srv.requestCopy(alloc);
+    try srv.reportKey(alloc, "x", true);
+
+    const b_first = try readOneFrame(io, alloc, &b, &b_dec);
+    defer alloc.free(b_first);
+    try testz.expectTrue(std.mem.indexOf(u8, b_first, "copy_request") != null);
+    const b_second = try readOneFrame(io, alloc, &b, &b_dec);
+    defer alloc.free(b_second);
+    try testz.expectTrue(std.mem.indexOf(u8, b_second, "\"key\":\"x\"") != null);
+}

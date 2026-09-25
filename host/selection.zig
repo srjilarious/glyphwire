@@ -507,9 +507,21 @@ pub const Selection = struct {
         if (!self.mouse_moved) {
             // A plain click: hand the shell the press+release it activates
             // on, and clear any leftover selection (standard behaviour).
+            //
+            // In the *focused pane's* frame, not the window's: `cell` here
+            // came straight off `cellFromPixel`, and a client seated in a
+            // pane (a `gmux` split, a `gwssh` session) numbers its rows
+            // and columns from its own top-left corner. Reporting the
+            // window cell put the synthesized click rows and columns away
+            // from where the user actually clicked -- and, past the pane's
+            // far edge, outside the client's grid entirely, where it was
+            // simply dropped. Sent as a matched pair, so `Session.input`
+            // stays balanced without `input.KeyInput.mouse_down`.
             const vo = self.rootViewScroll();
-            server.reportMouseButton(self.app.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, cell, vo) catch {};
-            server.reportMouseButton(self.app.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, cell, vo) catch {};
+            if (server.focusedCell(cell)) |pane_cell| {
+                server.reportMouseButton(self.app.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, pane_cell, vo) catch {};
+                server.reportMouseButton(self.app.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, pane_cell, vo) catch {};
+            }
             // Whatever was selected, wherever it was: a plain click
             // clears it, which for a click on a different layer than the
             // last selection means clearing that one, not this one.

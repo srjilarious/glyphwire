@@ -499,7 +499,15 @@ pub const Server = struct {
         return std.mem.eql(u8, event, "key") or
             std.mem.eql(u8, event, "text") or
             std.mem.eql(u8, event, "mouse_button") or
-            std.mem.eql(u8, event, "mouse_move");
+            std.mem.eql(u8, event, "mouse_move") or
+            // Not raw input, but the direct answer to one keystroke
+            // (Ctrl+Shift+C) and so addressed the same way: exactly one
+            // program should answer it, and it is the one on screen.
+            // Fanned out, every `"clipboard"` subscriber answers with
+            // `set_clipboard` and the last write wins at random -- a
+            // backgrounded gw-shell overwriting salacommander's file
+            // paths with its own prompt line.
+            std.mem.eql(u8, event, "copy_request");
     }
 
     /// The session's visibility change-counter (see
@@ -621,6 +629,28 @@ pub const Server = struct {
         const pane = self.session.panePtr(self.session.focusedPaneHandle()) orelse return null;
         if (!pane.rect.contains(cell.row, cell.col)) return null;
         return .{ .row = cell.row - pane.rect.row, .col = cell.col - pane.rect.col };
+    }
+
+    /// `focusedCell`, but clamped into the focused pane rather than
+    /// refusing when the pointer is outside it.
+    ///
+    /// For the *release* half of a button the client already saw pressed.
+    /// A press claims the button: the pointer wandering into a neighbour
+    /// pane (or into a divider band) before the user lets go must not
+    /// swallow the release, because the pair is what the client -- and
+    /// `Session.input`'s down-set -- balances on. A release reported
+    /// against a clamped cell is the same rule a pointer grab follows
+    /// everywhere else: the event goes to whoever took the press, at the
+    /// nearest cell that is theirs. Null only when the focused pane has
+    /// gone away entirely.
+    pub fn focusedCellClamped(self: *Server, cell: core.CellPos) ?core.CellPos {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        const pane = self.session.panePtr(self.session.focusedPaneHandle()) orelse return null;
+        const r = pane.rect;
+        const row = std.math.clamp(cell.row, r.row, r.row + (r.rows -| 1));
+        const col = std.math.clamp(cell.col, r.col, r.col + (r.cols -| 1));
+        return .{ .row = row - r.row, .col = col - r.col };
     }
 
     /// Click-to-focus: moves focus to whichever pane contains a window
@@ -1204,22 +1234,30 @@ pub const Server = struct {
         try self.ctx.setClipboard(text);
     }
 
-    /// Fans a `copy_request` notification out to every `"clipboard"`
-    /// subscriber -- the host calls this when the copy shortcut is
-    /// pressed with nothing selected, so glyphwire-shell can answer with
-    /// its current prompt via `set_clipboard`.
+    /// Sends a `copy_request` notification to the `"clipboard"` subscriber
+    /// whose context is on screen -- the host calls this when the copy
+    /// shortcut is pressed with nothing selected, so glyphwire-shell can
+    /// answer with its current prompt (or salacommander with the active
+    /// pane's paths) via `set_clipboard`.
+    ///
+    /// Broadcast under `"copy_request"` rather than the stream name the
+    /// two clipboard events share, because only this one is focus-gated
+    /// (`isFocusGatedEvent`): the answer is a single clipboard write, so
+    /// asking every subscriber would just mean the last reply wins.
     pub fn requestCopy(self: *Server, alloc: std.mem.Allocator) !void {
         const body = try rpc.copyRequestNotification(alloc);
         defer alloc.free(body);
-        self.broadcast(null, "clipboard", body);
+        self.broadcast(null, "copy_request", body);
     }
 
     /// Fans a `paste` notification (committed clipboard text) out to
-    /// every `"clipboard"` subscriber.
+    /// every `"clipboard"` subscriber. Not focus-gated, unlike
+    /// `requestCopy`: pasted text is data, and a backgrounded client
+    /// queueing it does no harm.
     pub fn broadcastPaste(self: *Server, alloc: std.mem.Allocator, text: []const u8) !void {
         const body = try rpc.pasteNotification(alloc, text);
         defer alloc.free(body);
-        self.broadcast(null, "clipboard", body);
+        self.broadcast(null, "paste", body);
     }
 
     /// The current session clipboard serial (see

@@ -163,6 +163,11 @@ pub fn build(b: *std.Build) void {
     });
     salacommander_support_mod.addImport("glyphwire", glyphwire_mod);
     salacommander_support_mod.addImport("ls_support", ls_support_mod);
+    // For `wordsplit.quoteArgIfNeeded`: Ctrl+Shift+C answers with the same
+    // shell-quoted path line gw-shell's own marked-paths copy produces, so
+    // the two paste identically. Same one-piece borrow gw-hist makes of
+    // this module (and it drags ziglua in the same way -- see `sala_exe`).
+    salacommander_support_mod.addImport("shell_support", shell_support_mod);
 
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const zopengl = b.dependency("zopengl", .{ .target = target });

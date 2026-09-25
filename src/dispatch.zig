@@ -957,6 +957,11 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "layout")) return self.layout;
         if (std.mem.eql(u8, event, "selection")) return self.selection;
         if (std.mem.eql(u8, event, "clipboard")) return self.clipboard;
+        // Broadcast under their own names, not the stream's: `copy_request`
+        // is addressed to the on-screen client and `paste` is not, so
+        // `Server.isFocusGatedEvent` has to be able to tell them apart.
+        if (std.mem.eql(u8, event, "copy_request")) return self.clipboard;
+        if (std.mem.eql(u8, event, "paste")) return self.clipboard;
         if (std.mem.eql(u8, event, "terminal")) return self.terminal;
         if (std.mem.eql(u8, event, "context")) return self.context;
         if (std.mem.eql(u8, event, "error")) return self.error_events;
@@ -984,6 +989,8 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "layout")) s.layout = true;
             if (std.mem.eql(u8, e, "selection")) s.selection = true;
             if (std.mem.eql(u8, e, "clipboard")) s.clipboard = true;
+            if (std.mem.eql(u8, e, "copy_request")) s.clipboard = true;
+            if (std.mem.eql(u8, e, "paste")) s.clipboard = true;
             if (std.mem.eql(u8, e, "terminal")) s.terminal = true;
             if (std.mem.eql(u8, e, "context")) s.context = true;
             if (std.mem.eql(u8, e, "error")) s.error_events = true;

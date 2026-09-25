@@ -9,7 +9,8 @@
 //! F7 makes a directory, F8 deletes, Space/Insert mark, Alt+Up goes to the
 //! parent directory, Alt+D edits the pane's path where it's shown, Tab
 //! switches sides, Ctrl+F3..F6 (or a click on a column header) re-orders
-//! a pane, and Ctrl+` opens a shell across the bottom that
+//! a pane, Ctrl+Shift+C copies the selected paths as a shell-quoted
+//! argument list, and Ctrl+` opens a shell across the bottom that
 //! follows the active pane's directory. Every key is an
 //! action that `salacommander.conf.lua` can rebind (see `actions.zig`),
 //! and what Enter opens a file with is its `open_actions` table (see
@@ -85,6 +86,9 @@ pub fn main(init: std.process.Init) !void {
         "scroll_offset",
         "mouse_button",
         "context",
+        // Ctrl+Shift+C with no host selection -- answered with the active
+        // pane's paths. See `Ui.copySelectionPaths`.
+        "copy_request",
     }) catch {
         cfg.deinit(alloc);
         return fail(io, "salacommander: couldn't subscribe to input\n");
