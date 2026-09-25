@@ -30,7 +30,9 @@ const zoe = @import("zoe_support");
 //     \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
 //     \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
 //     \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
-//     \\buffers (also :bn / :bp, closed with :bd or a tab's ×).
+//     \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
+//     \\or hides dotfiles and anything .gitignore excludes, everywhere at once
+//     \\-- the tree, its searches and Ctrl+P.
 //     \\
 //     \\In the file tree, j/k/arrows and Page Up/Page Down move and Enter or
 //     \\Space opens. f jumps to the next name starting with what you type; /
@@ -55,7 +57,9 @@ pub fn main(init: std.process.Init) !void {
         \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
         \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
         \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
-        \\buffers (also :bn / :bp, closed with :bd or a tab's ×).
+        \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
+        \\or hides dotfiles and anything .gitignore excludes, everywhere at once
+        \\-- the tree, its searches and Ctrl+P.
         \\
         \\In the file tree, j/k/arrows and Page Up/Page Down move and Enter or
         \\Space opens. f jumps to the next name starting with what you type; /

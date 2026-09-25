@@ -25,6 +25,30 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const gitignore = @import("gitignore.zig");
+
+/// What a listing or a walk is allowed to show. Off, both dotfiles and
+/// anything `.gitignore` excludes are skipped; Ctrl+H turns it on and
+/// every path appears.
+///
+/// One flag for both, deliberately: "show me everything" is a single
+/// intention, and two toggles would mean remembering which of them is
+/// hiding the file you are looking for. `.git/` stays out either way
+/// until you ask, since it is a dotfile.
+pub const Visibility = struct {
+    show_hidden: bool = false,
+
+    /// Whether a name is hidden purely for being a dotfile.
+    pub fn skipsDotfile(self: Visibility, name: []const u8) bool {
+        return !self.show_hidden and name.len > 0 and name[0] == '.';
+    }
+
+    /// Whether `rel` is hidden by the ignore files in scope.
+    pub fn skipsIgnored(self: Visibility, ignores: *const gitignore.Stack, rel: []const u8, is_dir: bool) bool {
+        if (self.show_hidden) return false;
+        return ignores.isIgnored(rel, is_dir);
+    }
+};
 
 /// Cells of indent per nesting level.
 pub const indent_cols: usize = 2;
@@ -60,12 +84,75 @@ pub const Tree = struct {
     entries: std.ArrayList(Entry) = .empty,
     /// The highlighted row, in `entries` indices.
     cursor: usize = 0,
+    /// What the listing is allowed to show. Changing it needs a `reload`
+    /// -- the entries are the answer to this question, not a view of it.
+    visible: Visibility = .{},
 
-    pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8) !Tree {
-        var self: Tree = .{ .alloc = alloc, .root = try alloc.dupe(u8, root) };
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8, visible: Visibility) !Tree {
+        var self: Tree = .{ .alloc = alloc, .root = try alloc.dupe(u8, root), .visible = visible };
         errdefer alloc.free(self.root);
-        try self.readInto(io, self.root, 0, 0);
+        try self.readInto(io, self.root, "", 0, 0);
         return self;
+    }
+
+    /// Re-reads the whole tree under the current `visible`, putting back
+    /// the directories that were open and the row the cursor was on.
+    ///
+    /// What Ctrl+H runs. A rebuild rather than a filter because the
+    /// flattened list *is* the listing: there is no hidden row to reveal,
+    /// the row was never read. Restoring by path rather than by index is
+    /// the point -- the indices all move when a hidden sibling appears
+    /// above them.
+    pub fn reload(self: *Tree, io: std.Io) !void {
+        var open: std.ArrayList([]u8) = .empty;
+        defer {
+            for (open.items) |p| self.alloc.free(p);
+            open.deinit(self.alloc);
+        }
+        // In tree order, so a parent is always restored before its child
+        // -- though `reveal` would open the ancestors anyway.
+        for (self.entries.items) |e| {
+            if (!e.is_dir or !e.expanded) continue;
+            try open.append(self.alloc, try self.alloc.dupe(u8, relOf(self.root, e.path)));
+        }
+        const on: ?[]u8 = if (self.at(self.cursor)) |e|
+            try self.alloc.dupe(u8, relOf(self.root, e.path))
+        else
+            null;
+        defer if (on) |p| self.alloc.free(p);
+
+        self.clearEntries();
+        try self.readInto(io, self.root, "", 0, 0);
+
+        for (open.items) |rel| {
+            const index = (try self.reveal(io, rel)) orelse continue;
+            const e = self.entries.items[index];
+            if (e.is_dir and !e.expanded) try self.toggle(io, index);
+        }
+        // The cursor's own row may itself have been hidden, in which case
+        // there is nothing to go back to and it stays where it lands.
+        if (on) |rel| {
+            if (try self.reveal(io, rel)) |index| self.cursor = index;
+        }
+        if (self.cursor >= self.entries.items.len) self.cursor = self.entries.items.len -| 1;
+    }
+
+    fn clearEntries(self: *Tree) void {
+        for (self.entries.items) |e| {
+            self.alloc.free(e.name);
+            self.alloc.free(e.path);
+        }
+        self.entries.clearRetainingCapacity();
+    }
+
+    /// `path` relative to `root`, `/` separated. Every entry's `path` was
+    /// built by joining onto the root, so this is a slice rather than a
+    /// computation; a path that somehow isn't under the root comes back
+    /// whole, which matches nothing and hides nothing.
+    fn relOf(root: []const u8, path: []const u8) []const u8 {
+        if (path.len <= root.len or !std.mem.startsWith(u8, path, root)) return path;
+        const rest = path[root.len..];
+        return if (rest[0] == '/') rest[1..] else rest;
     }
 
     pub fn deinit(self: *Tree) void {
@@ -105,7 +192,7 @@ pub const Tree = struct {
             self.collapse(index);
         } else {
             const e = self.entries.items[index];
-            try self.readInto(io, e.path, e.depth + 1, index + 1);
+            try self.readInto(io, e.path, relOf(self.root, e.path), e.depth + 1, index + 1);
             self.entries.items[index].expanded = true;
         }
     }
@@ -130,7 +217,10 @@ pub const Tree = struct {
     /// browser uses. A directory that can't be read leaves the tree
     /// unchanged rather than failing the whole operation: an unreadable
     /// folder should render as an empty one, not take the editor down.
-    fn readInto(self: *Tree, io: std.Io, dir: []const u8, depth: usize, insert_at: usize) !void {
+    ///
+    /// `rel_dir` is `dir` relative to the root, and is what the
+    /// `.gitignore` files in scope are matched against.
+    fn readInto(self: *Tree, io: std.Io, dir: []const u8, rel_dir: []const u8, depth: usize, insert_at: usize) !void {
         var listing: std.ArrayList(Entry) = .empty;
         defer listing.deinit(self.alloc);
         errdefer for (listing.items) |e| {
@@ -138,19 +228,31 @@ pub const Tree = struct {
             self.alloc.free(e.path);
         };
 
+        // Every ignore file from the root down to this directory. Expanding
+        // a folder re-reads the chain rather than keeping one alive across
+        // the session: it is a handful of small files, and a stack held
+        // between expansions would have to be invalidated by every edit to
+        // any `.gitignore` in the tree.
+        var ignores: gitignore.Stack = .{ .alloc = self.alloc };
+        defer ignores.deinit();
+        if (!self.visible.show_hidden) try self.pushIgnoreChain(io, &ignores, rel_dir);
+
         var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
         defer handle.close(io);
 
         var it = handle.iterate();
         while (it.next(io) catch null) |raw| {
-            // Dotfiles are hidden, matching every other tree view; there
-            // is no toggle for it yet.
-            if (raw.name.len > 0 and raw.name[0] == '.') continue;
+            if (self.visible.skipsDotfile(raw.name)) continue;
+
+            const path = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
+            errdefer self.alloc.free(path);
+            if (self.visible.skipsIgnored(&ignores, relOf(self.root, path), raw.kind == .directory)) {
+                self.alloc.free(path);
+                continue;
+            }
 
             const name = try self.alloc.dupe(u8, raw.name);
             errdefer self.alloc.free(name);
-            const path = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
-            errdefer self.alloc.free(path);
 
             try listing.append(self.alloc, .{
                 .name = name,
@@ -246,6 +348,25 @@ pub const Tree = struct {
         return found;
     }
 
+    /// Pushes the `.gitignore` of the root and of every directory on the
+    /// way down to `rel_dir`, outermost first -- the order `Stack.match`
+    /// resolves in.
+    fn pushIgnoreChain(self: *Tree, io: std.Io, stack: *gitignore.Stack, rel_dir: []const u8) !void {
+        _ = try stack.pushDir(io, self.root, "");
+        if (rel_dir.len == 0) return;
+
+        var i: usize = 0;
+        while (true) {
+            const end = std.mem.indexOfScalarPos(u8, rel_dir, i, '/') orelse rel_dir.len;
+            const prefix = rel_dir[0..end];
+            const abs = try std.fs.path.join(self.alloc, &.{ self.root, prefix });
+            defer self.alloc.free(abs);
+            _ = try stack.pushDir(io, abs, prefix);
+            if (end == rel_dir.len) return;
+            i = end + 1;
+        }
+    }
+
     fn indexOfName(self: *const Tree, name: []const u8, depth: usize, lo: usize, hi: usize) ?usize {
         var i = lo;
         const end = @min(hi, self.entries.items.len);
@@ -286,6 +407,9 @@ pub const DeepList = struct {
     /// The walk hit `deep_max_entries` and stopped early, so the listing
     /// is a prefix of the tree rather than the whole of it.
     truncated: bool = false,
+    /// What the walk was allowed to collect -- the same flag the tree
+    /// listing was built under, so a `/` hit always has a row to land on.
+    visible: Visibility = .{},
 
     pub fn deinit(self: *DeepList) void {
         for (self.paths.items) |p| self.alloc.free(p);
@@ -314,10 +438,17 @@ pub const DeepList = struct {
 /// too, so a `/` search can land on a folder; one that can't be read is
 /// skipped rather than failing the walk, the rule the rest of the tree
 /// uses.
-pub fn deepList(alloc: std.mem.Allocator, io: std.Io, root: []const u8) !DeepList {
-    var self: DeepList = .{ .alloc = alloc };
+pub fn deepList(alloc: std.mem.Allocator, io: std.Io, root: []const u8, visible: Visibility) !DeepList {
+    var self: DeepList = .{ .alloc = alloc, .visible = visible };
     errdefer self.deinit();
-    try deepScan(&self, io, root, "", 0);
+
+    // Unlike the tree's own reads, this walk descends, so it pushes each
+    // directory's ignore file on the way in and pops it on the way out
+    // rather than re-reading the chain per directory.
+    var ignores: gitignore.Stack = .{ .alloc = alloc };
+    defer ignores.deinit();
+    try deepScan(&self, io, &ignores, root, "", 0);
+
     std.mem.sort([]u8, self.paths.items, {}, lessThanPath);
     return self;
 }
@@ -330,8 +461,18 @@ fn lessThanPath(_: void, a: []u8, b: []u8) bool {
     };
 }
 
-fn deepScan(self: *DeepList, io: std.Io, dir: []const u8, rel: []const u8, depth: usize) !void {
+fn deepScan(
+    self: *DeepList,
+    io: std.Io,
+    ignores: *gitignore.Stack,
+    dir: []const u8,
+    rel: []const u8,
+    depth: usize,
+) !void {
     if (depth >= deep_max_depth) return;
+
+    const pushed = if (self.visible.show_hidden) false else try ignores.pushDir(io, dir, rel);
+    defer if (pushed) ignores.pop();
 
     var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
     defer handle.close(io);
@@ -342,19 +483,24 @@ fn deepScan(self: *DeepList, io: std.Io, dir: []const u8, rel: []const u8, depth
             self.truncated = true;
             return;
         }
-        // Dotfiles are hidden here for the reason they are hidden in the
-        // listing: a `/` search that landed on a row the tree will never
-        // show would have nowhere to put the cursor.
-        if (raw.name.len > 0 and raw.name[0] == '.') continue;
+        // Hidden here for the reason they are hidden in the listing: a
+        // `/` search that landed on a row the tree will never show would
+        // have nowhere to put the cursor.
+        if (self.visible.skipsDotfile(raw.name)) continue;
 
         const child_rel = if (rel.len == 0)
             try self.alloc.dupe(u8, raw.name)
         else
             try std.fmt.allocPrint(self.alloc, "{s}/{s}", .{ rel, raw.name });
-        {
-            errdefer self.alloc.free(child_rel);
-            try self.paths.append(self.alloc, child_rel);
+        errdefer self.alloc.free(child_rel);
+
+        // An ignored directory is not descended into either, which is
+        // what keeps `zig-cache/` from costing the walk anything.
+        if (self.visible.skipsIgnored(ignores, child_rel, raw.kind == .directory)) {
+            self.alloc.free(child_rel);
+            continue;
         }
+        try self.paths.append(self.alloc, child_rel);
 
         // Only a real directory is descended into: a symlink reports as
         // `.sym_link` whatever it points at, so it is never followed and
@@ -362,7 +508,7 @@ fn deepScan(self: *DeepList, io: std.Io, dir: []const u8, rel: []const u8, depth
         if (raw.kind == .directory) {
             const child_dir = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
             defer self.alloc.free(child_dir);
-            try deepScan(self, io, child_dir, child_rel, depth + 1);
+            try deepScan(self, io, ignores, child_dir, child_rel, depth + 1);
         }
     }
 }

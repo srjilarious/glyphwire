@@ -83,27 +83,27 @@ pub const scrollbar_width_px: i32 = 12;
 pub const scrollbar_min_thumb_px: f32 = 24;
 
 /// Pixels reserved on the window's right edge for the always-on
-/// scrollbar's gutter. Unconditional: the gutter is a property of the
-/// *window*, not of whichever context happens to be on screen.
+/// scrollbar's gutter -- `scrollbar_width_px` when the visible context
+/// wants the bar (`core.Context.window_scrollbar`), zero when it doesn't,
+/// so a pure-TUI context gets those columns to draw in rather than
+/// leaving an unpainted strip down the side of its panes.
 ///
-/// It used to go to zero whenever the visible context opted the bar out
-/// (`core.Context.window_scrollbar`), so the grid reflowed a column or
-/// two wider to fill the space the bar would have taken. That predates
-/// contexts being cheap and transient: a pure-TUI client like zoe opts
-/// the bar out for its own context, which made *every* context in the
-/// session -- the shell's root included -- get resized on the way in and
-/// resized back on the way out, clipping a column off the shell's
-/// scrollback each time and moving the grid under a foreground child
-/// that had no way to hear about it. A per-context piece of chrome must
-/// not reflow other contexts, so the gutter now stays reserved and the
-/// bar is simply not painted for such a context (see `render.zig`'s
-/// `drawScrollbar`, which already assumed exactly this).
+/// **This reflows the grid on a context switch, and that is the cost of
+/// the column.** A full-screen client like zoe opts the bar out for its
+/// own context, so the session resizes on the way in and back again on
+/// the way out -- the shell's root included, which loses and regains a
+/// column of scrollback width each time. The arrangement was dropped once
+/// before for exactly that reason and is back deliberately: the blank
+/// gutter beside a TUI's panes reads as a bug every time you look at it,
+/// and the half of the old damage that was actually dangerous -- a
+/// foreground child never hearing about the new size -- was a missing
+/// `layout` notification on resize, since fixed.
 ///
 /// `syncWindowSize` (px -> cell count) and `resizeWindowForCells` (cell
-/// count -> px) both read this, so the reserved width and the width the
-/// window is sized to always agree.
-pub fn rightGutterPx() i32 {
-    return scrollbar_width_px;
+/// count -> px) both read this through `WindowSizing.gutterPx`, so the
+/// reserved width and the width the window is sized to always agree.
+pub fn rightGutterPx(bar_enabled: bool) i32 {
+    return if (bar_enabled) scrollbar_width_px else 0;
 }
 
 /// How many grid rows one full wheel "tick" (`scroll().y` of magnitude
