@@ -66,6 +66,18 @@ const default_tree_cols: usize = 28;
 /// trailing blank row is what the bar covers instead.
 const tree_trailing_rows: usize = 1;
 
+/// Rows the tree keeps between its cursor and either edge of the pane --
+/// vim's `scrolloff`, for the sidebar.
+///
+/// Three, and the bottom edge is the reason. The host draws the
+/// horizontal scrollbar over the pane's last row, so a cursor that is
+/// merely *on screen* can be highlighted and unreadable at the same time.
+/// A margin also means you can see what you are about to move onto rather
+/// than scrolling one row at a time against the edge. See
+/// `scrollTreeToCursor`, which caps it in a short pane and lets the end
+/// of the listing override it.
+const tree_scroll_margin: usize = 3;
+
 /// The most zoe will read into a buffer. Every open buffer holds its
 /// text for as long as it is open, so this is also the per-tab ceiling.
 const max_file_bytes: usize = 64 * 1024 * 1024;
@@ -1419,16 +1431,40 @@ pub const Ui = struct {
     /// queueing a new `scroll_offset`, since the host has no idea zoe has
     /// a cursor. Queued rather than sent so it rides out in the same
     /// batch as the frame it belongs to (`tree_scroll_pending`).
+    ///
+    /// The cursor is kept `tree_scroll_margin` rows clear of both edges
+    /// rather than merely on screen -- vim's `scrolloff`, and here it is
+    /// load-bearing rather than a comfort: the host draws the horizontal
+    /// scrollbar *over* the pane's bottom row, so a cursor allowed to sit
+    /// on that row is a highlighted entry you cannot read. The margin is
+    /// capped to half the viewport so it still behaves in a short pane,
+    /// and the clamp at the end is what lets the end of the listing win
+    /// -- there the trailing blank row (`tree_trailing_rows`) is what
+    /// takes the scrollbar instead.
     fn scrollTreeToCursor(self: *Ui) void {
         const rows = self.tree_bounds.rows;
         if (rows == 0) return;
-        var top = self.tree_scroll.row;
-        if (self.tree.cursor < top) top = self.tree.cursor;
-        if (self.tree.cursor >= top + rows) top = self.tree.cursor - rows + 1;
+        const top = treeScrollTop(self.tree.cursor, self.tree_scroll.row, rows, self.tree.len());
         if (top == self.tree_scroll.row) return;
 
         self.tree_scroll.row = top;
         self.tree_scroll_pending = .{ .row = top, .col = self.tree_scroll.col };
+    }
+
+    /// Where the tree's viewport has to sit for a cursor at `cursor`,
+    /// given the current offset `top`, a `rows`-tall pane and a `len`
+    /// entry listing. Pure, so `tests/zoe_tests.zig` can pin the margin
+    /// arithmetic -- which is all off-by-ones, and the cost of getting
+    /// one wrong is an entry highlighted underneath the scrollbar.
+    pub fn treeScrollTop(cursor: usize, top: usize, rows: usize, len: usize) usize {
+        const margin = @min(tree_scroll_margin, (rows -| 1) / 2);
+        var out = top;
+        if (cursor < out + margin) out = cursor -| margin;
+        if (cursor + margin >= out + rows) out = (cursor + margin + 1) -| rows;
+        // Never past the end of the content: the last entries have
+        // nothing below them to scroll into, and the margin gives way to
+        // the trailing blank row, which is what takes the scrollbar there.
+        return @min(out, (len + tree_trailing_rows) -| rows);
     }
 
     /// Enter/Space on a directory expands it, on a file opens it.
@@ -1441,6 +1477,12 @@ pub const Ui = struct {
             // around it.
             self.clampTreeScroll();
             try self.syncContentSizes();
+            // A collapse can leave the cursor inside the bottom margin of
+            // a listing that just got shorter -- `clampTreeScroll` only
+            // pulls the viewport back off the end, it knows nothing about
+            // the cursor. Queued after the grid resize, so it rides out
+            // with the repaint below.
+            self.scrollTreeToCursor();
             // The listing itself changed shape.
             self.markTreeDirty(.full);
             return;
