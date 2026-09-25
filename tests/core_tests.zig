@@ -3526,6 +3526,39 @@ pub fn splitLayoutIsIdempotentTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(second.items.len, 0);
 }
 
+pub fn splitLayoutStillReportsWhatASilentPassAppliedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    _ = try buildEditorLayout(&ctx);
+
+    var initial: std.ArrayList(glyphwire.LayerBounds) = .empty;
+    defer initial.deinit(alloc);
+    try ctx.layoutSplits(&initial, null);
+    try testz.expectEqual(initial.items.len, 3);
+
+    try ctx.resize(60, 20);
+
+    // `Session.republish` re-walks every on-screen context's tree after
+    // any pane change, collecting nothing -- and a window resize goes
+    // through it (`layoutPanes`) *before* the server's `reportLayout`
+    // gets to ask what moved. This silent pass therefore applies all the
+    // new rects, and must not swallow them: a `layout` notification still
+    // owes every client its new geometry.
+    try ctx.layoutSplits(null, null);
+
+    var changed: std.ArrayList(glyphwire.LayerBounds) = .empty;
+    defer changed.deinit(alloc);
+    try ctx.layoutSplits(&changed, null);
+    try testz.expectEqual(changed.items.len, 3);
+
+    // And once reported, it stays reported.
+    var again: std.ArrayList(glyphwire.LayerBounds) = .empty;
+    defer again.deinit(alloc);
+    try ctx.layoutSplits(&again, null);
+    try testz.expectEqual(again.items.len, 0);
+}
+
 pub fn splitLayoutFollowsAWindowResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
