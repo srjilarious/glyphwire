@@ -1307,6 +1307,41 @@ pub fn treeSearchSurvivesThePrintableKeyEdgeTest(_: std.Io, _: std.mem.Allocator
     try testz.expectTrue(zoe.Ui.endsTreeSearch("enter"));
 }
 
+pub fn treeScrollKeepsTheCursorClearOfBothEdgesTest(_: std.Io, _: std.mem.Allocator) !void {
+    const top = zoe.Ui.treeScrollTop;
+    // A 10-row pane over a 100-entry listing, 3 rows of margin.
+
+    // At the very top there is nothing to scroll away, margin or not.
+    try testz.expectEqual(top(0, 0, 10, 100), 0);
+    try testz.expectEqual(top(3, 0, 10, 100), 0);
+
+    // Moving down, the viewport starts following three rows early: the
+    // cursor lands on screen row 6 of 0..9, leaving 7, 8 and 9 below it.
+    // Row 9 is the one the horizontal scrollbar is drawn over, which is
+    // the whole reason for the margin.
+    try testz.expectEqual(top(7, 0, 10, 100), 1);
+    try testz.expectEqual(top(20, 14, 10, 100), 14);
+    try testz.expectEqual(top(21, 14, 10, 100), 15);
+
+    // And the same three rows going up.
+    try testz.expectEqual(top(17, 14, 10, 100), 14);
+    try testz.expectEqual(top(16, 14, 10, 100), 13);
+
+    // The end of the listing overrides the margin -- there is nothing
+    // below to scroll into. The last entry (99) sits on screen row 8 with
+    // the trailing blank row beneath it, so the scrollbar covers the
+    // blank rather than the entry.
+    const last = top(99, 90, 10, 100);
+    try testz.expectEqual(last, 91);
+    try testz.expectEqual(99 - last, 8);
+
+    // A pane too short for the full margin still behaves: it is capped to
+    // half the viewport rather than scrolling the cursor off the top.
+    try testz.expectEqual(top(0, 0, 1, 100), 0);
+    try testz.expectEqual(top(5, 0, 1, 100), 5);
+    try testz.expectEqual(top(5, 0, 3, 100), 4);
+}
+
 pub fn treeDeepListWalksCollapsedFoldersTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var s = try ScanScratch.init(io, alloc, "deeplist");
     defer s.deinit();
