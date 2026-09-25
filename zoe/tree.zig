@@ -38,15 +38,27 @@ const gitignore = @import("gitignore.zig");
 pub const Visibility = struct {
     show_hidden: bool = false,
 
-    /// Whether a name is hidden purely for being a dotfile.
-    pub fn skipsDotfile(self: Visibility, name: []const u8) bool {
-        return !self.show_hidden and name.len > 0 and name[0] == '.';
+    /// Whether an entry is one the tree hides by default -- a dotfile, or
+    /// a path the `.gitignore` files in scope exclude.
+    ///
+    /// Deliberately independent of `show_hidden`: with the flag on the
+    /// entry is listed, but it is still *a hidden one*, and the pane draws
+    /// it dim (`Entry.hidden`) so the toggle explains itself rather than
+    /// silently doubling the size of the listing.
+    pub fn isHidden(
+        _: Visibility,
+        ignores: *const gitignore.Stack,
+        name: []const u8,
+        rel: []const u8,
+        is_dir: bool,
+    ) bool {
+        if (name.len > 0 and name[0] == '.') return true;
+        return ignores.isIgnored(rel, is_dir);
     }
 
-    /// Whether `rel` is hidden by the ignore files in scope.
-    pub fn skipsIgnored(self: Visibility, ignores: *const gitignore.Stack, rel: []const u8, is_dir: bool) bool {
-        if (self.show_hidden) return false;
-        return ignores.isIgnored(rel, is_dir);
+    /// Whether to leave it out of the listing entirely.
+    pub fn skips(self: Visibility, hidden: bool) bool {
+        return hidden and !self.show_hidden;
     }
 };
 
@@ -69,6 +81,11 @@ pub const Entry = struct {
     depth: usize,
     /// Directories only; always false for a file.
     expanded: bool = false,
+    /// A dotfile, or excluded by a `.gitignore` -- so it is only on screen
+    /// because Ctrl+H is on, and the pane draws it dim. Always computed,
+    /// whether or not hidden entries are being shown, so the listing knows
+    /// *why* each row is there.
+    hidden: bool = false,
 
     /// Columns this row occupies when drawn.
     pub fn cols(self: Entry) usize {
@@ -233,20 +250,24 @@ pub const Tree = struct {
         // the session: it is a handful of small files, and a stack held
         // between expansions would have to be invalidated by every edit to
         // any `.gitignore` in the tree.
+        // Read even when hidden entries are being *shown*: the chain is
+        // what says which of them are hidden, and the pane draws those
+        // dim rather than just listing them.
         var ignores: gitignore.Stack = .{ .alloc = self.alloc };
         defer ignores.deinit();
-        if (!self.visible.show_hidden) try self.pushIgnoreChain(io, &ignores, rel_dir);
+        try self.pushIgnoreChain(io, &ignores, rel_dir);
 
         var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
         defer handle.close(io);
 
         var it = handle.iterate();
         while (it.next(io) catch null) |raw| {
-            if (self.visible.skipsDotfile(raw.name)) continue;
-
+            const is_dir = raw.kind == .directory;
             const path = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
             errdefer self.alloc.free(path);
-            if (self.visible.skipsIgnored(&ignores, relOf(self.root, path), raw.kind == .directory)) {
+
+            const hidden = self.visible.isHidden(&ignores, raw.name, relOf(self.root, path), is_dir);
+            if (self.visible.skips(hidden)) {
                 self.alloc.free(path);
                 continue;
             }
@@ -257,8 +278,9 @@ pub const Tree = struct {
             try listing.append(self.alloc, .{
                 .name = name,
                 .path = path,
-                .is_dir = raw.kind == .directory,
+                .is_dir = is_dir,
                 .depth = depth,
+                .hidden = hidden,
             });
         }
 
@@ -471,7 +493,7 @@ fn deepScan(
 ) !void {
     if (depth >= deep_max_depth) return;
 
-    const pushed = if (self.visible.show_hidden) false else try ignores.pushDir(io, dir, rel);
+    const pushed = try ignores.pushDir(io, dir, rel);
     defer if (pushed) ignores.pop();
 
     var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
@@ -483,10 +505,6 @@ fn deepScan(
             self.truncated = true;
             return;
         }
-        // Hidden here for the reason they are hidden in the listing: a
-        // `/` search that landed on a row the tree will never show would
-        // have nowhere to put the cursor.
-        if (self.visible.skipsDotfile(raw.name)) continue;
 
         const child_rel = if (rel.len == 0)
             try self.alloc.dupe(u8, raw.name)
@@ -494,9 +512,13 @@ fn deepScan(
             try std.fmt.allocPrint(self.alloc, "{s}/{s}", .{ rel, raw.name });
         errdefer self.alloc.free(child_rel);
 
-        // An ignored directory is not descended into either, which is
-        // what keeps `zig-cache/` from costing the walk anything.
-        if (self.visible.skipsIgnored(ignores, child_rel, raw.kind == .directory)) {
+        // Skipped here for the reason they are skipped in the listing: a
+        // `/` search that landed on a row the tree will never show would
+        // have nowhere to put the cursor. An ignored *directory* is not
+        // descended into either, which is what keeps `zig-cache/` from
+        // costing the walk anything.
+        const hidden = self.visible.isHidden(ignores, raw.name, child_rel, raw.kind == .directory);
+        if (self.visible.skips(hidden)) {
             self.alloc.free(child_rel);
             continue;
         }

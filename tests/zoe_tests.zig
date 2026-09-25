@@ -1460,6 +1460,16 @@ pub fn treeHidesDotfilesAndIgnoredPathsUntilShownTest(io: std.Io, alloc: std.mem
     try t.reload(io);
     try testz.expectEqual(t.len(), 5);
 
+    // Showing them does not make them ordinary: each still knows it is
+    // only on screen because the flag is on, which is what the pane draws
+    // dim. `main.zig` is the one real entry here.
+    var hidden_rows: usize = 0;
+    for (0..t.len()) |i| {
+        const e = t.at(i).?;
+        if (e.hidden) hidden_rows += 1 else try testz.expectEqualStr(e.name, "main.zig");
+    }
+    try testz.expectEqual(hidden_rows, 4);
+
     // And the deep walk behind `/` honours the same flag, so a search can
     // never land on a row the tree refuses to show.
     var quiet = try zoe.tree.deepList(alloc, io, s.path, .{});
