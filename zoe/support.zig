@@ -20,6 +20,7 @@ pub const keys = @import("keys.zig");
 pub const display = @import("display.zig");
 pub const tree = @import("tree.zig");
 pub const finder = @import("finder.zig");
+pub const gitignore = @import("gitignore.zig");
 pub const filetype = @import("filetype.zig");
 pub const ui = @import("ui.zig");
 pub const tabs = @import("tabs.zig");

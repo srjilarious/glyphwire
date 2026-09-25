@@ -23,6 +23,8 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const fuzzy = @import("shell_support").fuzzy;
+const tree_mod = @import("tree.zig");
+const gitignore = @import("gitignore.zig");
 
 /// The walk stops after this many files and says so (`truncated`), rather
 /// than spending an unbounded amount of time and memory on a root that
@@ -61,15 +63,24 @@ pub const Finder = struct {
     /// header: a finder that silently can't see half your files is worse
     /// than one that admits it.
     truncated: bool = false,
+    /// What the walk was allowed to collect -- the tree pane's flag, so
+    /// Ctrl+P and the sidebar agree about which files exist.
+    visible: tree_mod.Visibility = .{},
 
     /// Walks `root` and builds the listing. A directory that can't be
     /// read is skipped rather than failing the whole scan, the same rule
     /// the file tree uses -- an unreadable folder should read as an empty
     /// one, not stop the finder opening.
-    pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8) !Finder {
-        var self: Finder = .{ .alloc = alloc, .root = try alloc.dupe(u8, root) };
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8, visible: tree_mod.Visibility) !Finder {
+        var self: Finder = .{ .alloc = alloc, .root = try alloc.dupe(u8, root), .visible = visible };
         errdefer self.deinit();
-        try self.scan(io, self.root, "", 0);
+
+        // Pushed on the way into each directory and popped on the way out,
+        // so a nested `.gitignore` is in scope for exactly its own subtree.
+        var ignores: gitignore.Stack = .{ .alloc = alloc };
+        defer ignores.deinit();
+        try self.scan(io, &ignores, self.root, "", 0);
+
         self.sortPaths();
         try self.refilter();
         return self;
@@ -104,8 +115,11 @@ pub const Finder = struct {
         try self.paths.append(self.alloc, owned);
     }
 
-    fn scan(self: *Finder, io: std.Io, dir: []const u8, rel: []const u8, depth: usize) !void {
+    fn scan(self: *Finder, io: std.Io, ignores: *gitignore.Stack, dir: []const u8, rel: []const u8, depth: usize) !void {
         if (depth >= max_depth) return;
+
+        const pushed = if (self.visible.show_hidden) false else try ignores.pushDir(io, dir, rel);
+        defer if (pushed) ignores.pop();
 
         var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
         defer handle.close(io);
@@ -116,15 +130,24 @@ pub const Finder = struct {
                 self.truncated = true;
                 return;
             }
-            // Dotfiles are hidden, the same rule the tree pane uses --
-            // which is also what keeps `.git/` out of the listing without
-            // the finder having to know what git is.
-            if (raw.name.len > 0 and raw.name[0] == '.') continue;
+            // Dotfiles and `.gitignore`d paths are hidden, the same rule
+            // the tree pane uses -- which is what keeps `.git/` out of the
+            // listing without the finder having to know what git is, and
+            // `zig-out/` out without it having to know what zig is.
+            if (self.visible.skipsDotfile(raw.name)) continue;
 
             const child_rel = if (rel.len == 0)
                 try self.alloc.dupe(u8, raw.name)
             else
                 try std.fs.path.join(self.alloc, &.{ rel, raw.name });
+            errdefer self.alloc.free(child_rel);
+
+            // An ignored directory is not walked either, which is most of
+            // what makes this scan cheap on a tree that has been built.
+            if (self.visible.skipsIgnored(ignores, child_rel, raw.kind == .directory)) {
+                self.alloc.free(child_rel);
+                continue;
+            }
 
             // Only a real directory is descended into. A symlink reports
             // as `.sym_link` whatever it points at, so it is listed as a
@@ -134,9 +157,8 @@ pub const Finder = struct {
                 defer self.alloc.free(child_rel);
                 const child_dir = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
                 defer self.alloc.free(child_dir);
-                try self.scan(io, child_dir, child_rel, depth + 1);
+                try self.scan(io, ignores, child_dir, child_rel, depth + 1);
             } else {
-                errdefer self.alloc.free(child_rel);
                 try self.paths.append(self.alloc, child_rel);
             }
         }

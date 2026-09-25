@@ -1225,7 +1225,7 @@ pub fn treeSortsCaseInsensitivelyWithDirectoriesFirstTest(io: std.Io, alloc: std
     try s.file("src/x", "");
     try s.file("Bin/x", "");
 
-    var t = try zoe.Tree.init(alloc, io, s.path);
+    var t = try zoe.Tree.init(alloc, io, s.path, .{});
     defer t.deinit();
 
     // Directories still lead, and inside each group `Downloads` sits next
@@ -1264,7 +1264,7 @@ pub fn treeRevealExpandsAncestorsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try s.file("a.txt", "");
     try s.file("sub/deep/c.zig", "");
 
-    var t = try zoe.Tree.init(alloc, io, s.path);
+    var t = try zoe.Tree.init(alloc, io, s.path, .{});
     defer t.deinit();
     // Only the root's own entries to start with: `sub` and `a.txt`.
     try testz.expectEqual(t.len(), 2);
@@ -1342,6 +1342,156 @@ pub fn treeScrollKeepsTheCursorClearOfBothEdgesTest(_: std.Io, _: std.mem.Alloca
     try testz.expectEqual(top(5, 0, 3, 100), 4);
 }
 
+// ─── .gitignore ─────────────────────────────────────────────────────────
+
+/// A stack holding one root-level ignore file, built from text so the
+/// matcher can be exercised without a filesystem.
+fn ignoreStack(alloc: std.mem.Allocator, dir: []const u8, text: []const u8) !zoe.gitignore.Stack {
+    var s: zoe.gitignore.Stack = .{ .alloc = alloc };
+    errdefer s.deinit();
+    _ = try s.pushText(dir, text);
+    return s;
+}
+
+pub fn gitignoreMatchesNamesAnywhereUnlessRootedTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ignoreStack(alloc, "",
+        \\zig-out
+        \\*.log
+        \\/only-at-root
+        \\build/
+    );
+    defer s.deinit();
+
+    // A bare name matches at any depth -- git's rule, and what makes a
+    // one-line `zig-out` cover the whole tree.
+    try testz.expectTrue(s.isIgnored("zig-out", true));
+    try testz.expectTrue(s.isIgnored("a/b/zig-out", true));
+    // And a matched directory carries everything under it.
+    try testz.expectTrue(s.isIgnored("zig-out/bin/app", false));
+    try testz.expectTrue(s.isIgnored("debug.log", false));
+    try testz.expectTrue(s.isIgnored("src/debug.log", false));
+
+    // A leading slash anchors to the ignore file's own directory.
+    try testz.expectTrue(s.isIgnored("only-at-root", false));
+    try testz.expectFalse(s.isIgnored("src/only-at-root", false));
+
+    // A trailing slash is directories only.
+    try testz.expectTrue(s.isIgnored("build", true));
+    try testz.expectFalse(s.isIgnored("build", false));
+
+    try testz.expectFalse(s.isIgnored("src/main.zig", false));
+}
+
+pub fn gitignoreLastMatchingPatternWinsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ignoreStack(alloc, "",
+        \\*.log
+        \\!important.log
+        \\# a comment, and the blank line below, are not patterns
+        \\
+    );
+    defer s.deinit();
+
+    try testz.expectTrue(s.isIgnored("debug.log", false));
+    // The negation comes after, so it wins -- this is the rule people
+    // are surprised by, and the reason `match` keeps going rather than
+    // returning on the first hit.
+    try testz.expectFalse(s.isIgnored("important.log", false));
+    try testz.expectEqual(s.match("important.log", false), .included);
+    try testz.expectEqual(s.match("main.zig", false), .none);
+}
+
+pub fn gitignoreNestedFileScopesToItsOwnSubtreeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var s: zoe.gitignore.Stack = .{ .alloc = alloc };
+    defer s.deinit();
+    _ = try s.pushText("", "*.tmp\n");
+    _ = try s.pushText("vendor", "!keep.tmp\n");
+
+    // The root's rule reaches everywhere...
+    try testz.expectTrue(s.isIgnored("a/keep.tmp", false));
+    try testz.expectTrue(s.isIgnored("scratch.tmp", false));
+    // ...and the nested `!` rescues only inside the directory it sits in,
+    // because it is consulted after the root's.
+    try testz.expectFalse(s.isIgnored("vendor/keep.tmp", false));
+    try testz.expectTrue(s.isIgnored("vendor/other.tmp", false));
+}
+
+pub fn gitignoreGlobsHandleStarsAndClassesTest(_: std.Io, _: std.mem.Allocator) !void {
+    const m = zoe.gitignore.globMatch;
+
+    try testz.expectTrue(m("*.zig", "main.zig"));
+    try testz.expectFalse(m("*.zig", "main.zag"));
+    // A single `*` never crosses a separator; `**` does.
+    try testz.expectFalse(m("src/*.zig", "src/sub/a.zig"));
+    try testz.expectTrue(m("src/**/a.zig", "src/sub/deep/a.zig"));
+    try testz.expectTrue(m("**", "anything/at/all"));
+
+    try testz.expectTrue(m("a?c", "abc"));
+    try testz.expectFalse(m("a?c", "ac"));
+
+    try testz.expectTrue(m("[abc]x", "bx"));
+    try testz.expectFalse(m("[abc]x", "dx"));
+    try testz.expectTrue(m("[a-z]x", "qx"));
+    try testz.expectTrue(m("[!a-z]x", "Qx"));
+    try testz.expectFalse(m("[!a-z]x", "qx"));
+
+    // An escape makes the next character literal.
+    try testz.expectTrue(m("a\\*b", "a*b"));
+    try testz.expectFalse(m("a\\*b", "axb"));
+}
+
+pub fn treeHidesDotfilesAndIgnoredPathsUntilShownTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "hidden");
+    defer s.deinit();
+    try s.file(".gitignore", "zig-out\n*.log\n");
+    try s.file("main.zig", "");
+    try s.file("debug.log", "");
+    try s.file(".hidden", "");
+    try s.file("zig-out/bin/app", "");
+
+    var t = try zoe.Tree.init(alloc, io, s.path, .{});
+    defer t.deinit();
+    // Only `main.zig` survives: the dotfile, the ignored file and the
+    // ignored directory are all absent.
+    try testz.expectEqual(t.len(), 1);
+    try testz.expectEqualStr(t.at(0).?.name, "main.zig");
+
+    // Ctrl+H is this, and it rebuilds rather than filters.
+    t.visible.show_hidden = true;
+    try t.reload(io);
+    try testz.expectEqual(t.len(), 5);
+
+    // And the deep walk behind `/` honours the same flag, so a search can
+    // never land on a row the tree refuses to show.
+    var quiet = try zoe.tree.deepList(alloc, io, s.path, .{});
+    defer quiet.deinit();
+    try testz.expectEqual(quiet.paths.items.len, 1);
+
+    var loud = try zoe.tree.deepList(alloc, io, s.path, .{ .show_hidden = true });
+    defer loud.deinit();
+    try testz.expectTrue(loud.paths.items.len > 1);
+}
+
+pub fn treeReloadKeepsOpenFoldersAndTheCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "reload");
+    defer s.deinit();
+    try s.file("src/deep/a.zig", "");
+    try s.file("zzz.txt", "");
+
+    var t = try zoe.Tree.init(alloc, io, s.path, .{});
+    defer t.deinit();
+    _ = try t.reveal(io, "src/deep/a.zig");
+    const before = t.len();
+    t.cursor = (try t.reveal(io, "src/deep/a.zig")).?;
+
+    try t.reload(io);
+
+    // Restored by path, not by index -- a newly revealed sibling would
+    // have moved every index below it.
+    try testz.expectEqual(t.len(), before);
+    try testz.expectEqualStr(t.at(t.cursor).?.name, "a.zig");
+    try testz.expectTrue(t.at(0).?.expanded);
+}
+
 pub fn treeDeepListWalksCollapsedFoldersTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var s = try ScanScratch.init(io, alloc, "deeplist");
     defer s.deinit();
@@ -1349,7 +1499,7 @@ pub fn treeDeepListWalksCollapsedFoldersTest(io: std.Io, alloc: std.mem.Allocato
     try s.file("sub/deep/c.zig", "");
     try s.file(".hidden/x.txt", "");
 
-    var d = try zoe.tree.deepList(alloc, io, s.path);
+    var d = try zoe.tree.deepList(alloc, io, s.path, .{});
     defer d.deinit();
 
     // Directories are listed as well as walked -- a `/` search can land
@@ -1501,7 +1651,10 @@ pub fn showWhitespaceHidesAClippedTabArrowTest(_: std.Io, alloc: std.mem.Allocat
 // ─── Pane focus chords ─────────────────────────────────────────────────
 
 pub fn focusDirectionReadsHjklAndArrowsTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqual(zoe.ui.focusDirection("h").?, .left);
+    // `h` is *not* a focus chord: Ctrl+H toggles hidden files, the
+    // binding every file manager uses for it. Focusing left is Ctrl+Left
+    // (and Ctrl+W cycles), so nothing was lost that had no other key.
+    try testz.expectTrue(zoe.ui.focusDirection("h") == null);
     try testz.expectEqual(zoe.ui.focusDirection("left").?, .left);
     try testz.expectEqual(zoe.ui.focusDirection("l").?, .right);
     try testz.expectEqual(zoe.ui.focusDirection("right").?, .right);
@@ -2178,7 +2331,7 @@ pub fn finderWalksTheTreeAndSkipsDotfilesTest(io: std.Io, alloc: std.mem.Allocat
     try s.file(".dotfile", "");
     try s.file(".hidden/x.txt", "");
 
-    var f = try zoe.Finder.init(alloc, io, s.path);
+    var f = try zoe.Finder.init(alloc, io, s.path, .{});
     defer f.deinit();
 
     // Directories are walked, not listed: only files are things to open.
