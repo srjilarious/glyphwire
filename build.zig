@@ -82,6 +82,12 @@ pub fn build(b: *std.Build) void {
     // The tree pane reuses glyphwire-ls's name -> icon mapping rather
     // than growing a second copy of it.
     zoe_support_mod.addImport("ls_support", ls_support_mod);
+    // ... and the Ctrl+P finder reuses gw-shell's subsequence matcher,
+    // the one gw-hist's Ctrl+R search already ranks with, rather than
+    // growing a second set of surprises. Pulls ziglua in behind it, the
+    // same way ls_exe and hist_exe do -- zoe already links the Lua C
+    // library for `zoe.conf.lua`.
+    zoe_support_mod.addImport("shell_support", shell_support_mod);
 
     // gmux's split-tree structure (pure) and its tiny Lua config, shared
     // by the `gmux` binary and its test runner -- same cross-directory-

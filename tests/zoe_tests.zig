@@ -1834,3 +1834,212 @@ pub fn tabLabelIsTheBasenameTest(_: std.Io, _: std.mem.Allocator) !void {
     // does.
     try testz.expectEqualStr(tabs.labelFor(null), "[No Name]");
 }
+
+// ── Ctrl+P file finder ──────────────────────────────────────────────────
+//
+// The scan is the only part of `zoe/finder.zig` that touches a
+// filesystem, so these build the listing directly and exercise the
+// ranking, the cursor and the scroll -- which is what the popup is.
+
+/// A finder over `paths`, as if a walk of `root` had just produced them.
+fn finderOf(alloc: std.mem.Allocator, root: []const u8, paths: []const []const u8) !zoe.Finder {
+    var f: zoe.Finder = .{ .alloc = alloc, .root = try alloc.dupe(u8, root) };
+    errdefer f.deinit();
+    for (paths) |p| try f.addPath(p);
+    f.sortPaths();
+    try f.refilter();
+    return f;
+}
+
+fn expectMatches(f: *const zoe.Finder, expected: []const []const u8) !void {
+    try testz.expectEqual(f.matchCount(), expected.len);
+    for (expected, 0..) |want, i| {
+        try testz.expectEqualStr(f.matchAt(i).?, want);
+    }
+}
+
+pub fn finderEmptyQueryListsEverythingAlphabeticallyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var f = try finderOf(alloc, "/repo", &.{ "zoe/ui.zig", "README.md", "src/core.zig" });
+    defer f.deinit();
+
+    // No query is nothing to rank by, so the listing's own order stands.
+    try expectMatches(&f, &.{ "README.md", "src/core.zig", "zoe/ui.zig" });
+}
+
+pub fn finderRanksTighterMatchesFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var f = try finderOf(alloc, "/repo", &.{
+        "zoe/ui.zig",
+        "ui.zig",
+        "gui/build.zig",
+        "README.md",
+        "u/very/long/path/that/goes/on/i.zig",
+    });
+    defer f.deinit();
+
+    try testz.expectTrue(try f.query.insert(alloc, "ui"));
+    try f.refilter();
+
+    // `README.md` has no `u` at all and drops out. The other four all
+    // contain `ui` as one contiguous span *except* the last, which spends
+    // most of the path getting from its `u` to its `i` -- so it ranks
+    // last on score. The first three tie on score and are broken by path
+    // length: the file at the root before the one a directory down.
+    try expectMatches(&f, &.{
+        "ui.zig",
+        "zoe/ui.zig",
+        "gui/build.zig",
+        "u/very/long/path/that/goes/on/i.zig",
+    });
+}
+
+pub fn finderCursorClampsAtBothEndsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var f = try finderOf(alloc, "/repo", &.{ "a.zig", "b.zig", "c.zig" });
+    defer f.deinit();
+
+    try testz.expectEqual(f.cursor, 0);
+    // Clamped, not wrapped: running off the top of a ranked list back to
+    // its worst match is never what was meant.
+    f.moveCursor(-1);
+    try testz.expectEqual(f.cursor, 0);
+    f.moveCursor(2);
+    try testz.expectEqual(f.cursor, 2);
+    f.moveCursor(10);
+    try testz.expectEqual(f.cursor, 2);
+    try testz.expectEqualStr(f.selected().?, "c.zig");
+
+    // A query that matches nothing leaves the cursor somewhere safe and
+    // `selected` with no answer.
+    try testz.expectTrue(try f.query.insert(alloc, "zzzz"));
+    try f.refilter();
+    try testz.expectEqual(f.matchCount(), 0);
+    f.moveCursor(1);
+    try testz.expectEqual(f.cursor, 0);
+    try testz.expectTrue(f.selected() == null);
+}
+
+pub fn finderScrollFollowsTheCursorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var f = try finderOf(alloc, "/repo", &.{ "a", "b", "c", "d", "e", "f" });
+    defer f.deinit();
+
+    // Three visible rows. Moving inside them doesn't scroll.
+    f.moveCursor(2);
+    f.follow(3);
+    try testz.expectEqual(f.top, 0);
+
+    // Past the bottom: scrolled just far enough to show the cursor.
+    f.moveCursor(1);
+    f.follow(3);
+    try testz.expectEqual(f.top, 1);
+
+    // Back to the top, and the view comes with it.
+    f.moveCursor(-4);
+    f.follow(3);
+    try testz.expectEqual(f.top, 0);
+
+    // A host-side scroll (the wheel) moves the view and leaves the cursor
+    // alone -- and never past the end of the list.
+    f.scrollTo(99, 3);
+    try testz.expectEqual(f.top, 3);
+    try testz.expectEqual(f.cursor, 0);
+}
+
+pub fn finderOpensPathsAgainstItsRootTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var f = try finderOf(alloc, "/repo", &.{"zoe/ui.zig"});
+    defer f.deinit();
+
+    // The listing is relative (that is what gets matched and drawn), but
+    // opening has to name the same file the tree pane would, or the same
+    // file ends up in two tabs under two spellings.
+    try testz.expectEqualStr(f.selected().?, "zoe/ui.zig");
+    const path = (try f.selectedPath(alloc)).?;
+    defer alloc.free(path);
+    try testz.expectEqualStr(path, "/repo/zoe/ui.zig");
+}
+
+// ── Non-text files ──────────────────────────────────────────────────────
+
+pub fn nonTextFilesAreRefusedByTheirNulBytesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try testz.expectFalse(zoe.filetype.looksBinary(""));
+    try testz.expectFalse(zoe.filetype.looksBinary("const std = @import(\"std\");\n"));
+    // A PNG's signature, which is a NUL two bytes in.
+    try testz.expectTrue(zoe.filetype.looksBinary("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"));
+
+    // Latin-1, CRLF and a stray control character are all still text: the
+    // test is a NUL, deliberately, and not "is this valid UTF-8".
+    try testz.expectFalse(zoe.filetype.looksBinary("caf\xe9\r\nna\xefve\x07\n"));
+
+    // Only the head is looked at, so a NUL past the sniff window doesn't
+    // reach the verdict -- the rule the doc comment states.
+    const tail_nul = try alloc.alloc(u8, zoe.filetype.sniff_bytes + 16);
+    defer alloc.free(tail_nul);
+    @memset(tail_nul, 'a');
+    tail_nul[tail_nul.len - 1] = 0;
+    try testz.expectFalse(zoe.filetype.looksBinary(tail_nul));
+}
+
+/// A throwaway directory tree to walk, removed when the test ends. The
+/// scan is the one part of the finder that touches a filesystem, so it
+/// is the one part that needs a real one.
+const ScanScratch = struct {
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    path: []u8,
+    dir: std.Io.Dir,
+
+    fn init(io: std.Io, alloc: std.mem.Allocator, label: []const u8) !ScanScratch {
+        const rel = try std.fmt.allocPrint(alloc, "zoe-test-{s}-{d}", .{ label, std.Thread.getCurrentId() });
+        defer alloc.free(rel);
+        std.Io.Dir.cwd().deleteTree(io, rel) catch {};
+        try std.Io.Dir.cwd().createDirPath(io, rel);
+        const cwd = try std.process.currentPathAlloc(io, alloc);
+        defer alloc.free(cwd);
+        const path = try std.fs.path.join(alloc, &.{ cwd, rel });
+        errdefer alloc.free(path);
+        return .{
+            .io = io,
+            .alloc = alloc,
+            .path = path,
+            .dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }),
+        };
+    }
+
+    fn deinit(self: *ScanScratch) void {
+        self.dir.close(self.io);
+        std.Io.Dir.cwd().deleteTree(self.io, self.path) catch {};
+        self.alloc.free(self.path);
+    }
+
+    fn file(self: *ScanScratch, name: []const u8, contents: []const u8) !void {
+        if (std.fs.path.dirname(name)) |parent| try self.dir.createDirPath(self.io, parent);
+        try self.dir.writeFile(self.io, .{ .sub_path = name, .data = contents });
+    }
+};
+
+pub fn finderWalksTheTreeAndSkipsDotfilesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "scan");
+    defer s.deinit();
+    try s.file("a.txt", "");
+    try s.file("sub/b.zig", "");
+    try s.file("sub/deep/c.zig", "");
+    // Hidden, the same rule the tree pane uses -- which is what keeps a
+    // `.git/` out of the listing without knowing what git is.
+    try s.file(".dotfile", "");
+    try s.file(".hidden/x.txt", "");
+
+    var f = try zoe.Finder.init(alloc, io, s.path);
+    defer f.deinit();
+
+    // Directories are walked, not listed: only files are things to open.
+    try expectMatches(&f, &.{ "a.txt", "sub/b.zig", "sub/deep/c.zig" });
+    try testz.expectFalse(f.truncated);
+
+    // And a path opens against the root it was walked from.
+    try testz.expectTrue(try f.query.insert(alloc, "cz"));
+    try f.refilter();
+    try expectMatches(&f, &.{"sub/deep/c.zig"});
+    const path = (try f.selectedPath(alloc)).?;
+    defer alloc.free(path);
+    const want = try std.fs.path.join(alloc, &.{ s.path, "sub/deep/c.zig" });
+    defer alloc.free(want);
+    try testz.expectEqualStr(path, want);
+}

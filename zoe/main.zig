@@ -102,6 +102,9 @@ pub fn main(init: std.process.Init) !void {
     else
         try alloc.dupe(u8, "");
     defer alloc.free(text);
+    // Same refusal the UI gives, so `zoe --keys` and a live window agree
+    // on what zoe will open (see zoe/filetype.zig).
+    if (zoe.filetype.looksBinary(text)) return fail(io, "zoe: not a text file\n");
 
     var ed = try zoe.Editor.initFromText(alloc, text, file_path);
     defer ed.deinit();

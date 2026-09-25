@@ -68,7 +68,7 @@ wheel and gamepad streams.
 | App | What it is | What glyphwire makes possible |
 |---|---|---|
 | **`gw-shell`** | The shell `glyphwire` spawns | Pipelines, Lua config and scripting, history, completion, powerline prompts, `gwssh` remote sessions, and Ctrl+R history search through `gw-hist`. `--embed` runs the same prompt inside another client's layer. |
-| **`zoe`** | Modal text editor | File tree, tabs and buffer in a host-side split tree. Incremental tree-sitter highlighting with embedded languages. Small scrolls move drawn rows instead of repainting. |
+| **`zoe`** | Modal text editor | File tree, tabs and buffer in a host-side split tree. Incremental tree-sitter highlighting with embedded languages. Ctrl+P fuzzy file finding over the working directory. Small scrolls move drawn rows instead of repainting. |
 | **`gmux`** | Terminal multiplexer | A pure window manager: it draws nothing and never touches a program's I/O. It asks the server for panes and places them. |
 | **`salacommander`** | Two-pane file manager | File-type icons, modal dialogs on their own layer, host scrollbars, only the visible rows sent. Ctrl+` drops a `gw-shell` into a panel that follows the active pane. Every key is a rebindable named action. |
 | **`gwmd`** | Markdown reader | Scaled headings, GFM tables as native tables, inline images, clickable links. The document is one tall layer the host scrolls. |
