@@ -5306,20 +5306,55 @@ pub const Outline = struct {
         layer.touchRender();
     }
 
-    /// The scrollback view offset that would bring the outline's **top
-    /// row** back on screen, or null when it is already visible (or the
-    /// layer has no scrollback to move).
+    /// Where a node sits in the outline's painted rows: its own row, and
+    /// how many rows it plus its currently-visible descendants occupy.
+    /// Null when the node is hidden under a collapsed ancestor.
+    pub const NodeSpan = struct { row: usize, rows: usize };
+
+    pub fn visibleSpan(self: *const Outline, idx: usize) ?NodeSpan {
+        if (idx >= self.nodes.len) return null;
+        const own_depth = self.nodes[idx].depth;
+        var it = self.visibleIter();
+        var start: ?usize = null;
+        var rows: usize = 0;
+        while (it.next()) |v| {
+            if (start == null) {
+                if (v.index != idx) continue;
+                start = v.row;
+                rows = 1;
+                continue;
+            }
+            // Descendants are the contiguous deeper run after it.
+            if (v.node.depth <= own_depth) break;
+            rows += 1;
+        }
+        return .{ .row = start orelse return null, .rows = rows };
+    }
+
+    /// The scrollback view offset that would reveal `focus` -- the node
+    /// just toggled, together with whatever it now shows -- or null when
+    /// it is already on screen (or the layer has no scrollback to move).
+    /// A null `focus` anchors on the outline's own top row instead, which
+    /// is what a whole-list `setAllCollapsed` wants since it has no one
+    /// node to point at.
     ///
-    /// Expanding a node pushes the rows above the split up into
-    /// scrollback (see `Layer.reflowAt`), so a node opened near the top
-    /// of a tall outline can shove the outline's own header off the top
-    /// of the window -- you click a triangle and the thing you clicked
-    /// leaves. Scrolling the view back to it is the fix, and it is the
+    /// Expanding pushes the rows above the split up into scrollback (see
+    /// `Layer.reflowAt`), so a node opened near the top of the window can
+    /// shove itself off it -- you click a triangle and the thing you
+    /// clicked leaves. Scrolling back to it is the fix, and it is the
     /// *view* that moves, not the content: `view_scroll` is display-only.
     ///
+    /// **The focal node, not the outline's top.** A `gw-grep` run is one
+    /// outline hundreds of rows tall; anchoring on its first row would
+    /// fling the view back to the first file every time you opened a hit
+    /// somewhere down the list. What has to stay put is the hit you
+    /// opened.
+    ///
     /// Ensure-visible rather than scroll-to-top: it returns the nearest
-    /// offset that puts the top row somewhere in the window, so a toggle
-    /// that needed no scrolling does not jolt the view for nothing.
+    /// offset that fits the node and its body in the window, so a toggle
+    /// that needed no scrolling does not jolt the view for nothing. When
+    /// the body is taller than the window the node's own row wins the top
+    /// of it, since reading starts there.
     ///
     /// Deliberately **computed, not applied**. Moving a layer's view is a
     /// presentation decision belonging to whoever owns it, and both real
@@ -5327,15 +5362,30 @@ pub const Outline = struct {
     /// broadcasts `scroll` to subscribers (`Server.reportScroll*`, or
     /// `handleOutlineSetCollapsed`'s own broadcast) -- otherwise
     /// glyphwire-shell's idea of the scroll position silently goes stale.
-    pub fn desiredViewScroll(self: *const Outline, layer: *const Layer) ?usize {
+    pub fn desiredViewScroll(self: *const Outline, layer: *const Layer, focus: ?usize) ?usize {
         if (layer.history_len == 0) return null;
 
+        var block_top = self.top_live;
+        var block_rows: usize = 1;
+        if (focus) |idx| {
+            if (self.visibleSpan(idx)) |span| {
+                block_top = self.top_live + @as(i64, @intCast(span.row));
+                block_rows = span.rows;
+            }
+        }
+        const block_bot = block_top + @as(i64, @intCast(block_rows)) - 1;
+
         // `view_scroll` of V shows live row L at screen row L + V, so the
-        // top row is on screen for any V in [-top_live, height-1-top_live].
+        // block is fully on screen for V in [-block_top, h-1-block_bot].
         const height_i: i64 = @intCast(layer.height);
         const hist: i64 = @intCast(layer.history_len);
-        const lo = std.math.clamp(-self.top_live, 0, hist);
-        const hi = std.math.clamp(height_i - 1 - self.top_live, 0, hist);
+        const want_top = -block_top;
+        var lo = want_top;
+        var hi = height_i - 1 - block_bot;
+        // Taller than the window: settle for its first row at the top.
+        if (lo > hi) hi = lo;
+        lo = std.math.clamp(lo, 0, hist);
+        hi = std.math.clamp(hi, 0, hist);
         if (lo > hi) return null;
 
         const cur: i64 = @intCast(layer.view_scroll);

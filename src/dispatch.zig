@@ -3584,22 +3584,25 @@ pub const Dispatcher = struct {
             error.OutlineNodeOutOfRange => return DispatchError.OutlineNodeOutOfRange,
             else => return err,
         };
-        return self.outlineViewFollow(alloc, p.layer, layer, outline);
+        return self.outlineViewFollow(alloc, p.layer, layer, outline, p.node);
     }
 
-    /// Scrolls the layer's view back to the outline's top if the toggle
-    /// pushed it off screen, and reports the move as a `scroll` broadcast
-    /// so a subscriber (glyphwire-shell tracks this) stays in step -- the
-    /// same notification `scroll_view` itself emits. No move, no
-    /// broadcast. See `core.Outline.desiredViewScroll`.
+    /// Scrolls the layer's view back to the toggled node if it landed off
+    /// screen, and reports the move as a `scroll` broadcast so a
+    /// subscriber (glyphwire-shell tracks this) stays in step -- the same
+    /// notification `scroll_view` itself emits. `focus` is the node that
+    /// was toggled, or null for a whole-list change with no one node to
+    /// point at. No move, no broadcast. See
+    /// `core.Outline.desiredViewScroll`.
     fn outlineViewFollow(
         self: *Dispatcher,
         alloc: std.mem.Allocator,
         named_layer: ?core.LayerHandle,
         layer: *core.Layer,
         outline: *core.Outline,
+        focus: ?usize,
     ) !HandleResult {
-        const want = outline.desiredViewScroll(layer) orelse return .{};
+        const want = outline.desiredViewScroll(layer, focus) orelse return .{};
         const now = layer.scrollView(want, null);
         const body = try rpc.scrollNotification(alloc, self.surfaceOr(named_layer), now, layer.history_len);
         return .{ .broadcast = .{ .event = "scroll", .body = body } };
@@ -3618,7 +3621,7 @@ pub const Dispatcher = struct {
         const outline = layer.outlines.getPtr(p.outline) orelse return DispatchError.UnknownOutline;
 
         try outline.setAllCollapsed(layer, self.ctx, p.collapsed, p.depth);
-        return self.outlineViewFollow(alloc, p.layer, layer, outline);
+        return self.outlineViewFollow(alloc, p.layer, layer, outline, null);
     }
 
     fn handleOutlineSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {

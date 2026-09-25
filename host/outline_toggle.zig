@@ -86,10 +86,11 @@ pub const OutlineToggle = struct {
                 std.log.err("outline marker toggle failed: {t}", .{err});
             };
             // Expanding pushes the rows above the split into scrollback, so
-            // a node opened near the top of a tall outline can shove the
-            // header you just clicked off the window. Pull the view back to
-            // it.
-            if (outline.desiredViewScroll(layer)) |offset| {
+            // a node opened near the top of the window can shove itself off
+            // it. Pull the view back to the node that was clicked -- not to
+            // the outline's own top, which on a `gw-grep` run is the first
+            // file, nowhere near the hit being opened.
+            if (outline.desiredViewScroll(layer, found_node)) |offset| {
                 follow = .{ .layer = target.handle, .offset = offset };
             }
         }
