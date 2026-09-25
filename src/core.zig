@@ -1590,6 +1590,20 @@ pub const Layer = struct {
     /// which resolve the default and clamp to the content.
     viewport_cols: usize = 0,
     viewport_rows: usize = 0,
+    /// The rect this layer's bounds were last *reported* at -- the last
+    /// time `Context.applyBounds` ran with a `changed` list to collect
+    /// into. Null until the first such pass.
+    ///
+    /// Deliberately separate from the applied geometry (`pos_cells` /
+    /// `viewport_*`), because a layout pass that collects nothing still
+    /// applies. `Session.republish` re-walks every on-screen context's
+    /// split tree after any pane change, passing no list -- so on a window
+    /// resize it applied every new rect silently, and the `reportLayout`
+    /// that followed compared the new rects against the new geometry,
+    /// found them equal and broadcast nothing. Clients got a `resize` and
+    /// no `layout`, and every split-using pane sat at its old size.
+    /// Comparing against what was last *reported* is what closes that.
+    reported_bounds: ?CellRect = null,
     /// See `PropertyName.scroll_offset` -- the viewport's top-left within
     /// the content grid. Always within `maxScroll` (every writer goes
     /// through `setScrollOffset`, and `resize` re-clamps).
@@ -6463,6 +6477,14 @@ pub const Context = struct {
     /// Idempotent, and cheap enough to re-run for the divider geometry
     /// alone -- a re-run with unchanged inputs appends nothing to
     /// `changed`. A no-op when there is no root split.
+    ///
+    /// "Unchanged" means *since the last pass that collected*, not since
+    /// the last pass at all: a run with `changed == null` applies the new
+    /// rects but leaves them owed, so the next collecting run still
+    /// reports them. That is what lets `Session.republish` re-walk every
+    /// on-screen tree after a pane change without swallowing the `layout`
+    /// notification a window resize is about to need. See
+    /// `Layer.reported_bounds`.
     pub fn layoutSplits(
         self: *Context,
         changed: ?*std.ArrayList(LayerBounds),
@@ -6595,7 +6617,6 @@ pub const Context = struct {
             layer.pos_cells.?.row != rect.row or
             layer.pos_cells.?.col != rect.col;
         const resized = layer.viewport_cols != rect.cols or layer.viewport_rows != rect.rows;
-        if (!moved and !resized) return;
 
         if (moved) {
             layer.pos_cells = .{ .row = rect.row, .col = rect.col };
@@ -6604,15 +6625,24 @@ pub const Context = struct {
         }
         if (resized) layer.setProperty(.{ .viewport = .{ .cols = rect.cols, .rows = rect.rows } });
 
-        if (changed) |out| {
-            try out.append(self.alloc, .{
-                .layer = handle,
-                .row = rect.row,
-                .col = rect.col,
-                .cols = rect.cols,
-                .rows = rect.rows,
-            });
+        // Reporting is measured against the last rect that was *reported*,
+        // not the one currently applied -- see `Layer.reported_bounds`.
+        // The two differ exactly when a silent pass (`changed == null`)
+        // applied a rect nobody has been told about yet, which is what a
+        // window resize does on its way through `Session.republish`.
+        const out = changed orelse return;
+        if (layer.reported_bounds) |prev| {
+            if (prev.row == rect.row and prev.col == rect.col and
+                prev.cols == rect.cols and prev.rows == rect.rows) return;
         }
+        layer.reported_bounds = rect;
+        try out.append(self.alloc, .{
+            .layer = handle,
+            .row = rect.row,
+            .col = rect.col,
+            .cols = rect.cols,
+            .rows = rect.rows,
+        });
     }
 
     /// `move_divider`: drags the band after child `index` by `delta`

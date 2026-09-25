@@ -10,9 +10,10 @@
 //! divider drag or a window resize arrives as a `layout` notification
 //! saying where each pane ended up, and that notification is the *only*
 //! thing zoe takes pane geometry from. A resize also brings a `resize`,
-//! which zoe repaints on but reads nothing from -- see the `.resize` arm
-//! of `handleEvent` for why asking the server where a pane is cannot
-//! answer that question after a pane has grown.
+//! which zoe repaints on but reads nothing from -- asking the server
+//! where a pane is cannot answer that after a pane has grown, since
+//! `get_property`'s viewport is clamped to the layer's own grid. See the
+//! `.resize` arm of `handleEvent`.
 //!
 //! **Every open buffer is a `Slot`**, and the tab strip lists them. A
 //! slot holds its own editor, scroll position, redraw bookkeeping and
@@ -1011,20 +1012,20 @@ pub const Ui = struct {
                 self.finder_dirty = self.finder != null;
             },
             // The window (or this pane) changed size. Repaint, but take
-            // no geometry from it: a `layout` carries the new pane rects
-            // and is what moves `*_bounds`.
+            // no geometry from it: the `layout` that comes with it
+            // carries the new pane rects, and is the only thing that
+            // moves `*_bounds`.
             //
-            // Nothing here reads the bounds back from the server, and it
-            // is important that nothing ever does. `get_property`'s
-            // `viewport` is `Layer.viewportCols`/`viewportRows`, which
-            // are **clamped to the content grid** -- so a layer whose
-            // grid is 60 wide reports a 60-wide viewport however wide its
-            // pane just became. Feeding that back into `setLayerSize`
-            // latches the pane at whatever size it last shrank to: the
-            // grid can never grow again, the area past it stays
-            // transparent, and the scrollbar keeps measuring the small
-            // grid. The `layout` notification carries the true, unclamped
-            // rect, and is the only thing that can report a grow.
+            // Nothing here reads the bounds back from the server, and
+            // nothing ever should. `get_property`'s `viewport` is
+            // `Layer.viewportCols`/`viewportRows`, which are **clamped to
+            // the content grid** -- so a layer whose grid is 60 wide
+            // reports a 60-wide viewport however wide its pane just
+            // became. Feed that into `setLayerSize` and the pane latches
+            // at whatever size it last shrank to: the grid can never grow
+            // again, the area past it stays transparent, and the
+            // scrollbar keeps measuring the small grid. Only `layout`
+            // carries the true, unclamped rect.
             .resize => {
                 self.buf.full_redraw = true;
                 self.buffer_dirty = true;

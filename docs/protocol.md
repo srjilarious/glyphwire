@@ -960,7 +960,10 @@ remainder.
 
 `set_root_split(null)` detaches the tree. When the tree is re-laid-out — a
 window resize or a divider drag — subscribers to `layout` receive the new
-bounds for every pane that moved.
+bounds for every pane that has moved **since the last `layout` they were
+sent**. A server may re-walk the tree without notifying (it does so after
+any pane change), so "moved" is measured against what was last reported,
+not against what was last computed.
 
 ### 6.15 Panes and the window-manager role
 
