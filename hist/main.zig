@@ -23,6 +23,12 @@
 //! the selection. Every redraw -- rows, sizes and scroll position -- goes
 //! out as one `batch` frame (`render`).
 //!
+//! `gw-hist [query...]` opens with the search field already holding
+//! `query` and the list already filtered by it -- glyphwire-shell's
+//! Ctrl+R passes whatever was typed at the prompt (see
+//! `Prompt.historySearch`), so reaching for the history mid-line keeps
+//! that typing instead of discarding it. See `seedQuery`.
+//!
 //! On Enter, the selected line is written to `$GLYPHWIRE_RESULT_FD` --
 //! the shell opens this pipe before spawning every foreground command
 //! (see `shell/main.zig`'s `result_fd_env`) so any program, not just this
@@ -51,6 +57,9 @@ const fg_selected = glyphwire.Color{ .r = 245, .g = 250, .b = 255 };
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
+    const arena = init.arena.allocator();
+
+    const seed = try seedQuery(arena, try init.minimal.args.toSlice(arena));
 
     const entries = loadHistory(alloc, io, init.environ_map) catch &.{};
     defer if (entries.len > 0) history.freeEntries(alloc, @constCast(entries));
@@ -66,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer listener.deinit();
 
-    const ui = try Ui.init(alloc, &client, listener, entries);
+    const ui = try Ui.init(alloc, &client, listener, entries, seed);
     defer ui.deinit();
 
     try ui.run();
@@ -84,6 +93,24 @@ pub fn main(init: std.process.Init) !void {
         w.interface.flush() catch {};
         if (maybe_fd != null) out_file.close(io);
     }
+}
+
+/// The query the search opens with, from `gw-hist [query...]`: every
+/// argument after the program name, joined with single spaces. Empty (no
+/// arguments) opens on the whole history, which is what a bare `gw-hist`
+/// has always done.
+///
+/// Joined rather than "take `args[1]`, ignore the rest" so both callers
+/// read naturally: glyphwire-shell's Ctrl+R passes the typed line as one
+/// argument (a query is one string, not an argv), while `gw-hist git
+/// commit` typed by hand seeds `git commit` instead of silently dropping
+/// everything past the first word. The two spellings coincide for any
+/// line without runs of whitespace in it, and the fuzzy matcher
+/// (`fuzzy.matches`) treats the space as just another character to find
+/// in order, so neither needs the original spacing preserved exactly.
+fn seedQuery(arena: std.mem.Allocator, args: []const []const u8) ![]const u8 {
+    if (args.len < 2) return "";
+    return std.mem.join(arena, " ", args[1..]);
 }
 
 fn resultFd(environ_map: *const std.process.Environ.Map) ?std.Io.File.Handle {
@@ -144,6 +171,9 @@ const Ui = struct {
         client: *glyphwire.Client,
         listener: *glyphwire.InputListener,
         entries: []const []const u8,
+        /// The query to open on -- see `seedQuery`. Copied into `query`,
+        /// so the caller's storage doesn't have to outlive this.
+        seed: []const u8,
     ) !*Ui {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
@@ -186,6 +216,13 @@ const Ui = struct {
             .rows = rows,
             .list_rows = list_rows,
         };
+
+        // Before the first `refilter`, so the opening list is already
+        // narrowed rather than showing everything for one frame. The
+        // drawn caret needs nothing extra: `renderHeader` puts it right
+        // after `query`, and typing appends to the end of it, so a seeded
+        // field behaves exactly like one typed into.
+        try self.query.appendSlice(alloc, seed);
 
         try self.refilter();
         self.followSelection();

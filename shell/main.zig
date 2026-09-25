@@ -165,7 +165,8 @@ fn plColor(s: ?[]const u8) ?glyphwire.Color {
 ///
 /// The prompt supports echo, Enter, real cursor movement and interior
 /// insert/delete (arrow keys, ctrl+a/e/u, ctrl+arrow word jumps, Up/Down
-/// history recall, Ctrl+Up to browse scrollback -- see `Prompt`), and now
+/// history recall, Ctrl+Up to browse scrollback, alt+d to drop
+/// `cd <cwd>` onto the line -- see `Prompt`), and now
 /// launches a child process
 /// per submitted line (see `Prompt.runCommand`). Every child's
 /// stdout/stderr is piped and mirrored onto the grid via `write_text` by
@@ -766,13 +767,14 @@ fn runPrompt(
         defer alloc.free(ev.key);
         if (!ev.pressed) continue; // only key-down drives the prompt
 
-        // Only `ctrl` gates key-event handling now (the ctrl+letter / ctrl+
-        // arrow editing chords below). `alt` / `super` chords have no
-        // explicit cases and no longer need checking: plain characters
-        // come from the `text` stream, and the host doesn't emit `text`
-        // for a genuine modifier chord, so an unhandled alt/super combo
-        // simply does nothing here. Read off the event, as it was pressed.
+        // `ctrl` gates most of the chords below (the ctrl+letter / ctrl+
+        // arrow editing ones); `alt` gates exactly one, alt+d. `super`
+        // has no cases and needs no checking: plain characters come from
+        // the `text` stream, and the host doesn't emit `text` for a
+        // genuine modifier chord, so an unhandled alt/super combo simply
+        // does nothing here. Read off the event, as it was pressed.
         const ctrl = ev.ctrl();
+        const alt = ev.alt();
 
         if (std.mem.eql(u8, ev.key, "enter")) {
             // The completion picker takes priority over both browsing and
@@ -856,6 +858,11 @@ fn runPrompt(
             try prompt.clearScreen();
         } else if (ctrl and std.mem.eql(u8, ev.key, "r")) {
             try prompt.historySearch();
+        } else if (alt and std.mem.eql(u8, ev.key, "d")) {
+            // Drops `cd <cwd>` onto the line to be edited into the
+            // directory you actually want -- see `cdCwdLine`. The one
+            // alt chord the prompt binds.
+            try prompt.cdCwdLine();
         } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
             // While browsing, ctrl+left/right is a bigger horizontal step
             // (`scrollback_jump` columns), mirroring ctrl+up/down's row
@@ -2361,17 +2368,10 @@ const Prompt = struct {
     /// Returns `path` with a leading `$HOME` replaced by `~` (`~` alone
     /// for exactly `$HOME`), written into `buf`. Falls back to `path`
     /// unchanged when there's no `$HOME`, it isn't a prefix, or `buf` is
-    /// too small.
+    /// too small. The rule itself lives in `logicalpath` so it can be
+    /// tested without a prompt; this just supplies `$HOME`.
     fn collapseHome(self: *Prompt, path: []const u8, buf: []u8) []const u8 {
-        const home = self.environ_map.get("HOME") orelse return path;
-        if (home.len == 0 or !std.mem.startsWith(u8, path, home)) return path;
-        if (path.len == home.len) return "~";
-        if (path[home.len] != '/') return path; // `/home/foobar` isn't under `/home/foo`
-        const rest = path[home.len..];
-        if (rest.len + 1 > buf.len) return path;
-        buf[0] = '~';
-        @memcpy(buf[1 .. rest.len + 1], rest);
-        return buf[0 .. rest.len + 1];
+        return logicalpath.collapseHome(path, self.environ_map.get("HOME"), buf);
     }
 
     /// The caret's column offset from `line_start_col` -- the display
@@ -3379,11 +3379,53 @@ const Prompt = struct {
     /// directly rather than over any live connection to this process.
     fn historySearch(self: *Prompt) !void {
         self.flushPersistentState(.due);
-        try self.runCommand(&.{"gw-hist"});
+        // Whatever is already typed seeds the search (`gw-hist [query...]`,
+        // see hist/main.zig's `seedQuery`), so Ctrl+R after `git com`
+        // opens already filtered on `git com` instead of throwing that
+        // typing away -- fish and mcfly both work this way. The whole
+        // line goes as *one* argument, since a query is one string, not
+        // an argv; `expand_tilde = false` keeps `runCommandOpts` from
+        // turning a typed `~/code` into an absolute path that would then
+        // match none of the history lines that literally contain
+        // `~/code` (see `RunOptions`). Trimmed, and
+        // a blank line spawns `gw-hist` bare, so a stray space doesn't
+        // open the search filtered down to nothing.
+        const seed = std.mem.trim(u8, self.line.text(), " \t");
+        if (seed.len == 0) {
+            try self.runCommand(&.{"gw-hist"});
+        } else {
+            try self.runCommandOpts(&.{ "gw-hist", seed }, .{ .expand_tilde = false });
+        }
         if (self.takePendingResultLine()) |line| {
             defer self.client.alloc.free(line);
             try self.setLine(line);
         }
+    }
+
+    /// Alt+D: replaces the line with `cd <cwd>`, so the directory you are
+    /// already in can be *edited* into the one you want (up a level, over
+    /// to a sibling) rather than retyped from scratch. The prompt-line
+    /// counterpart of salacommander's Alt+D in-place path edit
+    /// (`actions.editPath`), and bound to the same chord for that reason,
+    /// deliberately over readline's `kill-word` -- the shell already has
+    /// Ctrl+Delete for that.
+    ///
+    /// The path is written the way the default prompt shows it
+    /// (`~`-collapsed); `runCommand`'s `expandTilde` turns it back into
+    /// an absolute path when the line is submitted, so the round trip is
+    /// exact. Replaces whatever was typed outright, with the caret at the
+    /// end of the path (`setLine`), which is where an edit almost always
+    /// starts.
+    fn cdCwdLine(self: *Prompt) !void {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var tilde_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = self.collapseHome(self.logicalCwd(&cwd_buf), &tilde_buf);
+
+        // `max_path_bytes + 4` covers `"cd "` before a full-length path,
+        // the same slack `writeDefaultPrefix` gives its `" > "` suffix.
+        var line_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
+        const text = std.fmt.bufPrint(&line_buf, "cd {s}", .{cwd}) catch "cd ";
+        try self.setLine(text);
     }
 
     /// Runs whatever the just-committed line (`self.line`) names.
@@ -4045,8 +4087,27 @@ const Prompt = struct {
     /// reported onto the grid, not propagated.
     ///
     /// Every argument gets the same leading `~`/`~/...` expansion `cd`
-    /// already gives its target (see `expandTilde`).
+    /// already gives its target (see `expandTilde`) -- `runCommandOpts`
+    /// is the same thing with that switchable.
     fn runCommand(self: *Prompt, argv: []const []const u8) !void {
+        return self.runCommandOpts(argv, .{});
+    }
+
+    /// Knobs for `runCommandOpts`. Everything here defaults to what a
+    /// typed command line gets, so plain `runCommand` is `.{}`.
+    const RunOptions = struct {
+        /// Whether each argument gets `expandTilde`. Off for an argument
+        /// that is *data* rather than a path: `gw-hist`'s seed query (see
+        /// `historySearch`), where expanding a typed `~/code` into
+        /// `/home/you/code` would stop it matching the history lines that
+        /// literally contain `~/code`.
+        expand_tilde: bool = true,
+    };
+
+    /// `runCommand`'s body -- see its doc comment. Split out only so a
+    /// caller that builds argv itself can turn off the tilde expansion
+    /// meant for a *typed* path argument.
+    fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions) !void {
         const alloc = self.client.alloc;
         var expanded: std.ArrayList([]const u8) = .empty;
         defer {
@@ -4058,10 +4119,13 @@ const Prompt = struct {
             expanded.deinit(alloc);
         }
         for (argv) |arg| {
-            const exp = self.expandTilde(arg) catch {
-                try self.drawText("~: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
-                return;
-            };
+            const exp = if (opts.expand_tilde)
+                self.expandTilde(arg) catch {
+                    try self.drawText("~: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
+                    return;
+                }
+            else
+                arg;
             try expanded.append(alloc, exp);
         }
 

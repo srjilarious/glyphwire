@@ -817,6 +817,94 @@ pub fn shellCtrlRLoadsResultFdLineIntoPromptTest(_: std.Io, alloc: std.mem.Alloc
     try testz.expectEqual(cur.col, text_col + line.len);
 }
 
+/// The seeding half of Ctrl+R: whatever is already typed at the prompt
+/// is handed to `gw-hist` as its *one* argument, so the search opens
+/// filtered on it instead of discarding it (`Prompt.historySearch` ->
+/// `runCommandOpts` -> `gw-hist`'s `seedQuery`).
+///
+/// Same `sh` stand-in trick as `shellCtrlRLoadsResultFdLineIntoPromptTest`
+/// above, and for the same reason -- see its doc comment. Here the
+/// stand-in echoes its `"$1"` straight back down the result pipe, so what
+/// lands on the prompt line *is* the argv the shell built. The typed line
+/// has a space in it deliberately: it has to arrive as one argument, not
+/// word-split into two, or `"$1"` would come back as just `git`.
+pub fn shellCtrlRSeedsGwHistWithTypedLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Wide for the same reason the sibling test is: prompt path plus the
+    // loaded line has to fit on one row. See its comment.
+    var ctx = try glyphwire.Context.init(alloc, 240, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shell-ctrlr-seed-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    const fake_bin = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-e2e-ctrlr-seed-bin-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(fake_bin);
+    defer std.Io.Dir.cwd().deleteTree(io, fake_bin) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, fake_bin);
+    const fake_hist = try std.fs.path.join(alloc, &.{ fake_bin, "gw-hist" });
+    defer alloc.free(fake_hist);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = fake_hist,
+        .data = "#!/bin/sh\nprintf 'echo seed=[%s]' \"$1\" > \"/dev/fd/$GLYPHWIRE_RESULT_FD\"\n",
+        .flags = .{ .permissions = .executable_file },
+    });
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+    try shell_env.put("GLYPHWIRE_BIN_DIR", fake_bin);
+    const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
+    const new_path = try std.fmt.allocPrint(alloc, "{s}:{s}/zig-out/bin:{s}", .{ fake_bin, cwd_buf[0..cwd_len], path_env });
+    defer alloc.free(new_path);
+    try shell_env.put("PATH", new_path);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{shell_path},
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    const text_col = cwd_len + 3;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    try typeText(&reporter, "git com");
+    // The last character of what was typed, so Ctrl+R can't race ahead of
+    // the line the shell is supposed to pass on.
+    try waitForCell(&reporter, 0, text_col + "git com".len - 1, "m");
+
+    try reporter.reportKey("left_control", true);
+    try reporter.reportKey("r", true);
+    try reporter.reportKey("r", false);
+    try reporter.reportKey("left_control", false);
+
+    const line = "echo seed=[git com]";
+    try waitForCell(&reporter, 0, text_col + line.len - 1, "]");
+    var snapshot = try reporter.getCells();
+    defer snapshot.deinit();
+    for (line, 0..) |ch, i| {
+        try testz.expectEqualStr(&.{ch}, snapshot.cellAt(0, text_col + i).grapheme);
+    }
+}
+
 /// Drives the real glyphwire-shell binary through a `*` glob expansion:
 /// types `echo *.zon` at the prompt and presses Enter. The shell's cwd
 /// (this repo's root, same assumption the other shell e2e tests make)
