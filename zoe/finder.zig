@@ -118,7 +118,7 @@ pub const Finder = struct {
     fn scan(self: *Finder, io: std.Io, ignores: *gitignore.Stack, dir: []const u8, rel: []const u8, depth: usize) !void {
         if (depth >= max_depth) return;
 
-        const pushed = if (self.visible.show_hidden) false else try ignores.pushDir(io, dir, rel);
+        const pushed = try ignores.pushDir(io, dir, rel);
         defer if (pushed) ignores.pop();
 
         var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
@@ -130,21 +130,20 @@ pub const Finder = struct {
                 self.truncated = true;
                 return;
             }
-            // Dotfiles and `.gitignore`d paths are hidden, the same rule
-            // the tree pane uses -- which is what keeps `.git/` out of the
-            // listing without the finder having to know what git is, and
-            // `zig-out/` out without it having to know what zig is.
-            if (self.visible.skipsDotfile(raw.name)) continue;
-
             const child_rel = if (rel.len == 0)
                 try self.alloc.dupe(u8, raw.name)
             else
                 try std.fs.path.join(self.alloc, &.{ rel, raw.name });
             errdefer self.alloc.free(child_rel);
 
-            // An ignored directory is not walked either, which is most of
+            // Dotfiles and `.gitignore`d paths are skipped, the same rule
+            // the tree pane uses -- which is what keeps `.git/` out of the
+            // listing without the finder having to know what git is, and
+            // `zig-out/` out without it having to know what zig is. An
+            // ignored directory is not walked either, which is most of
             // what makes this scan cheap on a tree that has been built.
-            if (self.visible.skipsIgnored(ignores, child_rel, raw.kind == .directory)) {
+            const hidden = self.visible.isHidden(ignores, raw.name, child_rel, raw.kind == .directory);
+            if (self.visible.skips(hidden)) {
                 self.alloc.free(child_rel);
                 continue;
             }
