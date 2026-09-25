@@ -1618,8 +1618,8 @@ pub const Dispatcher = struct {
         .{ "create_outline", catBytesId(handleCreateOutline) },
         .{ "destroy_outline", catVoid(handleDestroyOutline) },
         .{ "outline_set_nodes", catVoid(handleOutlineSetNodes) },
-        .{ "outline_set_collapsed", catVoid(handleOutlineSetCollapsed) },
-        .{ "outline_set_all_collapsed", catVoid(handleOutlineSetAllCollapsed) },
+        .{ "outline_set_collapsed", catResult(handleOutlineSetCollapsed) },
+        .{ "outline_set_all_collapsed", catResult(handleOutlineSetAllCollapsed) },
         .{ "outline_set_style", catVoid(handleOutlineSetStyle) },
         .{ "outline_get_state", catBytesId(handleOutlineGetState) },
         .{ "create_rect", catResultId(handleCreateRect) },
@@ -3571,7 +3571,7 @@ pub const Dispatcher = struct {
     /// layer around the outline (`core.Layer.reflowAt`) and redraws it --
     /// see `core.Outline.setNodeCollapsed` for why this can't be the
     /// in-place repaint a table re-sort gets.
-    fn handleOutlineSetCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleOutlineSetCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
         const parsed = try std.json.parseFromValue(OutlineSetCollapsedParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
@@ -3584,12 +3584,31 @@ pub const Dispatcher = struct {
             error.OutlineNodeOutOfRange => return DispatchError.OutlineNodeOutOfRange,
             else => return err,
         };
+        return self.outlineViewFollow(alloc, p.layer, layer, outline);
+    }
+
+    /// Scrolls the layer's view back to the outline's top if the toggle
+    /// pushed it off screen, and reports the move as a `scroll` broadcast
+    /// so a subscriber (glyphwire-shell tracks this) stays in step -- the
+    /// same notification `scroll_view` itself emits. No move, no
+    /// broadcast. See `core.Outline.desiredViewScroll`.
+    fn outlineViewFollow(
+        self: *Dispatcher,
+        alloc: std.mem.Allocator,
+        named_layer: ?core.LayerHandle,
+        layer: *core.Layer,
+        outline: *core.Outline,
+    ) !HandleResult {
+        const want = outline.desiredViewScroll(layer) orelse return .{};
+        const now = layer.scrollView(want, null);
+        const body = try rpc.scrollNotification(alloc, self.surfaceOr(named_layer), now, layer.history_len);
+        return .{ .broadcast = .{ .event = "scroll", .body = body } };
     }
 
     /// `outline_set_all_collapsed`: one reflow and one repaint for the
     /// whole list, rather than the N a client would pay sending one
     /// `outline_set_collapsed` per node.
-    fn handleOutlineSetAllCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleOutlineSetAllCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
         const parsed = try std.json.parseFromValue(OutlineSetAllCollapsedParams, alloc, params_value, .{
             .ignore_unknown_fields = true,
         });
@@ -3599,6 +3618,7 @@ pub const Dispatcher = struct {
         const outline = layer.outlines.getPtr(p.outline) orelse return DispatchError.UnknownOutline;
 
         try outline.setAllCollapsed(layer, self.ctx, p.collapsed, p.depth);
+        return self.outlineViewFollow(alloc, p.layer, layer, outline);
     }
 
     fn handleOutlineSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {

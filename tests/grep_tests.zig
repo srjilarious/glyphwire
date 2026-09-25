@@ -152,9 +152,10 @@ pub fn grepBuildsThreeLevelNodesTest(io: std.Io, alloc: std.mem.Allocator) !void
     var built = try nodes_mod.build(alloc, files, .{ .ctx = .{ .before = 1, .after = 2 } }, null);
     defer built.deinit();
 
-    // a.zig: file + hit(10) + its 3 context rows + hit(40), which has no
-    // reported lines near it; then b.zig: file + hit(7).
-    try testz.expectEqual(built.nodes.len, 8);
+    // a.zig: file + hit(10) + its 4 body rows (the window *includes* the
+    // hit's own line) + hit(40) + its 1 body row, which is just itself;
+    // then b.zig: file + hit(7) + its 1 body row.
+    try testz.expectEqual(built.nodes.len, 11);
 
     try testz.expectEqual(built.nodes[0].depth, 0);
     try testz.expectTrue(built.nodes[0].collapsible);
@@ -191,9 +192,9 @@ pub fn grepHitRowSplitsTheMatchIntoItsOwnRunTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectEqual(hit.runs[1].fg.?.r, 210);
 
     // The line-40 match, which starts at byte 0, so it has no leading
-    // run before the highlight. It follows the first hit's three context
-    // rows, at index 5.
-    const hit2 = built.nodes[5];
+    // run before the highlight. It follows the first hit's four body
+    // rows, at index 6.
+    const hit2 = built.nodes[6];
     try testz.expectEqualStr("fn init", hit2.runs[1].text);
 }
 
@@ -266,7 +267,43 @@ pub fn grepBuiltNodesDriveARealOutlineTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqualStr("s", ctx.root.cell(0, 2).grapheme());
     try testz.expectEqualStr("\u{25B8}", ctx.root.cell(1, 2).grapheme());
 
-    // Expanding the first hit reveals its three context rows.
+    // Expanding the first hit reveals its four body rows -- three context
+    // lines plus the hit's own line sitting among them.
     try outline.setNodeCollapsed(&ctx.root, &ctx, 1, false);
-    try testz.expectEqual(outline.visibleRows(), 8);
+    try testz.expectEqual(outline.visibleRows(), 9);
+}
+
+pub fn grepHitLineIsRepeatedInItsBodyWithALitNumberTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const files = try parseSample(alloc, sample);
+    defer freeFiles(alloc, files);
+
+    var built = try nodes_mod.build(alloc, files, .{ .ctx = .{ .before = 1, .after = 2 } }, null);
+    defer built.deinit();
+
+    const colors = nodes_mod.Colors{};
+
+    // Body rows 2..5 are lines 9, 10, 11, 12 -- the hit at line 10 sits
+    // among its own context rather than leaving a hole where it belongs.
+    try testz.expectEqualStr(" 9  ", built.nodes[2].runs[0].text);
+    try testz.expectEqualStr("10  ", built.nodes[3].runs[0].text);
+    try testz.expectEqualStr("11  ", built.nodes[4].runs[0].text);
+    try testz.expectEqualStr("12  ", built.nodes[5].runs[0].text);
+
+    // Only the hit's own row has its line number in the match colour;
+    // that is what marks which line you searched for.
+    try testz.expectEqual(built.nodes[3].runs[0].fg.?.r, colors.match.r);
+    try testz.expectEqual(built.nodes[3].runs[0].fg.?.g, colors.match.g);
+    try testz.expectEqual(built.nodes[2].runs[0].fg.?.r, colors.line_number.r);
+    try testz.expectEqual(built.nodes[4].runs[0].fg.?.r, colors.line_number.r);
+
+    // And the repeated line still splits on its match, so the matched
+    // bytes stay highlighted inside the body too.
+    try testz.expectEqual(built.nodes[3].runs.len, 4);
+    try testz.expectEqualStr("fn init", built.nodes[3].runs[2].text);
+    try testz.expectEqual(built.nodes[3].runs[2].fg.?.r, colors.match.r);
+
+    // A plain context row is one run of text in the dimmer colour.
+    try testz.expectEqual(built.nodes[2].runs.len, 2);
+    try testz.expectEqual(built.nodes[2].runs[1].fg.?.r, colors.context.r);
 }

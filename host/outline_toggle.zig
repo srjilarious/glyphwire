@@ -53,32 +53,59 @@ pub const OutlineToggle = struct {
         const server = self.app.server;
         const pos = eng.inputs.mouse.pos();
 
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        // What the toggle decided about the view, carried out of the lock:
+        // the scroll has to go through `Server.reportScroll*`, which takes
+        // `ctx_mutex` itself and broadcasts `scroll` to subscribers.
+        var follow: ?struct { layer: ?glyphwire.LayerHandle, offset: usize } = null;
 
-        const ctx = server.ctx;
-        const target = hit.layerUnder(ctx, pos.x, pos.y) orelse return false;
-        const layer = target.layer;
-        // While a full-screen program owns the screen its own content is
-        // on the grid, not an outline -- leave the click for mouse
-        // reporting. Only root can be taken over that way.
-        if (target.is_root and scroll_mod.rootOwned(layer)) return false;
+        {
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
 
-        // Paint order = last drawn wins where two overlap, matching how
-        // the renderer composites them.
-        var found: ?*glyphwire.Outline = null;
-        var found_node: usize = 0;
-        for (layer.outline_order.items) |handle| {
-            const outline = layer.outlines.getPtr(handle) orelse continue;
-            const node = outline.toggleAt(target.row, target.col, layer.view_scroll) orelse continue;
-            found = outline;
-            found_node = node;
+            const ctx = server.ctx;
+            const target = hit.layerUnder(ctx, pos.x, pos.y) orelse return false;
+            const layer = target.layer;
+            // While a full-screen program owns the screen its own content
+            // is on the grid, not an outline -- leave the click for mouse
+            // reporting. Only root can be taken over that way.
+            if (target.is_root and scroll_mod.rootOwned(layer)) return false;
+
+            // Paint order = last drawn wins where two overlap, matching
+            // how the renderer composites them.
+            var found: ?*glyphwire.Outline = null;
+            var found_node: usize = 0;
+            for (layer.outline_order.items) |handle| {
+                const outline = layer.outlines.getPtr(handle) orelse continue;
+                const node = outline.toggleAt(target.row, target.col, layer.view_scroll) orelse continue;
+                found = outline;
+                found_node = node;
+            }
+            const outline = found orelse return false;
+
+            outline.setNodeCollapsed(layer, ctx, found_node, null) catch |err| {
+                std.log.err("outline marker toggle failed: {t}", .{err});
+            };
+            // Expanding pushes the rows above the split into scrollback, so
+            // a node opened near the top of a tall outline can shove the
+            // header you just clicked off the window. Pull the view back to
+            // it.
+            if (outline.desiredViewScroll(layer)) |offset| {
+                follow = .{ .layer = target.handle, .offset = offset };
+            }
         }
-        const outline = found orelse return false;
 
-        outline.setNodeCollapsed(layer, ctx, found_node, null) catch |err| {
-            std.log.err("outline marker toggle failed: {t}", .{err});
-        };
+        if (follow) |f| {
+            if (f.layer) |handle| {
+                server.reportLayerScroll(self.app.alloc, handle, f.offset, null) catch |err| {
+                    std.log.err("glyphwire-host: outline view follow failed: {t}", .{err});
+                };
+            } else {
+                server.reportScroll(self.app.alloc, f.offset, null) catch |err| {
+                    std.log.err("glyphwire-host: outline view follow failed: {t}", .{err});
+                };
+            }
+        }
+
         self.swallow_release = true;
         return true;
     }

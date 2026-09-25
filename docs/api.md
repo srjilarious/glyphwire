@@ -419,8 +419,8 @@ a non-collapsible node one level deeper rather than a second concept.
 | `create_outline` | request | `layer?, row?, col?, width?, style?` | outline handle | ✅ `row`/`col` default to the layer's cursor, same convention `create_table`/`draw_box` use; `width` defaults to the rest of the layer's width from `col`. No nodes yet — nothing paints until `outline_set_nodes`, exactly as a fresh table paints nothing until `table_set_rows` |
 | `destroy_outline` | notification | `layer?, outline` | — | ✅ blanks whatever the outline last painted, frees it, and drops it from its layer's `outline_order`. The rows it occupied are left **blank rather than closed up**: collapsing them would move content the caller didn't ask to move, and a client that wants the space back collapses the outline first. Errors `UnknownLayer`/`UnknownOutline` |
 | `outline_set_nodes` | notification | `layer?, outline, nodes: [{depth, runs, icon?, metadata_id?, collapsible?, collapsed?}]` | — | ✅ replaces every node wholesale and draws fresh at the anchor, scrolling the layer terminal-style — the same `render` path `table_set_rows` takes. Collapse state travels **with** the new nodes rather than carrying over from the old ones: a client replacing the list knows what it wants shown, and matching old state onto new nodes would need an identity a flat list doesn't have. `icon` is an icon-registry name resolved like `draw_icon`'s (`UnknownIcon` on an unknown one) |
-| `outline_set_collapsed` | notification | `layer?, outline, node, collapsed?` | — | ✅ the height-changing mutation. An omitted `collapsed` **toggles**, which is what both the host's own marker click and a client keybinding want far more often than a set. Reflows the layer and redraws the outline. A `node` past the end reports `OutlineNodeOutOfRange`; a non-collapsible node is a silent no-op. Toggling a node currently hidden under a collapsed ancestor changes its stored state without moving anything on screen, so it is already open when its parent expands |
-| `outline_set_all_collapsed` | notification | `layer?, outline, collapsed, depth?` | — | ✅ every collapsible node, or every one at `depth`, in **one** reflow and one repaint instead of the N a client would pay sending one `outline_set_collapsed` per node. `depth: 1` closes a `gw-grep` run's hits while leaving its files open; an omitted `depth` closes everything |
+| `outline_set_collapsed` | notification | `layer?, outline, node, collapsed?` | — | ✅ the height-changing mutation. An omitted `collapsed` **toggles**, which is what both the host's own marker click and a client keybinding want far more often than a set. Reflows the layer and redraws the outline. A `node` past the end reports `OutlineNodeOutOfRange`; a non-collapsible node is a silent no-op. **Scrolls the layer's view back to the outline's top** if the toggle pushed it off screen, and broadcasts the move as a `scroll` notification — see "Keeping the top in view" below. Toggling a node currently hidden under a collapsed ancestor changes its stored state without moving anything on screen, so it is already open when its parent expands |
+| `outline_set_all_collapsed` | notification | `layer?, outline, collapsed, depth?` | — | ✅ every collapsible node, or every one at `depth`, in **one** reflow and one repaint instead of the N a client would pay sending one `outline_set_collapsed` per node. `depth: 1` closes a `gw-grep` run's hits while leaving its files open; an omitted `depth` closes everything. Follows the outline's top the same way `outline_set_collapsed` does |
 | `outline_set_style` | notification | `layer?, outline, style` | — | ✅ replaces the whole style (`indent`, `marker_collapsed`, `marker_expanded`, `marker_fg`, `alt_row_bg`) and repaints |
 | `outline_get_state` | request | `layer?, outline` | `{nodes, node_count, visible_rows, style, painted, revision}` | ✅ structured config, not rendered cells — those are already readable through the layer's `get_cells`, same as for a table. Each `nodes[]` entry reports `depth, collapsible, collapsed, visible`, where **`visible`** is whether the node is on screen right now (no collapsed node above it in the list is shallower) — derived state a client would otherwise re-walk the list for. `painted` is the on-screen footprint, the same shape and purpose `table_get_state`'s has: `painted.row + painted.rows` is the first row below the outline, for a caller placing its own next content there (`gw-grep` parks the next shell prompt with it) |
 
@@ -483,6 +483,34 @@ The layer's **selection is dropped** by a reflow, the same call `resize`
 makes for the same reason: the rows it referred to moved by two different
 amounts depending on which side of the split they sat on, and a selection
 spanning the split has no correct answer at all.
+
+### Keeping the top in view
+
+Growing upward has one consequence worth handling rather than
+documenting away: a node opened near the top of a tall outline pushes the
+outline's own header off the top of the window, so you click a triangle
+and the thing you clicked leaves — while the bottom of the screen, where
+nothing moved, sits unchanged.
+
+So a toggle that leaves the outline's top row off screen **scrolls the
+layer's view back to it**. It is the *view* that moves, not the content:
+`view_scroll` is the display-only scrollback offset (see `scroll_view`),
+so nothing in the grid is disturbed and scrolling forward returns to the
+live tail as usual. The move is reported as an ordinary `scroll`
+notification, so a subscriber — glyphwire-shell tracks this — stays in
+step, exactly as it would for a wheel tick or a `scroll_view` call.
+
+It is **ensure-visible, not scroll-to-top**: the view moves to the
+nearest offset that puts the top row somewhere in the window, so a toggle
+that needed no scrolling does not jolt the view for nothing. A collapse
+usually needs no correction at all, because pulling rows back out of
+history walks `view_scroll` down with them.
+
+This needs a scrollback ring to move through, so it applies to a shell's
+root layer and to any layer created with `scrollback_rows > 0`. On a TUI
+pane created with none there is nothing to scroll and the outline just
+grows within the layer the client sized for it — the client owns its own
+scrolling there.
 
 ### Outline interactivity
 
