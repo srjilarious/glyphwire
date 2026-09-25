@@ -991,6 +991,14 @@ pub const Ui = struct {
                 if (l.boundsFor(self.tabs_layer)) |b| self.tabs_bounds = toBounds(b);
                 if (l.boundsFor(self.buffer_layer)) |b| self.buffer_bounds = toBounds(b);
                 if (l.boundsFor(self.status_layer)) |b| self.status_bounds = toBounds(b);
+                // This notification *is* the server's answer about where
+                // the panes are, so it settles any doubt a `resize` in the
+                // same burst raised. Leaving the doubt standing would have
+                // `render` re-read the bounds straight over these, and
+                // that read can land before the server has re-run the
+                // split layout -- which pinned the buffer's content grid
+                // to its pre-resize size with nothing left to correct it.
+                self.bounds_stale = false;
                 try self.syncContentSizes();
                 // The buffer layer's grid was resized: the rows it holds no
                 // longer line up with the panes, so the next frame can't
@@ -1018,10 +1026,14 @@ pub const Ui = struct {
             // has no such change filter: every subscriber gets one every
             // time. See `Server.reportContextSizes` / `reportLayout`.
             //
-            // The bounds themselves are read back in `render` rather than
-            // here: this notification goes out *before* the server
-            // re-runs the split layout, so asking now would answer with
-            // the old rects.
+            // So this arm is a *fallback*, and only that. When a `layout`
+            // does follow -- the usual case -- it arrives in this same
+            // burst and clears `bounds_stale` again, and its bounds are
+            // the ones used. The read-back in `render` happens only when
+            // no `layout` came, and it is deferred to there rather than
+            // done here because this notification goes out before the
+            // server re-runs the split layout: asking now would answer
+            // with the old rects.
             .resize => {
                 self.bounds_stale = true;
                 self.buf.full_redraw = true;
@@ -2382,12 +2394,12 @@ pub const Ui = struct {
     /// just the status row, leaving the buffer's syntax pass and the
     /// tree's per-entry icons untouched.
     fn render(self: *Ui) !void {
-        // A `resize` left every pane's geometry in doubt. Reading the
-        // bounds back happens here rather than in the event arm so it
-        // runs once per frame, after the whole notification burst has
-        // been folded in -- a resize arrives as a `resize` *and* a
-        // `layout`, and answering the first one with four round trips
-        // only to have the second overwrite them is wasted.
+        // A `resize` with no `layout` behind it left every pane's
+        // geometry in doubt. Deferred to here, once per frame, because
+        // the whole notification burst has been folded in by now: a
+        // resize normally arrives as a `resize` *and* a `layout`, and it
+        // is the `layout` that answers this -- it clears the flag, so
+        // this read never runs over the bounds it just installed.
         if (self.bounds_stale) {
             self.bounds_stale = false;
             try self.readBounds();
