@@ -234,7 +234,10 @@ pub const Direction = enum { left, right, up, down };
 /// than it meaning nothing.
 pub fn focusDirection(key: []const u8) ?Direction {
     const eq = std.mem.eql;
-    if (eq(u8, key, "h") or eq(u8, key, "left")) return .left;
+    // `h` is deliberately absent: Ctrl+H toggles hidden files, the
+    // binding every file manager uses for it, and focusing left is
+    // already Ctrl+Left and Ctrl+W. `l` stays -- nothing wants Ctrl+L.
+    if (eq(u8, key, "left")) return .left;
     if (eq(u8, key, "l") or eq(u8, key, "right")) return .right;
     if (eq(u8, key, "k") or eq(u8, key, "up")) return .up;
     if (eq(u8, key, "j") or eq(u8, key, "down")) return .down;
@@ -579,7 +582,7 @@ pub const Ui = struct {
             .io = io,
             .client = client,
             .listener = listener,
-            .tree = try Tree.init(alloc, io, root_dir),
+            .tree = try Tree.init(alloc, io, root_dir, .{}),
             // Set a few lines below, before anything can read it: the
             // first buffer builds its highlighter against the grammar
             // registry, which has to be at its final address in `self`
@@ -1134,6 +1137,15 @@ pub const Ui = struct {
                         try self.toggleTree();
                         return;
                     }
+                    // Ctrl+H shows or hides dotfiles and everything
+                    // `.gitignore` excludes, in one flag -- the sidebar,
+                    // both tree searches and Ctrl+P alike. Taken here so
+                    // it works from either pane: which files exist is a
+                    // session-wide question, not a sidebar-local one.
+                    if (std.mem.eql(u8, k.key, "h")) {
+                        try self.toggleHidden();
+                        return;
+                    }
                     // Ctrl+P opens the file finder, in every mode -- the
                     // chord every editor with one uses. Insert mode
                     // included: zoe has no keyword completion for the
@@ -1311,6 +1323,27 @@ pub const Ui = struct {
         self.buffer_dirty = true;
         self.markTreeDirty(.full);
         self.tabs_dirty = true;
+        self.status_dirty = true;
+    }
+
+    /// Ctrl+H: flips "show everything" and re-reads the tree under it.
+    ///
+    /// The listing has to be rebuilt rather than re-filtered, because the
+    /// rows that were hidden were never read (see `Tree.reload`) -- which
+    /// is also why the open folders and the cursor are restored by path.
+    /// A search in progress is dropped: its candidates are indices into
+    /// the listing that is about to be replaced.
+    fn toggleHidden(self: *Ui) !void {
+        self.cancelFind();
+        self.tree.visible.show_hidden = !self.tree.visible.show_hidden;
+        self.tree.reload(self.io) catch {};
+        self.clampTreeScroll();
+        try self.syncContentSizes();
+        self.scrollTreeToCursor();
+        self.markTreeDirty(.full);
+        self.buf.ed.setStatus("hidden files {s}", .{
+            if (self.tree.visible.show_hidden) "shown" else "hidden",
+        });
         self.status_dirty = true;
     }
 
@@ -1504,7 +1537,7 @@ pub const Ui = struct {
         self.cancelFind();
         var find: TreeFind = .{ .scope = scope, .anchor = self.tree.cursor };
         errdefer find.deinit(self.alloc);
-        if (scope == .deep) find.deep = try tree_mod.deepList(self.alloc, self.io, self.tree.root);
+        if (scope == .deep) find.deep = try tree_mod.deepList(self.alloc, self.io, self.tree.root, self.tree.visible);
         self.find = find;
         self.status_dirty = true;
     }
@@ -1883,7 +1916,7 @@ pub const Ui = struct {
         const new_n = std.process.currentPath(self.io, &new_buf) catch 0;
         const new_root = if (new_n > 0) new_buf[0..new_n] else dest;
 
-        if (Tree.init(self.alloc, self.io, new_root)) |fresh| {
+        if (Tree.init(self.alloc, self.io, new_root, self.tree.visible)) |fresh| {
             // A search's candidates are indices into the listing that is
             // about to be replaced.
             self.cancelFind();
@@ -1910,7 +1943,7 @@ pub const Ui = struct {
         // The popup is modal, so a tree search underneath it would have
         // the statusline to itself with no way left to type into it.
         self.cancelFind();
-        self.finder = Finder.init(self.alloc, self.io, self.tree.root) catch |err| {
+        self.finder = Finder.init(self.alloc, self.io, self.tree.root, self.tree.visible) catch |err| {
             self.finder = null;
             self.buf.ed.setStatus("E484: Can't scan {s}: {s}", .{ self.tree.root, @errorName(err) });
             self.status_dirty = true;

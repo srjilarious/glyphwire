@@ -1729,11 +1729,14 @@ pub const Renderer = struct {
         const x0: i32 = geometry.content_pad_px;
 
         var used_rows: usize = geometry.min_grid_rows;
-        const gutter: i32 = geometry.rightGutterPx();
+        var gutter: i32 = 0;
         {
             const server = self.app.server;
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
+            // Whatever the grid was sized against -- a context that opts
+            // the bar out has no gutter to crop off.
+            gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
             // Cropping to the cursor row keeps a one-line shell session's
             // screenshot from being mostly blank, which is what the README
             // assets want. It only makes sense for a single pane, though:

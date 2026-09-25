@@ -72,7 +72,7 @@ pub const WindowSizing = struct {
         const fb = eng.window_state.framebuffer_size;
         if (geometry.cell_w <= 0 or geometry.cell_h <= 0) return;
 
-        const gutter = geometry.rightGutterPx();
+        const gutter = self.gutterPx();
 
         const cols: usize = @intCast(@max(@divTrunc(fb.x - 2 * geometry.content_pad_px - gutter, geometry.cell_w), geometry.min_grid_cols));
         const rows: usize = @intCast(@max(@divTrunc(fb.y, geometry.cell_h), geometry.min_grid_rows));
@@ -98,6 +98,21 @@ pub const WindowSizing = struct {
                 geometry.grid_rows = rows;
             },
         }
+    }
+
+    /// The right gutter for the context currently on screen. Zero for one
+    /// that opts the window scrollbar out, whose columns are then the
+    /// grid's -- see `geometry.rightGutterPx` for what that costs.
+    ///
+    /// Read under `ctx_mutex` and never cached: it changes whenever the
+    /// visible context does, and the next `syncWindowSize` is what turns
+    /// that into a grid size. Cheap enough to take per frame, and the
+    /// resize it may produce is debounced like any other.
+    fn gutterPx(self: *WindowSizing) i32 {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+        return geometry.rightGutterPx(server.ctx.window_scrollbar);
     }
 
     /// A bounded wait, in ms, while a resize is still settling -- null
@@ -185,12 +200,12 @@ pub const WindowSizing = struct {
     /// `divCeil` biases the window up so rounding never drops a cell. A
     /// tiling WM that ignores the request just leaves `syncWindowSize` to
     /// reflow the grid to whatever size it forces instead.
-    pub fn resizeWindowForCells(_: *WindowSizing, eng: *Engine) void {
+    pub fn resizeWindowForCells(self: *WindowSizing, eng: *Engine) void {
         const ws = &eng.window_state;
         const fb = ws.framebuffer_size;
         if (fb.x <= 0 or fb.y <= 0 or ws.window_size.x <= 0 or ws.window_size.y <= 0) return;
 
-        const gutter = geometry.rightGutterPx();
+        const gutter = self.gutterPx();
 
         const target_fb_w = @as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w + 2 * geometry.content_pad_px + gutter;
         const target_fb_h = @as(i32, @intCast(geometry.grid_rows)) * geometry.cell_h;
