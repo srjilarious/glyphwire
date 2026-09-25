@@ -72,6 +72,15 @@ pub const Config = struct {
     /// Ctrl-U) moves the cursor. Default 10; a non-positive or
     /// non-number value is ignored.
     page_lines: usize = 10,
+    /// `config.tree_page_lines` -- rows a PageDown / PageUp moves the
+    /// cursor in the file tree. Zero, the default, means "a viewport
+    /// less one row of overlap", which is the rule a listing wants: a
+    /// page through what is on screen, tracking a resized sidebar with
+    /// nothing to keep in sync. A number >= 1 pins it to that many rows
+    /// instead. Separate from `page_lines` because the buffer's page is a
+    /// jump through *text*, where the window it is seen through is
+    /// incidental -- see `Ui.treePageRows`.
+    tree_page_lines: usize = 0,
     /// `config.key_repeat_delay_ms` / `config.key_repeat_interval_ms` --
     /// the typematic repeat cadence zoe asks glyphwire-host for in
     /// normal and visual mode (`Client.setKeyRepeat`), where a repeat is
@@ -161,7 +170,8 @@ pub fn load(
     cfg.grammar_dirs = readGrammarDirs(lua, a, environ);
     cfg.langs = readLangs(lua, a);
     cfg.injections = readInjections(lua);
-    cfg.page_lines = readPageLines(lua, cfg.page_lines);
+    cfg.page_lines = readPageLines(lua, "page_lines", cfg.page_lines);
+    cfg.tree_page_lines = readPageLines(lua, "tree_page_lines", cfg.tree_page_lines);
     cfg.key_repeat_delay_ms = readMs(lua, "key_repeat_delay_ms", 0, cfg.key_repeat_delay_ms);
     cfg.key_repeat_interval_ms = readMs(lua, "key_repeat_interval_ms", 1, cfg.key_repeat_interval_ms);
     cfg.key_repeat_insert_delay_ms = readMs(lua, "key_repeat_insert_delay_ms", 0, cfg.key_repeat_insert_delay_ms);
@@ -186,10 +196,12 @@ fn readMs(lua: *Lua, comptime name: [:0]const u8, min: f64, current: f64) f64 {
     return n;
 }
 
-/// `config.page_lines = 15`. A number >= 1 replaces the default;
-/// anything else (absent, zero, negative, non-number) leaves it.
-fn readPageLines(lua: *Lua, current: usize) usize {
-    const t = lua.getField(-1, "page_lines");
+/// `config.page_lines = 15` / `config.tree_page_lines = 15`. A number
+/// >= 1 replaces the default; anything else (absent, zero, negative,
+/// non-number) leaves it -- which for `tree_page_lines` is how the
+/// viewport-sized default is spelled.
+fn readPageLines(lua: *Lua, comptime name: [:0]const u8, current: usize) usize {
+    const t = lua.getField(-1, name);
     defer lua.pop(1);
     if (t != .number) return current;
     const n = lua.toNumber(-1) catch return current;

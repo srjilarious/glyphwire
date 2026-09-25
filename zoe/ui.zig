@@ -1325,10 +1325,23 @@ pub const Ui = struct {
         if (eq(u8, key, "escape")) self.setFocus(.buffer);
     }
 
-    /// How far Page Up / Page Down move: a viewport, less one row of
+    /// How far Page Up / Page Down move in the tree: `tree_page_lines`
+    /// from `zoe.conf.lua`, or by default a viewport less one row of
     /// overlap, so the entry that was at the edge is still on screen to
-    /// read from -- the same rule the buffer pane's `page_up` uses.
+    /// read from.
+    ///
+    /// The *default* is deliberately not the buffer pane's rule. That one
+    /// moves a flat `page_lines` (default 10) whatever the pane's height,
+    /// because a jump in a file is a jump through text and the window it
+    /// happens to be seen through is incidental. A jump in a listing is a
+    /// jump through what is on screen, so the screen sets it -- which
+    /// also means it stays right when the sidebar is resized, with
+    /// nothing to keep in sync. The two are separate keys for that
+    /// reason, rather than one governing both panes.
     fn treePageRows(self: *const Ui) usize {
+        if (self.hl_config) |cfg| {
+            if (cfg.tree_page_lines >= 1) return cfg.tree_page_lines;
+        }
         return @max(1, self.tree_bounds.rows -| 1);
     }
 
