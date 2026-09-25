@@ -7,11 +7,12 @@
 //! The layout is a `column` split holding a `row` split (the tree beside
 //! a column of tab strip over buffer) above a one-row statusline. The
 //! host owns it: zoe describes it once at startup, and after that a
-//! divider drag arrives as a `layout` notification saying where each pane
-//! ended up. A *window* resize arrives as both a `resize` and a `layout`,
-//! and zoe needs the first as well as the second -- `layout` names only
-//! the layers whose bounds the split walk found different, and isn't sent
-//! at all when it finds none. See the `.resize` arm of `handleEvent`.
+//! divider drag or a window resize arrives as a `layout` notification
+//! saying where each pane ended up, and that notification is the *only*
+//! thing zoe takes pane geometry from. A resize also brings a `resize`,
+//! which zoe repaints on but reads nothing from -- see the `.resize` arm
+//! of `handleEvent` for why asking the server where a pane is cannot
+//! answer that question after a pane has grown.
 //!
 //! **Every open buffer is a `Slot`**, and the tab strip lists them. A
 //! slot holds its own editor, scroll position, redraw bookkeeping and
@@ -417,11 +418,6 @@ pub const Ui = struct {
     /// time. See `TreeFind`.
     find: ?TreeFind = null,
 
-    /// Every pane's bounds are stale and have to be read back from the
-    /// server before the next frame -- set by a `resize`. See the
-    /// `.resize` arm of `handleEvent` for why the `layout` notification
-    /// can't be the only thing zoe reflows on.
-    bounds_stale: bool = false,
 
     /// An in-progress left-button drag in the buffer pane. `anchor` is
     /// the buffer byte offset the press landed on; `moved` flips true the
@@ -875,6 +871,15 @@ pub const Ui = struct {
 
     /// Reads each pane's bounds straight from the server -- used once at
     /// startup; after that `layout` notifications keep them current.
+    ///
+    /// **Startup only, and it cannot be used to recover from a resize.**
+    /// `boundsOf` gets its size from `get_property("viewport")`, which
+    /// the server answers with `Layer.viewportCols`/`viewportRows` --
+    /// clamped to the layer's own content grid. It can therefore report a
+    /// pane that shrank but never one that grew, and feeding the answer
+    /// back into `syncContentSizes` latches the layer at its smallest
+    /// size for good. It works here only because `init` has just created
+    /// every layer at the full window size, so nothing is clamped yet.
     fn readBounds(self: *Ui) !void {
         self.tree_bounds = try self.boundsOf(self.tree_layer);
         self.tabs_bounds = try self.boundsOf(self.tabs_layer);
@@ -961,7 +966,7 @@ pub const Ui = struct {
         while (!self.quit) {
             if (self.buffer_dirty or self.tree_dirty != .none or self.tabs_dirty or
                 self.status_dirty or self.finder_dirty or
-                self.bounds_stale or self.tree_scroll_pending != null)
+                self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
 
@@ -991,14 +996,6 @@ pub const Ui = struct {
                 if (l.boundsFor(self.tabs_layer)) |b| self.tabs_bounds = toBounds(b);
                 if (l.boundsFor(self.buffer_layer)) |b| self.buffer_bounds = toBounds(b);
                 if (l.boundsFor(self.status_layer)) |b| self.status_bounds = toBounds(b);
-                // This notification *is* the server's answer about where
-                // the panes are, so it settles any doubt a `resize` in the
-                // same burst raised. Leaving the doubt standing would have
-                // `render` re-read the bounds straight over these, and
-                // that read can land before the server has re-run the
-                // split layout -- which pinned the buffer's content grid
-                // to its pre-resize size with nothing left to correct it.
-                self.bounds_stale = false;
                 try self.syncContentSizes();
                 // The buffer layer's grid was resized: the rows it holds no
                 // longer line up with the panes, so the next frame can't
@@ -1013,29 +1010,22 @@ pub const Ui = struct {
                 // against the buffer pane, which just moved.
                 self.finder_dirty = self.finder != null;
             },
-            // The window (or this pane) changed size.
+            // The window (or this pane) changed size. Repaint, but take
+            // no geometry from it: a `layout` carries the new pane rects
+            // and is what moves `*_bounds`.
             //
-            // `layout` alone is not enough to reflow on, which is why
-            // this arm exists at all. That notification carries only the
-            // layers whose bounds the split walk found *different*, and
-            // is not sent when it finds none -- so a resize that leaves
-            // zoe's panes at the same cell rects (a width change absorbed
-            // entirely by the fixed-width sidebar, a pane that was
-            // already clamped) delivers a `resize` and nothing else, and
-            // zoe used to sit there holding the previous frame. `resize`
-            // has no such change filter: every subscriber gets one every
-            // time. See `Server.reportContextSizes` / `reportLayout`.
-            //
-            // So this arm is a *fallback*, and only that. When a `layout`
-            // does follow -- the usual case -- it arrives in this same
-            // burst and clears `bounds_stale` again, and its bounds are
-            // the ones used. The read-back in `render` happens only when
-            // no `layout` came, and it is deferred to there rather than
-            // done here because this notification goes out before the
-            // server re-runs the split layout: asking now would answer
-            // with the old rects.
+            // Nothing here reads the bounds back from the server, and it
+            // is important that nothing ever does. `get_property`'s
+            // `viewport` is `Layer.viewportCols`/`viewportRows`, which
+            // are **clamped to the content grid** -- so a layer whose
+            // grid is 60 wide reports a 60-wide viewport however wide its
+            // pane just became. Feeding that back into `setLayerSize`
+            // latches the pane at whatever size it last shrank to: the
+            // grid can never grow again, the area past it stays
+            // transparent, and the scrollbar keeps measuring the small
+            // grid. The `layout` notification carries the true, unclamped
+            // rect, and is the only thing that can report a grow.
             .resize => {
-                self.bounds_stale = true;
                 self.buf.full_redraw = true;
                 self.buffer_dirty = true;
                 self.markTreeDirty(.full);
@@ -2394,17 +2384,6 @@ pub const Ui = struct {
     /// just the status row, leaving the buffer's syntax pass and the
     /// tree's per-entry icons untouched.
     fn render(self: *Ui) !void {
-        // A `resize` with no `layout` behind it left every pane's
-        // geometry in doubt. Deferred to here, once per frame, because
-        // the whole notification burst has been folded in by now: a
-        // resize normally arrives as a `resize` *and* a `layout`, and it
-        // is the `layout` that answers this -- it clears the flag, so
-        // this read never runs over the bounds it just installed.
-        if (self.bounds_stale) {
-            self.bounds_stale = false;
-            try self.readBounds();
-        }
-
         var batch = self.client.batch();
         defer batch.deinit();
 
