@@ -488,6 +488,7 @@ pub fn build(b: *std.Build) void {
     });
     zoe_exe.root_module.addImport("glyphwire", glyphwire_mod);
     zoe_exe.root_module.addImport("zoe_support", zoe_support_mod);
+    zoe_exe.root_module.addImport("zargunaught", zargunaught_mod);
     // zoe_support -> langconf.zig -> ziglua, and -> syntax.zig ->
     // tree_sitter (which links the vendored libtree-sitter C runtime).
     // Both need libc and the Lua C lib on the final binary, same as

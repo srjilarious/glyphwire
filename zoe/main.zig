@@ -13,55 +13,85 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const zargs = @import("zargunaught");
 const zoe = @import("zoe_support");
 
-const usage =
-    \\usage: zoe [--keys <script>] [--quiet] [file|directory]
-    \\
-    \\  --keys <script>  Headless: replay a vim-notation key script against
-    \\                   the buffer, e.g. 'ihello<esc>dd' or ':w<cr>'.
-    \\  --quiet          Headless: don't print the buffer afterwards.
-    \\
-    \\A directory argument changes into it (as `:cd` would) and starts on
-    \\the file tree with an empty buffer; anything else is a file to open.
-    \\
-    \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
-    \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
-    \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
-    \\the file tree; Ctrl+Tab / Ctrl+Shift+Tab walk the open buffers (also
-    \\:bn / :bp, closed with :bd or a tab's ×).
-    \\See docs/investigations/zoe-editor.md.
-    \\
-;
+// const usage =
+//     \\usage: zoe [--keys <script>] [--quiet] [file|directory]
+//     \\
+//     \\  --keys <script>  Headless: replay a vim-notation key script against
+//     \\                   the buffer, e.g. 'ihello<esc>dd' or ':w<cr>'.
+//     \\  --quiet          Headless: don't print the buffer afterwards.
+//     \\
+//     \\A directory argument changes into it (as `:cd` would) and starts on
+//     \\the file tree with an empty buffer; anything else is a file to open.
+//     \\
+//     \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
+//     \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
+//     \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
+//     \\the file tree; Ctrl+Tab / Ctrl+Shift+Tab walk the open buffers (also
+//     \\:bn / :bp, closed with :bd or a tab's ×).
+//     \\
+// ;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
-    // Arena, not `alloc`: process-lifetime, freed automatically on exit --
-    // see `server/main.zig`'s identical `args` allocation.
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    var script: ?[]const u8 = null;
-    var path: ?[]const u8 = null;
-    var quiet = false;
+    var parser = try zargs.ArgParser.init(alloc, .{
+        .name = "zoe",
+        .description =
+        \\A glyphwire vim-like editor
+        \\
+        \\A directory argument changes into it (as `:cd` would) and starts on
+        \\the file tree with an empty buffer; anything else is a file to open.
+        \\
+        \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
+        \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
+        \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
+        \\the file tree; Ctrl+Tab / Ctrl+Shift+Tab walk the open buffers (also
+        \\:bn / :bp, closed with :bd or a tab's ×).
+        ,
+        .opts = &.{
+            .{
+                .longName = "keys",
+                .description = "Headless: replay a vim-notation key script against the buffer, e.g. 'ihello<esc>dd' or ':w<cr>'.",
+                .minNumParams = 1,
+                .maxNumParams = 1,
+            },
+            .{
+                .longName = "quiet",
+                .description = "Headless: don't print the buffer afterwards.",
+                .maxNumParams = 0,
+            },
+            .{ .longName = "help", .shortName = "h", .description = "Print this help and exit" },
+        },
+    });
+    defer parser.deinit();
 
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--keys")) {
-            i += 1;
-            if (i >= args.len) return fail(io, "zoe: --keys needs a script\n");
-            script = args[i];
-        } else if (std.mem.eql(u8, arg, "--quiet")) {
-            quiet = true;
-        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            return write(io, usage);
-        } else if (arg.len > 0 and arg[0] == '-') {
-            return fail(io, "zoe: unknown option\n");
-        } else {
-            path = arg;
-        }
+    var args = parser.parse(init.minimal.args) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "zoe: error parsing args: {t}\n", .{err}) catch "gw-view: error parsing args\n";
+        return write(io, msg);
+    };
+    defer args.deinit();
+
+    if (args.hasOption("help")) {
+        var stdout = try zargs.print.Printer.stdout(alloc);
+        defer stdout.deinit();
+        var help = try zargs.help.HelpFormatter.init(&parser, stdout, zargs.help.DefaultTheme, alloc);
+        defer help.deinit();
+        help.printHelpText() catch |err| std.debug.print("zoe: error printing help: {t}\n", .{err});
+        try stdout.flush();
+        return;
     }
+
+    const script: ?[]const u8 = args.optionVal("keys");
+    var path: ?[]const u8 = null;
+    if (args.positional.items.len > 0) {
+        path = args.positional.items[0];
+    }
+    const quiet = args.hasOption("quiet");
 
     // A directory argument is a place to work, not a file to open, so it
     // is resolved here rather than deeper in: change into it, and from
@@ -149,7 +179,11 @@ fn runUi(
     target: zoe.Target,
     environ: *const std.process.Environ.Map,
 ) !bool {
-    var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch return false;
+    var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch {
+        try write(io, "zoe: Requires a glyphwire host with GLYPHWIRE_SOCK set.\n");
+        return false;
+    };
+
     defer client.deinit();
 
     // Two connections: one for requests and drawing, one subscribed for
