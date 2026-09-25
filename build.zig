@@ -285,6 +285,22 @@ pub fn build(b: *std.Build) void {
     const testz_dep = b.dependency("testz", .{});
     tests_exe.root_module.addImport("testz", testz_dep.module("testz"));
 
+    // The `e2e` group spawns the real `gw-shell` / `gw-ls` binaries and
+    // drives them over real sockets and pty pairs, and it is flaky on the
+    // CI runner: a run that passes locally failed three of them there.
+    // CI therefore builds with `-Dskip-e2e=true` until that is fixed,
+    // while a plain `zig build tests` still runs the group. tests/main.zig
+    // discovers the group either way and only drops it from what it hands
+    // the runner, so `tests/e2e_tests.zig` keeps getting compiled.
+    const skip_e2e = b.option(
+        bool,
+        "skip-e2e",
+        "Do not run the end-to-end test group (still compiled; used by CI while those tests are flaky)",
+    ) orelse false;
+    const tests_options = b.addOptions();
+    tests_options.addOption(bool, "skip_e2e", skip_e2e);
+    tests_exe.root_module.addImport("build_options", tests_options.createModule());
+
     b.installArtifact(tests_exe);
 
     const run_tests = b.addRunArtifact(tests_exe);

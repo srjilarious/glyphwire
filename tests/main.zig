@@ -3,8 +3,9 @@
 
 const std = @import("std");
 const testz = @import("testz");
+const build_options = @import("build_options");
 
-const Tests = blk: {
+const all_tests = blk: {
     // testz's per-module discovery walks every `pub` decl with an
     // `inline for`; enough test functions across the groups below tips it
     // past the default 1000-branch comptime limit.
@@ -43,6 +44,36 @@ const Tests = blk: {
     }, .{});
 };
 
+/// Everything discovered above, minus the groups this build was told to
+/// leave out. Filtering here rather than at discovery means the skipped
+/// group's file is still compiled into the binary, so a break in it still
+/// fails the build -- see build.zig's `skip-e2e` option for why CI skips
+/// the end-to-end group.
+const tests_to_run = if (build_options.skip_e2e)
+    withoutGroup(all_tests, "e2e")
+else
+    all_tests;
+
+/// The tests in `tests` whose group tag is not `tag`.
+fn withoutGroup(
+    comptime tests: []const testz.TestFuncInfo,
+    comptime tag: []const u8,
+) []const testz.TestFuncInfo {
+    comptime {
+        // One pass over every discovered test, same reason as above.
+        @setEvalBranchQuota(20000);
+        var kept: [tests.len]testz.TestFuncInfo = undefined;
+        var count: usize = 0;
+        for (tests) |t| {
+            if (std.mem.eql(u8, t.group.tag, tag)) continue;
+            kept[count] = t;
+            count += 1;
+        }
+        const final = kept[0..count].*;
+        return &final;
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
-    try testz.testzRunner(Tests, init.minimal.args);
+    try testz.testzRunner(tests_to_run, init.minimal.args);
 }
