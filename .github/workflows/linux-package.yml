@@ -54,14 +54,6 @@ jobs:
           version: 0.17.0-dev.1857+3c46da14d
           mirror: https://github.com/srjilarious/zig-toolchains/releases/download/0.17.0-dev.1857+3c46da14d
 
-      # Cheap, needs no compilation, and catches the two mistakes that
-      # follow code moving between licence zones: an SPDX header left
-      # behind by `git mv`, and an MPL file still importing a GPL module.
-      # Before the build so a licence problem fails fast.
-      - name: Check licence zones
-        working-directory: glyphwire
-        run: python3 scripts/check-licenses.py
-
       # `zig build package` (defined in build.zig) installs only the shipped
       # programs, assets, grammars and desktop files, skipping the test
       # runner and the internal server/client/table-demo tools. This is the

@@ -154,14 +154,17 @@ when you are extracting a real library; the zone map stays easier to read.
 ### Checking it
 
 ```sh
-zig build check-licenses          # or: scripts/check-licenses.py
+scripts/check-licenses.py
 ```
 
 It verifies that every source file's SPDX header matches its directory's
 zone, that no MPL file imports a GPL module, that no file carries MPL
 Exhibit B, and that the licence texts are present. It needs no compilation
-and runs in well under a second, and CI runs it on every push and pull
-request.
+and runs in well under a second. It is deliberately not wired into `zig
+build` or CI: the zones are a judgement call that moving a file cannot
+make for you, and a header left behind by `git mv` should not block a
+build or a release. Run it yourself after moving code between
+directories.
 
 Module licences are derived from where each module's `root_source_file`
 lives in `build.zig`, not hardcoded — so moving `ls/support.zig` into
@@ -247,7 +250,7 @@ Before opening a pull request:
 
 - `zig fmt` is clean
 - `zig build tests` passes
-- `zig build check-licenses` passes (new files carry the right SPDX header,
+- `scripts/check-licenses.py` passes (new files carry the right SPDX header,
   and no MPL file imports a GPL module)
 - the protocol spec is updated if the wire changed
 - you are in `CONTRIBUTORS.md`, if this is your first contribution

@@ -95,10 +95,10 @@ repo.
 **The dependency graph only runs one way.** No MPL directory imports a GPL
 one. `zoe/` reuses `ls/`'s icon mapping, which is GPL importing GPL. If you
 add a dependency, keep that direction: an MPL file may never import from
-`shell/`, `gmux/`, `ls/`, `view/`, `read/`, `md/`, or `zoe/`. `zig build check-licenses`
-enforces this, along with every file's SPDX header; CI runs it on every
-push. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the procedure when code
-moves between zones.
+`shell/`, `gmux/`, `ls/`, `view/`, `read/`, `md/`, or `zoe/`.
+[`scripts/check-licenses.py`](scripts/check-licenses.py) checks this, along
+with every file's SPDX header. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for
+the procedure when code moves between zones.
 
 **Embedding the host is an MPL question, but the assets are not.** The
 default icon theme shipped in `assets/icons/filetype/oxygen/` is LGPL-3.0,

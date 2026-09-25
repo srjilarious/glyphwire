@@ -666,27 +666,6 @@ pub fn build(b: *std.Build) void {
     // gw-shell, notify, demo, gw-view, gw-read, gwmd, gw-ls, zoe, gmux, salacommander, the bundled
     // tree-sitter grammars, and assets -- without also building the test
     // runner or the internal server/client tools that plain `zig build`
-    // Verifies the three-way licence split in LICENSE.md still holds:
-    // every source file's SPDX header matches the zone its directory is
-    // in, and no MPL file imports a GPL module (which would make the MPL
-    // library undistributable as MPL). Worth running after moving code
-    // between directories -- `git mv` carries the old header along, and a
-    // relicensed file often keeps an import it should have shed. Not
-    // wired into any other step: it needs no build, and a licence problem
-    // shouldn't block someone compiling.
-    const check_licenses_step = b.step("check-licenses", "Check SPDX headers and MPL/GPL import direction");
-    const check_licenses_cmd = b.addSystemCommand(&.{ "python3", "scripts/check-licenses.py" });
-    check_licenses_cmd.setCwd(b.path("."));
-    // The script walks the source tree itself, so nothing it reads is a
-    // tracked build input; without this the build system caches the result
-    // and a later violation goes unnoticed. `inherit` also puts the
-    // script's own diagnostics on the terminal -- captured stdio would
-    // reduce a failure to "process exited with code 1", which tells you
-    // nothing about which file is wrong.
-    check_licenses_cmd.has_side_effects = true;
-    check_licenses_cmd.stdio = .inherit;
-    check_licenses_step.dependOn(&check_licenses_cmd.step);
-
     // pulls in. The CI packaging job
     // (.github/workflows/linux-package.yml) drives this step.
     const package_step = b.step("package", "Install the shipped programs and assets into zig-out");

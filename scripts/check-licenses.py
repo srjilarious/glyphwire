@@ -17,7 +17,7 @@ two mistakes are easy to make while moving it:
 This script fails on either, plus a few related invariants. Run it before
 committing a move:
 
-    zig build check-licenses        # or: scripts/check-licenses.py
+    scripts/check-licenses.py
 
 Module licences are derived from where each module's root source file
 lives, not hardcoded -- so moving `ls/support.zig` into `src/`
