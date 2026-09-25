@@ -1301,20 +1301,46 @@ pub const Ui = struct {
 
     // ── Tree pane input ─────────────────────────────────────────────────
 
+    /// Whether the named key is one of the tree pane's own cursor
+    /// commands -- the set a running search is cancelled by.
+    ///
+    /// This is a *closed list*, not "everything the search didn't
+    /// consume", and the difference is the whole point. **Every printable
+    /// keystroke is delivered twice**: once as a `key` notification and
+    /// once as `text` (it is why the Ctrl+letter chords in `handleInput`
+    /// can match on `k.key` at all). Cancelling on any unrecognised key
+    /// therefore killed the search on the `key` half of the very
+    /// keystroke whose `text` half was about to extend it -- typing in
+    /// the tree searched nothing, and the prompt reappearing on the next
+    /// trigger looked like a search that had simply found no match.
+    ///
+    /// `escape` is deliberately absent: while a search is up
+    /// `findKey` has already taken it, and with no search there is
+    /// nothing to cancel.
+    pub fn endsTreeSearch(key: []const u8) bool {
+        const commands = [_][]const u8{
+            "down", "up", "page_down", "page_up", "home", "end", "enter",
+        };
+        for (commands) |c| {
+            if (std.mem.eql(u8, key, c)) return true;
+        }
+        return false;
+    }
+
     fn treeKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
         // A search owns the keyboard while it is up, the way the Ctrl+P
         // popup does: Tab steps the candidates, Backspace shortens the
         // prefix, Enter takes the row and Escape drops the search.
-        if (self.find != null) {
-            if (try self.findKey(ev)) return;
-            // Anything else is a plain navigation key, and moving the
-            // cursor by hand ends the search: the prefix is only ever a
-            // description of where the search put the cursor.
-            self.cancelFind();
-        }
+        if (self.find != null and try self.findKey(ev)) return;
 
+        // Moving the cursor by hand ends a running search -- the prefix
+        // stops describing where the cursor is. Gated on the command set
+        // rather than on "anything findKey didn't want", which is the
+        // distinction `endsTreeSearch` exists to make.
         const eq = std.mem.eql;
         const key = ev.key;
+        if (endsTreeSearch(key)) self.cancelFind();
+
         if (eq(u8, key, "down")) self.treeMove(1);
         if (eq(u8, key, "up")) self.treeMove(-1);
         if (eq(u8, key, "page_down")) self.treeMove(@intCast(self.treePageRows()));
@@ -1497,6 +1523,11 @@ pub const Ui = struct {
         const f = &self.find.?;
         var it = (std.unicode.Utf8View.init(text) catch return).iterator();
         while (it.nextCodepointSlice()) |cp| {
+            // Tab and Enter reach the text stream as well as the key one,
+            // and they are the search's own controls -- `findKey` has
+            // already acted on them, so they are not also characters to
+            // match on. No file name contains one either.
+            if (cp.len == 1 and (cp[0] < 0x20 or cp[0] == 0x7f)) continue;
             const before = f.query.items.len;
             try f.query.appendSlice(self.alloc, cp);
             try self.refilterFind();

@@ -1283,6 +1283,30 @@ pub fn treeRevealExpandsAncestorsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqual(t.len(), 4);
 }
 
+pub fn treeSearchSurvivesThePrintableKeyEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Every printable keystroke is delivered twice, as a `key` *and* as
+    // `text`. Only the pane's own cursor commands may cancel a running
+    // search; a letter must not, or the `key` half of a keystroke kills
+    // the search the `text` half was about to extend -- which is exactly
+    // what made typing in the tree search nothing.
+    try testz.expectFalse(zoe.Ui.endsTreeSearch("s"));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch("f"));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch("slash"));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch("tab"));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch("backspace"));
+    // Escape belongs to the search itself while one is up, and has
+    // nothing to cancel when none is.
+    try testz.expectFalse(zoe.Ui.endsTreeSearch("escape"));
+
+    try testz.expectTrue(zoe.Ui.endsTreeSearch("down"));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch("up"));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch("page_up"));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch("page_down"));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch("home"));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch("end"));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch("enter"));
+}
+
 pub fn treeDeepListWalksCollapsedFoldersTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var s = try ScanScratch.init(io, alloc, "deeplist");
     defer s.deinit();
