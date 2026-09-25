@@ -21,6 +21,15 @@
 -- `defcmd(name, fn)`,
 -- and the `sh` table (`sh.setenv` / `sh.unsetenv` / `sh.getenv` /
 -- `sh.cwd` / `sh.chdir` / `sh.realpath`). See the Scripts section below.
+--
+-- Reloading: the `reload` builtin re-runs this file in the running shell,
+-- so an edit doesn't need a restart. The parsed config is thrown away
+-- first rather than merged into, so a binding you delete here really
+-- reverts to its default, and the alias table is rebuilt from scratch --
+-- which also drops any alias you typed interactively this session. The
+-- Lua state itself survives, so `defcmd` registrations, globals and
+-- anything `sh.setenv` changed carry over, as do the cwd, the history and
+-- the zj database.
 
 
 ---- Aliases ------------------------------------------------------------

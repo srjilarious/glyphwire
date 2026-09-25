@@ -199,6 +199,11 @@ pub const ScriptEngine = struct {
     /// is captured in `self.conf_err` (whatever ran before the failing
     /// line still took effect), never returned -- only an allocation
     /// failure is.
+    ///
+    /// Calling this a second time (the shell's `reload` builtin) *merges*
+    /// into whatever `self.cfg` already holds. To reload rather than
+    /// accumulate, `cfg.reset()` first -- and drop the borrows into the
+    /// old arena before you do, as that function's doc comment spells out.
     pub fn runConf(self: *ScriptEngine, source: [:0]const u8) std.mem.Allocator.Error!void {
         if (self.conf_err) |e| {
             self.alloc.free(e);

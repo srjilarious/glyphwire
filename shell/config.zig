@@ -220,12 +220,42 @@ pub const ShellConfig = struct {
     prompt_arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *ShellConfig) void {
+        self.freeAliases();
+        self.aliases.deinit(self.alloc);
+        self.prompt_arena.deinit();
+    }
+
+    /// Throws away everything a previous run declared, leaving the struct
+    /// ready to collect a fresh one. This is what the shell's `reload`
+    /// builtin needs: re-running the conf on top of the old result would
+    /// merge into it (see `prompt`'s doc comment), so a key the user
+    /// *deleted* from shell.conf.lua would keep its old value until the
+    /// next restart.
+    ///
+    /// The struct's own address, allocator and arena identity survive, so
+    /// a long-lived `*ShellConfig` (the live prompt holds one) stays
+    /// valid. Every *string* handed out from the old run does not: the
+    /// caller has to drop its borrows -- prompt command-var caches, a
+    /// queued `on{ chdir }` command, copied `zj` excludes -- before
+    /// calling this.
+    pub fn reset(self: *ShellConfig) void {
+        self.freeAliases();
+        self.aliases.clearRetainingCapacity();
+        self.prompt = .{};
+        self.zj = .{};
+        self.on = .{};
+        // `open_actions`' list backing is arena memory too, so it has to
+        // be dropped wholesale rather than cleared -- the reset below is
+        // what frees it.
+        self.open_actions = .empty;
+        _ = self.prompt_arena.reset(.free_all);
+    }
+
+    fn freeAliases(self: *ShellConfig) void {
         for (self.aliases.items) |a| {
             self.alloc.free(a.name);
             self.alloc.free(a.value);
         }
-        self.aliases.deinit(self.alloc);
-        self.prompt_arena.deinit();
     }
 };
 

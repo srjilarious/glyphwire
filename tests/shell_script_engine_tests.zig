@@ -580,3 +580,87 @@ pub fn collectCommandNamesMergesDefcmdAndFilesTest(io: std.Io, alloc: std.mem.Al
     try testz.expectTrue(hasName(names.items, "sync"));
     try testz.expectEqual(names.items.len, 3);
 }
+
+// ─── the `reload` builtin's path: cfg.reset() then another runConf ────
+
+pub fn confResetDropsThePreviousRunTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf(
+        \\alias("ll", "ls -l")
+        \\prompt { left = "a> ", right = "R" }
+        \\zj { enabled = false, exclude_dirs = { "/tmp" } }
+        \\open_actions { ["directory"] = "cd {sel}" }
+    );
+    try testz.expectEqual(eng.conf_err, null);
+
+    eng.cfg.reset();
+
+    // Everything the run declared is gone and every default is back --
+    // this is what makes `reload` a reload rather than an overlay.
+    try testz.expectEqual(eng.cfg.aliases.items.len, 0);
+    try testz.expectEqual(eng.cfg.open_actions.items.len, 0);
+    try testz.expectEqual(eng.cfg.prompt.left, null);
+    try testz.expectEqual(eng.cfg.prompt.right, null);
+    try testz.expectTrue(eng.cfg.zj.enabled);
+    try testz.expectEqual(eng.cfg.zj.exclude_dirs.len, 0);
+}
+
+pub fn confResetThenRerunRevertsADeletedKeyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf("prompt { left = \"a> \", right = \"R\" }");
+    try testz.expectEqual(eng.conf_err, null);
+
+    // The user edited the conf: `left` changed, `right` was deleted.
+    eng.cfg.reset();
+    try eng.runConf("prompt { left = \"b> \" }");
+
+    try testz.expectEqual(eng.conf_err, null);
+    try testz.expectEqualStr("b> ", eng.cfg.prompt.left.?);
+    try testz.expectEqual(eng.cfg.prompt.right, null);
+}
+
+pub fn runConfWithoutResetMergesIntoThePreviousRunTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    // The behaviour `reload` resets to avoid: a second run merges key by
+    // key, so a deleted `right` would keep its old value.
+    try eng.runConf("prompt { left = \"a> \", right = \"R\" }");
+    try eng.runConf("prompt { left = \"b> \" }");
+
+    try testz.expectEqual(eng.conf_err, null);
+    try testz.expectEqualStr("b> ", eng.cfg.prompt.left.?);
+    try testz.expectEqualStr("R", eng.cfg.prompt.right.?);
+}
+
+pub fn confResetKeepsTheLuaStateTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf("defcmd('greet', function() print('hi') end)\nGW_MARK = 7");
+    try testz.expectEqual(eng.conf_err, null);
+    try testz.expectTrue(eng.hasCommand("greet"));
+
+    // A reload re-runs the conf in the *same* interpreter: a conf that no
+    // longer mentions `greet` doesn't unregister it, and a global set by
+    // the earlier run is still there.
+    eng.cfg.reset();
+    try eng.runConf("alias('ll', 'ls -l')");
+    try testz.expectEqual(eng.conf_err, null);
+    try testz.expectTrue(eng.hasCommand("greet"));
+
+    try eng.runConf("if GW_MARK == 7 then sh.setenv('GW_KEPT', 'yes') end");
+    try testz.expectEqualStr("yes", host.env.get("GW_KEPT").?);
+}

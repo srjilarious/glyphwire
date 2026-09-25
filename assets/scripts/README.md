@@ -23,7 +23,8 @@ runs in it, and so does every *script builtin*. A builtin is:
 - a file `~/.config/glyphwire/scripts/<name>.lua`, looked up by basename
   and re-read on every call (so editing it takes effect immediately).
 
-Dispatch precedence: **core builtins** (`cd`, `exit`, `alias`, `unalias`)
+Dispatch precedence: **core builtins** (`cd`, `exit`, `alias`, `unalias`,
+`reload`)
 > **aliases** > **script builtins** > **`$PATH`**. A `cd.lua` can't
 shadow the real `cd`; a `ls.lua` does shadow `/usr/bin/ls`.
 

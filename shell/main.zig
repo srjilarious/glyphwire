@@ -569,7 +569,7 @@ fn runPrompt(
     // missing config directory or file is not an error -- the shell just
     // starts with no configured aliases and an empty history.
     if (configDirPath(alloc, environ_map)) |config_dir| {
-        defer alloc.free(config_dir);
+        prompt.config_dir = config_dir; // owned from here on -- freed in `deinit`
         prompt.initScriptEngine(config_dir) catch |err| {
             std.log.warn("prompt: couldn't start the script engine: {t}", .{err});
         };
@@ -1035,7 +1035,7 @@ const CompletionPickerState = struct {
 /// precedence comment there). Offered by Tab completion in command
 /// position alongside aliases and script builtins. `alias` is handled a
 /// step earlier than the rest but is still a name worth completing.
-const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "gwssh", "unalias", "unset", "zj" };
+const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "gwssh", "reload", "unalias", "unset", "zj" };
 
 /// Where `assets/scripts/provision_remote.lua` puts the remote-side
 /// binaries. Deliberately *not* on the remote `PATH` -- the minimal one a
@@ -1277,6 +1277,12 @@ const Prompt = struct {
     /// overlay -- whenever a command runs, the window resizes, or Escape
     /// is pressed. Owned; freed in `deinit`.
     marks: std.ArrayList(Mark) = .empty,
+    /// `$XDG_CONFIG_HOME/glyphwire` (or `$HOME/.config/glyphwire`),
+    /// `null` when neither is set. Kept for the session rather than used
+    /// and dropped at startup because `reload` has to find
+    /// `shell.conf.lua` again long after `runPrompt` resolved the path.
+    /// Owned; freed in `deinit`.
+    config_dir: ?[]const u8 = null,
     /// Absolute path to `~/.config/glyphwire/history`, set by
     /// `loadHistory` once it knows the config directory exists. `null`
     /// when there's no `$HOME`/`$XDG_CONFIG_HOME` to derive it from, or
@@ -1436,14 +1442,12 @@ const Prompt = struct {
         self.aliases.deinit(alloc);
         for (self.marks.items) |m| freeMark(alloc, m);
         self.marks.deinit(alloc);
+        if (self.config_dir) |p| alloc.free(p);
         if (self.history_path) |p| alloc.free(p);
         if (self.zdb) |*db| db.deinit();
         if (self.zdb_journal) |*j| j.deinit();
         if (self.zdb_path) |p| alloc.free(p);
-        if (self.zj_excludes.len > 0) {
-            for (self.zj_excludes) |s| alloc.free(s);
-            alloc.free(self.zj_excludes);
-        }
+        self.clearZjExcludes();
         // `prompt_config` just borrows `script_engine.?.cfg`; the engine
         // frees it.
         if (self.script_engine) |eng| eng.deinit();
@@ -3548,6 +3552,8 @@ const Prompt = struct {
             // Records its own `last_status` (it has a remote session's
             // exit to report), like `runCommand` does.
             _ = try self.doGwssh(argv[1..]);
+        } else if (std.mem.eql(u8, argv[0], "reload")) {
+            _ = try self.doReload(argv[1..]);
         } else if (self.runScriptBuiltin(argv)) {
             // handled by the persistent Lua engine
         } else {
@@ -3657,7 +3663,8 @@ const Prompt = struct {
         if (std.mem.eql(u8, name, "exit") or std.mem.eql(u8, name, "unalias") or
             std.mem.eql(u8, name, "cd") or std.mem.eql(u8, name, "alias") or
             std.mem.eql(u8, name, "export") or std.mem.eql(u8, name, "unset") or
-            std.mem.eql(u8, name, "zj") or std.mem.eql(u8, name, "gwssh")) return true;
+            std.mem.eql(u8, name, "zj") or std.mem.eql(u8, name, "gwssh") or
+            std.mem.eql(u8, name, "reload")) return true;
         if (self.script_engine) |eng| return eng.hasCommand(name);
         return false;
     }
@@ -3691,6 +3698,9 @@ const Prompt = struct {
         }
         if (std.mem.eql(u8, argv[0], "gwssh")) {
             return self.doGwssh(argv[1..]);
+        }
+        if (std.mem.eql(u8, argv[0], "reload")) {
+            return self.doReload(argv[1..]);
         }
         if (std.mem.eql(u8, argv[0], "alias")) {
             try self.drawText("alias: only supported as a standalone command", err_color, null);
@@ -5160,31 +5170,59 @@ const Prompt = struct {
         };
     }
 
-    /// Reads `shell.conf.lua` and runs it through the persistent
-    /// `script_engine` (so a `function` it defines survives as a
-    /// builtin). Its `alias` declarations are replayed into the live
-    /// alias table; a syntax/runtime error is shown in red with whatever
-    /// ran first still in effect. A missing file or no engine is fine.
-    fn loadStartupConfig(self: *Prompt, config_dir: []const u8) !void {
+    /// What `readConfSource` can fail with. `FileNotFound` is split out
+    /// from the rest because the two callers disagree about it: startup
+    /// treats no config file as perfectly normal, `reload` reports it.
+    const ConfReadError = error{ FileNotFound, ReadFailed, OutOfMemory };
+
+    /// Reads `<config_dir>/shell.conf.lua` into a null-terminated buffer
+    /// (what the Lua loader takes), owned by the caller. An IO failure
+    /// other than a missing file is logged here and reported as
+    /// `error.ReadFailed`.
+    fn readConfSource(self: *Prompt, config_dir: []const u8) ConfReadError![:0]u8 {
         const alloc = self.client.alloc;
         const io = self.client.io;
-
-        const eng = self.script_engine orelse return;
 
         const path = try std.fs.path.join(alloc, &.{ config_dir, "shell.conf.lua" });
         defer alloc.free(path);
 
-        const source = std.Io.Dir.cwd().readFileAllocOptions(io, path, alloc, .limited(1 << 20), .of(u8), 0) catch |err| switch (err) {
-            error.FileNotFound => return,
-            error.OutOfMemory => return error.OutOfMemory,
+        return std.Io.Dir.cwd().readFileAllocOptions(io, path, alloc, .limited(1 << 20), .of(u8), 0) catch |err| switch (err) {
+            error.FileNotFound => error.FileNotFound,
+            error.OutOfMemory => error.OutOfMemory,
             else => {
                 std.log.warn("shell.conf.lua: could not read {s}: {t}", .{ path, err });
-                return;
+                return error.ReadFailed;
             },
+        };
+    }
+
+    /// Reads `shell.conf.lua` and runs it through the persistent
+    /// `script_engine` (so a `function` it defines survives as a
+    /// builtin), then applies what it declared. A missing file, an
+    /// unreadable one, or no engine at all is fine -- the shell starts
+    /// with its defaults.
+    fn loadStartupConfig(self: *Prompt, config_dir: []const u8) !void {
+        const alloc = self.client.alloc;
+
+        const eng = self.script_engine orelse return;
+
+        const source = self.readConfSource(config_dir) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.FileNotFound, error.ReadFailed => return,
         };
         defer alloc.free(source);
 
         try eng.runConf(source);
+        try self.applyConfig(eng);
+    }
+
+    /// Pushes the config `script_engine` has just parsed into the live
+    /// prompt: the alias bindings, the borrowed `prompt_config` pointer
+    /// every redraw reads, and the `zj{}` settings. A syntax/runtime error
+    /// from the run is shown in red, with whatever ran before it still in
+    /// effect. Shared by startup and `reload` so the two can't drift.
+    fn applyConfig(self: *Prompt, eng: *script_engine.ScriptEngine) !void {
+        const alloc = self.client.alloc;
 
         for (eng.cfg.aliases.items) |a| {
             try self.aliases.set(alloc, a.name, a.value);
@@ -5193,7 +5231,7 @@ const Prompt = struct {
         if (eng.conf_err) |msg| {
             var buf: [512]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "shell.conf.lua: {s}\n", .{msg}) catch "shell.conf.lua: error\n";
-            try self.drawText(line, .{ .r = 255, .g = 85, .b = 85 }, null);
+            try self.drawText(line, err_color, null);
         }
 
         // The engine owns the parsed config for the session --
@@ -5219,6 +5257,97 @@ const Prompt = struct {
             }
             self.zj_excludes = owned;
         }
+    }
+
+    /// Frees the `~`-expanded `zj{ exclude_dirs }` copies and leaves the
+    /// list empty. Called before `reload` rebuilds them, and from `deinit`.
+    fn clearZjExcludes(self: *Prompt) void {
+        const alloc = self.client.alloc;
+        if (self.zj_excludes.len == 0) return;
+        for (self.zj_excludes) |s| alloc.free(s);
+        alloc.free(self.zj_excludes);
+        self.zj_excludes = &.{};
+    }
+
+    /// `reload` builtin -- re-reads `shell.conf.lua` and applies it to the
+    /// running shell, so editing the config doesn't need a restart.
+    ///
+    /// The conf re-runs in the *same* Lua state: `defcmd` registrations,
+    /// globals a script built up and anything `sh.setenv` changed all
+    /// survive, which is what a source-style reload should do. What does
+    /// not survive is the parsed config -- it is reset rather than merged
+    /// into (see `config.ShellConfig.reset`), or a `prompt{}` key or
+    /// `open_actions` entry deleted from the file would keep its old value
+    /// until the next restart. The alias table goes the same way, wiped
+    /// and reseeded from the conf, so a deleted `alias` line really goes
+    /// away; the price is that aliases typed interactively this session go
+    /// with it.
+    ///
+    /// Everything outside the config file is untouched: cwd, environment,
+    /// history and the `zj` database all carry on.
+    fn doReload(self: *Prompt, args: []const []const u8) !u8 {
+        const alloc = self.client.alloc;
+
+        if (args.len > 0) {
+            try self.drawText("reload: takes no arguments\n", err_color, null);
+            return 2;
+        }
+
+        const config_dir = self.config_dir orelse {
+            try self.drawText("reload: no config directory ($HOME and $XDG_CONFIG_HOME are unset)\n", err_color, null);
+            return 1;
+        };
+        const eng = self.script_engine orelse {
+            try self.drawText("reload: the script engine isn't running\n", err_color, null);
+            return 1;
+        };
+
+        // Read the file *before* touching anything live, so a config that
+        // has gone missing (or won't read) leaves the session exactly as
+        // it was instead of wiping it.
+        const source = self.readConfSource(config_dir) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.FileNotFound => {
+                try self.drawText("reload: no shell.conf.lua to reload\n", err_color, null);
+                return 1;
+            },
+            error.ReadFailed => {
+                try self.drawText("reload: could not read shell.conf.lua\n", err_color, null);
+                return 1;
+            },
+        };
+        defer alloc.free(source);
+
+        // Drop every borrow into the previous parse before the arena
+        // backing it goes away: the memoised command-var values are keyed
+        // by config-owned names, a queued `on{ chdir }` listing *is* a
+        // config-owned string, and `prompt_config` itself must not be
+        // readable across the reset.
+        self.prompt_config = null;
+        self.resetCmdVars();
+        self.chdir_pending_list = null;
+        self.clearZjExcludes();
+        // Back to the built-in default; the conf turns it off again if it
+        // still says so.
+        self.zj_enabled = true;
+        self.aliases.deinit(alloc);
+        self.aliases = .{};
+
+        eng.cfg.reset();
+        try eng.runConf(source);
+        try self.applyConfig(eng);
+
+        // `applyConfig` has already drawn the diagnostic in red -- no
+        // "reloaded" line on top of it.
+        if (eng.conf_err != null) return 1;
+
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "reload: shell.conf.lua -- {d} aliases, {d} open actions\n", .{
+            eng.cfg.aliases.items.len,
+            eng.cfg.open_actions.items.len,
+        }) catch "reload: shell.conf.lua\n";
+        try self.drawText(line, null, null);
+        return 0;
     }
 
     /// Loads `~/.config/glyphwire/history` into `self.history` so Up-arrow

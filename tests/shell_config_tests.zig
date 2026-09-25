@@ -598,3 +598,25 @@ pub fn configOnEmptyTableIsHarmlessTest(_: std.Io, alloc: std.mem.Allocator) !vo
     try testz.expectEqual(res.err, null);
     try testz.expectEqual(res.config.on.chdir.list, .metadata);
 }
+
+// ─── ShellConfig.reset (what the shell's `reload` builtin leans on) ─────
+
+pub fn configResetLeavesTheStructReusableTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc,
+        \\alias("ll", "ls -l")
+        \\prompt { left = "a> " }
+        \\open_actions { ["directory"] = "cd {sel}" }
+    );
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+
+    // `reset` frees the arena the prompt strings and the `open_actions`
+    // list backing live in, so the struct has to survive both the reset
+    // and the `deinit` this test defers afterwards.
+    res.config.reset();
+
+    try testz.expectEqual(res.config.aliases.items.len, 0);
+    try testz.expectEqual(res.config.open_actions.items.len, 0);
+    try testz.expectEqual(res.config.prompt.left, null);
+}
