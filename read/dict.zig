@@ -98,14 +98,42 @@
 //! godan and ichidan verbs and i-adjectives; causative; passive/potential;
 //! polite non-past/past/negative (-masu/-mashita/-masen); progressive
 //! (-teiru/-teru/-deiru/-deru, chaining down onto the existing te-form
-//! rules); and volitional. **Still not done:** polite negative-past
-//! (-masendeshita), imperative, conditional/provisional forms (-eba/-tara),
-//! keigo, a dedicated godan す-row causative row (causative "させる" is
-//! only wired to its ichidan target, so 話す's causative 話させる doesn't
-//! resolve -- see the causative rows below), and anything needing more
-//! than `max_deinflect_depth` chained rules. Widening further is the
-//! natural follow-up once this is proven against a real volume -- see
-//! `docs/roadmap.md`.
+//! rules); volitional and polite volitional (-mashou); desiderative
+//! (-tai); conditional (-tara) and provisional (-eba); imperative; and the
+//! three irregular classes the index tags but no regular rule can reach --
+//! **vs** (する and the kanji+する headwords), **vk** (来る, in both
+//! spellings) and **vz** (ずる verbs) -- plus 行く, whose te-form and past
+//! are irregular.
+//!
+//! Why the irregular classes matter out of proportion to their share of
+//! the dictionary: every rule that produces only `v1`/`v5`/`adj-i` leaves
+//! those rows unreachable *at any depth*, so before they were added a
+//! click on した landed on 下 "below" and しない on 市内 "in the city" --
+//! confident wrong answers rather than misses. する and 来る are also
+//! about the most frequent verbs in the language.
+//!
+//! **Still not done:** the copula and na-adjectives (だった/じゃない/
+//! でした), adjective derivations as rules rather than as lexicalized
+//! entries (-さ/-く/-そう/-すぎる), te-form compounds (-ちゃう/-てしまう/
+//! -ておく/-てくる), classical and colloquial negatives (-ぬ/-ず/-ん),
+//! polite negative-past (-masendeshita), a dedicated godan す-row
+//! causative row (causative "させる" is wired to its ichidan and する
+//! targets, so 話す's causative 話させる doesn't resolve -- see the
+//! causative rows below), godan potential -える where the dictionary
+//! hasn't lexicalized it (読める and 話せる are their own `v1` entries,
+//! 書ける is not), keigo, Kansai-ben, and anything needing more than
+//! `max_deinflect_depth` chained rules. The phased plan for the rest,
+//! including the structural fix the remaining forms want underneath them
+//! (condition sets in place of `rules_out`), is in tech-notes:
+//! `plans/glyphwire/2026-09-26-gw-read-yomitan-parity.md`.
+//!
+//! **A reachable hit is not necessarily the first hit.** `rankBefore` puts
+//! fewer deinflection rules ahead of more, so a depth-0 homograph noun
+//! outranks a depth-1 verb whenever both exist: した shows 下 first and
+//! する fourth, しよう shows する thirteenth. That is Yomitan's own
+//! ordering minus the frequency data that settles it there, and it is why
+//! the lookup panel showing one hit at a time is the next thing worth
+//! fixing after the rules themselves.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
@@ -360,13 +388,198 @@ pub const deinflect_rules = [_]DeinflectRule{
     .{ .kana_in = "ぼう", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "volitional" },
     .{ .kana_in = "もう", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "volitional" },
     .{ .kana_in = "ろう", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "volitional" },
+
+    // Desiderative ("-tai", "wants to"). Terminal, from the i-stem like
+    // the polite rows above. "-tai" is itself an i-adjective, so its own
+    // negative/past come for free through the i-adjective rows above:
+    // 食べたくない -> 食べたい -> 食べる, two steps. The irregular verbs'
+    // desiderative rows (したい, 来たい, ...) live in their own blocks at
+    // the end of this table, not here.
+    .{ .kana_in = "たい", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "desiderative" },
+    .{ .kana_in = "いたい", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "きたい", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "ぎたい", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "したい", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "ちたい", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "にたい", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "びたい", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "みたい", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "りたい", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "desiderative" },
+
+    // Conditional ("-tara"). Two rows, not ten: "-tara" *is* the past
+    // form plus ら, so it collapses onto the past and the past rules
+    // above finish the job -- non-terminal for the same reason the
+    // progressive rows are. 食べたら -> 食べた -> 食べる, 読んだら ->
+    // 読んだ -> 読む, 高かったら -> 高かった -> 高い, したら -> した ->
+    // する. Modelling it this way isn't a shortcut, it's the morphology.
+    .{ .kana_in = "たら", .kana_out = "た", .rules_out = &.{}, .reason = "conditional" },
+    .{ .kana_in = "だら", .kana_out = "だ", .rules_out = &.{}, .reason = "conditional" },
+
+    // Provisional ("-eba"). Terminal. "れば" is ambiguous between
+    // ichidan (食べれば) and godan -る (分かれば) exactly as "られる" is,
+    // so it accepts either tag.
+    //
+    // There is deliberately no "なければ" row: "ければ" already strips
+    // 食べなければ to 食べない, which the negative rows then reduce to
+    // 食べる, and the chain reads "negative, provisional" -- which is
+    // what 食べなければ is.
+    .{ .kana_in = "えば", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "provisional" },
+    .{ .kana_in = "けば", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "provisional" },
+    .{ .kana_in = "げば", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "provisional" },
+    .{ .kana_in = "せば", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "provisional" },
+    .{ .kana_in = "てば", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "provisional" },
+    .{ .kana_in = "ねば", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "provisional" },
+    .{ .kana_in = "べば", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "provisional" },
+    .{ .kana_in = "めば", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "provisional" },
+    .{ .kana_in = "れば", .kana_out = "る", .rules_out = &.{ "v1", "v5" }, .reason = "provisional" },
+    .{ .kana_in = "ければ", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "provisional" },
+
+    // Imperative. The only single-kana `kana_in` rules in the table, and
+    // so the most aggressive: every word ending in え/け/せ/て/... now
+    // generates a godan candidate. いえ (家) produces 言う "imperative"
+    // alongside the real 家 entry, which hits at depth 0 and outranks it;
+    // Yomitan offers the same candidate for the same reason. Accepted
+    // deliberately -- the alternative, multi-kana rows only, leaves
+    // 話せ, 待て and 頑張れ unresolvable, and that is most of what shouted
+    // dialogue is made of.
+    //
+    // "て" -> "つ" sits beside the existing te-form "て" -> "る": both
+    // fire on the same text and each finds only its own class.
+    .{ .kana_in = "ろ", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "imperative" },
+    .{ .kana_in = "よ", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "imperative" },
+    .{ .kana_in = "え", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "け", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "げ", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "せ", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "て", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "ね", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "べ", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "め", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "れ", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "imperative" },
+
+    // Polite volitional ("-mashou"). One non-terminal row onto the polite
+    // non-past, which the -masu rules above then take to the headword:
+    // 食べましょう -> 食べます -> 食べる.
+    .{ .kana_in = "ましょう", .kana_out = "ます", .rules_out = &.{}, .reason = "polite volitional" },
+
+    // -- Irregular verbs -------------------------------------------------
+    //
+    // Three classes the index tags but the rules above can never reach,
+    // because every rule above produces only v1/v5/adj-i: vs (する, 987
+    // rows in a Jitendex build, 932 of them kanji+する headwords), vk
+    // (来る, 184 rows) and vz (ずる, 124 rows). Each class gets its own
+    // block holding *all* of its forms -- including the ones whose
+    // regular counterparts live in the form-family blocks above -- so
+    // that "how is する handled" is one place in the file rather than a
+    // dozen.
+
+    // する (vs). The stem is irregular, so these strip whole surface
+    // endings back to する rather than swapping a final kana. Suffix
+    // matching means the kanji+する headwords come along for free:
+    // 察した -> 察する, 愛して -> 愛する.
+    //
+    // Not listed, because they already chain through the rows above:
+    // している / してる (progressive -> して), しなかった (negative past
+    // -> しない), したら (conditional -> した).
+    .{ .kana_in = "した", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "past" },
+    .{ .kana_in = "して", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "te-form" },
+    .{ .kana_in = "しない", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "negative" },
+    .{ .kana_in = "します", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "polite" },
+    .{ .kana_in = "しました", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "polite past" },
+    .{ .kana_in = "しません", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "polite negative" },
+    .{ .kana_in = "しよう", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "volitional" },
+    .{ .kana_in = "したい", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "desiderative" },
+    .{ .kana_in = "すれば", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "provisional" },
+    .{ .kana_in = "しろ", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "imperative" },
+    .{ .kana_in = "せよ", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "imperative" },
+    .{ .kana_in = "される", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "passive/potential" },
+    .{ .kana_in = "させる", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "causative" },
+
+    // 来る (vk), written with the kanji. The irregularity is in the stem
+    // vowel, which the kanji spelling hides -- 来 stays put and only the
+    // kana after it change -- so these look like ordinary suffix swaps.
+    // Compounds come along by suffix match: 帰って来ない -> 帰って来る.
+    .{ .kana_in = "来た", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "past" },
+    .{ .kana_in = "来て", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "te-form" },
+    .{ .kana_in = "来ない", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "negative" },
+    .{ .kana_in = "来ます", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "polite" },
+    .{ .kana_in = "来ました", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "polite past" },
+    .{ .kana_in = "来ません", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "polite negative" },
+    .{ .kana_in = "来よう", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "volitional" },
+    .{ .kana_in = "来たい", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "desiderative" },
+    .{ .kana_in = "来れば", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "provisional" },
+    .{ .kana_in = "来い", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "imperative" },
+    .{ .kana_in = "来られる", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "passive/potential" },
+    .{ .kana_in = "来させる", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "causative" },
+
+    // 来る (vk), written in kana, where the stem vowel really does change
+    // (き-/こ-/く-) and each form needs its own row.
+    .{ .kana_in = "きた", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "past" },
+    .{ .kana_in = "きて", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "te-form" },
+    .{ .kana_in = "こない", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "negative" },
+    .{ .kana_in = "きます", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "polite" },
+    .{ .kana_in = "きました", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "polite past" },
+    .{ .kana_in = "きません", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "polite negative" },
+    .{ .kana_in = "こよう", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "volitional" },
+    .{ .kana_in = "きたい", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "desiderative" },
+    .{ .kana_in = "くれば", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "provisional" },
+    .{ .kana_in = "こい", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "imperative" },
+    .{ .kana_in = "こられる", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "passive/potential" },
+    .{ .kana_in = "こさせる", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "causative" },
+
+    // ずる verbs (vz): 信ずる, 論ずる, 策を講ずる. Largely redundant --
+    // most have a modern ichidan twin (信じる, tagged v1) that the rows
+    // above already reach -- but 124 rows is 124 rows, and the ずる form
+    // is what shows up in older or stiffer writing. No imperative row:
+    // じろ belongs to the v1 twin, and the vz imperative (ぜよ) is rare
+    // enough to leave to phase 3.
+    .{ .kana_in = "じた", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "past" },
+    .{ .kana_in = "じて", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "te-form" },
+    .{ .kana_in = "じない", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "negative" },
+    .{ .kana_in = "じます", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "polite" },
+    .{ .kana_in = "じました", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "polite past" },
+    .{ .kana_in = "じません", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "polite negative" },
+    .{ .kana_in = "じよう", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "volitional" },
+    .{ .kana_in = "じたい", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "desiderative" },
+    .{ .kana_in = "じれば", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "provisional" },
+    .{ .kana_in = "じられる", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "passive/potential" },
+    .{ .kana_in = "じさせる", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "causative" },
+
+    // 行く (v5), whose te-form and past are irregular: 行って/行った, not
+    // the 書いて/書いた its -く ending would predict.
+    //
+    // **This does not make 行く the top hit for 行った, and that is
+    // accepted.** 行った still also reaches 行う(おこなう) through the
+    // generic "った" -> "う", at the same depth, with the same score and
+    // the same term length -- so `rankBefore` falls through to byte order
+    // and 行う, whose う sorts before く, is shown first. The reader
+    // presses `]` once. A rule-specificity tiebreaker (prefer the chain
+    // that consumed more `kana_in` bytes) was considered and rejected: it
+    // is a ranking axis Yomitan does not have, invented to cover for the
+    // frequency data that is the real answer. Reachability is the win
+    // here; ordering waits for `term_meta_bank` support.
+    .{ .kana_in = "行った", .kana_out = "行く", .rules_out = &.{"v5"}, .reason = "past" },
+    .{ .kana_in = "行って", .kana_out = "行く", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "いった", .kana_out = "いく", .rules_out = &.{"v5"}, .reason = "past" },
+    .{ .kana_in = "いって", .kana_out = "いく", .rules_out = &.{"v5"}, .reason = "te-form" },
 };
 
 /// Ceiling on how many deinflection rules may be chained for one
-/// candidate substring -- see `Search.collect`. 4 covers every
-/// example in this module's doc comment (a causative-passive-negative
-/// chain is 3 rule applications) with one step of headroom.
-pub const max_deinflect_depth: usize = 4;
+/// candidate substring -- see `Search.collect`. 5 is the deepest real
+/// form the table can reach: 食べさせられたくなかった unwinds through
+/// causative, passive/potential, desiderative, negative and past, one
+/// rule each.
+///
+/// Raising it is close to free, which is not obvious from the rule count.
+/// Replaying `collect` against a real 398k-row Jitendex index, a long
+/// kana-only form reaches 40 distinct queried forms at depth 4, 42 at
+/// depth 5 and **42 at depth 6** -- the search saturates rather than
+/// branching, because the rules' `kana_in` suffixes are near-disjoint so
+/// only two or three ever match a given form, and each chain dead-ends
+/// within a step or two. The per-call cache in `Search.query` then makes
+/// repeats free. So the cap is set by what the table can actually
+/// express, not by what the search costs.
+pub const max_deinflect_depth: usize = 5;
 
 /// One entry a lookup found, with how it was found. `dict.lookup` ranks
 /// hits on these fields the way Yomitan's `_sortTermDictionaryEntries`
