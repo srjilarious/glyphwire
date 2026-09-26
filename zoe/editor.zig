@@ -158,6 +158,13 @@ pub const Editor = struct {
     /// `[min, max]` of the two -- see `selectionSpan`.
     select_anchor: ?usize = null,
 
+    /// The selection the last visual mode ended with, so `gv` can put it
+    /// back. Recorded by `exitVisual`, which every way out of visual mode
+    /// goes through -- including the operators, so a `gv` right after a
+    /// `d` reselects a range whose text has changed. vim's `gv` is no
+    /// better behaved there; both ends are clamped on the way back in.
+    last_visual: ?struct { anchor: usize, cursor: usize, mode: Mode } = null,
+
     /// Lines a PageDown / PageUp (or Ctrl-D / Ctrl-U) moves the cursor.
     /// vim scrolls close to a full screen, but the editor core has no
     /// viewport to measure, so this is a fixed count -- overridable from
@@ -771,7 +778,7 @@ pub const Editor = struct {
                         // No yank and no `yank_pending` -- a shift moves
                         // text, it doesn't take a copy of it.
                         '>', '<' => {
-                            try self.shiftLines(first, last, op == '>');
+                            try self.shiftLines(first, last, op == '>', 1);
                             return .none;
                         },
                         else => return .none,
@@ -780,6 +787,15 @@ pub const Editor = struct {
                     return .none;
                 }
                 self.moveTo(motion.gotoLine(&self.buf, n - 1), true);
+            },
+            // `gv`: the selection the last visual mode ended with. From
+            // visual mode it swaps this selection for that one, which is
+            // what vim does too.
+            'v' => {
+                const last = self.last_visual orelse return .none;
+                self.mode = last.mode;
+                self.select_anchor = motion.clampNormal(&self.buf, last.anchor);
+                self.moveTo(motion.clampNormal(&self.buf, last.cursor), true);
             },
             else => self.resetPending(),
         }
@@ -812,10 +828,10 @@ pub const Editor = struct {
             const line = self.buf.lineAt(self.cursor);
             const right = op == '>';
             switch (c) {
-                '>', '<' => if (c == op) try self.shiftLines(line, line + n - 1, right),
-                'j' => try self.shiftLines(line, line + n, right),
-                'k' => try self.shiftLines(line -| n, line, right),
-                'G' => try self.shiftLines(line, self.buf.lineCount() - 1, right),
+                '>', '<' => if (c == op) try self.shiftLines(line, line + n - 1, right, 1),
+                'j' => try self.shiftLines(line, line + n, right, 1),
+                'k' => try self.shiftLines(line -| n, line, right, 1),
+                'G' => try self.shiftLines(line, self.buf.lineCount() - 1, right, 1),
                 else => {},
             }
             return .none;
@@ -1099,23 +1115,85 @@ pub const Editor = struct {
     }
 
     /// `>>` / `<<` and their operator forms: shift lines `[first, last]`
-    /// by one `tab_width`. vim's `shiftwidth` is a separate option; zoe
-    /// has one indent size, so the Tab key and `>>` agree by
+    /// by `times` `tab_width`s. vim's `shiftwidth` is a separate option;
+    /// zoe has one indent size, so the Tab key and `>>` agree by
     /// construction.
-    fn shiftLines(self: *Editor, first: usize, last: usize, right: bool) !void {
+    ///
+    /// A normal-mode count is a number of *lines* (`3>>` shifts three
+    /// lines one level), so `times` is 1 there; it is the visual-mode
+    /// `3>` that means three levels.
+    fn shiftLines(self: *Editor, first: usize, last: usize, right: bool, times: usize) !void {
         const lc = self.buf.lineCount();
         const f = @min(first, lc - 1);
         const l = @min(@max(first, last), lc - 1);
 
-        // Bottom-up: indenting a line moves every line after it, so a
-        // top-down walk would be reading stale offsets by the second one.
-        var line = l + 1;
-        while (line > f) {
-            line -= 1;
-            if (right) try self.indentLine(line) else try self.dedentLine(line);
+        var pass: usize = 0;
+        while (pass < times) : (pass += 1) {
+            // Bottom-up: indenting a line moves every line after it, so a
+            // top-down walk would be reading stale offsets by the second.
+            var line = l + 1;
+            while (line > f) {
+                line -= 1;
+                if (right) try self.indentLine(line) else try self.dedentLine(line);
+            }
         }
         self.moveTo(motion.firstNonBlank(&self.buf, self.buf.lineStart(f)), true);
     }
+
+    /// Visual `>` / `<`: shift every line the selection touches, `times`
+    /// levels, and **keep the selection** so pressing `>` again shifts it
+    /// further and Escape is what leaves.
+    ///
+    /// vim exits visual mode here and makes you `gv` to get the selection
+    /// back, which is why `vnoremap > >gv` is in so many vimrcs; zoe just
+    /// does the useful thing. `gv` exists too, for everything else it is
+    /// good for.
+    ///
+    /// Both ends are carried across by line, with their column moved by
+    /// however much that line's indent grew or shrank, so the selection
+    /// stays on the same characters instead of sliding along the indent.
+    fn visualShift(self: *Editor, right: bool, times: usize) !void {
+        const span = self.selectionSpan() orelse {
+            self.exitVisual();
+            return;
+        };
+        const anchor = self.select_anchor orelse self.cursor;
+
+        const a = SelEnd.of(&self.buf, anchor);
+        const c = SelEnd.of(&self.buf, self.cursor);
+        const first = self.buf.lineAt(span.lo);
+        const last = self.buf.lineAt(if (span.hi > span.lo) span.hi - 1 else span.hi);
+
+        try self.shiftLines(first, last, right, times);
+
+        self.select_anchor = a.restore(&self.buf);
+        self.moveTo(c.restore(&self.buf), true);
+    }
+
+    /// One end of a visual selection, remembered across an edit that
+    /// changes its line's indent. See `visualShift`.
+    const SelEnd = struct {
+        line: usize,
+        col: usize,
+        /// The line's length before the shift, so the difference gives
+        /// how far the text on it moved.
+        was: usize,
+
+        fn of(buf: *const Buffer, at: usize) SelEnd {
+            const line = buf.lineAt(at);
+            return .{ .line = line, .col = at - buf.lineStart(line), .was = buf.lineLen(line) };
+        }
+
+        fn restore(self: SelEnd, buf: *const Buffer) usize {
+            const line = @min(self.line, buf.lineCount() - 1);
+            const now = buf.lineLen(line);
+            const col = if (now >= self.was)
+                self.col + (now - self.was)
+            else
+                self.col -| (self.was - now);
+            return buf.lineStart(line) + @min(col, now);
+        }
+    };
 
     fn indentLine(self: *Editor, line: usize) !void {
         // An empty line stays empty -- vim doesn't leave trailing
@@ -1245,6 +1323,11 @@ pub const Editor = struct {
     /// Back to normal mode, selection dropped. Also the target of
     /// `<esc>` in a visual mode.
     pub fn exitVisual(self: *Editor) void {
+        if (self.select_anchor) |a| {
+            if (self.mode == .visual or self.mode == .visual_line) {
+                self.last_visual = .{ .anchor = a, .cursor = self.cursor, .mode = self.mode };
+            }
+        }
         self.resetPending();
         self.mode = .normal;
         self.select_anchor = null;
@@ -1314,20 +1397,9 @@ pub const Editor = struct {
             'y' => return self.visualOperate(.yank),
             'd', 'x' => return self.visualOperate(.delete),
             'c', 's' => return self.visualOperate(.change),
-            // Shift every line the selection touches, then leave visual
-            // mode. vim's `3>` shifts three times; zoe's `count` here is
-            // the motion count it already consumed, so one shift it is.
-            '>', '<' => {
-                const span = self.selectionSpan() orelse {
-                    self.exitVisual();
-                    return .none;
-                };
-                const first = self.buf.lineAt(span.lo);
-                const last = self.buf.lineAt(if (span.hi > span.lo) span.hi - 1 else span.hi);
-                try self.shiftLines(first, last, c == '>');
-                self.exitVisual();
-                return .none;
-            },
+            // Shift every line the selection touches, `n` levels, and
+            // stay in visual mode -- see `visualShift`.
+            '>', '<' => try self.visualShift(c == '>', n),
             // Search from a selection extends it: the anchor stays put
             // and the match becomes the moving end.
             '/' => self.startSearch(.forward),
