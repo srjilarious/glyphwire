@@ -619,14 +619,29 @@ cursor stays on the glyph's row. `transparent_bg` leaves whatever
 background is already in the cell — an image, an icon, a panel gradient —
 instead of resetting it. `metadata_id` tags every cell written.
 
+`underline` draws a line at the bottom of every cell the text touches —
+`"single"`, `"double"`, `"curly"`, `"dotted"` or `"dashed"` — and
+`underline_color` colours it independently of the text, defaulting to the
+text's own foreground. Both are per-span as well as per-message. This is
+the one style attribute beyond colour that the wire carries, and it is
+here because a mark that is not a colour is the only kind that can coexist
+with syntax highlighting and a selection tint on the same cell: a language
+server's diagnostics need exactly that. It is drawn from a rect at the
+cell's baseline, which is why it is affordable where bold and italic —
+which would need further font faces in the atlas — are not. The pad of a
+`pad`ded write is never underlined.
+
 `write_text` also mirrors a useful subset of ANSI/VT escape sequences found
 in the text, so output from a program that does not know about glyphwire
-still shows colour. This is **colour only**: SGR 30-37 / 90-97 / 38;2;r;g;b
-and their background forms, plus `bold` (maps a basic foreground to its
-bright variant), `dim` and `inverse`. There are no attribute bitflags on
-the wire. A sequence that is a *query* (`CSI 6n`, device attributes,
-DECRQM) produces a `terminal_reply` notification (section 7) rather than a
-grid change.
+still shows colour. This is **colour, plus underline**: SGR 30-37 / 90-97 /
+38;2;r;g;b and their background forms, plus `bold` (maps a basic foreground
+to its bright variant), `dim`, `inverse`, and the underline set — `4`,
+`4:0`–`4:5`, `21`, `24`, with `58`/`59` for its colour. There are no other
+attribute bitflags on the wire. Note that `;` and `:` are not
+interchangeable here: `4:3` is a curly underline, `4;3` is an underline
+followed by an italic (still ignored). A sequence that is a *query*
+(`CSI 6n`, device attributes, DECRQM) produces a `terminal_reply`
+notification (section 7) rather than a grid change.
 
 `clear` with `bg` leaves the region blank but opaque in that colour.
 

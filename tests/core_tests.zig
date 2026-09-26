@@ -3377,6 +3377,128 @@ pub fn sgrInverseOnTheDefaultBackgroundStaysVisibleTest(io: std.Io, alloc: std.m
     try testz.expectEqual(layer.cell(0, 0).style.fg.a, 255);
 }
 
+pub fn underlineRunsMarkOnlyTheirOwnCellsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+
+    // The diagnostic shape: a curly, separately coloured underline on one
+    // span of an otherwise plain row.
+    try layer.writeRuns(&.{
+        .{ .text = "let ", .fg = glyphwire.default_style.fg, .bg = glyphwire.default_style.bg },
+        .{
+            .text = "oops",
+            .fg = glyphwire.default_style.fg,
+            .bg = glyphwire.default_style.bg,
+            .underline = .{ .style = .curly, .color = .{ .r = 255, .g = 0, .b = 0 } },
+        },
+        .{ .text = " = 1", .fg = glyphwire.default_style.fg, .bg = glyphwire.default_style.bg },
+    }, .{});
+
+    try testz.expectEqual(layer.cell(0, 3).style.underline.style, .none);
+    try testz.expectEqual(layer.cell(0, 4).style.underline.style, .curly);
+    try testz.expectEqual(layer.cell(0, 7).style.underline.style, .curly);
+    try testz.expectEqual(layer.cell(0, 7).style.underline.color.?.r, 255);
+    // The colour rides with the underline and not with the text.
+    try testz.expectEqual(layer.cell(0, 7).style.fg.r, glyphwire.default_style.fg.r);
+    try testz.expectEqual(layer.cell(0, 8).style.underline.style, .none);
+
+    // A plain rewrite of the row takes the mark off again -- underline is
+    // set by a write, never merged into what was there.
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 0 } });
+    try layer.writeText("let oops = 1", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 4).style.underline.style, .none);
+    try testz.expectEqual(layer.cell(0, 4).style.underline.color, null);
+}
+
+pub fn underlinePadAndWidePairsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+
+    // `pad`'s blanks are deliberately not underlined: a padded row would
+    // otherwise draw its line out to the full width.
+    try layer.writeTextOpts("ab", glyphwire.default_style.fg, glyphwire.default_style.bg, .{
+        .max_cols = 6,
+        .pad = true,
+        .underline = .{ .style = .single },
+    });
+    try testz.expectEqual(layer.cell(0, 1).style.underline.style, .single);
+    try testz.expectEqual(layer.cell(0, 2).style.underline.style, .none);
+
+    // Both halves of a wide character carry it, so the line spans the
+    // whole glyph rather than half of it.
+    layer.setProperty(.{ .cursor = .{ .row = 1, .col = 0 } });
+    try layer.writeTextOpts("日", glyphwire.default_style.fg, glyphwire.default_style.bg, .{
+        .underline = .{ .style = .double },
+    });
+    try testz.expectEqual(layer.cell(1, 0).style.underline.style, .double);
+    try testz.expectEqual(layer.cell(1, 1).style.underline.style, .double);
+}
+
+pub fn sgrUnderlineStylesAndColorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    var pen: glyphwire.SgrPen = .{};
+
+    pen.applySgr("4");
+    try testz.expectEqual(pen.underline.style, .single);
+    // `4:3` is a curly underline...
+    pen.applySgr("0");
+    pen.applySgr("4:3");
+    try testz.expectEqual(pen.underline.style, .curly);
+    // ...while `4;3` is an underline followed by an italic, which stays
+    // parsed-and-ignored. Collapsing the two separators would make every
+    // `ESC [ 4;3 m` a squiggle.
+    pen.applySgr("0");
+    pen.applySgr("4;3");
+    try testz.expectEqual(pen.underline.style, .single);
+
+    pen.applySgr("21");
+    try testz.expectEqual(pen.underline.style, .double);
+    pen.applySgr("24");
+    try testz.expectEqual(pen.underline.style, .none);
+
+    // `58` takes the same colour grammar as `38`/`48`, in both spellings,
+    // and `59` puts it back to "follow the fg".
+    pen.applySgr("4;58;2;255;0;0");
+    try testz.expectEqual(pen.underline.style, .single);
+    try testz.expectEqual(pen.underline.color.?.r, 255);
+    try testz.expectEqual(pen.underline.color.?.g, 0);
+    pen.applySgr("58:5:196");
+    try testz.expectEqual(pen.underline.color.?.r, 255);
+    pen.applySgr("59");
+    try testz.expectEqual(pen.underline.color, null);
+
+    // A truecolor fg after an underline colour still lands on the fg --
+    // the shared parameter walk keeps the three targets apart.
+    pen.applySgr("0");
+    pen.applySgr("58;2;10;20;30;38;2;40;50;60");
+    try testz.expectEqual(pen.underline.color.?.r, 10);
+    try testz.expectEqual(pen.fg.?.r, 40);
+}
+
+pub fn sgrUnderlineReachesTheCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+
+    // An escape in a mirrored program's output underlines text the call
+    // itself left plain.
+    try layer.writeText("a\x1b[4:3;58;2;9;9;9mb", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(0, 0).style.underline.style, .none);
+    try testz.expectEqual(layer.cell(0, 1).style.underline.style, .curly);
+    try testz.expectEqual(layer.cell(0, 1).style.underline.color.?.b, 9);
+
+    // ...and the call's own underline survives text that never mentions
+    // one, since the pen only wins where it has an opinion.
+    layer.setProperty(.{ .cursor = .{ .row = 1, .col = 0 } });
+    try layer.writeTextOpts("\x1b[31mx", glyphwire.default_style.fg, glyphwire.default_style.bg, .{
+        .underline = .{ .style = .dotted },
+    });
+    try testz.expectEqual(layer.cell(1, 0).style.underline.style, .dotted);
+}
+
 pub fn scrollbarStateReportsDerivedMaximaTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 50, 200, 0);

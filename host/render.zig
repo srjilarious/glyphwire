@@ -139,6 +139,11 @@ pub const LayerBatches = struct {
     icon_bg: SpriteBatch,
     icon_fg: SpriteBatch,
     text: GlyphBatch,
+    /// `Cell.style.underline`'s rects -- its own batch, drawn *after*
+    /// `text` (see `drawLayerBatches`), because an underline has to stay
+    /// visible under a descender: a `g` or `y` in `color_bg` order would
+    /// paint over the line and break it wherever the text dips.
+    underline: ShapeBatch,
     /// `Layer.rects`' quads -- drawn last (see `drawLayerBatches`) so an
     /// overlay rect sits on top of everything else the layer paints,
     /// text included.
@@ -162,8 +167,17 @@ pub const LayerBatches = struct {
         errdefer icon_fg.deinit();
         var text = try GlyphBatch.init(alloc, glyph_shader);
         errdefer text.deinit();
+        var underline = try ShapeBatch.init(alloc, shape_shader);
+        errdefer underline.deinit();
         const rects = try ShapeBatch.init(alloc, shape_shader);
-        return .{ .color_bg = color_bg, .icon_bg = icon_bg, .icon_fg = icon_fg, .text = text, .rects = rects };
+        return .{
+            .color_bg = color_bg,
+            .icon_bg = icon_bg,
+            .icon_fg = icon_fg,
+            .text = text,
+            .underline = underline,
+            .rects = rects,
+        };
     }
 
     fn deinit(self: *LayerBatches, alloc: std.mem.Allocator) void {
@@ -171,6 +185,7 @@ pub const LayerBatches = struct {
         self.icon_bg.deinit();
         self.icon_fg.deinit();
         self.text.deinit();
+        self.underline.deinit();
         self.rects.deinit();
         for (self.images.items) |*t| t.batch.deinit();
         self.images.deinit(alloc);
@@ -203,6 +218,82 @@ fn colour4(c: host_eng.Color) [4][4]f32 {
 
 fn addRect(b: *ShapeBatch, dest: host_eng.RectF, c: host_eng.Color) void {
     b.addQuad(quad4(dest.l, dest.t, dest.r, dest.b), {}, colour4(c)) catch {};
+}
+
+/// Emits one cell's worth of `Cell.style.underline` as filled rects into
+/// `b`, at cell origin `(px, py)` in absolute window pixels.
+///
+/// Every dimension is derived from the current cell size rather than fixed,
+/// because the font is resizable at runtime (Ctrl+/-) and a hard-coded 2px
+/// line that reads right at 18px rows is a hairline at 40px ones.
+///
+/// **`px` is absolute, and that matters.** The repeating styles take their
+/// phase from it, so a dotted or curly underline running across several
+/// cells reads as one continuous line instead of restarting its pattern in
+/// every cell -- which is the difference between a squiggle under a word
+/// and a row of identical little marks.
+fn emitUnderline(
+    b: *ShapeBatch,
+    style: glyphwire.Underline,
+    px: i32,
+    py: i32,
+    color: host_eng.Color,
+) void {
+    const cw = geometry.cell_w;
+    const ch = geometry.cell_h;
+    if (cw <= 0 or ch <= 0) return;
+
+    // Line weight, and the clearance kept below it so the line doesn't
+    // touch the glyphs of the row underneath. Both at least a pixel: a
+    // line rounded away to nothing is worse than one slightly too thick.
+    const t: i32 = @max(1, @divTrunc(ch, 14));
+    const clearance: i32 = @max(1, @divTrunc(ch, 12));
+    const base = py + ch - t - clearance;
+
+    switch (style) {
+        // Handled by the caller, which doesn't call this for `.none`.
+        .none => {},
+        .single => addRect(b, host_eng.RectF.fromPosSize(px, base, cw, t), color),
+        .double => {
+            // The second line goes *above* the first: below would eat the
+            // clearance and collide with the next row's ascenders.
+            addRect(b, host_eng.RectF.fromPosSize(px, base, cw, t), color);
+            addRect(b, host_eng.RectF.fromPosSize(px, base - 2 * t, cw, t), color);
+        },
+        .dotted, .dashed => {
+            // One on/off cycle: a dot is square-ish, a dash a third of a
+            // cell, and each is followed by a gap of its own length.
+            const on: i32 = if (style == .dotted) t else @max(2, @divTrunc(cw, 3));
+            const period = on * 2;
+            var x = px;
+            while (x < px + cw) : (x += 1) {
+                if (@mod(x, period) >= on) continue;
+                // One pixel column at a time, so a dash clipped by the
+                // cell edge continues correctly in the next cell rather
+                // than starting over.
+                addRect(b, host_eng.RectF.fromPosSize(x, base, 1, t), color);
+            }
+        },
+        .curly => {
+            // A triangle wave, one full period per cell, drawn as a column
+            // of 1px-wide rects. A triangle rather than a real sine: at
+            // these sizes (a 2-3px amplitude) the two are indistinguishable
+            // and this needs no floating point or table.
+            const amp: i32 = @max(1, @divTrunc(ch, 18));
+            const period: i32 = @max(4, cw);
+            const half = @divTrunc(period, 2);
+            var x = px;
+            while (x < px + cw) : (x += 1) {
+                const phase = @mod(x, period);
+                // Up across the first half, back down across the second.
+                const off: i32 = if (phase < half)
+                    -amp + @divTrunc(2 * amp * phase, half)
+                else
+                    amp - @divTrunc(2 * amp * (phase - half), period - half);
+                addRect(b, host_eng.RectF.fromPosSize(x, base + off, 1, t), color);
+            }
+        },
+    }
 }
 
 fn addSprite(b: *SpriteBatch, dest: host_eng.RectF, src: host_eng.RectF) void {
@@ -855,6 +946,7 @@ pub const Renderer = struct {
         lb.scaled_text.clearRetainingCapacity();
 
         lb.color_bg.beginBuild({});
+        lb.underline.beginBuild({});
         lb.rects.beginBuild({});
 
         const atlas_tex: ?*const host_eng.Texture = if (self.icon_atlas) |a|
@@ -981,6 +1073,23 @@ pub const Renderer = struct {
                     );
                 }
 
+                // Before the glyph, but into a batch drawn after it: an
+                // underline belongs to the cell whether or not anything is
+                // written in it, so a run of blanks in an underlined span
+                // (a diagnostic covering trailing whitespace, a scaled
+                // glyph's fill columns) still draws its part of the line.
+                if (c.style.underline.style != .none) {
+                    const ul = c.style.underline;
+                    const src = ul.color orelse c.style.fg;
+                    emitUnderline(
+                        &lb.underline,
+                        ul.style,
+                        px,
+                        py,
+                        fade(host_eng.Color.from(src.r, src.g, src.b, src.a), alpha),
+                    );
+                }
+
                 if (fa) |f| {
                     const g = c.grapheme();
                     if (g.len > 0) {
@@ -1085,6 +1194,7 @@ pub const Renderer = struct {
         }
 
         lb.color_bg.endBuild();
+        lb.underline.endBuild();
         lb.rects.endBuild();
         if (has_icon_atlas) {
             lb.icon_bg.endBuild();
@@ -1369,6 +1479,10 @@ pub const Renderer = struct {
         // Already-`fade`d per-vertex, same as `lb.text` -- plain, not
         // tinted.
         for (lb.scaled_text.items) |*t| self.drawBatch(&t.batch, mvp);
+        // Underlines over the glyphs they belong to -- see the field's doc
+        // comment -- but under `create_rect`'s overlay rects, which are
+        // the layer's topmost thing by contract.
+        self.drawBatch(&lb.underline, mvp);
         self.drawBatch(&lb.rects, mvp);
     }
 

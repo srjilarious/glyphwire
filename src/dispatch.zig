@@ -47,6 +47,8 @@ pub const DispatchError = error{
     InvalidIconOption,
     /// `write_text`'s `scale` wasn't `"x1"`, `"x1_5"`, `"x2"`, or `"x3"`.
     InvalidTextScale,
+    /// `write_text`'s `underline` wasn't one of `core.Underline`'s names.
+    InvalidUnderline,
     /// `move_content`'s `direction` wasn't `"up"` or `"down"`.
     InvalidMoveDirection,
     /// `find_metadata`'s `direction` wasn't `"next"` or `"prev"`.
@@ -159,6 +161,13 @@ const WriteTextParams = struct {
     /// doc comment. Wire strings match the enum's tag names exactly, the
     /// same convention `draw_icon`'s `scale` already uses.
     scale: ?[]const u8 = null,
+    /// `"none"` (default), `"single"`, `"double"`, `"curly"`, `"dotted"` or
+    /// `"dashed"` -- see `core.Underline`. Tag names again, like `scale`.
+    underline: ?[]const u8 = null,
+    /// The underline's colour; omitted means the text's own `fg`, which is
+    /// what an ordinary underline wants. A diagnostic squiggle sets it so
+    /// the line can be red under syntax-coloured text.
+    underline_color: ?protocol.Color = null,
 };
 
 /// One entry of `write_text`'s `spans`. Every field but `text` is optional
@@ -170,6 +179,8 @@ const SpanParams = struct {
     metadata_id: ?core.MetadataHandle = null,
     transparent_bg: ?bool = null,
     scale: ?[]const u8 = null,
+    underline: ?[]const u8 = null,
+    underline_color: ?protocol.Color = null,
 };
 
 /// Params shared by `insert_cells`/`delete_cells` -- also cursor-implicit
@@ -688,6 +699,20 @@ fn resolveBg(c: ?protocol.Color, transparent_bg: bool) ?core.Background {
 fn parseTextScale(value: ?[]const u8) !core.TextScale {
     const s = value orelse return .x1;
     return std.meta.stringToEnum(core.TextScale, s) orelse DispatchError.InvalidTextScale;
+}
+
+/// `write_text`'s `underline` + `underline_color` as one `core.UnderlineStyle`.
+/// An absent style is `.none` (no underline), and an absent colour is null
+/// ("use the text's fg") -- so a colour given without a style is stored and
+/// simply has nothing to paint, the same way `bg` is kept on a cell with no
+/// glyph in it.
+fn parseUnderline(style: ?[]const u8, color: ?protocol.Color) !core.UnderlineStyle {
+    const s: core.Underline = if (style) |name|
+        std.meta.stringToEnum(core.Underline, name) orelse return DispatchError.InvalidUnderline
+    else
+        .none;
+    const c: ?core.Color = if (color) |v| .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a } else null;
+    return .{ .style = s, .color = c };
 }
 
 const DrawBoxParams = struct {
@@ -1854,13 +1879,14 @@ pub const Dispatcher = struct {
         const bg = resolveBg(p.bg, p.transparent_bg);
         const metadata_id = try self.resolveMetadata(p.metadata_id);
         const scale = try parseTextScale(p.scale);
+        const underline = try parseUnderline(p.underline, p.underline_color);
 
         // Everything is validated into runs before the cursor moves, so a
         // bad span can't leave the write half-applied.
         var one: [1]core.Layer.TextRun = undefined;
         const runs: []const core.Layer.TextRun = if (p.text) |text| blk: {
             if (p.spans != null) return DispatchError.InvalidSpans;
-            one[0] = .{ .text = text, .fg = fg, .bg = bg, .metadata_id = metadata_id, .scale = scale };
+            one[0] = .{ .text = text, .fg = fg, .bg = bg, .metadata_id = metadata_id, .scale = scale, .underline = underline };
             break :blk &one;
         } else if (p.spans) |spans| blk: {
             const out = try alloc.alloc(core.Layer.TextRun, spans.len);
@@ -1875,6 +1901,14 @@ pub const Dispatcher = struct {
                         bg,
                     .metadata_id = if (s.metadata_id != null) try self.resolveMetadata(s.metadata_id) else metadata_id,
                     .scale = if (s.scale != null) try parseTextScale(s.scale) else scale,
+                    // Per field, not as a pair: a span that names a style
+                    // and leaves the colour off means "this style, the
+                    // message's colour", which is how one underlined
+                    // colour serves a row of several marked spans.
+                    .underline = if (s.underline != null or s.underline_color != null)
+                        try parseUnderline(s.underline orelse p.underline, s.underline_color orelse p.underline_color)
+                    else
+                        underline,
                 };
             }
             break :blk out;
@@ -3015,6 +3049,14 @@ pub const Dispatcher = struct {
                         .wide_lead => "lead",
                         .wide_spacer => "spacer",
                     },
+                    .underline = if (cell.style.underline.style == .none)
+                        null
+                    else
+                        @tagName(cell.style.underline.style),
+                    .underline_color = if (cell.style.underline.color) |c|
+                        .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a }
+                    else
+                        null,
                 };
             }
         }

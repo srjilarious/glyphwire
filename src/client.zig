@@ -333,6 +333,13 @@ pub const Client = struct {
         /// and copied text -- a panel's border and pad. See
         /// `core.Cell.selectable`.
         selectable: bool = true,
+        /// Underline the text (`core.Underline`): `.curly` for a
+        /// diagnostic squiggle, `.single` for a link. Never applied to
+        /// `pad`'s blanks -- see `core.Layer.WriteOpts.underline`.
+        underline: core.Underline = .none,
+        /// The underline's colour; null follows `fg`. Set it to keep a red
+        /// squiggle red under syntax-coloured text.
+        underline_color: ?core.Color = null,
     };
 
     /// `write_text` with every option (see `TextOpts`) -- a notification.
@@ -349,6 +356,10 @@ pub const Client = struct {
         metadata_id: ?core.MetadataHandle = null,
         transparent_bg: ?bool = null,
         scale: ?core.TextScale = null,
+        /// See `TextOpts.underline`. Per span, so one write can underline
+        /// part of a syntax-coloured row.
+        underline: ?core.Underline = null,
+        underline_color: ?core.Color = null,
     };
 
     /// `write_text` with `spans`: several differently styled runs written
@@ -371,6 +382,8 @@ pub const Client = struct {
             .metadata_id = s.metadata_id,
             .transparent_bg = s.transparent_bg,
             .scale = if (s.scale) |sc| @tagName(sc) else null,
+            .underline = if (s.underline) |u| @tagName(u) else null,
+            .underline_color = colorToJson(s.underline_color),
         };
         return out;
     }
@@ -382,6 +395,8 @@ pub const Client = struct {
         metadata_id: ?core.MetadataHandle,
         transparent_bg: ?bool,
         scale: ?[]const u8,
+        underline: ?[]const u8,
+        underline_color: ?protocol.Color,
     };
 
     /// The wire params for a `TextOpts` write: either `text` or `spans`.
@@ -401,6 +416,11 @@ pub const Client = struct {
             .max_cols = opts.max_cols,
             .pad = opts.pad,
             .selectable = opts.selectable,
+            // Omitted entirely for the overwhelmingly common no-underline
+            // write, so nothing grows on the wire for every existing
+            // caller. Same reason `spans` is null for a plain write.
+            .underline = if (opts.underline == .none) null else @tagName(opts.underline),
+            .underline_color = colorToJson(opts.underline_color),
         };
     }
 
@@ -418,6 +438,8 @@ pub const Client = struct {
         max_cols: ?usize,
         pad: bool,
         selectable: bool,
+        underline: ?[]const u8,
+        underline_color: ?protocol.Color,
     };
 
     /// `clear`'s options: the region (defaulting to the whole layer) and
@@ -3572,6 +3594,9 @@ pub const InputListener = struct {
     /// waiter re-checks the queue after every wake and treats an empty one
     /// as a spurious wake.
     sem: std.Io.Semaphore = .{},
+    /// Set by `wake` and cleared by whichever waiter observes it. See
+    /// `wake` -- this is why a bare `sem.post` wouldn't do.
+    woken: std.atomic.Value(bool) = .init(false),
     /// How many `.mouse_move` entries `events` holds, for the cap in
     /// `enqueue`.
     mouse_moves_queued: usize = 0,
@@ -3700,11 +3725,37 @@ pub const InputListener = struct {
         const deadline = timeout.toDeadline(self.io);
         while (true) {
             if (self.takeFirst(matches)) |ev| return ev;
+            // A `wake` while nothing was queued: return "no event" rather
+            // than going back to sleep, so the caller's loop gets a turn.
+            // Checked after the queue so a real event always wins the race.
+            if (self.woken.swap(false, .acquire)) return null;
             self.sem.waitTimeout(self.io, deadline) catch |err| switch (err) {
                 error.Timeout => return null,
                 error.Canceled => |e| return e,
             };
         }
+    }
+
+    /// Wakes a blocked `next` / `waitX` from another thread, without
+    /// queueing an event: the waiter returns `null` exactly as it would on
+    /// a timeout, which every caller already handles by going round its
+    /// loop again.
+    ///
+    /// This is what lets a program block on `next(.none)` -- no polling
+    /// interval, no latency floor -- while *also* having work arrive from
+    /// somewhere the display server knows nothing about: a language
+    /// server's stdout (`zoe/lsp.zig`, the first caller), a build finishing,
+    /// a file watcher. The thread doing that work parks its result wherever
+    /// the UI will look and calls this.
+    ///
+    /// A flag rather than a bare `sem.post` because `waitFirst` loops on an
+    /// empty queue: a permit with nothing behind it would be consumed and
+    /// waited on again, and the caller would never get its turn. Coalescing
+    /// is deliberate -- ten wakes before the waiter runs are one turn round
+    /// the loop, which is what a drain-everything consumer wants.
+    pub fn wake(self: *InputListener) void {
+        self.woken.store(true, .release);
+        self.sem.post(self.io);
     }
 
     /// Appends one parsed notification (the reader thread's only way into
@@ -3769,10 +3820,14 @@ pub const InputListener = struct {
     /// queues after this returns handles them immediately -- but `next`
     /// is the better shape for a new loop.
     pub fn waitInputEvent(self: *InputListener, timeout: std.Io.Timeout) !?InputEvent {
+        // A `wake` releases this too, and reads as "nothing" -- the same
+        // answer this already gives for a wake on a non-input event.
+        if (self.woken.swap(false, .acquire)) return self.pollInputEvent();
         self.sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
             error.Timeout => return null,
             error.Canceled => |e| return e,
         };
+        _ = self.woken.swap(false, .acquire);
         return self.pollInputEvent();
     }
 
