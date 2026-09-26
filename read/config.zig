@@ -103,6 +103,26 @@ pub const ReadConfig = struct {
     /// default -- leaves the feature off entirely: no load at startup,
     /// no click handling in the dialog.
     dictionary: []const u8 = "",
+    /// Path to a second unzipped Yomitan dictionary directory holding
+    /// *frequency* data -- `term_meta_bank_*.json` rows. Empty (the
+    /// default) leaves ranking exactly as it was.
+    ///
+    /// It is a separate key rather than a second entry in `dictionary`
+    /// because the two are separate downloads: a term dictionary like
+    /// Jitendex ships no frequency data at all, and the frequency lists
+    /// Yomitan users install (JPDB, Innocent Corpus, BCCWJ, …) ship no
+    /// definitions. Each directory keeps its own `index.sqlite3`, so
+    /// swapping the frequency list doesn't force the term index to be
+    /// rebuilt.
+    frequency_dictionary: []const u8 = "",
+    /// Which direction `frequency_dictionary`'s numbers run, because the
+    /// format does not say: `"rank"` (the default) means lower is more
+    /// common, the way a ranked list like JPDB or Innocent Corpus is
+    /// numbered; `"count"` means higher is more common, the way a raw
+    /// corpus tally is. Yomitan makes the same thing a per-dictionary
+    /// setting rather than guessing, and guessing wrong silently inverts
+    /// every ranking.
+    frequency_order: FrequencyOrder = .rank,
     /// Default size of the lookup panel's title (the looked-up term) --
     /// `"1x"` (normal), `"1.5x"`, or `"2x"`, drawn via `write_text`'s
     /// `scale` (see `core.TextScale`'s doc comment). `s` cycles it at
@@ -319,6 +339,14 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     // result points into Lua's own string and doesn't outlive `load`.
     if (stringField(lua, "dictionary")) |v|
         result.config.dictionary = ownString(alloc, &result.config, v, "");
+    if (stringField(lua, "frequency_dictionary")) |v|
+        result.config.frequency_dictionary = ownString(alloc, &result.config, v, "");
+    if (stringField(lua, "frequency_order")) |v| {
+        if (parseFrequencyOrder(v)) |o| result.config.frequency_order = o else std.log.warn(
+            "gw-read: {s} `frequency_order` = '{s}' is not 'rank'/'count'; ignored",
+            .{ conf_name, v },
+        );
+    }
     if (stringField(lua, "dictionary_title_scale")) |v| {
         if (parseTitleScale(v)) |s| result.config.dictionary_title_scale = s else std.log.warn(
             "gw-read: {s} `dictionary_title_scale` = '{s}' is not '1x'/'1.5x'/'2x'/'3x'; ignored",
@@ -452,6 +480,30 @@ pub fn parseMode(name: []const u8) ?zoom.Mode {
     if (std.mem.eql(u8, name, "fit-height") or std.mem.eql(u8, name, "fit_height")) return .fit_height;
     if (std.mem.eql(u8, name, "natural") or std.mem.eql(u8, name, "1:1")) return .natural;
     if (std.mem.eql(u8, name, "free") or std.mem.eql(u8, name, "zoom")) return .free;
+    return null;
+}
+
+/// Which way a frequency dictionary's numbers run -- see
+/// `ReadConfig.frequency_order`.
+pub const FrequencyOrder = enum {
+    /// Lower is more common (JPDB, Innocent Corpus, BCCWJ rank files).
+    rank,
+    /// Higher is more common (a raw corpus occurrence count).
+    count,
+
+    /// Whether `a` names a more common word than `b` under this order.
+    pub fn moreCommon(self: FrequencyOrder, a: i64, b: i64) bool {
+        return switch (self) {
+            .rank => a < b,
+            .count => a > b,
+        };
+    }
+};
+
+/// The `frequency_order` key's accepted spellings.
+pub fn parseFrequencyOrder(text: []const u8) ?FrequencyOrder {
+    if (std.mem.eql(u8, text, "rank")) return .rank;
+    if (std.mem.eql(u8, text, "count")) return .count;
     return null;
 }
 
