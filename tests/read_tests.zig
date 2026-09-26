@@ -1771,6 +1771,223 @@ pub fn dictLookupChainsFiveRulesAtTheRaisedDepthCapTest(_: std.Io, alloc: std.me
     );
 }
 
+
+// ─── dict: derived forms, the copula, and the dialect negatives ──────────
+//
+// Its own fixture again, for the same reason `irregular_dict_json` has
+// one: the na-adjectives and nouns here carry an *empty* `rules` column,
+// which is exactly what the copula rows' `rules_out = null` exists to
+// accept, and adding them to the shared fixture would change the hit
+// counts the tests above assert exactly.
+
+const derived_dict_json =
+    \\[
+    \\  ["綺麗","きれい","","",0,["pretty; clean"],1,""],
+    \\  ["静か","しずか","","",0,["quiet; calm"],2,""],
+    \\  ["学生","がくせい","","",0,["student"],3,""],
+    \\  ["高い","たかい","","adj-i",0,["high; tall"],4,""],
+    \\  ["早い","はやい","","adj-i",0,["fast; early"],5,""],
+    \\  ["食べる","たべる","","v1",0,["to eat"],6,""],
+    \\  ["見る","みる","","v1",0,["to see"],7,""],
+    \\  ["飲む","のむ","","v5",0,["to drink"],8,""],
+    \\  ["書く","かく","","v5",0,["to write"],9,""],
+    \\  ["泳ぐ","およぐ","","v5",0,["to swim"],10,""],
+    \\  ["知る","しる","","v5",0,["to know"],11,""],
+    \\  ["行く","いく","","v5",0,["to go"],12,""],
+    \\  ["分かる","わかる","","v5",0,["to understand"],13,""],
+    \\  ["話す","はなす","","v5",0,["to speak"],14,""],
+    \\  ["降る","ふる","","v5",0,["to fall (rain)"],15,""]
+    \\]
+;
+
+pub fn dictLookupStripsTheCopulaOffANaAdjectiveTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // A na-adjective has no class tag at all -- its `rules` column is
+    // empty -- so these are the only rules in the table whose `rules_out`
+    // is `null`, meaning "any row will do". Nothing else could validate
+    // 綺麗だった -> 綺麗.
+    const cases = [_]struct { text: []const u8, term: []const u8, reason: []const u8 }{
+        .{ .text = "綺麗だった", .term = "綺麗", .reason = "copula past" },
+        .{ .text = "静かじゃない", .term = "静か", .reason = "negative copula" },
+        .{ .text = "静かではない", .term = "静か", .reason = "negative copula" },
+        .{ .text = "学生でした", .term = "学生", .reason = "polite copula past" },
+        .{ .text = "学生です", .term = "学生", .reason = "polite copula" },
+        .{ .text = "静かな", .term = "静か", .reason = "attributive" },
+        .{ .text = "静かに", .term = "静か", .reason = "adverbial" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        try testz.expectEqualStr(m.hits[0].entry.term, c.term);
+        try testz.expectEqualStr(m.hits[0].reason.?, c.reason);
+    }
+}
+
+pub fn dictLookupChainsTheNegativePastCopulaTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // No じゃなかった row is needed: "ない" is an i-adjective, so
+    // じゃなかった is じゃない plus the adjective past, and the "かった" ->
+    // "い" row reduces it to 静かじゃない for the copula row to strip.
+    //
+    // The chain therefore reads "past", not "negative past" -- the
+    // dedicated なかった row produces the identical string but sits later
+    // in the table and loses the tie. See its comment in `dict.zig`.
+    const m = (try dict.lookup(alloc, &d, "静かじゃなかった")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "静か");
+    try testz.expectEqualStr(m.hits[0].reason.?, "negative copula, past");
+}
+
+pub fn dictLookupDeinflectsAdjectiveDerivationsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // 高さ and 早く resolved before only because Jitendex lexicalizes
+    // them; as rules they work for any i-adjective.
+    const cases = [_]struct { text: []const u8, term: []const u8, reason: []const u8 }{
+        .{ .text = "高さ", .term = "高い", .reason = "nominalizer" },
+        .{ .text = "早く", .term = "早い", .reason = "adverbial" },
+        .{ .text = "高そう", .term = "高い", .reason = "appearance" },
+        .{ .text = "高すぎる", .term = "高い", .reason = "excessive" },
+        .{ .text = "高かろう", .term = "高い", .reason = "presumptive" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        try testz.expectEqualStr(m.hits[0].entry.term, c.term);
+        try testz.expectEqualStr(m.hits[0].reason.?, c.reason);
+    }
+}
+
+pub fn dictLookupRejectsTheAdverbialRuleOnAVerbTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // The "く" -> "い" adverbial rule also matches 行く, which would
+    // "deinflect" to 行い -- the `adj-i` filter is what stops that, since
+    // no such row exists here and a noun row would not carry the tag. The
+    // verb itself must still be found, at depth 0.
+    const m = (try dict.lookup(alloc, &d, "行く")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits.len, 1);
+    try testz.expectEqualStr(m.hits[0].entry.term, "行く");
+    try testz.expectTrue(m.hits[0].reason == null);
+}
+
+pub fn dictLookupDeinflectsVerbalAppearanceAndExcessiveTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    const cases = [_]struct { text: []const u8, term: []const u8, reason: []const u8 }{
+        .{ .text = "降りそう", .term = "降る", .reason = "appearance" },
+        .{ .text = "食べそう", .term = "食べる", .reason = "appearance" },
+        .{ .text = "飲みすぎる", .term = "飲む", .reason = "excessive" },
+        .{ .text = "食べすぎる", .term = "食べる", .reason = "excessive" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, c.term) orelse return error.DerivationNotReached;
+        try testz.expectEqualStr(hit.reason.?, c.reason);
+    }
+}
+
+pub fn dictLookupChainsTeFormCompoundsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // Every one of these is non-terminal onto the te-form, so the existing
+    // te-form rows finish it -- two rule applications, and the voiced で
+    // variant matters for the -んで verbs (飲んじゃう, not 飲んちゃう).
+    const cases = [_]struct { text: []const u8, term: []const u8, reason: []const u8 }{
+        .{ .text = "食べちゃう", .term = "食べる", .reason = "te-form, completive" },
+        .{ .text = "飲んじゃう", .term = "飲む", .reason = "te-form, completive" },
+        .{ .text = "食べてしまう", .term = "食べる", .reason = "te-form, completive" },
+        .{ .text = "書いておく", .term = "書く", .reason = "te-form, preparatory" },
+        .{ .text = "書いとく", .term = "書く", .reason = "te-form, preparatory" },
+        .{ .text = "見てくる", .term = "見る", .reason = "te-form, continuative" },
+        .{ .text = "食べてみる", .term = "食べる", .reason = "te-form, attemptive" },
+        .{ .text = "書いてある", .term = "書く", .reason = "te-form, resultative" },
+        .{ .text = "食べてくれる", .term = "食べる", .reason = "te-form, benefactive" },
+        .{ .text = "見とる", .term = "見る", .reason = "te-form, Kansai progressive" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, c.term) orelse return error.CompoundNotReached;
+        try testz.expectEqualStr(hit.reason.?, c.reason);
+        try testz.expectEqual(hit.depth, 2);
+    }
+}
+
+pub fn dictLookupChainsClassicalAndDialectNegativesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // Four rows rather than forty: each of these attaches to the same stem
+    // "ない" does, so they put "ない" back and the negative rows finish.
+    const cases = [_]struct { text: []const u8, term: []const u8, reason: []const u8 }{
+        .{ .text = "知らぬ", .term = "知る", .reason = "negative, classical negative" },
+        .{ .text = "行かず", .term = "行く", .reason = "negative, classical negative" },
+        .{ .text = "分からん", .term = "分かる", .reason = "negative, colloquial negative" },
+        .{ .text = "分からへん", .term = "分かる", .reason = "negative, Kansai negative" },
+        .{ .text = "食べん", .term = "食べる", .reason = "negative, colloquial negative" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, c.term) orelse return error.NegativeNotReached;
+        try testz.expectEqualStr(hit.reason.?, c.reason);
+        try testz.expectEqual(hit.depth, 2);
+    }
+}
+
+pub fn dictLookupChainsClassicalNegativeThroughTheAdverbialTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // 行かずに -- the "に" row strips the adverbial, then ず -> ない, then
+    // the godan negative. Three rules, and none of them had to know about
+    // the combination.
+    const m = (try dict.lookup(alloc, &d, "行かずに")).?;
+    defer m.deinit(alloc);
+    const hit = hitFor(m, "行く") orelse return error.NegativeNotReached;
+    try testz.expectEqualStr(hit.reason.?, "negative, classical negative, adverbial");
+    try testz.expectEqual(hit.depth, 3);
+}
+
+pub fn dictLookupPoliteNegativePastBeatsTheCopulaOnTableOrderTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // Two rules reduce 食べませんでした to 食べません at the same depth:
+    // the specific "ませんでした" row and the copula's "でした" -> "".
+    // `Search.offer` keeps whichever was offered first, which is whichever
+    // comes first in `deinflect_rules` -- so the specific row has to stay
+    // above the copula block. Below it, this reads "polite negative,
+    // polite copula past".
+    const m = (try dict.lookup(alloc, &d, "食べませんでした")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "polite negative, polite negative past");
+}
+
+pub fn dictLookupResolvesGodanSuCausativeAndPotentialTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{derived_dict_json}, null);
+    defer d.deinit();
+    // The two gaps the earlier phases left: the godan す causative row the
+    // table's doc comment had been admitting was missing, and godan
+    // potential, which is a different form from the passive/potential
+    // -areru and only worked before where the dictionary lexicalized it.
+    const cases = [_]struct { text: []const u8, term: []const u8, reason: []const u8 }{
+        .{ .text = "話させる", .term = "話す", .reason = "causative" },
+        .{ .text = "泳げる", .term = "泳ぐ", .reason = "potential" },
+        .{ .text = "書ける", .term = "書く", .reason = "potential" },
+        .{ .text = "書けない", .term = "書く", .reason = "potential, negative" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, c.term) orelse return error.GapNotClosed;
+        try testz.expectEqualStr(hit.reason.?, c.reason);
+    }
+}
+
 // ─── dict: Yomitan parity (reading column, all lengths, ranking) ────────
 
 /// Shaped like Jitendex: kana-written words are filed under their kanji
