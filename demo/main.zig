@@ -149,11 +149,58 @@ fn run(init: std.process.Init) !void {
     try client.setCursor(intl_row + 3, 2);
     try client.writeText("Japanese: \u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\u{4E16}\u{754C}", rgb(80, 250, 123), null);
 
+    // Underline styles: the five `write_text` takes, then the two cases that
+    // are the reason the attribute exists at all -- a coloured underline
+    // under text of a different colour (a diagnostic squiggle over syntax
+    // highlighting), and the same thing arriving as an escape sequence in a
+    // mirrored program's output.
+    const ul_row = intl_row + 5;
+    try client.setCursor(ul_row, 0);
+    try client.writeText("underline styles:", rgb(200, 200, 200), null);
+    const styles = [_]glyphwire.Underline{ .single, .double, .curly, .dotted, .dashed };
+    for (styles, 0..) |style, i| {
+        try client.writeTextOpts(@tagName(style), .{
+            .row = ul_row + 1 + i,
+            .col = 2,
+            .fg = rgb(220, 220, 228),
+            .underline = style,
+        });
+    }
+
+    // The diagnostic case: the squiggle is red, the code under it is not.
+    // `underline_color` is what keeps those two independent.
+    try client.writeSpans(&.{
+        .{ .text = "const " },
+        .{
+            .text = "oops",
+            .underline = .curly,
+            .underline_color = rgb(232, 92, 92),
+        },
+        .{ .text = " = 1;   " },
+        .{
+            .text = "warning",
+            .underline = .curly,
+            .underline_color = rgb(226, 176, 74),
+        },
+    }, .{
+        .row = ul_row + 1 + styles.len,
+        .col = 2,
+        .fg = rgb(126, 200, 255),
+    });
+
+    // And through SGR, the way a compiler's own output would carry it:
+    // `4:3` is curly, `58;2;r;g;b` its colour. Note `4:3` and not `4;3` --
+    // the latter is an underline followed by an italic.
+    try client.writeTextOpts(
+        "\x1b[4:3;58;2;232;92;92mvia SGR escape\x1b[0m",
+        .{ .row = ul_row + 2 + styles.len, .col = 2, .fg = rgb(220, 220, 228) },
+    );
+
     // Leaves the cursor a couple of blank rows below the last text: none of
     // draw_box/draw_icon move the cursor, so without this it would still
     // sit wherever the last write_text call left it. glyphwire-shell draws
     // its next prompt one row below wherever the cursor ends up after a
     // child runs (see Prompt.submitLine), so leaving it higher up made the
     // next prompt overwrite this output.
-    try client.setCursor(intl_row + 5, 0);
+    try client.setCursor(ul_row + 4 + styles.len, 0);
 }
