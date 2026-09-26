@@ -150,26 +150,36 @@ const Ocr = struct {
 
 /// A dictionary lookup result shown in `Ui.dict_layer`. `match` holds
 /// every ranked hit (owned by `Ui.alloc`; `Ui.clearLookup` frees it
-/// before every replacement and on shutdown) -- not only homographs of
+/// before every replacement and on shutdown) -- not only other spellings of
 /// one word but shorter words off the same start, since
-/// `dict_mod.lookup` collects every length the way Yomitan does. `hit`
-/// picks which one is shown, cycled with `]`/`[` while the panel is up
-/// (`Ui.cycleLookupHit`).
+/// `dict_mod.lookup` collects every length the way Yomitan does.
+///
+/// **`entry` indexes `match.groups`, not `match.hits`.** The panel is a
+/// list of *words*, one row per entry, with the focused one expanded in
+/// place; several spellings of one word (する and 為る) are one entry and
+/// one row. `]`/`[` move the focus (`Ui.cycleLookupHit`), which is what
+/// the dialog highlight and an Anki capture follow.
 const Lookup = struct {
     match: dict_mod.Match,
-    hit: usize = 0,
+    entry: usize = 0,
     /// Where the looked-up text began, as a byte offset into
     /// `Ocr.text.joined`. Every hit's span starts here and runs its own
     /// `source_len`, which is what the dialog's highlight follows as the
-    /// shown hit changes (`Ui.highlightLookup`).
+    /// focused entry changes (`Ui.highlightLookup`).
     source_start: usize,
 
+    fn group(self: Lookup) dict_mod.Group {
+        return self.match.groups[self.entry];
+    }
+
+    /// The focused entry's best hit -- what the title, the highlight span
+    /// and an Anki card are all about.
     fn current(self: Lookup) dict_mod.Hit {
-        return self.match.hits[self.hit];
+        return self.match.hits[self.group().primary];
     }
 
     fn count(self: Lookup) usize {
-        return self.match.hits.len;
+        return self.match.groups.len;
     }
 };
 
@@ -1394,6 +1404,15 @@ pub const Ui = struct {
         scale: glyphwire.TextScale = .x1,
     };
 
+    /// A run of a side panel's content rows that must stay on screen: the
+    /// focused dictionary entry, so `]`/`[` scroll the list to it instead of
+    /// moving a selection out of view. In *cells*, not `PanelLine`s, since a
+    /// scaled line is several cells tall.
+    const Reveal = struct {
+        row: usize,
+        rows: usize,
+    };
+
     /// Widest an AI answer's panel wraps to. Wider than the dictionary
     /// panel's `ocr_dialog_cols`: the answer is English prose, which reads
     /// badly in a 36-column ribbon.
@@ -1436,9 +1455,7 @@ pub const Ui = struct {
     fn renderLookup(self: *Ui) !void {
         if (self.ocr) |o| if (o.hidden) return self.hideSide();
         const lk = self.lookup orelse return self.hideSide();
-        const shown = lk.current();
-        const entry = shown.entry;
-        if (entry.term.len == 0) return self.hideSide();
+        if (lk.current().entry.term.len == 0) return self.hideSide();
 
         // Every wrapped row points into a buffer built here, so one arena
         // holds the lot until the panel has been sent.
@@ -1446,80 +1463,168 @@ pub const Ui = struct {
         defer arena.deinit();
         const a = arena.allocator();
 
-        // Subheader: the reading when that differs from the term itself
-        // (kana-only entries have the same string in both), the
-        // deinflection reason when this wasn't the dictionary form, and
-        // -- when the lookup found more than one hit -- a "[hit/total]"
-        // position, cycled with `]`/`[` (`Ui.cycleLookupHit`).
-        var sub_buf: std.ArrayList(u8) = .empty;
-        if (entry.reading.len > 0 and !std.mem.eql(u8, entry.reading, entry.term)) {
-            try sub_buf.appendSlice(a, "\u{3010}");
-            try sub_buf.appendSlice(a, entry.reading);
-            try sub_buf.appendSlice(a, "\u{3011}");
-        }
-        if (shown.reason) |r| {
-            if (sub_buf.items.len > 0) try sub_buf.append(a, ' ');
-            try sub_buf.append(a, '(');
-            try sub_buf.appendSlice(a, r);
-            try sub_buf.append(a, ')');
-        }
-        // The frequency list's number for this word, when one is loaded and
-        // has it -- shown next to the headword the way Yomitan does, since
-        // it is now the first thing ranking goes on and a reader should be
-        // able to see what the order was based on. The list's own
-        // `displayValue` wins when it supplied one, because a list that
-        // writes "1200㋕" means the ㋕.
-        if (shown.frequency) |f| {
-            if (sub_buf.items.len > 0) try sub_buf.append(a, ' ');
-            if (shown.frequency_display.len > 0)
-                try sub_buf.print(a, "#{s}", .{shown.frequency_display})
-            else
-                try sub_buf.print(a, "#{d}", .{f});
-        }
-        if (lk.count() > 1) {
-            if (sub_buf.items.len > 0) try sub_buf.append(a, ' ');
-            try sub_buf.print(a, "[{d}/{d}]", .{ lk.hit + 1, lk.count() });
-        }
-
-        // Body: every sense joined onto one ribbon before wrapping, not
-        // one row per sense -- a homograph can carry a dozen, and this
-        // panel is meant to answer "what does this word mean", not
-        // replace the dictionary. A long one scrolls (`drawSidePanel`).
-        var body_buf: std.ArrayList(u8) = .empty;
-        for (entry.glossary, 0..) |g, i| {
-            if (i > 0) try body_buf.appendSlice(a, "; ");
-            try body_buf.appendSlice(a, g);
-        }
-
         const inner_max = self.sideInnerMax(self.conf.ocr_dialog_cols -| 4);
-        const sub_rows = try mokuro.wrap(a, sub_buf.items, inner_max);
-        const body_rows = try mokuro.wrap(a, body_buf.items, inner_max);
-
-        // The term gets its own row at `dict_title_scale`: a scaled glyph
-        // draws down into the rows below its own, so it can't share a row
-        // with the subheader. `drawSidePanel` reserves those rows -- all
-        // of them, which is what 3x used to overrun.
-        //
         // At scale the term is `pitch` times wider, so it is measured
-        // against the window rather than `inner_max` (the configured
-        // dialog width): the panel widens to fit it, and only a term too
-        // wide even for the window wraps onto further scaled rows. Sizing
-        // it against `inner_max` clipped a long 3x term mid-word.
+        // against the window rather than `inner_max` (the configured dialog
+        // width): the panel widens to fit it, and only a term too wide even
+        // for the window wraps onto further scaled rows. Sizing it against
+        // `inner_max` clipped a long 3x term mid-word.
         const pitch = glyphwire.scaledPitch(self.dict_title_scale);
-        const title_cap = self.sideInnerMax(std.math.maxInt(usize));
-        const term_rows = try mokuro.wrap(a, entry.term, @max(title_cap / pitch, 1));
-        var panel_cap = inner_max;
-        for (term_rows) |r| panel_cap = @max(panel_cap, mokuro.displayWidth(r) * pitch);
+        const title_cap = @max(self.sideInnerMax(std.math.maxInt(usize)) / pitch, 1);
 
         var lines: std.ArrayList(PanelLine) = .empty;
-        for (term_rows) |r| try lines.append(a, .{ .text = r, .fg = fg_lookup_term, .scale = self.dict_title_scale });
-        for (sub_rows) |r| try lines.append(a, .{ .text = r });
-        // A blank separator row before the body, but only when there is
-        // one -- the term (plus its subheader) is always shown.
-        if (body_rows.len > 0) try lines.append(a, .{ .text = "" });
-        for (body_rows) |r| try lines.append(a, .{ .text = r });
+        var panel_cap = inner_max;
+        // The focused entry's block, as indices into `lines` -- converted to
+        // cell rows below, since a scaled line is taller than one cell.
+        var focus_from: usize = 0;
+        var focus_to: usize = 0;
 
-        try self.drawSidePanel(lines.items, panel_cap);
+        for (lk.match.groups, 0..) |g, gi| {
+            const hit = lk.match.hits[g.primary];
+            const entry = hit.entry;
+            if (entry.term.len == 0) continue;
+
+            // A blank row between entries so the expanded block doesn't run
+            // into the row above it. Not before the first.
+            if (lines.items.len > 0) try lines.append(a, .{ .text = "" });
+
+            if (gi != lk.entry) {
+                // Collapsed: term, other spellings, reading and frequency on
+                // one 1x row -- enough to tell whether it is the word you
+                // meant. This is the point of the whole change: an entry
+                // ranked fourth used to be invisible behind `]`.
+                for (try mokuro.wrap(a, try collapsedEntryLine(a, lk, g), inner_max)) |r| {
+                    try lines.append(a, .{ .text = r });
+                }
+                continue;
+            }
+
+            focus_from = lines.items.len;
+
+            // Expanded: the treatment the one-hit-at-a-time panel always
+            // gave its single hit.
+            for (try mokuro.wrap(a, entry.term, title_cap)) |r| {
+                panel_cap = @max(panel_cap, mokuro.displayWidth(r) * pitch);
+                try lines.append(a, .{ .text = r, .fg = fg_lookup_term, .scale = self.dict_title_scale });
+            }
+            for (try mokuro.wrap(a, try subheaderFor(a, lk, g), inner_max)) |r| {
+                try lines.append(a, .{ .text = r });
+            }
+
+            // Body: every sense joined onto one ribbon before wrapping, not
+            // one row per sense -- a homograph can carry a dozen, and this
+            // panel is meant to answer "what does this word mean", not
+            // replace the dictionary.
+            var body_buf: std.ArrayList(u8) = .empty;
+            for (entry.glossary, 0..) |gl, i| {
+                if (i > 0) try body_buf.appendSlice(a, "; ");
+                try body_buf.appendSlice(a, gl);
+            }
+            const body_rows = try mokuro.wrap(a, body_buf.items, inner_max);
+            if (body_rows.len > 0) try lines.append(a, .{ .text = "" });
+            for (body_rows) |r| try lines.append(a, .{ .text = r });
+
+            focus_to = lines.items.len;
+        }
+
+        // `focus_from`/`focus_to` count lines; `drawSidePanel` scrolls in
+        // cells, and a scaled title line occupies `pitch` of them.
+        var reveal: Reveal = .{ .row = 0, .rows = 0 };
+        for (lines.items, 0..) |l, i| {
+            const p = glyphwire.scaledPitch(l.scale);
+            if (i < focus_from) reveal.row += p;
+            if (i >= focus_from and i < focus_to) reveal.rows += p;
+        }
+        // Only reachable if every group had an empty term, which `hideSide`
+        // above has already ruled out for the focused one -- but a zero-row
+        // reveal would mean "keep nothing on screen".
+        if (reveal.rows == 0) reveal.rows = 1;
+
+        try self.drawSidePanel(lines.items, panel_cap, reveal);
+    }
+
+    /// The focused entry's subheader: its reading when that differs from the
+    /// term itself (a kana-only entry has the same string in both), its
+    /// other spellings, the deinflection reason when this wasn't the
+    /// dictionary form, its frequency, and -- when the lookup found more
+    /// than one entry -- an "[n/total]" position, cycled with `]`/`[`.
+    fn subheaderFor(a: std.mem.Allocator, lk: Lookup, g: dict_mod.Group) ![]const u8 {
+        const hit = lk.match.hits[g.primary];
+        const entry = hit.entry;
+        var buf: std.ArrayList(u8) = .empty;
+
+        if (entry.reading.len > 0 and !std.mem.eql(u8, entry.reading, entry.term)) {
+            try buf.appendSlice(a, "\u{3010}");
+            try buf.appendSlice(a, entry.reading);
+            try buf.appendSlice(a, "\u{3011}");
+        }
+        try appendOtherSpellings(a, &buf, lk, g);
+        if (hit.reason) |r| {
+            if (buf.items.len > 0) try buf.append(a, ' ');
+            try buf.append(a, '(');
+            try buf.appendSlice(a, r);
+            try buf.append(a, ')');
+        }
+        try appendFrequency(a, &buf, hit, buf.items.len > 0);
+        if (lk.count() > 1) {
+            if (buf.items.len > 0) try buf.append(a, ' ');
+            try buf.print(a, "[{d}/{d}]", .{ lk.entry + 1, lk.count() });
+        }
+        return buf.items;
+    }
+
+    /// One unfocused entry's row: term, other spellings, reading and
+    /// frequency. No senses -- reading those is what focusing it is for.
+    fn collapsedEntryLine(a: std.mem.Allocator, lk: Lookup, g: dict_mod.Group) ![]const u8 {
+        const hit = lk.match.hits[g.primary];
+        const entry = hit.entry;
+        var buf: std.ArrayList(u8) = .empty;
+        try buf.appendSlice(a, entry.term);
+        try appendOtherSpellings(a, &buf, lk, g);
+        if (entry.reading.len > 0 and !std.mem.eql(u8, entry.reading, entry.term)) {
+            try buf.appendSlice(a, " \u{3010}");
+            try buf.appendSlice(a, entry.reading);
+            try buf.appendSlice(a, "\u{3011}");
+        }
+        try appendFrequency(a, &buf, hit, true);
+        return buf.items;
+    }
+
+    /// The same word's other spellings, joined the way Japanese lists
+    /// alternatives: `する・為る`. They are one entry because they share a
+    /// JMdict sequence and therefore share every sense (see `dict.Group`),
+    /// so the spelling is all there is left to show for them.
+    fn appendOtherSpellings(
+        a: std.mem.Allocator,
+        buf: *std.ArrayList(u8),
+        lk: Lookup,
+        g: dict_mod.Group,
+    ) !void {
+        for (g.others) |oi| {
+            const other = lk.match.hits[oi].entry.term;
+            if (other.len == 0) continue;
+            try buf.appendSlice(a, "\u{30FB}");
+            try buf.appendSlice(a, other);
+        }
+    }
+
+    /// The frequency list's number for `hit`, shown next to the headword the
+    /// way Yomitan does -- it is the first thing ranking goes on, so a
+    /// reader should be able to see what the order was based on. The list's
+    /// own `displayValue` wins when it supplied one, because a list that
+    /// writes "1200㋕" means the ㋕.
+    fn appendFrequency(
+        a: std.mem.Allocator,
+        buf: *std.ArrayList(u8),
+        hit: dict_mod.Hit,
+        space_before: bool,
+    ) !void {
+        const f = hit.frequency orelse return;
+        if (space_before) try buf.append(a, ' ');
+        if (hit.frequency_display.len > 0)
+            try buf.print(a, "#{s}", .{hit.frequency_display})
+        else
+            try buf.print(a, "#{d}", .{f});
     }
 
     /// Draws the AI panel for `self.ai` in the side slot: the first-send
@@ -1578,7 +1683,7 @@ pub const Ui = struct {
             },
         }
 
-        try self.drawSidePanel(lines.items, inner_max);
+        try self.drawSidePanel(lines.items, inner_max, null);
     }
 
     /// Wraps `text` paragraph by paragraph -- `mokuro.wrap` knows nothing
@@ -1604,7 +1709,7 @@ pub const Ui = struct {
     ///
     /// `inner_cap` bounds the interior width; the panel is otherwise sized
     /// to its widest line.
-    fn drawSidePanel(self: *Ui, lines: []const PanelLine, inner_cap: usize) !void {
+    fn drawSidePanel(self: *Ui, lines: []const PanelLine, inner_cap: usize, reveal: ?Reveal) !void {
         var inner: usize = 1;
         var content_rows: usize = 0;
         for (lines) |l| {
@@ -1624,6 +1729,18 @@ pub const Ui = struct {
             self.side_reset_scroll = false;
         }
         self.side_scroll = @min(self.side_scroll, self.side_max_scroll);
+        // Scroll only as far as it takes to bring `reveal` into view, and
+        // prefer showing its top when it is taller than the slot -- a long
+        // entry should start at its headword, not end at its last sense.
+        if (reveal) |r| {
+            // +1 for the top border row, which scrolls with the content.
+            const top = r.row + 1;
+            const bottom = top + r.rows;
+            if (top < self.side_scroll) self.side_scroll = top;
+            if (bottom > self.side_scroll + slot.rows)
+                self.side_scroll = @min(bottom - slot.rows, top);
+            self.side_scroll = @min(self.side_scroll, self.side_max_scroll);
+        }
         self.side_rect = .{ .row = slot.row, .col = slot.col, .rows = slot.rows, .cols = box_cols };
 
         const layer = self.dict_layer;
@@ -1860,7 +1977,7 @@ pub const Ui = struct {
         "  \\                    hide the dialog",
         "  S                    cycle the dialog's text size",
         "  click a word         dictionary lookup",
-        "  ] / [                other matches of the lookup",
+        "  ] / [                focus the next / previous match",
         "  s                    cycle the lookup title size",
         "  a                    AI translation of the bubble",
         "  c                    Anki card from the lookup / AI",
@@ -2251,10 +2368,10 @@ pub const Ui = struct {
         if (eq(u8, text, "+") or eq(u8, text, "=")) return self.zoomBy(.in);
         if (eq(u8, text, "-")) return self.zoomBy(.out);
         if (eq(u8, text, "\\")) return self.toggleDialogHidden();
-        // While the lookup panel is showing more than one homograph,
-        // `]`/`[` cycle through them instead of jumping pages -- the
-        // panel "captures" the keys for as long as there's something to
-        // cycle, same as `goto_prompt` captures every key above.
+        // While the lookup panel is listing more than one entry, `]`/`[`
+        // move the focus down and up that list instead of jumping pages --
+        // the panel "captures" the keys for as long as there's something to
+        // move between, same as `goto_prompt` captures every key above.
         if (self.lookup) |lk| if (lk.count() > 1) {
             if (eq(u8, text, "]")) return self.cycleLookupHit(1);
             if (eq(u8, text, "[")) return self.cycleLookupHit(-1);
@@ -2662,10 +2779,13 @@ pub const Ui = struct {
         if (self.lookup == null) return;
         const n: i64 = @intCast(self.lookup.?.count());
         if (n <= 1) return;
-        const idx = @mod(@as(i64, @intCast(self.lookup.?.hit)) + delta, n);
-        self.lookup.?.hit = @intCast(idx);
+        const idx = @mod(@as(i64, @intCast(self.lookup.?.entry)) + delta, n);
+        self.lookup.?.entry = @intCast(idx);
         self.side_dirty = true;
-        self.side_reset_scroll = true;
+        // Deliberately *not* `side_reset_scroll`: the list stays put and
+        // `renderLookup` scrolls only as far as it must to bring the newly
+        // focused entry into view, so cycling reads as moving down a list
+        // rather than as replacing the panel.
         self.highlightLookup();
     }
 
@@ -3532,7 +3652,7 @@ pub const Ui = struct {
             },
         }
 
-        try self.drawSidePanel(lines.items, inner_max);
+        try self.drawSidePanel(lines.items, inner_max, null);
     }
 
     fn handleMouseMove(self: *Ui, ev: glyphwire.MouseMoveEvent) !void {

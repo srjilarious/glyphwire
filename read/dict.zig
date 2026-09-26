@@ -151,10 +151,19 @@
 //! same per-dictionary setting Yomitan makes it, because guessing wrong
 //! silently inverts every result.
 //!
-//! Still on the list: Yomitan groups hits into one entry per headword and
-//! shows them stacked, where this panel shows one at a time behind `]`/`[`.
-//! Every ranking improvement is worth less than it should be until that
-//! changes.
+//! **Hits are also grouped into entries** (`Match.groups`), so that ranking
+//! has somewhere to show itself: the panel lists one row per *word* with the
+//! focused one expanded, rather than one row per dictionary row behind
+//! `]`/`[`. The grouping key is the term bank's `sequence` -- Yomitan's
+//! "merge" output mode -- which is the only field that says "these are one
+//! word"; see `Group` for why term+reading is the wrong key and for the
+//! measurement that says merging by sequence loses nothing.
+//!
+//! Still on the list: pitch accent (`term_meta_bank`'s other row type, which
+//! is read past rather than read), `definitionTags`/`termTags` and
+//! `tag_bank_*.json`, several term dictionaries at once, and the condition
+//! system that would replace `rules_out` -- see
+//! `tech-notes/plans/glyphwire/2026-09-26-gw-read-yomitan-parity.md`.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
@@ -948,11 +957,42 @@ pub const Hit = struct {
     }
 };
 
+/// One dictionary entry, as a reader thinks of it: every spelling of the
+/// same word collapsed into a single result. Yomitan's "merge" output mode.
+///
+/// The key is the term bank's `sequence` -- the JMdict entry id -- which is
+/// the only thing in the data that actually says "these are one word". In a
+/// real Jitendex build 61629 sequences span more than one headword spelling,
+/// and **not one sequence's rows disagree about their glossary**, so merging
+/// them loses nothing: a sequence is one JMdict entry and the extra rows are
+/// its alternate spellings, carrying identical senses.
+///
+/// Grouping on term+reading instead would be wrong in both directions: it
+/// leaves する and 為る (different terms, one sequence, identical senses) as
+/// two entries, and it fuses ああ with ああ -- two *different* sequences,
+/// "like that; so" and "ah!; oh!" -- into one.
+///
+/// A row with no sequence (`0`) is never merged with anything, since there
+/// is nothing to say it belongs with another row.
+pub const Group = struct {
+    /// Index into `Match.hits` of the best-ranked hit here. It titles the
+    /// entry and supplies its reading, reason, frequency, senses and span:
+    /// `hits` is already in rank order when groups are built, so this is
+    /// the most frequent / shallowest / longest-source route to the word.
+    primary: u32,
+    /// The group's *other* spellings, in rank order -- indices into
+    /// `Match.hits`. Empty for the common case of a word with one spelling.
+    others: []const u32,
+};
+
 /// A successful lookup: every hit, best first. Never empty -- `lookup`
 /// returns null instead. Owned by the allocator `lookup` was given; free
 /// with `deinit`.
 pub const Match = struct {
     hits: []Hit,
+    /// `hits` collapsed to one entry per word, best first -- see `Group`.
+    /// Never empty either, and every hit belongs to exactly one group.
+    groups: []Group,
 
     /// Bytes covered by the best hit -- the longest match, since that is
     /// the first thing hits are ranked on.
@@ -963,8 +1003,49 @@ pub const Match = struct {
     pub fn deinit(self: Match, alloc: std.mem.Allocator) void {
         for (self.hits) |h| h.deinit(alloc);
         alloc.free(self.hits);
+        for (self.groups) |g| alloc.free(g.others);
+        alloc.free(self.groups);
     }
 };
+
+/// Collapses `hits` (already in rank order) into one `Group` per sequence.
+/// The first hit seen for a sequence is its `primary`, so group order
+/// follows hit order and the best hit overall heads the first group.
+fn groupHits(alloc: std.mem.Allocator, hits: []const Hit) ![]Group {
+    var groups: std.ArrayList(Group) = .empty;
+    errdefer {
+        for (groups.items) |g| alloc.free(g.others);
+        groups.deinit(alloc);
+    }
+    // sequence -> index into `groups`. Only for sequences > 0: a row with
+    // no sequence gets a group to itself and never joins this map.
+    var by_sequence: std.AutoHashMapUnmanaged(i64, usize) = .empty;
+    defer by_sequence.deinit(alloc);
+
+    // `others` is grown per group and only sealed at the end, since a later
+    // hit can still join a group opened much earlier.
+    var others: std.ArrayList(std.ArrayList(u32)) = .empty;
+    defer {
+        for (others.items) |*o| o.deinit(alloc);
+        others.deinit(alloc);
+    }
+
+    for (hits, 0..) |h, i| {
+        const idx: u32 = @intCast(i);
+        if (h.entry.sequence != 0) {
+            if (by_sequence.get(h.entry.sequence)) |gi| {
+                try others.items[gi].append(alloc, idx);
+                continue;
+            }
+            try by_sequence.put(alloc, h.entry.sequence, groups.items.len);
+        }
+        try groups.append(alloc, .{ .primary = idx, .others = &.{} });
+        try others.append(alloc, .empty);
+    }
+
+    for (groups.items, 0..) |*g, gi| g.others = try others.items[gi].toOwnedSlice(alloc);
+    return groups.toOwnedSlice(alloc);
+}
 
 /// How many codepoints of `text` a lookup considers -- Yomitan's default
 /// scan length. Covers every realistic single-word span (this table's
@@ -1069,7 +1150,12 @@ pub fn lookup(
             .frequency_display = try alloc.dupe(u8, c.frequency_display),
         });
     }
-    return .{ .hits = try hits.toOwnedSlice(alloc) };
+    const owned = try hits.toOwnedSlice(alloc);
+    errdefer {
+        for (owned) |h| h.deinit(alloc);
+        alloc.free(owned);
+    }
+    return .{ .hits = owned, .groups = try groupHits(alloc, owned) };
 }
 
 /// One way of reaching a dictionary row, before ranking. Everything in it
