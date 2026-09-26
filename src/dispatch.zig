@@ -917,6 +917,18 @@ const SetBgParams = struct {
     bg: protocol.Color,
 };
 
+/// `set_underline` params: the same region as `set_bg`, and `underline` is
+/// required for the same reason `bg` is. `"none"` is how a mark comes off.
+const SetUnderlineParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: usize = 0,
+    col: usize = 0,
+    rows: ?usize = null,
+    cols: ?usize = null,
+    underline: []const u8,
+    underline_color: ?protocol.Color = null,
+};
+
 /// `batch` params: an ordered list of sub-messages, each a normal
 /// JSON-RPC object (`{method, params, id?}`) -- the same shape `handle`
 /// parses from a standalone frame. See `handleBatch` for how they're
@@ -1640,6 +1652,7 @@ pub const Dispatcher = struct {
         .{ "draw_box", catVoid(handleDrawBox) },
         .{ "clear", catVoid(handleClear) },
         .{ "set_bg", catVoid(handleSetBg) },
+        .{ "set_underline", catVoid(handleSetUnderline) },
         .{ "get_cell_metrics", catBytesIdNoParams(handleGetCellMetrics) },
         .{ "create_metadata", catBytesId(handleCreateMetadata) },
         .{ "destroy_metadata", catVoid(handleDestroyMetadata) },
@@ -3433,6 +3446,25 @@ pub const Dispatcher = struct {
         const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
         const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
         layer.fillBg(p.row, p.col, rows, cols, colorFromJson(p.bg));
+    }
+
+    /// `set_underline`: `set_bg` for the underline channel -- a mark applied
+    /// over text already on the grid, without the caller having to know what
+    /// colours are under it. See `core.Layer.fillUnderline` for why an
+    /// editor needs this rather than threading the underline through every
+    /// write that touches the row.
+    fn handleSetUnderline(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetUnderlineParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const ul = try parseUnderline(p.underline, p.underline_color);
+        const layer = try self.resolveLayer(p.layer);
+        const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
+        const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
+        layer.fillUnderline(p.row, p.col, rows, cols, ul);
     }
 
     /// A client-side convenience for aspect-ratio-aware placement

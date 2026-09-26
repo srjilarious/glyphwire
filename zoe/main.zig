@@ -157,8 +157,22 @@ pub fn main(init: std.process.Init) !void {
         switch (try zoe.keys.feed(&ed, s)) {
             // `:bn` / `:bp` / `:bd` need the UI's buffer list, `:cd` /
             // `:pwd` a live client and a real cwd, the clipboard ones a
-            // live host. The headless driver just reports what parsed.
-            .none, .quit, .chdir, .pwd, .set_clipboard, .paste, .buffer_step, .buffer_close => {},
+            // live host, and every LSP one a running language server.
+            // The headless driver just reports what parsed.
+            .none,
+            .quit,
+            .chdir,
+            .pwd,
+            .set_clipboard,
+            .paste,
+            .buffer_step,
+            .buffer_close,
+            .lsp_hover,
+            .lsp_definition,
+            .diag_step,
+            .lsp_status,
+            .diag_list,
+            => {},
             .write, .write_quit, .edit => |dest| try headlessSave(io, &ed, dest),
         }
     }

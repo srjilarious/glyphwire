@@ -27,6 +27,8 @@ pub const ui = @import("ui.zig");
 pub const tabs = @import("tabs.zig");
 pub const syntax = @import("syntax.zig");
 pub const langconf = @import("langconf.zig");
+pub const lsp = @import("lsp.zig");
+pub const diag = @import("diag.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const GapBuffer = buffer.GapBuffer;
