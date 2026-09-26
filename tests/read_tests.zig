@@ -2203,6 +2203,129 @@ pub fn dictFrequencyCarriesItsDisplayTextOntoTheHitTest(_: std.Io, alloc: std.me
     try testz.expectEqualStr(m.hits[0].frequency_display, "1200㋕");
 }
 
+
+// ─── dict: grouping spellings into one entry ──────────────────────────────
+//
+// `Match.groups` collapses hits that are the same *word* into one entry, so
+// the lookup panel can list entries rather than rows. The key is the term
+// bank's `sequence` -- the JMdict entry id -- for reasons the fixtures below
+// make concrete.
+
+/// Modelled on the real cases in a Jitendex build:
+/// - する / 為る: different terms, **one** sequence, identical senses.
+/// - ああ / ああ: same term and reading, **two** sequences, different senses.
+/// - 合判 / 合い判: spelling variants sharing a sequence.
+/// - 猫: no sequence at all (0).
+const group_dict_json =
+    \\[
+    \\  ["する","する","","vs",200,["to do"],1157170,""],
+    \\  ["為る","する","","vs",-101,["to do"],1157170,""],
+    \\  ["ああ","ああ","","",200,["like that; so"],2085080,""],
+    \\  ["ああ","ああ","","",200,["ah!; oh!"],1565440,""],
+    \\  ["合判","あいばん","","",-4,["official seal"],2691870,""],
+    \\  ["合い判","あいばん","","",-5,["official seal"],2691870,""],
+    \\  ["猫","ねこ","","",0,["cat"],0,""]
+    \\]
+;
+
+pub fn dictLookupGroupsSpellingsThatShareASequenceTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{group_dict_json}, &.{}, null);
+    defer d.deinit();
+    // する and 為る are one word written two ways: one sequence, identical
+    // glossaries. Two hits, one entry -- which is also what stops the
+    // frequency ranking showing the same word twice at the top of the list.
+    const m = (try dict.lookup(alloc, &d, null, .rank, "する")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits.len, 2);
+    try testz.expectEqual(m.groups.len, 1);
+    // The better-scoring spelling leads and the other becomes an alternate.
+    try testz.expectEqualStr(m.hits[m.groups[0].primary].entry.term, "する");
+    try testz.expectEqual(m.groups[0].others.len, 1);
+    try testz.expectEqualStr(m.hits[m.groups[0].others[0]].entry.term, "為る");
+}
+
+pub fn dictLookupKeepsDifferentSequencesApartTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{group_dict_json}, &.{}, null);
+    defer d.deinit();
+    // The case that rules out grouping on term+reading: both ああ rows have
+    // the same term *and* the same reading, but they are different words
+    // ("like that" vs "ah!") with different sequences. Fusing them would
+    // merge two unrelated meanings into one entry.
+    const m = (try dict.lookup(alloc, &d, null, .rank, "ああ")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits.len, 2);
+    try testz.expectEqual(m.groups.len, 2);
+    try testz.expectEqual(m.groups[0].others.len, 0);
+    try testz.expectEqual(m.groups[1].others.len, 0);
+}
+
+pub fn dictLookupGroupsSpellingVariantsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{group_dict_json}, &.{}, null);
+    defer d.deinit();
+    // 合判 and 合い判 differ only by an okurigana い. One sequence, so one
+    // entry -- reached here through the *reading*, which both share.
+    const m = (try dict.lookup(alloc, &d, null, .rank, "あいばん")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.groups.len, 1);
+    try testz.expectEqual(m.groups[0].others.len, 1);
+}
+
+pub fn dictLookupNeverMergesRowsWithNoSequenceTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A sequence of 0 means the term bank said nothing about which entry the
+    // row belongs to, so there is no evidence two such rows are one word --
+    // they each get their own entry rather than all collapsing into one.
+    var d = try dict.openMemory(alloc, &.{
+        \\[["猫","ねこ","","",0,["cat"],0,""],
+        \\ ["寝子","ねこ","","",0,["sleeping child"],0,""]]
+    }, &.{}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, null, .rank, "ねこ")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.hits.len, 2);
+    try testz.expectEqual(m.groups.len, 2);
+}
+
+pub fn dictLookupGroupOrderFollowsHitRankingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{group_dict_json}, &.{
+        \\[["する","freq",38]]
+    }, null);
+    defer d.deinit();
+    // Groups are built by walking `hits` in rank order, so the best hit
+    // overall heads the first group and `groups[0].primary` is always hit 0.
+    // That is what lets the panel focus entry 0 and get the best answer.
+    const m = (try dict.lookup(alloc, &d, &d, .rank, "する")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqual(m.groups[0].primary, 0);
+    try testz.expectEqualStr(m.hits[0].entry.term, "する");
+
+    // Every hit belongs to exactly one group, as a primary or an alternate.
+    var seen: usize = 0;
+    for (m.groups) |g| seen += 1 + g.others.len;
+    try testz.expectEqual(seen, m.hits.len);
+}
+
+pub fn dictLookupGroupsEveryHitOfARealisticLookupTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{group_dict_json}, &.{}, null);
+    defer d.deinit();
+    // The invariant the panel depends on across a lookup that reaches
+    // several lengths and several words at once: no hit is dropped, none is
+    // counted twice, and no group is empty.
+    const m = (try dict.lookup(alloc, &d, null, .rank, "する")).?;
+    defer m.deinit(alloc);
+    var counted = try alloc.alloc(bool, m.hits.len);
+    defer alloc.free(counted);
+    @memset(counted, false);
+    for (m.groups) |g| {
+        try testz.expectFalse(counted[g.primary]);
+        counted[g.primary] = true;
+        for (g.others) |o| {
+            try testz.expectFalse(counted[o]);
+            counted[o] = true;
+        }
+    }
+    for (counted) |c| try testz.expectTrue(c);
+}
+
 // ─── dict: Yomitan parity (reading column, all lengths, ranking) ────────
 
 /// Shaped like Jitendex: kana-written words are filed under their kanji
