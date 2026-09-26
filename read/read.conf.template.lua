@@ -123,6 +123,46 @@
 --     -- mokuro sidecar.
 --     dictionary = "",
 --
+--     -- A *second* unzipped Yomitan dictionary directory, holding word
+--     -- frequency data (term_meta_bank_*.json) rather than definitions.
+--     -- With one configured, lookup results are ranked commonest-first
+--     -- instead of fewest-deinflections-first, which is what makes a
+--     -- click on した land on する rather than on the noun 下 "below".
+--     -- Empty -- the default -- leaves ranking exactly as it was.
+--     --
+--     -- It is a separate key because these are separate downloads: a
+--     -- term dictionary like Jitendex ships no frequency data at all.
+--     -- Any of the frequency lists Yomitan users install works here;
+--     -- all of them are on Yomitan's own list at
+--     -- https://github.com/yomidevs/yomitan/blob/master/docs/dictionaries.md
+--     -- and the usual choices are:
+--     --
+--     --   * JPDB v2.2 -- ranks by how often a word appears across a
+--     --     large corpus of novels, manga, anime and visual novels, so
+--     --     it is the one that matches manga reading best. Grab
+--     --     "jpdb_v2.2_freq_list_2024-10-13.zip" from
+--     --     https://github.com/Kuuuube/yomitan-dictionaries
+--     --   * Innocent Corpus -- 5000 novels; the long-standing default.
+--     --     https://github.com/yomidevs/yomitan/releases/tag/dictionaries
+--     --   * BCCWJ -- the Balanced Corpus of Contemporary Written
+--     --     Japanese, i.e. weighted toward newspapers and books rather
+--     --     than dialogue. Also on Kuuuube's list above.
+--     --
+--     -- Unzip it next to the term dictionary and point this at the
+--     -- directory, same as `dictionary`. It gets its own index.sqlite3
+--     -- inside its own directory, so swapping the frequency list does
+--     -- not force the (much larger) term index to be rebuilt.
+--     frequency_dictionary = "",
+--
+--     -- Which direction `frequency_dictionary`'s numbers run, because
+--     -- the file format does not record it: "rank" (the default) means
+--     -- lower is more common, which is how JPDB, Innocent Corpus and
+--     -- BCCWJ are all numbered; "count" means higher is more common,
+--     -- for a list that stores raw occurrence counts. Getting it
+--     -- backwards silently inverts every ranking, so Yomitan makes it a
+--     -- per-dictionary setting too rather than guessing.
+--     frequency_order = "rank",
+--
 --     -- Starting size of the lookup panel's title (the looked-up term)
 --     -- -- "1x" (normal, the default), "1.5x", "2x", or "3x", drawn larger via
 --     -- the wire protocol's text-scale support. `s` cycles it for the

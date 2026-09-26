@@ -320,6 +320,13 @@ pub const Ui = struct {
     /// OCR dialog doing nothing but clearing its selection, same as
     /// before this feature existed.
     dict: ?dict_mod.Dict = null,
+    /// The frequency list from `conf.frequency_dictionary`, when one is
+    /// configured and indexed to something. A second `dict_mod.Dict` rather
+    /// than a different type: a frequency list is a Yomitan dictionary
+    /// directory like any other, just one whose banks are
+    /// `term_meta_bank_*.json`, so it builds and opens through exactly the
+    /// same path. Null leaves ranking as it was.
+    freq: ?dict_mod.Dict = null,
     /// The last word looked up, shown in `dict_layer`. See `Lookup`.
     lookup: ?Lookup = null,
     /// The AI panel, shown in the same slot. See `AiPanel`. At most one
@@ -377,6 +384,11 @@ pub const Ui = struct {
     /// directory was already indexed).
     dict_build: ?dict_mod.Builder = null,
     dict_build_dirty: bool = false,
+    /// Whether `dict_build` is indexing the frequency list rather than the
+    /// term dictionary. The two never build at once -- the frequency build
+    /// only starts once the term build has finished -- so one slot and one
+    /// progress panel serve both, and this says which is in it.
+    dict_build_is_freq: bool = false,
 
     /// The `g` prefix (as in `gg`) and the `:` goto-page prompt. Only one
     /// can be pending at a time, which is why they share a field.
@@ -516,6 +528,52 @@ pub const Ui = struct {
         }
     }
 
+    /// Starts (or finishes) loading `conf.frequency_dictionary`, the same
+    /// way `loadDict` does for the term dictionary and with the same
+    /// best-effort policy: anything wrong with it leaves `freq` null and
+    /// ranking exactly as it was, because a dictionary that ranks its hits
+    /// less well is not a reason to refuse to open a book.
+    ///
+    /// Called only once the term dictionary is in hand, so that the two
+    /// builds queue through `dict_build` one after the other rather than
+    /// competing for the one progress panel.
+    fn loadFreqDict(self: *Ui) void {
+        if (self.conf.frequency_dictionary.len == 0) return;
+        const load = dict_mod.openOrBeginBuild(self.alloc, self.client.io, self.conf.frequency_dictionary) catch |err| {
+            std.log.warn(
+                "gw-read: couldn't load frequency dictionary '{s}' ({t}); ranking unchanged",
+                .{ self.conf.frequency_dictionary, err },
+            );
+            return;
+        };
+        switch (load) {
+            .ready => |d| self.finishFreqLoad(d),
+            .building => |b| {
+                self.dict_build = b;
+                self.dict_build_is_freq = true;
+                self.dict_build_dirty = true;
+            },
+        }
+    }
+
+    /// Tail of both `loadFreqDict` paths. A directory with no `term_meta`
+    /// rows is the interesting failure: it means the reader pointed
+    /// `frequency_dictionary` at a *term* dictionary (one with no
+    /// `term_meta_bank_*.json` in it at all), which is easy to do and
+    /// silently does nothing, so it says so.
+    fn finishFreqLoad(self: *Ui, dict_in: dict_mod.Dict) void {
+        var d = dict_in;
+        if (!dict_mod.hasFrequency(&d)) {
+            d.deinit();
+            std.log.warn(
+                "gw-read: frequency dictionary '{s}' has no term_meta_bank entries; ranking unchanged",
+                .{self.conf.frequency_dictionary},
+            );
+            return;
+        }
+        self.freq = d;
+    }
+
     /// Common tail of `loadDict`'s fast path and `run`'s "a build just
     /// finished" path: an empty dictionary (nothing parsed to anything)
     /// is treated the same as no dictionary at all.
@@ -527,6 +585,7 @@ pub const Ui = struct {
             return;
         }
         self.dict = d;
+        self.loadFreqDict();
     }
 
     /// Reads and parses the book's mokuro sidecar, if it has one. Best
@@ -600,6 +659,7 @@ pub const Ui = struct {
         self.clearCard();
         if (self.ai_cache) |*cch| cch.close();
         if (self.dict) |*d| d.deinit();
+        if (self.freq) |*f| f.deinit();
         // A quit mid-build: abandon it rather than let it finish
         // unobserved -- there is no reader left to hand the result to.
         if (self.dict_build) |*b| b.deinit();
@@ -632,17 +692,26 @@ pub const Ui = struct {
             // show a frame) the whole time a real dictionary is indexed.
             if (self.dict_build) |*b| {
                 self.dict_build_dirty = true;
+                const is_freq = self.dict_build_is_freq;
+                const which = if (is_freq) self.conf.frequency_dictionary else self.conf.dictionary;
                 if (b.isDone()) {
                     if (b.finish()) |d| {
-                        self.finishDictLoad(d);
+                        // Clear the slot before dispatching: `finishDictLoad`
+                        // goes on to start the frequency build, which wants
+                        // to put its own builder here.
+                        self.dict_build = null;
+                        self.dict_build_is_freq = false;
+                        if (is_freq) self.finishFreqLoad(d) else self.finishDictLoad(d);
                     } else |err| {
-                        std.log.warn("gw-read: building dictionary '{s}' failed ({t}); lookup off", .{ self.conf.dictionary, err });
+                        std.log.warn("gw-read: building dictionary '{s}' failed ({t})", .{ which, err });
+                        self.dict_build = null;
+                        self.dict_build_is_freq = false;
                     }
-                    self.dict_build = null;
                 } else if (b.step()) |_| {} else |err| {
-                    std.log.warn("gw-read: building dictionary '{s}' failed ({t}); lookup off", .{ self.conf.dictionary, err });
+                    std.log.warn("gw-read: building dictionary '{s}' failed ({t})", .{ which, err });
                     b.deinit();
                     self.dict_build = null;
+                    self.dict_build_is_freq = false;
                 }
             }
             self.pollAi();
@@ -1394,6 +1463,19 @@ pub const Ui = struct {
             try sub_buf.appendSlice(a, r);
             try sub_buf.append(a, ')');
         }
+        // The frequency list's number for this word, when one is loaded and
+        // has it -- shown next to the headword the way Yomitan does, since
+        // it is now the first thing ranking goes on and a reader should be
+        // able to see what the order was based on. The list's own
+        // `displayValue` wins when it supplied one, because a list that
+        // writes "1200㋕" means the ㋕.
+        if (shown.frequency) |f| {
+            if (sub_buf.items.len > 0) try sub_buf.append(a, ' ');
+            if (shown.frequency_display.len > 0)
+                try sub_buf.print(a, "#{s}", .{shown.frequency_display})
+            else
+                try sub_buf.print(a, "#{d}", .{f});
+        }
         if (lk.count() > 1) {
             if (sub_buf.items.len > 0) try sub_buf.append(a, ' ');
             try sub_buf.print(a, "[{d}/{d}]", .{ lk.hit + 1, lk.count() });
@@ -1626,8 +1708,15 @@ pub const Ui = struct {
             return;
         };
 
-        const line1 = "Building dictionary index...";
-        const line2 = try std.fmt.allocPrint(
+        const line1 = if (self.dict_build_is_freq)
+            "Building frequency index..."
+        else
+            "Building dictionary index...";
+        const line2 = if (self.dict_build_is_freq) try std.fmt.allocPrint(
+            self.alloc,
+            "file {d} / {d} -- {d} frequencies indexed",
+            .{ b.file_idx, b.totalFiles(), b.freqs_indexed },
+        ) else try std.fmt.allocPrint(
             self.alloc,
             "file {d} / {d} -- {d} terms indexed",
             .{ b.file_idx, b.totalFiles(), b.terms_indexed },
@@ -2445,7 +2534,13 @@ pub const Ui = struct {
         if (byte_off >= row.len) return self.clearLookup();
 
         const start = mokuro.rowOffset(o.text.joined, row) + byte_off;
-        const m = dict_mod.lookup(self.alloc, d, o.text.joined[start..]) catch null;
+        const m = dict_mod.lookup(
+            self.alloc,
+            d,
+            if (self.freq) |*f| f else null,
+            self.conf.frequency_order,
+            o.text.joined[start..],
+        ) catch null;
         self.setLookupFromMatch(m, start);
     }
 
@@ -2488,7 +2583,13 @@ pub const Ui = struct {
         const abs_end = mokuro.rowOffset(joined, row_second) + mokuro.charEnd(row_second, second.byte_off);
         if (abs_end <= abs_start) return self.clearLookup();
 
-        const m = dict_mod.lookup(self.alloc, d, joined[abs_start..abs_end]) catch null;
+        const m = dict_mod.lookup(
+            self.alloc,
+            d,
+            if (self.freq) |*f| f else null,
+            self.conf.frequency_order,
+            joined[abs_start..abs_end],
+        ) catch null;
         self.setLookupFromMatch(m, abs_start);
     }
 
@@ -2939,7 +3040,8 @@ pub const Ui = struct {
         // that word, with the answer as its notes.
         if (panel.highlight.len > 0) if (self.dict) |*d| if (std.mem.indexOf(u8, sentence, panel.highlight)) |start| {
             const end = start + panel.highlight.len;
-            if (dict_mod.lookup(alloc, d, sentence[start..end]) catch null) |m| {
+            const freq: ?*dict_mod.Dict = if (self.freq) |*f| f else null;
+            if (dict_mod.lookup(alloc, d, freq, self.conf.frequency_order, sentence[start..end]) catch null) |m| {
                 defer m.deinit(alloc);
                 const hit = m.hits[0];
                 return try anki.Note.create(alloc, .{
