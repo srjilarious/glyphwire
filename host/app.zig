@@ -275,6 +275,7 @@ pub const App = struct {
         // `pane_proc.PaneProcs.pump`.
         if (self.pane_procs) |pp| pp.pump(self.alloc);
 
+        self.syncWindowFocus(eng);
         self.window_sizing.syncWindowSize(eng, deltaTimeMs);
         // After syncWindowSize so a font change (which alters cell_w/cell_h
         // and then resizes the window) is only reconciled against the
@@ -429,6 +430,20 @@ pub const App = struct {
         return need;
     }
 
+    /// Mirrors the OS window's keyboard focus onto the caret and puts
+    /// each change on the wire as a `focus` notification. Edge-triggered:
+    /// clients hear about the change, not about every frame that follows
+    /// it. The caret's own use of the flag is `Caret.shapeFor` (hollow
+    /// box) and `Caret.blinkOn` (held still).
+    fn syncWindowFocus(self: *App, eng: *Engine) void {
+        const focused = eng.window_state.focused;
+        if (focused == self.caret.window_focused) return;
+        self.caret.window_focused = focused;
+        self.server.reportFocus(self.alloc, focused) catch |err| {
+            std.log.err("glyphwire-host: reportFocus failed: {t}", .{err});
+        };
+    }
+
     fn redrawSig(self: *App, eng: *Engine) RedrawSig {
         const server = self.server;
         const fb = eng.window_state.framebuffer_size;
@@ -437,6 +452,7 @@ pub const App = struct {
         var caret_shown = false;
         var caret_row: usize = 0;
         var caret_col: usize = 0;
+        var caret_shape: CursorShape = self.caret.shapeFor(null);
         {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
@@ -445,6 +461,10 @@ pub const App = struct {
             // reads them under. Inert when profiling is off.
             if (self.profiler.active()) server.session.profile = self.profiler.snapshot();
             ctx_sig = redraw_mod.contextSig(server.ctx);
+            // The shape actually drawn, not the configured one: a client
+            // `set_caret_shape`, or the window losing focus, changes the
+            // caret without touching a cell.
+            caret_shape = self.caret.shapeFor(server.ctx.caret_shape);
             const root = &server.ctx.root;
             const view: usize = if (scroll_mod.rootOwned(root)) 0 else root.view_scroll;
             if (self.caret.visible()) {
@@ -466,7 +486,7 @@ pub const App = struct {
             .caret_shown = caret_shown,
             .caret_row = caret_row,
             .caret_col = caret_col,
-            .caret_shape = self.caret.shape,
+            .caret_shape = caret_shape,
             .preedit_hash = std.hash.Fnv1a_64.hash(self.preedit.text(eng)),
             .screenshot_pending = self.screenshot.path != null and !self.screenshot.done,
             .divider_preview_x = if (self.panes.preview) |p| p.x else 0,

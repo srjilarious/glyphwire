@@ -111,6 +111,28 @@ pub fn parseDirective(line: []const u8) ?Directive {
     return null;
 }
 
+/// A cell the host reported, brought into the panel's own frame -- or
+/// null when it landed outside the panel.
+///
+/// Every cell on the wire is a cell of the *context*, and the panel is a
+/// layer the host has put somewhere down that context (`pos`, its
+/// `cell_position`, `cols` x `rows` its grid). Without taking the layer's
+/// corner off first, a click on the panel's third row addresses the third
+/// row of the *window* -- somebody else's content, and in practice no
+/// metadata at all, which is why clicking an `ls` entry in the panel used
+/// to do nothing.
+pub fn surfaceCell(
+    cell: glyphwire.CellPos,
+    pos: glyphwire.CellPos,
+    cols: usize,
+    rows: usize,
+) ?glyphwire.CellPos {
+    if (cell.row < pos.row or cell.col < pos.col) return null;
+    const local: glyphwire.CellPos = .{ .row = cell.row - pos.row, .col = cell.col - pos.col };
+    if (local.row >= rows or local.col >= cols) return null;
+    return local;
+}
+
 const c = struct {
     extern "c" fn read(fd: i32, buf: [*]u8, n: usize) isize;
     extern "c" fn close(fd: i32) i32;

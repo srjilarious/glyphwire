@@ -458,6 +458,25 @@ pub fn contextSigMovesOnScrollViewTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectFalse(std.meta.eql(at_tail, scrolled));
 }
 
+// ─── config.effectiveCursorShape ──────────────────────────────────────
+
+/// With the window focused, a client's `set_caret_shape` wins over
+/// `host.conf.lua` and no request leaves the configured shape alone.
+pub fn cursorShapeFollowsTheClientWhileFocusedTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(config.effectiveCursorShape(.line, null, true), .line);
+    try testz.expectEqual(config.effectiveCursorShape(.underline, null, true), .underline);
+    try testz.expectEqual(config.effectiveCursorShape(.line, .block, true), .block);
+    try testz.expectEqual(config.effectiveCursorShape(.block, .line, true), .line);
+}
+
+/// A window without the keyboard draws a hollow box, whatever anyone
+/// asked for -- including a client that explicitly asked for a block.
+pub fn cursorShapeIsAHollowBoxWhileUnfocusedTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(config.effectiveCursorShape(.line, null, false), .box);
+    try testz.expectEqual(config.effectiveCursorShape(.underline, null, false), .box);
+    try testz.expectEqual(config.effectiveCursorShape(.line, .block, false), .box);
+}
+
 /// A client switching the caret's shape (`set_caret_shape`) changes what
 /// is drawn without writing a cell, so the frame has to be redrawn for it.
 pub fn contextSigMovesOnCaretShapeTest(_: std.Io, alloc: std.mem.Allocator) !void {

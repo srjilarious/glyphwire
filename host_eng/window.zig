@@ -27,6 +27,11 @@ pub const WindowState = struct {
     /// display-scale change. Cleared by `Engine.refreshWindowState` after
     /// it rebuilds the viewport.
     resized: bool = false,
+    /// Whether the OS window currently has keyboard focus, tracked from
+    /// SDL's focus events. Assumed true until told otherwise: a window
+    /// that has just been created and shown normally has it, and SDL does
+    /// not always send a gained event for that first focus.
+    focused: bool = true,
 
     /// Initialises state from the current window metrics.
     pub fn init(window: *sdl_window.Window) WindowState {

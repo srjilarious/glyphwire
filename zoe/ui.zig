@@ -466,11 +466,19 @@ pub const Ui = struct {
     /// every keystroke but Ctrl+` while it is open. Rooted at the tree's
     /// directory. See `src/shellpanel.zig`.
     shell: shellpanel.Panel,
-    /// Whether the host is drawing the caret (`true`, insert mode's bar)
-    /// or zoe's own inverted cell is (`false`), as last sent to the host;
-    /// null when unknown and the next `syncCaret` must send it. Nulled
-    /// whenever the shell panel takes the caret or gives it back.
+    /// Whether the host is drawing the caret (`true`, insert mode's bar
+    /// or the unfocused box) or zoe's own inverted cell is (`false`), as
+    /// last sent to the host; null when unknown and the next `syncCaret`
+    /// must send it. Nulled whenever the shell panel takes the caret or
+    /// gives it back.
     caret_host: ?bool = null,
+    /// The shape last asked of the host, so a mode change inside the
+    /// host-drawn cases still re-sends it.
+    caret_shape: ?glyphwire.CaretShape = null,
+    /// Whether the host's window has the keyboard, from `focus`
+    /// notifications. Assumed true until told otherwise -- a window that
+    /// has just been opened has it, and the host only reports changes.
+    window_focused: bool = true,
     /// Whether the host's key repeat is currently the shell's -- its own
     /// default, with a hold before the first repeat -- rather than the
     /// editor's per-mode cadence. See `syncKeyRepeat`.
@@ -844,28 +852,46 @@ pub const Ui = struct {
     }
 
     /// Hands the caret to whoever should draw it for the current mode.
-    /// Insert mode gets the host's own caret as a thin bar on the buffer
-    /// layer, like nvim's insert cursor; every other mode is zoe's
-    /// inverted cell (see `renderBuffer`), which shows the character under
-    /// it, and the host's caret is hidden. Sent only when that changes.
+    ///
+    /// The host draws it in two cases, both of them shapes that leave the
+    /// character underneath readable: insert mode, as a thin bar on the
+    /// buffer layer (nvim's insert cursor), and a window that has lost
+    /// the keyboard, as a hollow box (every terminal's convention). Every
+    /// other mode is zoe's own inverted cell (see `renderBuffer`), which
+    /// is a filled block the host has no equivalent for -- its `block`
+    /// paints over the glyph rather than inverting it -- and the host's
+    /// caret is hidden. Sent only when the answer changes.
     ///
     /// Not at all while the shell panel is up: the shell owns the caret
     /// then, and `shellClosed` makes the next call send it afresh.
     fn syncCaret(self: *Ui) void {
         if (self.shell.isOpen()) return;
-        const host = self.buf.ed.mode == .insert;
-        if (self.caret_host == host) return;
-        self.sendCaret(host) catch |err| {
+        const shape = self.caretShape();
+        const host = shape != null;
+        if (self.caret_host == host and self.caret_shape == shape) return;
+        self.sendCaret(shape) catch |err| {
             std.log.warn("zoe: can't set the caret ({t}); it may show in the wrong shape", .{err});
             return;
         };
         self.caret_host = host;
+        self.caret_shape = shape;
     }
 
-    fn sendCaret(self: *Ui, host: bool) !void {
-        if (host) {
+    /// The shape the host should draw the caret in, or null when the
+    /// caret is zoe's own inverted cell. Read by `renderBuffer` too, so
+    /// the two can never disagree about who is drawing it.
+    fn caretShape(self: *const Ui) ?glyphwire.CaretShape {
+        if (!self.window_focused) return .box;
+        if (self.buf.ed.mode == .insert) return .line;
+        return null;
+    }
+
+    /// `shape` non-null hands the host the caret, on the buffer layer, in
+    /// that shape; null takes it back for `renderBuffer` to draw.
+    fn sendCaret(self: *Ui, shape: ?glyphwire.CaretShape) !void {
+        if (shape) |s| {
             try self.client.setCaretLayer(self.buffer_layer);
-            try self.client.setCaretShape(.line);
+            try self.client.setCaretShape(s);
             try self.client.setCaretVisible(true);
         } else {
             try self.client.setCaretVisible(false);
@@ -1222,6 +1248,16 @@ pub const Ui = struct {
             // The pointer belongs to the shell panel too while it is up:
             // a click on its output is the host's selection, not a move
             // of the buffer cursor underneath.
+            // The window came back or went away. Who draws the cursor
+            // changes with it (`caretShape`), so the row it sits on has
+            // to be repainted -- zoe's own inverted cell has to come off
+            // before the host's box goes on, and back on afterwards.
+            .focus => |f| {
+                if (f.focused == self.window_focused) return;
+                self.window_focused = f.focused;
+                self.buf.full_redraw = true;
+                self.buffer_dirty = true;
+            },
             .mouse_move => |m| if (!self.shell.isOpen()) try self.handleMouseDrag(m),
             // `defer ev.deinit` above frees the button string.
             .mouse_button => |m| if (!self.shell.isOpen()) try self.handleMouseButton(m),
@@ -2751,15 +2787,15 @@ pub const Ui = struct {
         // about the root layer, and a client that owns its pane knows
         // better than the host where its cursor is anyway.
         //
-        // Insert mode is the exception: nvim draws a thin bar there, which
-        // the host's caret does (`syncCaret` points it at this layer), so
-        // all that is left to do here is say which cell it belongs on.
+        // Unless the host is drawing it (`caretShape`: insert mode's bar,
+        // or the hollow box of an unfocused window), in which case all
+        // that is left to do here is say which cell it belongs on.
         if (cursor.line >= self.buf.top_line and cursor.line < self.buf.top_line + b.rows) {
             const display_col = try self.cursorDisplayCol();
             if (display_col >= self.buf.left_col and display_col - self.buf.left_col < self.textCols()) {
                 const row = cursor.line - self.buf.top_line;
                 const col = self.gutterWidth() + display_col - self.buf.left_col;
-                if (self.buf.ed.mode == .insert) {
+                if (self.caretShape() != null) {
                     try batch.setCursorOn(self.buffer_layer, row, col);
                 } else {
                     const under = try self.cursorGrapheme();

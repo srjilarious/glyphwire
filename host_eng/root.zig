@@ -326,7 +326,11 @@ pub fn EngineType(comptime engOpts: EngineOptions) type {
                     // An event-driven key bitset latches where per-frame
                     // polling self-healed, so anything held when the window
                     // loses focus would otherwise stay down forever.
-                    sdl.SDL_EVENT_WINDOW_FOCUS_LOST => self.inputs.clear(),
+                    sdl.SDL_EVENT_WINDOW_FOCUS_LOST => {
+                        self.window_state.focused = false;
+                        self.inputs.clear();
+                    },
+                    sdl.SDL_EVENT_WINDOW_FOCUS_GAINED => self.window_state.focused = true,
                     // `wakeEventLoop`'s nudge from another thread: its only
                     // job was to break the wait above so the loop re-checks
                     // its redraw state -- nothing to handle here.

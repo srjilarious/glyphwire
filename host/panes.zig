@@ -24,6 +24,7 @@ const glyphwire = @import("glyphwire");
 
 const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
+const hit = @import("hit.zig");
 
 const App = app_mod.App;
 
@@ -224,11 +225,38 @@ pub const Panes = struct {
     }
 
     /// The band under `(px, py)`, if any. Call `syncLocked` first.
+    /// Takes `ctx_mutex` itself, briefly, for the occlusion test below --
+    /// so the caller must *not* hold it.
+    ///
+    /// A layer band that something is drawn over is not a hit. A split's
+    /// own children sit either side of its band and never on it, so the
+    /// only thing that can cover one is a layer that *floats* -- a popup,
+    /// the Ctrl+` shell panel -- and a band the user cannot see is not one
+    /// they can mean to drag. zoe's tree divider runs the full height of
+    /// its split, so without this a click into the column of the panel it
+    /// crosses resized the sidebar instead of reaching the shell.
     pub fn dividerAt(self: *const Panes, px: f32, py: f32) ?Band {
         for (self.bands.items) |d| {
-            if (geometry.cellRectPx(d.rect).contains(px, py)) return d;
+            if (!geometry.cellRectPx(d.rect).contains(px, py)) continue;
+            switch (d.level) {
+                // Pane bands separate whole programs and sit outside every
+                // context's own area, so nothing can be over them.
+                .pane => return d,
+                .layer => |h| if (!self.layerCovers(h, px, py)) return d,
+            }
         }
         return null;
+    }
+
+    /// Whether a visible non-root layer of context `h` is drawn over this
+    /// pixel -- the occlusion test `dividerAt` runs on a layer band.
+    fn layerCovers(self: *const Panes, h: glyphwire.ContextHandle, px: f32, py: f32) bool {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+        const ctx = server.session.contextPtr(h) orelse return false;
+        const t = hit.layerUnder(ctx, px, py) orelse return false;
+        return !t.is_root;
     }
 
     /// Mouse handling for the dividers, run before the grid sees the
@@ -250,16 +278,16 @@ pub const Panes = struct {
         if (self.bands.items.len == 0 and self.drag == null) return false;
 
         if (eng.inputs.mouse.pressed(.left)) {
-            const hit = self.dividerAt(pos.x, pos.y) orelse return false;
+            const band = self.dividerAt(pos.x, pos.y) orelse return false;
             self.drag = .{
-                .level = hit.level,
-                .split = hit.split,
-                .index = hit.index,
-                .axis = hit.axis,
-                .grab_px = if (hit.axis == .row) pos.x else pos.y,
-                .base = geometry.cellRectPx(hit.rect),
+                .level = band.level,
+                .split = band.split,
+                .index = band.index,
+                .axis = band.axis,
+                .grab_px = if (band.axis == .row) pos.x else pos.y,
+                .base = geometry.cellRectPx(band.rect),
             };
-            self.preview = geometry.cellRectPx(hit.rect);
+            self.preview = geometry.cellRectPx(band.rect);
             return true;
         }
 
