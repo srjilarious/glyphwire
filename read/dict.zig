@@ -127,17 +127,39 @@
 //! (condition sets in place of `rules_out`), is in tech-notes:
 //! `plans/glyphwire/2026-09-26-gw-read-yomitan-parity.md`.
 //!
-//! **A reachable hit is not necessarily the first hit.** `rankBefore` puts
-//! fewer deinflection rules ahead of more, so a depth-0 homograph noun
-//! outranks a depth-1 verb whenever both exist: した shows 下 first and
-//! する fourth, しよう shows する thirteenth. That is Yomitan's own
-//! ordering minus the frequency data that settles it there, and it is why
-//! the lookup panel showing one hit at a time is the next thing worth
-//! fixing after the rules themselves.
+//! **Frequency data, when there is any, is what makes the ranking
+//! usable.** Without it `rankBefore` puts fewer deinflection rules ahead of
+//! more, so a depth-0 homograph noun outranks a depth-1 verb whenever both
+//! exist: した showed 下 "below" first with する fourth, and しよう buried
+//! する thirteenth under 私用/使用/仕様/至要. Reachable, and useless.
+//!
+//! So `term_meta_bank_*.json` -- Yomitan's frequency banks -- are indexed
+//! into a `term_meta` table and `lookup` ranks on frequency *above*
+//! deinflection depth. The data comes from a **separate dictionary
+//! directory** (`config.frequency_dictionary`), because the two really are
+//! separate downloads: a term dictionary like Jitendex ships no frequency
+//! data at all, and the lists that do (JPDB, Innocent Corpus, BCCWJ) ship
+//! no definitions. Mechanically a frequency list is just another dictionary
+//! directory whose banks happen to be meta banks, so `Builder` indexes
+//! either kind -- it dispatches per file name -- and `ui.zig` holds two
+//! `Dict`s. With no frequency dictionary configured nothing has a
+//! frequency, the axis is inert, and the order is what it always was.
+//!
+//! A frequency number carries no direction of its own: a ranked list counts
+//! up from 1 and a corpus tally counts occurrences, and the file format does
+//! not say which it is. `config.FrequencyOrder` is the reader's answer, the
+//! same per-dictionary setting Yomitan makes it, because guessing wrong
+//! silently inverts every result.
+//!
+//! Still on the list: Yomitan groups hits into one entry per headword and
+//! shows them stacked, where this panel shows one at a time behind `]`/`[`.
+//! Every ranking improvement is worth less than it should be until that
+//! changes.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const kana = @import("kana.zig");
+const config = @import("config.zig");
 
 /// One dictionary row, always fully owned by whatever allocator produced
 /// it (`lookup`'s caller-supplied `alloc`, or a test's) -- unlike the
@@ -182,6 +204,10 @@ pub fn freeEntries(alloc: std.mem.Allocator, entries: []const Entry) void {
 pub const Dict = struct {
     db: sqlite.Db,
     lookup_stmt: sqlite.Stmt,
+    /// Queries `term_meta` -- the frequency table. Always prepared, since
+    /// the table always exists as of schema 4; it simply finds nothing in a
+    /// dictionary that shipped no `term_meta_bank_*.json`.
+    freq_stmt: sqlite.Stmt,
     /// Backs `title` only -- everything else this module hands out is
     /// owned by whichever allocator the caller passed in.
     title_arena: std.heap.ArenaAllocator,
@@ -190,10 +216,114 @@ pub const Dict = struct {
 
     pub fn deinit(self: *Dict) void {
         self.lookup_stmt.finalize();
+        self.freq_stmt.finalize();
         self.db.close();
         self.title_arena.deinit();
     }
 };
+
+/// One headword's frequency, as a frequency dictionary gave it.
+///
+/// `value` is the raw number and carries no direction of its own: whether
+/// smaller means "more common" is the frequency list's convention, not a
+/// property of the number, which is why `lookup` takes a
+/// `config.FrequencyOrder` rather than normalising here. `display` is the
+/// list's own rendering of it when it supplied one (Yomitan's
+/// `displayValue`) and empty otherwise.
+pub const Frequency = struct {
+    value: i64,
+    display: []const u8 = "",
+};
+
+/// The frequency `freq` records for the headword `term`/`reading`, or null
+/// when it has none.
+///
+/// Preference order among the rows that match, which is what makes a
+/// frequency list usable against a dictionary that spells things
+/// differently:
+///
+/// 1. A row filed under `term` beats one filed under `reading` -- Jitendex
+///    files 面白い under the kanji, and a frequency list that has both
+///    should be read as agreeing with the headword, not the reading.
+/// 2. A row naming a *reading* beats one that names none, but only when it
+///    names **this** reading; a row for another reading of the same kanji
+///    (今日/きょう vs 今日/こんにち) is not about this headword at all and
+///    is skipped.
+/// 3. Between rows that are otherwise equal, the more common one wins under
+///    `order`. Lists do sometimes carry several numbers for one word.
+///
+/// **Known cost of the reading fallback.** A rare kanji spelling that the
+/// frequency list has never heard of picks up its *reading's* number, so
+/// 為る -- the archaic spelling of する -- ranks as commonly as する and the
+/// two appear back to back. Not a wrong answer (it is the same word twice),
+/// and the fallback is what lets a kana-keyed list meet a kanji-keyed
+/// dictionary at all, which matters more. Yomitan avoids it from the other
+/// direction: it looks frequencies up by term only, and reaches the kana
+/// spelling by *grouping* headwords that share a reading into one entry
+/// first. Grouping would subsume this and is the remaining Yomitan gap; see
+/// the module doc comment.
+pub fn frequencyFor(
+    freq: *Dict,
+    order: config.FrequencyOrder,
+    term: []const u8,
+    reading: []const u8,
+) ?Frequency {
+    freq.freq_stmt.reset();
+    freq.freq_stmt.bindText(1, term) catch return null;
+    freq.freq_stmt.bindText(2, reading) catch return null;
+
+    var best: ?Frequency = null;
+    var best_rank: u8 = 0;
+    while (freq.freq_stmt.step() catch false) {
+        const row_term = freq.freq_stmt.columnText(0);
+        const row_reading = freq.freq_stmt.columnText(1);
+
+        // A row for some *other* reading of this term says nothing here.
+        if (row_reading.len != 0 and !std.mem.eql(u8, row_reading, reading)) continue;
+
+        const on_term = std.mem.eql(u8, row_term, term);
+        const has_reading = row_reading.len != 0;
+        // 3 = filed under the term and naming this reading, 0 = filed under
+        // the reading with no reading of its own.
+        const rank: u8 = (if (on_term) @as(u8, 2) else 0) + (if (has_reading) @as(u8, 1) else 0);
+
+        const value = freq.freq_stmt.columnInt64(2);
+        const display = freq.freq_stmt.columnText(3);
+        const better = if (best) |b|
+            rank > best_rank or (rank == best_rank and order.moreCommon(value, b.value))
+        else
+            true;
+        if (!better) continue;
+        best_rank = rank;
+        // `columnText` points into SQLite's own row buffer, which the next
+        // `step` invalidates -- so the winner's display text has to be
+        // copied out. It is bounded by the column and never long (a
+        // `displayValue` like "12㋕"), so a fixed buffer beats threading an
+        // allocator through every caller of this.
+        best = .{ .value = value, .display = displayCopy(display) };
+    }
+    return best;
+}
+
+/// Scratch for the one `display` string `frequencyFor` returns. Overwritten
+/// by the next call, which is safe because `lookup` consumes each result
+/// before asking for the next one.
+var display_buf: [64]u8 = undefined;
+
+fn displayCopy(text: []const u8) []const u8 {
+    const n = @min(text.len, display_buf.len);
+    @memcpy(display_buf[0..n], text[0..n]);
+    return display_buf[0..n];
+}
+
+/// True when `dict` actually carries frequency data -- `ui.zig` uses it to
+/// warn that a configured `frequency_dictionary` indexed to nothing, the
+/// same way `isEmpty` reports a term dictionary that did.
+pub fn hasFrequency(dict: *Dict) bool {
+    var stmt = dict.db.prepare("SELECT 1 FROM term_meta LIMIT 1") catch return false;
+    defer stmt.finalize();
+    return stmt.step() catch false;
+}
 
 /// One deinflection step: strip `kana_in` off the end of the clicked
 /// text and append `kana_out` to get a candidate one layer less
@@ -593,8 +723,13 @@ pub const deinflect_rules = [_]DeinflectRule{
     // presses `]` once. A rule-specificity tiebreaker (prefer the chain
     // that consumed more `kana_in` bytes) was considered and rejected: it
     // is a ranking axis Yomitan does not have, invented to cover for the
-    // frequency data that is the real answer. Reachability is the win
-    // here; ordering waits for `term_meta_bank` support.
+    // frequency data that is the real answer.
+    //
+    // That frequency data now exists (see the module doc comment), and it
+    // settles this the honest way: 行く is a far commoner word than 行う, so
+    // with a `frequency_dictionary` configured it leads. Without one, 行う
+    // still does -- which is the argument for configuring one, not for a
+    // tiebreaker.
     .{ .kana_in = "行った", .kana_out = "行く", .rules_out = &.{"v5"}, .reason = "past" },
     .{ .kana_in = "行って", .kana_out = "行く", .rules_out = &.{"v5"}, .reason = "te-form" },
     .{ .kana_in = "いった", .kana_out = "いく", .rules_out = &.{"v5"}, .reason = "past" },
@@ -797,10 +932,19 @@ pub const Hit = struct {
     /// string that matched -- a kana-written headword ranks above a
     /// kanji one that merely reads the same.
     exact: bool = false,
+    /// The frequency dictionary's raw number for this headword, or null
+    /// when none was loaded or it had nothing for this word. Interpret it
+    /// with the `frequency_order` the lookup was given -- the number alone
+    /// does not say which direction is "common".
+    frequency: ?i64 = null,
+    /// The frequency list's own rendering of `frequency` when it supplied
+    /// one, else empty. Owned by the allocator `lookup` was given.
+    frequency_display: []const u8 = "",
 
     pub fn deinit(self: Hit, alloc: std.mem.Allocator) void {
         self.entry.deinit(alloc);
         if (self.reason) |r| alloc.free(r);
+        alloc.free(self.frequency_display);
     }
 };
 
@@ -852,7 +996,13 @@ pub const max_results: usize = 32;
 /// A dragged selection goes through here too: its full text is simply
 /// the longest prefix, so an exact match on the selection ranks first
 /// and shorter prefixes follow only as fallbacks.
-pub fn lookup(alloc: std.mem.Allocator, dict: *Dict, text: []const u8) !?Match {
+pub fn lookup(
+    alloc: std.mem.Allocator,
+    dict: *Dict,
+    freq: ?*Dict,
+    order: config.FrequencyOrder,
+    text: []const u8,
+) !?Match {
     // Every query result, variant string and chain lives here until the
     // winners are copied out into `alloc` at the end.
     var arena: std.heap.ArenaAllocator = .init(alloc);
@@ -882,7 +1032,21 @@ pub fn lookup(alloc: std.mem.Allocator, dict: *Dict, text: []const u8) !?Match {
 
     const found = search.best.values();
     if (found.len == 0) return null;
-    std.mem.sort(Candidate, found, {}, rankBefore);
+
+    // Frequency is read here, once per surviving candidate, rather than
+    // during `collect`: the search reaches the same row by several routes
+    // and only the winning route is kept, so annotating at the end is one
+    // query per *entry* (a few dozen) instead of one per route.
+    if (freq) |f| {
+        for (found) |*c| {
+            if (frequencyFor(f, order, c.entry.term, c.entry.reading)) |got| {
+                c.frequency = got.value;
+                c.frequency_display = try search.scratch.dupe(u8, got.display);
+            }
+        }
+    }
+
+    std.mem.sort(Candidate, found, order, rankBefore);
 
     const n = @min(found.len, max_results);
     var hits: std.ArrayList(Hit) = .empty;
@@ -901,6 +1065,8 @@ pub fn lookup(alloc: std.mem.Allocator, dict: *Dict, text: []const u8) !?Match {
             .depth = @intCast(c.chain.len),
             .variant_steps = c.variant_steps,
             .exact = c.exact,
+            .frequency = c.frequency,
+            .frequency_display = try alloc.dupe(u8, c.frequency_display),
         });
     }
     return .{ .hits = try hits.toOwnedSlice(alloc) };
@@ -913,6 +1079,11 @@ const Candidate = struct {
     source_len: usize,
     variant_steps: u8,
     exact: bool,
+    /// The frequency dictionary's number for this headword, or null when
+    /// there is no frequency dictionary or it has nothing for this word.
+    /// Filled in by `lookup` after the search, not by `collect`.
+    frequency: ?i64 = null,
+    frequency_display: []const u8 = "",
     /// Rule reasons in application order, outermost first -- see
     /// `joinChainReasons`.
     chain: []const []const u8,
@@ -926,14 +1097,35 @@ const Candidate = struct {
     }
 };
 
-/// Yomitan's result order, minus the parts that need data this reader
-/// doesn't have (frequency dictionaries, several dictionaries at once):
-/// longest source text, fewest normalization steps, fewest deinflection
-/// rules, an exact term match over a reading-only one, higher dictionary
-/// score, longer headword, headword text, more senses -- and the row id
-/// last, so the order is total and repeatable.
-fn rankBefore(_: void, a: Candidate, b: Candidate) bool {
+/// Yomitan's result order, minus the one part that still needs data this
+/// reader doesn't have (several dictionaries at once): longest source text,
+/// **most frequent**, fewest normalization steps, fewest deinflection rules,
+/// an exact term match over a reading-only one, higher dictionary score,
+/// longer headword, headword text, more senses -- and the row id last, so
+/// the order is total and repeatable.
+///
+/// **Frequency outranks deinflection depth deliberately**, and that is the
+/// whole point of loading it. Without it, "fewest rules wins" means any
+/// depth-0 homograph noun beats the verb a reader is actually looking at:
+/// した showed 下 "below" first with する fourth, and しよう buried する
+/// thirteenth under 私用/使用/仕様/至要. Frequency is the thing that knows
+/// する is one of the most common words in the language and 至要 is not.
+/// The cost, accepted: a common but heavily conjugated reading can now
+/// outrank a rarer word that matched as written.
+///
+/// A candidate with no frequency at all sorts *after* every candidate that
+/// has one -- silence from a frequency list is weak evidence of rarity, and
+/// treating it as "unknown, so neutral" would let it jump ahead of a word
+/// the list explicitly ranked. With no frequency dictionary loaded nothing
+/// has a frequency, the whole axis is inert, and the order is exactly what
+/// it was before.
+fn rankBefore(order: config.FrequencyOrder, a: Candidate, b: Candidate) bool {
     if (a.source_len != b.source_len) return a.source_len > b.source_len;
+    if (a.frequency) |af| {
+        if (b.frequency) |bf| {
+            if (af != bf) return order.moreCommon(af, bf);
+        } else return true;
+    } else if (b.frequency != null) return false;
     if (a.variant_steps != b.variant_steps) return a.variant_steps < b.variant_steps;
     if (a.chain.len != b.chain.len) return a.chain.len < b.chain.len;
     if (a.exact != b.exact) return a.exact;
@@ -1181,6 +1373,125 @@ fn insertRow(
     _ = try stmt.step();
 }
 
+/// Parses one `term_meta_bank_N.json` and inserts its **frequency** rows,
+/// returning how many landed. Same drop-don't-fail policy and same
+/// per-file scratch arena as `insertTermBank`.
+///
+/// A meta row is `[term, type, data]` where `type` is "freq", "pitch" or
+/// "ipa"; only "freq" is kept, since pitch accent is display-only and this
+/// module has nowhere to show it yet.
+///
+/// `data` has five shapes in the wild, all of which appear in the
+/// frequency lists Yomitan users install, and `parseFrequency` folds them
+/// into one `(reading, value, display)` triple:
+///
+/// ```
+/// 12                                              -- a bare number
+/// "12"                                            -- the same, as text
+/// { "value": 12, "displayValue": "12㋕" }          -- a display override
+/// { "reading": "にほん", "frequency": 12 }         -- reading-specific
+/// { "reading": "にほん",
+///   "frequency": { "value": 12, "displayValue": "12" } }
+/// ```
+///
+/// A reading-specific row only applies to that reading; a row without one
+/// applies to any reading of the term, and is stored with an empty
+/// `reading` to say so. That is the distinction `frequencyFor` then uses.
+fn insertTermMetaBank(
+    insert_stmt: sqlite.Stmt,
+    scratch_backing: std.mem.Allocator,
+    json: []const u8,
+) std.mem.Allocator.Error!usize {
+    var scratch: std.heap.ArenaAllocator = .init(scratch_backing);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+
+    const parsed = std.json.parseFromSlice(std.json.Value, sa, json, .{}) catch return 0;
+    const rows = switch (parsed.value) {
+        .array => |arr| arr,
+        else => return 0,
+    };
+    var inserted: usize = 0;
+    for (rows.items) |row_val| {
+        const row = switch (row_val) {
+            .array => |r| r,
+            else => continue,
+        };
+        if (row.items.len < 3) continue;
+        const term = jsonString(row.items[0]) orelse continue;
+        const kind = jsonString(row.items[1]) orelse continue;
+        if (!std.mem.eql(u8, kind, "freq")) continue;
+        const freq = parseFrequency(row.items[2]) orelse continue;
+
+        insertMetaRow(insert_stmt, term, freq.reading, freq.value, freq.display) catch {
+            insert_stmt.reset();
+            continue;
+        };
+        insert_stmt.reset();
+        inserted += 1;
+    }
+    return inserted;
+}
+
+/// One frequency row as it came out of a `term_meta_bank` file, before it
+/// is bound to the insert. `reading` is empty when the row applies to any
+/// reading; `display` is empty when the number speaks for itself.
+const ParsedFrequency = struct {
+    reading: []const u8 = "",
+    value: i64,
+    display: []const u8 = "",
+};
+
+/// Folds every `data` shape listed on `insertTermMetaBank` into one
+/// triple, or null when there is no usable number in there at all.
+///
+/// The string form is parsed rather than stored as text: a frequency has
+/// to be ordered against other frequencies, and a list that writes its
+/// numbers as strings is otherwise indistinguishable from one that writes
+/// them as numbers. Text that isn't a number keeps its display value and
+/// is dropped from ranking, which is the honest outcome -- "㋕" is a
+/// label, not a rank.
+fn parseFrequency(v: std.json.Value) ?ParsedFrequency {
+    switch (v) {
+        .integer => |n| return .{ .value = n },
+        .float => |f| return .{ .value = @intFromFloat(f) },
+        .string => |t| return .{
+            .value = std.fmt.parseInt(i64, t, 10) catch return null,
+            .display = t,
+        },
+        .object => |obj| {
+            // Reading-specific: recurse on the inner `frequency`, which is
+            // itself any of the non-object shapes or the value/displayValue
+            // object.
+            if (obj.get("frequency")) |inner| {
+                var got = parseFrequency(inner) orelse return null;
+                got.reading = jsonString(obj.get("reading") orelse .null) orelse "";
+                return got;
+            }
+            const value = obj.get("value") orelse return null;
+            var got = parseFrequency(value) orelse return null;
+            if (jsonString(obj.get("displayValue") orelse .null)) |d| got.display = d;
+            got.reading = jsonString(obj.get("reading") orelse .null) orelse got.reading;
+            return got;
+        },
+        else => return null,
+    }
+}
+
+fn insertMetaRow(
+    stmt: sqlite.Stmt,
+    term: []const u8,
+    reading: []const u8,
+    frequency: i64,
+    display: []const u8,
+) sqlite.Error!void {
+    try stmt.bindText(1, term);
+    try stmt.bindText(2, reading);
+    try stmt.bindInt64(3, frequency);
+    try stmt.bindText(4, display);
+    _ = try stmt.step();
+}
+
 /// Reads `index.json`'s `title` into `out`, replacing whatever was there.
 /// Leaves `out` untouched if the JSON doesn't parse or has no title.
 fn readTitleInto(
@@ -1325,6 +1636,13 @@ fn isTermBankName(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "term_bank_") and std.ascii.endsWithIgnoreCase(name, ".json");
 }
 
+/// `term_meta_bank_*.json` -- frequency (and pitch accent, which this
+/// module skips) rather than definitions. Checked *before*
+/// `isTermBankName` would matter, since the two prefixes don't overlap.
+fn isTermMetaBankName(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "term_meta_bank_") and std.ascii.endsWithIgnoreCase(name, ".json");
+}
+
 /// Ceiling on one term bank file's raw JSON size. Jitendex's largest
 /// files run to tens of MB; 256 MiB is the "obviously wrong" line for a
 /// single file the same way `archive.max_page_bytes` draws one for a
@@ -1339,6 +1657,7 @@ pub const db_file_name = "index.sqlite3";
 
 const schema_sql =
     \\DROP TABLE IF EXISTS entries;
+    \\DROP TABLE IF EXISTS term_meta;
     \\DROP TABLE IF EXISTS meta;
     \\CREATE TABLE entries (
     \\  id INTEGER PRIMARY KEY,
@@ -1349,6 +1668,13 @@ const schema_sql =
     \\  sequence INTEGER NOT NULL,
     \\  score INTEGER NOT NULL
     \\);
+    \\CREATE TABLE term_meta (
+    \\  id INTEGER PRIMARY KEY,
+    \\  term TEXT NOT NULL,
+    \\  reading TEXT NOT NULL,
+    \\  frequency INTEGER NOT NULL,
+    \\  display TEXT NOT NULL
+    \\);
     \\CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ;
 
@@ -1356,10 +1682,19 @@ const schema_sql =
 /// index built by an older gw-read is rebuilt rather than queried with
 /// columns it doesn't have. 2 added `score`, the `reading` index, and
 /// empty readings stored as the term. 3 stores structured glossaries as
-/// one string per sense list, without badges, examples or credits.
-pub const schema_version = "3";
+/// one string per sense list, without badges, examples or credits. 4 adds
+/// `term_meta`, the frequency table built from `term_meta_bank_*.json`.
+pub const schema_version = "4";
 
 const insert_sql = "INSERT INTO entries (term, reading, rules, glossary, sequence, score) VALUES (?, ?, ?, ?, ?, ?)";
+
+const insert_meta_sql = "INSERT INTO term_meta (term, reading, frequency, display) VALUES (?, ?, ?, ?)";
+
+/// Every frequency row for a headword, matched on either its `term` or its
+/// `reading` -- a frequency list files a kana-written word under the kana,
+/// while Jitendex files it under the kanji. `frequencyFor` picks between
+/// the rows this returns; see it for the preference order.
+const freq_sql = "SELECT term, reading, frequency, display FROM term_meta WHERE term = ?1 OR term = ?2";
 
 /// Matches on the headword *or* its reading -- see `lookup` for why the
 /// reading half is essential.
@@ -1368,6 +1703,7 @@ const lookup_sql = "SELECT id, term, reading, rules, glossary, sequence, score F
 const index_sql =
     \\CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term);
     \\CREATE INDEX IF NOT EXISTS idx_entries_reading ON entries(reading);
+    \\CREATE INDEX IF NOT EXISTS idx_term_meta_term ON term_meta(term);
 ;
 
 /// Writes the `meta` rows, `complete` last -- see `isBuilt`.
@@ -1419,12 +1755,18 @@ pub const Builder = struct {
     dir: std.Io.Dir,
     db: sqlite.Db,
     insert_stmt: sqlite.Stmt,
-    /// Every `term_bank_*.json` name found in the directory, resolved up
-    /// front (during `beginBuild`) so `total_files` is known from the
-    /// very first `step`.
+    insert_meta_stmt: sqlite.Stmt,
+    /// Every `term_bank_*.json` **and** `term_meta_bank_*.json` name found
+    /// in the directory, resolved up front (during `beginBuild`) so
+    /// `total_files` is known from the very first `step`. `step` dispatches
+    /// on the name, which is what lets one `Builder` index a term
+    /// dictionary, a frequency list, or a directory holding both -- see
+    /// `Dict`'s doc comment for why a frequency list is just another
+    /// dictionary directory here.
     files: std.ArrayList([]u8) = .empty,
     file_idx: usize = 0,
     terms_indexed: usize = 0,
+    freqs_indexed: usize = 0,
     title_buf: std.ArrayList(u8) = .empty,
 
     pub fn totalFiles(self: *const Builder) usize {
@@ -1437,8 +1779,9 @@ pub const Builder = struct {
         return self.file_idx >= self.files.items.len;
     }
 
-    /// Parses and inserts exactly one term bank file -- one unit of
-    /// visible progress. Undefined to call once `isDone`.
+    /// Parses and inserts exactly one bank file -- one unit of visible
+    /// progress -- choosing the parser by file name. Undefined to call once
+    /// `isDone`.
     pub fn step(self: *Builder) !void {
         const name = self.files.items[self.file_idx];
         self.file_idx += 1;
@@ -1447,7 +1790,11 @@ pub const Builder = struct {
         // `self.alloc`, not a per-dictionary arena: the scratch arena
         // backing this file's parse tree has nothing to do with anything
         // kept afterward -- every row is inserted straight into `db`.
-        self.terms_indexed += try insertTermBank(self.insert_stmt, self.alloc, bytes);
+        if (isTermMetaBankName(name)) {
+            self.freqs_indexed += try insertTermMetaBank(self.insert_meta_stmt, self.alloc, bytes);
+        } else {
+            self.terms_indexed += try insertTermBank(self.insert_stmt, self.alloc, bytes);
+        }
     }
 
     /// Commits, builds the index, writes `meta`, and returns the now-open
@@ -1455,6 +1802,7 @@ pub const Builder = struct {
     /// `deinit` afterward.
     pub fn finish(self: *Builder) !Dict {
         self.insert_stmt.finalize();
+        self.insert_meta_stmt.finalize();
         try self.db.exec("COMMIT");
         try self.db.exec(index_sql);
         try writeMeta(&self.db, self.title_buf.items);
@@ -1465,9 +1813,16 @@ pub const Builder = struct {
         self.title_buf.deinit(self.alloc);
 
         const lookup_stmt = try self.db.prepare(lookup_sql);
+        const freq_stmt = try self.db.prepare(freq_sql);
         var title_arena: std.heap.ArenaAllocator = .init(self.alloc);
         const title = readTitle(title_arena.allocator(), &self.db) catch "";
-        return .{ .db = self.db, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
+        return .{
+            .db = self.db,
+            .lookup_stmt = lookup_stmt,
+            .freq_stmt = freq_stmt,
+            .title_arena = title_arena,
+            .title = title,
+        };
     }
 
     /// Releases everything without finishing -- e.g. the reader quit, or
@@ -1475,6 +1830,7 @@ pub const Builder = struct {
     /// `finish`.
     pub fn deinit(self: *Builder) void {
         self.insert_stmt.finalize();
+        self.insert_meta_stmt.finalize();
         self.db.exec("ROLLBACK") catch {};
         self.db.close();
         self.dir.close(self.io);
@@ -1503,6 +1859,8 @@ fn beginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Builder {
     try db.exec("BEGIN");
     const insert_stmt = try db.prepare(insert_sql);
     errdefer insert_stmt.finalize();
+    const insert_meta_stmt = try db.prepare(insert_meta_sql);
+    errdefer insert_meta_stmt.finalize();
 
     var files: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -1523,7 +1881,7 @@ fn beginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Builder {
             } else |_| {}
             continue;
         }
-        if (!isTermBankName(raw.name)) continue;
+        if (!isTermBankName(raw.name) and !isTermMetaBankName(raw.name)) continue;
         try files.append(alloc, try alloc.dupe(u8, raw.name));
     }
 
@@ -1533,6 +1891,7 @@ fn beginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Builder {
         .dir = dir,
         .db = db,
         .insert_stmt = insert_stmt,
+        .insert_meta_stmt = insert_meta_stmt,
         .files = files,
         .title_buf = title_buf,
     };
@@ -1560,12 +1919,20 @@ fn openExisting(alloc: std.mem.Allocator, db: sqlite.Db) !Dict {
     errdefer d.close();
     const lookup_stmt = try d.prepare(lookup_sql);
     errdefer lookup_stmt.finalize();
+    const freq_stmt = try d.prepare(freq_sql);
+    errdefer freq_stmt.finalize();
 
     var title_arena: std.heap.ArenaAllocator = .init(alloc);
     errdefer title_arena.deinit();
     const title = readTitle(title_arena.allocator(), &d) catch "";
 
-    return .{ .db = d, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
+    return .{
+        .db = d,
+        .lookup_stmt = lookup_stmt,
+        .freq_stmt = freq_stmt,
+        .title_arena = title_arena,
+        .title = title,
+    };
 }
 
 /// Either the dictionary directory at `path` was already built and is
@@ -1617,7 +1984,12 @@ pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Dict
 /// `index_json`, for the title) -- `tests/read_tests.zig`'s way of
 /// exercising `insertTermBank` / `lookup` / the whole build-then-query
 /// path without touching disk. Not used by `gw-read` itself.
-pub fn openMemory(alloc: std.mem.Allocator, term_bank_jsons: []const []const u8, index_json: ?[]const u8) !Dict {
+pub fn openMemory(
+    alloc: std.mem.Allocator,
+    term_bank_jsons: []const []const u8,
+    term_meta_bank_jsons: []const []const u8,
+    index_json: ?[]const u8,
+) !Dict {
     var db = try sqlite.Db.open(":memory:", sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE);
     errdefer db.close();
 
@@ -1626,6 +1998,9 @@ pub fn openMemory(alloc: std.mem.Allocator, term_bank_jsons: []const []const u8,
     const insert_stmt = try db.prepare(insert_sql);
     for (term_bank_jsons) |j| _ = try insertTermBank(insert_stmt, alloc, j);
     insert_stmt.finalize();
+    const insert_meta_stmt = try db.prepare(insert_meta_sql);
+    for (term_meta_bank_jsons) |j| _ = try insertTermMetaBank(insert_meta_stmt, alloc, j);
+    insert_meta_stmt.finalize();
     try db.exec("COMMIT");
     try db.exec(index_sql);
 
@@ -1636,8 +2011,15 @@ pub fn openMemory(alloc: std.mem.Allocator, term_bank_jsons: []const []const u8,
     try writeMeta(&db, title_buf.items);
 
     const lookup_stmt = try db.prepare(lookup_sql);
+    const freq_stmt = try db.prepare(freq_sql);
     var title_arena: std.heap.ArenaAllocator = .init(alloc);
     const title = readTitle(title_arena.allocator(), &db) catch "";
 
-    return .{ .db = db, .lookup_stmt = lookup_stmt, .title_arena = title_arena, .title = title };
+    return .{
+        .db = db,
+        .lookup_stmt = lookup_stmt,
+        .freq_stmt = freq_stmt,
+        .title_arena = title_arena,
+        .title = title,
+    };
 }
