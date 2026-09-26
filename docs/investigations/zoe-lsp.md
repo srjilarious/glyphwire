@@ -178,6 +178,16 @@ So the protocol now carries, on `write_text` and its spans:
   half that makes a red squiggle under white text possible, and it is SGR
   `58`/`59`.
 
+It also needed a second, less obvious wire op: **`set_underline`**, which is
+`set_bg` for the underline channel. A row in zoe is painted as coloured runs
+and *then* overpainted with the search highlight and the visual selection,
+and each of those is a full cell write that resets the underline. So a
+squiggle threaded through the row's own writes is erased by the next
+selection, and threading it through all of them means every overpaint — and
+every future one — knowing about diagnostics. One `set_underline` after them
+means none of them do. `set_bg` exists for the same shape of reason, which is
+the argument for the op rather than a reason to avoid it.
+
 Two consequences worth knowing about:
 
 - **The SGR tokenizer now remembers its separators.** `4:3` is a curly
@@ -314,7 +324,7 @@ come from a small override table.
 | `zoe/ui.zig` | inbox drain in `run`, sign column in the gutter, squiggle in the row painter, statusline message, `K` / `gd` / `]d` / `[d` / `:lsp` / `:diag`, the jumplist. |
 | `src/client.zig` | `InputListener.wake()`, and `underline` on `TextOpts`/`Span`. |
 | `src/core.zig` | `Underline` / `UnderlineStyle`, `Style.underline`, the SGR underline codes and the separator-aware tokenizer. |
-| `src/dispatch.zig`, `src/protocol.zig` | `write_text`'s `underline` / `underline_color`, and `get_cells` reading them back. |
+| `src/dispatch.zig`, `src/protocol.zig` | `write_text`'s `underline` / `underline_color`, the `set_underline` op, and `get_cells` reading them back. |
 | `host/render.zig` | the underline batch, drawn over the glyphs, and the five styles' geometry. |
 | `tests/zoe_tests.zig` | framing + correlation against a canned stream, utf-8/utf-16 position conversion, the diagnostic store's index and per-source replacement, config parsing. |
 

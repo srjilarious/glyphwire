@@ -21,6 +21,9 @@ const motion = zoe.motion;
 const search = zoe.search;
 const keys = zoe.keys;
 const tabs = zoe.tabs;
+const lsp = zoe.lsp;
+const diag = zoe.diag;
+const langconf = zoe.langconf;
 
 /// Builds an editor over `text`, runs `script`, and asserts the buffer
 /// matches `expected`. Most cases below are one call to this.
@@ -2801,4 +2804,350 @@ pub fn gvWithNoPreviousSelectionDoesNothingTest(_: std.Io, alloc: std.mem.Alloca
 
 pub fn shiftUndoesInOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try expectEdit(alloc, "a\nb\nc", "3>>u", "a\nb\nc");
+}
+
+// ─── LSP: position encoding ──────────────────────────────────────────────
+//
+// The trap this whole group exists for: LSP counts UTF-16 code units by
+// default, zls negotiates UTF-8, and basedpyright does not. A conversion bug
+// here is invisible in ASCII and silently off-by-N on the first line with a
+// non-ASCII character in it.
+
+pub fn lspUtf8PositionsAreByteOffsetsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    const line = "let x = \"日本\";";
+    // Under `utf-8` a character *is* a byte, so nothing moves.
+    try testz.expectEqual(lsp.byteToCharacter(line, 4, .utf8), 4);
+    try testz.expectEqual(lsp.characterToByte(line, 4, .utf8), 4);
+    // Past the end clamps rather than running off it.
+    try testz.expectEqual(lsp.characterToByte(line, 9999, .utf8), line.len);
+    try testz.expectEqual(lsp.byteToCharacter(line, 9999, .utf8), line.len);
+}
+
+pub fn lspUtf16PositionsCountCodeUnitsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    // `日` and `本` are 3 UTF-8 bytes each but one UTF-16 unit each.
+    const line = "a日本b";
+    try testz.expectEqual(lsp.byteToCharacter(line, 0, .utf16), 0);
+    try testz.expectEqual(lsp.byteToCharacter(line, 1, .utf16), 1); // after "a"
+    try testz.expectEqual(lsp.byteToCharacter(line, 4, .utf16), 2); // after "日"
+    try testz.expectEqual(lsp.byteToCharacter(line, 7, .utf16), 3); // after "本"
+    try testz.expectEqual(lsp.byteToCharacter(line, 8, .utf16), 4); // after "b"
+
+    try testz.expectEqual(lsp.characterToByte(line, 1, .utf16), 1);
+    try testz.expectEqual(lsp.characterToByte(line, 2, .utf16), 4);
+    try testz.expectEqual(lsp.characterToByte(line, 3, .utf16), 7);
+    try testz.expectEqual(lsp.characterToByte(line, 4, .utf16), 8);
+
+    // An astral-plane codepoint is a surrogate *pair*: two units for four
+    // bytes. This is the case that makes utf-16 more than a rename.
+    const emoji = "x🎉y";
+    try testz.expectEqual(lsp.byteToCharacter(emoji, 5, .utf16), 3); // after the emoji
+    try testz.expectEqual(lsp.characterToByte(emoji, 3, .utf16), 5);
+    // A character landing between the surrogate halves can't split the
+    // codepoint -- it rounds down to its start.
+    try testz.expectEqual(lsp.characterToByte(emoji, 2, .utf16), 1);
+}
+
+pub fn lspPositionRoundTripsAcrossAnAwkwardLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    const line = "// é日🎉 tail";
+    // Every byte offset that starts a codepoint must survive the round trip
+    // in both encodings; the ones inside a codepoint have no character of
+    // their own and are not round-tripped.
+    var i: usize = 0;
+    while (i <= line.len) : (i += 1) {
+        if (i < line.len and std.unicode.utf8ByteSequenceLength(line[i]) catch 0 == 0) continue;
+        inline for (.{ lsp.PositionEncoding.utf8, lsp.PositionEncoding.utf16 }) |enc| {
+            const ch = lsp.byteToCharacter(line, i, enc);
+            try testz.expectEqual(lsp.characterToByte(line, ch, enc), i);
+        }
+    }
+}
+
+// ─── LSP: URIs ───────────────────────────────────────────────────────────
+
+pub fn lspUriRoundTripTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const cases = [_][]const u8{
+        "/home/j/code/main.zig",
+        "/tmp/a dir/with space.py",
+        "/srv/日本/読む.md",
+        "/x/100%.txt",
+        "/x/hash#and?query.zig",
+    };
+    for (cases) |path| {
+        const uri = try lsp.pathToUri(alloc, path);
+        defer alloc.free(uri);
+        try testz.expectTrue(std.mem.startsWith(u8, uri, "file:///"));
+        // Path separators stay readable; nothing else questionable does.
+        const back = (try lsp.uriToPath(alloc, uri)).?;
+        defer alloc.free(back);
+        try testz.expectEqualStr(path, back);
+    }
+
+    // A space really is encoded, not passed through.
+    const spaced = try lsp.pathToUri(alloc, "/a b");
+    defer alloc.free(spaced);
+    try testz.expectEqualStr("file:///a%20b", spaced);
+
+    // Lowercase hex from another client decodes too.
+    const lower = (try lsp.uriToPath(alloc, "file:///a%2fb")).?;
+    defer alloc.free(lower);
+    try testz.expectEqualStr("/a/b", lower);
+
+    // `localhost` is this machine; any other scheme is not a file we can
+    // open, and says so rather than guessing.
+    const local = (try lsp.uriToPath(alloc, "file://localhost/etc/hosts")).?;
+    defer alloc.free(local);
+    try testz.expectEqualStr("/etc/hosts", local);
+    try testz.expectEqual(try lsp.uriToPath(alloc, "untitled:Untitled-1"), null);
+}
+
+pub fn lspLanguageIdMapsOnlyWhereItMustTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    // The grammar names double as LSP languageIds for everything that
+    // matters...
+    try testz.expectEqualStr("zig", lsp.languageId("zig"));
+    try testz.expectEqualStr("python", lsp.languageId("python"));
+    // ...except the handful where LSP spells it differently.
+    try testz.expectEqualStr("shellscript", lsp.languageId("bash"));
+}
+
+// ─── Diagnostics store ───────────────────────────────────────────────────
+
+/// Builds one owned `lsp.Diagnostic` the way `lsp.Pool` would, so a test can
+/// hand it to `Store.publish` (which takes ownership).
+fn makeDiag(
+    alloc: std.mem.Allocator,
+    line: u32,
+    from: u32,
+    to: u32,
+    severity: lsp.Severity,
+    message: []const u8,
+    source: []const u8,
+) !lsp.Diagnostic {
+    return .{
+        .range = .{
+            .start = .{ .line = line, .character = from },
+            .end = .{ .line = line, .character = to },
+        },
+        .severity = severity,
+        .message = try alloc.dupe(u8, message),
+        .source = try alloc.dupe(u8, source),
+        .code = null,
+    };
+}
+
+/// `Store.publish` copies, so the test's own diagnostics are freed here
+/// afterwards -- exactly what `lsp.Event.deinit` does in the real path.
+fn publishOne(store: *diag.Store, alloc: std.mem.Allocator, server: []const u8, items: []const lsp.Diagnostic) !void {
+    defer for (items) |*d| d.deinit(alloc);
+    try store.publish("/p/main.py", server, items);
+}
+
+pub fn diagStoreReplacesPerServerTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var store = diag.Store.init(alloc);
+    defer store.deinit();
+
+    // Two servers on one Python file -- the setup the whole store is shaped
+    // for (basedpyright for types, ruff for lint).
+    try publishOne(&store, alloc, "basedpyright", &.{
+        try makeDiag(alloc, 3, 4, 8, .err, "is not defined", "basedpyright"),
+    });
+    try publishOne(&store, alloc, "ruff", &.{
+        try makeDiag(alloc, 3, 0, 1, .warning, "unused import", "ruff"),
+    });
+    try testz.expectEqual(store.counts("/p/main.py").errors, 1);
+    try testz.expectEqual(store.counts("/p/main.py").warnings, 1);
+
+    // One server republishing a clean file must not take the other's
+    // findings with it.
+    try publishOne(&store, alloc, "ruff", &.{});
+    try testz.expectEqual(store.counts("/p/main.py").errors, 1);
+    try testz.expectEqual(store.counts("/p/main.py").warnings, 0);
+
+    // A crashed server's marks go away entirely -- nothing will refresh them.
+    store.clearServer("basedpyright");
+    try testz.expectEqual(store.counts("/p/main.py").errors, 0);
+    try testz.expectEqual(store.worstOnLine("/p/main.py", 3), null);
+}
+
+pub fn diagStoreQueriesByLineAndSeverityTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var store = diag.Store.init(alloc);
+    defer store.deinit();
+
+    try publishOne(&store, alloc, "basedpyright", &.{
+        try makeDiag(alloc, 10, 5, 9, .warning, "shadows a builtin", "basedpyright"),
+        try makeDiag(alloc, 10, 2, 4, .err, "bad type", "basedpyright"),
+        try makeDiag(alloc, 2, 0, 3, .hint, "could be simpler", "basedpyright"),
+    });
+
+    // The sign column takes the worst on the row, whatever order they were
+    // published in.
+    try testz.expectEqual(store.worstOnLine("/p/main.py", 10), .err);
+    try testz.expectEqual(store.worstOnLine("/p/main.py", 2), .hint);
+    try testz.expectEqual(store.worstOnLine("/p/main.py", 11), null);
+
+    // The row painter gets them sorted, worst first within a line.
+    var row: std.ArrayList(diag.Entry) = .empty;
+    defer row.deinit(alloc);
+    try store.onLine("/p/main.py", 10, &row, alloc);
+    try testz.expectEqual(row.items.len, 2);
+    try testz.expectEqual(row.items[0].range.start.character, 2);
+
+    // The cursor inside a range gets that range's message...
+    const inside = store.atCursor("/p/main.py", 10, 6).?;
+    try testz.expectEqualStr("shadows a builtin", inside.message);
+    // ...and a cursor on the line but inside nothing still gets the worst
+    // one on it, because a zero-width range nobody can stand inside is the
+    // common case and a message nobody can see is no message.
+    const fallback = store.atCursor("/p/main.py", 10, 40).?;
+    try testz.expectEqualStr("bad type", fallback.message);
+    try testz.expectEqual(store.atCursor("/p/main.py", 11, 0), null);
+}
+
+pub fn diagStoreStepsAndWrapsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var store = diag.Store.init(alloc);
+    defer store.deinit();
+
+    try publishOne(&store, alloc, "ruff", &.{
+        try makeDiag(alloc, 1, 0, 1, .warning, "first", "ruff"),
+        try makeDiag(alloc, 5, 2, 3, .warning, "middle", "ruff"),
+        try makeDiag(alloc, 9, 0, 1, .warning, "last", "ruff"),
+    });
+
+    try testz.expectEqualStr("middle", store.step("/p/main.py", 1, 0, .next).?.message);
+    try testz.expectEqualStr("first", store.step("/p/main.py", 5, 2, .prev).?.message);
+    // Off the end either way is null: wrapping is the caller's decision, so
+    // `]d` can wrap while a plain search doesn't.
+    try testz.expectEqual(store.step("/p/main.py", 9, 0, .next), null);
+    try testz.expectEqual(store.step("/p/main.py", 1, 0, .prev), null);
+    try testz.expectEqualStr("first", store.first("/p/main.py").?.message);
+    try testz.expectEqualStr("last", store.last("/p/main.py").?.message);
+}
+
+// ─── config.lsp ──────────────────────────────────────────────────────────
+
+/// Parses `src` as a `zoe.conf.lua` and hands back the config. The caller
+/// deinits it.
+fn parseConf(alloc: std.mem.Allocator, src: [:0]const u8) !langconf.Config {
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+    return langconf.parseSource(alloc, src, &env, langconf.defaults(alloc));
+}
+
+fn findServer(cfg: *const langconf.Config, name: []const u8) ?lsp.ServerConfig {
+    for (cfg.lsp_servers) |s| if (std.mem.eql(u8, s.name, name)) return s;
+    return null;
+}
+
+pub fn lspConfigDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cfg = try parseConf(alloc, "config = {}");
+    defer cfg.deinit();
+
+    // With nothing said about LSP, the three built-ins stand.
+    try testz.expectTrue(cfg.lsp_enabled);
+    try testz.expectEqual(cfg.lsp_servers.len, 3);
+    try testz.expectEqualStr("zls", findServer(&cfg, "zls").?.cmd[0]);
+    try testz.expectEqualStr("basedpyright-langserver", findServer(&cfg, "basedpyright").?.cmd[0]);
+    try testz.expectEqualStr("ruff", findServer(&cfg, "ruff").?.cmd[0]);
+    try testz.expectEqualStr("python", findServer(&cfg, "ruff").?.languages[0]);
+}
+
+pub fn lspConfigMergesByNameTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cfg = try parseConf(alloc,
+        \\config = {
+        \\  lsp = {
+        \\    servers = {
+        \\      { name = "zls", cmd = { "/opt/zls/zls" } },
+        \\      { name = "ruff", enabled = false },
+        \\      { name = "ty", languages = { "python" }, cmd = { "ty", "server" } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer cfg.deinit();
+
+    // Overriding one server must not drop the ones the config never
+    // mentioned -- the whole point of merging by name.
+    try testz.expectEqual(cfg.lsp_servers.len, 4);
+    const zls = findServer(&cfg, "zls").?;
+    try testz.expectEqualStr("/opt/zls/zls", zls.cmd[0]);
+    // ...and an override touches only the fields it named.
+    try testz.expectEqualStr("zig", zls.languages[0]);
+    try testz.expectTrue(zls.enabled);
+
+    try testz.expectFalse(findServer(&cfg, "ruff").?.enabled);
+    try testz.expectEqualStr("basedpyright-langserver", findServer(&cfg, "basedpyright").?.cmd[0]);
+    const ty = findServer(&cfg, "ty").?;
+    try testz.expectEqualStr("server", ty.cmd[1]);
+    try testz.expectEqualStr("python", ty.languages[0]);
+}
+
+pub fn lspConfigRejectsUnusableNewEntriesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cfg = try parseConf(alloc,
+        \\config = {
+        \\  lsp = {
+        \\    enabled = false,
+        \\    servers = {
+        \\      { name = "nocmd", languages = { "zig" } },
+        \\      { name = "nolangs", cmd = { "thing" } },
+        \\      { cmd = { "nameless" }, languages = { "zig" } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer cfg.deinit();
+
+    try testz.expectFalse(cfg.lsp_enabled);
+    // A new entry with nothing to run, nothing to run it for, or no name to
+    // be known by would start and then do nothing; only the built-ins are
+    // left.
+    try testz.expectEqual(cfg.lsp_servers.len, 3);
+    try testz.expectEqual(findServer(&cfg, "nocmd"), null);
+    try testz.expectEqual(findServer(&cfg, "nolangs"), null);
+}
+
+pub fn lspConfigPassesSettingsThroughAsJsonTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cfg = try parseConf(alloc,
+        \\config = {
+        \\  lsp = {
+        \\    servers = {
+        \\      {
+        \\        name = "basedpyright",
+        \\        settings = {
+        \\          python = { analysis = { typeCheckingMode = "standard", extraPaths = { "a", "b" } } },
+        \\          depth = 3,
+        \\          quiet = true,
+        \\        },
+        \\      },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer cfg.deinit();
+
+    // Transcribed, not modelled: every server's settings schema is its own
+    // and changes faster than zoe would track one.
+    const json = findServer(&cfg, "basedpyright").?.settings_json.?;
+    try testz.expectTrue(std.mem.indexOf(u8, json, "\"typeCheckingMode\":\"standard\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, json, "\"extraPaths\":[\"a\",\"b\"]") != null);
+    // An integral Lua number must not arrive as "3e0" -- a count or a port
+    // written that way is rejected by the server, not merely ugly.
+    try testz.expectTrue(std.mem.indexOf(u8, json, "\"depth\":3") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, json, "\"quiet\":true") != null);
+    // It has to parse as JSON, which is the only claim that really matters.
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    try testz.expectTrue(parsed.value == .object);
+}
+
+pub fn diagStoreForgetsAClosedFileTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var store = diag.Store.init(alloc);
+    defer store.deinit();
+    try publishOne(&store, alloc, "ruff", &.{
+        try makeDiag(alloc, 0, 0, 1, .err, "boom", "ruff"),
+    });
+    store.clearPath("/p/main.py");
+    try testz.expectEqual(store.counts("/p/main.py").errors, 0);
 }

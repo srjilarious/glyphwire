@@ -21,6 +21,7 @@ const ziglua = @import("ziglua");
 const glyphwire = @import("glyphwire");
 const syntax = @import("syntax.zig");
 const editor = @import("editor.zig");
+const lsp = @import("lsp.zig");
 
 const Lua = ziglua.Lua;
 const Color = glyphwire.Color;
@@ -52,6 +53,25 @@ pub const key_repeat_delay_ms_default: f64 = 300;
 pub const key_repeat_interval_ms_default: f64 = 30;
 pub const key_repeat_insert_delay_ms_default: f64 = 300;
 pub const key_repeat_insert_interval_ms_default: f64 = 30;
+
+/// The language servers zoe knows about without being told. Each is started
+/// only if its binary is on `PATH`, so having all three listed costs nothing
+/// on a machine with none of them installed.
+///
+/// Two servers on Python is the point, not an oversight: the 2026 standard
+/// setup is a type checker for hover and navigation (basedpyright -- the
+/// open-source Pylance equivalent, pip-installable) *plus* `ruff server` for
+/// lint and format diagnostics. The store keys diagnostics by
+/// `(path, server)` precisely so the two can coexist.
+pub const default_lsp_servers = [_]lsp.ServerConfig{
+    .{ .name = "zls", .languages = &.{"zig"}, .cmd = &.{"zls"} },
+    .{
+        .name = "basedpyright",
+        .languages = &.{"python"},
+        .cmd = &.{ "basedpyright-langserver", "--stdio" },
+    },
+    .{ .name = "ruff", .languages = &.{"python"}, .cmd = &.{ "ruff", "server" } },
+};
 
 /// The parsed config. Everything it points at is owned by `arena`.
 pub const Config = struct {
@@ -116,11 +136,33 @@ pub const Config = struct {
     /// a faint middle dot on each space, a faint arrow on each tab.
     /// Default false; `:set whitespace=…` overrides.
     show_whitespace: bool = false,
+    /// `config.lsp.enabled` -- the master switch. False stops every
+    /// language server from starting, whatever `lsp_servers` says.
+    lsp_enabled: bool = true,
+    /// `config.lsp.servers`, merged **by name** over `default_lsp_servers`
+    /// so overriding one server doesn't mean re-declaring the others. In
+    /// the arena, like everything else here. Each entry's binary is
+    /// probed on `PATH` at startup; one that isn't installed is simply not
+    /// started (see `lsp.Pool.start`).
+    lsp_servers: []const lsp.ServerConfig = &default_lsp_servers,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
     }
 };
+
+/// A `Config` holding nothing but the defaults, with a fresh arena. What
+/// `load` starts from, and what a test hands to `parseSource`.
+pub fn defaults(gpa: std.mem.Allocator) Config {
+    return .{
+        .arena = std.heap.ArenaAllocator.init(gpa),
+        .langs = &syntax.default_langs,
+        .grammar_dirs = &.{},
+        .theme = syntax.Theme.initDefault(),
+        .injections = true,
+        .line_numbers = .absolute,
+    };
+}
 
 /// Reads `zoe.conf.lua` from glyphwire's config dir and returns the merged
 /// config. A missing file / missing config home is the normal case:
@@ -131,19 +173,26 @@ pub fn load(
     io: std.Io,
     environ: *const std.process.Environ.Map,
 ) Config {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    const a = arena.allocator();
-
-    var cfg = Config{
-        .arena = arena,
-        .langs = &syntax.default_langs,
-        .grammar_dirs = &.{},
-        .theme = syntax.Theme.initDefault(),
-        .injections = true,
-        .line_numbers = .absolute,
-    };
-
+    var cfg = defaults(gpa);
     const src = readConf(&cfg.arena, io, environ) orelse return cfg;
+    return parseSource(gpa, src, environ, cfg);
+}
+
+/// The parse half of `load`, over config text already in hand. Split out so
+/// `tests/zoe_tests.zig` can exercise it against a string -- which is the
+/// whole reason this file isn't part of `ui.zig` (see the module comment),
+/// and what `config.lsp`'s merge-by-name rules are checked against.
+///
+/// `cfg` comes in holding the defaults and its arena owns everything the
+/// result points at.
+pub fn parseSource(
+    gpa: std.mem.Allocator,
+    src: [:0]const u8,
+    environ: *const std.process.Environ.Map,
+    cfg_in: Config,
+) Config {
+    var cfg = cfg_in;
+    const a = cfg.arena.allocator();
 
     const lua = Lua.init(gpa) catch {
         std.log.warn("zoe: could not create Lua interpreter for {s}; using defaults", .{conf_name});
@@ -180,6 +229,7 @@ pub fn load(
     cfg.tab_width = readTabWidth(lua, cfg.tab_width);
     cfg.expand_tab = readFlag(lua, "expand_tab", cfg.expand_tab);
     cfg.show_whitespace = readFlag(lua, "show_whitespace", cfg.show_whitespace);
+    readLsp(lua, a, &cfg);
     return cfg;
 }
 
@@ -363,6 +413,207 @@ fn readLangs(lua: *Lua, a: std.mem.Allocator) []const syntax.LangDef {
     if (out.items.len == 0) return &syntax.default_langs;
     out.appendSlice(a, &syntax.default_langs) catch {};
     return out.toOwnedSlice(a) catch &syntax.default_langs;
+}
+
+/// `config.lsp`: the master switch and the server list, merged by name over
+/// `default_lsp_servers`.
+///
+/// Merging by name rather than replacing the list wholesale is what makes
+/// the common edits one line each: pointing `zls` at a different binary, or
+/// turning `ruff` off, without having to restate the servers you were happy
+/// with. A name the defaults don't have is a new server.
+fn readLsp(lua: *Lua, a: std.mem.Allocator, cfg: *Config) void {
+    if (lua.getField(-1, "lsp") != .table) {
+        lua.pop(1);
+        return;
+    }
+    defer lua.pop(1);
+
+    cfg.lsp_enabled = readFlag(lua, "enabled", cfg.lsp_enabled);
+
+    if (lua.getField(-1, "servers") != .table) {
+        lua.pop(1);
+        return;
+    }
+    defer lua.pop(1);
+
+    // Start from the built-ins and edit in place, so an entry naming one of
+    // them overrides just the fields it mentions.
+    var out: std.ArrayList(lsp.ServerConfig) = .empty;
+    out.appendSlice(a, &default_lsp_servers) catch return;
+
+    const n = lua.rawLen(-1);
+    var i: usize = 1;
+    while (i <= n) : (i += 1) {
+        defer lua.pop(1); // the entry table
+        if (lua.rawGetIndex(-1, @intCast(i)) != .table) continue;
+
+        // `name` is what an entry is identified by, so an entry without one
+        // can't be merged and can't stand alone either.
+        if (lua.getField(-1, "name") != .string) {
+            lua.pop(1);
+            continue;
+        }
+        const name_raw = lua.toString(-1) catch {
+            lua.pop(1);
+            continue;
+        };
+        const name = a.dupe(u8, name_raw) catch {
+            lua.pop(1);
+            continue;
+        };
+        lua.pop(1);
+
+        const existing: ?*lsp.ServerConfig = blk: {
+            for (out.items) |*s| if (std.mem.eql(u8, s.name, name)) break :blk s;
+            break :blk null;
+        };
+        var entry: lsp.ServerConfig = if (existing) |e| e.* else .{
+            .name = name,
+            .languages = &.{},
+            .cmd = &.{},
+        };
+
+        if (readStringList(lua, a, "languages")) |langs| entry.languages = langs;
+        if (readStringList(lua, a, "cmd")) |cmd| entry.cmd = cmd;
+        entry.enabled = readFlag(lua, "enabled", entry.enabled);
+        {
+            // Bracketed by the stack height rather than a counted `pop`:
+            // `luaValueToJson` walks a table with `next`, which leaves a key
+            // and a value on the stack, and an early return out of it would
+            // otherwise make the pop below take the wrong thing and corrupt
+            // the walk over the remaining entries.
+            const top = lua.getTop();
+            defer lua.setTop(top);
+            if (lua.getField(-1, "settings") == .table) {
+                var json: std.ArrayList(u8) = .empty;
+                if (luaValueToJson(lua, a, &json, 0)) {
+                    entry.settings_json = json.toOwnedSlice(a) catch null;
+                }
+            }
+        }
+
+        if (existing) |e| {
+            e.* = entry;
+        } else {
+            // A brand-new server with nothing to run, or nothing to run it
+            // for, would be started and immediately do nothing.
+            if (entry.cmd.len == 0 or entry.languages.len == 0) continue;
+            out.append(a, entry) catch continue;
+        }
+    }
+
+    cfg.lsp_servers = out.toOwnedSlice(a) catch &default_lsp_servers;
+}
+
+/// A table of strings at `config.<...>.<name>`, duped into `a`. Null when
+/// the field is absent or isn't a table, so a caller can tell "not
+/// mentioned" (keep the default) from "mentioned as empty" (an entry that
+/// won't start). A non-string element is skipped.
+fn readStringList(lua: *Lua, a: std.mem.Allocator, comptime name: [:0]const u8) ?[]const []const u8 {
+    if (lua.getField(-1, name) != .table) {
+        lua.pop(1);
+        return null;
+    }
+    defer lua.pop(1);
+    var out: std.ArrayList([]const u8) = .empty;
+    const n = lua.rawLen(-1);
+    var i: usize = 1;
+    while (i <= n) : (i += 1) {
+        defer lua.pop(1);
+        if (lua.rawGetIndex(-1, @intCast(i)) != .string) continue;
+        const s = lua.toString(-1) catch continue;
+        out.append(a, a.dupe(u8, s) catch continue) catch continue;
+    }
+    return out.toOwnedSlice(a) catch null;
+}
+
+/// Serializes the Lua value on top of the stack as JSON into `out`, for a
+/// server's `initializationOptions` -- `settings` in the config.
+///
+/// Passed through rather than modelled: every server has its own settings
+/// schema (basedpyright's `python.analysis.*`, zls's own keys), all of them
+/// change faster than zoe would track, and none of them mean anything here.
+/// So the config's table is transcribed and forwarded verbatim.
+///
+/// A table with a positive `rawLen` is an array and everything else is an
+/// object, which is the usual Lua ambiguity and the usual resolution.
+/// Returns false if the value isn't representable, leaving `out` unusable.
+fn luaValueToJson(lua: *Lua, a: std.mem.Allocator, out: *std.ArrayList(u8), depth: u8) bool {
+    // Bounded rather than trusting the config not to contain a cycle: a
+    // self-referencing table would otherwise recurse until the stack went.
+    if (depth > 16) return false;
+    switch (lua.typeOf(-1)) {
+        .nil => out.appendSlice(a, "null") catch return false,
+        .boolean => out.appendSlice(a, if (lua.toBoolean(-1)) "true" else "false") catch return false,
+        .number => {
+            const v = lua.toNumber(-1) catch return false;
+            // Lua has one number type; integral values are written without
+            // a decimal point so a count or a port doesn't arrive as "8.0e0".
+            if (v == @trunc(v) and @abs(v) < 1e15) {
+                out.print(a, "{d}", .{@as(i64, @intFromFloat(v))}) catch return false;
+            } else {
+                out.print(a, "{d}", .{v}) catch return false;
+            }
+        },
+        .string => {
+            const s = lua.toString(-1) catch return false;
+            appendJsonString(a, out, s) catch return false;
+        },
+        .table => {
+            const len = lua.rawLen(-1);
+            if (len > 0) {
+                out.append(a, '[') catch return false;
+                var i: usize = 1;
+                while (i <= len) : (i += 1) {
+                    if (i > 1) out.append(a, ',') catch return false;
+                    _ = lua.rawGetIndex(-1, @intCast(i));
+                    const ok = luaValueToJson(lua, a, out, depth + 1);
+                    lua.pop(1);
+                    if (!ok) return false;
+                }
+                out.append(a, ']') catch return false;
+                return true;
+            }
+            out.append(a, '{') catch return false;
+            var first = true;
+            lua.pushNil();
+            while (lua.next(-2)) {
+                // key at -2, value at -1. Only string keys make sense in
+                // JSON; a numeric key in a table with no array part is a
+                // config mistake, not a thing to invent a name for.
+                if (lua.typeOf(-2) != .string) {
+                    lua.pop(1);
+                    continue;
+                }
+                if (!first) out.append(a, ',') catch return false;
+                first = false;
+                // `toString` on the key would coerce it in place and break
+                // `next`; it is already a string, so this is just a read.
+                const key = lua.toString(-2) catch {
+                    lua.pop(1);
+                    continue;
+                };
+                appendJsonString(a, out, key) catch return false;
+                out.append(a, ':') catch return false;
+                const ok = luaValueToJson(lua, a, out, depth + 1);
+                if (!ok) return false;
+                lua.pop(1); // the value; the key stays for `next`
+            }
+            out.append(a, '}') catch return false;
+        },
+        else => return false,
+    }
+    return true;
+}
+
+/// One JSON string literal, quotes and escapes included, appended to `out`.
+/// Through `Stringify` rather than hand-rolled so the escaping is the same
+/// as everywhere else in the codebase.
+fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    const quoted = try std.json.Stringify.valueAlloc(a, s, .{});
+    defer a.free(quoted);
+    try out.appendSlice(a, quoted);
 }
 
 fn readConf(

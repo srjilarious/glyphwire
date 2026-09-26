@@ -645,6 +645,14 @@ notification (section 7) rather than a grid change.
 
 `clear` with `bg` leaves the region blank but opaque in that colour.
 
+`set_underline` takes the same region again and repaints only the
+underline, for a mark that goes *over* text already on the grid. An editor
+paints a row as coloured runs and then overpaints the search highlight and
+the selection on it, and each of those is a full cell write that clears the
+underline — so a diagnostic squiggle has to be applied after them, by
+something that does not need to know what colours are underneath. `"none"`
+takes a mark off.
+
 `set_bg` takes the same region, with the same defaulting, and repaints
 only each cell's background: the grapheme, foreground colour,
 `metadata_id`, `selectable` flag, text scale and foreground icon are all

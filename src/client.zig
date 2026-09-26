@@ -524,6 +524,51 @@ pub const Client = struct {
         bg: protocol.Color,
     };
 
+    /// `set_underline`'s options: `SetBgOpts`' region for the underline
+    /// channel. Shared by `Client.setUnderline` and `Batch.setUnderline`.
+    pub const SetUnderlineOpts = struct {
+        /// null = the root layer.
+        layer: ?core.LayerHandle = null,
+        row: usize = 0,
+        col: usize = 0,
+        /// null = to the layer's edge.
+        rows: ?usize = null,
+        cols: ?usize = null,
+        underline: core.Underline,
+        /// null follows each cell's own `fg`.
+        underline_color: ?core.Color = null,
+    };
+
+    /// `set_underline` -- marks a region's underline and nothing else, for a
+    /// mark that goes *over* text already drawn: a diagnostic squiggle under
+    /// a row that has already been syntax-coloured, search-highlighted and
+    /// selection-tinted. `.none` takes the mark off. A notification.
+    pub fn setUnderline(self: *Client, opts: SetUnderlineOpts) !void {
+        try self.notify("set_underline", setUnderlineParams(opts));
+    }
+
+    fn setUnderlineParams(opts: SetUnderlineOpts) SetUnderlineWire {
+        return .{
+            .layer = opts.layer,
+            .row = opts.row,
+            .col = opts.col,
+            .rows = opts.rows,
+            .cols = opts.cols,
+            .underline = @tagName(opts.underline),
+            .underline_color = colorToJson(opts.underline_color),
+        };
+    }
+
+    const SetUnderlineWire = struct {
+        layer: ?core.LayerHandle,
+        row: usize,
+        col: usize,
+        rows: ?usize,
+        cols: ?usize,
+        underline: []const u8,
+        underline_color: ?protocol.Color,
+    };
+
     /// `set_property(layer, "cursor", {row, col})` -- a notification.
     pub fn setCursor(self: *Client, row: usize, col: usize) !void {
         try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
@@ -2567,6 +2612,13 @@ pub const Client = struct {
         /// go out together, in one frame.
         pub fn setBg(self: *Batch, opts: SetBgOpts) !void {
             try self.notify("set_bg", setBgParams(opts));
+        }
+
+        /// Batched `set_underline` -- see `Client.SetUnderlineOpts`. Batched
+        /// is how an editor uses it: every diagnostic mark on the visible
+        /// rows goes out in the same frame as the text it sits under.
+        pub fn setUnderline(self: *Batch, opts: SetUnderlineOpts) !void {
+            try self.notify("set_underline", setUnderlineParams(opts));
         }
 
         /// Batched `set_property(cursor)` on the root layer -- see

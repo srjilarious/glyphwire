@@ -58,6 +58,8 @@ const filetype = @import("filetype.zig");
 const syntax = @import("syntax.zig");
 const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
+const lsp = @import("lsp.zig");
+const diag = @import("diag.zig");
 const shellpanel = glyphwire.shellpanel;
 
 const Editor = editor.Editor;
@@ -160,6 +162,109 @@ const finder_max_cols: usize = 84;
 const finder_max_rows: usize = 20;
 const finder_min_cols: usize = 24;
 const finder_min_rows: usize = 4;
+
+/// Diagnostic colours: the squiggle under the text, and the mark in the
+/// sign column. Red/amber/blue/grey by severity, which is the convention
+/// every editor and every compiler shares -- worth following exactly
+/// because it is read at a glance and never looked up.
+const fg_diag_error = Color{ .r = 232, .g = 92, .b = 92, .a = 255 };
+const fg_diag_warning = Color{ .r = 226, .g = 176, .b = 74, .a = 255 };
+const fg_diag_info = Color{ .r = 108, .g = 164, .b = 232, .a = 255 };
+const fg_diag_hint = Color{ .r = 132, .g = 132, .b = 148, .a = 255 };
+
+/// The sign-column glyph. Solid for an error, hollow for everything else,
+/// so severity still reads on a display where the colours are hard to tell
+/// apart -- and both are one cell wide in every font, which a fancier
+/// symbol from a Nerd Font range would not be.
+const sign_error = "\u{25cf}"; // ●
+const sign_other = "\u{25cb}"; // ○
+
+/// The hover popup's size limits, clamped to the pane like the finder's.
+const hover_max_cols: usize = 76;
+const hover_max_rows: usize = 14;
+const bg_hover = Color{ .r = 34, .g = 34, .b = 42, .a = 255 };
+const fg_hover = Color{ .r = 214, .g = 214, .b = 222, .a = 255 };
+
+/// How long after the last edit a `didChange` goes out. Long enough that a
+/// burst of typing is one message and a server isn't re-analysing the file
+/// on every keystroke; short enough that pausing to look at the screen
+/// gets you current diagnostics. 150ms is roughly where every editor with
+/// this knob has landed.
+const lsp_change_debounce_ms: u64 = 150;
+
+/// Entries the jumplist keeps. vim's default is 100; there is no reason to
+/// differ, and a bounded list is what keeps `gd` from being a memory leak
+/// in a long session.
+const max_jumps: usize = 100;
+
+/// One place the cursor was before a jump, for Ctrl+O / Ctrl+I. The path is
+/// owned; a scratch buffer with no path can't be returned to and is not
+/// recorded.
+const Jump = struct {
+    path: []const u8,
+    offset: usize,
+};
+
+/// The jumplist: where `gd` came from, so Ctrl+O gets you back.
+///
+/// zoe had none before LSP, which was fine while nothing moved the cursor
+/// somewhere it hadn't been asked to -- and stops being fine the moment
+/// `gd` can open another file. vim's model: a stack with a cursor into it,
+/// where Ctrl+O steps back through what you left and Ctrl+I returns, and a
+/// fresh jump truncates whatever Ctrl+O had walked past.
+const JumpList = struct {
+    entries: std.ArrayList(Jump) = .empty,
+    /// How far back Ctrl+O has walked; 0 is "at the newest entry".
+    back: usize = 0,
+
+    fn deinit(self: *JumpList, alloc: std.mem.Allocator) void {
+        for (self.entries.items) |e| alloc.free(e.path);
+        self.entries.deinit(alloc);
+    }
+
+    /// Records where a jump is leaving from. A new jump discards anything
+    /// Ctrl+O had stepped back past, the way vim's does -- the branch you
+    /// walked back through is not a place forward navigation should return
+    /// to.
+    fn push(self: *JumpList, alloc: std.mem.Allocator, path: []const u8, offset: usize) !void {
+        while (self.back > 0) {
+            const dropped = self.entries.pop() orelse break;
+            alloc.free(dropped.path);
+            self.back -= 1;
+        }
+        try self.entries.append(alloc, .{ .path = try alloc.dupe(u8, path), .offset = offset });
+        if (self.entries.items.len > max_jumps) {
+            const oldest = self.entries.orderedRemove(0);
+            alloc.free(oldest.path);
+        }
+    }
+
+    /// The entry Ctrl+O should go to, or null at the end of the list.
+    fn stepBack(self: *JumpList) ?Jump {
+        if (self.back >= self.entries.items.len) return null;
+        self.back += 1;
+        return self.entries.items[self.entries.items.len - self.back];
+    }
+
+    /// The entry Ctrl+I should return to.
+    fn stepForward(self: *JumpList) ?Jump {
+        if (self.back == 0) return null;
+        self.back -= 1;
+        if (self.back == 0) return null;
+        return self.entries.items[self.entries.items.len - self.back];
+    }
+};
+
+/// An open hover popup. `text` is owned; `scroll` is the first line shown,
+/// since a hover on a documented function easily runs past the popup.
+const Hover = struct {
+    text: []const u8,
+    scroll: usize = 0,
+
+    fn deinit(self: *Hover, alloc: std.mem.Allocator) void {
+        alloc.free(self.text);
+    }
+};
 
 /// A pane's bounds, mirrored from the last `layout` notification.
 const Bounds = struct {
@@ -386,8 +491,30 @@ const Slot = struct {
     /// `renderBuffer` triggers a reparse.
     hl_edits: u64 = 0,
 
+    /// The `Buffer.edits` value the language servers have been told about.
+    /// A mismatch arms the `didChange` debounce -- deliberately a separate
+    /// watermark from `hl_edits` rather than a second consumer of
+    /// `Buffer.pending_edits`, which the highlighter drains alone (see
+    /// `docs/investigations/zoe-lsp.md`).
+    lsp_sent_edits: u64 = 0,
+    /// The LSP document version to send next. Monotonic per buffer, as the
+    /// protocol requires; a server uses it to discard a stale reply.
+    lsp_version: i64 = 1,
+    /// Whether `didOpen` has been sent for this buffer. A scratch buffer
+    /// with no path never is, and neither is one whose extension no
+    /// configured server claims.
+    lsp_opened: bool = false,
+    /// `ed.path` resolved to an absolute path, owned, filled on first use
+    /// (`Ui.slotAbs`). The diagnostic store is keyed by absolute path, and
+    /// the sign column asks it a question per visible row per frame --
+    /// resolving the cwd that many times a frame is the kind of cost that
+    /// only shows up as the editor feeling slightly heavy. Invalidated by
+    /// whatever changes `ed.path`.
+    abs_path: ?[]u8 = null,
+
     fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
         if (self.hl) |*h| h.deinit();
+        if (self.abs_path) |p| alloc.free(p);
         self.ed.deinit();
         alloc.destroy(self);
     }
@@ -487,6 +614,36 @@ pub const Ui = struct {
     finder: ?Finder = null,
     finder_layer: glyphwire.LayerHandle,
     finder_list_layer: glyphwire.LayerHandle,
+
+    /// The language servers, and everything they have said. The pool is
+    /// null when `config.lsp.enabled` is false; it exists but holds no
+    /// server when none of the configured binaries is installed, which is
+    /// the ordinary case on a machine with only one toolchain. See
+    /// `docs/investigations/zoe-lsp.md`.
+    lsp_pool: ?lsp.Pool = null,
+    diags: diag.Store,
+    /// Whether a sign column is reserved in the gutter. Decided once at
+    /// startup from "did any server actually start", and never changed
+    /// after: a gutter that appears the first time a diagnostic arrives
+    /// would reflow every line of the pane under the user's cursor.
+    signs: bool = false,
+    /// A `didChange` waiting on the debounce, with the deadline it goes out
+    /// at. `run` shortens its wait to this, which is the only thing that
+    /// makes the loop time-bound at all -- see `lsp_change_debounce_ms`.
+    lsp_change_due: ?std.Io.Clock.Timestamp = null,
+    /// The hover popup, non-null while it is up. One float layer, placed
+    /// against the cursor like the finder is against the pane.
+    hover: ?Hover = null,
+    hover_layer: glyphwire.LayerHandle,
+    hover_rect: Bounds = .{},
+    hover_dirty: bool = false,
+    /// The newest outstanding `hover` / `definition` request id. A reply
+    /// carrying anything else is stale -- the user asked again, or moved on
+    /// -- and is dropped rather than popping a popup for a cursor position
+    /// that is two jumps old.
+    hover_request: ?i64 = null,
+    definition_request: ?i64 = null,
+    jumps: JumpList = .{},
     /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom, above
     /// the statusline, for running builds and tests without leaving the
     /// editor. It floats outside the split tree like the finder and takes
@@ -643,6 +800,11 @@ pub const Ui = struct {
         // sized by `renderFinder`, and stays invisible until Ctrl+P.
         const finder_layer = try client.createLayer(finder_min_cols, finder_header_rows, 0);
         const finder_list_layer = try client.createLayer(finder_min_cols, 1, 0);
+        // The hover popup, floating like the finder's layers and placed
+        // against the cursor rather than the pane -- `hoverRect`.
+        const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
+        try client.setLayerVisible(hover_layer, false);
+        try client.setLayerBackground(hover_layer, bg_hover);
         try client.setLayerVisible(finder_layer, false);
         try client.setLayerVisible(finder_list_layer, false);
         try client.setLayerBackground(finder_layer, bg_finder);
@@ -680,6 +842,8 @@ pub const Ui = struct {
             .status_layer = status_layer,
             .finder_layer = finder_layer,
             .finder_list_layer = finder_list_layer,
+            .hover_layer = hover_layer,
+            .diags = diag.Store.init(alloc),
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
             .pane_split = pane_split,
             .buffer_col_split = buffer_col_split,
@@ -693,6 +857,10 @@ pub const Ui = struct {
         // to fail bringing the editor up. Done before the first buffer,
         // which builds its own highlighter against what this leaves.
         self.loadConfig(environ);
+
+        // After the config (which carries the server list) and before the
+        // first buffer (which announces itself to whatever started).
+        self.startLsp(root_dir, environ);
 
 
         const target_path: ?[]const u8 = switch (target) {
@@ -991,6 +1159,12 @@ pub const Ui = struct {
             } else |_| {}
         }
 
+        // The language servers hear about it here rather than at each call
+        // site, so `:e`, Ctrl+P, the file tree and the first buffer `init`
+        // opens all announce it the same way. A no-op without a server, or
+        // for a scratch buffer with no path.
+        self.lspDidOpen(slot);
+
         // A `:set lineno=…` typed this session beats the config default,
         // so a buffer opened afterwards matches the ones already open.
         if (self.buffers.items.len > 0) {
@@ -1032,6 +1206,13 @@ pub const Ui = struct {
         // Before the context goes: the shell draws on a layer inside it,
         // and this is what tells it to leave.
         self.shell.deinit();
+        // Each server gets `shutdown`/`exit` and then, if it has not gone,
+        // a kill -- bounded, so quitting zoe never waits on a language
+        // server that has stopped listening. See `lsp.Server.deinit`.
+        if (self.lsp_pool) |*p| p.deinit();
+        self.diags.deinit();
+        if (self.hover) |*h| h.deinit(self.alloc);
+        self.jumps.deinit(self.alloc);
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
         if (self.finder) |*f| f.deinit();
@@ -1167,8 +1348,12 @@ pub const Ui = struct {
 
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
+            // Before the frame: everything the language servers have said
+            // since the last turn, so an arriving diagnostic is drawn in the
+            // frame it arrived for rather than the one after.
+            self.drainLsp();
             if (self.buffer_dirty or self.tree_dirty != .none or self.tabs_dirty or
-                self.status_dirty or self.finder_dirty or
+                self.status_dirty or self.finder_dirty or self.hover_dirty or
                 self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
@@ -1183,12 +1368,30 @@ pub const Ui = struct {
             // everything already queued is folded into the same frame, in
             // the order it arrived (a drag's moves before its release, a
             // resize after the keystroke that preceded it).
-            const first = try self.listener.next(.none) orelse continue;
-            try self.handleEvent(first);
-            while (!self.quit) {
-                const ev = self.listener.pollNext() orelse break;
-                try self.handleEvent(ev);
+            //
+            // A language server's output arrives here too, without a
+            // notification behind it: its reader thread parks the message and
+            // calls `InputListener.wake`, which releases this with no event.
+            // So the editor stays event-driven with a server attached -- no
+            // polling interval, no latency floor.
+            //
+            // The one timed wait is the `didChange` debounce: while one is
+            // armed, wait no longer than its deadline (see `armLspChange`).
+            self.armLspChange();
+            const timeout: std.Io.Timeout = if (self.lsp_change_due) |due|
+                .{ .deadline = due }
+            else
+                .none;
+            if (try self.listener.next(timeout)) |first| {
+                try self.handleEvent(first);
+                while (!self.quit) {
+                    const ev = self.listener.pollNext() orelse break;
+                    try self.handleEvent(ev);
+                }
             }
+            // A wake with nothing queued, or the deadline passing: either way
+            // this is where the debounced change goes out.
+            if (self.lspChangeDue()) self.lspFlushChange();
             // After the events, before the frame they produced: a mode
             // change in that batch retimes the host's key repeat before
             // the user can hold anything down in the new mode.
@@ -1346,9 +1549,27 @@ pub const Ui = struct {
                 // down-set here would read a quick Ctrl+W as a plain `w`
                 // whenever a heavy redraw left this loop behind.
                 const ctrl = k.ctrl();
+                // The hover popup is transient chrome, not a mode: the next
+                // keystroke dismisses it and then does whatever it was going
+                // to do. Escape is the exception -- it only dismisses, so
+                // it doesn't also leave insert mode on the way out.
+                if (self.hover != null) {
+                    _ = self.closeHover();
+                    if (std.mem.eql(u8, k.key, "escape")) return;
+                }
                 if (ctrl) {
                     if (std.mem.eql(u8, k.key, "w")) {
                         self.setFocus(if (self.focus == .buffer) .tree else .buffer);
+                        return;
+                    }
+                    // Ctrl+O / Ctrl+I walk the jumplist -- vim's chords, and
+                    // the way back from a `gd` that opened another file.
+                    if (self.focus == .buffer and std.mem.eql(u8, k.key, "o")) {
+                        self.jumpStep(true);
+                        return;
+                    }
+                    if (self.focus == .buffer and std.mem.eql(u8, k.key, "i")) {
+                        self.jumpStep(false);
                         return;
                     }
                     // Ctrl + a direction moves focus that way rather than
@@ -2112,6 +2333,14 @@ pub const Ui = struct {
             // `p` / `P`: the editor can't read the clipboard, so pull it
             // here and hand the text back.
             .paste => |p| try self.pasteFromClipboard(p.after),
+
+            // The language-server commands. The editor core named them; the
+            // servers, the diagnostics and the jumplist all live here.
+            .lsp_hover => self.requestLsp(.hover),
+            .lsp_definition => self.requestLsp(.definition),
+            .diag_step => |d| self.stepDiagnostic(d.forward),
+            .lsp_status => |arg| self.lspStatus(arg),
+            .diag_list => self.diagList(),
         }
     }
 
@@ -2548,6 +2777,9 @@ pub const Ui = struct {
         // at, so everything below reads it back off the editor.
         try self.buf.ed.loadText(bytes, path);
         self.selectHighlightLanguage(self.buf, self.buf.ed.path);
+        // Wholly different contents: the servers' copy is stale in a way the
+        // edit watermark can't express, so force the next flush to send.
+        self.buf.lsp_sent_edits = self.buf.ed.buf.edits -% 1;
         self.buf.top_line = 0;
         self.buf.left_col = 0;
         // Fresh contents -- nothing on screen carries over.
@@ -2626,6 +2858,10 @@ pub const Ui = struct {
             return;
         }
 
+        // While the slot still exists: `didClose` needs its path, and the
+        // stored diagnostics go with it.
+        self.lspDidClose(slot);
+
         const closed_active = index == self.active;
         _ = self.buffers.orderedRemove(index);
         slot.deinit(self.alloc);
@@ -2660,11 +2896,528 @@ pub const Ui = struct {
             self.buf.ed.setStatus("E212: Can't open file for writing: {s}", .{dest});
             return;
         };
-        if (target) |t| self.buf.ed.setPath(t) catch {};
+        if (target) |t| {
+            self.buf.ed.setPath(t) catch {};
+            // The buffer is a different file now, so the cached absolute
+            // path and whatever the servers were told about the old name
+            // both stop being true.
+            self.invalidateAbs(self.buf);
+            self.buf.lsp_opened = false;
+        }
         self.buf.ed.markSaved();
+        self.lspDidSave();
         // The tab loses its `+`, and a `:w <name>` also renamed it.
         self.tabs_dirty = true;
         self.buf.ed.setStatus("\"{s}\" {d}L written", .{ dest, self.buf.ed.buf.lineCount() });
+    }
+
+    // ── Language servers ────────────────────────────────────────────────
+    //
+    // See `docs/investigations/zoe-lsp.md`. The short version: `zoe/lsp.zig`
+    // owns the processes and the protocol, `zoe/diag.zig` owns what they
+    // said, and everything here is the editor's half -- when to tell them
+    // about a buffer, what to do with an answer, and how a diagnostic gets
+    // onto the screen.
+
+    /// Starts the configured servers, if any. Best-effort in every
+    /// direction: LSP is not part of the editor's correctness, so a server
+    /// that isn't installed, won't spawn or won't answer leaves zoe exactly
+    /// as it was without one.
+    fn startLsp(self: *Ui, root_dir: []const u8, environ: *const std.process.Environ.Map) void {
+        const cfg = self.hl_config orelse return;
+        if (!cfg.lsp_enabled) return;
+
+        var pool = lsp.Pool.init(self.alloc, self.io, self.listener, root_dir) catch return;
+        pool.start(cfg.lsp_servers, environ) catch {};
+        if (pool.servers.items.len == 0) {
+            // Nothing started. Keep the pool anyway so `:lsp` can list what
+            // it looked for and didn't find, but don't reserve the gutter
+            // column for marks that will never come.
+            self.lsp_pool = pool;
+            return;
+        }
+        self.lsp_pool = pool;
+        self.signs = true;
+    }
+
+    /// The grammar name for `path`, which doubles as the key servers are
+    /// registered under. Null when nothing claims the extension -- the same
+    /// answer that turns highlighting off for a file.
+    fn lspGrammarFor(self: *Ui, path: ?[]const u8) ?[]const u8 {
+        const reg = if (self.grammars) |*r| r else return null;
+        const p = path orelse return null;
+        return reg.nameForPath(p);
+    }
+
+    /// Tells every server that serves this buffer's language about it.
+    /// A buffer with no path (a scratch one) and a file no server claims are
+    /// both simply not announced.
+    fn lspDidOpen(self: *Ui, slot: *Slot) void {
+        const pool = if (self.lsp_pool) |*p| p else return;
+        if (slot.lsp_opened) return;
+        const path = slot.ed.path orelse return;
+        const grammar = self.lspGrammarFor(path) orelse return;
+
+        const abs = self.slotAbs(slot) orelse return;
+        const uri = lsp.pathToUri(self.alloc, abs) catch return;
+        defer self.alloc.free(uri);
+        const text = slot.ed.buf.text(self.alloc) catch return;
+        defer self.alloc.free(text);
+
+        var any = false;
+        var it = pool.forLanguage(grammar);
+        while (it.next()) |s| {
+            s.didOpen(uri, lsp.languageId(grammar), text) catch continue;
+            any = true;
+        }
+        if (!any) return;
+        slot.lsp_opened = true;
+        slot.lsp_sent_edits = slot.ed.buf.edits;
+    }
+
+    /// The counterpart, on `:bd`. The stored diagnostics go too: a closed
+    /// buffer's marks would otherwise come back with the next file to reuse
+    /// the slot.
+    fn lspDidClose(self: *Ui, slot: *Slot) void {
+        const pool = if (self.lsp_pool) |*p| p else return;
+        if (!slot.lsp_opened) return;
+        const path = slot.ed.path orelse return;
+        const grammar = self.lspGrammarFor(path) orelse return;
+
+        const abs = self.slotAbs(slot) orelse return;
+        const uri = lsp.pathToUri(self.alloc, abs) catch return;
+        defer self.alloc.free(uri);
+
+        var it = pool.forLanguage(grammar);
+        while (it.next()) |s| s.didClose(uri) catch {};
+        self.diags.clearPath(abs);
+        slot.lsp_opened = false;
+    }
+
+    /// `:w` -- some servers only report on save (and `ruff`'s formatting
+    /// checks are among them), so this is not redundant with `didChange`.
+    fn lspDidSave(self: *Ui) void {
+        const pool = if (self.lsp_pool) |*p| p else return;
+        // A `:w <newname>` makes this a file the servers have never seen;
+        // announce it rather than saving under a name they don't know.
+        if (!self.buf.lsp_opened) {
+            self.lspDidOpen(self.buf);
+            return;
+        }
+        const path = self.buf.ed.path orelse return;
+        const grammar = self.lspGrammarFor(path) orelse return;
+        const abs = self.slotAbs(self.buf) orelse return;
+        const uri = lsp.pathToUri(self.alloc, abs) catch return;
+        defer self.alloc.free(uri);
+
+        // The save is the newest state, so any debounced change is spent.
+        self.lspFlushChange();
+        var it = pool.forLanguage(grammar);
+        while (it.next()) |s| s.didSave(uri) catch {};
+    }
+
+    /// Arms the `didChange` debounce if the active buffer has moved on since
+    /// the servers were last told. Called once a frame from `run`, which is
+    /// enough: the deadline is what decides when the message goes, not how
+    /// often this is called.
+    fn armLspChange(self: *Ui) void {
+        if (self.lsp_pool == null) return;
+        if (!self.buf.lsp_opened) return;
+        if (self.buf.ed.buf.edits == self.buf.lsp_sent_edits) return;
+        if (self.lsp_change_due != null) return;
+        self.lsp_change_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
+            .raw = .fromMilliseconds(lsp_change_debounce_ms),
+            .clock = .awake,
+        });
+    }
+
+    /// Sends the active buffer's whole text as a `didChange` and disarms the
+    /// debounce. Full text rather than ranges -- see the design note: the
+    /// incremental form needs a second consumer of `Buffer.pending_edits`,
+    /// which the highlighter currently drains alone.
+    fn lspFlushChange(self: *Ui) void {
+        self.lsp_change_due = null;
+        const pool = if (self.lsp_pool) |*p| p else return;
+        if (!self.buf.lsp_opened) return;
+        if (self.buf.ed.buf.edits == self.buf.lsp_sent_edits) return;
+
+        const path = self.buf.ed.path orelse return;
+        const grammar = self.lspGrammarFor(path) orelse return;
+        const abs = self.slotAbs(self.buf) orelse return;
+        const uri = lsp.pathToUri(self.alloc, abs) catch return;
+        defer self.alloc.free(uri);
+        const text = self.buf.ed.buf.text(self.alloc) catch return;
+        defer self.alloc.free(text);
+
+        self.buf.lsp_version += 1;
+        var it = pool.forLanguage(grammar);
+        while (it.next()) |s| s.didChange(uri, self.buf.lsp_version, text) catch {};
+        self.buf.lsp_sent_edits = self.buf.ed.buf.edits;
+    }
+
+    /// Whether the debounce has come due, checked after every wait.
+    fn lspChangeDue(self: *Ui) bool {
+        const due = self.lsp_change_due orelse return false;
+        // Through `.raw`, the clock-free timestamp: the deadline is kept as a
+        // `Clock.Timestamp` because that is what `Io.Timeout` takes.
+        return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() >= 0;
+    }
+
+    /// `path` as an absolute path, owned by the caller. Every LSP URI is
+    /// absolute, and zoe's buffer paths are whatever was typed -- so this is
+    /// also what makes a diagnostic for `./src/main.zig` and one for the
+    /// absolute path the same file.
+    fn absPath(self: *Ui, path: []const u8) ?[]u8 {
+        if (std.fs.path.isAbsolute(path)) return std.fs.path.resolve(self.alloc, &.{path}) catch null;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = std.process.currentPath(self.io, &cwd_buf) catch return null;
+        return std.fs.path.resolve(self.alloc, &.{ cwd_buf[0..n], path }) catch null;
+    }
+
+    /// `slot`'s absolute path, resolved once and cached on the slot (see
+    /// `Slot.abs_path`). Borrowed -- the slot owns it. Null for a buffer with
+    /// no file behind it, which is also "nothing a language server can say
+    /// anything about".
+    fn slotAbs(self: *Ui, slot: *Slot) ?[]const u8 {
+        if (slot.abs_path) |p| return p;
+        const path = slot.ed.path orelse return null;
+        const abs = self.absPath(path) orelse return null;
+        slot.abs_path = abs;
+        return abs;
+    }
+
+    /// Drops the cached absolute path, for whatever just changed `ed.path`
+    /// (`:w <newname>`, `:e`).
+    fn invalidateAbs(self: *Ui, slot: *Slot) void {
+        if (slot.abs_path) |p| self.alloc.free(p);
+        slot.abs_path = null;
+    }
+
+    /// Drains everything the servers have said since the last turn round the
+    /// loop. Called once per iteration of `run`, before the frame, so an
+    /// arriving diagnostic is drawn in the same frame as the keystroke that
+    /// happened to wake us.
+    fn drainLsp(self: *Ui) void {
+        const pool = if (self.lsp_pool) |*p| p else return;
+        while (pool.nextEvent() catch null) |ev| {
+            defer ev.deinit(self.alloc);
+            switch (ev) {
+                .diagnostics => |d| self.applyDiagnostics(d.path, d.server, d.items),
+                .hover => |h| self.applyHover(h.request_id, h.text),
+                .definition => |d| self.applyDefinition(d.request_id, d.target),
+                .died => |d| {
+                    // Its marks will never be refreshed again, so they go
+                    // rather than growing stale on screen.
+                    self.diags.clearServer(d.server);
+                    self.buf.ed.setStatus("LSP: {s} exited (:lsp restart)", .{d.server});
+                    self.status_dirty = true;
+                    self.buf.full_redraw = true;
+                    self.buffer_dirty = true;
+                },
+            }
+        }
+    }
+
+    /// Stores one publish, converting each range out of the server's
+    /// position encoding into byte columns first.
+    ///
+    /// Converting here rather than at paint time is the only correct moment:
+    /// the positions describe the text the server analysed, and the buffer
+    /// may have moved on by the time a row is drawn. It also puts the
+    /// encoding question in one place -- from here down, a diagnostic's
+    /// `character` is a byte offset in its line, like every other column in
+    /// the editor.
+    fn applyDiagnostics(self: *Ui, path: []const u8, server: []const u8, items: []lsp.Diagnostic) void {
+        const pool = if (self.lsp_pool) |*p| p else return;
+        const enc = pool.encodingOf(server);
+
+        // The buffer this is about, if it is open. A server may publish for
+        // any file in the project, including ones zoe has never opened;
+        // those are stored unconverted (nothing paints them) rather than
+        // dropped, so `:diag` could list them later.
+        const slot: ?*Slot = self.slotForPath(path);
+        if (slot) |sl| {
+            for (items) |*d| {
+                d.range.start.character = self.byteColumn(sl, d.range.start, enc);
+                d.range.end.character = self.byteColumn(sl, d.range.end, enc);
+            }
+        }
+
+        // `publish` copies, so `items` stays the event's to free either way.
+        self.diags.publish(path, server, items) catch return;
+
+        // Every visible row may have gained or lost a mark, and the marks
+        // live on cells the row painter owns.
+        if (slot != null and slot.? == self.buf) {
+            self.buf.full_redraw = true;
+            self.buffer_dirty = true;
+            self.status_dirty = true;
+        }
+    }
+
+    /// The byte column in `slot`'s line for an LSP position under `enc`.
+    fn byteColumn(self: *Ui, slot: *Slot, pos: lsp.Position, enc: lsp.PositionEncoding) u32 {
+        if (pos.line >= slot.ed.buf.lineCount()) return pos.character;
+        const text = slot.ed.buf.lineText(self.alloc, pos.line) catch return pos.character;
+        defer self.alloc.free(text);
+        return @intCast(lsp.characterToByte(text, pos.character, enc));
+    }
+
+    fn slotForPath(self: *Ui, abs: []const u8) ?*Slot {
+        for (self.buffers.items) |slot| {
+            const slot_abs = self.slotAbs(slot) orelse continue;
+            if (std.mem.eql(u8, slot_abs, abs)) return slot;
+        }
+        return null;
+    }
+
+    /// `K` and `gd`: ask whichever attached server can answer.
+    ///
+    /// The first capable server wins rather than all of them being asked.
+    /// With basedpyright and ruff both on a Python file only one of them
+    /// even claims `hover`, and if two did, two popups for one keystroke is
+    /// not an improvement.
+    fn requestLsp(self: *Ui, kind: lsp.RequestKind) void {
+        const pool = if (self.lsp_pool) |*p| p else {
+            self.buf.ed.setStatus("LSP: not enabled", .{});
+            self.status_dirty = true;
+            return;
+        };
+        const path = self.buf.ed.path orelse return;
+        const grammar = self.lspGrammarFor(path) orelse return;
+        const abs = self.slotAbs(self.buf) orelse return;
+        const uri = lsp.pathToUri(self.alloc, abs) catch return;
+        defer self.alloc.free(uri);
+
+        // Anything typed since the last sync would make the server answer
+        // about text that is no longer there.
+        self.lspFlushChange();
+
+        const cursor = self.buf.ed.pos();
+        var it = pool.forLanguage(grammar);
+        while (it.next()) |s| {
+            const line_text = self.buf.ed.buf.lineText(self.alloc, cursor.line) catch continue;
+            defer self.alloc.free(line_text);
+            const character = lsp.byteToCharacter(line_text, cursor.col, s.encoding);
+            const id = s.positionRequest(kind, uri, .{
+                .line = @intCast(cursor.line),
+                .character = character,
+            }) catch continue orelse continue;
+            switch (kind) {
+                .hover => self.hover_request = id,
+                .definition => self.definition_request = id,
+                else => {},
+            }
+            return;
+        }
+        self.buf.ed.setStatus("LSP: no server for this", .{});
+        self.status_dirty = true;
+    }
+
+    /// A hover reply. A reply to a request that is no longer the newest is
+    /// dropped: the user asked again, or has moved on, and a popup for a
+    /// cursor position two jumps back is worse than none.
+    fn applyHover(self: *Ui, request_id: i64, text: ?[]const u8) void {
+        const want = self.hover_request orelse return;
+        if (request_id != want) return;
+        self.hover_request = null;
+
+        const t = text orelse {
+            self.buf.ed.setStatus("No hover information", .{});
+            self.status_dirty = true;
+            return;
+        };
+        // Owned by the event, which frees it on return -- take a copy.
+        const owned = self.alloc.dupe(u8, t) catch return;
+        if (self.hover) |*h| h.deinit(self.alloc);
+        self.hover = .{ .text = owned };
+        self.hover_dirty = true;
+    }
+
+    /// A definition reply: jump, recording where we came from so Ctrl+O
+    /// comes back.
+    fn applyDefinition(self: *Ui, request_id: i64, target: ?lsp.Location) void {
+        const want = self.definition_request orelse return;
+        if (request_id != want) return;
+        self.definition_request = null;
+
+        const loc = target orelse {
+            self.buf.ed.setStatus("No definition found", .{});
+            self.status_dirty = true;
+            return;
+        };
+
+        self.pushJump();
+        // Another file is a tab; the same file is just a cursor move. Either
+        // way the target is the range's *start*: a definition's range covers
+        // the whole declaration, and landing on its first character is what
+        // every editor does.
+        const same = if (self.slotAbs(self.buf)) |abs|
+            std.mem.eql(u8, abs, loc.path)
+        else
+            false;
+
+        if (!same) {
+            self.openFile(loc.path) catch {
+                self.buf.ed.setStatus("E484: Can't open {s}", .{loc.path});
+                self.status_dirty = true;
+                return;
+            };
+        }
+        self.gotoLineColumn(loc.range.start.line, loc.range.start.character);
+    }
+
+    /// Moves the cursor to a (line, byte column) pair, clamped into the
+    /// buffer. Shared by `gd`, `]d` and the jumplist.
+    fn gotoLineColumn(self: *Ui, line: u32, column: u32) void {
+        const lines = self.buf.ed.buf.lineCount();
+        const target_line = @min(@as(usize, line), lines -| 1);
+        const start = self.buf.ed.buf.lineStart(target_line);
+        const end = self.buf.ed.buf.lineEnd(target_line);
+        self.buf.ed.setCursor(@min(start + column, end));
+        self.buf.full_redraw = true;
+        self.buffer_dirty = true;
+        self.status_dirty = true;
+    }
+
+    /// `]d` / `[d`, wrapping round the file like vim's quickfix stepping
+    /// does. A buffer with no diagnostics says so rather than moving the
+    /// cursor to nowhere.
+    fn stepDiagnostic(self: *Ui, forward: bool) void {
+        const abs = self.slotAbs(self.buf) orelse return;
+
+        const cursor = self.buf.ed.pos();
+        const dir: diag.Direction = if (forward) .next else .prev;
+        const found = self.diags.step(abs, @intCast(cursor.line), @intCast(cursor.col), dir) orelse
+            // Off the end: wrap. Doing it here rather than in the store
+            // keeps `step` honest for callers that shouldn't wrap.
+            (if (forward) self.diags.first(abs) else self.diags.last(abs)) orelse {
+                self.buf.ed.setStatus("No diagnostics", .{});
+                self.status_dirty = true;
+                return;
+            };
+        self.gotoLineColumn(found.range.start.line, found.range.start.character);
+        self.buf.ed.setStatus("{s}: {s}", .{ found.source, found.message });
+    }
+
+    /// `:lsp` / `:lsp restart`.
+    fn lspStatus(self: *Ui, arg: ?[]const u8) void {
+        self.status_dirty = true;
+        const pool = if (self.lsp_pool) |*p| p else {
+            self.buf.ed.setStatus("LSP: disabled in zoe.conf.lua", .{});
+            return;
+        };
+        if (arg) |a| {
+            if (std.mem.eql(u8, a, "restart")) {
+                self.restartLsp();
+                return;
+            }
+            self.buf.ed.setStatus("LSP: unknown argument \"{s}\" (try :lsp restart)", .{a});
+            return;
+        }
+
+        var msg: std.ArrayList(u8) = .empty;
+        defer msg.deinit(self.alloc);
+        msg.appendSlice(self.alloc, "LSP:") catch return;
+        if (pool.servers.items.len == 0 and pool.missing.items.len == 0) {
+            msg.appendSlice(self.alloc, " no servers configured") catch return;
+        }
+        for (pool.servers.items) |s| {
+            const state = if (!s.alive()) "dead" else if (s.state == .starting) "starting" else "ready";
+            msg.print(self.alloc, " {s}[{s}]", .{ s.name, state }) catch return;
+        }
+        // Named rather than silently absent: "nothing happened" with no
+        // explanation is the worst answer a feature like this can give.
+        for (pool.missing.items) |name| {
+            msg.print(self.alloc, " {s}[not installed]", .{name}) catch return;
+        }
+        self.buf.ed.setStatus("{s}", .{msg.items});
+    }
+
+    /// Tears the pool down and starts it again, re-announcing every open
+    /// buffer. The recovery path for a server that crashed -- deliberately
+    /// manual, because a server that died on a file will die on it again and
+    /// a respawn loop is worse than a dead server.
+    fn restartLsp(self: *Ui) void {
+        if (self.lsp_pool) |*p| p.deinit();
+        self.lsp_pool = null;
+        self.diags.deinit();
+        self.diags = diag.Store.init(self.alloc);
+        for (self.buffers.items) |slot| slot.lsp_opened = false;
+
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = std.process.currentPath(self.io, &root_buf) catch 0;
+        self.startLsp(if (n > 0) root_buf[0..n] else ".", self.environ);
+        for (self.buffers.items) |slot| self.lspDidOpen(slot);
+
+        self.buf.full_redraw = true;
+        self.buffer_dirty = true;
+        self.buf.ed.setStatus("LSP: restarted", .{});
+    }
+
+    /// `:diag` -- this buffer's diagnostics, on the statusline. A one-line
+    /// summary plus the first message, which is what fits; the popup list
+    /// this deserves is the finder's job and a later slice.
+    fn diagList(self: *Ui) void {
+        self.status_dirty = true;
+        const abs = self.slotAbs(self.buf) orelse return;
+
+        const c = self.diags.counts(abs);
+        if (c.errors == 0 and c.warnings == 0) {
+            self.buf.ed.setStatus("No diagnostics", .{});
+            return;
+        }
+        const first = self.diags.first(abs) orelse return;
+        self.buf.ed.setStatus("{d}E {d}W  {d}: {s}: {s}", .{
+            c.errors,
+            c.warnings,
+            first.range.start.line + 1,
+            first.source,
+            first.message,
+        });
+    }
+
+    /// Records where the cursor is, before something moves it somewhere
+    /// else entirely.
+    fn pushJump(self: *Ui) void {
+        const path = self.buf.ed.path orelse return;
+        self.jumps.push(self.alloc, path, self.buf.ed.cursor) catch {};
+    }
+
+    /// Ctrl+O / Ctrl+I.
+    fn jumpStep(self: *Ui, back: bool) void {
+        const entry = (if (back) self.jumps.stepBack() else self.jumps.stepForward()) orelse {
+            // `setStatus` takes a comptime format, so the two messages are
+            // two calls rather than one with a runtime string.
+            if (back) {
+                self.buf.ed.setStatus("At the oldest jump", .{});
+            } else {
+                self.buf.ed.setStatus("At the newest jump", .{});
+            }
+            self.status_dirty = true;
+            return;
+        };
+        // The file may have been closed since; reopening it is what the user
+        // meant either way.
+        self.openFile(entry.path) catch {
+            self.buf.ed.setStatus("E484: Can't open {s}", .{entry.path});
+            self.status_dirty = true;
+            return;
+        };
+        self.buf.ed.setCursor(entry.offset);
+        self.buf.full_redraw = true;
+        self.buffer_dirty = true;
+        self.status_dirty = true;
+    }
+
+    /// The severity's colour, for the squiggle and the sign alike.
+    fn diagColor(severity: lsp.Severity) Color {
+        return switch (severity) {
+            .err => fg_diag_error,
+            .warning => fg_diag_warning,
+            .information => fg_diag_info,
+            .hint => fg_diag_hint,
+        };
     }
 
     // ── Render ──────────────────────────────────────────────────────────
@@ -2694,8 +3447,11 @@ pub const Ui = struct {
         };
         if (self.tabs_dirty) try self.renderTabs(&batch);
         if (self.status_dirty) try self.renderStatus(&batch);
-        // Last in the frame, as it is last in the compositing order.
+        // Last in the frame, as they are last in the compositing order. The
+        // hover popup after the finder: both float, and a hover raised while
+        // the finder is open is the newer of the two.
         if (self.finder_dirty) try self.renderFinder(&batch);
+        if (self.hover_dirty) try self.renderHover(&batch);
 
         _ = try batch.send();
 
@@ -2704,6 +3460,7 @@ pub const Ui = struct {
         self.tabs_dirty = false;
         self.status_dirty = false;
         self.finder_dirty = false;
+        self.hover_dirty = false;
     }
 
     /// Raises the tree pane's pending repaint to at least `level`. Never
@@ -2989,7 +3746,18 @@ pub const Ui = struct {
     /// the count already forces a full pane repaint, so it is always safe
     /// to read fresh.
     fn gutterWidth(self: *const Ui) usize {
-        return gutterWidthFor(self.buf.ed.line_numbers, self.buf.ed.buf.lineCount());
+        return self.signWidth() + gutterWidthFor(self.buf.ed.line_numbers, self.buf.ed.buf.lineCount());
+    }
+
+    /// Cells reserved for the diagnostic sign column, left of the line
+    /// numbers: one when a language server is attached, none otherwise.
+    ///
+    /// Fixed for the session (`signs`), not "one when there is something to
+    /// show". A column that appeared with the first diagnostic would reflow
+    /// every line of the pane sideways while the user was reading it, and
+    /// vanish again when the file went clean.
+    fn signWidth(self: *const Ui) usize {
+        return if (self.signs) 1 else 0;
     }
 
     /// Buffer-text width: the pane less the gutter. Saturates to zero if
@@ -3010,10 +3778,43 @@ pub const Ui = struct {
         const cursor_line = self.buf.ed.pos().line;
         const past_end = line >= self.buf.ed.buf.lineCount();
 
+        // The sign first, in its own cell: the worst severity starting on
+        // this line, or a blank. Painted even on a clean line, because this
+        // is also what takes yesterday's mark off.
+        const signs = self.signWidth();
+        if (signs > 0) {
+            var sign: []const u8 = " ";
+            var sign_fg = fg_dim;
+            if (!past_end) {
+                if (self.diagSeverityForLine(line)) |sev| {
+                    sign = if (sev == .err) sign_error else sign_other;
+                    sign_fg = diagColor(sev);
+                }
+            }
+            try writeAt(batch, self.buffer_layer, r, 0, sign, sign_fg, bg_buffer);
+        }
+
         var buf: [32]u8 = undefined;
-        const cell = gutterCellText(&buf, self.buf.ed.line_numbers, width, line, cursor_line, past_end);
+        const cell = gutterCellText(
+            &buf,
+            self.buf.ed.line_numbers,
+            width - signs,
+            line,
+            cursor_line,
+            past_end,
+        );
         const fg = if (!past_end and line == cursor_line) fg_text else fg_dim;
-        try writeAt(batch, self.buffer_layer, r, 0, cell, fg, bg_buffer);
+        try writeAt(batch, self.buffer_layer, r, signs, cell, fg, bg_buffer);
+    }
+
+    /// The worst diagnostic severity starting on buffer `line` of the active
+    /// buffer, or null. Runs once per visible row per frame, so it does no
+    /// allocation -- the path resolution is the only cost, and it is skipped
+    /// entirely when nothing has published anything.
+    fn diagSeverityForLine(self: *Ui, line: usize) ?lsp.Severity {
+        if (self.lsp_pool == null) return null;
+        const abs = self.slotAbs(self.buf) orelse return null;
+        return self.diags.worstOnLine(abs, @intCast(line));
     }
 
     fn renderBufferRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize) !void {
@@ -3056,6 +3857,177 @@ pub const Ui = struct {
         // selection wins because it is the thing you are about to act on.
         try self.paintMatchRow(batch, r, line, text);
         try self.paintSelectionRow(batch, r, line, text);
+        // Diagnostics last, and through `set_underline` rather than a write:
+        // the two overpaints above are full cell writes that would clear a
+        // squiggle laid down before them, and the underline is a channel of
+        // its own so it doesn't have to fight either of them for the cell.
+        // Every path that repaints a row comes through here, so a mark is
+        // re-applied whenever the row under it is redrawn.
+        try self.paintDiagnosticRow(batch, r, line, text);
+    }
+
+    /// Draws every diagnostic starting on buffer `line` as a coloured
+    /// underline over its range, clipped to the horizontal scroll.
+    ///
+    /// A zero-width range -- which is how servers often report "the error is
+    /// *here*" -- is widened to one cell, because a squiggle under nothing is
+    /// nothing. Worst severity last, so where two diagnostics overlap the
+    /// more serious colour is the one left on the cells.
+    fn paintDiagnosticRow(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        r: usize,
+        line: usize,
+        text: []const u8,
+    ) !void {
+        if (self.lsp_pool == null) return;
+        const abs = self.slotAbs(self.buf) orelse return;
+        const cols = self.textCols();
+        if (cols == 0) return;
+
+        var row: std.ArrayList(diag.Entry) = .empty;
+        defer row.deinit(self.alloc);
+        self.diags.onLine(abs, @intCast(line), &row, self.alloc) catch return;
+        if (row.items.len == 0) return;
+
+        const opts = self.displayOpts();
+        // `onLine` gives worst first; paint in reverse so the worst is the
+        // one that ends up on any cell two of them share.
+        var i = row.items.len;
+        while (i > 0) {
+            i -= 1;
+            const e = row.items[i];
+            const lo_b = @min(@as(usize, e.range.start.character), text.len);
+            // A range that runs past this line's end (a multi-line
+            // diagnostic) is clipped to it: the rows below have their own
+            // marks, or deliberately none. See `diag.Store.onLine`.
+            const hi_b = if (e.range.end.line > e.range.start.line)
+                text.len
+            else
+                @min(@as(usize, e.range.end.character), text.len);
+
+            const start_dc = display.colOfByte(text, lo_b, opts);
+            var end_dc = display.colOfByte(text, @max(hi_b, lo_b), opts);
+            if (end_dc <= start_dc) end_dc = start_dc + 1;
+            if (end_dc <= self.buf.left_col or start_dc >= self.buf.left_col + cols) continue;
+
+            const vis_lo = @max(start_dc, self.buf.left_col);
+            const vis_hi = @min(end_dc, self.buf.left_col + cols);
+            if (vis_hi <= vis_lo) continue;
+
+            try batch.setUnderline(.{
+                .layer = self.buffer_layer,
+                .row = r,
+                .col = self.gutterWidth() + (vis_lo - self.buf.left_col),
+                .rows = 1,
+                .cols = vis_hi - vis_lo,
+                .underline = .curly,
+                .underline_color = diagColor(e.severity),
+            });
+        }
+    }
+
+    /// Where the hover popup goes: under the cursor when there is room
+    /// below it, above it otherwise -- so it never covers the identifier it
+    /// is describing. Clamped inside the buffer pane like `finderRect`.
+    fn hoverRect(self: *const Ui, want_rows: usize) Bounds {
+        const b = self.buffer_bounds;
+        const cols = @min(hover_max_cols, b.cols);
+        const rows = @min(@min(want_rows, hover_max_rows), b.rows);
+
+        const cursor = self.buf.ed.pos();
+        const cursor_row = b.row + (cursor.line -| self.buf.top_line);
+        // Below if it fits, else above; if neither fits (a two-row pane),
+        // below and clipped by the clamp.
+        const below = cursor_row + 1 + rows <= b.row + b.rows;
+        const row = if (below)
+            cursor_row + 1
+        else if (cursor_row >= b.row + rows)
+            cursor_row - rows
+        else
+            b.row;
+
+        // Left-aligned with the cursor's column, pulled back inside the
+        // pane's right edge rather than hanging off it.
+        const cursor_col = b.col + self.gutterWidth();
+        const col = @min(cursor_col, b.col + (b.cols -| cols));
+        return .{ .row = row, .col = col, .cols = cols, .rows = rows };
+    }
+
+    /// Draws the hover popup, or hides its layer when there is none.
+    ///
+    /// The content is markdown; this slice renders it as plain text with its
+    /// blank lines kept, which is what makes a type signature and a sentence
+    /// of documentation readable. Running it through the `md/` renderer is a
+    /// later slice -- and a bigger one than it looks, since that renderer
+    /// draws into a layer of its own.
+    fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
+        const h = if (self.hover) |*open| open else {
+            try batch.setLayerVisible(self.hover_layer, false);
+            return;
+        };
+
+        // Wrapped to the popup's width first, so the height is the height of
+        // what will actually be drawn rather than of the source text.
+        var lines: std.ArrayList([]const u8) = .empty;
+        defer lines.deinit(self.alloc);
+        const wrap_cols = @min(hover_max_cols, self.buffer_bounds.cols) -| 2;
+        if (wrap_cols == 0) {
+            try batch.setLayerVisible(self.hover_layer, false);
+            return;
+        }
+        var it = std.mem.splitScalar(u8, h.text, '\n');
+        while (it.next()) |raw| {
+            if (raw.len == 0) {
+                try lines.append(self.alloc, "");
+                continue;
+            }
+            var wrap = glyphwire.WrapIterator.init(raw, wrap_cols);
+            while (wrap.next()) |piece| try lines.append(self.alloc, piece);
+        }
+
+        const r = self.hoverRect(lines.items.len);
+        self.hover_rect = r;
+        if (r.cols == 0 or r.rows == 0) {
+            try batch.setLayerVisible(self.hover_layer, false);
+            return;
+        }
+        if (h.scroll >= lines.items.len) h.scroll = lines.items.len -| 1;
+
+        try batch.setLayerSize(self.hover_layer, r.cols, r.rows);
+        try batch.setLayerCellPosition(self.hover_layer, r.row, r.col);
+
+        var row: usize = 0;
+        while (row < r.rows) : (row += 1) {
+            const idx = h.scroll + row;
+            const body: []const u8 = if (idx < lines.items.len) lines.items[idx] else "";
+            // One padded write per row: the leading space is the popup's
+            // margin and `pad` fills the rest, so the panel reads as a solid
+            // block whatever the text length.
+            try batch.writeTextOpts(body, .{
+                .layer = self.hover_layer,
+                .row = row,
+                .col = 1,
+                .fg = fg_hover,
+                .bg = bg_hover,
+                .max_cols = r.cols -| 1,
+                .pad = true,
+            });
+            try writeAt(batch, self.hover_layer, row, 0, " ", fg_hover, bg_hover);
+        }
+        try batch.setLayerVisible(self.hover_layer, true);
+    }
+
+    /// Closes the popup. Returns whether there was one, so a key can be
+    /// swallowed by the closing (Escape) or fall through (anything else).
+    fn closeHover(self: *Ui) bool {
+        if (self.hover) |*h| {
+            h.deinit(self.alloc);
+            self.hover = null;
+            self.hover_dirty = true;
+            return true;
+        }
+        return false;
     }
 
     /// Paints every search match on buffer `line` -- `bg_match`, or
@@ -3650,6 +4622,16 @@ pub const Ui = struct {
         self.pushed_tab_bar = now;
     }
 
+    /// The diagnostic the statusline should show, if any: whatever covers the
+    /// cursor, else the worst on its line (see `diag.Store.atCursor` for why
+    /// the fallback is there).
+    fn cursorDiagnostic(self: *Ui) ?diag.Entry {
+        if (self.lsp_pool == null) return null;
+        const abs = self.slotAbs(self.buf) orelse return null;
+        const pos = self.buf.ed.pos();
+        return self.diags.atCursor(abs, @intCast(pos.line), @intCast(pos.col));
+    }
+
     fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const b = self.status_bounds;
         if (b.cols == 0) return;
@@ -3698,6 +4680,14 @@ pub const Ui = struct {
             // above shows the names; this is the count.
             if (self.buffers.items.len > 1) {
                 try line.print(self.alloc, "  [{d}/{d}]", .{ self.active + 1, self.buffers.items.len });
+            }
+            // The diagnostic under the cursor, with the tool that reported
+            // it -- which matters, because two servers publish for the same
+            // Python file and "unused import" and "is not defined" come from
+            // different places. Truncated by the write's `max_cols`; the
+            // position on the right is the thing worth keeping whole.
+            if (self.cursorDiagnostic()) |d| {
+                try line.print(self.alloc, "  {s}: {s}", .{ d.source, d.message });
             }
             // The position is right-aligned, so the mode and filename on
             // the left don't shift it around as they change length.
