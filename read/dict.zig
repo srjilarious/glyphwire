@@ -217,7 +217,21 @@ pub const Dict = struct {
 pub const DeinflectRule = struct {
     kana_in: []const u8,
     kana_out: []const u8,
-    rules_out: []const []const u8,
+    /// The classes a row must carry for this rule's output to be accepted
+    /// as a final match. Three cases, and the third is the newest:
+    ///
+    /// - `&.{"v1"}`, `&.{ "v1", "v5" }`, ... -- the row's `rules` column
+    ///   must name one of these. The ordinary case.
+    /// - `&.{}` -- never accepted, so the rule is a pure intermediate
+    ///   derivation and the search must apply at least one more rule.
+    /// - `null` -- **accept any row, including one with no `rules` at
+    ///   all.** The copula and na-adjective rows need this: 綺麗だった
+    ///   reduces to 綺麗, and a na-adjective carries an *empty* `rules`
+    ///   column in a Jitendex build, so there is no tag for a filter to
+    ///   bite on. It is the most permissive setting in the table -- な and
+    ///   に in particular will strip a kana off anything -- and it is used
+    ///   only where the target genuinely has no verb class.
+    rules_out: ?[]const []const u8,
     /// Shown next to a deinflected match so it doesn't read as a typo of
     /// the dictionary form. Joined with other reasons along the same
     /// chain into `Hit.reason` -- see that field's doc comment for the
@@ -283,6 +297,18 @@ pub const deinflect_rules = [_]DeinflectRule{
     // negative rule above matches next (godan/ichidan/adjective all end
     // in exactly "ない" regardless of what precedes it, so one row here
     // covers every conjugation class).
+    //
+    // **This row never actually decides anything, and the reason is worth
+    // understanding.** "ない" is itself an i-adjective, so "なかった" is
+    // just its adjective past -- and the "かった" -> "い" row directly
+    // above produces exactly the same string for every input this one
+    // does (X なかった -> X な + い -> X ない). Being earlier in the table,
+    // it always wins the tie in `Search.offer`, so a negative-past chain
+    // reports "negative, past" rather than "negative, negative past".
+    // That decomposition is the more honest one, which is why this is
+    // documented rather than fixed by reordering. The row is kept because
+    // it states the intent, but the live example of a non-terminal rule
+    // is the progressive block further down, not this one.
     .{ .kana_in = "なかった", .kana_out = "ない", .rules_out = &.{}, .reason = "negative past" },
 
     // Causative. Terminal, not non-terminal: stripping it always lands
@@ -364,6 +390,17 @@ pub const deinflect_rules = [_]DeinflectRule{
     .{ .kana_in = "びません", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "polite negative" },
     .{ .kana_in = "みません", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "polite negative" },
     .{ .kana_in = "りません", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "polite negative" },
+
+    // Polite negative past ("-masendeshita"), non-terminal onto the polite
+    // negative just above: 食べませんでした -> 食べません -> 食べる.
+    //
+    // **Must stay ahead of the copula rows.** "でした" -> "" reduces
+    // 食べませんでした to 食べません too, at the same depth, and on a tie
+    // `Search.offer` keeps whichever route was offered first -- which is
+    // whichever rule comes first in this table. Below the copula block, the
+    // chain reads "polite negative, polite copula past" instead of "polite
+    // negative, polite negative past".
+    .{ .kana_in = "ませんでした", .kana_out = "ません", .rules_out = &.{}, .reason = "polite negative past" },
 
     // Progressive ("-teiru"/"-teru" and the "-deiru"/"-deru" variant after
     // a te-form that ends in で, e.g. 死んでいる). These strip back down
@@ -562,6 +599,162 @@ pub const deinflect_rules = [_]DeinflectRule{
     .{ .kana_in = "行って", .kana_out = "行く", .rules_out = &.{"v5"}, .reason = "te-form" },
     .{ .kana_in = "いった", .kana_out = "いく", .rules_out = &.{"v5"}, .reason = "past" },
     .{ .kana_in = "いって", .kana_out = "いく", .rules_out = &.{"v5"}, .reason = "te-form" },
+
+    // -- The copula and na-adjectives ------------------------------------
+    //
+    // The first rows in the table with `rules_out = null`, because their
+    // target has no class tag to check: a na-adjective or a noun carries an
+    // *empty* `rules` column, so 綺麗だった -> 綺麗 can only be validated
+    // by "some row exists". See `DeinflectRule.rules_out`.
+    //
+    // No bare "だ" or "では"/"じゃ" row. Those would strip a kana off a
+    // large share of all text for a null filter to wave through, which is
+    // a different risk from the imperative rows' -- those at least still
+    // demand a v5 row at the other end.
+    .{ .kana_in = "だった", .kana_out = "", .rules_out = null, .reason = "copula past" },
+    .{ .kana_in = "です", .kana_out = "", .rules_out = null, .reason = "polite copula" },
+    .{ .kana_in = "でした", .kana_out = "", .rules_out = null, .reason = "polite copula past" },
+    .{ .kana_in = "じゃない", .kana_out = "", .rules_out = null, .reason = "negative copula" },
+    .{ .kana_in = "ではない", .kana_out = "", .rules_out = null, .reason = "negative copula" },
+    .{ .kana_in = "じゃありません", .kana_out = "", .rules_out = null, .reason = "polite negative copula" },
+    .{ .kana_in = "ではありません", .kana_out = "", .rules_out = null, .reason = "polite negative copula" },
+    // 綺麗な人 / 静かに -- the attributive and adverbial forms a
+    // na-adjective takes. These two are the most permissive rules in the
+    // table: any text ending in な or に gets its last kana stripped and
+    // whatever is left accepted if it exists at all. Kept because 〜な and
+    // 〜に are everywhere in dialogue, and because a hit still has to be a
+    // real headword; ここに -> ここ is the shape that makes it worth it.
+    .{ .kana_in = "な", .kana_out = "", .rules_out = null, .reason = "attributive" },
+    .{ .kana_in = "に", .kana_out = "", .rules_out = null, .reason = "adverbial" },
+    // じゃなかった / ではなかった need no rows: the negative-past row
+    // already reduces them to じゃない / ではない.
+
+    // -- i-adjective derivations -----------------------------------------
+    //
+    // 高さ, 早く, 高かろう, 高そう, 高すぎる. These resolved before only
+    // when the dictionary happened to lexicalize the derived form (早く and
+    // 高さ are their own Jitendex entries, 大きすぎる too) -- as rules they
+    // work for any adjective. The `adj-i` filter is what keeps "く" -> "い"
+    // honest: 行く also matches it, but 行い is a noun, so the guess is
+    // rejected rather than shown as an adjective.
+    .{ .kana_in = "さ", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "nominalizer" },
+    .{ .kana_in = "く", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "adverbial" },
+    .{ .kana_in = "かろう", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "presumptive" },
+    .{ .kana_in = "そう", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "appearance" },
+    .{ .kana_in = "すぎる", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "excessive" },
+
+    // Verbal "-sou" ("looks like it will"), from the i-stem. "そう" -> "す"
+    // already exists above as the godan volitional (話そう); both fire and
+    // each finds only its own class.
+    .{ .kana_in = "そう", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "appearance" },
+    .{ .kana_in = "いそう", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "きそう", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "ぎそう", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "しそう", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "ちそう", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "にそう", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "びそう", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "みそう", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "りそう", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "appearance" },
+    .{ .kana_in = "しそう", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "appearance" },
+
+    // Verbal "-sugiru" ("does too much"), from the same i-stem.
+    .{ .kana_in = "すぎる", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "excessive" },
+    .{ .kana_in = "いすぎる", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "きすぎる", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "ぎすぎる", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "しすぎる", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "ちすぎる", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "にすぎる", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "びすぎる", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "みすぎる", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "りすぎる", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "excessive" },
+    .{ .kana_in = "しすぎる", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "excessive" },
+
+    // -- te-form compounds ------------------------------------------------
+    //
+    // An auxiliary verb attached to a te-form. All non-terminal: they strip
+    // back to て (or で, after a te-form that voiced it) and the existing
+    // te-form rows finish the job, exactly like the progressive rows.
+    // 食べちゃう -> 食べて -> 食べる; 飲んじゃう -> 飲んで -> 飲む.
+    //
+    // "である" is here as the voiced partner of 〜てある (読んである ->
+    // 読んで), not as the formal copula. The copula sense collides with it
+    // and simply dead-ends: 学生である -> 学生で, which no te-form rule
+    // accepts and no row spells.
+    .{ .kana_in = "ちゃう", .kana_out = "て", .rules_out = &.{}, .reason = "completive" },
+    .{ .kana_in = "じゃう", .kana_out = "で", .rules_out = &.{}, .reason = "completive" },
+    .{ .kana_in = "ちまう", .kana_out = "て", .rules_out = &.{}, .reason = "completive" },
+    .{ .kana_in = "じまう", .kana_out = "で", .rules_out = &.{}, .reason = "completive" },
+    .{ .kana_in = "てしまう", .kana_out = "て", .rules_out = &.{}, .reason = "completive" },
+    .{ .kana_in = "でしまう", .kana_out = "で", .rules_out = &.{}, .reason = "completive" },
+    .{ .kana_in = "ておく", .kana_out = "て", .rules_out = &.{}, .reason = "preparatory" },
+    .{ .kana_in = "でおく", .kana_out = "で", .rules_out = &.{}, .reason = "preparatory" },
+    .{ .kana_in = "とく", .kana_out = "て", .rules_out = &.{}, .reason = "preparatory" },
+    .{ .kana_in = "どく", .kana_out = "で", .rules_out = &.{}, .reason = "preparatory" },
+    .{ .kana_in = "ていく", .kana_out = "て", .rules_out = &.{}, .reason = "continuative" },
+    .{ .kana_in = "でいく", .kana_out = "で", .rules_out = &.{}, .reason = "continuative" },
+    .{ .kana_in = "てくる", .kana_out = "て", .rules_out = &.{}, .reason = "continuative" },
+    .{ .kana_in = "でくる", .kana_out = "で", .rules_out = &.{}, .reason = "continuative" },
+    .{ .kana_in = "てある", .kana_out = "て", .rules_out = &.{}, .reason = "resultative" },
+    .{ .kana_in = "である", .kana_out = "で", .rules_out = &.{}, .reason = "resultative" },
+    .{ .kana_in = "てみる", .kana_out = "て", .rules_out = &.{}, .reason = "attemptive" },
+    .{ .kana_in = "でみる", .kana_out = "で", .rules_out = &.{}, .reason = "attemptive" },
+    .{ .kana_in = "てくれる", .kana_out = "て", .rules_out = &.{}, .reason = "benefactive" },
+    .{ .kana_in = "でくれる", .kana_out = "で", .rules_out = &.{}, .reason = "benefactive" },
+    .{ .kana_in = "てもらう", .kana_out = "て", .rules_out = &.{}, .reason = "benefactive" },
+    .{ .kana_in = "でもらう", .kana_out = "で", .rules_out = &.{}, .reason = "benefactive" },
+    .{ .kana_in = "てあげる", .kana_out = "て", .rules_out = &.{}, .reason = "benefactive" },
+    .{ .kana_in = "であげる", .kana_out = "で", .rules_out = &.{}, .reason = "benefactive" },
+
+    // -- Classical, colloquial and dialect negatives ----------------------
+    //
+    // Four rows instead of the forty their conjugation tables would
+    // suggest, because every one of these attaches to the same negative
+    // stem "ない" does: strip the ending, put "ない" back, and the
+    // negative rows above take it the rest of the way. 知らぬ ->
+    // 知らない -> 知る; 行かず -> 行かない -> 行く; 分からん ->
+    // 分からない -> 分かる. The chain then reads "negative, colloquial
+    // negative", which is accurate -- these *are* negatives.
+    //
+    // 行かずに comes along too, via the "に" row above: three rules deep.
+    .{ .kana_in = "ぬ", .kana_out = "ない", .rules_out = &.{}, .reason = "classical negative" },
+    .{ .kana_in = "ず", .kana_out = "ない", .rules_out = &.{}, .reason = "classical negative" },
+    .{ .kana_in = "ん", .kana_out = "ない", .rules_out = &.{}, .reason = "colloquial negative" },
+    .{ .kana_in = "へん", .kana_out = "ない", .rules_out = &.{}, .reason = "Kansai negative" },
+    .{ .kana_in = "せん", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "colloquial negative" },
+
+    // Kansai progressive (見とる, 何しとるんや). Strips to the te-form like
+    // the standard 〜ている does. Only the kana spelling collides (取る is
+    // 取 + る, so it does not end in とる).
+    .{ .kana_in = "とる", .kana_out = "て", .rules_out = &.{}, .reason = "Kansai progressive" },
+    .{ .kana_in = "どる", .kana_out = "で", .rules_out = &.{}, .reason = "Kansai progressive" },
+
+    // -- The gaps the earlier phases left behind --------------------------
+
+    // The godan す-row causative the table's own doc comment has been
+    // admitting was missing since causative landed: 話させる -> 話す.
+    .{ .kana_in = "させる", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "causative" },
+
+    // Godan potential ("can do"), which is a distinct form from the
+    // passive/potential -areru above: 書ける, 飲める, 泳げる. Jitendex
+    // lexicalizes some of these as their own v1 entries (読める, 話せる)
+    // and not others (書ける), so before this a click on 書けない found
+    // nothing at all.
+    //
+    // These overlap with real ichidan verbs by construction -- 入れる is
+    // its own v1 headword *and* looks like the potential of 入る -- so
+    // both are offered, the depth-0 headword first. Same trade as the
+    // imperative rows.
+    .{ .kana_in = "える", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "ける", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "げる", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "せる", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "てる", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "ねる", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "べる", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "める", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "れる", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "potential" },
 };
 
 /// Ceiling on how many deinflection rules may be chained for one
@@ -803,6 +996,12 @@ const Search = struct {
             if (!std.mem.endsWith(u8, form, rule.kana_in)) continue;
             const stem = form[0 .. form.len - rule.kana_in.len];
             const next = try std.mem.concat(self.scratch, u8, &.{ stem, rule.kana_out });
+            // The copula rows have an empty `kana_out`, so a form that is
+            // nothing but the ending ("だった" on its own) deinflects to
+            // nothing. Querying "" finds no rows and no rule can match it,
+            // so this only skips work -- but it makes that explicit
+            // rather than leaving it to fall out.
+            if (next.len == 0) continue;
             const next_chain = try self.scratch.alloc([]const u8, chain.len + 1);
             @memcpy(next_chain[0..chain.len], chain);
             next_chain[chain.len] = rule.reason;
