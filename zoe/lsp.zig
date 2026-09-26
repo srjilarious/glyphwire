@@ -372,8 +372,6 @@ pub const Server = struct {
     languages: []const []const u8,
 
     child: std.process.Child,
-    /// The child's stdin. Writes are small and go out on the UI thread.
-    stdin: std.Io.File,
     reader_thread: ?std.Thread = null,
 
     /// Guards `inbox` and `dead_reported`, and is the only lock the reader
@@ -443,7 +441,6 @@ pub const Server = struct {
             .name = name,
             .languages = langs,
             .child = child,
-            .stdin = child.stdin.?,
             .listener = listener,
         };
 
@@ -470,9 +467,18 @@ pub const Server = struct {
             _ = self.request(.shutdown, "shutdown", null) catch 0;
             self.notify("exit", null) catch {};
         }
-        // Closing stdin is what actually makes a well-behaved server leave,
-        // and what unblocks its stdout read so the reader thread can end.
-        self.stdin.close(self.io);
+        // Closing stdin is what actually makes a well-behaved server leave.
+        // Through `child.stdin`, and nulled, because `kill` closes whichever
+        // of the three streams the child still holds -- closing our own copy
+        // of the same descriptor and then letting `kill` close it again is a
+        // double close, and the number could belong to something else by
+        // then.
+        if (self.child.stdin) |stdin| {
+            stdin.close(self.io);
+            self.child.stdin = null;
+        }
+        // Closes the child's stdout too, which is what unblocks the reader
+        // thread's read so the join below returns.
         self.child.kill(self.io);
         if (self.reader_thread) |t| t.join();
 
@@ -595,10 +601,16 @@ pub const Server = struct {
     /// the error being propagated into an editor command -- a language server
     /// that stopped listening is not an editing error.
     fn writeFrame(self: *Server, body: []const u8) !void {
+        // The child owns the descriptor (see `deinit`); a null one means the
+        // connection is already being torn down.
+        const stdin = self.child.stdin orelse {
+            self.state = .dead;
+            return error.ServerDead;
+        };
         const framed = try glyphwire.wire.framedAlloc(self.alloc, body);
         defer self.alloc.free(framed);
         var buf: [4096]u8 = undefined;
-        var w = self.stdin.writer(self.io, &buf);
+        var w = stdin.writer(self.io, &buf);
         w.interface.writeAll(framed) catch {
             self.state = .dead;
             return error.ServerDead;
