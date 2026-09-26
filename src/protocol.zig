@@ -81,6 +81,13 @@ pub const WireCell = struct {
     /// half (renders nothing, carries the lead's bg + metadata), absent =
     /// an ordinary 1-cell character. See decisions.md, Cell content.
     wide: ?[]const u8 = null,
+    /// The cell's underline style name (`core.Underline`), absent for the
+    /// common `none`. Exposed -- unlike `text_scale`, which isn't -- because
+    /// a diagnostic mark is a thing a test or `glyphwire-probe` needs to
+    /// read back to know it landed, and there is no other way to see it.
+    underline: ?[]const u8 = null,
+    /// The underline's colour, absent when it follows `fg`.
+    underline_color: ?Color = null,
 };
 
 /// The `get_cells` response body: the layer's visible viewport as a

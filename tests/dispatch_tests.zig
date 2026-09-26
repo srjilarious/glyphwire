@@ -4131,3 +4131,63 @@ pub fn opacityWithNoValueFieldLeavesTheLayerOpaqueTest(io: std.Io, alloc: std.me
     );
     try testz.expectTrue(ctx.layerPtr(panel).?.opacity == 1.0);
 }
+
+/// `write_text`'s `underline` / `underline_color`, per message and per span,
+/// and the `get_cells` fields that read them back. Spans inherit each of the
+/// two independently, so one message can mark several ranges in one colour.
+pub fn writeTextUnderlineSpansAndReadbackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 12, 2, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"underline_color":{"r":255,"g":0,"b":0},"spans":[{"text":"ok"},{"text":"bad","underline":"curly"},{"text":"x","underline":"single","underline_color":{"r":0,"g":0,"b":255}}]}}
+    );
+
+    const get_cells_msg =
+        \\{"jsonrpc":"2.0","id":1,"method":"get_cells","params":{}}
+    ;
+    const response_body = (try d.handle(alloc, get_cells_msg)).response.?;
+    defer alloc.free(response_body);
+
+    const CellJson = struct {
+        g: []const u8,
+        underline: ?[]const u8 = null,
+        underline_color: ?struct { r: u8, g: u8, b: u8, a: u8 } = null,
+    };
+    const Response = struct {
+        id: i64,
+        result: struct { cells: []CellJson },
+    };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    const cells = parsed.value.result.cells;
+
+    // A span that named no style is unmarked, even though the message
+    // carried a colour -- a colour alone underlines nothing.
+    try testz.expectEqual(cells[0].underline, null);
+    // The `curly` span inherits the message's red.
+    try testz.expectEqualStr("curly", cells[2].underline.?);
+    try testz.expectEqual(cells[2].underline_color.?.r, 255);
+    try testz.expectEqualStr("curly", cells[4].underline.?);
+    // ...and a span that names its own colour keeps it.
+    try testz.expectEqualStr("single", cells[5].underline.?);
+    try testz.expectEqual(cells[5].underline_color.?.b, 255);
+}
+
+/// An unknown `underline` name is a parse error, the same treatment
+/// `scale` gets -- silently drawing no underline would hide the typo.
+pub fn writeTextRejectsUnknownUnderlineNameTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 12, 2, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const msg =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi","underline":"squiggly"}}
+    ;
+    try testz.expectError(d.handle(alloc, msg), dispatch.DispatchError.InvalidUnderline);
+}

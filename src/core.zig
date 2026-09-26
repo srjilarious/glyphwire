@@ -413,9 +413,50 @@ pub fn gifDimensions(bytes: []const u8) ImageError!ImageInfo {
     };
 }
 
+/// Which underline a cell carries, if any. The five drawn styles are the
+/// SGR `4:1`..`4:5` set every modern terminal has settled on, and they are
+/// here because a language server's diagnostics need a mark that is *not*
+/// a colour: a squiggle under a misspelled identifier has to coexist with
+/// the syntax colour on that identifier and with a selection tint over it,
+/// which a second fg or bg cannot do (see docs/investigations/zoe-lsp.md).
+///
+/// `curly` is the diagnostic squiggle; `single` is the ordinary underline
+/// a link or a heading wants. `dotted` and `dashed` round out the SGR set
+/// rather than adding cases nothing asks for -- the renderer draws all
+/// five from the same run of rects, so the marginal cost of the last three
+/// is a pattern table.
+///
+/// Note the deliberate gap: bold, italic and strikethrough stay *parsed
+/// and ignored* (see `SgrPen`). Underline earns its `Style` field because
+/// it is drawn from geometry the host already has (a rect at the cell's
+/// baseline); the others need a second and third font face in the atlas,
+/// which is a different piece of work.
+pub const Underline = enum { none, single, double, curly, dotted, dashed };
+
+/// A cell's underline: which style, and in what colour. `color` null means
+/// "the cell's own `fg`", which is what an ordinary underline wants; a
+/// diagnostic sets it explicitly so a red squiggle can sit under
+/// syntax-coloured text without recolouring the text itself. This is SGR
+/// `58`/`59`'s distinction too.
+pub const UnderlineStyle = struct {
+    style: Underline = .none,
+    color: ?Color = null,
+
+    pub fn eql(a: UnderlineStyle, b: UnderlineStyle) bool {
+        if (a.style != b.style) return false;
+        if (a.color == null and b.color == null) return true;
+        const ac = a.color orelse return false;
+        const bc = b.color orelse return false;
+        return ac.r == bc.r and ac.g == bc.g and ac.b == bc.b and ac.a == bc.a;
+    }
+};
+
 pub const Style = struct {
     fg: Color,
     bg: Background,
+    /// See `UnderlineStyle`. Defaults to no underline, so every existing
+    /// `Style` initializer means what it did before this field existed.
+    underline: UnderlineStyle = .{},
 };
 
 /// The blank cell's style. `bg` is **fully transparent** (alpha 0), and
@@ -443,6 +484,11 @@ pub const Mods = struct {
     super: bool = false,
 };
 
+/// Which of the pen's three colours an SGR `38` / `48` / `58` sets. Named
+/// rather than anonymous only so `applySgr` and `setSgrColor` can name the
+/// same type.
+const SgrColorTarget = enum { fg, bg, ul };
+
 /// The "current pen" a `Layer` builds up from SGR (`ESC [ ... m`) sequences
 /// seen in mirrored plain-command output -- glyphwire's small, deliberate
 /// step toward honouring the escape codes a non-glyphwire-aware program
@@ -450,13 +496,14 @@ pub const Mods = struct {
 /// rather than the full VT model a real terminal library would bring (see
 /// `docs/investigations/libghostty-vt-fallback.md`, Phase A).
 ///
-/// **Colour only.** `bold` maps a basic (30-37) foreground to its bright
-/// (90-97) variant; `dim` darkens the resolved foreground; `inverse` swaps
-/// foreground and background. All three are folded into the concrete
-/// `Cell.style` at write time -- no attribute bitflags on `Style`, no
-/// renderer changes. Italic / underline / strikethrough are *parsed and
-/// ignored* (they need a `Style` bitfield + font/renderer work -- the
-/// separate "style attributes beyond fg/bg" roadmap item).
+/// **Colour, plus underline.** `bold` maps a basic (30-37) foreground to
+/// its bright (90-97) variant; `dim` darkens the resolved foreground;
+/// `inverse` swaps foreground and background. All three are folded into the
+/// concrete `Cell.style` at write time -- no attribute bitflags on `Style`.
+/// Underline (`4`, `4:1`..`4:5`, `21`, `24`) and its colour (`58`, `59`)
+/// are carried through to `Style.underline` and drawn -- see `Underline`.
+/// Italic / blink / strikethrough are still *parsed and ignored*: they need
+/// font faces in the atlas rather than a rect at the baseline.
 ///
 /// A `null` `fg` / `bg` override means "fall back to the `write_text`
 /// call's own `fg`/`bg` argument (and then `default_style`)". `ESC [ 0 m`
@@ -474,6 +521,10 @@ pub const SgrPen = struct {
     bold: bool = false,
     dim: bool = false,
     inverse: bool = false,
+    /// Underline style and colour from `4` / `4:n` / `21` / `24` / `58` /
+    /// `59`. Unlike `bold`/`dim`/`inverse` this is not folded into the
+    /// colours -- it passes straight through to `Style.underline`.
+    underline: UnderlineStyle = .{},
 
     /// The 16 base ANSI colours (xterm's default palette). Index 0-7 are
     /// the normal set, 8-15 the bright set.
@@ -509,8 +560,15 @@ pub const SgrPen = struct {
     /// `m`, e.g. `"1;38;5;208"`) to the pen. Tolerant: unknown or
     /// malformed parameters are skipped, never an error -- matching the
     /// "recognize and don't choke" spirit of the old escape *stripper*
-    /// this replaces. `:` sub-parameter separators (`38:2:...`) are
-    /// accepted as equivalent to `;`.
+    /// this replaces.
+    ///
+    /// `:` sub-parameter separators are accepted where `;` is, *and* which
+    /// separator preceded each parameter is remembered (`colon`). That
+    /// distinction used to be discardable, when the colon forms only ever
+    /// appeared in `38`/`48` colours where either spelling means the same
+    /// thing. It stopped being discardable with underline styles: `4:3` is
+    /// a curly underline, while `4;3` is an underline *and* an italic, and
+    /// collapsing the two would turn every `ESC [ 4;3 m` into a squiggle.
     pub fn applySgr(self: *SgrPen, params: []const u8) void {
         // At most a handful of numeric params in any real SGR sequence;
         // a longer/garbled one is truncated rather than grown. `null` =
@@ -518,12 +576,25 @@ pub const SgrPen = struct {
         // an empty colour-space id in the colon form `38:2::r:g:b` is
         // skipped over (see below).
         var nums: [24]?u16 = undefined;
+        // `colon[i]` is true when parameter `i` was introduced by a `:`
+        // rather than a `;` -- i.e. it is a sub-parameter of `i - 1`.
+        // Never true for `i == 0`.
+        var colon: [24]bool = @splat(false);
         var n: usize = 0;
-        var it = std.mem.splitAny(u8, params, ";:");
-        while (it.next()) |tok| {
+        var start: usize = 0;
+        var idx: usize = 0;
+        while (idx <= params.len) : (idx += 1) {
+            const at_end = idx == params.len;
+            if (!at_end and params[idx] != ';' and params[idx] != ':') continue;
             if (n == nums.len) break;
+            const tok = params[start..idx];
             nums[n] = if (tok.len == 0) null else (std.fmt.parseInt(u16, tok, 10) catch null);
+            // The separator *before* this token decided whether it is a
+            // sub-parameter, so it is the one at `start - 1`.
+            colon[n] = start > 0 and params[start - 1] == ':';
             n += 1;
+            if (at_end) break;
+            start = idx + 1;
         }
         if (n == 0) {
             self.* = .{}; // bare `ESC [ m` is `ESC [ 0 m`
@@ -543,9 +614,37 @@ pub const SgrPen = struct {
                 },
                 7 => self.inverse = true,
                 27 => self.inverse = false,
-                // Parsed and ignored: italic (3/23), underline (4/24),
-                // blink (5/25), strikethrough (9/29). Colour-only for now.
-                3, 4, 5, 9, 23, 24, 25, 29 => {},
+                // `4` alone is a single underline; `4:n` names the style.
+                // Only a *sub*-parameter can do that -- `4;3` is an
+                // underline followed by an italic, which is why the
+                // tokenizer keeps the separators (see above).
+                4 => {
+                    if (i + 1 < n and colon[i + 1]) {
+                        self.underline.style = switch (nums[i + 1] orelse 0) {
+                            0 => .none,
+                            1 => .single,
+                            2 => .double,
+                            3 => .curly,
+                            4 => .dotted,
+                            5 => .dashed,
+                            // An unknown style id still means "underlined"
+                            // -- better a plain line than none at all.
+                            else => .single,
+                        };
+                        i += 1;
+                    } else {
+                        self.underline.style = .single;
+                    }
+                },
+                // ECMA-48 calls 21 "doubly underlined" and xterm reads it
+                // as "bold off"; kitty, VTE and every terminal that draws
+                // underline styles take the ECMA reading, so we do too.
+                21 => self.underline.style = .double,
+                24 => self.underline.style = .none,
+                59 => self.underline.color = null,
+                // Parsed and ignored: italic (3/23), blink (5/25),
+                // strikethrough (9/29) -- see `SgrPen`'s doc comment.
+                3, 5, 9, 23, 25, 29 => {},
                 30...37 => {
                     self.fg_basic = @intCast(code - 30);
                     self.fg = ansi16[code - 30];
@@ -561,21 +660,24 @@ pub const SgrPen = struct {
                     self.fg = ansi16[8 + (code - 90)];
                 },
                 100...107 => self.bg = ansi16[8 + (code - 100)],
-                38, 48 => {
+                38, 48, 58 => {
                     // `38;5;N` (256) / `38;2;R;G;B` (truecolor), with the
                     // colon variants `38:5:N` and `38:2[:cs]:R:G:B`. Skip
                     // the params consumed so the outer loop doesn't re-read
-                    // them as standalone codes.
-                    const target_fg = code == 38;
+                    // them as standalone codes. `58` is the same grammar
+                    // for the underline colour (`59` resets it) -- which is
+                    // how a red squiggle gets under white text.
+                    const target: SgrColorTarget = switch (code) {
+                        38 => .fg,
+                        48 => .bg,
+                        else => .ul,
+                    };
                     if (i + 1 >= n) break;
                     const mode = nums[i + 1] orelse 0;
                     if (mode == 5) {
                         if (i + 2 >= n) break;
                         const col = xterm256(@intCast((nums[i + 2] orelse 0) & 0xff));
-                        if (target_fg) {
-                            self.fg = col;
-                            self.fg_basic = null;
-                        } else self.bg = col;
+                        self.setSgrColor(target, col);
                         i += 2;
                     } else if (mode == 2) {
                         // The colon form may carry an empty colour-space
@@ -588,10 +690,7 @@ pub const SgrPen = struct {
                             .g = @intCast((nums[base + 1] orelse 0) & 0xff),
                             .b = @intCast((nums[base + 2] orelse 0) & 0xff),
                         };
-                        if (target_fg) {
-                            self.fg = col;
-                            self.fg_basic = null;
-                        } else self.bg = col;
+                        self.setSgrColor(target, col);
                         i = base + 2;
                     } else break;
                 },
@@ -600,13 +699,41 @@ pub const SgrPen = struct {
         }
     }
 
-    /// Resolves the concrete `(fg, bg)` a printed cell gets, given the
-    /// pen and the `write_text` call's own `fg`/`bg` arguments (`bg` is a
+    /// Stores one resolved 256-colour / truecolor value on the pen, for
+    /// whichever of `38` / `48` / `58` introduced it. Split out only
+    /// because all three spellings share the parameter grammar above.
+    fn setSgrColor(self: *SgrPen, target: SgrColorTarget, col: Color) void {
+        switch (target) {
+            .fg => {
+                self.fg = col;
+                // No longer a basic 30-37 colour, so a later `bold` can't
+                // promote it -- same rule as `90`-`97`.
+                self.fg_basic = null;
+            },
+            .bg => self.bg = col,
+            .ul => self.underline.color = col,
+        }
+    }
+
+    /// Resolves the concrete `(fg, bg, underline)` a printed cell gets,
+    /// given the pen and the `write_text` call's own arguments (`bg` is a
     /// `?Background`: `null` = "leave the cell's existing background",
     /// per `write_text`'s `transparent_bg`). The pen overrides the
     /// arguments where it has an opinion; `bold`/`dim`/`inverse` are then
     /// folded into the result.
-    pub fn resolve(self: SgrPen, arg_fg: Color, arg_bg: ?Background) struct { fg: Color, bg: ?Background } {
+    ///
+    /// The underline is "whichever of the two asked for one": an SGR `4`
+    /// in a mirrored program's output underlines text the call itself left
+    /// plain, and a call's own `underline` (a client drawing a diagnostic
+    /// squiggle) survives output that never mentions underlines. They can
+    /// only conflict inside one `write_text` whose text also carries SGR,
+    /// and there the escape in the text is the more specific instruction.
+    pub fn resolve(
+        self: SgrPen,
+        arg_fg: Color,
+        arg_bg: ?Background,
+        arg_ul: UnderlineStyle,
+    ) struct { fg: Color, bg: ?Background, underline: UnderlineStyle } {
         var fg: Color = self.fg orelse arg_fg;
         if (self.bold) {
             if (self.fg_basic) |idx| fg = ansi16[8 + @as(usize, idx)];
@@ -636,7 +763,16 @@ pub const SgrPen = struct {
             bg = .{ .color = new_bg };
         }
 
-        return .{ .fg = fg, .bg = bg };
+        // The pen wins only where it has something to say: a style of
+        // `.none` is "no opinion", not "no underline". Its colour follows
+        // the same rule, and falls back to the argument's rather than to
+        // the fg, so `ESC [ 4 m` inside a run the client already gave a
+        // colour keeps that colour.
+        var ul = arg_ul;
+        if (self.underline.style != .none) ul.style = self.underline.style;
+        if (self.underline.color) |c| ul.color = c;
+
+        return .{ .fg = fg, .bg = bg, .underline = ul };
     }
 };
 
@@ -2515,11 +2651,17 @@ pub const Layer = struct {
         /// `Cell.selectable` for every cell the write touches, padding
         /// and a scaled glyph's fill included.
         selectable: bool = true,
+        /// The underline every cell the *text* touches carries (see
+        /// `Underline`). Deliberately not applied to `pad`'s blanks: a
+        /// padded status bar or list row would otherwise draw its
+        /// underline out to the full width, and a diagnostic squiggle
+        /// should stop at the end of the token it marks.
+        underline: UnderlineStyle = .{},
     };
 
     /// `writeTextTaggedScaled` with `WriteOpts` -- a single styled run.
     pub fn writeTextOpts(self: *Layer, text: []const u8, fg: Color, bg: ?Background, opts: WriteOpts) !void {
-        const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale }};
+        const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale, .underline = opts.underline }};
         return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable });
     }
 
@@ -2533,6 +2675,10 @@ pub const Layer = struct {
         bg: ?Background,
         metadata_id: ?MetadataHandle = null,
         scale: TextScale = .x1,
+        /// See `WriteOpts.underline`. Per run, like `fg`, so one write can
+        /// underline part of a row -- which is the whole point for a
+        /// diagnostic span inside a syntax-coloured line.
+        underline: UnderlineStyle = .{},
     };
 
     /// The whole-write options for `writeRuns`: clipping and padding apply
@@ -2579,7 +2725,7 @@ pub const Layer = struct {
             var it = (std.unicode.Utf8View.init(r.text) catch unreachable).iterator();
             while (it.nextCodepointSlice()) |cp_bytes| {
                 if (cp_bytes.len == 1 and try self.consumeControl(cp_bytes[0])) continue;
-                const eff = self.pen.resolve(r.fg, r.bg);
+                const eff = self.pen.resolve(r.fg, r.bg, r.underline);
                 // While the shifted-in charset is line drawing, a byte in
                 // `` ` ``..`~` names a box-drawing/symbol glyph, not itself
                 // -- see `EscState`'s charset paragraph and `acsGraphic`.
@@ -2587,16 +2733,16 @@ pub const Layer = struct {
                 if (line_drawing and cp_bytes.len == 1 and cp_bytes[0] >= '`' and cp_bytes[0] <= '~') {
                     var buf: [4]u8 = undefined;
                     const n = std.unicode.utf8Encode(acsGraphic(cp_bytes[0]), &buf) catch unreachable;
-                    if (!self.putRunGlyph(buf[0..n], 1, eff.fg, eff.bg, r.metadata_id, r.scale, clip_end)) break :runs;
+                    if (!self.putRunGlyph(buf[0..n], 1, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end)) break :runs;
                     continue;
                 }
                 const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
-                if (!self.putRunGlyph(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, r.metadata_id, r.scale, clip_end)) break :runs;
+                if (!self.putRunGlyph(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end)) break :runs;
             }
         }
         if (clip_end) |end| {
             if (opts.pad) {
-                while (self.cursor.col < end) self.putAtCursor(" ", 1, opts.pad_fg, opts.pad_bg, opts.pad_metadata_id, .x1);
+                while (self.cursor.col < end) self.putAtCursor(" ", 1, opts.pad_fg, opts.pad_bg, opts.pad_metadata_id, .x1, .{});
             }
         }
         // Don't carry a half-consumed `ESC ...` sequence into the next
@@ -3089,11 +3235,27 @@ pub const Layer = struct {
     /// the cursor stays on the glyph's own row. Returns false when
     /// `clip_end` stops the write: the cells of the footprint that do fit
     /// are blanked instead, never half a glyph.
-    fn putRunGlyph(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale, clip_end: ?usize) bool {
-        const footprint = @as(usize, w) * scaledPitch(scale);
+    fn putRunGlyph(
+        self: *Layer,
+        bytes: []const u8,
+        w: u2,
+        fg: Color,
+        bg: ?Background,
+        metadata_id: ?MetadataHandle,
+        scale: TextScale,
+        ul: UnderlineStyle,
+        clip_end: ?usize,
+    ) bool {
+        const pitch = scaledPitch(scale);
+        const footprint = @as(usize, w) * pitch;
+        // A scaled glyph's underline belongs at the bottom of the *block*
+        // it draws, not under its own cell row -- otherwise the line
+        // crosses the middle of a 2x or 3x glyph. So the glyph's row only
+        // carries it when the block is one row tall.
+        const glyph_row_ul: UnderlineStyle = if (pitch == 1) ul else .{};
         if (clip_end) |end| {
             if (self.cursor.col + footprint > end) {
-                while (self.cursor.col < end) self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1);
+                while (self.cursor.col < end) self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1, .{});
                 return false;
             }
         } else if (footprint > w and self.cursor.col > 0 and self.cursor.col + footprint > self.width) {
@@ -3102,20 +3264,24 @@ pub const Layer = struct {
             self.cursor.col = 0;
             self.cursor.row += 1;
         }
-        self.putAtCursor(bytes, w, fg, bg, metadata_id, scale);
+        self.putAtCursor(bytes, w, fg, bg, metadata_id, scale, glyph_row_ul);
         // Read back after the put, which may have wrapped the glyph.
         const row = self.cursor.row;
         const start_col = self.cursor.col - w;
         var extra = footprint - w;
         while (extra > 0 and self.cursor.col < self.width) : (extra -= 1) {
-            self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1);
+            self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1, glyph_row_ul);
         }
         const end_col = self.cursor.col;
-        const pitch = scaledPitch(scale);
         var r = row + 1;
         while (r < row + pitch and r < self.height) : (r += 1) {
+            // Only the last row of the block gets the line (see above);
+            // and if the block is clipped at the layer's bottom edge, the
+            // line goes with the rows that were dropped rather than moving
+            // up onto a row the glyph still occupies.
+            const row_ul: UnderlineStyle = if (r == row + pitch - 1) ul else .{};
             var col = start_col;
-            while (col < end_col) : (col += 1) self.blankScaledCell(r, col, @intCast(r - row), fg, bg, metadata_id);
+            while (col < end_col) : (col += 1) self.blankScaledCell(r, col, @intCast(r - row), fg, bg, metadata_id, row_ul);
         }
         return true;
     }
@@ -3125,11 +3291,12 @@ pub const Layer = struct {
     /// marked as sitting `below` rows under the glyph's own row
     /// (`Cell.under_scaled`). `bg == null` (`transparent_bg`) leaves the
     /// cell's background alone, same as `putAtCursor`.
-    fn blankScaledCell(self: *Layer, row: usize, col: usize, below: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle) void {
+    fn blankScaledCell(self: *Layer, row: usize, col: usize, below: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, ul: UnderlineStyle) void {
         self.clearWidePartner(row, col);
         const c = self.cell(row, col);
         c.setGrapheme(" ");
         c.style.fg = fg;
+        c.style.underline = ul;
         if (bg) |b| c.style.bg = b;
         c.metadata_id = metadata_id;
         c.meta_focus = false;
@@ -3148,7 +3315,7 @@ pub const Layer = struct {
     /// resolves the same. A width-2 cluster that would straddle the right
     /// edge wraps to the next row first. Overwriting either half of an
     /// existing wide pair blanks its orphaned partner.
-    fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale) void {
+    fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale, ul: UnderlineStyle) void {
         if (self.cursor.col + w > self.width) {
             self.cursor.col = 0;
             self.cursor.row += 1;
@@ -3169,6 +3336,10 @@ pub const Layer = struct {
         var c = self.cell(row, col);
         c.setGrapheme(bytes);
         c.style.fg = fg;
+        // Set, not merged, like `fg` -- a write with no underline clears
+        // whatever the cell carried before, which is what makes a repaint
+        // of a row enough to take a stale squiggle off it.
+        c.style.underline = ul;
         if (bg) |b| c.style.bg = b;
         c.metadata_id = metadata_id;
         c.meta_focus = false;

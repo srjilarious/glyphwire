@@ -4,11 +4,10 @@ Design note, 2026-09-26. What it would take to put language servers behind
 zoe -- `zls` for Zig, `basedpyright` + `ruff server` for Python -- and what
 the first slice actually implements.
 
-Nothing here touches the wire protocol. Every decision below is zoe-side or
-client-library-side, so `docs/api.md` and `docs/protocol.md` are unchanged
-by slice 1. The one place a protocol change *would* help (undercurl) is
-called out in [Drawing diagnostics](#drawing-diagnostics) and deliberately
-left out.
+Slice 1 carries one protocol change with it: underline styles, including
+the curly one, because the alternative was a diagnostic mark made of colour
+competing with the syntax colour it sits on. See
+[Drawing diagnostics](#drawing-diagnostics).
 
 ## What already exists
 
@@ -156,22 +155,50 @@ debounce means a burst of typing is one message either way.
 
 ## Drawing diagnostics
 
-There is no underline in the protocol. `core.Style` is colour-only by
-decision -- bold/italic/underline/strikethrough are parsed out of SGR and
-ignored, and first-class `Style` fields for them are decided-not-wired. So
-the squiggle everyone pictures is not available, and inventing it means a
-`Style` field, a wire field, a host renderer change and an atlas question
-about how to draw a curl in a cell. Out of scope, worth doing later.
+`core.Style` was colour-only by decision: bold, italic, underline and
+strikethrough were parsed out of SGR and thrown away, and first-class
+`Style` fields for them were decided-not-wired.
 
-What slice 1 does instead, all of it with pieces that exist:
+That was the right call for the attributes that need font work, and the
+wrong one for underline, which is why slice 1 adds it. The reason is
+specific: a diagnostic mark has to survive *on the same cell as* a syntax
+colour and under a selection tint. A mark made of foreground colour fights
+the highlighter, and a mark made of background colour fights the selection
+and the search highlight; both lose information the moment they overlap. An
+underline is a third channel on the cell, which is exactly what is needed,
+and unlike bold or italic it is drawn from geometry the host already has --
+a rect at the baseline, no second font face in the atlas.
 
-1. **A sign column**, one cell wide, left of the line numbers: a coloured
-   `*` for the worst severity on that line. This is the part that reads at
-   a glance and the part that survives scrolling, and it costs one more
-   cell in `gutterWidth`.
-2. **A background tint over the range**, through `paintRowSpan`, painted
-   *before* the search highlight and the selection so the thing you are
-   about to act on still wins. Severity picks the colour.
+So the protocol now carries, on `write_text` and its spans:
+
+- `underline`: `"none"` (default), `"single"`, `"double"`, `"curly"`,
+  `"dotted"`, `"dashed"` -- the SGR `4:1`..`4:5` set, so the escape
+  sequences map onto it one-to-one instead of being a glyphwire invention.
+- `underline_color`: independent of `fg`, defaulting to it. This is the
+  half that makes a red squiggle under white text possible, and it is SGR
+  `58`/`59`.
+
+Two consequences worth knowing about:
+
+- **The SGR tokenizer now remembers its separators.** `4:3` is a curly
+  underline and `4;3` is an underline plus an italic, and the parser used
+  to collapse `:` and `;` because in `38`/`48` colours the two spellings
+  mean the same thing. Left alone, every `ESC [ 4;3 m` in a mirrored
+  program's output would have become a squiggle.
+- **The repeating styles take their phase from the cell's absolute window
+  position**, so a curly underline across a word is one continuous wave
+  rather than a row of identical per-cell marks.
+
+Bold, italic, strikethrough and dim stay unwired. Nothing changed about
+why: they need font faces, not a rect.
+
+On top of that, slice 1 draws diagnostics as:
+
+1. **The squiggle itself** -- a `curly` underline in the severity's colour
+   over the diagnostic's range, painted through the row painter.
+2. **A sign column**, one cell wide, left of the line numbers: a coloured
+   mark for the worst severity on that line. The squiggle shows *where*;
+   the sign survives horizontal scrolling and shows *that*.
 3. **The message in the statusline** when the cursor is on a diagnostic,
    with its source prefixed (`basedpyright: ...` vs `ruff: ...`), because
    with two servers on one file "which tool is complaining" is half the
@@ -284,8 +311,11 @@ come from a small override table.
 | `zoe/lsp.zig` | `Server`: spawn, framing over `wire.FrameDecoder`, reader thread, inbox, request correlation, capabilities, position-encoding conversion. `Pool`: the per-root registry and the "which server can do X for this buffer" query. |
 | `zoe/diag.zig` | the diagnostic store -- per `(uri, server)` sets, line-indexed lookup, severity ordering, next/previous. |
 | `zoe/langconf.zig` | `config.lsp` parsing and the built-in server table. |
-| `zoe/ui.zig` | inbox drain in `run`, sign column in the gutter, tint in the row painter, statusline message, `K` / `gd` / `]d` / `[d` / `:lsp` / `:diag`, the jumplist. |
-| `src/client.zig` | `InputListener.wake()`. |
+| `zoe/ui.zig` | inbox drain in `run`, sign column in the gutter, squiggle in the row painter, statusline message, `K` / `gd` / `]d` / `[d` / `:lsp` / `:diag`, the jumplist. |
+| `src/client.zig` | `InputListener.wake()`, and `underline` on `TextOpts`/`Span`. |
+| `src/core.zig` | `Underline` / `UnderlineStyle`, `Style.underline`, the SGR underline codes and the separator-aware tokenizer. |
+| `src/dispatch.zig`, `src/protocol.zig` | `write_text`'s `underline` / `underline_color`, and `get_cells` reading them back. |
+| `host/render.zig` | the underline batch, drawn over the glyphs, and the five styles' geometry. |
 | `tests/zoe_tests.zig` | framing + correlation against a canned stream, utf-8/utf-16 position conversion, the diagnostic store's index and per-source replacement, config parsing. |
 
 No live server in the test run -- that is an `e2e` shape and `e2e` is
@@ -303,5 +333,4 @@ an installed zls.
   help. Rename is multi-file edits, which wants the undo groups to span
   buffers.
 - **Slice 4** -- incremental sync (needs the journal's second consumer),
-  markdown hover through `md/`, undercurl as a real protocol addition,
-  `:lsp log`.
+  markdown hover through `md/`, `:lsp log`.
