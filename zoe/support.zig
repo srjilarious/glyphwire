@@ -15,6 +15,7 @@
 
 pub const buffer = @import("buffer.zig");
 pub const motion = @import("motion.zig");
+pub const search = @import("search.zig");
 pub const editor = @import("editor.zig");
 pub const keys = @import("keys.zig");
 pub const display = @import("display.zig");
