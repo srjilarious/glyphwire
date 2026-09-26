@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const testz = @import("testz");
+const glyphwire = @import("glyphwire");
 
 // salacommander's windowless pieces, gathered in `salacommander_support`
 // (see build.zig) so they can be exercised here against real temporary
@@ -779,7 +780,7 @@ pub fn paneTotalBytesCountsListedFilesOnlyTest(io: std.Io, alloc: std.mem.Alloca
 }
 
 pub fn shellPanelTakesAThirdOfTheWindowTest(_: std.Io, _: std.mem.Allocator) !void {
-    const rowsFor = sala.shellpanel.Panel.rowsFor;
+    const rowsFor = glyphwire.shellpanel.Panel.rowsFor;
     // A third of the window, once there's a third worth having.
     try testz.expectEqual(rowsFor(45), 15);
     try testz.expectEqual(rowsFor(30), 10);

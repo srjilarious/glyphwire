@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Ctrl+` -- a `gw-shell` running across the bottom of salacommander's
-//! own context, in a layer salacommander created for it.
+//! Ctrl+` -- a `gw-shell` running across the bottom of a client's own
+//! context, in a layer that client created for it. salacommander and zoe
+//! both host one.
 //!
 //! The shell is a glyphwire client, not a terminal program, so this is
 //! not a pty being mirrored into a panel: the shell attaches to *this*
@@ -12,21 +13,29 @@
 //! costs on this side is the layer, a pipe, and a child process.
 //!
 //! **Who has the keyboard.** Input is delivered per context and there is
-//! one context, so both programs see every keystroke and salacommander
+//! one context, so both programs see every keystroke and the host
 //! decides: while the panel is open it consumes nothing but Ctrl+`, and
 //! the shell is told `focus` / `blur` over the control pipe. The pipe is
-//! also how the panel follows the file pane -- a `cd` line whenever the
-//! active pane or its directory changes, applied by the shell before its
-//! next prompt rather than typed into whatever is on its line.
+//! also how the panel follows the host's directory -- a `cd` line
+//! whenever it changes, applied by the shell before its next prompt
+//! rather than typed into whatever is on its line.
+//!
+//! **Who has the caret.** The shell takes the host caret when it is
+//! focused (`set_caret_layer`, `set_caret_visible`, and the default
+//! `set_caret_shape`), but it does not give it back on `blur`: the host
+//! is the one taking the keyboard back, so it puts the caret where it
+//! wants it (`close` hides it; an editor then re-sends its own). Both
+//! sides doing it raced.
 //!
 //! **Closing keeps the shell.** Ctrl+` hides the layer and blurs it; the
 //! shell keeps running with its history, its environment and whatever it
-//! was in the middle of. Only salacommander exiting ends it, and it ends
+//! was in the middle of. Only the host exiting ends it, and it ends
 //! by itself: the control pipe's write end closes, the shell reads EOF
 //! and leaves.
 
 const std = @import("std");
-const glyphwire = @import("glyphwire");
+const client_mod = @import("client.zig");
+const core = @import("core.zig");
 
 const c = struct {
     extern "c" fn pipe2(fds: *[2]i32, flags: i32) i32;
@@ -51,7 +60,8 @@ const share_den = 3;
 const min_rows = 6;
 const max_rows = 24;
 
-/// Rows left below the panel: the function-key bar, which stays readable
+/// Rows left below the panel: salacommander's function-key bar and zoe's
+/// statusline (the mode word lives there), which stay readable
 /// with the shell up -- Ctrl+` is not a mode you should have to remember
 /// your way out of.
 const bar_rows = 1;
@@ -66,13 +76,13 @@ pub const WinSize = struct { cols: usize, rows: usize };
 pub const Panel = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
-    client: *glyphwire.Client,
+    client: *client_mod.Client,
     /// The panel's layer. Created with the rest of the UI's layers and
     /// kept hidden until the panel is first opened -- a layer costs
     /// nothing while it's invisible, and creating it up front keeps the
     /// compositing order fixed.
-    layer: glyphwire.LayerHandle,
-    context: glyphwire.ContextHandle,
+    layer: core.LayerHandle,
+    context: core.ContextHandle,
 
     /// The running shell, once Ctrl+` has started one.
     child: ?std.process.Child = null,
@@ -88,9 +98,9 @@ pub const Panel = struct {
     pub fn init(
         alloc: std.mem.Allocator,
         io: std.Io,
-        client: *glyphwire.Client,
-        context: glyphwire.ContextHandle,
-        layer: glyphwire.LayerHandle,
+        client: *client_mod.Client,
+        context: core.ContextHandle,
+        layer: core.LayerHandle,
     ) Panel {
         return .{ .alloc = alloc, .io = io, .client = client, .context = context, .layer = layer };
     }

@@ -5886,6 +5886,12 @@ pub const KeyRepeat = struct {
     pub const default_interval_ms: f64 = 40;
 };
 
+/// The shape glyphwire-host draws a context's caret in, set with
+/// `set_caret_shape`. The same four names `host.conf.lua`'s
+/// `cursor_shape` takes; `line` is a thin bar at the cell's left edge
+/// (nvim's insert cursor) and `block` fills the cell.
+pub const CaretShape = enum { line, block, box, underline };
+
 pub const Context = struct {
     alloc: std.mem.Allocator,
     root: Layer,
@@ -5944,6 +5950,11 @@ pub const Context = struct {
     /// resets; this one only changes on the wire message, and hides the
     /// caret whichever layer `caret_layer` points it at.
     caret_visible: bool = true,
+    /// The shape the host draws the caret in, set with `set_caret_shape`,
+    /// or null for the shape `host.conf.lua` chose. A modal editor
+    /// switches it as the mode changes (a bar for insert), and puts it
+    /// back to null when it hands the caret to something else.
+    caret_shape: ?CaretShape = null,
     /// The typematic key-repeat timing this context's program asked for
     /// with `set_key_repeat`, or null to run at the host's own default
     /// (`host.conf.lua`'s `key_repeat_delay_ms` / `key_repeat_interval_ms`).
