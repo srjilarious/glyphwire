@@ -121,6 +121,52 @@ pub fn lspHandshakeSplitAcrossReadsTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectFalse(server.caps.definition);
 }
 
+/// Several frames in ONE chunk, which is what a language server actually
+/// sends: zls emits four or five `window/logMessage` notifications and its
+/// `initialize` reply, and they arrive batched. The case this misses is the
+/// one that shipped broken -- every test fed one frame per chunk, so nothing
+/// caught a reader that only ever handled the first.
+pub fn lspManyFramesInOneChunkTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var counter: Counter = .{};
+    var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");
+    defer pool.deinit();
+    const server = try pool.addForTest(.{ .name = "zls", .languages = &.{"zig"}, .cmd = &.{"zls"} });
+
+    var chunk: std.ArrayList(u8) = .empty;
+    defer chunk.deinit(alloc);
+    inline for (.{
+        \\{"jsonrpc":"2.0","method":"window/logMessage","params":{"type":3,"message":"Starting ZLS"}}
+        ,
+        \\{"jsonrpc":"2.0","method":"window/logMessage","params":{"type":5,"message":"Offset Encoding: 'utf-8'"}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///tmp/root/a.zig","diagnostics":[{"range":{"start":{"line":1,"character":2},"end":{"line":1,"character":6}},"severity":2,"message":"early"}]}}
+        ,
+        \\{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-8","hoverProvider":true,"definitionProvider":true}}}
+        ,
+    }) |body| {
+        const f = try frame(alloc, body);
+        defer alloc.free(f);
+        try chunk.appendSlice(alloc, f);
+    }
+
+    // One read, four messages.
+    try server.feedBytes(chunk.items);
+    // One wake for the batch, not one per message.
+    try testz.expectEqual(counter.hits, 1);
+
+    // The diagnostics come out...
+    const ev = (try pool.nextEvent()).?;
+    defer ev.deinit(alloc);
+    try testz.expectTrue(ev == .diagnostics);
+    try testz.expectEqualStr("early", ev.diagnostics.items[0].message);
+
+    // ...and the reply *behind* them still completed the handshake, which is
+    // the part a one-frame-per-chunk reader silently dropped.
+    try testz.expectEqual(try pool.nextEvent(), null);
+    try testz.expectTrue(server.ready());
+    try testz.expectEqual(server.encoding, .utf8);
+}
+
 pub fn lspDiagnosticsArriveAsEventsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var counter: Counter = .{};
     var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");

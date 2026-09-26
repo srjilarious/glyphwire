@@ -613,20 +613,33 @@ pub const Server = struct {
     /// The whole of the reader thread: bytes in, `feedBytes`, repeat. It
     /// never parses a message and never touches a field other than the ones
     /// `feedBytes` does.
+    ///
+    /// **`readStreaming`, not a buffered reader.** This wants "whatever has
+    /// arrived, at least one byte", and a `std.Io.Reader` over a 16K buffer
+    /// gives "fill the buffer, or hit end of stream". Against a program that
+    /// writes a reply and then stays alive -- which is every language server
+    /// -- that second thing never happens: the reply sits in the pipe, the
+    /// read blocks on for the rest of the buffer, and the handshake never
+    /// completes. It looks like a server that ignored `initialize`, and it
+    /// cost an afternoon. `InputListener.listenLoop` reads its own frames the
+    /// same way, for the same reason.
     fn readLoop(self: *Server, stdout: std.Io.File) void {
-        var buf: [16 * 1024]u8 = undefined;
-        var file_reader = stdout.reader(self.io, &buf);
-
         var chunk: [16 * 1024]u8 = undefined;
         while (true) {
-            const n = file_reader.interface.readSliceShort(&chunk) catch |err| {
-                trace("{s}: stdout read failed: {t}", .{ self.name, err });
-                break;
+            var data: [1][]u8 = .{&chunk};
+            const n = stdout.readStreaming(self.io, &data) catch |err| switch (err) {
+                error.EndOfStream => {
+                    trace("{s}: stdout EOF", .{self.name});
+                    break;
+                },
+                else => {
+                    trace("{s}: stdout read failed: {t}", .{ self.name, err });
+                    break;
+                },
             };
-            if (n == 0) {
-                trace("{s}: stdout EOF", .{self.name});
-                break; // The server exited.
-            }
+            // A zero-length read is not end of stream here (that is its own
+            // error), so it is nothing to act on -- go round again.
+            if (n == 0) continue;
             trace("{s}: read {d} bytes", .{ self.name, n });
             self.feedBytes(chunk[0..n]) catch |err| {
                 trace("{s}: feed failed: {t}", .{ self.name, err });
@@ -651,9 +664,14 @@ pub const Server = struct {
     pub fn feedBytes(self: *Server, chunk: []const u8) !void {
         try self.decoder.feed(self.alloc, chunk);
 
-        var any = false;
+        var queued: usize = 0;
         while (true) {
-            const body = (self.decoder.next(self.alloc) catch break) orelse break;
+            const body = self.decoder.next(self.alloc) catch |err| {
+                // A frame we can't parse a header out of means the stream is
+                // no longer in sync, and nothing later in it can be trusted.
+                trace("{s}: framing error: {t}", .{ self.name, err });
+                break;
+            } orelse break;
             self.mutex.lockUncancelable(self.io);
             self.inbox.append(self.alloc, body) catch {
                 self.mutex.unlock(self.io);
@@ -661,9 +679,12 @@ pub const Server = struct {
                 break;
             };
             self.mutex.unlock(self.io);
-            any = true;
+            queued += 1;
         }
-        if (any) self.waker.wake();
+        if (queued > 0) {
+            trace("{s}: queued {d} message(s)", .{ self.name, queued });
+            self.waker.wake();
+        }
     }
 
     /// Pops the oldest queued body, or null. Caller owns it.
