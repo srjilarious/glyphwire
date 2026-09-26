@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 const std = @import("std");
+const glyphwire = @import("glyphwire");
 const geometry = @import("geometry.zig");
 const key_repeat = @import("key_repeat.zig");
 
@@ -79,6 +80,30 @@ pub fn bundledFontRelPath(value: []const u8, default_rel_path: []const u8) ?[]co
 pub const CursorShape = enum { line, block, box, underline };
 
 pub const cursor_shape_default: CursorShape = .line;
+
+/// The shape the caret is actually drawn in, given what `host.conf.lua`
+/// configured, what the visible context's client asked for with
+/// `set_caret_shape` (null for "whatever you were going to use"), and
+/// whether the host's window has the keyboard.
+///
+/// Focus wins over both. A hollow box in a window that isn't taking
+/// input is the convention every terminal follows, and it is the one
+/// thing on screen that says at a glance where the keyboard is going;
+/// a client that would rather draw that itself gets the same news from
+/// the `focus` notification.
+pub fn effectiveCursorShape(
+    configured: CursorShape,
+    requested: ?glyphwire.CaretShape,
+    window_focused: bool,
+) CursorShape {
+    if (!window_focused) return .box;
+    return switch (requested orelse return configured) {
+        .line => .line,
+        .block => .block,
+        .box => .box,
+        .underline => .underline,
+    };
+}
 pub const cursor_blink_default: bool = true;
 // Half-period: the caret is shown for this long, then hidden for this
 // long. ~530ms matches the historical xterm default. Clamped to a sane

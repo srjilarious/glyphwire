@@ -22,6 +22,13 @@ pub const Caret = struct {
     blink: bool,
     blink_ms: f64,
 
+    /// Whether the host's window has the keyboard, mirrored from the
+    /// engine each `update` (`App.syncWindowFocus`, which also puts the
+    /// change on the wire as `focus`). While false the caret is a hollow
+    /// box and holds still -- a blinking caret in a window that isn't
+    /// taking input is just movement in the corner of the eye.
+    window_focused: bool = true,
+
     /// Milliseconds since the caret's blink phase last reset. Advanced by
     /// `deltaTimeMs` every `update`, zeroed whenever the caret moves or the
     /// window scrolls (see `tickBlink`) so the caret is solid the instant
@@ -91,15 +98,10 @@ pub const Caret = struct {
         self.blink_elapsed_ms += delta_ms;
     }
 
-    /// The shape to draw a context's caret in: the one its client asked
-    /// for with `set_caret_shape`, else the one `host.conf.lua` chose.
+    /// The shape to draw a context's caret in -- see
+    /// `config.effectiveCursorShape`, which is the whole rule.
     pub fn shapeFor(self: *const Caret, requested: ?glyphwire.CaretShape) CursorShape {
-        return switch (requested orelse return self.shape) {
-            .line => .line,
-            .block => .block,
-            .box => .box,
-            .underline => .underline,
-        };
+        return config.effectiveCursorShape(self.shape, requested, self.window_focused);
     }
 
     /// Whether the blink phase clock is in its "on" half this frame (or
@@ -107,6 +109,7 @@ pub const Caret = struct {
     /// per-layer concern the caller folds in -- see `visible` for the
     /// root caret, `render.drawFocusedCaret` for a `caret_layer` pane.
     pub fn blinkOn(self: *const Caret) bool {
+        if (!self.window_focused) return true;
         if (!self.blink) return true;
         const period = self.blink_ms * 2;
         return @mod(self.blink_elapsed_ms, period) < self.blink_ms;

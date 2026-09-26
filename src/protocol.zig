@@ -407,6 +407,13 @@ pub const RemoteExitParams = struct {
 /// decisions.md's "Zig JSON gotcha").
 pub const ShutdownParams = struct { grace_ms: u32 = 0 };
 
+/// `focus` params: whether the host's own window now has the keyboard.
+/// Nothing to do with which *context* is on screen (that is `context`) or
+/// which pane is focused within the window -- this is the whole window
+/// against the rest of the desktop. A client that paints its own cursor
+/// dims or hollows it out on `false`, the way the host does its caret.
+pub const FocusParams = struct { focused: bool };
+
 /// `context` params: the now-visible context's handle and the size of
 /// its root layer (in cells). A client that manages its own context
 /// (zoe) uses the handle to tell "I'm the one on screen now" from "I've

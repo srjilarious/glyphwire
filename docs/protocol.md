@@ -1146,6 +1146,7 @@ flag.
 | mouse_move | `mouse_move` | `mouse_move` |
 | resize | `resize` | `resize` |
 | shutdown | `shutdown` | `shutdown` |
+| focus | `focus` | `focus` |
 | scroll | `scroll`, `scroll_offset` | `scroll`, `scroll_offset` |
 | layout | `layout` | `layout` |
 | selection | `selection` | `selection` |
@@ -1184,6 +1185,7 @@ the client drains with `get_errors`.
 | `window_text` | `{text}` |
 | `remote_exit` | `{session, status, started}` |
 | `shutdown` | `{grace_ms}` |
+| `focus` | `{focused}` |
 
 **`key_down` vs `text`.** These are deliberately separate streams. A key
 event carries a *physical key name*, for chords and navigation. `text`
@@ -1198,9 +1200,17 @@ the event, left and right folded. Read chords from it, not from a live
 key-state query made when the event is handled: by then a quick chord may
 already be released.
 
+**`mouse_button`'s `cell`** is a cell of the receiving connection's
+*context*, never of one of its layers. A client drawing into a layer that
+sits somewhere inside the window — a popup, an embedded panel — **MUST**
+take that layer's `cell_position` off it before using it to address the
+layer's grid.
+
 **`mouse_button`'s `view_offset`** is the root layer's scrollback offset at
 click time. Pass it back to `get_metadata` to resolve `cell` against the
-row the user actually clicked.
+row the user actually clicked. It is the *root* layer's, so a client whose
+content is on a layer with a scrollback ring of its own uses that layer's
+offset (from its `scroll` notifications) instead.
 
 **`mouse_move`** fires only when the pointer changes *cell*; per-pixel
 motion is coalesced.
@@ -1222,6 +1232,15 @@ code through, so `status` alone cannot say.
 **`shutdown`** means the host window is closing. `grace_ms` is roughly how
 long the host will wait before exiting anyway; it is advisory, and a client
 with nothing to flush **MAY** ignore it.
+
+**`focus`** says whether the host's window has the keyboard. It is about
+the whole window against the rest of the desktop — not which context is
+on screen (`context`) or which pane is focused within the window. Sent on
+the edge only, to every subscriber whatever their context, so a
+backgrounded client comes back up drawn correctly. A client **SHOULD**
+assume it has focus until told otherwise. While the window is away the
+host draws its own caret as a hollow box and stops blinking it; a client
+that paints its own cursor **SHOULD** do something equivalent.
 
 ## 8. Vocabularies
 

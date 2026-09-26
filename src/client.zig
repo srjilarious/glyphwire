@@ -3282,6 +3282,12 @@ pub const ResizeEvent = struct { cols: usize, rows: usize };
 /// line with the input it has already queued.
 pub const ShutdownEvent = struct { grace_ms: u32 };
 
+/// One `focus` notification: whether the host's window has the keyboard
+/// (see `protocol.FocusParams`). No owned memory, and on the same ordered
+/// queue as key/text, so a client that dims its own cursor does it in
+/// line with the keystroke that came just before the window went away.
+pub const FocusEvent = struct { focused: bool };
+
 /// `get_property(layer, "scroll_offset")`'s result -- where the viewport
 /// sits and how far it can go on each axis.
 pub const ScrollOffsetState = struct {
@@ -3471,6 +3477,11 @@ pub const Event = union(enum) {
     paste: TextEvent,
     copy_request,
     shutdown: ShutdownEvent,
+    /// The host's window gained or lost the keyboard. Not an
+    /// `InputEvent`: it is a fact about the window, like `resize`, and a
+    /// client reads it off the full `Event` queue rather than out of its
+    /// key handling.
+    focus: FocusEvent,
     window_key: KeyEvent,
     window_text: TextEvent,
     mouse_button: MouseButtonEvent,
@@ -3494,7 +3505,7 @@ pub const Event = union(enum) {
             .terminal_reply => |b| alloc.free(b),
             .layout => |l| l.deinit(alloc),
             .pane_layout => |l| l.deinit(alloc),
-            .copy_request, .shutdown, .mouse_move, .resize, .scroll, .scroll_offset, .pane_exit, .remote_exit, .context => {},
+            .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .pane_exit, .remote_exit, .context => {},
         }
     }
 
@@ -4176,6 +4187,10 @@ pub const InputListener = struct {
             const p = try self.parseParams(protocol.ShutdownParams, params);
             defer p.deinit();
             try self.enqueue(.{ .shutdown = .{ .grace_ms = p.value.grace_ms } });
+        } else if (eql(u8, method, "focus")) {
+            const p = try self.parseParams(protocol.FocusParams, params);
+            defer p.deinit();
+            try self.enqueue(.{ .focus = .{ .focused = p.value.focused } });
         } else if (eql(u8, method, "context")) {
             const p = try self.parseParams(protocol.ContextParams, params);
             defer p.deinit();

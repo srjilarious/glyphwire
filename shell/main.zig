@@ -385,18 +385,22 @@ fn heldMouseButton(listener: *glyphwire.InputListener) ?keyencode.MouseButton {
 /// Re-encodes one mouse button event as an xterm mouse report for the
 /// foregrounded pty child, when it has a mouse-reporting mode on
 /// (`glyphwire.ModeTracker`); otherwise drops it.
-fn ptyMouseButton(pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseButtonEvent) void {
+/// `origin` is where the shell's surface starts in the context, which is
+/// what the reported cell has to be measured from: the child's screen is
+/// the shell's surface, and embedded that is a panel partway down the
+/// host's window rather than the window itself.
+fn ptyMouseButton(pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseButtonEvent, origin: glyphwire.CellPos) void {
     if (!modes.mouseReporting()) return;
     const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
     const btn = keyencode.mouseButtonFromName(mev.button) orelse return;
     const action: keyencode.MouseAction = if (mev.pressed) .press else .release;
     var buf: [16]u8 = undefined;
-    if (keyencode.encodeMouse(enc, btn, action, mev.cell.col, mev.cell.row, ptyMods(mev.mods), &buf)) |seq|
+    if (keyencode.encodeMouse(enc, btn, action, mev.cell.col -| origin.col, mev.cell.row -| origin.row, ptyMods(mev.mods), &buf)) |seq|
         pty.writeAll(seq);
 }
 
 /// `ptyMouseButton` for pointer motion.
-fn ptyMouseMove(listener: *glyphwire.InputListener, pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseMoveEvent) void {
+fn ptyMouseMove(listener: *glyphwire.InputListener, pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseMoveEvent, origin: glyphwire.CellPos) void {
     if (!modes.mouseReporting() or !modes.wantsMotion()) return;
     const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
     // `?1002` reports motion only while a button is held; `?1003`
@@ -404,7 +408,7 @@ fn ptyMouseMove(listener: *glyphwire.InputListener, pty: *Pty, modes: *ModeTrack
     const btn = heldMouseButton(listener) orelse
         (if (modes.wantsAnyMotion()) keyencode.MouseButton.none else return);
     var buf: [16]u8 = undefined;
-    if (keyencode.encodeMouse(enc, btn, .motion, mev.cell.col, mev.cell.row, ptyMods(mev.mods), &buf)) |seq|
+    if (keyencode.encodeMouse(enc, btn, .motion, mev.cell.col -| origin.col, mev.cell.row -| origin.row, ptyMods(mev.mods), &buf)) |seq|
         pty.writeAll(seq);
 }
 
@@ -436,26 +440,40 @@ fn promptIdleTick(prompt: *Prompt) bool {
 /// the way keyboard Enter is.
 fn promptClick(prompt: *Prompt, mev: glyphwire.MouseButtonEvent) !void {
     if (!mev.pressed or !std.mem.eql(u8, mev.button, "left")) return;
-    // `mev.view_offset` is how far the host was scrolled back when the
-    // click happened -- ground truth, stamped by the host atomically with
-    // the click, so trust it over the locally-mirrored `view_scroll`
-    // (which can lag a host-driven wheel/scrollbar scroll). It's both the
-    // lookup offset (resolve against the row actually under the pointer)
-    // and, once recorded here, what makes `setLine` -> `setCursorAt` snap
-    // the view back down to the live prompt when the click activates a
-    // command -- clicking an `ls` entry in scrollback should land you back
-    // at the new prompt, not leave you scrolled up.
-    prompt.view_scroll = mev.view_offset;
+    // Every cell the host reports is a cell of the *context*, so embedded
+    // it has to be brought into the panel's own frame first -- see
+    // `surfaceCell`.
+    const cell = prompt.surfaceCell(mev.cell) orelse return;
+
+    // How far the surface was scrolled back when the click happened, which
+    // is both the lookup offset (resolve against the row actually under
+    // the pointer) and what makes `setLine` -> `setCursorAt` snap the view
+    // back down to the live prompt when the click activates a command --
+    // clicking an `ls` entry in scrollback should land you back at the new
+    // prompt, not leave you scrolled up.
+    //
+    // On the root grid that is `mev.view_offset`: ground truth, stamped by
+    // the host atomically with the click, so it beats the locally-mirrored
+    // `view_scroll` (which can lag a host-driven wheel/scrollbar scroll).
+    // Embedded it is not -- the host stamps the *root* layer's offset, and
+    // the panel has a scrollback ring of its own -- so the mirrored value
+    // is all there is, and `scroll` notifications for this layer keep it
+    // current (see the `.scroll` arm of the prompt loop).
+    const view_offset = if (prompt.layer != null) prompt.view_scroll else blk: {
+        prompt.view_scroll = mev.view_offset;
+        break :blk mev.view_offset;
+    };
+
     if (mev.mods.ctrl) {
         // Ctrl+click toggles the entry in the multi-select mark set (same
         // as Space while browsing).
-        try prompt.toggleHighlightAt(mev.cell.row, mev.cell.col, mev.view_offset);
+        try prompt.toggleHighlightAt(cell.row, cell.col, view_offset);
     } else {
         // A plain click always runs the entry's own action (the first
         // `open_actions` command for its type), regardless of what's
         // marked -- marks are built and acted on from the keyboard (Space
         // to mark, Enter to run) or copied with Ctrl+Shift+C.
-        try prompt.activateSelectionAt(mev.cell.row, mev.cell.col, mev.view_offset);
+        try prompt.activateSelectionAt(cell.row, cell.col, view_offset);
     }
 }
 
@@ -2082,6 +2100,32 @@ const Prompt = struct {
     fn drawIconStyled(self: *Prompt, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
         if (self.layer) |l| return self.client.drawIconOnStyled(l, row, col, name, opts);
         try self.client.drawIconStyled(row, col, name, opts);
+    }
+
+    /// A cell the host reported, in the surface's own frame -- or null
+    /// when it landed somewhere the surface isn't.
+    ///
+    /// Owning the context, the surface *is* the root grid and a context
+    /// cell is already a surface cell. Embedded, the panel's own corner
+    /// has to come off it first -- see `embed.surfaceCell`, which is the
+    /// arithmetic and the reason for it.
+    ///
+    /// The position is read at click time rather than cached: the host
+    /// moves the panel whenever its window resizes, and one round trip is
+    /// nothing on a path that is about to ask for metadata anyway.
+    /// Where the surface's top-left cell sits in the context: zero when
+    /// the shell owns the context, the panel's `cell_position` when
+    /// embedded. Falls back to zero if the host can't be asked, which
+    /// leaves a click where it used to be rather than dropping it.
+    fn surfaceOrigin(self: *Prompt) glyphwire.CellPos {
+        const layer = self.layer orelse return .{};
+        return self.client.getLayerCellPosition(layer) catch .{};
+    }
+
+    fn surfaceCell(self: *Prompt, cell: glyphwire.CellPos) ?glyphwire.CellPos {
+        const layer = self.layer orelse return cell;
+        const pos = self.client.getLayerCellPosition(layer) catch return null;
+        return embed.surfaceCell(cell, pos, self.grid_cols, self.grid_rows);
     }
 
     /// The surface's cell size: the window when the shell owns its
@@ -4264,6 +4308,15 @@ const Prompt = struct {
             return;
         };
 
+        // Where the surface's top-left cell sits in the context, so a
+        // click can be reported to the child in *its* screen's
+        // coordinates. Zero when the shell owns the context and its
+        // screen is the whole grid. Read once rather than per event: the
+        // panel only moves on a window resize, which is handled in the
+        // loop, and motion reporting would otherwise put a round trip on
+        // every pointer move.
+        var mouse_origin = self.surfaceOrigin();
+
         // Foreground: forward input to the pty until the child exits, in
         // the order the host sent it -- a click, a resize and a keystroke
         // reach the child in the sequence they happened. `pty.reaped()`
@@ -4301,11 +4354,14 @@ const Prompt = struct {
                     .resize => |rev| {
                         pty.resize(@intCast(rev.cols), @intCast(rev.rows));
                         self.noteResize(rev.cols, rev.rows);
+                        // A resize is also when an embedded panel is
+                        // re-placed, so the click origin moves with it.
+                        mouse_origin = self.surfaceOrigin();
                     },
                     // Mouse: encoded to the child when it asked for
                     // reporting, dropped otherwise.
-                    .mouse_button => |mev| if (!is_aware) ptyMouseButton(&pty, &modes, mev),
-                    .mouse_move => |mev| if (!is_aware) ptyMouseMove(listener, &pty, &modes, mev),
+                    .mouse_button => |mev| if (!is_aware) ptyMouseButton(&pty, &modes, mev, mouse_origin),
+                    .mouse_move => |mev| if (!is_aware) ptyMouseMove(listener, &pty, &modes, mev, mouse_origin),
                     // Terminal query replies (`CSI 6n` / DA / DECRQM) the
                     // host parsed out of the child's own output on the way
                     // to the grid.

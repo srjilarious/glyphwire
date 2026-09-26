@@ -36,6 +36,7 @@ pub const InputListener = client.InputListener;
 pub const InputStateSnapshot = client.InputStateSnapshot;
 pub const ResizeEvent = client.ResizeEvent;
 pub const ShutdownEvent = client.ShutdownEvent;
+pub const FocusEvent = client.FocusEvent;
 pub const ScrollEvent = client.ScrollEvent;
 pub const ContextEvent = client.ContextEvent;
 pub const MouseButtonEvent = client.MouseButtonEvent;

@@ -651,6 +651,24 @@ pub fn subscribeMouseMoveEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectFalse(d.subscriptions.mouse_button);
 }
 
+/// `focus` is its own stream: a client that paints its own cursor asks
+/// for it by name, and asking for it brings nothing else along.
+pub fn subscribeFocusEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const sub =
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["focus"]}}
+    ;
+    const result = try d.handle(alloc, sub);
+    if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(d.subscriptions.focus);
+    try testz.expectTrue(d.subscriptions.has("focus"));
+    try testz.expectFalse(d.subscriptions.shutdown);
+}
+
 pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

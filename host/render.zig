@@ -1465,6 +1465,13 @@ pub const Renderer = struct {
         const root_view: usize = if (scroll.rootOwned(&ctx.root)) 0 else ctx.root.view_scroll;
 
         self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = glyphwire.root_layer_handle });
+        // This context's own split bands, before any of its layers: the
+        // split layers sit either side of a band and never over one, so
+        // nothing is lost by drawing them first -- and a layer that
+        // *floats* (a popup, the Ctrl+` shell panel) then covers them the
+        // way it covers everything else it is laid over. Drawn in the
+        // chrome pass, zoe's tree divider ran straight down the panel.
+        self.drawLayerDividers(eng, ctx_handle);
 
         // The caret follows `ctx.caret_layer` when a client set one --
         // otherwise the root cursor. Drawn here, on top of root's content
@@ -1491,6 +1498,41 @@ pub const Renderer = struct {
             // floats over, the same as it covers that layer's cells.
             drawLayerScrollbars(eng, layer, origin);
             if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape);
+        }
+    }
+
+    /// One context's layer-split bands. Drawn per context inside
+    /// `drawOneContext` rather than with the pane bands in the chrome
+    /// pass, so a floating layer covers them -- the same move
+    /// `drawLayerScrollbars` made, for the same reason.
+    ///
+    /// `App.panes` holds every band for every on-screen context, already
+    /// translated into window cells (`Panes.syncLocked`), so this filters
+    /// the cache down to the context being composited and draws those
+    /// where they are. The cache is refreshed each frame by the mouse
+    /// handler, which runs before any of this.
+    fn drawLayerDividers(self: *Renderer, eng: *Engine, ctx_handle: glyphwire.ContextHandle) void {
+        // `render` holds `ctx_mutex` around this whole pass, which is what
+        // `syncLocked` wants. Refreshing here rather than relying on the
+        // mouse handler keeps the bands right in a session that has never
+        // seen a pointer.
+        self.app.panes.syncLocked();
+        var drawing = false;
+        defer if (drawing) eng.renderer.end();
+        for (self.app.panes.bands.items) |d| {
+            switch (d.level) {
+                .pane => continue,
+                .layer => |h| if (h != ctx_handle) continue,
+            }
+            if (!drawing) {
+                drawing = true;
+                eng.renderer.begin(eng.projMat);
+            }
+            const r = geometry.cellRectPx(d.rect);
+            eng.renderer.drawFilledRect(
+                host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
+                divider_color,
+            );
         }
     }
 
@@ -1823,9 +1865,14 @@ pub const Renderer = struct {
         return false;
     }
 
-    /// The bands between split children, drawn as a flat separator. Their
-    /// geometry comes from `App.panes`' cache, which the mouse handler
-    /// already refreshes each frame -- see `panes.Panes.syncLocked`.
+    /// The bands between *panes*, drawn as a flat separator over
+    /// everything: they separate whole programs, so nothing one program
+    /// draws may cover them. Their geometry comes from `App.panes`' cache,
+    /// which the mouse handler already refreshes each frame -- see
+    /// `panes.Panes.syncLocked`.
+    ///
+    /// A context's own layer bands are *not* drawn here. See
+    /// `drawLayerDividers`.
     fn renderDividers(self: *Renderer, eng: *Engine) void {
         const server = self.app.server;
         {
@@ -1834,15 +1881,11 @@ pub const Renderer = struct {
             self.app.panes.syncLocked();
         }
         for (self.app.panes.bands.items) |d| {
+            if (d.level != .pane) continue;
             const r = geometry.cellRectPx(d.rect);
             eng.renderer.drawFilledRect(
                 host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                // Pane bands separate whole programs, so they read a shade
-                // brighter than the bands inside one program's own layout.
-                switch (d.level) {
-                    .pane => pane_divider_color,
-                    .layer => divider_color,
-                },
+                pane_divider_color,
             );
         }
         // The drag ghost, over the top: the real dividers above are still
