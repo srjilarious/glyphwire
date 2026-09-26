@@ -6,6 +6,7 @@ const glyphwire = @import("glyphwire");
 const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
+const config = @import("config.zig");
 const geometry = @import("geometry.zig");
 const scroll = @import("scroll.zig");
 const selection = @import("selection.zig");
@@ -13,6 +14,7 @@ const preedit_mod = @import("preedit.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
+const CursorShape = config.CursorShape;
 
 // Width in px of the `.line` caret, and thickness in px of the
 // `.underline` bar and the `.box` outline.
@@ -1473,8 +1475,9 @@ pub const Renderer = struct {
             const l = ctx.layers.getPtr(h) orelse break :blk null;
             break :blk if (l.visible) l else null;
         };
+        const shape = self.app.caret.shapeFor(ctx.caret_shape);
         if (focused and ctx.caret_visible and focus_caret == null)
-            self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view);
+            self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, shape);
         // IME composition, over both: it covers the cells the caret is
         // about to write into, so it has to sit above the caret too.
         if (focused) self.drawPreedit(eng, &ctx.root, origin.x, origin.y, root_view);
@@ -1487,7 +1490,7 @@ pub const Renderer = struct {
             // a popup created later has to cover the bars of whatever it
             // floats over, the same as it covers that layer's cells.
             drawLayerScrollbars(eng, layer, origin);
-            if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin);
+            if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape);
         }
     }
 
@@ -1564,12 +1567,12 @@ pub const Renderer = struct {
     /// Normally at the live grid cursor; a mouse-driven scroll pins it
     /// (`caret.Caret.pin`) to the buffer cell it was on when the scroll
     /// began, clipping off-screen once that cell leaves the viewport.
-    fn drawRootCaret(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize) void {
+    fn drawRootCaret(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize, shape: CursorShape) void {
         if (!self.app.caret.visible()) return;
         const cell = self.app.caret.screenCell(root, view_offset) orelse return;
 
         eng.renderer.begin(eng.projMat);
-        self.drawCaret(eng, root, origin_x, origin_y, cell.row, cell.col, view_offset);
+        drawCaret(eng, root, origin_x, origin_y, cell.row, cell.col, view_offset, shape);
         eng.renderer.end();
     }
 
@@ -1582,7 +1585,7 @@ pub const Renderer = struct {
     /// it is scrolled back into its own history (`view_scroll != 0`), or
     /// while the cursor sits outside the visible viewport. Shares the
     /// blink clock with the root caret.
-    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin) void {
+    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, shape: CursorShape) void {
         if (!layer.cursor_visible) return;
         if (!self.app.caret.blinkOn()) return;
         if (layer.view_scroll != 0) return;
@@ -1597,7 +1600,7 @@ pub const Renderer = struct {
         const oy = @as(i32, @intFromFloat(@round(layer.pos.y))) + origin.y;
 
         eng.renderer.begin(eng.projMat);
-        self.drawCaret(eng, layer, ox, oy, crow, ccol, 0);
+        drawCaret(eng, layer, ox, oy, crow, ccol, 0, shape);
         eng.renderer.end();
     }
 
@@ -1691,7 +1694,7 @@ pub const Renderer = struct {
     /// cell -- two cells on the lead of a wide (CJK) character -- while
     /// `line` stays a thin bar at the left edge. Assumes an open renderer
     /// pass.
-    fn drawCaret(self: *const Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, crow: usize, ccol: usize, view_offset: usize) void {
+    fn drawCaret(eng: *Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, crow: usize, ccol: usize, view_offset: usize, shape: CursorShape) void {
         const white = host_eng.Color.from(255, 255, 255, 255);
         const cx = origin_x + @as(i32, @intCast(ccol)) * geometry.cell_w;
         const cy = origin_y + @as(i32, @intCast(crow)) * geometry.cell_h;
@@ -1699,7 +1702,7 @@ pub const Renderer = struct {
         const on_wide_lead = layer.viewRow(view_offset, crow)[ccol].wide == .wide_lead;
         const cell_span: i32 = if (on_wide_lead) geometry.cell_w * 2 else geometry.cell_w;
 
-        switch (self.app.caret.shape) {
+        switch (shape) {
             .line => eng.renderer.drawFilledRect(
                 host_eng.RectF.fromPosSize(cx, cy, cursor_width, geometry.cell_h),
                 white,

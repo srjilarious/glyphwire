@@ -36,6 +36,14 @@
 //! with one `move_content` and repaints only the exposed band
 //! (`planBufferRender`), rather than rewriting the whole pane every tick.
 //! See docs/investigations/zoe-editor.md for what a full diff would add.
+//!
+//! **The caret is drawn by two parties.** Insert mode uses the host's own
+//! caret as a thin bar on the buffer layer (`set_caret_shape`), the way
+//! nvim does; every other mode is zoe's inverted cell, which keeps the
+//! character under it readable, and the host's caret is hidden. See
+//! `syncCaret`. Ctrl+` opens a `gw-shell` panel over the bottom of the
+//! window (`src/shellpanel.zig`) that takes the keyboard and the caret
+//! until it is closed.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -49,6 +57,7 @@ const filetype = @import("filetype.zig");
 const syntax = @import("syntax.zig");
 const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
+const shellpanel = glyphwire.shellpanel;
 
 const Editor = editor.Editor;
 const Tree = tree_mod.Tree;
@@ -118,6 +127,11 @@ const fg_whitespace = Color{ .r = 62, .g = 62, .b = 72, .a = 255 };
 // the rest sit on a bar darker than either.
 const bg_tab_bar = Color{ .r = 16, .g = 16, .b = 20, .a = 255 };
 const bg_tab = Color{ .r = 34, .g = 34, .b = 41, .a = 255 };
+
+// The Ctrl+` shell panel: darker than the buffer, so it reads as a
+// terminal laid over the editor and not as more of it. Opaque for the
+// same reason -- the shell only writes the cells it uses.
+const bg_shell = Color{ .r = 14, .g = 15, .b = 18, .a = 255 };
 
 // The Ctrl+P finder popup. Lighter than the panes it floats over, so it
 // reads as being in front of them rather than as another pane -- the
@@ -446,6 +460,21 @@ pub const Ui = struct {
     finder: ?Finder = null,
     finder_layer: glyphwire.LayerHandle,
     finder_list_layer: glyphwire.LayerHandle,
+    /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom, above
+    /// the statusline, for running builds and tests without leaving the
+    /// editor. It floats outside the split tree like the finder and takes
+    /// every keystroke but Ctrl+` while it is open. Rooted at the tree's
+    /// directory. See `src/shellpanel.zig`.
+    shell: shellpanel.Panel,
+    /// Whether the host is drawing the caret (`true`, insert mode's bar)
+    /// or zoe's own inverted cell is (`false`), as last sent to the host;
+    /// null when unknown and the next `syncCaret` must send it. Nulled
+    /// whenever the shell panel takes the caret or gives it back.
+    caret_host: ?bool = null,
+    /// Whether the host's key repeat is currently the shell's -- its own
+    /// default, with a hold before the first repeat -- rather than the
+    /// editor's per-mode cadence. See `syncKeyRepeat`.
+    key_repeat_shell: bool = false,
     /// Where the popup last landed, for hit-testing a click, and how many
     /// list rows that left. Recomputed every time it is drawn.
     finder_rect: Bounds = .{},
@@ -559,6 +588,19 @@ pub const Ui = struct {
         // back as a `scroll_offset`.
         try client.setLayerScrollbars(tabs_layer, false, false);
 
+        // The Ctrl+` shell panel. `gw-shell --embed` draws its prompt and
+        // its commands' output here, so it carries scrollback of its own
+        // for the shell's Ctrl+Up browsing. Created before the finder so
+        // the popup still composites over it, and outside the split tree:
+        // `Panel.place` puts it across the bottom when it opens.
+        const shell_layer = try client.createLayer(size.cols, 1, shellpanel.scrollback_rows);
+        try client.setLayerBackground(shell_layer, bg_shell);
+        try client.setLayerScrollbars(shell_layer, true, false);
+        // Output the user may want to copy: the host's drag-to-select,
+        // which zoe's own drag handling would otherwise never allow here.
+        try client.setLayerMouseSelect(shell_layer, true);
+        try client.setLayerVisible(shell_layer, false);
+
         // The finder popup, created last so it composites over every
         // pane (creation order is the initial stacking -- see
         // `raise_layer` in docs/api.md). Neither layer joins the split
@@ -603,6 +645,7 @@ pub const Ui = struct {
             .status_layer = status_layer,
             .finder_layer = finder_layer,
             .finder_list_layer = finder_list_layer,
+            .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
             .pane_split = pane_split,
             .buffer_col_split = buffer_col_split,
             .root_split = root_split,
@@ -705,6 +748,22 @@ pub const Ui = struct {
     /// Best-effort: a failure leaves the host on whatever cadence it was
     /// already using, and the next mode change tries again.
     fn syncKeyRepeat(self: *Ui) void {
+        // The shell panel wants the host's own cadence, hold and all: an
+        // editor's no-hold repeat re-runs a command a held Enter at a
+        // time. Clearing the override does that, and going back to the
+        // per-mode cadence afterwards means forgetting what was sent.
+        if (self.shell.isOpen()) {
+            if (self.key_repeat_shell) return;
+            self.client.setKeyRepeat(null, null) catch |err| {
+                std.log.warn("zoe: set_key_repeat failed ({t}); keeping the host's cadence", .{err});
+                return;
+            };
+            self.key_repeat_shell = true;
+            self.key_repeat_mode_sent = null;
+            return;
+        }
+        self.key_repeat_shell = false;
+
         const mode = self.buf.ed.mode;
         if (self.key_repeat_mode_sent) |sent| {
             if (sent == mode) return;
@@ -739,6 +798,80 @@ pub const Ui = struct {
             .delay_ms = cfg.key_repeat_delay_ms,
             .interval_ms = cfg.key_repeat_interval_ms,
         };
+    }
+
+    /// Ctrl+`: shows the shell panel (starting the shell the first time)
+    /// or hides it again. Hiding leaves the shell running, history and
+    /// any job in it included.
+    fn toggleShell(self: *Ui) void {
+        if (self.shell.isOpen()) {
+            self.shell.close();
+            self.shellClosed();
+            return;
+        }
+        self.shell.open(self.tree.root, self.winSize()) catch |err| {
+            self.buf.ed.setStatus("can't start gw-shell: {t}", .{err});
+            self.status_dirty = true;
+            return;
+        };
+        // The shell takes the caret; what zoe last sent no longer stands.
+        self.caret_host = null;
+    }
+
+    /// The panel went away -- Ctrl+` closed it, or its shell exited. Zoe
+    /// has the host caret back and has to send it afresh. Nothing is
+    /// repainted: the panel is a layer over the panes, and hiding it
+    /// shows them exactly as they were.
+    fn shellClosed(self: *Ui) void {
+        self.caret_host = null;
+    }
+
+    /// The whole window in cells. The statusline is the last row of the
+    /// root split, so its bounds are the window's bottom edge.
+    fn winSize(self: *const Ui) shellpanel.WinSize {
+        return .{
+            .cols = self.status_bounds.cols,
+            .rows = self.status_bounds.row + self.status_bounds.rows,
+        };
+    }
+
+    /// Puts the open panel back across the bottom after a resize.
+    fn replaceShell(self: *Ui) void {
+        if (!self.shell.isOpen()) return;
+        self.shell.place(self.winSize()) catch |err| {
+            std.log.warn("zoe: can't resize the shell panel ({t})", .{err});
+        };
+    }
+
+    /// Hands the caret to whoever should draw it for the current mode.
+    /// Insert mode gets the host's own caret as a thin bar on the buffer
+    /// layer, like nvim's insert cursor; every other mode is zoe's
+    /// inverted cell (see `renderBuffer`), which shows the character under
+    /// it, and the host's caret is hidden. Sent only when that changes.
+    ///
+    /// Not at all while the shell panel is up: the shell owns the caret
+    /// then, and `shellClosed` makes the next call send it afresh.
+    fn syncCaret(self: *Ui) void {
+        if (self.shell.isOpen()) return;
+        const host = self.buf.ed.mode == .insert;
+        if (self.caret_host == host) return;
+        self.sendCaret(host) catch |err| {
+            std.log.warn("zoe: can't set the caret ({t}); it may show in the wrong shape", .{err});
+            return;
+        };
+        self.caret_host = host;
+    }
+
+    fn sendCaret(self: *Ui, host: bool) !void {
+        if (host) {
+            try self.client.setCaretLayer(self.buffer_layer);
+            try self.client.setCaretShape(.line);
+            try self.client.setCaretVisible(true);
+        } else {
+            try self.client.setCaretVisible(false);
+            try self.client.setCaretShape(null);
+            try self.client.setCaretLayer(null);
+        }
     }
 
     /// Opens `path` -- or an empty scratch buffer when null -- as a new,
@@ -841,6 +974,9 @@ pub const Ui = struct {
     /// anyway (see `Client.destroyContext`), this just makes the switch
     /// immediate. Best-effort -- the connection may already be going away.
     pub fn deinit(self: *Ui) void {
+        // Before the context goes: the shell draws on a layer inside it,
+        // and this is what tells it to leave.
+        self.shell.deinit();
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
         if (self.finder) |*f| f.deinit();
@@ -981,6 +1117,11 @@ pub const Ui = struct {
                 self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
+            // After the frame, not before: entering insert mode's frame
+            // is what places the host's bar on the buffer layer's cursor,
+            // and pointing the caret there first would flash it at
+            // wherever that cursor last was.
+            self.syncCaret();
 
             // Every notification wakes this -- layout and scroll included
             // -- so it blocks outright instead of polling on a timer. Then
@@ -1002,6 +1143,9 @@ pub const Ui = struct {
 
     fn handleEvent(self: *Ui, ev: glyphwire.Event) !void {
         defer ev.deinit(self.alloc);
+        // `exit` typed into the shell panel (or a shell that died): the
+        // panel closes itself and the keyboard is the editor's again.
+        if (self.shell.reapIfExited()) self.shellClosed();
         switch (ev) {
             .layout => |l| {
                 if (l.boundsFor(self.tree_layer)) |b| self.tree_bounds = toBounds(b);
@@ -1021,6 +1165,7 @@ pub const Ui = struct {
                 // notification never mentions it -- but it is placed
                 // against the buffer pane, which just moved.
                 self.finder_dirty = self.finder != null;
+                self.replaceShell();
             },
             // The window (or this pane) changed size. Repaint, but take
             // no geometry from it: the `layout` that comes with it
@@ -1044,6 +1189,7 @@ pub const Ui = struct {
                 self.tabs_dirty = true;
                 self.status_dirty = true;
                 self.finder_dirty = self.finder != null;
+                self.replaceShell();
             },
             .scroll_offset => |so| {
                 // A wheel or thumb drag over the finder popup: follow it
@@ -1073,9 +1219,12 @@ pub const Ui = struct {
                     self.tabs_dirty = true;
                 }
             },
-            .mouse_move => |m| try self.handleMouseDrag(m),
+            // The pointer belongs to the shell panel too while it is up:
+            // a click on its output is the host's selection, not a move
+            // of the buffer cursor underneath.
+            .mouse_move => |m| if (!self.shell.isOpen()) try self.handleMouseDrag(m),
             // `defer ev.deinit` above frees the button string.
-            .mouse_button => |m| try self.handleMouseButton(m),
+            .mouse_button => |m| if (!self.shell.isOpen()) try self.handleMouseButton(m),
             else => if (ev.asInput()) |input| try self.handleInput(input),
         }
     }
@@ -1101,6 +1250,15 @@ pub const Ui = struct {
                 // ...). Only the press edge is a command -- a release
                 // carries no motion/edit of its own.
                 if (!k.pressed) return;
+
+                // With the shell panel up the keyboard is the shell's:
+                // both programs are sent every keystroke (one context,
+                // one input stream), so the only one taken here is the
+                // key that closes it.
+                if (self.shell.isOpen()) {
+                    if (k.ctrl() and std.mem.eql(u8, k.key, "grave_accent")) self.toggleShell();
+                    return;
+                }
 
                 // The Ctrl+P popup is modal: while it is open it is the
                 // only thing reading keys, so nothing below here runs.
@@ -1143,6 +1301,12 @@ pub const Ui = struct {
                     }
                     if (std.mem.eql(u8, k.key, "n")) {
                         try self.toggleTree();
+                        return;
+                    }
+                    // Ctrl+` opens the shell panel, in every mode. (The
+                    // finder above is modal, so it never gets here.)
+                    if (std.mem.eql(u8, k.key, "grave_accent")) {
+                        self.toggleShell();
                         return;
                     }
                     // Ctrl+H shows or hides dotfiles and everything
@@ -1197,6 +1361,9 @@ pub const Ui = struct {
                 try self.applyOutcome(try self.buf.ed.feedKey(k.key, .{ .ctrl = ctrl }));
             },
             .text => |t| {
+                // Typed text is the shell's while its panel is up -- it
+                // has a line editor of its own.
+                if (self.shell.isOpen()) return;
                 if (self.finder != null) {
                     try self.finderText(t.text);
                     return;
@@ -1210,6 +1377,7 @@ pub const Ui = struct {
                 try self.applyOutcome(try self.buf.ed.feedText(t.text));
             },
             .paste => |t| {
+                if (self.shell.isOpen()) return;
                 if (self.finder != null) {
                     try self.finderText(t.text);
                     return;
@@ -1234,7 +1402,10 @@ pub const Ui = struct {
             // when zoe's context is the visible one -- the request is a
             // broadcast, and a backgrounded zoe would otherwise race the
             // shell's own answer.
-            .copy_request => if (self.isVisible()) {
+            //
+            // While the shell panel is up the request is its business
+            // (it copies its own selection), not the buffer's.
+            .copy_request => if (self.isVisible() and !self.shell.isOpen()) {
                 try self.applyOutcome(try self.buf.ed.clipboardCopy());
                 self.buffer_dirty = true;
                 self.status_dirty = true;
@@ -2579,20 +2750,22 @@ pub const Ui = struct {
         // row just (re)painted. The host's own caret renderer only knows
         // about the root layer, and a client that owns its pane knows
         // better than the host where its cursor is anyway.
+        //
+        // Insert mode is the exception: nvim draws a thin bar there, which
+        // the host's caret does (`syncCaret` points it at this layer), so
+        // all that is left to do here is say which cell it belongs on.
         if (cursor.line >= self.buf.top_line and cursor.line < self.buf.top_line + b.rows) {
             const display_col = try self.cursorDisplayCol();
             if (display_col >= self.buf.left_col and display_col - self.buf.left_col < self.textCols()) {
-                const under = try self.cursorGrapheme();
-                defer self.alloc.free(under);
-                try writeAt(
-                    batch,
-                    self.buffer_layer,
-                    cursor.line - self.buf.top_line,
-                    self.gutterWidth() + display_col - self.buf.left_col,
-                    under,
-                    fg_cursor,
-                    bg_cursor,
-                );
+                const row = cursor.line - self.buf.top_line;
+                const col = self.gutterWidth() + display_col - self.buf.left_col;
+                if (self.buf.ed.mode == .insert) {
+                    try batch.setCursorOn(self.buffer_layer, row, col);
+                } else {
+                    const under = try self.cursorGrapheme();
+                    defer self.alloc.free(under);
+                    try writeAt(batch, self.buffer_layer, row, col, under, fg_cursor, bg_cursor);
+                }
             }
         }
 

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 
+const glyphwire = @import("glyphwire");
 const config = @import("config.zig");
 const App = @import("app.zig").App;
 
@@ -26,9 +27,18 @@ pub const Caret = struct {
     /// window scrolls (see `tickBlink`) so the caret is solid the instant
     /// the user does anything and only blinks once things settle.
     blink_elapsed_ms: f64 = 0,
-    /// The `(row, col, view_scroll)` the blink phase was last reset for --
-    /// compared each `update` to detect caret movement / scrolling.
-    blink_ref: struct { row: usize = 0, col: usize = 0, scroll: usize = 0 } = .{},
+    /// The `(row, col, view_scroll, shape, visible)` the blink phase was
+    /// last reset for -- compared each `update` to detect caret movement,
+    /// scrolling, or a client changing what the caret looks like (a modal
+    /// editor's `i` shows the insert bar, which should start solid, not
+    /// in whatever half of the blink the last caret had reached).
+    blink_ref: struct {
+        row: usize = 0,
+        col: usize = 0,
+        scroll: usize = 0,
+        shape: ?glyphwire.CaretShape = null,
+        visible: bool = true,
+    } = .{},
 
     /// Set the moment a host-driven scroll (mouse wheel or scrollbar, not
     /// a client `scroll_view` -- so not glyphwire-shell's keyboard browse)
@@ -59,20 +69,37 @@ pub const Caret = struct {
             // focused pane's cursor for `gmux`, the root cursor otherwise
             // -- so the blink phase still resets the instant the caret
             // moves (see `Context.caret_layer`).
-            const tracked: *const @import("glyphwire").Layer = trk: {
+            const tracked: *const glyphwire.Layer = trk: {
                 if (server.ctx.caret_layer) |h| {
                     if (server.ctx.layers.getPtr(h)) |l| break :trk l;
                 }
                 break :trk &server.ctx.root;
             };
-            break :blk .{ .row = tracked.cursor.row, .col = tracked.cursor.col, .scroll = tracked.view_scroll };
+            break :blk .{
+                .row = tracked.cursor.row,
+                .col = tracked.cursor.col,
+                .scroll = tracked.view_scroll,
+                .shape = server.ctx.caret_shape,
+                .visible = server.ctx.caret_visible,
+            };
         };
-        if (now.row != self.blink_ref.row or now.col != self.blink_ref.col or now.scroll != self.blink_ref.scroll) {
+        if (!std.meta.eql(now, self.blink_ref)) {
             self.blink_ref = now;
             self.blink_elapsed_ms = 0;
             return;
         }
         self.blink_elapsed_ms += delta_ms;
+    }
+
+    /// The shape to draw a context's caret in: the one its client asked
+    /// for with `set_caret_shape`, else the one `host.conf.lua` chose.
+    pub fn shapeFor(self: *const Caret, requested: ?glyphwire.CaretShape) CursorShape {
+        return switch (requested orelse return self.shape) {
+            .line => .line,
+            .block => .block,
+            .box => .box,
+            .underline => .underline,
+        };
     }
 
     /// Whether the blink phase clock is in its "on" half this frame (or
@@ -107,7 +134,7 @@ pub const Caret = struct {
     /// used from inside `render`'s existing locked section.
     pub fn screenCell(
         self: *const Caret,
-        root: *const @import("glyphwire").Layer,
+        root: *const glyphwire.Layer,
         view_offset: usize,
     ) ?struct { row: usize, col: usize } {
         var crow: usize = root.cursor.row;

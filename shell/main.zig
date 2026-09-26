@@ -1969,20 +1969,23 @@ const Prompt = struct {
         }
     }
 
-    /// Takes the keyboard, or gives it back. The caret belongs to
-    /// whoever has focus: embedded, it's the host's context, so the
-    /// panel points it at its own layer while it's typing and hides it
-    /// again on the way out.
+    /// Takes the keyboard, or gives it back. Embedded, the caret is the
+    /// host's context's: the panel points it at its own layer, in the
+    /// host's configured shape rather than whatever the host drew its own
+    /// caret with, while it's typing.
+    ///
+    /// Giving it back sends nothing. The host is the one taking the
+    /// keyboard, and it sets the caret up for itself (see
+    /// `src/shellpanel.zig`); a hide from here would land after the
+    /// host's own caret for the mode it returned to, and win.
     fn setFocused(self: *Prompt, on: bool) void {
         if (self.focused == on) return;
         self.focused = on;
         if (self.layer) |l| {
             if (on) {
                 self.client.setCaretLayer(l) catch {};
+                self.client.setCaretShape(null) catch {};
                 self.client.setCaretVisible(true) catch {};
-            } else {
-                self.client.setCaretVisible(false) catch {};
-                self.client.setCaretLayer(null) catch {};
             }
         }
     }

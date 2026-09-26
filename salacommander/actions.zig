@@ -48,7 +48,7 @@ pub const Action = enum {
     delete,
 
     /// Open or close the shell panel across the bottom (see
-    /// `shellpanel.zig`). Closing it leaves the shell running.
+    /// `src/shellpanel.zig`). Closing it leaves the shell running.
     toggleShell,
 
     /// Re-order the active pane. Directories still lead; picking the

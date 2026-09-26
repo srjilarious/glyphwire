@@ -300,6 +300,9 @@ const SetCaretLayerParams = struct { layer: ?core.LayerHandle = null };
 /// `set_caret_visible`: whether glyphwire-host draws a caret for the
 /// issuing connection's active context. See `core.Context.caret_visible`.
 const SetCaretVisibleParams = struct { visible: bool };
+/// `set_caret_shape`: the shape glyphwire-host draws the caret in, or
+/// `null` for the host's configured one. See `core.Context.caret_shape`.
+const SetCaretShapeParams = struct { shape: ?core.CaretShape = null };
 /// `set_key_repeat`: the typematic key-repeat timing this context's
 /// program wants while it is focused. Both fields absent clears the
 /// override and puts the context back on the host's default; one alone
@@ -1567,6 +1570,7 @@ pub const Dispatcher = struct {
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
         .{ "set_caret_visible", catVoid(handleSetCaretVisible) },
+        .{ "set_caret_shape", catVoid(handleSetCaretShape) },
         .{ "set_key_repeat", catVoid(handleSetKeyRepeat) },
         .{ "request_role", catBytesId(handleRequestRole) },
         .{ "join_role", catVoid(handleJoinRole) },
@@ -2684,6 +2688,18 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         self.ctx.caret_visible = parsed.value.visible;
+    }
+
+    /// `set_caret_shape`: sets the shape glyphwire-host draws this
+    /// connection's caret in (see `core.Context.caret_shape`), or `null`
+    /// to go back to the shape `host.conf.lua` configured. An unknown
+    /// shape name fails to parse like any other bad param.
+    fn handleSetCaretShape(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetCaretShapeParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        self.ctx.caret_shape = parsed.value.shape;
     }
 
     /// `set_key_repeat`: retimes the typematic key repeat glyphwire-host
