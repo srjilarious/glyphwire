@@ -56,6 +56,48 @@ pub const PositionEncoding = enum {
     }
 };
 
+/// `GLYPHWIRE_LSP_DEBUG=1`: trace the server lifecycle to stderr -- spawn,
+/// handshake, each chunk of bytes, each routed reply, death. Off by default.
+///
+/// A language server failing is quiet by design (see `Pool.start`), which is
+/// right for someone who simply hasn't installed one and useless when
+/// something is actually wrong. This is the switch that makes it loud, and
+/// the precursor to the `:lsp log` the design note wants.
+pub var debug: bool = false;
+
+fn trace(comptime fmt: []const u8, args: anytype) void {
+    if (!debug) return;
+    std.debug.print("zoe-lsp: " ++ fmt ++ "\n", args);
+}
+
+/// Whatever the editor wants poked when a message lands. In the running
+/// editor this is `InputListener.wake`, which releases the blocked `next` in
+/// `Ui.run` so the UI thread comes round and drains the inbox.
+///
+/// A function pointer rather than the listener itself because a language
+/// server connection has no business knowing what a display server is -- and
+/// because `tests/zoe_tests.zig` can then drive the whole transport, the
+/// handshake and the message parsing with no process and no window, which is
+/// what `docs/investigations/zoe-lsp.md` promised: the transport is tested
+/// against bytes, not against an installed zls.
+pub const Waker = struct {
+    ctx: ?*anyopaque = null,
+    func: ?*const fn (?*anyopaque) void = null,
+
+    pub fn wake(self: Waker) void {
+        if (self.func) |f| f(self.ctx);
+    }
+
+    pub fn fromListener(listener: *glyphwire.InputListener) Waker {
+        return .{ .ctx = listener, .func = &wakeListener };
+    }
+
+    fn wakeListener(ctx: ?*anyopaque) void {
+        const listener: *glyphwire.InputListener = @ptrCast(@alignCast(ctx.?));
+        listener.wake();
+    }
+};
+
 pub const Position = struct { line: u32 = 0, character: u32 = 0 };
 pub const Range = struct { start: Position = .{}, end: Position = .{} };
 
@@ -371,13 +413,18 @@ pub const Server = struct {
     /// Grammar names this server serves, owned.
     languages: []const []const u8,
 
-    child: std.process.Child,
+    /// Null for a `Server` with no process behind it: one being torn down,
+    /// or one a test drives directly through `feedBytes`.
+    child: ?std.process.Child = null,
     reader_thread: ?std.Thread = null,
 
     /// Guards `inbox` and `dead_reported`, and is the only lock the reader
     /// thread takes.
     mutex: std.Io.Mutex = .init,
-    /// Raw JSON bodies the reader thread has framed, oldest first. Owned.
+    /// Reassembles frames out of whatever `feedBytes` is handed. Touched
+    /// only by whoever feeds bytes in -- the reader thread, or a test.
+    decoder: glyphwire.wire.FrameDecoder = .{},
+    /// Raw JSON bodies framed so far, oldest first. Owned.
     inbox: std.ArrayList([]u8) = .empty,
     /// Set by the reader thread when stdout closes. Atomic because the UI
     /// thread reads it every drain without taking the lock.
@@ -386,8 +433,8 @@ pub const Server = struct {
     /// server is reported once rather than every drain.
     died_reported: bool = false,
 
-    /// The listener woken when something lands in the inbox. Borrowed.
-    listener: *glyphwire.InputListener,
+    /// Poked when something lands in the inbox. See `Waker`.
+    waker: Waker,
 
     state: State = .starting,
     encoding: PositionEncoding = .utf16,
@@ -411,7 +458,7 @@ pub const Server = struct {
     pub fn start(
         alloc: std.mem.Allocator,
         io: std.Io,
-        listener: *glyphwire.InputListener,
+        waker: Waker,
         cfg: ServerConfig,
         root: []const u8,
     ) !*Server {
@@ -441,17 +488,49 @@ pub const Server = struct {
             .name = name,
             .languages = langs,
             .child = child,
-            .listener = listener,
+            .waker = waker,
         };
 
         self.reader_thread = try std.Thread.spawn(.{}, readLoop, .{ self, child.stdout.? });
+        trace("{s}: spawned {s}, reader thread up", .{ cfg.name, cfg.cmd[0] });
 
+        trace("{s}: sending initialize (root {s})", .{ cfg.name, root });
         self.sendInitialize(cfg, root) catch |err| {
+            trace("{s}: initialize failed to send: {t}", .{ cfg.name, err });
             // A server we can't even greet is no use; let the pool treat it
             // like one that isn't installed.
             self.state = .dead;
             return err;
         };
+        return self;
+    }
+
+    /// A `Server` with no child process, with `initialize` recorded as in
+    /// flight so a fed reply completes the handshake. See `Pool.addForTest`;
+    /// nothing else should build one, because a server with no process can
+    /// receive but never send.
+    fn detached(
+        alloc: std.mem.Allocator,
+        io: std.Io,
+        waker: Waker,
+        cfg: ServerConfig,
+    ) !*Server {
+        const self = try alloc.create(Server);
+        errdefer alloc.destroy(self);
+        const name = try alloc.dupe(u8, cfg.name);
+        errdefer alloc.free(name);
+        const langs = try dupeStrings(alloc, cfg.languages);
+        errdefer freeStrings(alloc, langs);
+
+        self.* = .{
+            .alloc = alloc,
+            .io = io,
+            .name = name,
+            .languages = langs,
+            .waker = waker,
+        };
+        self.next_id = 2;
+        try self.in_flight.append(alloc, .{ .id = 1, .kind = .initialize });
         return self;
     }
 
@@ -473,29 +552,51 @@ pub const Server = struct {
         // of the same descriptor and then letting `kill` close it again is a
         // double close, and the number could belong to something else by
         // then.
-        if (self.child.stdin) |stdin| {
-            stdin.close(self.io);
-            self.child.stdin = null;
+        if (self.child) |*child| {
+            if (child.stdin) |stdin| {
+                stdin.close(self.io);
+                child.stdin = null;
+            }
+            // Closes the child's stdout too, which is what unblocks the
+            // reader thread's read so the join below returns.
+            child.kill(self.io);
         }
-        // Closes the child's stdout too, which is what unblocks the reader
-        // thread's read so the join below returns.
-        self.child.kill(self.io);
         if (self.reader_thread) |t| t.join();
 
         for (self.inbox.items) |body| alloc.free(body);
         self.inbox.deinit(alloc);
+        self.decoder.deinit(alloc);
         for (self.pending_opens.items) |p| {
             alloc.free(p.uri);
             alloc.free(p.language_id);
             alloc.free(p.text);
         }
         self.pending_opens.deinit(alloc);
-        freeStrings(alloc, self.open_docs.items);
-        self.open_docs.deinit(alloc);
+        freeListStrings(alloc, &self.open_docs);
         self.in_flight.deinit(alloc);
         freeStrings(alloc, self.languages);
         alloc.free(self.name);
         alloc.destroy(self);
+    }
+
+    /// Whether the handshake has finished and requests may be sent. A
+    /// predicate rather than an exposed `state` field, because "can I ask
+    /// this server something" is the only question callers have.
+    pub fn ready(self: *const Server) bool {
+        return self.state == .ready;
+    }
+
+    /// Whether the handshake is still outstanding. Distinct from "no server"
+    /// and from "dead", because those three deserve three different messages.
+    pub fn starting(self: *const Server) bool {
+        return self.state == .starting;
+    }
+
+    /// Stands in for the reader thread reaching EOF, so a test can exercise
+    /// the death path without a process to kill.
+    pub fn markStdoutClosedForTest(self: *Server) void {
+        self.stdout_closed.store(true, .release);
+        self.waker.wake();
     }
 
     pub fn serves(self: *const Server, grammar: []const u8) bool {
@@ -509,44 +610,60 @@ pub const Server = struct {
 
     // ── The reader thread ────────────────────────────────────────────────
 
-    /// The whole of the reader thread: bytes in, frames onto the inbox, one
-    /// `wake` per batch. It never parses, never allocates anything the UI
-    /// thread doesn't own afterwards, and never touches a field other than
-    /// `inbox` / `stdout_closed`.
+    /// The whole of the reader thread: bytes in, `feedBytes`, repeat. It
+    /// never parses a message and never touches a field other than the ones
+    /// `feedBytes` does.
     fn readLoop(self: *Server, stdout: std.Io.File) void {
         var buf: [16 * 1024]u8 = undefined;
         var file_reader = stdout.reader(self.io, &buf);
 
-        var decoder: glyphwire.wire.FrameDecoder = .{};
-        defer decoder.deinit(self.alloc);
-
         var chunk: [16 * 1024]u8 = undefined;
         while (true) {
-            const n = file_reader.interface.readSliceShort(&chunk) catch break;
-            if (n == 0) break; // EOF: the server exited.
-            decoder.feed(self.alloc, chunk[0..n]) catch break;
-
-            var any = false;
-            while (true) {
-                const body = decoder.next(self.alloc) catch break;
-                const b = body orelse break;
-                self.mutex.lockUncancelable(self.io);
-                self.inbox.append(self.alloc, b) catch {
-                    self.mutex.unlock(self.io);
-                    self.alloc.free(b);
-                    break;
-                };
-                self.mutex.unlock(self.io);
-                any = true;
+            const n = file_reader.interface.readSliceShort(&chunk) catch |err| {
+                trace("{s}: stdout read failed: {t}", .{ self.name, err });
+                break;
+            };
+            if (n == 0) {
+                trace("{s}: stdout EOF", .{self.name});
+                break; // The server exited.
             }
-            // One wake per read, not per message: the UI drains everything
-            // queued in a single turn, so more wakes would be more turns
-            // round the loop for the same work.
-            if (any) self.listener.wake();
+            trace("{s}: read {d} bytes", .{ self.name, n });
+            self.feedBytes(chunk[0..n]) catch |err| {
+                trace("{s}: feed failed: {t}", .{ self.name, err });
+                break;
+            };
         }
 
+        trace("{s}: reader thread leaving", .{self.name});
         self.stdout_closed.store(true, .release);
-        self.listener.wake();
+        self.waker.wake();
+    }
+
+    /// Reassembles whatever arrived into frames and queues their bodies, then
+    /// wakes the editor once. Called by the reader thread with a chunk off the
+    /// server's stdout -- and directly by tests, which is the seam that lets
+    /// the handshake and the message parsing be exercised against bytes with
+    /// no process in the picture.
+    ///
+    /// One wake per chunk, not per message: the UI drains everything queued
+    /// in a single turn, so more wakes would be more turns round the loop for
+    /// the same work.
+    pub fn feedBytes(self: *Server, chunk: []const u8) !void {
+        try self.decoder.feed(self.alloc, chunk);
+
+        var any = false;
+        while (true) {
+            const body = (self.decoder.next(self.alloc) catch break) orelse break;
+            self.mutex.lockUncancelable(self.io);
+            self.inbox.append(self.alloc, body) catch {
+                self.mutex.unlock(self.io);
+                self.alloc.free(body);
+                break;
+            };
+            self.mutex.unlock(self.io);
+            any = true;
+        }
+        if (any) self.waker.wake();
     }
 
     /// Pops the oldest queued body, or null. Caller owns it.
@@ -603,7 +720,12 @@ pub const Server = struct {
     fn writeFrame(self: *Server, body: []const u8) !void {
         // The child owns the descriptor (see `deinit`); a null one means the
         // connection is already being torn down.
-        const stdin = self.child.stdin orelse {
+        const child = self.child orelse {
+            // No process: a `Server` a test drives, or one being torn down.
+            // Nothing to write to, and nothing to complain about.
+            return;
+        };
+        const stdin = child.stdin orelse {
             self.state = .dead;
             return error.ServerDead;
         };
@@ -660,6 +782,12 @@ pub const Server = struct {
             };
         }
         self.state = .ready;
+        trace("{s}: ready (encoding {t}, hover {}, definition {})", .{
+            self.name,
+            self.encoding,
+            self.caps.hover,
+            self.caps.definition,
+        });
         self.notify("initialized", "{}") catch return;
 
         // Drain in order, and give up the whole queue either way -- a
@@ -808,9 +936,21 @@ fn dupeStrings(alloc: std.mem.Allocator, in: []const []const u8) ![]const []cons
     return out;
 }
 
+/// Frees an owned slice of owned strings -- the slice itself included, so
+/// this is only ever right for a slice that came from a single `alloc.alloc`
+/// (`dupeStrings`), never for an `ArrayList`'s `items`: that slice is `len`
+/// long while its allocation is `capacity` long, and freeing it as a slice is
+/// a free of the wrong size. Use `freeListStrings` for a list.
 fn freeStrings(alloc: std.mem.Allocator, in: []const []const u8) void {
     for (in) |s| alloc.free(s);
     alloc.free(in);
+}
+
+/// Frees the strings an `ArrayList` holds and then the list, which is the
+/// pair that `freeStrings` cannot do (see above).
+fn freeListStrings(alloc: std.mem.Allocator, list: *std.ArrayList([]const u8)) void {
+    for (list.items) |s| alloc.free(s);
+    list.deinit(alloc);
 }
 
 // ─── The pool ────────────────────────────────────────────────────────────
@@ -823,7 +963,7 @@ fn freeStrings(alloc: std.mem.Allocator, in: []const []const u8) void {
 pub const Pool = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
-    listener: *glyphwire.InputListener,
+    waker: Waker,
     /// The workspace root every server was rooted at, owned.
     root: []const u8,
     servers: std.ArrayList(*Server) = .empty,
@@ -834,13 +974,13 @@ pub const Pool = struct {
     pub fn init(
         alloc: std.mem.Allocator,
         io: std.Io,
-        listener: *glyphwire.InputListener,
+        waker: Waker,
         root: []const u8,
     ) !Pool {
         return .{
             .alloc = alloc,
             .io = io,
-            .listener = listener,
+            .waker = waker,
             .root = try alloc.dupe(u8, root),
         };
     }
@@ -848,8 +988,7 @@ pub const Pool = struct {
     pub fn deinit(self: *Pool) void {
         for (self.servers.items) |s| s.deinit();
         self.servers.deinit(self.alloc);
-        freeStrings(self.alloc, self.missing.items);
-        self.missing.deinit(self.alloc);
+        freeListStrings(self.alloc, &self.missing);
         self.alloc.free(self.root);
     }
 
@@ -864,15 +1003,30 @@ pub const Pool = struct {
         for (configs) |cfg| {
             if (!cfg.enabled or cfg.cmd.len == 0) continue;
             if (!onPath(self.io, cfg.cmd[0], environ)) {
+                trace("{s}: {s} not on PATH, skipping", .{ cfg.name, cfg.cmd[0] });
                 try self.missing.append(self.alloc, try self.alloc.dupe(u8, cfg.name));
                 continue;
             }
-            const s = Server.start(self.alloc, self.io, self.listener, cfg, self.root) catch {
+            const s = Server.start(self.alloc, self.io, self.waker, cfg, self.root) catch |err| {
+                trace("{s}: failed to start: {t}", .{ cfg.name, err });
                 try self.missing.append(self.alloc, try self.alloc.dupe(u8, cfg.name));
                 continue;
             };
             try self.servers.append(self.alloc, s);
         }
+    }
+
+    /// Adds a `Server` with no process behind it, in exactly the state a real
+    /// one is in immediately after `start`: handshake outstanding, `initialize`
+    /// recorded as in flight under id 1. A test then feeds it bytes with
+    /// `Server.feedBytes` as though they had come off its stdout.
+    ///
+    /// Owned by the pool like any other server, so `Pool.deinit` frees it.
+    pub fn addForTest(self: *Pool, cfg: ServerConfig) !*Server {
+        const s = try Server.detached(self.alloc, self.io, self.waker, cfg);
+        errdefer s.deinit();
+        try self.servers.append(self.alloc, s);
+        return s;
     }
 
     /// The live servers for a grammar name, in config order. The caller
@@ -958,7 +1112,10 @@ pub const Pool = struct {
             .integer => |i| i,
             else => return null,
         };
-        const kind = s.takeInFlight(id) orelse return null;
+        const kind = s.takeInFlight(id) orelse {
+            trace("{s}: reply to unknown id {d}, dropped", .{ s.name, id });
+            return null;
+        };
         // An error response is a real answer -- the editor reports nothing
         // rather than pretending the server had no result.
         const result = root.object.get("result") orelse return null;

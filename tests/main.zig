@@ -37,6 +37,7 @@ const all_tests = blk: {
         testz.Group{ .name = "Host Tests", .tag = "host", .mod = @import("./host_tests.zig") },
         testz.Group{ .name = "Host Engine Tests", .tag = "host-eng", .mod = @import("./host_eng_tests.zig") },
         testz.Group{ .name = "Zoe Tests", .tag = "zoe", .mod = @import("./zoe_tests.zig") },
+        testz.Group{ .name = "LSP Transport Tests", .tag = "lsp", .mod = @import("./lsp_transport_tests.zig") },
         testz.Group{ .name = "Gmux Tests", .tag = "gmux", .mod = @import("./gmux_tests.zig") },
         testz.Group{ .name = "Read Tests", .tag = "read", .mod = @import("./read_tests.zig") },
         testz.Group{ .name = "Markdown Tests", .tag = "md", .mod = @import("./md_tests.zig") },
