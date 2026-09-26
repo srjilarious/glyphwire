@@ -2924,10 +2924,16 @@ pub const Ui = struct {
     /// that isn't installed, won't spawn or won't answer leaves zoe exactly
     /// as it was without one.
     fn startLsp(self: *Ui, root_dir: []const u8, environ: *const std.process.Environ.Map) void {
-        const cfg = self.hl_config orelse return;
+        lsp.debug = environ.get("GLYPHWIRE_LSP_DEBUG") != null;
+        const cfg = self.hl_config orelse {
+            // No config means no server list, and also no grammar registry --
+            // so this is the same failure that turns highlighting off.
+            std.log.warn("zoe: no config loaded; language servers are off", .{});
+            return;
+        };
         if (!cfg.lsp_enabled) return;
 
-        var pool = lsp.Pool.init(self.alloc, self.io, self.listener, root_dir) catch return;
+        var pool = lsp.Pool.init(self.alloc, self.io, lsp.Waker.fromListener(self.listener), root_dir) catch return;
         pool.start(cfg.lsp_servers, environ) catch {};
         if (pool.servers.items.len == 0) {
             // Nothing started. Keep the pool anyway so `:lsp` can list what
@@ -3194,8 +3200,19 @@ pub const Ui = struct {
         self.lspFlushChange();
 
         const cursor = self.buf.ed.pos();
+        // Why nothing could answer, for the message below. "No server" and
+        // "the server is still starting up" are very different situations to
+        // be in, and one message for both sends you looking for a
+        // misconfiguration when the answer is to wait a second.
+        var any_server = false;
+        var any_starting = false;
         var it = pool.forLanguage(grammar);
         while (it.next()) |s| {
+            any_server = true;
+            if (s.starting()) {
+                any_starting = true;
+                continue;
+            }
             const line_text = self.buf.ed.buf.lineText(self.alloc, cursor.line) catch continue;
             defer self.alloc.free(line_text);
             const character = lsp.byteToCharacter(line_text, cursor.col, s.encoding);
@@ -3210,8 +3227,16 @@ pub const Ui = struct {
             }
             return;
         }
-        self.buf.ed.setStatus("LSP: no server for this", .{});
         self.status_dirty = true;
+        if (any_starting) {
+            self.buf.ed.setStatus("LSP: still starting up, try again", .{});
+        } else if (any_server) {
+            // A server is attached but doesn't advertise this request -- ruff
+            // on a Python file has no hover, for instance.
+            self.buf.ed.setStatus("LSP: attached server can't answer that", .{});
+        } else {
+            self.buf.ed.setStatus("LSP: no server for {s} (:lsp)", .{grammar});
+        }
     }
 
     /// A hover reply. A reply to a request that is no longer the newest is
