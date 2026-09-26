@@ -184,6 +184,11 @@ pub fn remoteExitNotification(alloc: std.mem.Allocator, session: u64, status: i6
     });
 }
 
+/// `focus` -- the host window gained or lost the keyboard.
+pub fn focusNotification(alloc: std.mem.Allocator, focused: bool) ![]u8 {
+    return notification(alloc, "focus", protocol.FocusParams{ .focused = focused });
+}
+
 /// `shutdown` -- the host window is closing; flush and exit within
 /// roughly `grace_ms`.
 pub fn shutdownNotification(alloc: std.mem.Allocator, grace_ms: u32) ![]u8 {

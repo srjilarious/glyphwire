@@ -1044,6 +1044,20 @@ pub const Server = struct {
         try self.applyPaneLayout(alloc);
     }
 
+    /// Broadcasts a `focus` notification (`{focused}`) to every
+    /// connection subscribed to `"focus"` -- the host's window gained or
+    /// lost the keyboard. Sent by glyphwire-host on the edge only.
+    ///
+    /// Deliberately not focus-gated: this is a fact about the window, the
+    /// same for every client on it, and a backgrounded one still wants to
+    /// come back up drawn correctly. Touches no context state, so it
+    /// needs no lock.
+    pub fn reportFocus(self: *Server, alloc: std.mem.Allocator, focused: bool) !void {
+        const body = try rpc.focusNotification(alloc, focused);
+        defer alloc.free(body);
+        self.broadcast(null, "focus", body);
+    }
+
     /// Broadcasts a `shutdown` notification (`{grace_ms}`) to every
     /// connection subscribed to `"shutdown"` -- the window is closing and
     /// a client should flush any persistent state and exit. Sent once, by

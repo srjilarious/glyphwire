@@ -213,6 +213,9 @@ fn runUi(
         "mouse_button",
         "mouse_move",
         "context",
+        // The window gaining or losing the keyboard: zoe paints its own
+        // cursor, so it has to be told to hollow it out (see `syncCaret`).
+        "focus",
     }) catch return false;
     defer listener.deinit();
 

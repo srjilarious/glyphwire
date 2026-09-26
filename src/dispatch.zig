@@ -950,6 +950,11 @@ pub const Subscriptions = struct {
     /// state and exit cleanly -- see `Server.reportShutdown`.
     /// glyphwire-shell subscribes and treats it like a typed `exit`.
     shutdown: bool = false,
+    /// `focus` server->client notification (`{focused}`), sent when the
+    /// host's window gains or loses the keyboard -- see
+    /// `Server.reportFocus`. Only a client that paints its own cursor has
+    /// a reason to subscribe; zoe does, to hollow its block out.
+    focus: bool = false,
     /// `scroll` server->client notifications (`{offset, max}`), sent when
     /// the root layer's scrollback view offset moves -- see
     /// `Server.reportScroll` (mouse wheel / scrollbar) and
@@ -1016,6 +1021,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "mouse_move")) return self.mouse_move;
         if (std.mem.eql(u8, event, "resize")) return self.resize;
         if (std.mem.eql(u8, event, "shutdown")) return self.shutdown;
+        if (std.mem.eql(u8, event, "focus")) return self.focus;
         if (std.mem.eql(u8, event, "scroll")) return self.scroll;
         if (std.mem.eql(u8, event, "scroll_offset")) return self.scroll;
         if (std.mem.eql(u8, event, "layout")) return self.layout;
@@ -1048,6 +1054,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "mouse_move")) s.mouse_move = true;
             if (std.mem.eql(u8, e, "resize")) s.resize = true;
             if (std.mem.eql(u8, e, "shutdown")) s.shutdown = true;
+            if (std.mem.eql(u8, e, "focus")) s.focus = true;
             if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
             if (std.mem.eql(u8, e, "scroll_offset")) s.scroll = true;
             if (std.mem.eql(u8, e, "layout")) s.layout = true;

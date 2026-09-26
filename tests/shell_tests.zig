@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const testz = @import("testz");
+const glyphwire = @import("glyphwire");
 
 // glyphwire-shell is an executable (no importable module), but its pure
 // prompt helpers are gathered into the `shell_support` module (see
@@ -993,6 +994,32 @@ pub fn embedParsesItsHandlesTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectError(embed.parseOptions("3"), error.Malformed);
     try testz.expectError(embed.parseOptions("3,x"), error.Malformed);
     try testz.expectError(embed.parseOptions("3,4,5,6"), error.Malformed);
+}
+
+/// A click reported in context cells, brought into the panel's frame.
+/// The panel sits across the bottom of the host's window, so the row a
+/// click arrives on is never the row it means on the layer.
+pub fn embedTranslatesAClickIntoThePanelTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A 80x8 panel with its top-left at row 16, the shape a shell panel
+    // across the bottom of a 24-row window has.
+    const pos: glyphwire.CellPos = .{ .row = 16, .col = 0 };
+    const top = embed.surfaceCell(.{ .row = 16, .col = 3 }, pos, 80, 8).?;
+    try testz.expectEqual(top.row, @as(usize, 0));
+    try testz.expectEqual(top.col, @as(usize, 3));
+
+    const third = embed.surfaceCell(.{ .row = 19, .col = 12 }, pos, 80, 8).?;
+    try testz.expectEqual(third.row, @as(usize, 3));
+    try testz.expectEqual(third.col, @as(usize, 12));
+
+    // Above the panel (the file panes / the editor), and past its last
+    // row: not the panel's click at all.
+    try testz.expectTrue(embed.surfaceCell(.{ .row = 15, .col = 3 }, pos, 80, 8) == null);
+    try testz.expectTrue(embed.surfaceCell(.{ .row = 24, .col = 3 }, pos, 80, 8) == null);
+    try testz.expectTrue(embed.surfaceCell(.{ .row = 17, .col = 80 }, pos, 80, 8) == null);
+
+    // An indented panel takes the column off too.
+    const inset = embed.surfaceCell(.{ .row = 17, .col = 10 }, .{ .row = 16, .col = 4 }, 20, 8).?;
+    try testz.expectEqual(inset.col, @as(usize, 6));
 }
 
 pub fn embedParsesControlDirectivesTest(_: std.Io, _: std.mem.Allocator) !void {
