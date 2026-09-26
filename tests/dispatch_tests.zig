@@ -2408,6 +2408,40 @@ pub fn setCaretVisibleHidesAndShowsTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectTrue(ctx.caret_visible);
 }
 
+/// `set_caret_shape` picks one of the four named shapes, `null` (or an
+/// absent field) goes back to the host's configured one, and a name the
+/// host has no shape for is refused and leaves the setting alone.
+pub fn setCaretShapeSetsAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try testz.expectEqual(ctx.caret_shape, null);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_caret_shape","params":{"shape":"line"}}
+    );
+    try testz.expectEqual(ctx.caret_shape.?, glyphwire.CaretShape.line);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_caret_shape","params":{"shape":"underline"}}
+    );
+    try testz.expectEqual(ctx.caret_shape.?, glyphwire.CaretShape.underline);
+
+    // A shape that doesn't exist is a bad request, not a silent reset.
+    const bad = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","method":"set_caret_shape","params":{"shape":"squiggle"}}
+    );
+    defer alloc.free(bad);
+    if (d.handle(alloc, bad)) |_| return error.ExpectedFailure else |_| {}
+    try testz.expectEqual(ctx.caret_shape.?, glyphwire.CaretShape.underline);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_caret_shape","params":{"shape":null}}
+    );
+    try testz.expectEqual(ctx.caret_shape, null);
+}
+
 pub fn setKeyRepeatSetsAndClearsOverrideTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

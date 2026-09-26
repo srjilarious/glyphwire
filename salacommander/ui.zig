@@ -19,7 +19,7 @@
 //!
 //! Two more layers sit over those: the modal dialog layer, and the
 //! Ctrl+` shell panel -- a `gw-shell --embed` drawing its own prompt
-//! into a layer of ours across the bottom (see `shellpanel.zig`).
+//! into a layer of ours across the bottom (see `src/shellpanel.zig`).
 //!
 //! A server-side `Table` would sort and paint for us, but it paints every
 //! row and scrolls its layer the way terminal output does; a file pane
@@ -51,7 +51,7 @@ const fileops = @import("fileops.zig");
 const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
-const shellpanel = @import("shellpanel.zig");
+const shellpanel = glyphwire.shellpanel;
 const wordsplit = @import("shell_support").wordsplit;
 
 const Pane = pane_mod.Pane;
@@ -183,7 +183,7 @@ pub const Ui = struct {
     dialog_layer: glyphwire.LayerHandle,
     /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom. It
     /// takes every keystroke but Ctrl+` while it's open, and follows the
-    /// active pane's directory. See `shellpanel.zig`.
+    /// active pane's directory. See `src/shellpanel.zig`.
     shell: shellpanel.Panel,
 
     win: struct { cols: usize, rows: usize },
@@ -281,7 +281,7 @@ pub const Ui = struct {
         const bar_layer = try client.createLayer(size.cols, 1, 0);
         // The Ctrl+` shell panel. `gw-shell --embed` draws its prompt and
         // its commands' output here, so it carries scrollback of its own
-        // for the shell's Ctrl+Up browsing -- see `shellpanel.zig`.
+        // for the shell's Ctrl+Up browsing -- see `src/shellpanel.zig`.
         const shell_layer = try client.createLayer(size.cols, 1, shellpanel.scrollback_rows);
         // Created last so it composites over everything else, the panel
         // included: a modal question belongs on top of a shell.

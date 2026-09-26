@@ -35,8 +35,10 @@
 //!                 follow the file pane. Applied before the next prompt
 //!                 is drawn, so it never disturbs a half-typed line the
 //!                 way typing `cd` into the panel would.
-//!     focus       keystrokes are the shell's
-//!     blur        keystrokes are the host's
+//!     focus       keystrokes are the shell's, and so is the host caret
+//!                 (pointed at the panel's layer, in the default shape)
+//!     blur        keystrokes are the host's, and so is the caret: the
+//!                 shell sends nothing, the host sets its own up
 //!     size        the layer was resized; re-read it
 //!     quit        leave, as if `exit` had been typed
 //!

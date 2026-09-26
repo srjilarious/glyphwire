@@ -444,6 +444,7 @@ Each entry gives the method, its kind, its params and its result.
 | `set_window_scrollbar` | notification | `visible` | — |
 | `set_caret_layer` | notification | `layer?` | — |
 | `set_caret_visible` | notification | `visible` | — |
+| `set_caret_shape` | notification | `shape?` | — |
 
 `create_context` allocates a context, **shows it immediately**, and
 retargets the issuing connection onto it. `width`/`height` default to the
@@ -482,6 +483,14 @@ the tracked layer clears the setting.
 connection's context, whichever layer it tracks. A program with no text
 insertion point (a reader or a viewer) sends `false` once. It is separate
 from a layer's DECTCEM cursor-hide, which a PTY program drives.
+
+`set_caret_shape` picks the shape the host draws its caret in for the
+issuing connection's context: `line` (a thin bar at the cell's left
+edge), `block`, `box` or `underline`. `null` or an absent `shape` goes
+back to the shape the host is configured with. A modal editor sends
+`line` in insert mode. `block` covers the cell without redrawing the
+character in it, so a client that wants an inverted block draws that
+itself and hides the host caret.
 
 **Input follows visibility.** Raw input notifications (`key_down`,
 `key_up`, `text`, `mouse_button`, `mouse_move`) are delivered **only to

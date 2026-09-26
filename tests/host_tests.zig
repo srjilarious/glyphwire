@@ -458,6 +458,21 @@ pub fn contextSigMovesOnScrollViewTest(_: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectFalse(std.meta.eql(at_tail, scrolled));
 }
 
+/// A client switching the caret's shape (`set_caret_shape`) changes what
+/// is drawn without writing a cell, so the frame has to be redrawn for it.
+pub fn contextSigMovesOnCaretShapeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+
+    const default_shape = redraw.contextSig(&ctx);
+    ctx.caret_shape = .line;
+    const line = redraw.contextSig(&ctx);
+    ctx.caret_shape = .block;
+    const block = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(default_shape, line));
+    try testz.expectFalse(std.meta.eql(line, block));
+}
+
 pub fn contextSigMovesWhenALayerIsCreatedTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
     defer ctx.deinit();

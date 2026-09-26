@@ -76,6 +76,8 @@ pub fn contextSig(ctx: *const glyphwire.Context) ContextSig {
     // layer's cursor moves already show up in `gen_sum`, but the handle
     // switching between panes on a focus change does not.
     topo = mix(topo, ctx.caret_layer orelse 0);
+    // The caret's shape changes what is drawn without touching a cell.
+    topo = mix(topo, if (ctx.caret_shape) |shape| @as(u64, @intFromEnum(shape)) + 1 else 0);
     sig.topo = topo;
 
     sig.root_view = ctx.root.view_scroll;
