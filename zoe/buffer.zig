@@ -205,6 +205,44 @@ pub const Edit = struct {
 /// burst of typing between frames never trips it.
 const max_pending_edits: usize = 512;
 
+/// One primitive mutation, stored as what it takes to put the text back:
+/// at `at`, drop `inserted` bytes and re-insert `removed`. A pure insert
+/// has an empty `removed`; a pure delete has `inserted == 0`. `removed`
+/// is owned by the record.
+///
+/// Records are the *primitive* level -- `editor.zig` routinely issues
+/// several per command -- so they are gathered into `UndoGroup`s, and a
+/// group is the granularity `u` steps by.
+const UndoRec = struct {
+    at: usize,
+    removed: []const u8,
+    inserted: usize,
+};
+
+/// One `u` step: every mutation between two `undoCheckpoint` calls, plus
+/// where the cursor was when the group opened so undoing can put it back.
+const UndoGroup = struct {
+    recs: std.ArrayList(UndoRec) = .empty,
+    cursor: usize = 0,
+
+    fn deinit(self: *UndoGroup, alloc: std.mem.Allocator) void {
+        // An insert record's `removed` is the empty literal, not an
+        // allocation, so only non-empty ones are the allocator's.
+        for (self.recs.items) |r| if (r.removed.len > 0) alloc.free(r.removed);
+        self.recs.deinit(alloc);
+    }
+};
+
+/// How far back `u` can go. Each group holds the text it removed, so this
+/// bounds memory as much as history; past it the oldest group is dropped,
+/// the way vim's `undolevels` works.
+const max_undo_groups: usize = 512;
+
+/// Which stack the open group lands on when it closes, and so whether
+/// recording into it also discards the other one. Ordinary editing
+/// invalidates any redo history; replaying an undo or a redo must not.
+const UndoPhase = enum { normal, undoing, redoing };
+
 pub const Buffer = struct {
     alloc: std.mem.Allocator,
     gap: GapBuffer,
@@ -227,6 +265,18 @@ pub const Buffer = struct {
     /// change since the last drain.
     edits_overflowed: bool = false,
 
+    /// Closed undo groups, oldest first; `u` pops from the end.
+    undo_stack: std.ArrayList(UndoGroup) = .empty,
+    /// Groups undone and not yet redone; Ctrl+R pops from the end.
+    /// Discarded by the first mutation of any ordinary edit.
+    redo_stack: std.ArrayList(UndoGroup) = .empty,
+    /// The group mutations are being recorded into, opened by
+    /// `undoCheckpoint` and closed by `closeUndoGroup`. Null between
+    /// commands; an insert-mode session deliberately leaves one open so
+    /// the whole session is one `u`.
+    undo_open: ?UndoGroup = null,
+    undo_phase: UndoPhase = .normal,
+
     pub fn init(alloc: std.mem.Allocator) !Buffer {
         return initFromText(alloc, "");
     }
@@ -242,6 +292,9 @@ pub const Buffer = struct {
         self.gap.deinit();
         self.line_starts.deinit(self.alloc);
         self.pending_edits.deinit(self.alloc);
+        self.clearUndo();
+        self.undo_stack.deinit(self.alloc);
+        self.redo_stack.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -356,6 +409,7 @@ pub const Buffer = struct {
             .old_end_point = start_point,
             .new_end_point = self.posOf(at + bytes.len),
         });
+        self.recordUndo(at, "", bytes.len);
     }
 
     pub fn delete(self: *Buffer, offset: usize, count: usize) !void {
@@ -363,6 +417,11 @@ pub const Buffer = struct {
         const del = @min(count, self.len() - offset);
         const start_point = if (self.track_edits) self.posOf(offset) else Pos{};
         const old_end_point = if (self.track_edits) self.posOf(offset + del) else Pos{};
+
+        // Read before the cut, not after: the undo record *is* the text
+        // about to disappear, and this is the only place it still exists.
+        const removed = try self.gap.read(self.alloc, offset, offset + del);
+        errdefer self.alloc.free(removed);
 
         self.gap.delete(offset, del);
         try self.reindex();
@@ -377,6 +436,7 @@ pub const Buffer = struct {
             .old_end_point = old_end_point,
             .new_end_point = start_point,
         });
+        self.recordUndo(offset, removed, 0);
     }
 
     /// Append one edit to the pending log, or trip `edits_overflowed` and
@@ -402,5 +462,143 @@ pub const Buffer = struct {
     pub fn clearEdits(self: *Buffer) void {
         self.pending_edits.clearRetainingCapacity();
         self.edits_overflowed = false;
+    }
+
+    // ── Undo ────────────────────────────────────────────────────────────
+    //
+    // The buffer records, `editor.zig` decides where the steps fall. Every
+    // mutation lands in the currently open group; `undoCheckpoint` is what
+    // starts a new one, and the editor calls it once per command. Insert
+    // mode is the interesting case: it checkpoints when insert mode is
+    // *entered* and not again until it is left, so a whole typing session
+    // is one `u`, which is what vim does.
+    //
+    // Allocation failure anywhere in here drops history rather than
+    // corrupting it: a `u` that does nothing is recoverable, a `u` that
+    // replays half a group is not.
+
+    /// Opens a fresh undo group, closing whatever was open. `cursor` is
+    /// where undoing this group should put the cursor back.
+    pub fn undoCheckpoint(self: *Buffer, cursor: usize) void {
+        self.closeUndoGroup();
+        self.undo_open = .{ .cursor = cursor };
+    }
+
+    /// Ends the open group, pushing it onto whichever stack the current
+    /// phase names. An empty group is thrown away rather than becoming a
+    /// `u` that does nothing.
+    pub fn closeUndoGroup(self: *Buffer) void {
+        var g = self.undo_open orelse return;
+        self.undo_open = null;
+        if (g.recs.items.len == 0) {
+            g.deinit(self.alloc);
+            return;
+        }
+        const stack = if (self.undo_phase == .undoing) &self.redo_stack else &self.undo_stack;
+        if (stack.items.len >= max_undo_groups) {
+            var oldest = stack.orderedRemove(0);
+            oldest.deinit(self.alloc);
+        }
+        stack.append(self.alloc, g) catch g.deinit(self.alloc);
+    }
+
+    /// True while a group is open, so the editor can tell "this mutation
+    /// continues the command in progress" from "this one starts a new
+    /// step" -- see `Editor.putText`.
+    pub fn hasOpenUndoGroup(self: *const Buffer) bool {
+        return self.undo_open != null;
+    }
+
+    pub fn canUndo(self: *const Buffer) bool {
+        if (self.undo_stack.items.len > 0) return true;
+        const g = self.undo_open orelse return false;
+        return g.recs.items.len > 0;
+    }
+
+    pub fn canRedo(self: *const Buffer) bool {
+        return self.redo_stack.items.len > 0;
+    }
+
+    /// Reverses the newest undo group and returns where the cursor
+    /// belongs, or null when there is nothing left to undo.
+    pub fn undo(self: *Buffer) !?usize {
+        self.closeUndoGroup();
+        if (self.undo_stack.pop()) |popped| {
+            var group = popped;
+            defer group.deinit(self.alloc);
+            try self.replay(&group, .undoing);
+            return group.cursor;
+        }
+        return null;
+    }
+
+    /// Re-applies the newest undone group. Null when the redo stack is
+    /// empty -- including after any ordinary edit, which discards it.
+    pub fn redo(self: *Buffer) !?usize {
+        self.closeUndoGroup();
+        if (self.redo_stack.pop()) |popped| {
+            var group = popped;
+            defer group.deinit(self.alloc);
+            try self.replay(&group, .redoing);
+            return group.cursor;
+        }
+        return null;
+    }
+
+    /// Throws away all undo history -- `:e`, or an allocation failure
+    /// that would otherwise leave the log unable to account for the text.
+    pub fn clearUndo(self: *Buffer) void {
+        if (self.undo_open) |*g| g.deinit(self.alloc);
+        self.undo_open = null;
+        self.dropUndoStack(&self.undo_stack);
+        self.dropUndoStack(&self.redo_stack);
+    }
+
+    /// Applies `group`'s records backwards, each one inverted, with a
+    /// fresh group open to catch the inverse. That recorded inverse is
+    /// what lands on the opposite stack, which is why undo and redo need
+    /// no separate machinery: redoing is undoing the undo.
+    fn replay(self: *Buffer, group: *UndoGroup, phase: UndoPhase) !void {
+        // Where the *inverse* group should land the cursor: at the start
+        // of the first change it makes, which is vim's rule for both.
+        const back_to = if (group.recs.items.len > 0) group.recs.items[0].at else group.cursor;
+        self.undo_phase = phase;
+        self.undo_open = .{ .cursor = back_to };
+        defer {
+            self.closeUndoGroup();
+            self.undo_phase = .normal;
+        }
+
+        var i = group.recs.items.len;
+        while (i > 0) {
+            i -= 1;
+            const r = group.recs.items[i];
+            if (r.inserted > 0) try self.delete(r.at, r.inserted);
+            if (r.removed.len > 0) try self.insert(r.at, r.removed);
+        }
+    }
+
+    /// Adds one primitive mutation to the open group, taking ownership of
+    /// `removed`. Opens a group first if none is (a mutation the editor
+    /// didn't checkpoint for still belongs somewhere).
+    fn recordUndo(self: *Buffer, at: usize, removed: []const u8, inserted: usize) void {
+        if (self.undo_open == null) self.undo_open = .{ .cursor = at };
+        // An ordinary edit invalidates the redo history. A replay is what
+        // *rebuilds* the opposite stack, so it must leave both alone.
+        if (self.undo_phase == .normal) self.dropUndoStack(&self.redo_stack);
+
+        self.undo_open.?.recs.append(self.alloc, .{
+            .at = at,
+            .removed = removed,
+            .inserted = inserted,
+        }) catch {
+            if (removed.len > 0) self.alloc.free(removed);
+            self.clearUndo();
+        };
+    }
+
+    fn dropUndoStack(self: *Buffer, stack: *std.ArrayList(UndoGroup)) void {
+        for (stack.items) |*g| g.deinit(self.alloc);
+        stack.clearRetainingCapacity();
     }
 };

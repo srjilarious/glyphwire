@@ -51,6 +51,7 @@ const ls_icons = @import("ls_support").icons;
 
 const editor = @import("editor.zig");
 const display = @import("display.zig");
+const search = @import("search.zig");
 const tree_mod = @import("tree.zig");
 const finder_mod = @import("finder.zig");
 const filetype = @import("filetype.zig");
@@ -102,6 +103,12 @@ const bg_tree = Color{ .r = 20, .g = 20, .b = 25, .a = 255 };
 const bg_status = Color{ .r = 46, .g = 46, .b = 56, .a = 255 };
 const bg_cursor = Color{ .r = 220, .g = 220, .b = 230, .a = 255 };
 const bg_selected = Color{ .r = 48, .g = 62, .b = 84, .a = 255 };
+// Search matches. Amber rather than another blue so a `/` highlight is
+// never mistaken for a selection, and two weights of it: every match gets
+// the dim one, the match the cursor is on gets the bright one, which is
+// how you tell where `n` just landed in a screen full of hits.
+const bg_match = Color{ .r = 84, .g = 68, .b = 34, .a = 255 };
+const bg_match_current = Color{ .r = 150, .g = 116, .b = 42, .a = 255 };
 const fg_text = Color{ .r = 210, .g = 210, .b = 218, .a = 255 };
 const fg_dim = Color{ .r = 92, .g = 92, .b = 104, .a = 255 };
 const fg_dir = Color{ .r = 132, .g = 176, .b = 232, .a = 255 };
@@ -285,6 +292,14 @@ const EdSnapshot = struct {
     /// cursor -- still repaints the buffer pane.
     mode: editor.Mode,
     anchor: ?usize,
+    /// The search highlight, as a digest of the pattern plus where the
+    /// current match is. Like the selection it covers whole rows the
+    /// caret never touches, so it has to force a repaint of its own --
+    /// and a *digest* rather than the pattern itself because the snapshot
+    /// outlives the frame, while the `ArrayList` behind the pattern can
+    /// reallocate under it.
+    match_hash: u64,
+    match: ?usize,
     /// The modified flag, which the tab strip shows as a `+`. Left out of
     /// `eql` -- it only ever moves together with `edits`, and it is
     /// compared on its own so a keystroke that dirties the buffer
@@ -301,14 +316,26 @@ const EdSnapshot = struct {
             .show_whitespace = ed.show_whitespace,
             .mode = ed.mode,
             .anchor = ed.select_anchor,
+            .match_hash = matchHash(ed),
+            .match = ed.search_match,
             .dirty = ed.buf.dirty,
         };
     }
     fn eql(a: EdSnapshot, b: EdSnapshot) bool {
         return a.cursor == b.cursor and a.edits == b.edits and
             a.line_numbers == b.line_numbers and a.mode == b.mode and a.anchor == b.anchor and
+            a.match_hash == b.match_hash and a.match == b.match and
             a.tab_width == b.tab_width and a.expand_tab == b.expand_tab and
             a.show_whitespace == b.show_whitespace;
+    }
+
+    /// Zero when nothing is highlighted, otherwise a hash of the pattern
+    /// and the one option that isn't derived from it.
+    fn matchHash(ed: *const Editor) u64 {
+        const pat = ed.highlightPattern() orelse return 0;
+        var h = std.hash.Wyhash.init(@intFromBool(ed.highlightOpts().whole_word));
+        h.update(pat);
+        return h.final();
     }
 };
 
@@ -789,7 +816,9 @@ pub const Ui = struct {
     /// the config failed to load at all.
     fn keyRepeatForMode(self: *Ui) langconf.KeyRepeat {
         const typing = switch (self.buf.ed.mode) {
-            .insert, .command => true,
+            // The `/` line is typed into, like the `:` line, so it wants
+            // the typing cadence rather than the normal-mode one.
+            .insert, .command, .search => true,
             .normal, .visual, .visual_line => false,
         };
         const cfg = self.hl_config orelse return if (typing) .{
@@ -1420,7 +1449,15 @@ pub const Ui = struct {
                 }
                 self.buf.ed.status.clearRetainingCapacity();
                 if (self.focus == .buffer) {
-                    if (self.buf.ed.mode == .insert) {
+                    // Insert mode and the two typed lines (`:` and `/`)
+                    // all want the text *typed*, which is what `feedText`
+                    // does for them -- a pasted search pattern belongs on
+                    // the prompt, not in the buffer.
+                    const typed = switch (self.buf.ed.mode) {
+                        .insert, .command, .search => true,
+                        .normal, .visual, .visual_line => false,
+                    };
+                    if (typed) {
                         try self.applyOutcome(try self.buf.ed.feedText(t.text));
                     } else {
                         // Normal / visual mode: splice the pasted text in
@@ -1491,6 +1528,12 @@ pub const Ui = struct {
         if (after.mode != before.mode or after.anchor != before.anchor or
             (after.mode == .visual or after.mode == .visual_line))
         {
+            self.buf.full_redraw = true;
+        }
+        // The search highlight is the same story: a new pattern, or `n`
+        // moving which match is the current one, changes rows all over
+        // the pane.
+        if (after.match_hash != before.match_hash or after.match != before.match) {
             self.buf.full_redraw = true;
         }
     }
@@ -3007,10 +3050,91 @@ pub const Ui = struct {
         }
         if (!painted) try self.rowSpansImpl(batch, r, text, &.{});
 
-        // Overpaint the selected span of this row, if any, with the
-        // selection background. Done as a second write over the text just
-        // laid down rather than threaded through every colour run.
+        // Overpaint, in order: search matches, then the selection on top
+        // of them. Both are second writes over the text just laid down
+        // rather than threaded through every colour run, and the
+        // selection wins because it is the thing you are about to act on.
+        try self.paintMatchRow(batch, r, line, text);
         try self.paintSelectionRow(batch, r, line, text);
+    }
+
+    /// Paints every search match on buffer `line` -- `bg_match`, or
+    /// `bg_match_current` for the one the cursor is on. A no-op when
+    /// there is no pattern to highlight (`:noh`, or no search yet).
+    ///
+    /// Matches are found per row, at draw time, rather than collected
+    /// once into a list: a row is a few dozen bytes, the scan is a
+    /// `memchr`-shaped loop over it, and a stored list would have to be
+    /// invalidated by every edit.
+    fn paintMatchRow(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        r: usize,
+        line: usize,
+        text: []const u8,
+    ) !void {
+        const pat = self.buf.ed.highlightPattern() orelse return;
+        const opts = self.buf.ed.highlightOpts();
+        const ls = self.buf.ed.buf.lineStart(line);
+        const line_end = self.buf.ed.buf.lineEnd(line);
+
+        var at = ls;
+        while (search.firstIn(&self.buf.ed.buf, pat, opts, at, line_end)) |hit| {
+            at = hit + 1;
+            // A match running off the end of its line is clipped to it:
+            // the rest belongs to the row below, which paints its own.
+            const hi = @min(hit + pat.len, line_end);
+            const current = self.buf.ed.search_match == hit;
+            try self.paintRowSpan(
+                batch,
+                r,
+                text,
+                hit - ls,
+                hi - ls,
+                if (current) bg_match_current else bg_match,
+            );
+        }
+    }
+
+    /// Repaints the byte range `[lo_b, hi_b)` of a row's `text` in `bg`,
+    /// keeping the characters themselves. Clipped to the horizontal
+    /// scroll; a no-op when none of it is on screen. Shared by the
+    /// selection and the search highlight, which differ only in colour
+    /// and in how they pick the range.
+    fn paintRowSpan(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        r: usize,
+        text: []const u8,
+        lo_b: usize,
+        hi_b: usize,
+        bg: Color,
+    ) !void {
+        const cols = self.textCols();
+        if (cols == 0 or hi_b <= lo_b) return;
+
+        const opts = self.displayOpts();
+        const start_dc = display.colOfByte(text, @min(lo_b, text.len), opts);
+        const end_dc = display.colOfByte(text, @min(hi_b, text.len), opts);
+        if (end_dc <= self.buf.left_col or start_dc >= self.buf.left_col + cols) return;
+
+        const vis_lo = @max(start_dc, self.buf.left_col);
+        const vis_hi = @min(end_dc, self.buf.left_col + cols);
+        if (vis_hi <= vis_lo) return;
+
+        var overlay: std.ArrayList(u8) = .empty;
+        defer overlay.deinit(self.alloc);
+        try display.appendCols(self.alloc, &overlay, text, vis_lo, vis_hi - vis_lo, opts);
+
+        try writeAt(
+            batch,
+            self.buffer_layer,
+            r,
+            self.gutterWidth() + vis_lo - self.buf.left_col,
+            overlay.items,
+            fg_text,
+            bg,
+        );
     }
 
     /// If buffer `line` overlaps the visual selection, repaints its
@@ -3554,6 +3678,12 @@ pub const Ui = struct {
         } else if (self.buf.ed.mode == .command) {
             try line.append(self.alloc, ':');
             try line.appendSlice(self.alloc, self.buf.ed.cmdline.text());
+        } else if (self.buf.ed.mode == .search) {
+            // `/foo` or `?foo`, in the error colour once the pattern
+            // stops matching -- the same signal the tree's `/` gives.
+            if (self.buf.ed.search_failed) fg = fg_error;
+            try line.append(self.alloc, self.buf.ed.searchPrompt());
+            try line.appendSlice(self.alloc, self.buf.ed.cmdline.text());
         } else if (self.buf.ed.status.items.len > 0) {
             if (std.mem.startsWith(u8, self.buf.ed.status.items, "E")) fg = fg_error;
             try line.appendSlice(self.alloc, self.buf.ed.status.items);
@@ -3581,7 +3711,8 @@ pub const Ui = struct {
         // The mode word (right after the leading space, in the normal
         // status form) gets its own colour as a span of the same write.
         const mode_word = modeName(self.buf.ed.mode);
-        const show_mode = self.buf.ed.mode != .command and self.buf.ed.status.items.len == 0;
+        const show_mode = self.buf.ed.mode != .command and self.buf.ed.mode != .search and
+            self.buf.ed.status.items.len == 0;
         const opts: glyphwire.client.Client.TextOpts = .{
             .layer = self.status_layer,
             .row = 0,
@@ -3602,13 +3733,13 @@ pub const Ui = struct {
             try batch.writeTextOpts(line.items, opts);
         }
 
-        // The `:` line's caret, as the same inverted block the buffer
-        // pane draws. Only needed now that the command line is a real
-        // field: while it was append-only the caret was always at the
-        // end, and the statusline's own trailing blank read as one.
-        if (self.buf.ed.mode == .command) {
+        // The `:` and `/` lines' caret, as the same inverted block the
+        // buffer pane draws. Only needed now that the command line is a
+        // real field: while it was append-only the caret was always at
+        // the end, and the statusline's own trailing blank read as one.
+        if (self.buf.ed.mode == .command or self.buf.ed.mode == .search) {
             const cmd = &self.buf.ed.cmdline;
-            const col = 1 + cmd.caretCol(); // past the leading `:`
+            const col = 1 + cmd.caretCol(); // past the leading `:` or `/`
             if (col < b.cols) {
                 const under = if (cmd.caret < cmd.text().len)
                     cmd.text()[cmd.caret..lineedit.nextBoundary(cmd.text(), cmd.caret)]
@@ -3632,6 +3763,7 @@ pub const Ui = struct {
             .command => "COMMAND",
             .visual => "VISUAL",
             .visual_line => "V-LINE",
+            .search => "SEARCH",
         };
     }
 };

@@ -18,6 +18,7 @@ const GapBuffer = zoe.GapBuffer;
 const Buffer = zoe.Buffer;
 const Editor = zoe.Editor;
 const motion = zoe.motion;
+const search = zoe.search;
 const keys = zoe.keys;
 const tabs = zoe.tabs;
 
@@ -2357,4 +2358,376 @@ pub fn finderWalksTheTreeAndSkipsDotfilesTest(io: std.Io, alloc: std.mem.Allocat
     const want = try std.fs.path.join(alloc, &.{ s.path, "sub/deep/c.zig" });
     defer alloc.free(want);
     try testz.expectEqualStr(path, want);
+}
+
+// ─── Search ─────────────────────────────────────────────────────────────
+
+pub fn searchSmartcaseFoldsOnlyLowercasePatternsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "editor Editor EDITOR");
+    defer buf.deinit();
+
+    // All-lowercase: case-insensitive, so the first hit is at 0.
+    const lower = search.optsFor("editor", false);
+    try testz.expectTrue(lower.ignore_case);
+    try testz.expectEqual(search.firstIn(&buf, "editor", lower, 0, buf.len()).?, 0);
+    try testz.expectEqual(search.firstIn(&buf, "editor", lower, 1, buf.len()).?, 7);
+
+    // One uppercase letter and the whole pattern turns case-sensitive.
+    const mixed = search.optsFor("Editor", false);
+    try testz.expectFalse(mixed.ignore_case);
+    try testz.expectEqual(search.firstIn(&buf, "Editor", mixed, 0, buf.len()).?, 7);
+}
+
+pub fn searchForwardAndBackwardWrapTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "a.a.a");
+    defer buf.deinit();
+    const opts = search.optsFor("a", false);
+
+    // Forward never matches at the offset it starts from, so repeating
+    // moves; past the last match it comes round to the first.
+    try testz.expectEqual(search.forward(&buf, "a", opts, 0, true).?.at, 2);
+    try testz.expectEqual(search.forward(&buf, "a", opts, 2, true).?.at, 4);
+    const wrapped = search.forward(&buf, "a", opts, 4, true).?;
+    try testz.expectEqual(wrapped.at, 0);
+    try testz.expectTrue(wrapped.wrapped);
+
+    try testz.expectEqual(search.backward(&buf, "a", opts, 4, true).?.at, 2);
+    const back_wrapped = search.backward(&buf, "a", opts, 0, true).?;
+    try testz.expectEqual(back_wrapped.at, 4);
+    try testz.expectTrue(back_wrapped.wrapped);
+
+    // With wrapping off, running out of buffer is simply no match.
+    try testz.expectTrue(search.forward(&buf, "a", opts, 4, false) == null);
+}
+
+pub fn searchWholeWordRejectsSubstringsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "foo foobar barfoo foo");
+    defer buf.deinit();
+    const opts = search.Opts{ .whole_word = true };
+
+    try testz.expectEqual(search.firstIn(&buf, "foo", opts, 0, buf.len()).?, 0);
+    // 4 (`foobar`) and 14 (`barfoo`) are both rejected by a word
+    // character on one side; the next standalone `foo` is at 18.
+    try testz.expectEqual(search.firstIn(&buf, "foo", opts, 1, buf.len()).?, 18);
+}
+
+pub fn searchWordAtScansForwardOnTheLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "  hello world\nnext");
+    defer buf.deinit();
+
+    // From the middle of a word: the whole word, not the tail.
+    const mid = search.wordAt(&buf, 4).?;
+    try testz.expectEqual(mid.lo, 2);
+    try testz.expectEqual(mid.hi, 7);
+
+    // From leading whitespace: vim scans on to the first word.
+    const from_blank = search.wordAt(&buf, 0).?;
+    try testz.expectEqual(from_blank.lo, 2);
+
+    // A line with nothing left on it has no word under the cursor.
+    var blank = try Buffer.initFromText(alloc, "   ");
+    defer blank.deinit();
+    try testz.expectTrue(search.wordAt(&blank, 0) == null);
+}
+
+pub fn editorSlashJumpsToTheNextMatchTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one two three two", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "/two<cr>");
+
+    try testz.expectEqual(ed.cursor, 4);
+    try testz.expectEqual(ed.mode, .normal);
+    // The highlight is on, and it is the pattern that was typed.
+    try testz.expectEqualStr(ed.highlightPattern().?, "two");
+}
+
+pub fn editorIncrementalSearchPreviewsAndEscapeRestoresTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "alpha beta gamma", null);
+    defer ed.deinit();
+
+    // Typing walks the preview onto the match without leaving the prompt.
+    _ = try keys.feed(&ed, "/bet");
+    try testz.expectEqual(ed.mode, .search);
+    try testz.expectEqual(ed.cursor, 6);
+
+    // Deleting a character re-runs from the *origin*, not from the
+    // preview, so the cursor doesn't creep forward.
+    _ = try keys.feed(&ed, "<bs>");
+    try testz.expectEqual(ed.cursor, 6);
+
+    // A pattern that matches nothing says so and parks at the origin.
+    _ = try keys.feed(&ed, "zz");
+    try testz.expectTrue(ed.search_failed);
+    try testz.expectEqual(ed.cursor, 0);
+
+    _ = try keys.feed(&ed, "<esc>");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectEqual(ed.cursor, 0);
+}
+
+pub fn editorSearchRepeatsForwardAndBackTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "aXaXa", null);
+    defer ed.deinit();
+
+    _ = try keys.feed(&ed, "/a<cr>");
+    try testz.expectEqual(ed.cursor, 2);
+    _ = try keys.feed(&ed, "n");
+    try testz.expectEqual(ed.cursor, 4);
+    // Past the last one, `n` comes round to the top.
+    _ = try keys.feed(&ed, "n");
+    try testz.expectEqual(ed.cursor, 0);
+    // `N` is the same search the other way.
+    _ = try keys.feed(&ed, "N");
+    try testz.expectEqual(ed.cursor, 4);
+}
+
+pub fn editorQuestionMarkSearchesBackwardsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "aXaXa", null);
+    defer ed.deinit();
+
+    _ = try keys.feed(&ed, "$?a<cr>");
+    try testz.expectEqual(ed.cursor, 2);
+    // `n` repeats the stored *direction*, which `?` made backward.
+    _ = try keys.feed(&ed, "n");
+    try testz.expectEqual(ed.cursor, 0);
+}
+
+pub fn editorStarSearchesTheWordUnderTheCursorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "foo foobar foo", null);
+    defer ed.deinit();
+
+    // Whole-word, so `foobar` is skipped.
+    _ = try keys.feed(&ed, "*");
+    try testz.expectEqual(ed.cursor, 11);
+    try testz.expectTrue(ed.searchOpts().whole_word);
+
+    // `#` is the same search the other way, and wraps back round.
+    _ = try keys.feed(&ed, "#");
+    try testz.expectEqual(ed.cursor, 0);
+}
+
+pub fn editorNohClearsTheHighlightButKeepsThePatternTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "aXaXa", null);
+    defer ed.deinit();
+
+    _ = try keys.feed(&ed, "/a<cr>");
+    try testz.expectTrue(ed.highlightPattern() != null);
+
+    _ = try keys.feed(&ed, ":noh<cr>");
+    try testz.expectTrue(ed.highlightPattern() == null);
+
+    // The pattern survives, so `n` still steps -- and turns the highlight
+    // back on, the way vim does.
+    _ = try keys.feed(&ed, "n");
+    try testz.expectEqual(ed.cursor, 4);
+    try testz.expectEqualStr(ed.highlightPattern().?, "a");
+}
+
+pub fn editorBareSlashRepeatsThePreviousPatternTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "aXaXa", null);
+    defer ed.deinit();
+
+    _ = try keys.feed(&ed, "/a<cr>");
+    try testz.expectEqual(ed.cursor, 2);
+    _ = try keys.feed(&ed, "/<cr>");
+    try testz.expectEqual(ed.cursor, 4);
+}
+
+pub fn editorSearchFromVisualModeExtendsTheSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one two three", null);
+    defer ed.deinit();
+
+    _ = try keys.feed(&ed, "v/three<cr>");
+    try testz.expectEqual(ed.mode, .visual);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 0);
+    try testz.expectEqual(span.hi, 9);
+}
+
+// ─── Undo / redo ────────────────────────────────────────────────────────
+
+pub fn undoRestoresASingleDeleteTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "hello", "xu", "hello");
+}
+
+pub fn undoTreatsAnInsertSessionAsOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Every character typed between `i` and `<esc>` is one `u`, which is
+    // the whole reason the undo group is opened on entering insert mode
+    // rather than per mutation.
+    try expectEdit(alloc, "abc", "ihello<esc>u", "abc");
+}
+
+pub fn undoTreatsAChangeAndItsTypingAsOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    // `s` deletes *and* enters insert mode; both halves belong to the
+    // same step. Two `feed` calls because the delete's `set_clipboard`
+    // ends the first script -- see `keys.feed`.
+    _ = try keys.feed(&ed, "sX");
+    _ = try keys.feed(&ed, "<esc>u");
+    try expectText(alloc, &ed.buf, "abc");
+}
+
+pub fn redoReappliesAnUndoneChangeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "xu");
+    try expectText(alloc, &ed.buf, "abc");
+    _ = try keys.feed(&ed, "<c-r>");
+    try expectText(alloc, &ed.buf, "bc");
+}
+
+pub fn anEditAfterUndoDiscardsTheRedoStackTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abcdef", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "xu");
+    // A fresh edit between the undo and the redo: Ctrl+R now has nothing
+    // to re-apply, so the `dd` stands.
+    _ = try keys.feed(&ed, "dd");
+    _ = try keys.feed(&ed, "<c-r>");
+    try expectText(alloc, &ed.buf, "");
+    try testz.expectFalse(ed.buf.canRedo());
+}
+
+pub fn undoTakesACountTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "abcdef", "xxx2u", "bcdef");
+}
+
+pub fn undoOfALinewiseDeleteTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "one\ntwo\nthree", "jddu", "one\ntwo\nthree");
+}
+
+pub fn undoPutsTheCursorBackWhereTheChangeWasTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jjx");
+    try testz.expectEqual(ed.cursor, 8);
+    // Wander off, then undo: the cursor goes back to the change, not to
+    // wherever it happened to be.
+    _ = try keys.feed(&ed, "ggu");
+    try testz.expectEqual(ed.cursor, 8);
+}
+
+pub fn undoWithNothingToUndoReportsItTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "u");
+    try testz.expectEqualStr(ed.status.items, "Already at oldest change");
+
+    _ = try keys.feed(&ed, "<c-r>");
+    try testz.expectEqualStr(ed.status.items, "Already at newest change");
+}
+
+pub fn undoOfAPasteIsOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    // The host's half of `p`: the editor asked for the clipboard and the
+    // text came back.
+    try ed.putText("XY", true);
+    try expectText(alloc, &ed.buf, "aXYbc");
+    _ = try keys.feed(&ed, "u");
+    try expectText(alloc, &ed.buf, "abc");
+}
+
+pub fn undoOfAVisualReplaceIsOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abcdef", null);
+    defer ed.deinit();
+    // `v l l p` -- the selection goes first, then the host splices the
+    // clipboard into the gap. One `u` has to put "abc" back.
+    _ = try keys.feed(&ed, "vllp");
+    try ed.putText("Z", false);
+    try expectText(alloc, &ed.buf, "Zdef");
+    _ = try keys.feed(&ed, "u");
+    try expectText(alloc, &ed.buf, "abcdef");
+}
+
+// ─── r / J / ~ / >> ─────────────────────────────────────────────────────
+
+pub fn replaceCharOverwritesUnderTheCursorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "hello", "rx", "xello");
+    try expectEdit(alloc, "hello", "3rx", "xxxlo");
+}
+
+pub fn replaceCharIsAllOrNothingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // vim refuses a count that runs past the end of the line rather than
+    // replacing what fits.
+    try expectEdit(alloc, "abc", "5rx", "abc");
+    // And it never reaches onto the next line.
+    try expectEdit(alloc, "ab\ncd", "3rx", "ab\ncd");
+}
+
+pub fn replaceCharTakesTheNextCharacterLiterallyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A digit after `r` is the replacement, not a count, and `r` survives
+    // a multi-byte character.
+    try expectEdit(alloc, "abc", "r3", "3bc");
+    try expectEdit(alloc, "abc", "rä", "äbc");
+}
+
+pub fn joinPullsTheNextLineUpTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "foo\nbar", "J", "foo bar");
+    // The next line's indent goes with the newline.
+    try expectEdit(alloc, "foo\n    bar", "J", "foo bar");
+    // A count joins that many lines into one.
+    try expectEdit(alloc, "a\nb\nc\nd", "3J", "a b c\nd");
+}
+
+pub fn joinSkipsTheSpaceInVimsThreeCasesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A close paren starting the next line...
+    try expectEdit(alloc, "foo\n)bar", "J", "foo)bar");
+    // ...a line that already ends in whitespace...
+    try expectEdit(alloc, "foo \nbar", "J", "foo bar");
+    // ...and an empty line on either side.
+    try expectEdit(alloc, "\nbar", "J", "bar");
+    try expectEdit(alloc, "foo\n", "J", "foo");
+}
+
+pub fn toggleCaseFlipsAndStepsRightTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "~");
+    try expectText(alloc, &ed.buf, "Abc");
+    try testz.expectEqual(ed.cursor, 1);
+
+    try expectEdit(alloc, "aBc", "3~", "AbC");
+    // Non-letters are stepped over untouched, and it stops at the line
+    // end rather than running on.
+    try expectEdit(alloc, "a1b\nxy", "9~", "A1B\nxy");
+}
+
+pub fn shiftIndentsAndDedentsWholeLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "foo\nbar", ">>", "    foo\nbar");
+    try expectEdit(alloc, "foo\nbar", "2>>", "    foo\n    bar");
+    try expectEdit(alloc, "        foo", "<<", "    foo");
+    // A dedent stops at the first non-blank rather than eating text.
+    try expectEdit(alloc, "  foo", "<<", "foo");
+    try expectEdit(alloc, "foo", "<<", "foo");
+    // A leading tab comes off in one step, however wide it renders.
+    try expectEdit(alloc, "\tfoo", "<<", "foo");
+}
+
+pub fn shiftTakesAMotionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", ">j", "    a\n    b\nc");
+    try expectEdit(alloc, "a\nb\nc", ">G", "    a\n    b\n    c");
+    try expectEdit(alloc, "a\nb\nc", "jj>gg", "    a\n    b\n    c");
+}
+
+pub fn shiftLeavesEmptyLinesAloneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // An indented blank line is just trailing whitespace, so vim skips it.
+    try expectEdit(alloc, "a\n\nb", "3>>", "    a\n\n    b");
+}
+
+pub fn shiftLandsTheCursorOnTheFirstNonBlankTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "foo\nbar", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, ">>");
+    try testz.expectEqual(ed.cursor, 4);
+}
+
+pub fn visualShiftIndentsEveryLineItTouchesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", "Vj>", "    a\n    b\nc");
+    try expectEdit(alloc, "    a\n    b\nc", "Vj<", "a\nb\nc");
+}
+
+pub fn shiftUndoesInOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", "3>>u", "a\nb\nc");
 }

@@ -10,9 +10,10 @@
 //! rather than reaching past it into the edit functions.
 //!
 //! Everything outside `<...>` is committed text; a `<name>` is a named
-//! key. `<lt>` is a literal `<`, matching vim's own escape for it. An
-//! unrecognized `<name>` is passed to `feedKey` verbatim, so a key
-//! glyphwire grows later needs no change here.
+//! key, and a `c-` prefix on one (`<c-r>`) makes it a Ctrl chord. `<lt>`
+//! is a literal `<`, matching vim's own escape for it. An unrecognized
+//! `<name>` is passed to `feedKey` verbatim, so a key glyphwire grows
+//! later needs no change here.
 
 const std = @import("std");
 const editor = @import("editor.zig");
@@ -38,7 +39,13 @@ pub fn feed(ed: *Editor, script: []const u8) !Outcome {
                         else => |o| return o,
                     }
                 } else {
-                    switch (try ed.feedKey(keyName(name), .{})) {
+                    // `<c-r>`: vim's notation for a Ctrl chord. The host
+                    // delivers those as a named key plus modifiers, which
+                    // is the only way the editor can see Ctrl+R (redo) at
+                    // all -- there is no character to carry it.
+                    const ctrl = std.ascii.startsWithIgnoreCase(name, "c-") and name.len > 2;
+                    const bare = if (ctrl) name[2..] else name;
+                    switch (try ed.feedKey(keyName(bare), .{ .ctrl = ctrl })) {
                         .none => {},
                         else => |o| return o,
                     }
