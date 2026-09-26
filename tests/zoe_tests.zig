@@ -2728,6 +2728,77 @@ pub fn visualShiftIndentsEveryLineItTouchesTest(_: std.Io, alloc: std.mem.Alloca
     try expectEdit(alloc, "    a\n    b\nc", "Vj<", "a\nb\nc");
 }
 
+pub fn visualShiftKeepsTheSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The whole point of diverging from vim here: `>` again shifts the
+    // same block again, and Escape is what leaves visual mode.
+    try expectEdit(alloc, "a\nb\nc", "Vj>>", "        a\n        b\nc");
+
+    var ed = try Editor.initFromText(alloc, "a\nb\nc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "Vj>");
+    try testz.expectEqual(ed.mode, .visual_line);
+    // Still the same two lines, so the next `>` shifts neither more nor
+    // fewer of them.
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(ed.buf.lineAt(span.lo), 0);
+    try testz.expectEqual(ed.buf.lineAt(span.hi - 1), 1);
+}
+
+pub fn visualShiftCountIsLevelsNotLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // vim's rule: a normal-mode count is lines (`3>>`), a visual-mode one
+    // is shift widths (`3>`).
+    try expectEdit(alloc, "a\nb\nc", "Vj3>", "            a\n            b\nc");
+    try expectEdit(alloc, "a\nb\nc", "3>>", "    a\n    b\n    c");
+}
+
+pub fn visualShiftCarriesTheColumnsWithTheIndentTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc\nabc", null);
+    defer ed.deinit();
+    // A charwise selection starting on the first `a`: after the shift it
+    // is still on that `a`, not four columns of fresh indent.
+    _ = try keys.feed(&ed, "vj>");
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 4);
+    try testz.expectEqual(ed.buf.byteAt(span.lo), 'a');
+}
+
+pub fn visualShiftUndoesOneLevelAtATimeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Each `>` is its own command, so each is its own `u`.
+    try expectEdit(alloc, "a\nb", "Vj>><esc>u", "    a\n    b");
+}
+
+pub fn gvReselectsTheLastVisualRangeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abcdef", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "vll<esc>");
+    try testz.expectEqual(ed.mode, .normal);
+
+    _ = try keys.feed(&ed, "gv");
+    try testz.expectEqual(ed.mode, .visual);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 0);
+    try testz.expectEqual(span.hi, 3);
+
+    // And it is a real selection, so an operator acts on it.
+    _ = try keys.feed(&ed, "d");
+    try expectText(alloc, &ed.buf, "def");
+}
+
+pub fn gvRemembersLinewiseSelectionsTooTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "a\nb\nc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "Vj<esc>gv");
+    try testz.expectEqual(ed.mode, .visual_line);
+}
+
+pub fn gvWithNoPreviousSelectionDoesNothingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "gv");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectTrue(ed.selectionSpan() == null);
+}
+
 pub fn shiftUndoesInOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try expectEdit(alloc, "a\nb\nc", "3>>u", "a\nb\nc");
 }
