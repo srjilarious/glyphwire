@@ -135,6 +135,55 @@
 --     -- differently. `:set whitespace=on|off` changes it live.
 --     show_whitespace = false,
 --
+--     ---- Language servers (LSP) ---------------------------------------
+--
+--     -- zoe talks to language servers for diagnostics, hover (K) and
+--     -- goto-definition (gd). Each server below starts only if its binary
+--     -- is on $PATH, so listing all of them costs nothing on a machine
+--     -- that has none of them. `:lsp` says which are attached and which
+--     -- were looked for and not found; `:lsp restart` brings back one
+--     -- that crashed.
+--     --
+--     -- The built-in servers, at their defaults:
+--     --   zls           zig      `zls`
+--     --   basedpyright  python   `basedpyright-langserver --stdio`
+--     --   ruff          python   `ruff server`
+--     --
+--     -- Two servers on Python is deliberate, and is the standard setup:
+--     -- basedpyright for types, hover and navigation, ruff for lint and
+--     -- formatting diagnostics. Diagnostics are kept per server, so
+--     -- neither erases the other's, and each message is shown with the
+--     -- name of the tool that reported it.
+--     lsp = {
+--         -- Master switch. false stops every server from starting.
+--         enabled = true,
+--
+--         -- Merged with the built-ins **by name**: an entry naming one of
+--         -- them overrides just the fields it mentions, and a new name
+--         -- adds a server (which then needs both `cmd` and `languages`).
+--         servers = {
+--             -- A different binary, or one not on $PATH:
+--             -- { name = "zls", cmd = { "/opt/zls/zls" } },
+--
+--             -- Turn a built-in off without restating the others:
+--             -- { name = "ruff", enabled = false },
+--
+--             -- Add one. `languages` are grammar names -- the same ones
+--             -- `languages` above uses -- not file extensions.
+--             -- { name = "ty", languages = { "python" }, cmd = { "ty", "server" } },
+--
+--             -- `settings` is passed through verbatim as that server's
+--             -- `initializationOptions`, so its shape is whatever the
+--             -- server documents:
+--             -- {
+--             --     name = "basedpyright",
+--             --     settings = {
+--             --         python = { analysis = { typeCheckingMode = "standard" } },
+--             --     },
+--             -- },
+--         },
+--     },
+--
 --     ---- Theme --------------------------------------------------------
 --
 --     -- Capture-group colours, "#rrggbb". Unset groups keep zoe's

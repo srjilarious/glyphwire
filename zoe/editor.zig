@@ -128,6 +128,24 @@ pub const Outcome = union(enum) {
     /// plain `:bd` on a modified buffer never gets this far (E37, the
     /// same guard `:q` uses).
     buffer_close: struct { force: bool },
+    /// `K` -- ask a language server what is under the cursor. The editor
+    /// has no idea; `zoe/ui.zig` owns the servers and puts the answer in a
+    /// popup when it arrives. Named for what was asked, not for what will
+    /// happen, because the request may well come back empty.
+    lsp_hover,
+    /// `gd` -- jump to the definition of whatever is under the cursor.
+    /// Same division of labour as `lsp_hover`: the request and the jump
+    /// (and pushing the jumplist entry to come back to) are the host's.
+    lsp_definition,
+    /// `]d` / `[d` -- move the cursor to the next / previous diagnostic in
+    /// this buffer. The diagnostics live in `zoe/diag.zig`, which the
+    /// editor core can't see, so it only names the direction -- exactly
+    /// the arrangement `buffer_step` already has with the buffer list.
+    diag_step: struct { forward: bool },
+    /// `:lsp [restart]` -- report (or restart) the language servers.
+    lsp_status: ?[]const u8,
+    /// `:diag` -- list this buffer's diagnostics.
+    diag_list,
 };
 
 pub const Editor = struct {
@@ -553,6 +571,14 @@ pub const Editor = struct {
         self.pending_replace = null;
     }
 
+    /// Puts the cursor at a byte offset, clamped into the buffer and onto a
+    /// character boundary in normal mode -- for a jump decided outside the
+    /// editor core: a language server's `gd` target, a diagnostic's position,
+    /// a jumplist entry (see `zoe/ui.zig`).
+    pub fn setCursor(self: *Editor, offset: usize) void {
+        self.moveTo(motion.clampNormal(&self.buf, @min(offset, self.buf.len())), true);
+    }
+
     /// Moves the cursor, refreshing the sticky column for a horizontal
     /// move and preserving it for a vertical one.
     fn moveTo(self: *Editor, offset: usize, horizontal: bool) void {
@@ -754,13 +780,32 @@ pub const Editor = struct {
                 self.mode = .command;
                 self.cmdline.clear();
             },
+
+            // `K` -- what is this? Nothing the editor core can answer; see
+            // `Outcome.lsp_hover`.
+            'K' => return .lsp_hover,
+
+            // `]` and `[` are prefixes, like `g`. Only `]d` / `[d` exist so
+            // far; vim's other bracket pairs (`]]`, `]}`, `]c`) would land
+            // here too.
+            ']', '[' => self.prefix = c,
+
             else => {},
         }
         return .none;
     }
 
     fn prefixedCommand(self: *Editor, prefix: u8, c: u8) !Outcome {
-        if (prefix != 'g') return .none;
+        switch (prefix) {
+            'g' => {},
+            ']', '[' => {
+                // `]d` / `[d` -- step through this buffer's diagnostics.
+                _ = self.takeCount();
+                if (c != 'd') return .none;
+                return Outcome{ .diag_step = .{ .forward = prefix == ']' } };
+            },
+            else => return .none,
+        }
         const n = self.takeCount();
         switch (c) {
             // `gg`: the first line, or the count'th if one was typed.
@@ -797,6 +842,8 @@ pub const Editor = struct {
                 self.select_anchor = motion.clampNormal(&self.buf, last.anchor);
                 self.moveTo(motion.clampNormal(&self.buf, last.cursor), true);
             },
+            // `gd` -- go to the definition. See `Outcome.lsp_definition`.
+            'd' => return .lsp_definition,
             else => self.resetPending(),
         }
         return .none;
@@ -1837,6 +1884,11 @@ pub const Editor = struct {
             }
             return .{ .buffer_close = .{ .force = false } };
         }
+        // `:lsp` reports which language servers are attached; `:lsp restart`
+        // brings back one that crashed. The editor core knows about neither,
+        // so both are just relayed (see `Outcome.lsp_status`).
+        if (eq(u8, name, "lsp")) return .{ .lsp_status = arg_opt };
+        if (eq(u8, name, "diag") or eq(u8, name, "diagnostics")) return .diag_list;
         if (eq(u8, name, "wq") or eq(u8, name, "x")) return .{ .write_quit = arg_opt };
         if (eq(u8, name, "q!") or eq(u8, name, "quit!")) return .{ .quit = .{ .force = true } };
         if (eq(u8, name, "wq!") or eq(u8, name, "x!")) return .{ .write_quit = arg_opt };

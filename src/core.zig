@@ -3834,6 +3834,43 @@ pub const Layer = struct {
         self.render_gen +%= 1;
     }
 
+    /// Repaints only the *underline* of the cells in
+    /// `[row, row+rows) x [col, col+cols)` (clamped like `fillBg`), leaving
+    /// everything else on them alone -- `set_underline`, and `fillBg`'s
+    /// argument applies to it exactly: a mark applied over text that is
+    /// already drawn, by a caller that does not know and should not have to
+    /// recompute the colours underneath it.
+    ///
+    /// This is what makes a diagnostic squiggle work at all in a syntax-
+    /// highlighted editor. A row is painted as coloured runs, then the search
+    /// highlight and the selection are *overpainted* on top of it, and each
+    /// of those is a full cell write that resets the underline. Threading a
+    /// diagnostic through all three (and through every future overpaint)
+    /// would mean every one of them knowing about diagnostics; one call
+    /// after them means none of them do.
+    ///
+    /// A `.none` style is how a mark is taken off again.
+    pub fn fillUnderline(
+        self: *Layer,
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+        ul: UnderlineStyle,
+    ) void {
+        if (row >= self.height or col >= self.width or rows == 0 or cols == 0) return;
+
+        const row_end = @min(row + rows, self.height);
+        const col_end = @min(col + cols, self.width);
+
+        var r = row;
+        while (r < row_end) : (r += 1) {
+            for (self.liveRow(r)[col..col_end]) |*cell_ptr| cell_ptr.style.underline = ul;
+        }
+        self.revision += 1;
+        self.render_gen +%= 1;
+    }
+
     pub fn getProperty(self: *const Layer, name: PropertyName) PropertyValue {
         return switch (name) {
             .cursor => .{ .cursor = self.cursor },
