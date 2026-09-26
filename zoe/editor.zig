@@ -27,6 +27,7 @@ const glyphwire = @import("glyphwire");
 const buffer = @import("buffer.zig");
 const motion = @import("motion.zig");
 const display = @import("display.zig");
+const search = @import("search.zig");
 
 const Buffer = buffer.Buffer;
 const Pos = buffer.Pos;
@@ -42,7 +43,12 @@ const Pos = buffer.Pos;
 /// mode is deliberately left out -- it doubles every yank/cut/paste case
 /// for a rare need, the same reason the wire's selection is linear-only
 /// (see decisions.md's Selection & clipboard section).
-pub const Mode = enum { normal, insert, command, visual, visual_line };
+/// `search` is the `/` and `?` prompt. It is a separate mode from
+/// `command` rather than a flag on it because the two do opposite things
+/// with what you type: a `:` line is inert until Enter, while a `/` line
+/// moves the cursor on every keystroke (vim's `incsearch`) and Escape has
+/// to put it back.
+pub const Mode = enum { normal, insert, command, visual, visual_line, search };
 
 /// Ceiling on `tab_width`, so an expanding Tab can build its run of
 /// spaces on the stack and a nonsense `:set tabwidth=9999` can't make one
@@ -56,6 +62,17 @@ pub const max_tab_width: usize = 16;
 /// own line still absolute. Defaults to `absolute`; `zoe.conf.lua`'s
 /// `line_numbers` overrides it after `init`, the way `page_lines` does.
 pub const LineNumbers = enum { off, absolute, relative };
+
+/// Which way a search runs. `/` and `*` are forward, `?` and `#` back;
+/// `n` repeats the stored direction and `N` inverts it.
+pub const SearchDir = enum {
+    forward,
+    backward,
+
+    pub fn flipped(self: SearchDir) SearchDir {
+        return if (self == .forward) .backward else .forward;
+    }
+};
 
 /// Modifier state accompanying a `feedKey` call -- glyphwire's own, so
 /// it can be handed straight to the shared `LineEdit` the `:` line is.
@@ -194,6 +211,45 @@ pub const Editor = struct {
     /// The file this buffer came from, owned. Null for a scratch buffer.
     path: ?[]u8 = null,
 
+    /// The pattern of the most recent search, owned. Kept after the
+    /// prompt closes so `n` / `N` have something to repeat, and cleared
+    /// by nothing -- vim's search register survives everything short of
+    /// a new search.
+    search_pat: std.ArrayList(u8) = .empty,
+    /// Which way the last `/` / `?` (or `*` / `#`) went. `n` repeats it,
+    /// `N` reverses it.
+    search_dir: SearchDir = .forward,
+    /// The last search asked for whole-word matches -- set by `*` / `#`,
+    /// cleared by a typed `/` or `?`. See `search.zig`'s `whole_word`.
+    search_word: bool = false,
+    /// Whether matches are highlighted. On from the moment a search runs,
+    /// off again at `:noh`. vim's `hlsearch`, except it is a state rather
+    /// than an option because zoe has no `:set hlsearch` to turn off.
+    search_hl: bool = false,
+    /// Where the cursor was when the `/` prompt opened, so Escape can put
+    /// it back after incremental search has been dragging it around.
+    search_origin: usize = 0,
+    /// The mode to return to when the prompt closes. `/` from visual mode
+    /// keeps the selection and extends it to the match, which is why this
+    /// is a mode rather than a bool.
+    search_return: Mode = .normal,
+    /// Where the current match starts, when there is one. `ui.zig` paints
+    /// it in a stronger colour than the other matches, the way vim does.
+    search_match: ?usize = null,
+    /// The pattern on the open `/` line matches nothing, so the prompt
+    /// draws in the error colour while you keep typing.
+    search_failed: bool = false,
+
+    /// `r` was typed and is waiting for the character to replace with.
+    /// The count came with it (`3rx`), so it is stashed here too.
+    pending_replace: ?usize = null,
+
+    /// The command just run is only half of one edit and the host is
+    /// about to finish it (a visual-mode `p`: the selection has gone, the
+    /// clipboard text has not arrived yet). Keeps the undo group open
+    /// across the round trip so `u` puts both halves back at once.
+    undo_join_next: bool = false,
+
     pub fn init(alloc: std.mem.Allocator) !Editor {
         return .{ .alloc = alloc, .buf = try Buffer.init(alloc) };
     }
@@ -212,6 +268,7 @@ pub const Editor = struct {
         self.cmd_arg.deinit(self.alloc);
         self.status.deinit(self.alloc);
         self.yank.deinit(self.alloc);
+        self.search_pat.deinit(self.alloc);
         if (self.path) |p| self.alloc.free(p);
         self.* = undefined;
     }
@@ -252,6 +309,12 @@ pub const Editor = struct {
         self.sticky_col = 0;
         self.mode = .normal;
         self.resetPending();
+        // The pattern survives -- it is session state, like vim's search
+        // register -- but everything that points *into* the old text does
+        // not, and neither does the undo history for a file that is gone.
+        self.search_match = null;
+        self.search_hl = false;
+        self.search_origin = 0;
     }
 
     /// Replaces `path` with a copy of `new_path` -- what `:w <name>` does
@@ -270,6 +333,7 @@ pub const Editor = struct {
     /// a time, since each is its own command.
     pub fn feedText(self: *Editor, text: []const u8) !Outcome {
         self.yank_pending = false;
+        defer self.settleUndo();
         var rest = text;
         while (rest.len > 0) {
             switch (self.mode) {
@@ -279,6 +343,13 @@ pub const Editor = struct {
                 },
                 .command => {
                     _ = try self.cmdline.insert(self.alloc, rest);
+                    return self.takeYankPending();
+                },
+                // The `/` line moves the cursor on every keystroke, so
+                // the whole chunk goes in and the search is re-run once.
+                .search => {
+                    _ = try self.cmdline.insert(self.alloc, rest);
+                    self.incrementalSearch();
                     return self.takeYankPending();
                 },
                 .normal, .visual, .visual_line => {
@@ -324,6 +395,7 @@ pub const Editor = struct {
     /// everything printable arrives through `feedText`.
     pub fn feedKey(self: *Editor, key: []const u8, mods: Mods) !Outcome {
         self.yank_pending = false;
+        defer self.settleUndo();
         const eq = std.mem.eql;
         if (eq(u8, key, "escape")) {
             self.escape();
@@ -339,6 +411,9 @@ pub const Editor = struct {
                 // keys, all move by `page_lines`. The Ctrl forms are
                 // normal-mode only, leaving insert-mode Ctrl-U/D free
                 // for their vim meanings if zoe grows them later.
+                // Ctrl+R is redo -- the one vim chord with no printable
+                // character to carry it, so it has to be caught here.
+                if (mods.ctrl and eq(u8, key, "r")) return self.redo();
                 if (eq(u8, key, "page_down") or (mods.ctrl and eq(u8, key, "d"))) {
                     self.pageMove(.down, false);
                     return .none;
@@ -409,7 +484,38 @@ pub const Editor = struct {
                     .cancel => return .none,
                 }
             },
+            .search => {
+                // Backspacing the `/` away leaves the prompt, same rule
+                // the `:` line has -- and the cursor goes back where it
+                // started, since incremental search has been moving it.
+                if (eq(u8, key, "backspace") and self.cmdline.isEmpty()) {
+                    self.leaveSearch(.restore);
+                    return .none;
+                }
+                switch (self.cmdline.handleKey(key, mods)) {
+                    .submit => {
+                        try self.commitSearch();
+                        return .none;
+                    },
+                    // Any edit re-runs the search from the origin: the
+                    // `incsearch` preview must not walk forward one match
+                    // per keystroke.
+                    .edited => {
+                        self.incrementalSearch();
+                        return .none;
+                    },
+                    .moved, .ignored, .cancel => return .none,
+                }
+            },
         }
+    }
+
+    /// Closes the open undo group unless the command in progress means to
+    /// keep collecting into it: an insert-mode session is one `u`, and so
+    /// is the delete-then-paste pair a visual-mode `p` turns into.
+    fn settleUndo(self: *Editor) void {
+        if (self.mode == .insert or self.undo_join_next) return;
+        self.buf.closeUndoGroup();
     }
 
     /// Escape: leave insert or command mode. In insert mode the cursor
@@ -427,6 +533,7 @@ pub const Editor = struct {
                 self.mode = .normal;
                 self.cmdline.clear();
             },
+            .search => self.leaveSearch(.restore),
             .visual, .visual_line => self.exitVisual(),
         }
     }
@@ -436,6 +543,7 @@ pub const Editor = struct {
         self.operator = null;
         self.operator_count = 0;
         self.prefix = null;
+        self.pending_replace = null;
     }
 
     /// Moves the cursor, refreshing the sticky column for a horizontal
@@ -473,6 +581,21 @@ pub const Editor = struct {
     // ── Normal mode ─────────────────────────────────────────────────────
 
     fn normalChar(self: *Editor, s: []const u8) !Outcome {
+        // Every normal-mode command is its own undo step, so each one
+        // opens a group. An empty group (a motion, a count digit) is
+        // thrown away when it closes, so this costs nothing but the call.
+        self.buf.undoCheckpoint(self.cursor);
+        self.undo_join_next = false;
+
+        // `r` swallows the very next character, whatever it is -- a
+        // digit, an operator, or something outside ASCII. Checked before
+        // the single-byte guard below for exactly that last reason.
+        if (self.pending_replace) |n| {
+            self.pending_replace = null;
+            try self.replaceChar(s, n);
+            return .none;
+        }
+
         // Nothing multi-byte is a command; it can only be a stray
         // keystroke, so drop it and reset rather than half-applying an
         // operator.
@@ -592,9 +715,33 @@ pub const Editor = struct {
                 self.operator = 'y';
                 self.operator_count = n;
             },
+            // `r{char}` -- the character comes on the next input, so all
+            // this does is arm it.
+            'r' => self.pending_replace = n,
+            'J' => try self.joinLines(n),
+            '~' => try self.toggleCase(n),
+            // `>`/`<` are operators like `d`/`y`; `>>` is the doubled
+            // form, resolved in `operatorMotion`.
+            '>', '<' => {
+                self.operator = c;
+                self.operator_count = n;
+            },
+
+            // Undo and redo. `u` is vim's; the redo chord Ctrl+R has no
+            // character, so it is caught in `feedKey`.
+            'u' => return self.undo(n),
+
             // Paste. The editor can't read the clipboard itself, so the
             // host fetches it and calls `putText`.
             'p', 'P' => return Outcome{ .paste = .{ .after = c == 'p' } },
+
+            // Search.
+            '/' => self.startSearch(.forward),
+            '?' => self.startSearch(.backward),
+            'n' => self.repeatSearch(self.search_dir, n),
+            'N' => self.repeatSearch(self.search_dir.flipped(), n),
+            '*' => try self.searchWord(.forward, n),
+            '#' => try self.searchWord(.backward, n),
 
             ':' => {
                 self.mode = .command;
@@ -612,13 +759,23 @@ pub const Editor = struct {
             // `gg`: the first line, or the count'th if one was typed.
             'g' => {
                 if (self.operator) |op| {
-                    // `dgg` / `ygg` -- linewise from the target line to
-                    // the cursor's.
+                    // `dgg` / `ygg` / `>gg` -- linewise from the target
+                    // line to the cursor's.
                     self.operator = null;
                     self.operator_count = 0;
                     const first = n - 1;
                     const last = self.buf.lineAt(self.cursor);
-                    if (op == 'd') try self.deleteLines(first, last) else if (op == 'y') try self.yankLines(first, last) else return .none;
+                    switch (op) {
+                        'd' => try self.deleteLines(first, last),
+                        'y' => try self.yankLines(first, last),
+                        // No yank and no `yank_pending` -- a shift moves
+                        // text, it doesn't take a copy of it.
+                        '>', '<' => {
+                            try self.shiftLines(first, last, op == '>');
+                            return .none;
+                        },
+                        else => return .none,
+                    }
                     self.yank_pending = true;
                     return .none;
                 }
@@ -648,6 +805,22 @@ pub const Editor = struct {
         }
         self.operator = null;
         self.operator_count = 0;
+
+        // `>` / `<` are always linewise, so they take the vertical
+        // motions and the doubled form and nothing else.
+        if (op == '>' or op == '<') {
+            const line = self.buf.lineAt(self.cursor);
+            const right = op == '>';
+            switch (c) {
+                '>', '<' => if (c == op) try self.shiftLines(line, line + n - 1, right),
+                'j' => try self.shiftLines(line, line + n, right),
+                'k' => try self.shiftLines(line -| n, line, right),
+                'G' => try self.shiftLines(line, self.buf.lineCount() - 1, right),
+                else => {},
+            }
+            return .none;
+        }
+
         if (op != 'd' and op != 'y') return .none;
         const del = op == 'd';
 
@@ -839,6 +1012,171 @@ pub const Editor = struct {
         self.moveTo(motion.gotoLine(&self.buf, landed), true);
     }
 
+    /// `r{char}`: overwrite `count` characters with `count` copies of
+    /// `s`. All or nothing, like vim -- `5rx` on a three-character line
+    /// does nothing rather than replacing what fits.
+    ///
+    /// `r` followed by a *named* key other than Escape leaves the replace
+    /// armed rather than cancelling it; only a character (or Escape,
+    /// through `resetPending`) resolves it.
+    fn replaceChar(self: *Editor, s: []const u8, count: usize) !void {
+        const line = self.buf.lineAt(self.cursor);
+        const limit = self.buf.lineEnd(line);
+        var end = self.cursor;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            if (end >= limit) return;
+            end = motion.nextCodepoint(&self.buf, end);
+        }
+
+        var rep: std.ArrayList(u8) = .empty;
+        defer rep.deinit(self.alloc);
+        var k: usize = 0;
+        while (k < count) : (k += 1) try rep.appendSlice(self.alloc, s);
+
+        try self.buf.delete(self.cursor, end - self.cursor);
+        try self.buf.insert(self.cursor, rep.items);
+        // On the last replaced character, which is where vim leaves it.
+        self.moveTo(motion.clampNormal(&self.buf, self.cursor + rep.items.len - s.len), true);
+    }
+
+    /// `J`: pull the next line onto this one, `count - 1` times (a bare
+    /// `J` joins one line, `3J` joins three lines into one).
+    ///
+    /// The next line's indent goes with the newline and a single space
+    /// takes their place -- unless this line is empty, already ends in
+    /// whitespace, or the next line starts with `)`, which are vim's
+    /// three exceptions. The cursor lands on the join.
+    fn joinLines(self: *Editor, count: usize) !void {
+        const joins = if (count > 1) count - 1 else 1;
+        var i: usize = 0;
+        while (i < joins) : (i += 1) {
+            const line = self.buf.lineAt(self.cursor);
+            if (line + 1 >= self.buf.lineCount()) break;
+
+            const end = self.buf.lineEnd(line); // the newline itself
+            const next_end = self.buf.lineEnd(line + 1);
+            var cut = self.buf.lineStart(line + 1);
+            while (cut < next_end and isBlank(self.buf.byteAt(cut))) cut += 1;
+
+            const here_empty = end == self.buf.lineStart(line);
+            const ends_blank = !here_empty and isBlank(self.buf.byteAt(end - 1));
+            const next_empty = cut >= next_end;
+            const next_closes = !next_empty and self.buf.byteAt(cut) == ')';
+
+            try self.buf.delete(end, cut - end);
+            if (!(here_empty or ends_blank or next_empty or next_closes)) {
+                try self.buf.insert(end, " ");
+            }
+            self.moveTo(motion.clampNormal(&self.buf, end), true);
+        }
+    }
+
+    /// `~`: flip the case of `count` characters and step past them.
+    ///
+    /// ASCII only. Flipping case beyond ASCII needs a Unicode case table,
+    /// and a byte-wise flip of a UTF-8 sequence would corrupt it, so
+    /// anything multi-byte is stepped over untouched.
+    fn toggleCase(self: *Editor, count: usize) !void {
+        const line = self.buf.lineAt(self.cursor);
+        const limit = self.buf.lineEnd(line);
+        var at = self.cursor;
+        var i: usize = 0;
+        while (i < count and at < limit) : (i += 1) {
+            const b = self.buf.byteAt(at);
+            const next = motion.nextCodepoint(&self.buf, at);
+            if (next == at + 1 and std.ascii.isAlphabetic(b)) {
+                const flipped: u8 = if (std.ascii.isLower(b))
+                    std.ascii.toUpper(b)
+                else
+                    std.ascii.toLower(b);
+                try self.buf.delete(at, 1);
+                try self.buf.insert(at, &[_]u8{flipped});
+            }
+            at = next;
+        }
+        self.moveTo(motion.clampNormal(&self.buf, at), true);
+    }
+
+    /// `>>` / `<<` and their operator forms: shift lines `[first, last]`
+    /// by one `tab_width`. vim's `shiftwidth` is a separate option; zoe
+    /// has one indent size, so the Tab key and `>>` agree by
+    /// construction.
+    fn shiftLines(self: *Editor, first: usize, last: usize, right: bool) !void {
+        const lc = self.buf.lineCount();
+        const f = @min(first, lc - 1);
+        const l = @min(@max(first, last), lc - 1);
+
+        // Bottom-up: indenting a line moves every line after it, so a
+        // top-down walk would be reading stale offsets by the second one.
+        var line = l + 1;
+        while (line > f) {
+            line -= 1;
+            if (right) try self.indentLine(line) else try self.dedentLine(line);
+        }
+        self.moveTo(motion.firstNonBlank(&self.buf, self.buf.lineStart(f)), true);
+    }
+
+    fn indentLine(self: *Editor, line: usize) !void {
+        // An empty line stays empty -- vim doesn't leave trailing
+        // whitespace behind on one.
+        if (self.buf.lineLen(line) == 0) return;
+        const start = self.buf.lineStart(line);
+        if (!self.expand_tab) return self.buf.insert(start, "\t");
+        const spaces: [max_tab_width]u8 = @splat(' ');
+        try self.buf.insert(start, spaces[0..self.tab_width]);
+    }
+
+    fn dedentLine(self: *Editor, line: usize) !void {
+        const start = self.buf.lineStart(line);
+        const end = self.buf.lineEnd(line);
+        // Up to one shift width of leading whitespace, measured in
+        // display columns so a single leading tab comes off in one go
+        // however wide it renders.
+        var at = start;
+        var cols: usize = 0;
+        while (at < end and cols < self.tab_width) : (at += 1) {
+            const b = self.buf.byteAt(at);
+            if (b == ' ') {
+                cols += 1;
+            } else if (b == '\t') {
+                cols += display.tabStop(cols, self.tab_width);
+            } else break;
+        }
+        if (at > start) try self.buf.delete(start, at - start);
+    }
+
+    // ── Undo ────────────────────────────────────────────────────────────
+
+    /// `u`. The steps themselves are `buffer.zig`'s; this walks `count`
+    /// of them and puts the cursor where each one says.
+    fn undo(self: *Editor, count: usize) !Outcome {
+        var did = false;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const at = (try self.buf.undo()) orelse break;
+            self.moveTo(motion.clampNormal(&self.buf, at), true);
+            did = true;
+        }
+        if (!did) self.setStatus("Already at oldest change", .{});
+        return .none;
+    }
+
+    /// Ctrl+R, the counterpart to `u`. Takes the pending count the same
+    /// way, since it arrives through `feedKey` with one possibly typed.
+    fn redo(self: *Editor) !Outcome {
+        const count = self.takeCount();
+        var did = false;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const at = (try self.buf.redo()) orelse break;
+            self.moveTo(motion.clampNormal(&self.buf, at), true);
+            did = true;
+        }
+        if (!did) self.setStatus("Already at newest change", .{});
+        return .none;
+    }
+
     const OpenWhere = enum { above, below };
 
     /// `o` / `O`: a new line and insert mode on it.
@@ -873,7 +1211,11 @@ pub const Editor = struct {
         const a = self.select_anchor orelse return null;
         const lo = @min(a, self.cursor);
         const hi = @max(a, self.cursor);
-        switch (self.mode) {
+        // A `/` started from visual mode keeps the selection and extends
+        // it to the match as you type, so the prompt reports the mode it
+        // will return to rather than `.search`.
+        const m = if (self.mode == .search) self.search_return else self.mode;
+        switch (m) {
             .visual => return .{
                 .lo = @min(lo, self.buf.len()),
                 .hi = motion.nextCodepoint(&self.buf, hi),
@@ -926,6 +1268,9 @@ pub const Editor = struct {
     /// normal mode). Motions move the cursor end; `y` / `d` / `x` / `c` /
     /// `p` act on the selection and leave visual mode.
     fn visualChar(self: *Editor, s: []const u8) !Outcome {
+        self.buf.undoCheckpoint(self.cursor);
+        self.undo_join_next = false;
+
         if (s.len != 1) {
             self.resetPending();
             return .none;
@@ -969,6 +1314,28 @@ pub const Editor = struct {
             'y' => return self.visualOperate(.yank),
             'd', 'x' => return self.visualOperate(.delete),
             'c', 's' => return self.visualOperate(.change),
+            // Shift every line the selection touches, then leave visual
+            // mode. vim's `3>` shifts three times; zoe's `count` here is
+            // the motion count it already consumed, so one shift it is.
+            '>', '<' => {
+                const span = self.selectionSpan() orelse {
+                    self.exitVisual();
+                    return .none;
+                };
+                const first = self.buf.lineAt(span.lo);
+                const last = self.buf.lineAt(if (span.hi > span.lo) span.hi - 1 else span.hi);
+                try self.shiftLines(first, last, c == '>');
+                self.exitVisual();
+                return .none;
+            },
+            // Search from a selection extends it: the anchor stays put
+            // and the match becomes the moving end.
+            '/' => self.startSearch(.forward),
+            '?' => self.startSearch(.backward),
+            'n' => self.repeatSearch(self.search_dir, n),
+            'N' => self.repeatSearch(self.search_dir.flipped(), n),
+            '*' => try self.searchWord(.forward, n),
+            '#' => try self.searchWord(.backward, n),
             // Replace the selection with the clipboard: drop the selected
             // text (without touching the clipboard) and let the host
             // splice its contents in at the gap.
@@ -979,6 +1346,10 @@ pub const Editor = struct {
                 };
                 try self.removeSpan(span);
                 self.exitVisual();
+                // The host fetches the clipboard and calls `putText`;
+                // hold the undo group open across that round trip so the
+                // replacement is one step.
+                self.undo_join_next = true;
                 return Outcome{ .paste = .{ .after = false } };
             },
             // `:` from visual mode just enters the command line (no
@@ -1038,7 +1409,13 @@ pub const Editor = struct {
     /// in a `paste` notification (Ctrl+Shift+V over a selection). A no-op
     /// outside visual mode.
     pub fn dropSelection(self: *Editor) !void {
-        if (self.selectionSpan()) |span| try self.removeSpan(span);
+        if (self.selectionSpan()) |span| {
+            self.buf.undoCheckpoint(self.cursor);
+            try self.removeSpan(span);
+            // Its only caller pastes over the gap next, so the group
+            // stays open and the pair is one `u`. `putText` closes it.
+            self.undo_join_next = true;
+        }
         self.exitVisual();
     }
 
@@ -1050,6 +1427,18 @@ pub const Editor = struct {
     /// once it has fetched the clipboard for an `Outcome.paste`.
     pub fn putText(self: *Editor, text: []const u8, after: bool) !void {
         if (text.len == 0) return;
+        // A visual-mode `p` already removed the selection and asked for
+        // its group to be held open (`undo_join_next`), so the splice
+        // joins it and one `u` puts the original text back. Every other
+        // paste -- `p` from normal mode, the Ctrl+Shift+P chord, a
+        // bracketed paste -- is a step of its own.
+        if (self.undo_join_next) {
+            self.undo_join_next = false;
+        } else {
+            self.buf.undoCheckpoint(self.cursor);
+        }
+        defer self.buf.closeUndoGroup();
+
         const linewise = text[text.len - 1] == '\n';
         if (linewise) {
             const line = self.buf.lineAt(self.cursor);
@@ -1087,6 +1476,11 @@ pub const Editor = struct {
     /// Ctrl+Shift+X: like `clipboardCopy`, but also remove what it
     /// copied -- the visual selection, or the current line.
     pub fn clipboardCut(self: *Editor) !Outcome {
+        // Called straight from `ui.zig` (the Ctrl+Shift+X chord), so it
+        // opens and closes its own undo step rather than riding one a
+        // `feed*` call set up.
+        self.buf.undoCheckpoint(self.cursor);
+        defer self.buf.closeUndoGroup();
         if (self.selectionSpan()) |span| {
             try self.stashYankRange(span.lo, span.hi, span.linewise);
             try self.removeSpan(span);
@@ -1096,6 +1490,209 @@ pub const Editor = struct {
             try self.deleteLines(line, line);
         }
         return self.clipboardYankOutcome();
+    }
+
+    // ── Search ──────────────────────────────────────────────────────────
+    //
+    // `/` and `?` open a prompt that is the same `LineEdit` the `:` line
+    // is, but every keystroke re-runs the search **from where the cursor
+    // was when the prompt opened** rather than from where the last
+    // preview landed. That is what makes `incsearch` stable: deleting a
+    // character has to walk the preview backwards, and it can only do
+    // that if the origin never moved.
+    //
+    // Matching itself is `search.zig` -- literal text, smartcase. The
+    // state here is vim's search register (`search_pat`), the direction
+    // `n` repeats, and whether the highlight is showing.
+
+    /// `/` and `?`. Remembers where the cursor was and which mode to
+    /// return to, so Escape can undo the whole preview.
+    fn startSearch(self: *Editor, dir: SearchDir) void {
+        self.search_return = self.mode;
+        self.search_origin = self.cursor;
+        self.search_dir = dir;
+        self.search_failed = false;
+        self.search_match = null;
+        self.mode = .search;
+        self.cmdline.clear();
+    }
+
+    const SearchExit = enum {
+        /// Escape: put the cursor back where the prompt found it.
+        restore,
+        /// Enter: the preview is the answer, leave the cursor on it.
+        keep,
+    };
+
+    fn leaveSearch(self: *Editor, how: SearchExit) void {
+        self.mode = self.search_return;
+        self.cmdline.clear();
+        self.search_failed = false;
+        if (how == .restore) {
+            self.moveTo(self.search_origin, true);
+            self.search_match = null;
+        }
+    }
+
+    /// Re-runs the search for whatever is on the prompt, moving the
+    /// cursor onto the match. Called on every edit of the `/` line.
+    fn incrementalSearch(self: *Editor) void {
+        const pat = self.cmdline.text();
+        if (pat.len == 0) {
+            self.moveTo(self.search_origin, true);
+            self.search_match = null;
+            self.search_failed = false;
+            return;
+        }
+        // A typed pattern is never whole-word -- that is `*`'s doing --
+        // so the options come from the pattern alone.
+        const opts = search.optsFor(pat, false);
+        const hit = self.findFrom(pat, opts, self.search_origin, self.search_dir, 1);
+        if (hit) |h| {
+            self.search_failed = false;
+            self.search_match = h.at;
+            self.moveTo(h.at, true);
+        } else {
+            self.search_failed = true;
+            self.search_match = null;
+            self.moveTo(self.search_origin, true);
+        }
+    }
+
+    /// Enter on the `/` line: adopt the pattern as the one `n` repeats,
+    /// turn the highlight on, and stay on the match. An empty line
+    /// repeats the previous pattern, the way a bare `/` does in vim.
+    fn commitSearch(self: *Editor) !void {
+        const typed = self.cmdline.text();
+        if (typed.len > 0) {
+            self.search_pat.clearRetainingCapacity();
+            try self.search_pat.appendSlice(self.alloc, typed);
+            self.search_word = false;
+        }
+        const dir = self.search_dir;
+        const origin = self.search_origin;
+        self.leaveSearch(.keep);
+
+        if (self.search_pat.items.len == 0) {
+            self.setStatus("E35: No previous regular expression", .{});
+            return;
+        }
+        self.search_hl = true;
+        // From the origin, not from the preview: the preview already sits
+        // on the first match, and searching on from it would skip one.
+        self.moveTo(origin, true);
+        self.jump(dir, 1);
+    }
+
+    /// `n` / `N`: the stored pattern again, `count` matches on.
+    fn repeatSearch(self: *Editor, dir: SearchDir, count: usize) void {
+        if (self.search_pat.items.len == 0) {
+            self.setStatus("E35: No previous regular expression", .{});
+            return;
+        }
+        self.search_hl = true;
+        self.jump(dir, count);
+    }
+
+    /// `*` / `#`: search for the word under the cursor, whole-word, from
+    /// here. vim leaves the cursor on the *next* such word, which is what
+    /// the jump below does since it never matches at the cursor itself.
+    fn searchWord(self: *Editor, dir: SearchDir, count: usize) !void {
+        const word = search.wordAt(&self.buf, self.cursor) orelse {
+            self.setStatus("E348: No string under cursor", .{});
+            return;
+        };
+        const text = try self.buf.read(self.alloc, word.lo, word.hi);
+        defer self.alloc.free(text);
+
+        self.search_pat.clearRetainingCapacity();
+        try self.search_pat.appendSlice(self.alloc, text);
+        self.search_word = true;
+        self.search_hl = true;
+        // From the start of the word, so `*` on the middle of one doesn't
+        // find the same occurrence it is standing on.
+        self.moveTo(word.lo, true);
+        self.jump(dir, count);
+    }
+
+    /// Moves to the `count`th match of the stored pattern in `dir`,
+    /// reporting a wrap or a miss the way vim does. Also records the
+    /// direction, so a later `n` repeats *this*.
+    fn jump(self: *Editor, dir: SearchDir, count: usize) void {
+        self.search_dir = dir;
+        const pat = self.search_pat.items;
+        const opts = self.searchOpts();
+        const hit = self.findFrom(pat, opts, self.cursor, dir, count) orelse {
+            self.search_match = null;
+            self.setStatus("E486: Pattern not found: {s}", .{pat});
+            return;
+        };
+        self.search_match = hit.at;
+        self.moveTo(hit.at, true);
+        if (hit.wrapped) {
+            // vim's own wording, and its own two messages -- `setStatus`
+            // wants a comptime format, so they can't be one expression.
+            if (dir == .forward)
+                self.setStatus("search hit BOTTOM, continuing at TOP", .{})
+            else
+                self.setStatus("search hit TOP, continuing at BOTTOM", .{});
+        }
+    }
+
+    /// `count` steps of `search.forward` / `search.backward` from `from`.
+    /// Wrapping is on, so only a pattern that appears nowhere misses.
+    fn findFrom(
+        self: *const Editor,
+        pat: []const u8,
+        opts: search.Opts,
+        from: usize,
+        dir: SearchDir,
+        count: usize,
+    ) ?search.Hit {
+        var at = from;
+        var wrapped = false;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const step = switch (dir) {
+                .forward => search.forward(&self.buf, pat, opts, at, true),
+                .backward => search.backward(&self.buf, pat, opts, at, true),
+            } orelse return null;
+            at = step.at;
+            wrapped = wrapped or step.wrapped;
+        }
+        return .{ .at = at, .wrapped = wrapped };
+    }
+
+    /// How the stored pattern is compared -- smartcase, plus whole-word
+    /// when `*` / `#` set it. `ui.zig` needs this to paint the same
+    /// matches the cursor jumps between.
+    pub fn searchOpts(self: *const Editor) search.Opts {
+        return search.optsFor(self.search_pat.items, self.search_word);
+    }
+
+    /// The pattern `ui.zig` should highlight, or null when there is
+    /// nothing to show: no search yet, or `:noh` since the last one.
+    /// While the prompt is open it is the half-typed line, so the
+    /// highlight grows as you type.
+    pub fn highlightPattern(self: *const Editor) ?[]const u8 {
+        if (self.mode == .search) {
+            const typed = self.cmdline.text();
+            return if (typed.len == 0) null else typed;
+        }
+        if (!self.search_hl or self.search_pat.items.len == 0) return null;
+        return self.search_pat.items;
+    }
+
+    /// `searchOpts` for whatever `highlightPattern` returned -- the
+    /// half-typed line is never whole-word.
+    pub fn highlightOpts(self: *const Editor) search.Opts {
+        if (self.mode == .search) return search.optsFor(self.cmdline.text(), false);
+        return self.searchOpts();
+    }
+
+    /// The character the `/` prompt is drawn with, for the status line.
+    pub fn searchPrompt(self: *const Editor) u8 {
+        return if (self.search_dir == .forward) '/' else '?';
     }
 
     // ── Command line ────────────────────────────────────────────────────
@@ -1129,6 +1726,14 @@ pub const Editor = struct {
         const arg_opt: ?[]const u8 = if (self.cmd_arg.items.len == 0) null else self.cmd_arg.items;
 
         const eq = std.mem.eql;
+        // `:noh` -- drop the search highlight, keeping the pattern so `n`
+        // still works. vim spells it `:nohlsearch`; both are here because
+        // nobody types the long one.
+        if (eq(u8, name, "noh") or eq(u8, name, "nohl") or eq(u8, name, "nohlsearch")) {
+            self.search_hl = false;
+            self.search_match = null;
+            return .none;
+        }
         if (eq(u8, name, "cd") or eq(u8, name, "chdir")) return .{ .chdir = arg_opt };
         if (eq(u8, name, "pwd")) return .pwd;
         if (eq(u8, name, "set")) {
@@ -1326,6 +1931,11 @@ fn parseFlag(val: []const u8) ?bool {
     for (yes) |v| if (std.ascii.eqlIgnoreCase(val, v)) return true;
     for (no) |v| if (std.ascii.eqlIgnoreCase(val, v)) return false;
     return null;
+}
+
+/// A space or a tab -- the whitespace `J` eats and `<<` gives back.
+fn isBlank(b: u8) bool {
+    return b == ' ' or b == '\t';
 }
 
 fn allDigits(s: []const u8) bool {
