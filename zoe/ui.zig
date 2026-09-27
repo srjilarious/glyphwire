@@ -1592,12 +1592,11 @@ pub const Ui = struct {
                 // the cursor along so it stays on screen (like vim's Ctrl-E /
                 // Ctrl-Y). `pushed_bar` is updated so `syncBufferScrollbar`
                 // doesn't immediately echo this straight back.
-                if (so.layer == self.buffer_layer) {
-                    // The hover is placed against the line it describes;
-                    // scrolled, it would be left pointing at another one.
-                    if (so.row != self.buf.top_line) _ = self.closeHover();
-                    self.scrollBufferTo(so.row, so.col);
-                }
+                //
+                // The hover stays up through a scroll, deliberately: reading
+                // the code around a definition with its docs still open is
+                // what the wheel is for here. Only a button press closes it.
+                if (so.layer == self.buffer_layer) self.scrollBufferTo(so.row, so.col);
                 // A shift+wheel or thumb drag over the tab strip. Only the
                 // column matters -- the strip is one row tall -- and the
                 // offset is recorded as already pushed so `syncTabScrollbar`
