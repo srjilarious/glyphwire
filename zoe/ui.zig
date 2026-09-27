@@ -205,9 +205,12 @@ const fg_hover = Color{ .r = 214, .g = 214, .b = 222, .a = 255 };
 /// signature reads as a unit apart from the prose under it.
 const bg_hover_code = Color{ .r = 26, .g = 26, .b = 32, .a = 255 };
 const fg_hover_rule = Color{ .r = 80, .g = 80, .b = 96, .a = 255 };
-/// The popup's frame. Brighter than the rule inside it, so the edge of the
-/// panel reads against an editor background of nearly the same shade.
+/// The colour of a `---` rule across the popup: the same shade as the
+/// `panel` nine-patch's border, which it joins on both sides.
 const fg_hover_border = Color{ .r = 104, .g = 112, .b = 140, .a = 255 };
+/// The popup's background and border: the nine-patch the finder's frame
+/// uses. `bg_hover` is the flat fallback for a host without it.
+const hover_panel_style = "panel";
 /// The drop shadow: black at partial alpha, so the code under it darkens
 /// rather than disappears. Offset one row down and two columns right --
 /// cells are about twice as tall as they are wide, so that is roughly the
@@ -703,6 +706,11 @@ pub const Ui = struct {
     /// distance, and nothing but a translucent background: the part that
     /// sticks out past the popup's bottom and right edges is the shadow.
     hover_shadow_layer: glyphwire.LayerHandle,
+    /// The hover layer's `hover_panel_style` nine-patch, covering the whole
+    /// layer; its border lands in the popup's one-cell frame, which is left
+    /// transparent. Null when the host has no such style: the layer then
+    /// paints `bg_hover` and the popup has no border.
+    hover_panel_patch: ?glyphwire.NinePatchHandle,
     hover_rect: Bounds = .{},
     hover_dirty: bool = false,
     /// The newest outstanding `hover` / `definition` request id. A reply
@@ -930,7 +938,11 @@ pub const Ui = struct {
         try client.setLayerBackground(hover_shadow_layer, bg_hover_shadow);
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
         try client.setLayerVisible(hover_layer, false);
-        try client.setLayerBackground(hover_layer, bg_hover);
+        const hover_panel_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(hover_layer, 0, 0, 1, hover_max_cols, hover_panel_style) catch |err| blk: {
+            std.log.warn("zoe: no '{s}' nine-patch for the hover popup ({t}); drawing it flat", .{ hover_panel_style, err });
+            break :blk null;
+        };
+        if (hover_panel_patch == null) try client.setLayerBackground(hover_layer, bg_hover);
         // The completion popup: one more float, placed under the word being
         // completed (`completionRect`).
         const completion_layer = try client.createLayer(complete_max_cols, 1, 0);
@@ -980,6 +992,7 @@ pub const Ui = struct {
             .finder_frame_patch = finder_frame_patch,
             .hover_layer = hover_layer,
             .hover_shadow_layer = hover_shadow_layer,
+            .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
             .diags = diag.Store.init(alloc),
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
@@ -4668,10 +4681,13 @@ pub const Ui = struct {
     /// is the `md/` renderer's job, and a bigger one than it looks, since it
     /// draws into a layer of its own.
     ///
-    /// Framed in rounded box-drawing lines, with a translucent drop shadow
-    /// on its own layer underneath (`hover_shadow_layer`), so the panel
-    /// stands off an editor background of nearly its own colour. A `---`
-    /// rule joins the frame on both sides.
+    /// The panel is the `hover_panel_style` nine-patch over the whole layer:
+    /// its rounded border sits in the outer ring of cells, which nothing
+    /// writes to, and prose rows are transparent so its fill shows. A
+    /// translucent drop shadow on its own layer underneath
+    /// (`hover_shadow_layer`) stands it off an editor background of nearly
+    /// its own colour. A `---` rule runs the full width, so it meets the
+    /// border on both sides.
     fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const h = if (self.hover) |*open| open else return self.hideHover(batch);
 
@@ -4693,26 +4709,16 @@ pub const Ui = struct {
         try batch.setLayerCellPosition(self.hover_layer, r.row, r.col);
         try batch.setLayerSize(self.hover_shadow_layer, r.cols, r.rows);
         try batch.setLayerCellPosition(self.hover_shadow_layer, r.row + hover_shadow_rows, r.col + hover_shadow_cols);
+        if (self.hover_panel_patch) |np| try batch.updateNinePatch(self.hover_layer, np, .{ .rows = r.rows, .cols = r.cols });
+        // A resize keeps whatever the old cells held, so the frame ring
+        // (which is otherwise never written) is blanked every time.
+        try batch.clearArea(.{ .layer = self.hover_layer });
 
-        // The horizontal run every frame row shares, `cols - 2` wide.
+        // A rule's run: `cols` wide, so it crosses the frame cells and
+        // meets the nine-patch's border at both edges.
         var hline: std.ArrayList(u8) = .empty;
         defer hline.deinit(self.alloc);
-        for (0..r.cols - 2) |_| try hline.appendSlice(self.alloc, "\u{2500}");
-
-        const edge: glyphwire.client.Client.TextOpts = .{
-            .layer = self.hover_layer,
-            .col = 0,
-            .fg = fg_hover_border,
-            .bg = bg_hover,
-            .max_cols = r.cols,
-            .selectable = false,
-        };
-        var top = edge;
-        top.row = 0;
-        try batch.writeSpans(&.{ .{ .text = "\u{256d}" }, .{ .text = hline.items }, .{ .text = "\u{256e}" } }, top);
-        var bottom = edge;
-        bottom.row = r.rows - 1;
-        try batch.writeSpans(&.{ .{ .text = "\u{2570}" }, .{ .text = hline.items }, .{ .text = "\u{256f}" } }, bottom);
+        for (0..r.cols) |_| try hline.appendSlice(self.alloc, "\u{2500}");
 
         var runs: std.ArrayList(glyphwire.client.Client.Span) = .empty;
         defer runs.deinit(self.alloc);
@@ -4724,13 +4730,19 @@ pub const Ui = struct {
             const kind: hover_mod.Kind = if (hr) |x| h.doc.lines[x.line].kind else .prose;
 
             if (kind == .rule) {
-                var rule = edge;
-                rule.row = row;
-                try batch.writeSpans(&.{ .{ .text = "\u{251c}" }, .{ .text = hline.items }, .{ .text = "\u{2524}" } }, rule);
+                try batch.writeTextOpts(hline.items, .{
+                    .layer = self.hover_layer,
+                    .row = row,
+                    .col = 0,
+                    .fg = fg_hover_border,
+                    .max_cols = r.cols,
+                    .selectable = false,
+                });
                 continue;
             }
 
-            const bg = if (kind == .code) bg_hover_code else bg_hover;
+            // Prose is transparent, so the panel is its background.
+            const bg: ?Color = if (kind == .code) bg_hover_code else null;
             runs.clearRetainingCapacity();
             // The inner margin, in the row's own background so a code band
             // runs from frame to frame.
@@ -4740,9 +4752,9 @@ pub const Ui = struct {
                 if (x.indent > 0) try runs.append(self.alloc, .{ .text = spaces[0..@min(x.indent, spaces.len)] });
                 try colorRuns(self.alloc, line.text, h.spans[x.line], x.start, x.end, fg_hover, &runs);
             }
-            // One padded write between the two sides of the frame: `pad`
-            // fills the rest, right margin included, so the panel reads as
-            // a solid block whatever the text length.
+            // One padded write inside the frame: `pad` fills the rest,
+            // right margin included, so a code band runs edge to edge
+            // whatever the text length.
             try batch.writeSpans(runs.items, .{
                 .layer = self.hover_layer,
                 .row = row,
@@ -4752,12 +4764,6 @@ pub const Ui = struct {
                 .max_cols = r.cols - 2,
                 .pad = true,
             });
-            var side = edge;
-            side.row = row;
-            side.max_cols = 1;
-            try batch.writeTextOpts("\u{2502}", side);
-            side.col = r.cols - 1;
-            try batch.writeTextOpts("\u{2502}", side);
         }
         try batch.setLayerVisible(self.hover_shadow_layer, true);
         try batch.setLayerVisible(self.hover_layer, true);
