@@ -201,6 +201,16 @@ const fg_hover = Color{ .r = 214, .g = 214, .b = 222, .a = 255 };
 /// signature reads as a unit apart from the prose under it.
 const bg_hover_code = Color{ .r = 26, .g = 26, .b = 32, .a = 255 };
 const fg_hover_rule = Color{ .r = 80, .g = 80, .b = 96, .a = 255 };
+/// The popup's frame. Brighter than the rule inside it, so the edge of the
+/// panel reads against an editor background of nearly the same shade.
+const fg_hover_border = Color{ .r = 104, .g = 112, .b = 140, .a = 255 };
+/// The drop shadow: black at partial alpha, so the code under it darkens
+/// rather than disappears. Offset one row down and two columns right --
+/// cells are about twice as tall as they are wide, so that is roughly the
+/// same distance on screen both ways.
+const bg_hover_shadow = Color{ .r = 0, .g = 0, .b = 0, .a = 110 };
+const hover_shadow_rows: usize = 1;
+const hover_shadow_cols: usize = 2;
 
 /// The completion popup. Narrower and shorter than the hover: it sits under
 /// the line being typed, and every row of it covers code.
@@ -677,6 +687,10 @@ pub const Ui = struct {
     /// against the cursor like the finder is against the pane.
     hover: ?Hover = null,
     hover_layer: glyphwire.LayerHandle,
+    /// Directly under `hover_layer`, the same size, offset by the shadow
+    /// distance, and nothing but a translucent background: the part that
+    /// sticks out past the popup's bottom and right edges is the shadow.
+    hover_shadow_layer: glyphwire.LayerHandle,
     hover_rect: Bounds = .{},
     hover_dirty: bool = false,
     /// The newest outstanding `hover` / `definition` request id. A reply
@@ -884,6 +898,11 @@ pub const Ui = struct {
         const finder_list_layer = try client.createLayer(finder_min_cols, 1, 0);
         // The hover popup, floating like the finder's layers and placed
         // against the cursor rather than the pane -- `hoverRect`.
+        // The shadow first: creation order is stacking order, so it lands
+        // above the buffer and below the popup it belongs to.
+        const hover_shadow_layer = try client.createLayer(hover_max_cols, 1, 0);
+        try client.setLayerVisible(hover_shadow_layer, false);
+        try client.setLayerBackground(hover_shadow_layer, bg_hover_shadow);
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
         try client.setLayerVisible(hover_layer, false);
         try client.setLayerBackground(hover_layer, bg_hover);
@@ -930,6 +949,7 @@ pub const Ui = struct {
             .finder_layer = finder_layer,
             .finder_list_layer = finder_list_layer,
             .hover_layer = hover_layer,
+            .hover_shadow_layer = hover_shadow_layer,
             .completion_layer = completion_layer,
             .diags = diag.Store.init(alloc),
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
@@ -4545,18 +4565,23 @@ pub const Ui = struct {
     /// Where the hover popup goes: under the cursor when there is room
     /// below it, above it otherwise -- so it never covers the identifier it
     /// is describing. Clamped inside the buffer pane like `finderRect`.
+    /// `want_rows` counts the frame's two rows.
     fn hoverRect(self: *const Ui, want_rows: usize) Bounds {
         const b = self.buffer_bounds;
         const cols = @min(hover_max_cols, b.cols);
-        const rows = @min(@min(want_rows, hover_max_rows), b.rows);
+        const rows = @min(@min(want_rows, hover_max_rows + 2), b.rows);
 
         const cursor = self.buf.ed.pos();
         const cursor_row = b.row + (cursor.line -| self.buf.top_line);
         // Below if it fits, else above; if neither fits (a two-row pane),
-        // below and clipped by the clamp.
+        // below and clipped by the clamp. Above leaves a row for the
+        // shadow when there is one to spare, so it doesn't darken the very
+        // line being described.
         const below = cursor_row + 1 + rows <= b.row + b.rows;
         const row = if (below)
             cursor_row + 1
+        else if (cursor_row >= b.row + rows + hover_shadow_rows)
+            cursor_row - rows - hover_shadow_rows
         else if (cursor_row >= b.row + rows)
             cursor_row - rows
         else
@@ -4577,72 +4602,105 @@ pub const Ui = struct {
     /// as a line across. Headings, lists and emphasis are not styled -- that
     /// is the `md/` renderer's job, and a bigger one than it looks, since it
     /// draws into a layer of its own.
+    ///
+    /// Framed in rounded box-drawing lines, with a translucent drop shadow
+    /// on its own layer underneath (`hover_shadow_layer`), so the panel
+    /// stands off an editor background of nearly its own colour. A `---`
+    /// rule joins the frame on both sides.
     fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
-        const h = if (self.hover) |*open| open else {
-            try batch.setLayerVisible(self.hover_layer, false);
-            return;
-        };
+        const h = if (self.hover) |*open| open else return self.hideHover(batch);
 
         // Wrapped to the popup's width first, so the height is the height of
-        // what will actually be drawn rather than of the source text.
-        const wrap_cols = @min(hover_max_cols, self.buffer_bounds.cols) -| 2;
-        if (wrap_cols == 0) {
-            try batch.setLayerVisible(self.hover_layer, false);
-            return;
-        }
+        // what will actually be drawn rather than of the source text. Four
+        // columns go to the frame and a one-cell margin inside it each side.
+        const wrap_cols = @min(hover_max_cols, self.buffer_bounds.cols) -| 4;
+        if (wrap_cols == 0) return self.hideHover(batch);
         var rows: std.ArrayList(HoverRow) = .empty;
         defer rows.deinit(self.alloc);
         try wrapHover(self.alloc, &h.doc, wrap_cols, &rows);
 
-        const r = self.hoverRect(rows.items.len);
+        const r = self.hoverRect(rows.items.len + 2);
         self.hover_rect = r;
-        if (r.cols == 0 or r.rows == 0) {
-            try batch.setLayerVisible(self.hover_layer, false);
-            return;
-        }
+        if (r.cols < 4 or r.rows < 3) return self.hideHover(batch);
         if (h.scroll >= rows.items.len) h.scroll = rows.items.len -| 1;
 
         try batch.setLayerSize(self.hover_layer, r.cols, r.rows);
         try batch.setLayerCellPosition(self.hover_layer, r.row, r.col);
+        try batch.setLayerSize(self.hover_shadow_layer, r.cols, r.rows);
+        try batch.setLayerCellPosition(self.hover_shadow_layer, r.row + hover_shadow_rows, r.col + hover_shadow_cols);
+
+        // The horizontal run every frame row shares, `cols - 2` wide.
+        var hline: std.ArrayList(u8) = .empty;
+        defer hline.deinit(self.alloc);
+        for (0..r.cols - 2) |_| try hline.appendSlice(self.alloc, "\u{2500}");
+
+        const edge: glyphwire.client.Client.TextOpts = .{
+            .layer = self.hover_layer,
+            .col = 0,
+            .fg = fg_hover_border,
+            .bg = bg_hover,
+            .max_cols = r.cols,
+            .selectable = false,
+        };
+        var top = edge;
+        top.row = 0;
+        try batch.writeSpans(&.{ .{ .text = "\u{256d}" }, .{ .text = hline.items }, .{ .text = "\u{256e}" } }, top);
+        var bottom = edge;
+        bottom.row = r.rows - 1;
+        try batch.writeSpans(&.{ .{ .text = "\u{2570}" }, .{ .text = hline.items }, .{ .text = "\u{256f}" } }, bottom);
 
         var runs: std.ArrayList(glyphwire.client.Client.Span) = .empty;
         defer runs.deinit(self.alloc);
-        var rule: std.ArrayList(u8) = .empty;
-        defer rule.deinit(self.alloc);
-        for (0..r.cols -| 2) |_| try rule.appendSlice(self.alloc, "\u{2500}");
-
-        for (0..r.rows) |row| {
-            const idx = h.scroll + row;
+        const inner_rows = r.rows - 2;
+        for (0..inner_rows) |i| {
+            const row = i + 1;
+            const idx = h.scroll + i;
             const hr: ?HoverRow = if (idx < rows.items.len) rows.items[idx] else null;
             const kind: hover_mod.Kind = if (hr) |x| h.doc.lines[x.line].kind else .prose;
-            const bg = if (kind == .code) bg_hover_code else bg_hover;
 
+            if (kind == .rule) {
+                var rule = edge;
+                rule.row = row;
+                try batch.writeSpans(&.{ .{ .text = "\u{251c}" }, .{ .text = hline.items }, .{ .text = "\u{2524}" } }, rule);
+                continue;
+            }
+
+            const bg = if (kind == .code) bg_hover_code else bg_hover;
             runs.clearRetainingCapacity();
+            // The inner margin, in the row's own background so a code band
+            // runs from frame to frame.
+            try runs.append(self.alloc, .{ .text = " " });
             if (hr) |x| {
                 const line = h.doc.lines[x.line];
-                switch (kind) {
-                    .rule => try runs.append(self.alloc, .{ .text = rule.items, .fg = fg_hover_rule }),
-                    .prose, .code => {
-                        if (x.indent > 0) try runs.append(self.alloc, .{ .text = spaces[0..@min(x.indent, spaces.len)] });
-                        try colorRuns(self.alloc, line.text, h.spans[x.line], x.start, x.end, fg_hover, &runs);
-                    },
-                }
+                if (x.indent > 0) try runs.append(self.alloc, .{ .text = spaces[0..@min(x.indent, spaces.len)] });
+                try colorRuns(self.alloc, line.text, h.spans[x.line], x.start, x.end, fg_hover, &runs);
             }
-            // One padded write per row: the leading space is the popup's
-            // margin and `pad` fills the rest, so the panel reads as a solid
-            // block whatever the text length.
+            // One padded write between the two sides of the frame: `pad`
+            // fills the rest, right margin included, so the panel reads as
+            // a solid block whatever the text length.
             try batch.writeSpans(runs.items, .{
                 .layer = self.hover_layer,
                 .row = row,
                 .col = 1,
                 .fg = fg_hover,
                 .bg = bg,
-                .max_cols = r.cols -| 1,
+                .max_cols = r.cols - 2,
                 .pad = true,
             });
-            try writeAt(batch, self.hover_layer, row, 0, " ", fg_hover, bg);
+            var side = edge;
+            side.row = row;
+            side.max_cols = 1;
+            try batch.writeTextOpts("\u{2502}", side);
+            side.col = r.cols - 1;
+            try batch.writeTextOpts("\u{2502}", side);
         }
+        try batch.setLayerVisible(self.hover_shadow_layer, true);
         try batch.setLayerVisible(self.hover_layer, true);
+    }
+
+    fn hideHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
+        try batch.setLayerVisible(self.hover_layer, false);
+        try batch.setLayerVisible(self.hover_shadow_layer, false);
     }
 
     /// Draws the completion popup, or hides it. Each row is the item's kind,
