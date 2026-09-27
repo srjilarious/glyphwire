@@ -239,6 +239,71 @@ pub fn lspStaleAndUnknownRepliesAreDroppedTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(try pool.nextEvent(), null);
 }
 
+/// Completes a detached server's handshake with a zls-shaped reply.
+fn handshake(alloc: std.mem.Allocator, pool: *lsp.Pool, server: *lsp.Server) !void {
+    const reply = try frame(alloc,
+        \\{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-8","hoverProvider":true,"definitionProvider":true,"completionProvider":{"triggerCharacters":[".","@"]}}}}
+    );
+    defer alloc.free(reply);
+    try server.feedBytes(reply);
+    try testz.expectEqual(try pool.nextEvent(), null);
+    try testz.expectTrue(server.ready());
+}
+
+pub fn lspUnansweredRequestTimesOutTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var counter: Counter = .{};
+    var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");
+    defer pool.deinit();
+    const server = try pool.addForTest(.{ .name = "zls", .languages = &.{"zig"}, .cmd = &.{"zls"} });
+    try handshake(alloc, &pool, server);
+
+    // Nothing outstanding, nothing to wait for.
+    try testz.expectEqual(pool.nextDeadlineMs(), null);
+
+    const id = (try server.positionRequest(.hover, "file:///tmp/root/a.zig", .{ .line = 0, .character = 3 })).?;
+    const due = pool.nextDeadlineMs().?;
+    const sent = due - lsp.request_timeout_ms;
+
+    // A millisecond short: still waiting.
+    try testz.expectEqual(pool.expire(due - 1), null);
+    // On the deadline: reported once, with what it was for...
+    const ev = pool.expire(due).?;
+    defer ev.deinit(alloc);
+    try testz.expectTrue(ev == .timed_out);
+    try testz.expectEqual(ev.timed_out.request_id, id);
+    try testz.expectEqual(ev.timed_out.kind, .hover);
+    try testz.expectEqualStr("zls", ev.timed_out.server);
+    // ...and forgotten, so it is not reported again and the loop stops
+    // waking for it.
+    try testz.expectEqual(pool.expire(sent + 10 * lsp.request_timeout_ms), null);
+    try testz.expectEqual(pool.nextDeadlineMs(), null);
+    // The server is slow, not dead.
+    try testz.expectTrue(server.ready());
+
+    // The answer turning up afterwards is dropped as a reply to nobody.
+    const late = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","id":{d},"result":{{"contents":{{"kind":"markdown","value":"late"}}}}}}
+    , .{id});
+    defer alloc.free(late);
+    const f = try frame(alloc, late);
+    defer alloc.free(f);
+    try server.feedBytes(f);
+    try testz.expectEqual(try pool.nextEvent(), null);
+}
+
+pub fn lspHandshakeNeverTimesOutTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var counter: Counter = .{};
+    var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");
+    defer pool.deinit();
+    const server = try pool.addForTest(.{ .name = "zls", .languages = &.{"zig"}, .cmd = &.{"zls"} });
+
+    // A server still indexing a big workspace is not a wedged one: the
+    // outstanding `initialize` sets no deadline and never expires.
+    try testz.expectEqual(pool.nextDeadlineMs(), null);
+    try testz.expectEqual(pool.expire(std.math.maxInt(i32)), null);
+    try testz.expectTrue(server.starting());
+}
+
 pub fn lspServerDeathIsReportedOnceTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var counter: Counter = .{};
     var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");
