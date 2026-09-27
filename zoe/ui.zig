@@ -42,7 +42,7 @@
 //! nvim does; every other mode is zoe's inverted cell, which keeps the
 //! character under it readable, and the host's caret is hidden. See
 //! `syncCaret`. Ctrl+` opens a `gw-shell` panel over the bottom of the
-//! window (`src/shellpanel.zig`) that takes the keyboard and the caret
+//! window (`applib/shellpanel.zig`) that takes the keyboard and the caret
 //! until it is closed.
 
 const std = @import("std");
@@ -53,8 +53,8 @@ const editor = @import("editor.zig");
 const display = @import("display.zig");
 const search = @import("search.zig");
 const tree_mod = @import("tree.zig");
-const finder_mod = @import("shell_support").finder;
-const filetype = @import("shell_support").filetype;
+const finder_mod = @import("applib").finder;
+const filetype = @import("applib").filetype;
 const syntax = @import("syntax.zig");
 const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
@@ -63,12 +63,12 @@ const diag = @import("diag.zig");
 const hover_mod = @import("hover.zig");
 const complete = @import("complete.zig");
 const buffer_mod = @import("buffer.zig");
-const shellpanel = glyphwire.shellpanel;
+const shellpanel = @import("applib").shellpanel;
 
 const Editor = editor.Editor;
 const Tree = tree_mod.Tree;
 const Finder = finder_mod.Finder;
-const lineedit = glyphwire.lineedit;
+const lineedit = @import("applib").lineedit;
 const Color = glyphwire.Color;
 
 /// Cells the tree pane occupies until a divider drag says otherwise.
@@ -746,7 +746,7 @@ pub const Ui = struct {
     /// the statusline, for running builds and tests without leaving the
     /// editor. It floats outside the split tree like the finder and takes
     /// every keystroke but Ctrl+` while it is open. Rooted at the tree's
-    /// directory. See `src/shellpanel.zig`.
+    /// directory. See `applib/shellpanel.zig`.
     shell: shellpanel.Panel,
     /// Whether the host is drawing the caret (`true`, insert mode's bar
     /// or the unfocused box) or zoe's own inverted cell is (`false`), as

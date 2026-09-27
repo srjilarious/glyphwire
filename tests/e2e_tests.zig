@@ -725,7 +725,7 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
 /// The stand-in keeps what this test is actually about (the shell's
 /// spawn -> result pipe -> `setLine` path) and drops the part that needs
 /// a whole session to drive; `gw-hist`'s own filtering is covered by
-/// unit tests of `shell_support.fuzzy`.
+/// unit tests of `applib.fuzzy`.
 pub fn shellCtrlRLoadsResultFdLineIntoPromptTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();

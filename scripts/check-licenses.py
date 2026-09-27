@@ -37,7 +37,7 @@ CCBY = "CC-BY-4.0"
 
 # Directory -> licence. The single source of truth, mirroring LICENSE.md.
 ZONES = {
-    MPL: ["src", "host", "host_eng", "server", "client", "agent",
+    MPL: ["src", "applib", "host", "host_eng", "server", "client", "agent",
           "notify", "debug", "demo", "table-demo"],
     GPL: ["shell", "gmux", "ls", "view", "read", "md", "zoe", "salacommander", "tests"],
 }

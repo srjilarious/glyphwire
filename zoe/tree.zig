@@ -25,10 +25,10 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const gitignore = @import("shell_support").gitignore;
+const gitignore = @import("applib").gitignore;
 
 /// What a listing or a walk is allowed to show. Lives with the ignore
-/// matcher it consults, in `shell_support`, so salacommander's F3 finder
+/// matcher it consults, in `applib`, so salacommander's F3 finder
 /// applies the same rule the sidebar does.
 pub const Visibility = gitignore.Visibility;
 
@@ -374,7 +374,7 @@ pub const Tree = struct {
 
 /// The walk behind a `/` search stops after this many entries: generous
 /// enough for a real source tree, and a bound on a root that turns out to
-/// be `/`. Deliberately the same shape of guard `zoe/finder.zig` puts on
+/// be `/`. Deliberately the same shape of guard `applib/finder.zig` puts on
 /// the Ctrl+P scan.
 pub const deep_max_entries: usize = 20_000;
 

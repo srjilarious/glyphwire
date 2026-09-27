@@ -870,7 +870,7 @@ pub fn paneTotalBytesCountsListedFilesOnlyTest(io: std.Io, alloc: std.mem.Alloca
 }
 
 pub fn shellPanelTakesAThirdOfTheWindowTest(_: std.Io, _: std.mem.Allocator) !void {
-    const rowsFor = glyphwire.shellpanel.Panel.rowsFor;
+    const rowsFor = @import("applib").shellpanel.Panel.rowsFor;
     // A third of the window, once there's a third worth having.
     try testz.expectEqual(rowsFor(45), 15);
     try testz.expectEqual(rowsFor(30), 10);
@@ -1045,7 +1045,7 @@ pub fn paneRevealPutsTheCursorOnTheFoundEntryTest(io: std.Io, alloc: std.mem.All
 /// file rather than from a buffer already loaded. Empty is text (a new
 /// file), and a file that can't be opened is an error, not "binary".
 pub fn fileLooksBinaryReadsOnlyTheHeadTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    const filetype = @import("shell_support").filetype;
+    const filetype = @import("applib").filetype;
     var s = try Scratch.init(io, alloc, "sniff");
     defer s.deinit();
     try s.file("text.zig", "const std = @import(\"std\");\n");

@@ -22,9 +22,9 @@
 //! hands each pair to `Keymap.bindNamed`.
 
 const std = @import("std");
-const core = @import("core.zig");
+const glyphwire = @import("glyphwire");
 
-pub const Mods = core.Mods;
+pub const Mods = glyphwire.Mods;
 
 /// Longest key name a chord stores. The longest real one is
 /// `grave_accent`/`print_screen`; this leaves room for a key glyphwire

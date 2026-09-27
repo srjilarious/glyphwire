@@ -27,7 +27,7 @@
 //! before the field sees a key at all.
 
 const std = @import("std");
-const core = @import("core.zig");
+const glyphwire = @import("glyphwire");
 
 /// What a key meant, for a caller deciding whether to repaint and what
 /// else to do. `.moved` and `.edited` are split because they differ for
@@ -292,7 +292,7 @@ pub const LineEdit = struct {
     /// program around the field (salacommander's Alt+D, a pane switch),
     /// and swallowing them here would make a field that traps its
     /// application's own shortcuts.
-    pub fn handleKey(self: *LineEdit, key: []const u8, mods: core.Mods) Outcome {
+    pub fn handleKey(self: *LineEdit, key: []const u8, mods: glyphwire.Mods) Outcome {
         if (mods.alt or mods.super) return .ignored;
         const eq = std.mem.eql;
         const ctrl = mods.ctrl;
@@ -383,14 +383,14 @@ pub fn nextBoundary(buf: []const u8, offset: usize) usize {
 /// Display width, in grid columns, of `buf[0..offset]` -- the caret's
 /// column offset from where the line's text starts.
 pub fn displayCol(buf: []const u8, offset: usize) usize {
-    return core.stringWidth(buf[0..@min(offset, buf.len)]);
+    return glyphwire.stringWidth(buf[0..@min(offset, buf.len)]);
 }
 
 /// Display width, in grid columns, of the whole slice -- how many cells a
 /// run of text occupies once drawn, which is what `insert_cells` /
 /// `delete_cells` count in (not bytes).
 pub fn cellWidth(text: []const u8) usize {
-    return core.stringWidth(text);
+    return glyphwire.stringWidth(text);
 }
 
 /// The byte offset `cells` display columns past `start` in `text`, on a
@@ -402,7 +402,7 @@ pub fn offsetAtCol(text: []const u8, start: usize, cells: usize) usize {
     var w: usize = 0;
     while (i < text.len) {
         const next = nextBoundary(text, i);
-        const cw = core.stringWidth(text[i..next]);
+        const cw = glyphwire.stringWidth(text[i..next]);
         if (w + cw > cells) break;
         w += cw;
         i = next;

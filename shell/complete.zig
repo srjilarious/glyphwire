@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 const std = @import("std");
-const wordsplit = @import("wordsplit.zig");
+const wordsplit = @import("applib").wordsplit;
 
 /// Pure string helpers for glyphwire-shell's Tab completion. The actual
 /// directory scan and the edits to the on-screen line live in

@@ -216,7 +216,7 @@ pub const Editor = struct {
     /// so a long `:e some/deep/path` is editable rather than
     /// backspace-only. `.drop` (the default) because a `:` line is one
     /// command: a pasted newline is a mistake, not a separator.
-    cmdline: glyphwire.LineEdit = .{},
+    cmdline: @import("applib").LineEdit = .{},
     /// The argument of the command just run, kept alive so an `Outcome`
     /// can borrow it (see `Outcome.write`).
     cmd_arg: std.ArrayList(u8) = .empty,

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! Minimal subsequence fuzzy matching for `gw-hist`'s Ctrl+R history
 //! search: `query`'s characters just have to appear in `text` in order,

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! What zoe will open. Today that is one question -- "is this text?" --
 //! and one answer for everything else: an error in the statusline.

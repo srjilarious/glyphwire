@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `src/lineedit.zig`: the one-line text field shared by gw-shell's
+//! `applib/lineedit.zig`: the one-line text field shared by gw-shell's
 //! prompt, salacommander's path row and dialog fields, and zoe's `:`
 //! command line. The pure UTF-8 / display-width helpers came from
 //! gw-shell (they were `shell/lineedit.zig`), so their tests did too --
@@ -11,8 +11,8 @@ const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
 
-const lineedit = glyphwire.lineedit;
-const LineEdit = glyphwire.LineEdit;
+const lineedit = @import("applib").lineedit;
+const LineEdit = @import("applib").LineEdit;
 
 // ─── lineedit: codepoint / display-width helpers ───────────────────────
 

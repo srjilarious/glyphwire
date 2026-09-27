@@ -160,7 +160,8 @@ keeps its size and the grid gains or loses cells to match.
 
 | Path | What |
 |---|---|
-| `src/` | Protocol core: grid model (`core.zig`), dispatch, server, client, wire framing, PTY, keybind |
+| `src/` | Protocol core: grid model (`core.zig`), dispatch, server, client, wire framing, PTY |
+| `applib/` | Helpers shared by two or more applications: line editor, keymaps, fuzzy finder, shell panel, history |
 | `host/`, `host_eng/` | `glyphwire`, the SDL3 / OpenGL host, and its engine backend |
 | `shell/`, `hist/` | `gw-shell` and `gw-hist` |
 | `zoe/`, `gmux/`, `salacommander/`, `md/`, `read/`, `ls/`, `view/` | Applications |
@@ -187,7 +188,7 @@ Full detail in [`LICENSE.md`](LICENSE.md); third-party code and assets in
 | Part | License | Meaning |
 |---|---|---|
 | **The protocol**: `docs/` | `CC-BY-4.0` | Implement it in any language, under any license. |
-| **The plumbing**: `src/`, `host/`, `host_eng/`, `server/`, `client/`, `agent/`, demos and debug tools | `MPL-2.0` | File-level copyleft: owe source only for MPL files you change. |
+| **The plumbing**: `src/`, `applib/`, `host/`, `host_eng/`, `server/`, `client/`, `agent/`, demos and debug tools | `MPL-2.0` | File-level copyleft: owe source only for MPL files you change. |
 | **The applications**: `gw-shell`, `gw-hist`, `gmux`, `gw-ls`, `gw-view`, `gw-read`, `gwmd`, `zoe`, `salacommander` | `GPL-3.0-or-later` | Programs people run, not components people embed. |
 
 Every source file carries an `SPDX-License-Identifier`. The default icon

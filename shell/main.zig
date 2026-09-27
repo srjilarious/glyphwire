@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const wordsplit = @import("shell_support").wordsplit;
+const wordsplit = @import("applib").wordsplit;
 const embed = @import("shell_support").embed;
 const parse = @import("shell_support").parse;
 const envassign = @import("shell_support").envassign;
@@ -13,11 +13,11 @@ const glob = @import("shell_support").glob;
 const hs = @import("shell_support").handshake;
 const config = @import("shell_support").config;
 const script_engine = @import("shell_support").script_engine;
-const history = @import("shell_support").history;
+const history = @import("applib").history;
 const zjump = @import("shell_support").zjump;
 const flushgate = @import("shell_support").flushgate;
 const keyencode = @import("shell_support").keyencode;
-const lineedit = @import("shell_support").lineedit;
+const lineedit = @import("applib").lineedit;
 const prompt_template = @import("shell_support").prompt_template;
 const browsescroll = @import("shell_support").browsescroll;
 const promptrow = @import("shell_support").promptrow;
@@ -2009,7 +2009,7 @@ const Prompt = struct {
     ///
     /// Giving it back sends nothing. The host is the one taking the
     /// keyboard, and it sets the caret up for itself (see
-    /// `src/shellpanel.zig`); a hide from here would land after the
+    /// `applib/shellpanel.zig`); a hide from here would land after the
     /// host's own caret for the mode it returned to, and win.
     fn setFocused(self: *Prompt, on: bool) void {
         if (self.focused == on) return;
