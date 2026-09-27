@@ -61,6 +61,7 @@ const tabs = @import("tabs.zig");
 const lsp = @import("lsp.zig");
 const diag = @import("diag.zig");
 const hover_mod = @import("hover.zig");
+const complete = @import("complete.zig");
 const buffer_mod = @import("buffer.zig");
 const shellpanel = glyphwire.shellpanel;
 
@@ -200,6 +201,24 @@ const fg_hover = Color{ .r = 214, .g = 214, .b = 222, .a = 255 };
 /// signature reads as a unit apart from the prose under it.
 const bg_hover_code = Color{ .r = 26, .g = 26, .b = 32, .a = 255 };
 const fg_hover_rule = Color{ .r = 80, .g = 80, .b = 96, .a = 255 };
+
+/// The completion popup. Narrower and shorter than the hover: it sits under
+/// the line being typed, and every row of it covers code.
+const complete_max_cols: usize = 60;
+const complete_max_rows: usize = 10;
+/// The kind column (`fn`, `var`, `struct`), padded to this width.
+const complete_kind_cols: usize = 6;
+const bg_complete = Color{ .r = 34, .g = 34, .b = 42, .a = 255 };
+const bg_complete_selected = Color{ .r = 60, .g = 90, .b = 150, .a = 255 };
+const fg_complete_label = Color{ .r = 226, .g = 226, .b = 234, .a = 255 };
+const fg_complete_kind = Color{ .r = 140, .g = 170, .b = 220, .a = 255 };
+const fg_complete_detail = Color{ .r = 130, .g = 130, .b = 146, .a = 255 };
+
+/// How long typing has to pause before an identifier being typed asks for
+/// completions. A trigger character (`.`) doesn't wait. Short enough that
+/// the popup is there by the time you look for it; long enough that a word
+/// typed at speed is one request, not one per letter.
+const complete_auto_delay_ms: u64 = 80;
 
 /// How long after the last edit a `didChange` goes out. Long enough that a
 /// burst of typing is one message and a server isn't re-analysing the file
@@ -671,6 +690,30 @@ pub const Ui = struct {
     /// hover with a fenced block; its language is set per block and cleared
     /// again afterwards.
     hover_hl: ?syntax.Highlighter = null,
+
+    /// The completion popup, non-null while it is up (insert mode only).
+    /// See `zoe/complete.zig` for the model and `afterInsertEdit` for when
+    /// it opens, narrows and closes.
+    completion: ?complete.Menu = null,
+    completion_layer: glyphwire.LayerHandle,
+    completion_dirty: bool = false,
+    /// The newest outstanding completion request, and where the word it is
+    /// for starts -- a reply for a word the cursor has since left is
+    /// dropped, the same staleness rule hover has.
+    completion_request: ?i64 = null,
+    completion_req_start: usize = 0,
+    completion_req_line: usize = 0,
+    /// An identifier-driven request waiting on `complete_auto_delay_ms`, so
+    /// a burst of typing asks once, when it pauses, instead of per key.
+    completion_due: ?std.Io.Clock.Timestamp = null,
+    /// The word start the last request came back empty for. Typing more of
+    /// that word doesn't ask again: a server with nothing for `fo` has
+    /// nothing for `foo` either (unless it said its list was incomplete).
+    completion_empty_at: ?usize = null,
+    /// Ctrl+Space was just taken as "complete here". The host reports the
+    /// key before the text in the same frame, and some layouts also commit
+    /// a " " for the chord, which this drops.
+    swallow_space_text: bool = false,
     jumps: JumpList = .{},
     /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom, above
     /// the statusline, for running builds and tests without leaving the
@@ -844,6 +887,11 @@ pub const Ui = struct {
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
         try client.setLayerVisible(hover_layer, false);
         try client.setLayerBackground(hover_layer, bg_hover);
+        // The completion popup: one more float, placed under the word being
+        // completed (`completionRect`).
+        const completion_layer = try client.createLayer(complete_max_cols, 1, 0);
+        try client.setLayerVisible(completion_layer, false);
+        try client.setLayerBackground(completion_layer, bg_complete);
         try client.setLayerVisible(finder_layer, false);
         try client.setLayerVisible(finder_list_layer, false);
         try client.setLayerBackground(finder_layer, bg_finder);
@@ -882,6 +930,7 @@ pub const Ui = struct {
             .finder_layer = finder_layer,
             .finder_list_layer = finder_list_layer,
             .hover_layer = hover_layer,
+            .completion_layer = completion_layer,
             .diags = diag.Store.init(alloc),
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
             .pane_split = pane_split,
@@ -1252,6 +1301,7 @@ pub const Ui = struct {
         self.diags.deinit();
         if (self.hover) |*h| h.deinit();
         if (self.hover_hl) |*h| h.deinit();
+        if (self.completion) |*m| m.deinit();
         self.jumps.deinit(self.alloc);
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
@@ -1393,7 +1443,7 @@ pub const Ui = struct {
             // frame it arrived for rather than the one after.
             self.drainLsp();
             if (self.buffer_dirty or self.tree_dirty != .none or self.tabs_dirty or
-                self.status_dirty or self.finder_dirty or self.hover_dirty or
+                self.status_dirty or self.finder_dirty or self.hover_dirty or self.completion_dirty or
                 self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
@@ -1443,6 +1493,11 @@ pub const Ui = struct {
             // A wake with nothing queued, or the deadline passing: either way
             // this is where the debounced change goes out.
             if (self.lspChangeDue()) self.lspFlushChange();
+            // The popup closes if its reason went away in that batch (insert
+            // mode left, a click moved the cursor), before a delayed request
+            // gets the chance to reopen it.
+            self.syncCompletion();
+            if (self.completionDue()) self.requestCompletion(null, false);
             // After the events, before the frame they produced: a mode
             // change in that batch retimes the host's key repeat before
             // the user can hold anything down in the new mode.
@@ -1608,7 +1663,23 @@ pub const Ui = struct {
                     _ = self.closeHover();
                     if (std.mem.eql(u8, k.key, "escape")) return;
                 }
+                self.swallow_space_text = false;
+                // The completion popup reads its keys before the global
+                // chords below: with it up, Ctrl+N / Ctrl+P move through it
+                // rather than toggling the sidebar or opening the finder.
+                if (self.completion != null and self.focus == .buffer and self.buf.ed.mode == .insert) {
+                    if (try self.completionKey(k)) return;
+                }
                 if (ctrl) {
+                    // Ctrl+Space asks for completions here and now, whatever
+                    // has (or hasn't) been typed.
+                    if (std.mem.eql(u8, k.key, "space") and self.focus == .buffer and self.buf.ed.mode == .insert) {
+                        self.swallow_space_text = true;
+                        self.closeCompletion();
+                        self.completion_empty_at = null;
+                        self.requestCompletion(null, true);
+                        return;
+                    }
                     if (std.mem.eql(u8, k.key, "w")) {
                         self.setFocus(if (self.focus == .buffer) .tree else .buffer);
                         return;
@@ -1657,8 +1728,9 @@ pub const Ui = struct {
                     }
                     // Ctrl+P opens the file finder, in every mode -- the
                     // chord every editor with one uses. Insert mode
-                    // included: zoe has no keyword completion for the
-                    // vim meaning of Ctrl+P to collide with.
+                    // included: vim's meaning of Ctrl+P (previous
+                    // completion) only applies with the completion popup
+                    // up, and `completionKey` takes it first then.
                     if (std.mem.eql(u8, k.key, "p") and !k.shift()) {
                         try self.openFinder();
                         return;
@@ -1695,7 +1767,11 @@ pub const Ui = struct {
                     self.status_dirty = true;
                     return;
                 }
+                const was_insert = self.buf.ed.mode == .insert;
                 try self.applyOutcome(try self.buf.ed.feedKey(k.key, .{ .ctrl = ctrl }));
+                if (was_insert and (std.mem.eql(u8, k.key, "backspace") or std.mem.eql(u8, k.key, "delete"))) {
+                    self.afterInsertEdit(null);
+                }
             },
             .text => |t| {
                 // Typed text is the shell's while its panel is up -- it
@@ -1705,13 +1781,19 @@ pub const Ui = struct {
                     try self.finderText(t.text);
                     return;
                 }
+                if (self.swallow_space_text) {
+                    self.swallow_space_text = false;
+                    if (std.mem.eql(u8, t.text, " ")) return;
+                }
                 self.buf.ed.status.clearRetainingCapacity();
                 if (self.focus == .tree) {
                     try self.treeText(t.text);
                     self.status_dirty = true;
                     return;
                 }
+                const was_insert = self.buf.ed.mode == .insert;
                 try self.applyOutcome(try self.buf.ed.feedText(t.text));
+                if (was_insert) self.afterInsertEdit(t.text);
             },
             .paste => |t| {
                 if (self.shell.isOpen()) return;
@@ -1720,6 +1802,9 @@ pub const Ui = struct {
                     return;
                 }
                 self.buf.ed.status.clearRetainingCapacity();
+                // A paste is not typing: it neither narrows nor opens the
+                // popup.
+                self.closeCompletion();
                 if (self.focus == .buffer) {
                     // Insert mode and the two typed lines (`:` and `/`)
                     // all want the text *typed*, which is what `feedText`
@@ -3116,14 +3201,21 @@ pub const Ui = struct {
     /// request's timeout, or null for neither -- the loop's whole notion of
     /// time.
     fn nextLspDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
-        const pool = if (self.lsp_pool) |*p| p else return self.lsp_change_due;
-        const req_ms = pool.nextDeadlineMs() orelse return self.lsp_change_due;
-        const req: std.Io.Clock.Timestamp = .{
-            .raw = .fromNanoseconds(@as(i96, req_ms) * std.time.ns_per_ms),
-            .clock = .awake,
-        };
-        const change = self.lsp_change_due orelse return req;
-        return if (change.raw.nanoseconds <= req.raw.nanoseconds) change else req;
+        var best = earlier(self.lsp_change_due, self.completion_due);
+        const pool = if (self.lsp_pool) |*p| p else return best;
+        if (pool.nextDeadlineMs()) |req_ms| {
+            best = earlier(best, .{
+                .raw = .fromNanoseconds(@as(i96, req_ms) * std.time.ns_per_ms),
+                .clock = .awake,
+            });
+        }
+        return best;
+    }
+
+    fn earlier(a: ?std.Io.Clock.Timestamp, b: ?std.Io.Clock.Timestamp) ?std.Io.Clock.Timestamp {
+        const x = a orelse return b;
+        const y = b orelse return a;
+        return if (x.raw.nanoseconds <= y.raw.nanoseconds) x else y;
     }
 
     /// Whether the debounce has come due, checked after every wait.
@@ -3178,13 +3270,19 @@ pub const Ui = struct {
     }
 
     fn handleLspEvent(self: *Ui, ev: lsp.Event) void {
-        defer ev.deinit(self.alloc);
-        switch (ev) {
+        var e = ev;
+        defer e.deinit(self.alloc);
+        switch (e) {
             .diagnostics => |d| self.applyDiagnostics(d.path, d.server, d.items),
             .hover => |h| self.applyHover(h.request_id, h.text),
             .definition => |d| self.applyDefinition(d.request_id, d.target),
-            // Nothing asks for completions yet.
-            .completion => {},
+            .completion => |*c| {
+                // The items move into the popup rather than being copied:
+                // a completion list can run to thousands of entries.
+                const items = c.items;
+                c.items = &.{};
+                self.applyCompletion(c.request_id, c.server, items, c.incomplete);
+            },
             .timed_out => |t| self.applyTimeout(t.request_id, t.server, t.kind),
             .died => |d| {
                 // Its marks will never be refreshed again, so they go
@@ -3205,12 +3303,303 @@ pub const Ui = struct {
         const slot: *?i64 = switch (kind) {
             .hover => &self.hover_request,
             .definition => &self.definition_request,
-            .completion, .initialize, .shutdown => return,
+            .completion => &self.completion_request,
+            .initialize, .shutdown => return,
         };
         if (slot.* != request_id) return;
         slot.* = null;
         self.buf.ed.setStatus("LSP: {s} didn't answer {t}", .{ server, kind });
         self.status_dirty = true;
+    }
+
+    // ── Completion ──────────────────────────────────────────────────────
+
+    /// Asks for completions at the cursor. `trigger` is the trigger
+    /// character just typed, or null for an identifier being typed or an
+    /// explicit Ctrl+Space; `explicit` is the last, which is the only one
+    /// that says so on the statusline when nothing can answer.
+    fn requestCompletion(self: *Ui, trigger: ?[]const u8, explicit: bool) void {
+        self.completion_due = null;
+        const pool = if (self.lsp_pool) |*p| p else {
+            if (explicit) {
+                self.buf.ed.setStatus("LSP: not enabled", .{});
+                self.status_dirty = true;
+            }
+            return;
+        };
+        if (self.buf.ed.mode != .insert) return;
+        const path = self.buf.ed.path orelse return;
+        const grammar = self.lspGrammarFor(path) orelse return;
+        const abs = self.slotAbs(self.buf) orelse return;
+        const uri = lsp.pathToUri(self.alloc, abs) catch return;
+        defer self.alloc.free(uri);
+
+        // The server must see what was just typed, or it completes the word
+        // as it was before the last few keys.
+        self.lspFlushChange();
+
+        const cursor = self.buf.ed.pos();
+        const line_text = self.buf.ed.buf.lineText(self.alloc, cursor.line) catch return;
+        defer self.alloc.free(line_text);
+        const ws = complete.wordStart(line_text, cursor.col);
+        // A delayed identifier request whose word has gone by the time it
+        // fires (the space after it was typed in the pause).
+        if (trigger == null and !explicit and ws == cursor.col and self.completion == null) return;
+
+        var it = pool.forLanguage(grammar);
+        while (it.next()) |s| {
+            if (!s.ready()) continue;
+            const id = s.completionRequest(uri, .{
+                .line = @intCast(cursor.line),
+                .character = lsp.byteToCharacter(line_text, cursor.col, s.encoding),
+            }, trigger) catch continue orelse continue;
+            self.completion_request = id;
+            self.completion_req_start = self.buf.ed.buf.lineStart(cursor.line) + ws;
+            self.completion_req_line = cursor.line;
+            return;
+        }
+        if (explicit) {
+            self.buf.ed.setStatus("LSP: no server here can complete", .{});
+            self.status_dirty = true;
+        }
+    }
+
+    /// A completion reply: open (or replace) the popup, filtered by whatever
+    /// has been typed since the request went out. Takes ownership of
+    /// `items` whatever happens to them.
+    fn applyCompletion(
+        self: *Ui,
+        request_id: i64,
+        server: []const u8,
+        items: []lsp.CompletionItem,
+        incomplete: bool,
+    ) void {
+        var owned: ?[]lsp.CompletionItem = items;
+        defer if (owned) |o| lsp.freeCompletionItems(self.alloc, o);
+
+        if (self.completion_request != request_id) return;
+        self.completion_request = null;
+        if (self.buf.ed.mode != .insert or self.focus != .buffer) return;
+
+        // Still on the word it was asked about? A reply for a line the
+        // cursor has left, or a word backspaced away, is stale.
+        const cursor = self.buf.ed.pos();
+        const start = self.completion_req_start;
+        if (cursor.line != self.completion_req_line or self.buf.ed.cursor < start) return;
+
+        if (items.len == 0) {
+            if (!incomplete) self.completion_empty_at = start;
+            self.closeCompletion();
+            return;
+        }
+
+        // Edit ranges are in the server's encoding, and describe the line as
+        // it was when the server read it -- convert now, the way diagnostics
+        // are, so from here on a range's `character` is a byte column.
+        if (self.lsp_pool) |*pool| {
+            const enc = pool.encodingOf(server);
+            const line_text = self.buf.ed.buf.lineText(self.alloc, cursor.line) catch return;
+            defer self.alloc.free(line_text);
+            for (items) |*item| {
+                if (item.edit_range) |*r| {
+                    if (r.start.line != cursor.line) {
+                        item.edit_range = null;
+                        continue;
+                    }
+                    r.start.character = @intCast(lsp.characterToByte(line_text, r.start.character, enc));
+                }
+            }
+        }
+
+        self.closeCompletion();
+        owned = null;
+        self.completion = complete.Menu.init(self.alloc, items, start, cursor.line, incomplete);
+        self.refilterCompletion();
+    }
+
+    /// Narrows the open popup to what is now typed after its word start,
+    /// closing it when nothing matches.
+    fn refilterCompletion(self: *Ui) void {
+        const m = if (self.completion) |*x| x else return;
+        const typed = self.buf.ed.buf.read(self.alloc, m.word_start, self.buf.ed.cursor) catch {
+            self.closeCompletion();
+            return;
+        };
+        defer self.alloc.free(typed);
+        m.refilter(typed) catch {
+            self.closeCompletion();
+            return;
+        };
+        if (m.count() == 0) {
+            if (!m.incomplete) self.completion_empty_at = m.word_start;
+            self.closeCompletion();
+            return;
+        }
+        self.completion_dirty = true;
+    }
+
+    fn closeCompletion(self: *Ui) void {
+        if (self.completion) |*m| {
+            m.deinit();
+            self.completion = null;
+            self.completion_dirty = true;
+        }
+    }
+
+    /// Whether `text` ends in a completion trigger character for any server
+    /// on the current buffer.
+    fn isCompletionTrigger(self: *Ui, text: []const u8) bool {
+        const pool = if (self.lsp_pool) |*p| p else return false;
+        const path = self.buf.ed.path orelse return false;
+        const grammar = self.lspGrammarFor(path) orelse return false;
+        var it = pool.forLanguage(grammar);
+        while (it.next()) |s| if (s.ready() and s.isCompletionTrigger(text)) return true;
+        return false;
+    }
+
+    /// After an insert-mode edit: open, narrow or close the popup.
+    ///
+    /// `typed` is the text just typed, or null for a deletion. A trigger
+    /// character asks at once; an identifier being typed asks after
+    /// `complete_auto_delay_ms` of quiet; with the popup already up, typing
+    /// only narrows it (and asks again only if the server said its list was
+    /// incomplete). A deletion never opens the popup, only narrows or
+    /// closes it.
+    fn afterInsertEdit(self: *Ui, typed: ?[]const u8) void {
+        if (self.lsp_pool == null) return;
+        if (self.buf.ed.mode != .insert or self.focus != .buffer) {
+            self.closeCompletion();
+            return;
+        }
+        const cursor = self.buf.ed.pos();
+        const line_text = self.buf.ed.buf.lineText(self.alloc, cursor.line) catch return;
+        defer self.alloc.free(line_text);
+        const ws_col = complete.wordStart(line_text, cursor.col);
+        const ws = self.buf.ed.buf.lineStart(cursor.line) + ws_col;
+        const at_word = ws < self.buf.ed.cursor;
+        // The word an empty answer was for is gone; a new one gets asked.
+        if (!at_word) self.completion_empty_at = null;
+
+        if (typed) |t| if (self.isCompletionTrigger(t)) {
+            self.closeCompletion();
+            self.requestCompletion(t, false);
+            return;
+        };
+
+        if (self.completion) |m| {
+            // Left the word: typed a space or punctuation, or deleted past
+            // its start.
+            if (m.line != cursor.line or m.word_start != ws) {
+                self.closeCompletion();
+            } else {
+                const incomplete = m.incomplete;
+                self.refilterCompletion();
+                if (incomplete) self.armCompletion();
+                return;
+            }
+        }
+
+        if (typed == null or !at_word) return;
+        // `123` is a number being typed, not a name to complete.
+        if (std.ascii.isDigit(line_text[ws_col])) return;
+        if (self.completion_empty_at == ws) return;
+        // Already asked about this word; the reply will be filtered by what
+        // has been typed since.
+        if (self.completion_request != null and self.completion_req_start == ws) return;
+        self.armCompletion();
+    }
+
+    fn armCompletion(self: *Ui) void {
+        if (self.completion_due != null) return;
+        self.completion_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
+            .raw = .fromMilliseconds(complete_auto_delay_ms),
+            .clock = .awake,
+        });
+    }
+
+    fn completionDue(self: *Ui) bool {
+        const due = self.completion_due orelse return false;
+        return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() >= 0;
+    }
+
+    /// Closes the popup when what it was for has gone: insert mode left, the
+    /// sidebar or the finder took the keyboard, or the cursor moved off the
+    /// word (a click, an arrow). Run once a turn, so no path that moves the
+    /// cursor has to remember the popup exists.
+    fn syncCompletion(self: *Ui) void {
+        const in_insert = self.buf.ed.mode == .insert and self.focus == .buffer and
+            self.finder == null and !self.shell.isOpen();
+        if (!in_insert) {
+            self.completion_due = null;
+            self.completion_request = null;
+            self.completion_empty_at = null;
+            self.closeCompletion();
+            return;
+        }
+        const m = if (self.completion) |*x| x else return;
+        const cursor = self.buf.ed.pos();
+        if (cursor.line != m.line or self.buf.ed.cursor < m.word_start) self.closeCompletion();
+    }
+
+    /// Inserts the selected completion over the word it completes: the
+    /// server's edit range when it sent one on this line, else the word
+    /// before the cursor.
+    fn acceptCompletion(self: *Ui) !void {
+        const m = if (self.completion) |*x| x else return;
+        const item = m.current() orelse {
+            self.closeCompletion();
+            return;
+        };
+        var start = m.word_start;
+        if (item.edit_range) |r| {
+            start = @min(self.buf.ed.buf.lineStart(m.line) + r.start.character, self.buf.ed.cursor);
+        }
+        try self.buf.ed.replaceBeforeCursor(start, item.insert);
+        // Whatever comes next starts a new word; don't let this one's empty
+        // answer (or its request) hold that up.
+        self.completion_empty_at = null;
+        self.closeCompletion();
+        self.buf.full_redraw = true;
+        self.buffer_dirty = true;
+        self.status_dirty = true;
+        self.tabs_dirty = true;
+    }
+
+    /// A key while the popup is up. Returns true when the popup took it.
+    ///
+    /// Up/Down and Ctrl+N/Ctrl+P move (taken before the global Ctrl+N and
+    /// Ctrl+P chords, which only apply with the popup closed), Tab and Enter
+    /// accept, Escape closes only the popup so a second one leaves insert
+    /// mode. Left/Right/Home/End close it and then move as usual.
+    fn completionKey(self: *Ui, k: glyphwire.KeyEvent) !bool {
+        const eq = std.mem.eql;
+        const m = if (self.completion) |*x| x else return false;
+        const rows = @min(m.count(), complete_max_rows);
+        const ctrl = k.ctrl();
+        if (eq(u8, k.key, "down") or (ctrl and eq(u8, k.key, "n"))) {
+            m.move(1, rows);
+        } else if (eq(u8, k.key, "up") or (ctrl and eq(u8, k.key, "p"))) {
+            m.move(-1, rows);
+        } else if (eq(u8, k.key, "page_down")) {
+            m.move(@intCast(rows), rows);
+        } else if (eq(u8, k.key, "page_up")) {
+            m.move(-@as(i64, @intCast(rows)), rows);
+        } else if (!ctrl and (eq(u8, k.key, "tab") or eq(u8, k.key, "enter") or eq(u8, k.key, "kp_enter"))) {
+            try self.acceptCompletion();
+            return true;
+        } else if (eq(u8, k.key, "escape")) {
+            self.closeCompletion();
+            return true;
+        } else {
+            if (eq(u8, k.key, "left") or eq(u8, k.key, "right") or
+                eq(u8, k.key, "home") or eq(u8, k.key, "end"))
+            {
+                self.closeCompletion();
+            }
+            return false;
+        }
+        self.completion_dirty = true;
+        return true;
     }
 
     /// Stores one publish, converting each range out of the server's
@@ -3629,6 +4018,10 @@ pub const Ui = struct {
         // the finder is open is the newer of the two.
         if (self.finder_dirty) try self.renderFinder(&batch);
         if (self.hover_dirty) try self.renderHover(&batch);
+        // Placed against the word being typed, so it follows a buffer
+        // repaint (a scroll, a wrap) as well as its own changes.
+        if (self.completion_dirty or (self.completion != null and self.buffer_dirty))
+            try self.renderCompletion(&batch);
 
         _ = try batch.send();
 
@@ -3638,6 +4031,7 @@ pub const Ui = struct {
         self.status_dirty = false;
         self.finder_dirty = false;
         self.hover_dirty = false;
+        self.completion_dirty = false;
     }
 
     /// Raises the tree pane's pending repaint to at least `level`. Never
@@ -4249,6 +4643,94 @@ pub const Ui = struct {
             try writeAt(batch, self.hover_layer, row, 0, " ", fg_hover, bg);
         }
         try batch.setLayerVisible(self.hover_layer, true);
+    }
+
+    /// Draws the completion popup, or hides it. Each row is the item's kind,
+    /// its label, and its detail (a type or signature) dimmed after it; the
+    /// label column lines up with the word being typed, so the text you are
+    /// finishing sits directly above the text that would finish it.
+    fn renderCompletion(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
+        const m = if (self.completion) |*x| x else {
+            try batch.setLayerVisible(self.completion_layer, false);
+            return;
+        };
+        const b = self.buffer_bounds;
+        const rows = @min(@min(m.count(), complete_max_rows), b.rows);
+        if (rows == 0 or b.cols < complete_kind_cols + 8) {
+            try batch.setLayerVisible(self.completion_layer, false);
+            return;
+        }
+        m.follow(rows);
+
+        // As wide as the widest visible row wants, within the limits.
+        var want: usize = 20;
+        for (0..rows) |r| {
+            const it = m.visible(r) orelse break;
+            var w = 1 + complete_kind_cols + display.width(it.label, .{}) + 1;
+            if (it.detail) |d| w += 2 + display.width(d, .{});
+            want = @max(want, w);
+        }
+        const cols = @min(@min(want, complete_max_cols), b.cols);
+
+        // Under the cursor's row if it fits, else above it.
+        const cursor = self.buf.ed.pos();
+        const cursor_row = b.row + (cursor.line -| self.buf.top_line);
+        const row = if (cursor_row + 1 + rows <= b.row + b.rows)
+            cursor_row + 1
+        else if (cursor_row >= b.row + rows)
+            cursor_row - rows
+        else
+            b.row;
+
+        // The label column under the word's first character.
+        const line_start = self.buf.ed.buf.lineStart(m.line);
+        const before = try self.buf.ed.buf.read(self.alloc, line_start, @max(line_start, m.word_start));
+        defer self.alloc.free(before);
+        const word_col = display.width(before, self.displayOpts()) -| self.buf.left_col;
+        const label_col = b.col + self.gutterWidth() + word_col;
+        const want_col = label_col -| (1 + complete_kind_cols);
+        const col = @max(b.col, @min(want_col, b.col + (b.cols -| cols)));
+
+        try batch.setLayerSize(self.completion_layer, cols, rows);
+        try batch.setLayerCellPosition(self.completion_layer, row, col);
+
+        var kind_buf: [complete_kind_cols]u8 = undefined;
+        for (0..rows) |r| {
+            const it = m.visible(r) orelse break;
+            const selected = m.top + r == m.selected;
+            const bg = if (selected) bg_complete_selected else bg_complete;
+
+            const kind = complete.kindLabel(it.kind);
+            const kn = @min(kind.len, complete_kind_cols);
+            @memcpy(kind_buf[0..kn], kind[0..kn]);
+            @memset(kind_buf[kn..], ' ');
+
+            var runs: [5]glyphwire.client.Client.Span = undefined;
+            var n: usize = 0;
+            runs[n] = .{ .text = " " };
+            n += 1;
+            runs[n] = .{ .text = &kind_buf, .fg = fg_complete_kind };
+            n += 1;
+            runs[n] = .{ .text = it.label, .fg = fg_complete_label };
+            n += 1;
+            if (it.detail) |d| {
+                runs[n] = .{ .text = "  " };
+                n += 1;
+                runs[n] = .{ .text = d, .fg = fg_complete_detail };
+                n += 1;
+            }
+            try batch.writeSpans(runs[0..n], .{
+                .layer = self.completion_layer,
+                .row = r,
+                .col = 0,
+                .fg = fg_complete_label,
+                .bg = bg,
+                .max_cols = cols,
+                .pad = true,
+                .selectable = false,
+            });
+        }
+        try batch.setLayerVisible(self.completion_layer, true);
     }
 
     /// Closes the popup. Returns whether there was one, so a key can be

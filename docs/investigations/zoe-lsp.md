@@ -252,6 +252,53 @@ response carries its own target, so a cursor that moved in the meantime
 does not invalidate it; a *stale* one (the user already jumped somewhere
 else) is dropped by comparing the in-flight id against the newest.
 
+## Completion
+
+Slice 2. The model is `zoe/complete.zig` (pure, tested on its own), the
+wire side is `Server.completionRequest` and `Pool.parseCompletion`, and the
+popup lives in `zoe/ui.zig` next to hover's.
+
+**When it opens.** Three ways in, and only in insert mode:
+
+- a server's trigger character (`completionProvider.triggerCharacters`,
+  `.` and `@` for zls) asks at once, with `triggerKind: 2`;
+- typing an identifier asks after 80ms of quiet (`complete_auto_delay_ms`),
+  so a word typed at speed is one request rather than one per letter. A
+  word starting with a digit doesn't ask;
+- Ctrl+Space asks on demand, with nothing typed if need be. The host reports
+  the chord's key before its text in the same frame, so the `" "` some
+  layouts commit for it is dropped.
+
+**Filtering is ours.** A request goes out once per word; every keystroke
+after that narrows what came back without a round trip. Matches rank by
+tier first (exact-case prefix, case-insensitive prefix, subsequence) and by
+the server's `sortText` within a tier, so a prefix match is never buried
+under a server's idea of relevance. When the server marks its list
+`isIncomplete`, typing re-asks (debounced) as well as narrowing. An empty
+answer is remembered for its word, so `foo` doesn't ask again what `fo`
+already got nothing for.
+
+**Keys.** Up/Down and Ctrl+N/Ctrl+P move (taken ahead of the global Ctrl+N
+sidebar and Ctrl+P finder chords, which only apply with the popup closed),
+Tab and Enter accept, Escape closes the popup only so a second Escape leaves
+insert mode, and Left/Right/Home/End close it and move. It also closes on
+its own once a turn when its reason goes: insert mode left, the cursor off
+the word's line or back past its start, the sidebar or finder taking the
+keyboard.
+
+**Accepting** replaces from the item's `textEdit` start (converted to a
+byte column when the reply lands, like a diagnostic's range) or, without
+one, from the word start, up to the cursor. It goes through
+`Editor.replaceBeforeCursor`, so the word typed and the completion that
+finished it are one `u`.
+
+**Not done.** zoe advertises `snippetSupport: false`; a server that sends a
+snippet anyway has it flattened to its default text (`lsp.flattenSnippet`),
+with no tab stops to jump through. `additionalTextEdits` (an auto-import
+added at the top of the file) and `completionItem/resolve` (documentation
+for the selected item) are ignored. Filtering uses one typed prefix for
+every item, from the word start, rather than each item's own edit range.
+
 ## Failure modes
 
 Every one of these is "a language server is not part of the editor's
@@ -354,6 +401,7 @@ an installed zls.
 - **Slice 2** -- completion. The insert-mode popup is the biggest UI piece
   in the whole feature and deserves its own round; the finder is the
   precedent for the popup and the wrong precedent for the filtering.
+  *Done:* see [Completion](#completion).
 - **Slice 3** -- references, rename, formatting, code actions, signature
   help. Rename is multi-file edits, which wants the undo groups to span
   buffers.
