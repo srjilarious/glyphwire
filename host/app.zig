@@ -235,6 +235,7 @@ pub const App = struct {
                 .app = undefined,
                 .image_textures = std.AutoHashMap(render_mod.ImageKey, render_mod.CachedImage).init(alloc),
                 .icon_uv = std.AutoHashMap(glyphwire.ImageHandle, host_eng.RectF).init(alloc),
+                .shadow_textures = std.AutoHashMap(render_mod.ShadowKey, *host_eng.ManagedTexture).init(alloc),
             },
         };
         // Back-pointers: `app` is at a stable heap address for its whole

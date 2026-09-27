@@ -8,6 +8,7 @@ const host_eng = @import("host_eng");
 const app_mod = @import("app.zig");
 const config = @import("config.zig");
 const geometry = @import("geometry.zig");
+const shadow_mod = @import("shadow.zig");
 const scroll = @import("scroll.zig");
 const selection = @import("selection.zig");
 const preedit_mod = @import("preedit.zig");
@@ -102,6 +103,15 @@ pub const ImageKey = struct {
     handle: glyphwire.ImageHandle,
 };
 
+/// Identifies one cached drop-shadow texture: everything about a
+/// `core.Shadow` that changes its pixels. `x`/`y`/`spread` only move or
+/// size the drawn quads, so they aren't part of it.
+pub const ShadowKey = struct {
+    blur: u32,
+    radius: u32,
+    color: [4]u8,
+};
+
 /// Identifies one cached layer batch. Layer handles are per-context, so
 /// the context handle is part of the identity -- see
 /// `Renderer.layer_batches`.
@@ -144,6 +154,11 @@ pub const LayerBatches = struct {
     /// here rather than only consumed during the build.
     built_opacity: f32 = 1.0,
 
+    /// The layer's drop shadow (`core.Shadow`), bound to its cached
+    /// texture (`Renderer.shadowTexture`). At most one entry; a list only
+    /// so it can share `TexBatch`'s lifecycle with the other textured
+    /// batches. Drawn first -- under everything the layer itself paints.
+    shadow: std.ArrayList(TexBatch) = .empty,
     /// The layer's own `background` property -- its own batch so the
     /// nine-patches can sit between it and the cells' backgrounds (see
     /// `drawLayerBatches`).
@@ -210,6 +225,8 @@ pub const LayerBatches = struct {
         self.images.deinit(alloc);
         for (self.nine_patches.items) |*t| t.batch.deinit();
         self.nine_patches.deinit(alloc);
+        for (self.shadow.items) |*t| t.batch.deinit();
+        self.shadow.deinit(alloc);
         for (self.icon_fallback.items) |*t| t.batch.deinit();
         self.icon_fallback.deinit(alloc);
         for (self.scaled_text.items) |*t| t.batch.deinit();
@@ -419,6 +436,8 @@ pub const Renderer = struct {
     /// handle to its normalized sub-rect inside `icon_atlas`.
     icon_atlas: ?*host_eng.ManagedTexture = null,
     icon_uv: std.AutoHashMap(glyphwire.ImageHandle, host_eng.RectF),
+    /// Drop-shadow textures by look -- see `shadowTexture`.
+    shadow_textures: std.AutoHashMap(ShadowKey, *host_eng.ManagedTexture),
     /// Scratch for the `.natural`-icon overflow handled at the end of
     /// `rebuildLayer` -- see `DeferredIcon`. Cleared (not freed) at the
     /// start of each rebuild and reused across rebuilds/layers.
@@ -489,6 +508,7 @@ pub const Renderer = struct {
         if (self.scaled_atlas_3x) |*a| a.deinit();
         self.image_textures.deinit();
         self.icon_uv.deinit();
+        self.shadow_textures.deinit();
         var it = self.layer_batches.valueIterator();
         while (it.next()) |lb| {
             lb.*.deinit(alloc);
@@ -963,6 +983,8 @@ pub const Renderer = struct {
         lb.images.clearRetainingCapacity();
         for (lb.nine_patches.items) |*t| t.batch.deinit();
         lb.nine_patches.clearRetainingCapacity();
+        for (lb.shadow.items) |*t| t.batch.deinit();
+        lb.shadow.clearRetainingCapacity();
         for (lb.icon_fallback.items) |*t| t.batch.deinit();
         lb.icon_fallback.clearRetainingCapacity();
         for (lb.scaled_text.items) |*t| t.batch.deinit();
@@ -1036,6 +1058,10 @@ pub const Renderer = struct {
         self.deferred_icons.clearRetainingCapacity();
         self.deferred_scaled_text.clearRetainingCapacity();
         const any_highlight = layer.highlighted_ids.items.len > 0;
+
+        // `shadow` (see `core.Shadow`): drawn around the viewport's
+        // pixel rect, before -- so under -- everything else here.
+        if (layer.shadow) |sh| self.emitShadow(eng, lb, sh, origin_x, origin_y, @as(i32, @intCast(vp_cols)) * geometry.cell_w, @as(i32, @intCast(vp_rows)) * geometry.cell_h);
 
         // `background` (see `core.PropertyName.background`): one rect
         // under the whole viewport, in its own `base` batch so the
@@ -1238,8 +1264,70 @@ pub const Renderer = struct {
         if (fa_tex != null) lb.text.endBuild();
         for (lb.images.items) |*t| t.batch.endBuild();
         for (lb.nine_patches.items) |*t| t.batch.endBuild();
+        for (lb.shadow.items) |*t| t.batch.endBuild();
         for (lb.icon_fallback.items) |*t| t.batch.endBuild();
         for (lb.scaled_text.items) |*t| t.batch.endBuild();
+    }
+
+    /// Emits a layer's drop shadow around its `w x h` pixel rect at
+    /// `(x0, y0)`: the cached texture for this blur/radius/colour, split
+    /// like a nine-patch (`shadow_mod.geometry`) over the rect moved by
+    /// `x`/`y` and grown by `blur + spread` on every side.
+    fn emitShadow(self: *Renderer, eng: *Engine, lb: *LayerBatches, sh: glyphwire.Shadow, x0: i32, y0: i32, w: i32, h: i32) void {
+        const out = shadow_mod.outset(sh);
+        const dw = w + 2 * out;
+        const dh = h + 2 * out;
+        if (dw <= 0 or dh <= 0) return;
+        const tex = self.shadowTexture(eng, sh) orelse return;
+        const batch = self.texBatchFor(&lb.shadow, 0, tex) orelse return;
+
+        const g = shadow_mod.geometry(sh);
+        const left = x0 + sh.x - out;
+        const top = y0 + sh.y - out;
+        const side: f32 = @floatFromInt(g.side);
+        for (glyphwire.ninePatchQuads(g.style(), @intCast(dw), @intCast(dh))) |q| {
+            if (q.dst_w == 0 or q.dst_h == 0 or q.src_w == 0 or q.src_h == 0) continue;
+            const dest = host_eng.RectF.fromPosSize(
+                left + @as(i32, @intCast(q.dst_x)),
+                top + @as(i32, @intCast(q.dst_y)),
+                @intCast(q.dst_w),
+                @intCast(q.dst_h),
+            );
+            const src = host_eng.RectF{
+                .l = @as(f32, @floatFromInt(q.src_x)) / side,
+                .t = @as(f32, @floatFromInt(q.src_y)) / side,
+                .r = @as(f32, @floatFromInt(q.src_x + q.src_w)) / side,
+                .b = @as(f32, @floatFromInt(q.src_y + q.src_h)) / side,
+            };
+            addSprite(batch, dest, src);
+        }
+    }
+
+    /// The uploaded texture for a shadow's look, building it on first
+    /// use. Keyed on everything that changes the pixels (`ShadowKey`) --
+    /// not on the layer's size, which the nine-patch split absorbs -- and
+    /// kept for the session: a program uses a handful of looks, so the
+    /// cache stays a few small textures and is never evicted.
+    fn shadowTexture(self: *Renderer, eng: *Engine, sh: glyphwire.Shadow) ?*host_eng.Texture {
+        const key: ShadowKey = .{ .blur = sh.blur, .radius = sh.radius, .color = .{ sh.color.r, sh.color.g, sh.color.b, sh.color.a } };
+        const managed = self.shadow_textures.get(key) orelse blk: {
+            const pixels = shadow_mod.build(self.app.alloc, sh) catch |err| {
+                std.log.err("glyphwire-host: failed to build a shadow texture: {t}", .{err});
+                return null;
+            };
+            defer self.app.alloc.free(pixels);
+            const side = shadow_mod.geometry(sh).side;
+            var name_buf: [64]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buf, "glyphwire-shadow-{d}-{d}-{d}-{d}-{d}-{d}", .{ sh.blur, sh.radius, sh.color.r, sh.color.g, sh.color.b, sh.color.a }) catch unreachable;
+            const m = eng.resources.loadTextureFromBuffer(name, side, side, pixels) catch |err| {
+                std.log.err("glyphwire-host: failed to upload a shadow texture: {t}", .{err});
+                return null;
+            };
+            self.shadow_textures.put(key, m) catch {};
+            break :blk m;
+        };
+        const live = managed.get() orelse return null;
+        return &live.val;
     }
 
     /// Emits one nine-patch's quads into its texture's `nine_patches`
@@ -1531,12 +1619,13 @@ pub const Renderer = struct {
         // vertex alpha, and applied to the textured ones here -- they have
         // no colour channel, so the shader's `tint` uniform carries it.
         const a = lb.built_opacity;
-        // Back to front: the layer background, nine-patch panels (under
+        // Back to front: the drop shadow, the layer background, nine-patch panels (under
         // every cell background, so a selected or highlighted row inside
         // a dialog still shows), colour fills + tints, image cells, icon
         // backgrounds, foreground/overlay icons, non-atlas icons, text,
         // overlay rects (`create_rect`) last so they sit on top of
         // everything else the layer paints.
+        for (lb.shadow.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatch(&lb.base, mvp);
         for (lb.nine_patches.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatch(&lb.color_bg, mvp);

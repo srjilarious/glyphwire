@@ -551,6 +551,41 @@ pub fn clearBgAndLayerBackgroundOverWireTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectTrue(ctx.layerPtr(1).?.background == null);
 }
 
+/// `shadow` round-trips through `set_property` / `get_property`, fills
+/// omitted fields with the core defaults, clamps an oversized blur, and
+/// clears with no `shadow` object.
+pub fn shadowPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const mk = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"width":10,"height":4}}
+    );
+    alloc.free(mk.response.?);
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"shadow","shadow":{"y":6,"blur":500,"radius":6}}}
+    );
+    const sh = ctx.layerPtr(1).?.shadow.?;
+    try testz.expectEqual(sh.x, 0);
+    try testz.expectEqual(sh.y, 6);
+    try testz.expectEqual(sh.blur, glyphwire.Shadow.max_blur);
+    try testz.expectEqual(sh.radius, 6);
+    try testz.expectEqual(sh.color.a, 128);
+
+    const get = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"get_property","params":{"layer":1,"property":"shadow"}}
+    );
+    defer alloc.free(get.response.?);
+    try testz.expectTrue(std.mem.indexOf(u8, get.response.?, "\"radius\":6") != null);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"shadow"}}
+    );
+    try testz.expectTrue(ctx.layerPtr(1).?.shadow == null);
+}
+
 pub fn scrollModeRejectsAnUnknownModeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);

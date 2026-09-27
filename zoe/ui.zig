@@ -211,13 +211,10 @@ const fg_hover_border = Color{ .r = 104, .g = 112, .b = 140, .a = 255 };
 /// The popup's background and border: the nine-patch the finder's frame
 /// uses. `bg_hover` is the flat fallback for a host without it.
 const hover_panel_style = "panel";
-/// The drop shadow: black at partial alpha, so the code under it darkens
-/// rather than disappears. Offset one row down and two columns right --
-/// cells are about twice as tall as they are wide, so that is roughly the
-/// same distance on screen both ways.
-const bg_hover_shadow = Color{ .r = 0, .g = 0, .b = 0, .a = 110 };
+/// The rows the popup's drop shadow (`glyphwire.Shadow.dialog`, drawn by
+/// the host) reaches below it: `hoverRect` keeps that row clear of the line
+/// being described when the popup goes above the cursor.
 const hover_shadow_rows: usize = 1;
-const hover_shadow_cols: usize = 2;
 
 /// The completion popup. Narrower and shorter than the hover: it sits under
 /// the line being typed, and every row of it covers code.
@@ -702,10 +699,6 @@ pub const Ui = struct {
     /// against the cursor like the finder is against the pane.
     hover: ?Hover = null,
     hover_layer: glyphwire.LayerHandle,
-    /// Directly under `hover_layer`, the same size, offset by the shadow
-    /// distance, and nothing but a translucent background: the part that
-    /// sticks out past the popup's bottom and right edges is the shadow.
-    hover_shadow_layer: glyphwire.LayerHandle,
     /// The hover layer's `hover_panel_style` nine-patch, covering the whole
     /// layer; its border lands in the popup's one-cell frame, which is left
     /// transparent. Null when the host has no such style: the layer then
@@ -909,6 +902,10 @@ pub const Ui = struct {
         try client.setLayerMouseSelect(shell_layer, true);
         try client.setLayerVisible(shell_layer, false);
 
+        // Every floating popup below gets the same host-drawn drop shadow
+        // (`glyphwire.Shadow.dialog`): it follows the layer as it moves and
+        // resizes and hides with it, so nothing here tracks it again.
+        //
         // The finder popup, created last so it composites over every
         // pane (creation order is the initial stacking -- see
         // `raise_layer` in docs/api.md). Neither layer joins the split
@@ -927,17 +924,16 @@ pub const Ui = struct {
             std.log.warn("zoe: no '{s}' nine-patch for the finder frame ({t}); drawing it flat", .{ finder_frame_style, err });
             break :blk null;
         };
+        // The shadow goes on the frame, the popup's outline, when there is
+        // one; a borderless fallback popup is two layers and gets none.
+        if (finder_frame_patch != null) try client.setLayerShadow(finder_frame_layer, glyphwire.Shadow.dialog);
         const finder_layer = try client.createLayer(finder_min_cols, finder_header_rows, 0);
         const finder_list_layer = try client.createLayer(finder_min_cols, 1, 0);
         // The hover popup, floating like the finder's layers and placed
         // against the cursor rather than the pane -- `hoverRect`.
-        // The shadow first: creation order is stacking order, so it lands
-        // above the buffer and below the popup it belongs to.
-        const hover_shadow_layer = try client.createLayer(hover_max_cols, 1, 0);
-        try client.setLayerVisible(hover_shadow_layer, false);
-        try client.setLayerBackground(hover_shadow_layer, bg_hover_shadow);
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
         try client.setLayerVisible(hover_layer, false);
+        try client.setLayerShadow(hover_layer, glyphwire.Shadow.dialog);
         const hover_panel_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(hover_layer, 0, 0, 1, hover_max_cols, hover_panel_style) catch |err| blk: {
             std.log.warn("zoe: no '{s}' nine-patch for the hover popup ({t}); drawing it flat", .{ hover_panel_style, err });
             break :blk null;
@@ -948,6 +944,7 @@ pub const Ui = struct {
         const completion_layer = try client.createLayer(complete_max_cols, 1, 0);
         try client.setLayerVisible(completion_layer, false);
         try client.setLayerBackground(completion_layer, bg_complete);
+        try client.setLayerShadow(completion_layer, glyphwire.Shadow.dialog);
         try client.setLayerVisible(finder_frame_layer, false);
         try client.setLayerVisible(finder_layer, false);
         try client.setLayerVisible(finder_list_layer, false);
@@ -991,7 +988,6 @@ pub const Ui = struct {
             .finder_frame_layer = finder_frame_layer,
             .finder_frame_patch = finder_frame_patch,
             .hover_layer = hover_layer,
-            .hover_shadow_layer = hover_shadow_layer,
             .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
             .diags = diag.Store.init(alloc),
@@ -4683,11 +4679,10 @@ pub const Ui = struct {
     ///
     /// The panel is the `hover_panel_style` nine-patch over the whole layer:
     /// its rounded border sits in the outer ring of cells, which nothing
-    /// writes to, and prose rows are transparent so its fill shows. A
-    /// translucent drop shadow on its own layer underneath
-    /// (`hover_shadow_layer`) stands it off an editor background of nearly
-    /// its own colour. A `---` rule runs the full width, so it meets the
-    /// border on both sides.
+    /// writes to, and prose rows are transparent so its fill shows. The
+    /// layer's host-drawn shadow (set once in `init`) stands it off an
+    /// editor background of nearly its own colour. A `---` rule runs the
+    /// full width, so it meets the border on both sides.
     fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const h = if (self.hover) |*open| open else return self.hideHover(batch);
 
@@ -4707,8 +4702,6 @@ pub const Ui = struct {
 
         try batch.setLayerSize(self.hover_layer, r.cols, r.rows);
         try batch.setLayerCellPosition(self.hover_layer, r.row, r.col);
-        try batch.setLayerSize(self.hover_shadow_layer, r.cols, r.rows);
-        try batch.setLayerCellPosition(self.hover_shadow_layer, r.row + hover_shadow_rows, r.col + hover_shadow_cols);
         if (self.hover_panel_patch) |np| try batch.updateNinePatch(self.hover_layer, np, .{ .rows = r.rows, .cols = r.cols });
         // A resize keeps whatever the old cells held, so the frame ring
         // (which is otherwise never written) is blanked every time.
@@ -4765,13 +4758,11 @@ pub const Ui = struct {
                 .pad = true,
             });
         }
-        try batch.setLayerVisible(self.hover_shadow_layer, true);
         try batch.setLayerVisible(self.hover_layer, true);
     }
 
     fn hideHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         try batch.setLayerVisible(self.hover_layer, false);
-        try batch.setLayerVisible(self.hover_shadow_layer, false);
     }
 
     /// Draws the completion popup, or hides it. Each row is the item's kind,
