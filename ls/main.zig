@@ -5,11 +5,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
-const gridlayout = @import("ls_support").gridlayout;
-const lsfmt = @import("ls_support").format;
-const lsicons = @import("ls_support").icons;
+const gridlayout = @import("applib").gridlayout;
+const lsfmt = @import("applib").format;
+const lsicons = @import("applib").icons;
 const lsconfig = @import("ls_support").config;
-const lsentries = @import("ls_support").entries;
+const lsentries = @import("applib").entries;
 
 const EntryKind = lsentries.EntryKind;
 const FileEntry = lsentries.FileEntry;
@@ -51,7 +51,7 @@ const groupName = lsentries.groupName;
 /// terminal `ls`: `get_property("size")` exposes the layer's width in
 /// cells (it didn't when this was first written), so `writeGrid` fits as
 /// many entry columns across it as the longest name allows and fills
-/// them column-major (see `ls_support`/`gridlayout.zig`). The `-l`
+/// them column-major (see `applib/gridlayout.zig`). The `-l`
 /// listing stays a single server-side `Table`.
 ///
 /// Each entry does get a per-type icon (`draw_icon`, see `iconForEntry`):
@@ -397,7 +397,7 @@ fn sizeColor(size: u64) glyphwire.Color {
 // ── Long-listing formatting ─────────────────────────────────────────────────
 //
 // The size / permission-bit / timestamp / owner:group formatters live in
-// the pure `ls_support` module (`ls/format.zig`, re-exported here as
+// the pure `applib` module (`applib/format.zig`, re-exported here as
 // `lsfmt`) so `tests/ls_tests.zig` can exercise them directly. What can't
 // move there is the uid/gid *lookup* below: it needs a raw `statx(2)` and
 // libc's `getpwuid`/`getgrgid`, neither of which belongs in a pure module.
@@ -448,7 +448,7 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 /// which renders as a server-side `Table` instead.
 ///
 /// **Column packing.** `get_property("size")` gives the layer width in
-/// cells; `gridlayout.compute` (the pure `ls_support` module) turns that
+/// cells; `gridlayout.compute` (in `applib`) turns that
 /// plus the longest entry's display width into a `Grid` -- how many entry
 /// columns fit, how many rows per column, and the cell stride between
 /// blocks. Fill is **column-major**: entry 0,1,2... run down the first

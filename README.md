@@ -168,7 +168,7 @@ keeps its size and the grid gains or loses cells to match.
 | `agent/` | `gw-agent`, the remote end of an ssh session |
 | `debug/`, `demo/`, `table-demo/`, `notify/`, `client/`, `server/` | Developer tools and demos |
 | `tests/` | testz suite |
-| `docs/` | Protocol spec, API reference, design investigations |
+| `docs/` | Protocol spec, API reference |
 
 ## Regenerating the screenshots
 

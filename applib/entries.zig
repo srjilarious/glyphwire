@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! Directory scanning and per-entry classification shared by the tools
 //! that list files: `gw-ls` (`ls/main.zig`) and `salacommander`. Moved

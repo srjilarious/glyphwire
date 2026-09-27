@@ -405,7 +405,7 @@ pub fn gifDimensions(bytes: []const u8) ImageError!ImageInfo {
 /// here because a language server's diagnostics need a mark that is *not*
 /// a colour: a squiggle under a misspelled identifier has to coexist with
 /// the syntax colour on that identifier and with a selection tint over it,
-/// which a second fg or bg cannot do (see docs/investigations/zoe-lsp.md).
+/// which a second fg or bg cannot do.
 ///
 /// `curly` is the diagnostic squiggle; `single` is the ordinary underline
 /// a link or a heading wants. `dotted` and `dashed` round out the SGR set
@@ -480,8 +480,7 @@ const SgrColorTarget = enum { fg, bg, ul };
 /// seen in mirrored plain-command output -- glyphwire's small, deliberate
 /// step toward honouring the escape codes a non-glyphwire-aware program
 /// emits (compiler diagnostics in colour, `pip`/`npm` progress bars),
-/// rather than the full VT model a real terminal library would bring (see
-/// `docs/investigations/libghostty-vt-fallback.md`, Phase A).
+/// rather than the full VT model a real terminal library would bring.
 ///
 /// **Colour, plus underline.** `bold` maps a basic (30-37) foreground to
 /// its bright (90-97) variant; `dim` darkens the resolved foreground;
@@ -3725,8 +3724,8 @@ pub const Layer = struct {
     /// were -- `set_bg`, the "move a highlight" primitive. A client that
     /// draws a list with one highlighted row repaints the row it left and
     /// the row it landed on with two of these instead of redrawing their
-    /// text; see docs/investigations/salacommander-remote-lag.md for what
-    /// the difference costs on a remote session.
+    /// text -- ~300 bytes a keystroke rather than kilobytes, which is what
+    /// keeps a remote session responsive.
     ///
     /// The background is one slot (`Background` is a union), so a cell
     /// whose background was an image or an icon takes the colour like any

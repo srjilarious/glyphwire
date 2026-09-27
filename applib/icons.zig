@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
-//! Name -> icon-registry-name lookups for `glyphwire-ls`, split out of
-//! `ls/main.zig` into the pure `ls_support` module so `tests/ls_tests.zig`
-//! can exercise them directly (same reason `ls/format.zig` lives here).
+//! Name -> icon-registry-name lookups for `glyphwire-ls`, salacommander's
+//! panes and zoe's file tree, so all three show a file the same way. Pure,
+//! so `tests/ls_tests.zig` exercises it directly.
 //!
 //! Two icon subtrees are referenced:
 //!

@@ -4161,8 +4161,7 @@ const Prompt = struct {
     /// of block-buffering into a pipe), working stdin, `isatty()`-gated
     /// colour/progress, and Ctrl-C as a real SIGINT via the tty line
     /// discipline. Full-screen apps (alternate screen, scroll regions)
-    /// still need more -- see `docs/investigations/libghostty-vt-
-    /// fallback.md` §7a.
+    /// still need more: the screen model `core.Layer` interprets.
     ///
     /// The handshake (`glyphwire.handshake_marker`) is unchanged: a
     /// glyphwire-aware child writes the marker to its stdout (= pty

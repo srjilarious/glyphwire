@@ -54,14 +54,13 @@ pub fn build(b: *std.Build) void {
     // The line editor, word splitting and history the prompt is built on.
     shell_support_mod.addImport("applib", applib_mod);
 
-    // Column-packing math shared by gw-ls and its test runner,
-    // same cross-directory-module reason as `shell_support` above. Imports
-    // `glyphwire` only for `codepointWidth` (East Asian Width lookup) --
-    // still no IO / client / server pulled in for the math itself.
+    // gw-ls's own `ls.conf.lua` parser, for gw-ls and its test runner --
+    // same cross-directory-module reason as `shell_support` above. The
+    // scanner, formatting, grid packing and icons it shares with
+    // salacommander and zoe are in `applib`.
     const ls_support_mod = b.addModule("ls_support", .{
         .root_source_file = b.path("ls/support.zig"),
     });
-    ls_support_mod.addImport("glyphwire", glyphwire_mod);
 
     // gw-grep's pure halves (the `rg --json` parser and the node builder)
     // so `tests/grep_tests.zig` can drive them without a subprocess.
@@ -94,9 +93,6 @@ pub fn build(b: *std.Build) void {
     // `zoe/tree.zig` uses `stringWidth` for its column maths; the editor
     // core itself still pulls in nothing.
     zoe_support_mod.addImport("glyphwire", glyphwire_mod);
-    // The tree pane reuses glyphwire-ls's name -> icon mapping rather
-    // than growing a second copy of it.
-    zoe_support_mod.addImport("ls_support", ls_support_mod);
     // The Ctrl+P finder, `.gitignore` rule, text sniff, `:` line field,
     // keymap and shell panel it shares with salacommander.
     zoe_support_mod.addImport("applib", applib_mod);
@@ -174,7 +170,6 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("salacommander/support.zig"),
     });
     salacommander_support_mod.addImport("glyphwire", glyphwire_mod);
-    salacommander_support_mod.addImport("ls_support", ls_support_mod);
     // The finder, keymap, fields and shell panel it shares with zoe, and
     // `wordsplit.quoteArgIfNeeded`, so Ctrl+Shift+C answers with the same
     // shell-quoted path line gw-shell's own marked-paths copy produces.
@@ -238,9 +233,7 @@ pub fn build(b: *std.Build) void {
     // shell/config.zig lives in this module and imports ziglua; both
     // gw-shell and the test runner pull it in transitively.
     shell_support_mod.addImport("ziglua", ziglua_mod);
-    // ls/config.zig (glyphwire-ls's ls.conf.lua parser) does the same -- so
-    // `ls_support` is no longer strictly dependency-free, but the width
-    // math it also carries still pulls in nothing at its own call sites.
+    // ls/config.zig (glyphwire-ls's ls.conf.lua parser) does the same.
     ls_support_mod.addImport("ziglua", ziglua_mod);
     // zoe/langconf.zig (zoe.conf.lua parser) is the third ziglua consumer.
     zoe_support_mod.addImport("ziglua", ziglua_mod);
@@ -471,6 +464,7 @@ pub fn build(b: *std.Build) void {
     ls_exe.root_module.addImport("glyphwire", glyphwire_mod);
     ls_exe.root_module.addImport("zargunaught", zargunaught_mod);
     ls_exe.root_module.addImport("ls_support", ls_support_mod);
+    ls_exe.root_module.addImport("applib", applib_mod);
     // ls_support -> ls/config.zig -> ziglua: the Lua C library has to be
     // linked onto the final binary, same as shell_exe does for shell.conf.lua.
     ls_exe.root_module.linkLibrary(lua_lib);
@@ -536,7 +530,7 @@ pub fn build(b: *std.Build) void {
     );
     run_zoe.addPassthruArgs();
 
-    const zoe_step = b.step("zoe", "Run the zoe editor (headless core driver for now -- see docs/investigations/zoe-editor.md)");
+    const zoe_step = b.step("zoe", "Run the zoe editor");
     zoe_step.dependOn(&run_zoe.step);
 
     const gmux_exe = b.addExecutable(.{

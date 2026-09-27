@@ -41,7 +41,7 @@ people embed. They are GPL-3.0-or-later.
 
 | Path | |
 |---|---|
-| `docs/` | the protocol specification, design decisions, roadmap, investigations |
+| `docs/` | the protocol specification, design decisions, roadmap |
 | `README.md` | |
 
 ### `MPL-2.0`
