@@ -798,7 +798,8 @@ A panel background over the `rows` x `cols` cell rect at `row`/`col`
 every `<name>.9.png` in its bundled `ninepatch/` asset directory and then
 the user's `~/.config/glyphwire/ninepatch/` (a user file overrides a
 bundled one of the same name). The bundled styles are `dialog` (a
-gradient panel with a rounded white border) and `box` (a thin rounded
+top-to-bottom blue gradient with a rounded white border), `panel` (a dark
+popup background with a muted rounded border) and `box` (a thin rounded
 outline over a transparent middle).
 
 A `.9.png` is the image surrounded by a 1px guide border, as on Android.

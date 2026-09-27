@@ -15,9 +15,10 @@ const glyphwire = @import("glyphwire");
 ///
 /// Background is the bundled `"dialog"` nine-patch
 /// (`assets/ninepatch/dialog.9.png`, via `create_nine_patch`) -- a
-/// light-to-dark blue gradient under a white rounded border. The corners
-/// stay at their native pixel size and the gradient stretches across
-/// however wide the message makes the panel.
+/// light-to-dark blue gradient running top to bottom under a white rounded
+/// border. The corners stay at their native pixel size and the gradient
+/// stretches smoothly over however many pixels tall the panel is, which a
+/// per-cell tile could only have done in whole-row steps.
 ///
 /// Slides the layer in from off-screen right, holds for `hold_ms`, then
 /// slides it back off before destroying the layer and exiting -- a
