@@ -265,6 +265,13 @@ correctness":
   it again, and a respawn storm is worse than a dead server.
 - **Server wedges** -- requests time out (a few seconds) and the in-flight
   entry is dropped. The editor never waits on one.
+  *Since slice 1:* 5 seconds (`lsp.request_timeout_ms`) for the requests
+  someone is waiting on (hover, definition, completion). `Ui.run` waits no
+  longer than the oldest one's deadline, so the statusline says "LSP: zls
+  didn't answer hover" without a keystroke to prompt it, and only when it is
+  still the request the editor wants. A late reply is dropped as unknown.
+  The server is not marked dead; `initialize` never times out, since a
+  server indexing a big workspace is slow, not wedged.
 - **`initialize` fails or handshake times out** -- treated as "missing".
 - **Exit** -- `shutdown` then `exit`, a bounded wait, then kill. zoe's own
   quit path does not hang on a child.

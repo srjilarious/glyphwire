@@ -158,7 +158,35 @@ pub const Location = struct {
 /// response can be routed without the caller having stashed a continuation
 /// -- and so a stale reply (the user has since moved on) can be recognised
 /// and dropped.
-pub const RequestKind = enum { initialize, hover, definition, shutdown };
+pub const RequestKind = enum {
+    initialize,
+    hover,
+    definition,
+    shutdown,
+
+    /// Whether an unanswered request of this kind is given up on after
+    /// `request_timeout_ms`. Only the ones the user is waiting on: a slow
+    /// `initialize` is a server still indexing (and its documents queue
+    /// meanwhile), and `shutdown` is on the way out anyway.
+    pub fn expires(self: RequestKind) bool {
+        return switch (self) {
+            .hover, .definition => true,
+            .initialize, .shutdown => false,
+        };
+    }
+};
+
+/// How long a request the user is waiting on gets before it is dropped and
+/// the statusline says so. Long enough for a server busy with a big
+/// workspace; short enough that a wedged one doesn't leave `K` looking like
+/// it did nothing at all.
+pub const request_timeout_ms: i64 = 5000;
+
+/// Milliseconds on the monotonic clock, the unit in-flight requests are
+/// stamped with and `Pool.expire` is given.
+pub fn nowMs(io: std.Io) i64 {
+    return std.Io.Clock.awake.now(io).toMilliseconds();
+}
 
 /// Everything the editor gets back, already parsed and owned. Mirrors
 /// `glyphwire.Event`'s convention: the caller takes ownership and frees with
@@ -178,6 +206,10 @@ pub const Event = union(enum) {
     /// A `textDocument/definition` reply; `target` null for "no definition
     /// found", also a normal answer.
     definition: struct { request_id: i64, server: []const u8, target: ?Location },
+    /// A request went `request_timeout_ms` without an answer and has been
+    /// forgotten; a reply that turns up later is dropped as unknown. The
+    /// server itself is left alone -- slow once is not dead.
+    timed_out: struct { request_id: i64, server: []const u8, kind: RequestKind },
     /// The server's stdout closed: it exited or crashed. The editor clears
     /// its diagnostics and says so once -- see `Pool.reap`.
     died: struct { server: []const u8 },
@@ -191,7 +223,7 @@ pub const Event = union(enum) {
             },
             .hover => |h| if (h.text) |t| alloc.free(t),
             .definition => |d| if (d.target) |*t| t.deinit(alloc),
-            .died => {},
+            .timed_out, .died => {},
         }
     }
 };
@@ -402,6 +434,14 @@ const PendingOpen = struct {
     text: []const u8,
 };
 
+/// An outstanding request: what it was, and when it went out (`nowMs`), so
+/// `Pool.expire` can give up on it.
+const InFlight = struct {
+    id: i64,
+    kind: RequestKind,
+    sent_ms: i64,
+};
+
 /// One language server process and the connection to it.
 pub const Server = struct {
     alloc: std.mem.Allocator,
@@ -441,7 +481,7 @@ pub const Server = struct {
     caps: Caps = .{},
 
     next_id: i64 = 1,
-    in_flight: std.ArrayList(struct { id: i64, kind: RequestKind }) = .empty,
+    in_flight: std.ArrayList(InFlight) = .empty,
     pending_opens: std.ArrayList(PendingOpen) = .empty,
     /// Every uri `didOpen` has been sent for and `didClose` has not, owned.
     /// Kept so `deinit` can close them and so a `didChange` for a document
@@ -530,7 +570,7 @@ pub const Server = struct {
             .waker = waker,
         };
         self.next_id = 2;
-        try self.in_flight.append(alloc, .{ .id = 1, .kind = .initialize });
+        try self.in_flight.append(alloc, .{ .id = 1, .kind = .initialize, .sent_ms = nowMs(io) });
         return self;
     }
 
@@ -729,7 +769,7 @@ pub const Server = struct {
                 .{ id, method },
             );
         defer self.alloc.free(body);
-        try self.in_flight.append(self.alloc, .{ .id = id, .kind = kind });
+        try self.in_flight.append(self.alloc, .{ .id = id, .kind = kind, .sent_ms = nowMs(self.io) });
         try self.writeFrame(body);
         return id;
     }
@@ -1086,6 +1126,40 @@ pub const Pool = struct {
     pub fn anyAlive(self: *const Pool) bool {
         for (self.servers.items) |s| if (s.alive()) return true;
         return false;
+    }
+
+    /// When the oldest expiring request comes due, in `nowMs` terms, or
+    /// null with none outstanding. `Ui.run` waits no longer than this, which
+    /// is what lets a timeout fire with no keystroke to wake the loop.
+    pub fn nextDeadlineMs(self: *const Pool) ?i64 {
+        var best: ?i64 = null;
+        for (self.servers.items) |s| {
+            if (!s.alive()) continue;
+            for (s.in_flight.items) |f| {
+                if (!f.kind.expires()) continue;
+                const due = f.sent_ms + request_timeout_ms;
+                if (best == null or due < best.?) best = due;
+            }
+        }
+        return best;
+    }
+
+    /// Forgets one request that has gone `request_timeout_ms` unanswered as
+    /// of `now_ms`, and reports it; null when none has. Called in a loop
+    /// until null, like `nextEvent`. `now_ms` is a parameter rather than
+    /// read here so the tests can move time along without sleeping.
+    pub fn expire(self: *Pool, now_ms: i64) ?Event {
+        for (self.servers.items) |s| {
+            if (!s.alive()) continue;
+            for (s.in_flight.items, 0..) |f, i| {
+                if (!f.kind.expires()) continue;
+                if (now_ms - f.sent_ms < request_timeout_ms) continue;
+                _ = s.in_flight.orderedRemove(i);
+                trace("{s}: request {d} ({t}) timed out", .{ s.name, f.id, f.kind });
+                return .{ .timed_out = .{ .request_id = f.id, .server = s.name, .kind = f.kind } };
+            }
+        }
+        return null;
     }
 
     /// Drains one parsed event from whichever server has one, or null when

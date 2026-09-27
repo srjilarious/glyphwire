@@ -1421,8 +1421,12 @@ pub const Ui = struct {
             // A background parse (a big file's highlighting) turns the wait
             // into a poll: take what has queued, then give the parse one
             // slice, so keys never sit behind more than one slice of it.
+            //
+            // So is an outstanding request's timeout: with one out, wait no
+            // longer than it has left, so a server that never answers is
+            // reported without needing a keystroke to notice.
             self.armLspChange();
-            const timeout: std.Io.Timeout = if (self.lsp_change_due) |due|
+            const timeout: std.Io.Timeout = if (self.nextLspDeadline()) |due|
                 .{ .deadline = due }
             else
                 .none;
@@ -3108,6 +3112,20 @@ pub const Ui = struct {
         self.buf.lsp_sent_edits = self.buf.ed.buf.edits;
     }
 
+    /// The earlier of the `didChange` debounce and the oldest outstanding
+    /// request's timeout, or null for neither -- the loop's whole notion of
+    /// time.
+    fn nextLspDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
+        const pool = if (self.lsp_pool) |*p| p else return self.lsp_change_due;
+        const req_ms = pool.nextDeadlineMs() orelse return self.lsp_change_due;
+        const req: std.Io.Clock.Timestamp = .{
+            .raw = .fromNanoseconds(@as(i96, req_ms) * std.time.ns_per_ms),
+            .clock = .awake,
+        };
+        const change = self.lsp_change_due orelse return req;
+        return if (change.raw.nanoseconds <= req.raw.nanoseconds) change else req;
+    }
+
     /// Whether the debounce has come due, checked after every wait.
     fn lspChangeDue(self: *Ui) bool {
         const due = self.lsp_change_due orelse return false;
@@ -3152,23 +3170,45 @@ pub const Ui = struct {
     /// happened to wake us.
     fn drainLsp(self: *Ui) void {
         const pool = if (self.lsp_pool) |*p| p else return;
-        while (pool.nextEvent() catch null) |ev| {
-            defer ev.deinit(self.alloc);
-            switch (ev) {
-                .diagnostics => |d| self.applyDiagnostics(d.path, d.server, d.items),
-                .hover => |h| self.applyHover(h.request_id, h.text),
-                .definition => |d| self.applyDefinition(d.request_id, d.target),
-                .died => |d| {
-                    // Its marks will never be refreshed again, so they go
-                    // rather than growing stale on screen.
-                    self.diags.clearServer(d.server);
-                    self.buf.ed.setStatus("LSP: {s} exited (:lsp restart)", .{d.server});
-                    self.status_dirty = true;
-                    self.buf.full_redraw = true;
-                    self.buffer_dirty = true;
-                },
-            }
+        while (pool.nextEvent() catch null) |ev| self.handleLspEvent(ev);
+        // After the replies, so one that landed just inside its deadline
+        // counts as answered rather than timed out.
+        const now = lsp.nowMs(self.io);
+        while (pool.expire(now)) |ev| self.handleLspEvent(ev);
+    }
+
+    fn handleLspEvent(self: *Ui, ev: lsp.Event) void {
+        defer ev.deinit(self.alloc);
+        switch (ev) {
+            .diagnostics => |d| self.applyDiagnostics(d.path, d.server, d.items),
+            .hover => |h| self.applyHover(h.request_id, h.text),
+            .definition => |d| self.applyDefinition(d.request_id, d.target),
+            .timed_out => |t| self.applyTimeout(t.request_id, t.server, t.kind),
+            .died => |d| {
+                // Its marks will never be refreshed again, so they go
+                // rather than growing stale on screen.
+                self.diags.clearServer(d.server);
+                self.buf.ed.setStatus("LSP: {s} exited (:lsp restart)", .{d.server});
+                self.status_dirty = true;
+                self.buf.full_redraw = true;
+                self.buffer_dirty = true;
+            },
         }
+    }
+
+    /// A request the server never answered. Said on the statusline only when
+    /// it is the one the editor is still waiting on: a stale request timing
+    /// out (the user already asked again) is nobody's business.
+    fn applyTimeout(self: *Ui, request_id: i64, server: []const u8, kind: lsp.RequestKind) void {
+        const slot: *?i64 = switch (kind) {
+            .hover => &self.hover_request,
+            .definition => &self.definition_request,
+            .initialize, .shutdown => return,
+        };
+        if (slot.* != request_id) return;
+        slot.* = null;
+        self.buf.ed.setStatus("LSP: {s} didn't answer {t}", .{ server, kind });
+        self.status_dirty = true;
     }
 
     /// Stores one publish, converting each range out of the server's
