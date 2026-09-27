@@ -22,6 +22,12 @@
 //! the old tree, not a whole-buffer parse. A full parse is still the
 //! fallback (first parse, language switch, a journal that overflowed).
 //!
+//! **A full parse is staged.** `beginParse` gives it a small time budget
+//! through tree-sitter's progress callback; a file that doesn't finish
+//! in time gets a throwaway parse of just its first screens so they draw
+//! coloured, while the real parse stays parked in `parser` and
+//! `continueParse` resumes it in slices between UI events. No threads.
+//!
 //! **Injected languages.** After the primary parse, `injections.scm` (if
 //! the grammar dir ships one) is run to find embedded regions -- a
 //! fenced code block in Markdown, the `(inline)` span inside a Markdown
@@ -65,6 +71,102 @@ pub const ByteRange = struct { start: usize, end: usize };
 
 fn pointOf(p: buffer.Pos) ts.Point {
     return .{ .row = @intCast(p.line), .column = @intCast(p.col) };
+}
+
+/// How long one slice of a staged parse (`beginParse` / `continueParse`)
+/// may run before it gives control back to the event loop. The parser
+/// polls this through tree-sitter's progress callback, a few hundred
+/// parse operations apart, so a slice overshoots by at most that much.
+pub const ParseBudget = union(enum) {
+    /// Wall time on `io`'s awake clock, counted from the start of the
+    /// slice. What `ui.zig` uses.
+    time: struct { io: std.Io, ms: i64 },
+    /// Stop at the parser's `n`th progress check, whatever the clock
+    /// says. Deterministic, which is what the tests need; `0` cancels at
+    /// the very first check.
+    checks: u32,
+};
+
+/// What a staged parse step left behind.
+pub const ParseProgress = enum {
+    /// The whole buffer is parsed; `tree` covers all of it.
+    done,
+    /// The budget ran out first. `tree` (if any) is the provisional
+    /// prefix parse, and `continueParse` picks the full one up again.
+    pending,
+};
+
+// Declared here rather than through the binding's `parseWithOptions`:
+// zig-tree-sitter types the progress callback as taking `TSParseState`
+// by value, but libtree-sitter calls it with a *pointer* to one, so the
+// binding's callback would read its payload out of the wrong register.
+const TsParseOptions = extern struct {
+    payload: ?*anyopaque = null,
+    progress_callback: *const fn (state: *ts.Parser.State) callconv(.c) bool,
+};
+extern fn ts_parser_parse_with_options(
+    self: *ts.Parser,
+    old_tree: ?*const ts.Tree,
+    input: ts.Input,
+    options: TsParseOptions,
+) ?*ts.Tree;
+
+/// One running slice of a `ParseBudget` -- the progress callback's
+/// payload. `fired` records that it was the budget that stopped the
+/// parse, as opposed to the parse failing.
+const ParseSlice = struct {
+    budget: ParseBudget,
+    deadline: std.Io.Timestamp = .zero,
+    checks_left: u32 = 0,
+    fired: bool = false,
+
+    fn start(budget: ParseBudget) ParseSlice {
+        return switch (budget) {
+            .time => |t| .{
+                .budget = budget,
+                .deadline = std.Io.Clock.awake.now(t.io).addDuration(.fromMilliseconds(t.ms)),
+            },
+            .checks => |n| .{ .budget = budget, .checks_left = n },
+        };
+    }
+
+    fn expired(self: *ParseSlice) bool {
+        switch (self.budget) {
+            .time => |t| return std.Io.Clock.awake.now(t.io).compare(.gte, self.deadline),
+            .checks => {
+                if (self.checks_left == 0) return true;
+                self.checks_left -= 1;
+                return false;
+            },
+        }
+    }
+
+    /// Parses `src` with `parser` under this slice's budget, resuming
+    /// whatever parse `parser` has parked. Null when stopped (see
+    /// `fired`) or failed.
+    fn parse(self: *ParseSlice, parser: *ts.Parser, src: []const u8) ?*ts.Tree {
+        const input: ts.Input = .{ .payload = @ptrCast(@constCast(&src)), .read = readSlice };
+        const opts: TsParseOptions = .{ .payload = self, .progress_callback = budgetExpired };
+        return ts_parser_parse_with_options(parser, null, input, opts);
+    }
+};
+
+fn budgetExpired(state: *ts.Parser.State) callconv(.c) bool {
+    const slice: *ParseSlice = @ptrCast(@alignCast(state.payload.?));
+    if (slice.expired()) slice.fired = true;
+    return slice.fired;
+}
+
+/// `ts.Input.read` over one contiguous slice: hands the parser everything
+/// from `byte_index` on in a single chunk, and nothing past the end.
+fn readSlice(payload: ?*anyopaque, byte_index: u32, _: ts.Point, bytes_read: *u32) callconv(.c) [*c]const u8 {
+    const src: *const []const u8 = @ptrCast(@alignCast(payload.?));
+    if (byte_index >= src.len) {
+        bytes_read.* = 0;
+        return "";
+    }
+    bytes_read.* = @intCast(src.len - byte_index);
+    return src.ptr + byte_index;
 }
 
 /// The oldest grammar ABI libtree-sitter here can parse. A `parser.so`
@@ -609,8 +711,15 @@ pub const Highlighter = struct {
     query: ?*ts.Query = null,
     tree: ?*ts.Tree = null,
     /// The exact bytes `tree` was parsed from -- kept so `#eq?` /
-    /// `#any-of?` can read a captured node's text. Owned.
+    /// `#any-of?` can read a captured node's text. Owned. While a staged
+    /// parse is pending this is the whole-buffer snapshot the full parse
+    /// is reading, and the provisional prefix `tree` indexes into it too.
     source: []u8 = &.{},
+    /// A whole-buffer parse of `source` was cut short by its budget and
+    /// `parser` holds its state; `continueParse` resumes it. Anything else
+    /// that parses with `parser` must `cancelParse` first, or tree-sitter
+    /// would resume the old parse against the new input.
+    parse_pending: bool = false,
 
     /// capture id -> resolved colour (or null = don't colour). Rebuilt
     /// by `setLanguage`. Owned.
@@ -694,6 +803,7 @@ pub const Highlighter = struct {
     }
 
     pub fn clearLanguage(self: *Highlighter) void {
+        self.cancelParse();
         self.clearInjections();
 
         var cit = self.compiled.iterator();
@@ -793,6 +903,7 @@ pub const Highlighter = struct {
     /// or an edit journal that overflowed.
     pub fn reparse(self: *Highlighter, buf: *const Buffer) !void {
         if (self.query == null) return;
+        self.cancelParse();
 
         const src = try buf.text(self.alloc);
         errdefer self.alloc.free(src);
@@ -806,6 +917,92 @@ pub const Highlighter = struct {
 
         self.clearInjections();
         self.resolveInjections() catch {};
+    }
+
+    /// Starts a whole-buffer parse from scratch that gives up after
+    /// `budget`, so a large file doesn't hold the first frame hostage.
+    ///
+    /// If the full parse finishes inside the budget -- any file of
+    /// ordinary size -- this is just `reparse` and returns `.done`.
+    /// Otherwise the full parse is parked in `parser`, and the first
+    /// `prefix_end` bytes (the caller passes the end of the line just
+    /// past what it is about to draw) are parsed on their own by a
+    /// throwaway parser, so those lines highlight now. The rest of the
+    /// buffer has no nodes in that tree and paints plain until
+    /// `continueParse` reports `.done`.
+    ///
+    /// A prefix cut mid-construct (inside a block comment, say) can
+    /// colour its last lines differently from the full parse; the caller
+    /// repaints once the full tree lands, and cutting a screen or so past
+    /// what is visible keeps that out of sight.
+    pub fn beginParse(self: *Highlighter, buf: *const Buffer, prefix_end: usize, budget: ParseBudget) !ParseProgress {
+        if (self.query == null) return .done;
+        self.cancelParse();
+
+        const src = try buf.text(self.alloc);
+        if (self.tree) |t| t.destroy();
+        self.tree = null;
+        self.clearInjections();
+        self.alloc.free(self.source);
+        self.source = src;
+        self.parse_pending = true;
+
+        if (try self.stepFullParse(budget) == .done) return .done;
+
+        // The budget ran out. Show the prefix while the full parse waits.
+        // It gets a slice of its own: a prefix always starts at byte 0,
+        // so one that reaches far down a big file (an edit made while
+        // scrolled deep into it) could cost nearly the full parse, and
+        // then it is better to paint plain and let the slices finish.
+        const cut = @min(prefix_end, self.source.len);
+        const prefix = ts.Parser.create();
+        defer prefix.destroy();
+        prefix.setLanguage(self.parser.getLanguage()) catch return .pending;
+        var slice = ParseSlice.start(budget);
+        self.tree = slice.parse(prefix, self.source[0..cut]);
+        if (self.tree != null) self.resolveInjections() catch {};
+        return .pending;
+    }
+
+    /// Runs the parked full parse for another `budget`. `.done` once the
+    /// whole buffer's tree (and its injections) has replaced the prefix
+    /// one; a no-op `.done` when nothing is pending.
+    pub fn continueParse(self: *Highlighter, budget: ParseBudget) !ParseProgress {
+        if (!self.parse_pending) return .done;
+        return self.stepFullParse(budget);
+    }
+
+    /// A staged parse is still running; `continueParse` has work to do.
+    pub fn parsing(self: *const Highlighter) bool {
+        return self.parse_pending;
+    }
+
+    /// Drops a parked full parse, so the next parse starts from the top
+    /// instead of resuming it. The prefix tree (if any) stays as it is.
+    pub fn cancelParse(self: *Highlighter) void {
+        if (!self.parse_pending) return;
+        self.parser.reset();
+        self.parse_pending = false;
+    }
+
+    fn stepFullParse(self: *Highlighter, budget: ParseBudget) !ParseProgress {
+        var slice = ParseSlice.start(budget);
+        const new_tree = slice.parse(self.parser, self.source) orelse {
+            // Stopped by the budget: `parser` keeps its place for the
+            // next slice. Anything else (an external scanner error) would
+            // fail the same way every slice, so give up on it and keep
+            // whatever tree is showing.
+            if (slice.fired) return .pending;
+            self.cancelParse();
+            return error.ParseFailed;
+        };
+
+        self.parse_pending = false;
+        if (self.tree) |t| t.destroy();
+        self.tree = new_tree;
+        self.clearInjections();
+        self.resolveInjections() catch {};
+        return .done;
     }
 
     /// Replay one buffer mutation onto the retained tree so the next
@@ -837,6 +1034,12 @@ pub const Highlighter = struct {
         changed: *std.ArrayList(ByteRange),
     ) !bool {
         if (self.query == null) return false;
+        // The retained tree is a provisional prefix, not a tree of the
+        // pre-edit buffer: nothing incremental can be built on it.
+        if (self.parse_pending) {
+            try self.reparse(buf);
+            return false;
+        }
         const old = self.tree orelse {
             try self.reparse(buf);
             return false;
