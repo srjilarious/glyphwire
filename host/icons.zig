@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const host_eng = @import("host_eng");
 
 /// Recursively walks `root` and registers every `.png` under it into
 /// `ctx`'s flat icon catalog, named by its path beneath `root` with the
@@ -124,4 +125,68 @@ pub fn loadFiletypeTheme(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.C
         loaded += 1;
     }
     return loaded > 0;
+}
+
+/// Loads every `<name>.9.png` directly under `root` as the nine-patch
+/// style `<name>` (`Context.registerNinePatchStyle`). The PNG is decoded
+/// here only to read its stretch guides (`glyphwire.parseNinePatch`); the
+/// raw bytes go into the context like any other image, and the renderer
+/// samples inside the guide border. Same bundled-then-user, last-wins,
+/// log-and-skip conventions as `loadIconsFromDir`. Not recursive: styles
+/// are a flat set of names.
+///
+/// Runs before the engine exists, so it brackets its decoding with
+/// `stbi.init`/`deinit` itself (the engine's own `init` asserts stbi is
+/// *not* initialized yet). It can't wait for the engine: the styles have
+/// to be registered before the socket accepts the first client.
+pub fn loadNinePatchesFromDir(io: std.Io, alloc: std.mem.Allocator, ctx: *glyphwire.Context, root: []const u8, warn_if_absent: bool) void {
+    var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| {
+        if (warn_if_absent or err != error.FileNotFound) {
+            std.log.warn("glyphwire-host: couldn't open nine-patch directory '{s}': {t}", .{ root, err });
+        }
+        return;
+    };
+    defer dir.close(io);
+
+    host_eng.stbi.init(io, alloc);
+    defer host_eng.stbi.deinit();
+
+    const suffix = ".9.png";
+    var it = dir.iterate();
+    while (it.next(io) catch |err| {
+        std.log.warn("glyphwire-host: nine-patch directory iteration failed under '{s}': {t}", .{ root, err });
+        return;
+    }) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        if (!std.ascii.endsWithIgnoreCase(entry.name, suffix)) continue;
+        const name = entry.name[0 .. entry.name.len - suffix.len];
+
+        const bytes = dir.readFileAlloc(io, entry.name, alloc, .limited(16 * 1024 * 1024)) catch |err| {
+            std.log.warn("glyphwire-host: couldn't read nine-patch '{s}': {t}", .{ entry.name, err });
+            continue;
+        };
+        defer alloc.free(bytes);
+
+        var style = blk: {
+            var image = host_eng.stbi.Image.loadFromMemory(bytes, 4) catch |err| {
+                std.log.warn("glyphwire-host: couldn't decode nine-patch '{s}': {t}", .{ entry.name, err });
+                continue;
+            };
+            defer image.deinit();
+            break :blk glyphwire.parseNinePatch(image.data, image.width, image.height) catch |err| {
+                std.log.warn("glyphwire-host: nine-patch '{s}' has bad guides: {t}", .{ entry.name, err });
+                continue;
+            };
+        };
+        style.image = ctx.loadImage(.png, bytes) catch |err| {
+            std.log.warn("glyphwire-host: couldn't load nine-patch '{s}': {t}", .{ entry.name, err });
+            continue;
+        };
+        const replacing = ctx.ninePatchStyle(name) != null;
+        ctx.registerNinePatchStyle(name, style) catch |err| {
+            std.log.warn("glyphwire-host: couldn't register nine-patch '{s}': {t}", .{ name, err });
+            continue;
+        };
+        if (replacing) std.log.info("glyphwire-host: nine-patch '{s}' overridden by a user file", .{name});
+    }
 }

@@ -50,7 +50,7 @@ multi-script text:
 | **Layers** | `create_layer`, `raise_layer`, `get_property` / `set_property` | Addressable surfaces with position, size, visibility, opacity and background. A viewport over a larger content grid scrolls host-side, with opt-in scrollbars. |
 | **Text** | `write_text`, `insert_cells`, `delete_cells`, `move_content`, `clear`, `set_bg` | Truecolor styled runs or spans, text scale (1.5x, 2x, 3x) from re-rasterized font atlases, in-place cell editing, row shifting without a repaint, and background-only repaints for moving a highlight. |
 | **Images** | `load_image`, `update_image`, `draw_image` | Real bitmaps (PNG, JPEG, BMP, GIF) placed in the grid, with source cropping. Bytes ride a binary side channel, never base64. |
-| **Icons and boxes** | `draw_icon`, `draw_box` | A bundled icon catalog (file types, Devicon logos, distro logos) and 9-slice panels from tile sets. |
+| **Icons and panels** | `draw_icon`, `create_nine_patch` | A bundled icon catalog (file types, Devicon logos, distro logos) and nine-patch panels from `.9.png` art, corners at native pixel size. |
 | **Rects** | `create_rect`, `update_rect`, `destroy_rect` | Pixel-space outlines and fills on a layer, independent of the cell grid. Good for marks, crop boxes and focus rings. |
 | **Tables** | `create_table`, `table_set_rows`, `table_set_sort`, `table_set_style` | Typed, sortable tables with column widths, alignment and cell wrapping. Survive the client that created them. |
 | **Metadata** | `create_metadata`, `tag_metadata`, `get_metadata`, `find_metadata` | Opaque client JSON attached to cells: a path to open, a link to follow. The server stores it and never parses it. |

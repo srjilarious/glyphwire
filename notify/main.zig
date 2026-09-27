@@ -13,11 +13,11 @@ const glyphwire = @import("glyphwire");
 /// layer" (`destroyLayer`) is the entire cleanup, no `clear` needed to
 /// erase it first.
 ///
-/// Background is the bundled `"dialog"` 9-patch style drawn in
-/// `BoxMode.stretch` (the `assets/icons/dialog/` set) -- a light-to-dark
-/// blue gradient with a white border that reads as one continuous image
-/// regardless of the box's size, rather than `BoxMode.tile`'s repeated-
-/// per-cell look, which would band a gradient instead of blending it.
+/// Background is the bundled `"dialog"` nine-patch
+/// (`assets/ninepatch/dialog.9.png`, via `create_nine_patch`) -- a
+/// light-to-dark blue gradient under a white rounded border. The corners
+/// stay at their native pixel size and the gradient stretches across
+/// however wide the message makes the panel.
 ///
 /// Slides the layer in from off-screen right, holds for `hold_ms`, then
 /// slides it back off before destroying the layer and exiting -- a
@@ -132,23 +132,22 @@ fn run(io: std.Io, client: *glyphwire.Client, notify_type: NotifyType, message: 
     const rest_x: f32 = @floatFromInt(col * metrics.w);
     try client.setLayerPosition(handle, off_x, 0);
 
-    try client.drawBoxOnStyled(handle, 0, 0, box_rows, box_cols, "dialog", .{ .mode = .stretch });
-    // `foreground = true` draws into `Cell.fg_icon`, over the dialog fill
-    // `drawBoxOnStyled` just set, rather than replacing it the way a plain
-    // `draw_icon` would -- see `core.Cell.fg_icon`'s doc comment. `.natural`
-    // + `max_h` matches `glyphwire-ls`'s own icon treatment (bigger than a
-    // shrunk-to-fit `.fit` icon would be, vertically centered on its row).
+    // The panel is a nine-patch under the layer's cells, so it lives (and
+    // goes) with the layer -- no destroy of its own needed.
+    _ = try client.createNinePatch(handle, 0, 0, box_rows, box_cols, "dialog");
+    // `.natural` + `max_h` matches `glyphwire-ls`'s own icon treatment
+    // (bigger than a shrunk-to-fit `.fit` icon would be, vertically
+    // centered on its row). Its transparent pixels show the panel through.
     try client.drawIconOnStyled(handle, text_row, icon_col, notify_type.iconName(), .{
         .scale = .natural,
         .h_align = .start,
         .v_align = .center,
         .max_h = max_icon_h,
-        .foreground = true,
     });
     try client.setCursorOn(handle, text_row, text_col);
-    // `transparent_bg: true` leaves the dialog fill `drawBoxOnStyled`
-    // already drew on these cells alone instead of `write_text`'s default
-    // of resetting it to opaque black -- see `Client.writeTextTransparent`.
+    // `transparent_bg: true` leaves each cell's background exactly as it
+    // is, so nothing paints over the panel -- see
+    // `Client.writeTextTransparent`.
     try client.writeTextOnTransparent(handle, text, .{ .r = 255, .g = 255, .b = 255 });
 
     try slide(io, client, handle, off_x, rest_x);
