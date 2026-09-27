@@ -234,6 +234,84 @@ pub fn reportResizeResizesRootAndBroadcastsToSubscribersTest(io: std.Io, alloc: 
     try testz.expectEqual(ctx.root.height, 30);
 }
 
+/// `Server.reportFontStep` (glyphwire-host's Ctrl+-/Ctrl++) always sends
+/// a `resize`, even over an unchanged grid, since the cells themselves
+/// changed; and it catches a backgrounded context up on both the new
+/// metrics and the new size, telling that context's client too.
+pub fn reportFontStepAlwaysResizesAndCatchesUpBackgroundContextsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-fontstep-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer accept_thread.join();
+
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    defer stream.close(io);
+    var decoder: wire.FrameDecoder = .{};
+    defer decoder.deinit(alloc);
+
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+    try wire.writeFrame(&w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["resize"]}}
+    );
+    try w.interface.flush();
+    const ack = try readOneFrame(io, alloc, &stream, &decoder);
+    alloc.free(ack);
+
+    const Notification = struct {
+        method: []const u8,
+        params: struct { cols: usize, rows: usize },
+    };
+
+    // Same cell count as before: still announced.
+    try srv.reportFontStep(alloc, 11, 22, 80, 24);
+    {
+        const body = try readOneFrame(io, alloc, &stream, &decoder);
+        defer alloc.free(body);
+        const parsed = try std.json.parseFromSlice(Notification, alloc, body, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        try testz.expectEqualStr("resize", parsed.value.method);
+        try testz.expectEqual(parsed.value.params.cols, 80);
+        try testz.expectEqual(parsed.value.params.rows, 24);
+    }
+    try testz.expectEqual(ctx.cell_px_w, 11);
+    try testz.expectEqual(ctx.cell_px_h, 22);
+
+    // A second context on top of the same pane backgrounds the first,
+    // which is the one this connection draws into.
+    const top = try srv.session.createContext(glyphwire.root_pane_handle, null, null, 0);
+
+    try srv.reportFontStep(alloc, 8, 16, 100, 30);
+    {
+        const body = try readOneFrame(io, alloc, &stream, &decoder);
+        defer alloc.free(body);
+        const parsed = try std.json.parseFromSlice(Notification, alloc, body, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        try testz.expectEqualStr("resize", parsed.value.method);
+        try testz.expectEqual(parsed.value.params.cols, 100);
+        try testz.expectEqual(parsed.value.params.rows, 30);
+    }
+    try testz.expectEqual(ctx.root.width, 100);
+    try testz.expectEqual(ctx.root.height, 30);
+    try testz.expectEqual(ctx.cell_px_w, 8);
+    try testz.expectEqual(ctx.cell_px_h, 16);
+
+    const top_ctx = srv.session.contextPtr(top) orelse return error.TestExpectedContext;
+    try testz.expectEqual(top_ctx.root.width, 100);
+    try testz.expectEqual(top_ctx.root.height, 30);
+    try testz.expectEqual(top_ctx.cell_px_w, 8);
+    try testz.expectEqual(top_ctx.cell_px_h, 16);
+}
+
 /// `Server.reportScroll` (the in-process path glyphwire-host's mouse
 /// wheel / scrollbar call) moves the root layer's scrollback view offset
 /// and pushes a `scroll` notification to a `"scroll"` subscriber.

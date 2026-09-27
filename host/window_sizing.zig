@@ -72,12 +72,9 @@ pub const WindowSizing = struct {
         const fb = eng.window_state.framebuffer_size;
         if (geometry.cell_w <= 0 or geometry.cell_h <= 0) return;
 
-        const gutter = self.gutterPx();
-
-        const cols: usize = @intCast(@max(@divTrunc(fb.x - 2 * geometry.content_pad_px - gutter, geometry.cell_w), geometry.min_grid_cols));
-        const rows: usize = @intCast(@max(@divTrunc(fb.y, geometry.cell_h), geometry.min_grid_rows));
-
-        const target: geometry.GridSize = .{ .cols = cols, .rows = rows };
+        const target = geometry.gridForFramebuffer(.{ .w = fb.x, .h = fb.y }, self.gutterPx(), geometry.cell_w, geometry.cell_h);
+        const cols = target.cols;
+        const rows = target.rows;
         const committed: geometry.GridSize = .{ .cols = geometry.grid_cols, .rows = geometry.grid_rows };
         self.pending_elapsed_ms += delta_ms;
 
@@ -145,10 +142,18 @@ pub const WindowSizing = struct {
     }
 
     /// Repacks the default font atlas at `size_px`, re-measures the cell
-    /// metrics from the same face, updates `cell_w`/`cell_h` and the
-    /// RPC-visible `ctx.cell_px_*`, and resizes the window so the current
-    /// `grid_cols` x `grid_rows` still fits. Any step failing leaves the
-    /// previous size in place.
+    /// metrics from the same face, and reflows the grid to however many
+    /// of the new cells the window already holds: the window keeps its
+    /// size and the cell count changes, not the other way round. A
+    /// failure before the atlas repack leaves the previous size in place.
+    ///
+    /// The new grid is committed at once rather than through
+    /// `syncWindowSize`'s drag debounce -- until it is, the old cell count
+    /// would be drawn at the new cell size and overrun the window.
+    ///
+    /// The one case the window does change: a step so large that even
+    /// `min_grid_cols` x `min_grid_rows` no longer fits, where the short
+    /// axis grows just enough to hold the minimum (`geometry.fontStepFit`).
     pub fn applyFontSize(self: *WindowSizing, eng: *Engine, size_px: f32) void {
         const fa = eng.defaultFontAtlas() orelse {
             std.log.warn("glyphwire-host: no resizable default font atlas", .{});
@@ -175,43 +180,45 @@ pub const WindowSizing = struct {
         geometry.cell_w = metrics.advance;
         geometry.cell_h = metrics.line_height;
 
-        // Keep the metrics clients query via `get_cell_metrics` (e.g.
-        // glyphwire-shell sizing an image) in step. `ctx_mutex`-guarded
-        // like every other host write to `ctx`. Already-connected clients
-        // are not proactively notified of a cell-size change.
-        const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        // `setCellMetrics`, not a pair of field writes: it also re-derives
-        // the pixel position of every cell-placed layer against the new
-        // metrics (see `core.PropertyName.cell_position`). Applied to
-        // every context -- a font-size step is session-wide, so a
-        // backgrounded context is caught up too.
-        server.session.setCellMetricsAll(@intCast(geometry.cell_w), @intCast(geometry.cell_h));
-        server.ctx_mutex.unlock(server.io);
+        const fb = eng.window_state.framebuffer_size;
+        const fit = geometry.fontStepFit(.{ .w = fb.x, .h = fb.y }, self.gutterPx(), geometry.cell_w, geometry.cell_h);
+        if (fit.grow) |px| growWindowTo(eng, px);
 
-        self.resizeWindowForCells(eng);
+        // Metrics and size in one call, so every context (backgrounded
+        // ones and every pane's) is caught up and every client gets a
+        // `resize` even when the cell count didn't move -- see
+        // `Server.reportFontStep`. The metrics half also re-derives the
+        // pixel position of every cell-placed layer (see
+        // `core.PropertyName.cell_position`).
+        self.app.server.reportFontStep(
+            self.app.alloc,
+            @intCast(geometry.cell_w),
+            @intCast(geometry.cell_h),
+            fit.grid.cols,
+            fit.grid.rows,
+        ) catch |err| {
+            std.log.err("glyphwire-host: reportFontStep({d}x{d}) failed: {t}", .{ fit.grid.cols, fit.grid.rows, err });
+        };
+        geometry.grid_cols = fit.grid.cols;
+        geometry.grid_rows = fit.grid.rows;
+        // A half-settled drag resize was measured against the old cells.
+        self.pending_grid = null;
+        self.pending_elapsed_ms = 0;
     }
 
-    /// Resizes the OS window so a framebuffer of exactly
-    /// `grid_cols` x `grid_rows` cells (plus the scrollbar and side
-    /// padding) fits -- the inverse of `syncWindowSize`'s cell math, so it
-    /// round-trips back to the same cell counts next frame with no
-    /// `reportResize`. The framebuffer -> window ratio handles HiDPI;
-    /// `divCeil` biases the window up so rounding never drops a cell. A
-    /// tiling WM that ignores the request just leaves `syncWindowSize` to
-    /// reflow the grid to whatever size it forces instead.
-    pub fn resizeWindowForCells(self: *WindowSizing, eng: *Engine) void {
+    /// Resizes the OS window so its framebuffer is at least `target` --
+    /// only for a font step the minimum grid no longer fits. The
+    /// framebuffer -> window ratio handles HiDPI; `divCeil` biases the
+    /// window up so rounding never drops a cell. A tiling WM that ignores
+    /// the request leaves the minimum grid clipped, the same as a window
+    /// dragged too small.
+    fn growWindowTo(eng: *Engine, target: geometry.PxSize) void {
         const ws = &eng.window_state;
         const fb = ws.framebuffer_size;
         if (fb.x <= 0 or fb.y <= 0 or ws.window_size.x <= 0 or ws.window_size.y <= 0) return;
 
-        const gutter = self.gutterPx();
-
-        const target_fb_w = @as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w + 2 * geometry.content_pad_px + gutter;
-        const target_fb_h = @as(i32, @intCast(geometry.grid_rows)) * geometry.cell_h;
-
-        const win_w = std.math.divCeil(i32, target_fb_w * ws.window_size.x, fb.x) catch return;
-        const win_h = std.math.divCeil(i32, target_fb_h * ws.window_size.y, fb.y) catch return;
+        const win_w = std.math.divCeil(i32, target.w * ws.window_size.x, fb.x) catch return;
+        const win_h = std.math.divCeil(i32, target.h * ws.window_size.y, fb.y) catch return;
         eng.window.setSize(win_w, win_h);
     }
 };

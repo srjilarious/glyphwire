@@ -1136,6 +1136,12 @@ the change from the next press, never mid-hold.
 | `get_cell_metrics` | request | — | `{cell_px_w, cell_px_h}` |
 | `get_errors` | request | — | `{errors, dropped}` |
 
+The metrics change at runtime with a font-size step. The host keeps the
+window's pixel size and reflows the grid instead, and announces the step
+as a `resize` to every client, even one whose cell count came out the
+same. A client that works in pixels re-reads `get_cell_metrics` on every
+`resize`; there is no separate metrics notification.
+
 `subscribe` **replaces** the connection's subscription set; it is not
 additive. `events` is an array of stream names (section 7.1). Unknown names
 are ignored. `pane` atomically binds the connection to a pane as it arms
