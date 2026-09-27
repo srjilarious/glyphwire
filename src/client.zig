@@ -1159,6 +1159,23 @@ pub const Client = struct {
         return parsed.value.result.context;
     }
 
+    /// `set_context_title(title)` -- a notification. Names this
+    /// connection's active context for display: glyphwire-host's context
+    /// switcher lists it and a shell's `jobs` prints it. Send it right
+    /// after `createContext` (a program that inherited its context, like
+    /// the shell, can name that one too).
+    pub fn setContextTitle(self: *Client, title: []const u8) !void {
+        try self.notify("set_context_title", .{ .title = title });
+    }
+
+    /// `list_contexts` -- a request. This connection's pane stack, top
+    /// (on screen) first, and which of them is this connection's own
+    /// active context. Caller `deinit`s the result.
+    pub fn listContexts(self: *Client) !ContextList {
+        const parsed = try self.request(protocol.ListContextsResult, "list_contexts", .{});
+        return .{ .parsed = parsed };
+    }
+
     /// `set_window_scrollbar(visible)` -- a notification. Toggles the
     /// always-on window scrollbar for this connection's active context
     /// after the fact (see `createContext`'s `window_scrollbar`).
@@ -3184,6 +3201,34 @@ pub const HighlightSnapshot = struct {
     /// stored JSON blob (`json` null for a dangling id).
     pub fn entries(self: *const HighlightSnapshot) []const protocol.HighlightEntry {
         return self.parsed.value.result.entries;
+    }
+};
+
+/// Owns the parsed JSON backing a `listContexts` response; `deinit`
+/// frees it.
+pub const ContextList = struct {
+    parsed: std.json.Parsed(ResponseOf(protocol.ListContextsResult)),
+
+    pub fn deinit(self: *ContextList) void {
+        self.parsed.deinit();
+    }
+
+    /// This connection's own active context.
+    pub fn current(self: *const ContextList) core.ContextHandle {
+        return self.parsed.value.result.current;
+    }
+
+    /// The pane's stack, top (on screen) first.
+    pub fn entries(self: *const ContextList) []const protocol.ContextEntry {
+        return self.parsed.value.result.contexts;
+    }
+
+    /// `handle`'s title, or null when it isn't in the pane any more.
+    pub fn title(self: *const ContextList, handle: core.ContextHandle) ?[]const u8 {
+        for (self.entries()) |e| {
+            if (e.context == handle) return e.title;
+        }
+        return null;
     }
 };
 

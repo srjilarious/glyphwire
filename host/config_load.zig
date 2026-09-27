@@ -157,6 +157,17 @@ pub fn loadConfig(
 
     if (luaStrField(lua, arena, "icon_theme")) |v| cfg.icon_theme = v;
 
+    // A string names the chord; `false` turns the switcher off.
+    if (luaBoolField(lua, "context_switcher_key")) |v| {
+        if (!v) cfg.context_switcher = null;
+    } else if (luaStrField(lua, arena, "context_switcher_key")) |v| {
+        if (config.parseChord(v)) |chord| {
+            cfg.context_switcher = chord;
+        } else {
+            std.log.warn("glyphwire-host: host.conf.lua context_switcher_key '{s}' not a chord; keeping the default", .{v});
+        }
+    }
+
     const clamped = config.clampFontSize(cfg.font.size);
     if (clamped != cfg.font.size) {
         std.log.warn("glyphwire-host: host.conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });

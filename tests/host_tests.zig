@@ -161,6 +161,31 @@ pub fn clampScrollbackCeilingTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(config.clampScrollback(1000), @as(usize, 1000));
 }
 
+pub fn parseChordReadsModifiersAndKeyInAnyCaseTest(_: std.Io, _: std.mem.Allocator) !void {
+    const sf12 = config.parseChord("super+f12").?;
+    try testz.expectEqual(sf12.key, .F12);
+    try testz.expectTrue(sf12.super);
+    try testz.expectFalse(sf12.ctrl or sf12.alt or sf12.shift);
+    try testz.expectTrue(std.meta.eql(sf12, config.context_switcher_default));
+
+    const cat = config.parseChord("Ctrl + Alt + Tab").?;
+    try testz.expectEqual(cat.key, .tab);
+    try testz.expectTrue(cat.ctrl and cat.alt);
+    try testz.expectFalse(cat.super);
+
+    try testz.expectTrue(config.parseChord("win+grave_accent").?.super);
+    try testz.expectTrue(config.parseChord("f12").?.matches(false, false, false, false));
+}
+
+pub fn parseChordRejectsMalformedChordsTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(config.parseChord("") == null);
+    try testz.expectTrue(config.parseChord("super+") == null);
+    try testz.expectTrue(config.parseChord("super") == null); // no key
+    try testz.expectTrue(config.parseChord("a+b") == null); // two keys
+    try testz.expectTrue(config.parseChord("hyper+f12") == null);
+    try testz.expectTrue(config.parseChord("super+unknown") == null);
+}
+
 pub fn cursorShapeFromStrTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(config.cursorShapeFromStr("block").?, .block);
     try testz.expectEqual(config.cursorShapeFromStr("underline").?, .underline);

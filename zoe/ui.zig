@@ -754,6 +754,17 @@ pub const Ui = struct {
         const context = try client.createContext(null, null, 0, false);
         errdefer client.destroyContext(context) catch {};
         try listener.attachContext(context);
+        // What the context switcher and the shell's `jobs` call this one.
+        // The starting file only: telling two editors apart is what it is
+        // for, and following every buffer switch isn't needed for that.
+        switch (target) {
+            .file => |f| {
+                var title_buf: [glyphwire.Context.max_title_len]u8 = undefined;
+                const title = std.fmt.bufPrint(&title_buf, "zoe {s}", .{std.fs.path.basename(f)}) catch "zoe";
+                try client.setContextTitle(title);
+            },
+            else => try client.setContextTitle("zoe"),
+        }
 
         const size = try client.getSize();
         const metrics = try client.getCellMetrics();
