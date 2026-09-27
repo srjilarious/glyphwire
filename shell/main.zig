@@ -4398,6 +4398,18 @@ const Prompt = struct {
         // every pointer move.
         var mouse_origin = self.surfaceOrigin();
 
+        // Whether this pane's stack may have changed since it was last
+        // read. A `context` event only sets this; the stack is read once
+        // the child is known to be glyphwire-aware. The two race: an aware
+        // program writes its handshake marker and creates its context
+        // within a few milliseconds, so the event announcing its context
+        // routinely arrives before the reader thread has resolved the
+        // handshake. Acting on the event immediately dropped it, the
+        // shell never learned the program's context, and switching back to
+        // the shell left it stuck waiting. Starts true so a job brought
+        // back by `fg` is checked straight away too.
+        var stack_dirty = true;
+
         while (!pty.reaped()) {
             // Once the handshake resolves an aware child, it's drawing
             // over its own wire connection and never reads its own stdin
@@ -4407,6 +4419,15 @@ const Prompt = struct {
             // the block below would then pass straight through to this
             // process's own real stdout as if the child had printed it.
             const is_aware = awareState(&job.reader_ctx) orelse false;
+
+            // Only an aware child has a context of its own to put behind
+            // the shell; a plain PTY child draws on this very layer. Also
+            // the only case where the `Client` is free to ask: for a plain
+            // child the reader thread is drawing through it.
+            if (is_aware and stack_dirty) {
+                stack_dirty = false;
+                if (self.noteVisibleContext(job)) return .backgrounded;
+            }
 
             const any_ev = (listener.next(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
             const input_ev = any_ev.asInput() orelse {
@@ -4434,10 +4455,10 @@ const Prompt = struct {
                         // re-placed, so the click origin moves with it.
                         mouse_origin = self.surfaceOrigin();
                     },
-                    // Visibility moved. Only a program with a context of
-                    // its own can be put behind the shell; a plain PTY
-                    // child draws on this very layer.
-                    .context => if (is_aware and self.noteVisibleContext(job)) return .backgrounded,
+                    // Visibility moved: read the pane's stack at the top of
+                    // the next pass, where awareness is current (see
+                    // `stack_dirty`).
+                    .context => stack_dirty = true,
                     // Mouse: encoded to the child when it asked for
                     // reporting, dropped otherwise.
                     .mouse_button => |mev| if (!is_aware) ptyMouseButton(pty, modes, mev, mouse_origin),
