@@ -1371,11 +1371,11 @@ pub const Shadow = struct {
     /// than it's pushed sideways, as if lit from slightly above; `radius`
     /// matches the bundled `panel`/`dialog` nine-patches' corners.
     pub const dialog: Shadow = .{
-        .x = 2,
-        .y = 6,
-        .blur = 12,
+        .x = 4,
+        .y = 16,
+        .blur = 18,
         .radius = 6,
-        .color = .{ .r = 0, .g = 0, .b = 0, .a = 150 },
+        .color = .{ .r = 0, .g = 0, .b = 0, .a = 190 },
     };
 
     pub fn clamped(self: Shadow) Shadow {
@@ -5363,7 +5363,6 @@ fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: us
     while (c < end_col) : (c += 1) setCellText(layer, row, c, " ", fg, bg, metadata_id);
 }
 
-
 // ─── Outline ───────────────────────────────────────────────────────────
 //
 // A collapsible tree of text rows, and the second layer component after
@@ -6060,7 +6059,6 @@ pub fn iconName(rel_path: []const u8) ?[]const u8 {
     if (!std.ascii.endsWithIgnoreCase(rel_path, ".png")) return null;
     return rel_path[0 .. rel_path.len - ".png".len];
 }
-
 
 // ─── Splits ─────────────────────────────────────────────────────────────
 //
@@ -6777,7 +6775,6 @@ pub const Context = struct {
         return null;
     }
 
-
     // ── Splits ──────────────────────────────────────────────────────────
 
     /// `create_split`: an empty container. It draws nothing and lays out
@@ -7040,8 +7037,14 @@ pub const Context = struct {
 
         const a = &split.children.items[index];
         const b = &split.children.items[index + 1];
-        const wa: ?f32 = switch (a.size) { .weight => |w| @max(w, 0), .fixed => null };
-        const wb: ?f32 = switch (b.size) { .weight => |w| @max(w, 0), .fixed => null };
+        const wa: ?f32 = switch (a.size) {
+            .weight => |w| @max(w, 0),
+            .fixed => null,
+        };
+        const wb: ?f32 = switch (b.size) {
+            .weight => |w| @max(w, 0),
+            .fixed => null,
+        };
 
         // A fixed neighbour just gets a new cell count. A weighted one
         // next to a fixed one needs no change at all -- it already
