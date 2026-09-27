@@ -5,7 +5,7 @@ const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
 
-const keybind = glyphwire.keybind;
+const keybind = @import("applib").keybind;
 const Chord = keybind.Chord;
 
 const TestAction = enum { up, parent, copy, quit };

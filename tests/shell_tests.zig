@@ -8,18 +8,18 @@ const glyphwire = @import("glyphwire");
 // glyphwire-shell is an executable (no importable module), but its pure
 // prompt helpers are gathered into the `shell_support` module (see
 // build.zig) precisely so they can be exercised here.
-const wordsplit = @import("shell_support").wordsplit;
+const wordsplit = @import("applib").wordsplit;
 const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
 const handshake = @import("shell_support").handshake;
-const history = @import("shell_support").history;
+const history = @import("applib").history;
 const keyencode = @import("shell_support").keyencode;
 const pty = @import("shell_support").pty;
 const browsescroll = @import("shell_support").browsescroll;
 const promptrow = @import("shell_support").promptrow;
 const embed = @import("shell_support").embed;
 const logicalpath = @import("shell_support").logicalpath;
-const fuzzy = @import("shell_support").fuzzy;
+const fuzzy = @import("applib").fuzzy;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 

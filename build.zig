@@ -35,16 +35,24 @@ pub fn build(b: *std.Build) void {
         "glyphwire.png",
     );
 
+    // Application-level helpers shared by two or more of the programs
+    // (the line editor, keymaps, the fuzzy finder, the shell panel, ...).
+    // MPL-2.0 like `src/`, and built only on `glyphwire`'s public API --
+    // see applib/applib.zig for what's in it and who uses what.
+    const applib_mod = b.addModule("applib", .{
+        .root_source_file = b.path("applib/applib.zig"),
+    });
+    applib_mod.addImport("glyphwire", glyphwire_mod);
+
     // Pure prompt helpers shared by gw-shell and its test runner
     // (a Zig module can't be reached across directories via relative
     // `@import`, so tests/ can't pull shell/ files in directly).
     const shell_support_mod = b.addModule("shell_support", .{
         .root_source_file = b.path("shell/support.zig"),
     });
-    // `shell/lineedit.zig` imports `glyphwire` for `stringWidth` (East
-    // Asian Width lookup); like `ls_support`, no IO / client / server is
-    // pulled in for the pure width math itself.
     shell_support_mod.addImport("glyphwire", glyphwire_mod);
+    // The line editor, word splitting and history the prompt is built on.
+    shell_support_mod.addImport("applib", applib_mod);
 
     // Column-packing math shared by gw-ls and its test runner,
     // same cross-directory-module reason as `shell_support` above. Imports
@@ -89,12 +97,9 @@ pub fn build(b: *std.Build) void {
     // The tree pane reuses glyphwire-ls's name -> icon mapping rather
     // than growing a second copy of it.
     zoe_support_mod.addImport("ls_support", ls_support_mod);
-    // ... and the Ctrl+P finder reuses gw-shell's subsequence matcher,
-    // the one gw-hist's Ctrl+R search already ranks with, rather than
-    // growing a second set of surprises. Pulls ziglua in behind it, the
-    // same way ls_exe and hist_exe do -- zoe already links the Lua C
-    // library for `zoe.conf.lua`.
-    zoe_support_mod.addImport("shell_support", shell_support_mod);
+    // The Ctrl+P finder, `.gitignore` rule, text sniff, `:` line field,
+    // keymap and shell panel it shares with salacommander.
+    zoe_support_mod.addImport("applib", applib_mod);
 
     // gmux's split-tree structure (pure) and its tiny Lua config, shared
     // by the `gmux` binary and its test runner -- same cross-directory-
@@ -170,11 +175,10 @@ pub fn build(b: *std.Build) void {
     });
     salacommander_support_mod.addImport("glyphwire", glyphwire_mod);
     salacommander_support_mod.addImport("ls_support", ls_support_mod);
-    // For `wordsplit.quoteArgIfNeeded`: Ctrl+Shift+C answers with the same
-    // shell-quoted path line gw-shell's own marked-paths copy produces, so
-    // the two paste identically. Same one-piece borrow gw-hist makes of
-    // this module (and it drags ziglua in the same way -- see `sala_exe`).
-    salacommander_support_mod.addImport("shell_support", shell_support_mod);
+    // The finder, keymap, fields and shell panel it shares with zoe, and
+    // `wordsplit.quoteArgIfNeeded`, so Ctrl+Shift+C answers with the same
+    // shell-quoted path line gw-shell's own marked-paths copy produces.
+    salacommander_support_mod.addImport("applib", applib_mod);
 
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const zopengl = b.dependency("zopengl", .{ .target = target });
@@ -270,6 +274,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    tests_exe.root_module.addImport("applib", applib_mod);
     tests_exe.root_module.addImport("shell_support", shell_support_mod);
     tests_exe.root_module.addImport("ls_support", ls_support_mod);
     tests_exe.root_module.addImport("grep_support", grep_support_mod);
@@ -346,6 +351,7 @@ pub fn build(b: *std.Build) void {
     });
     shell_exe.root_module.addImport("glyphwire", glyphwire_mod);
     shell_exe.root_module.addImport("shell_support", shell_support_mod);
+    shell_exe.root_module.addImport("applib", applib_mod);
     shell_exe.root_module.addImport("ziglua", ziglua_mod);
     shell_exe.root_module.linkLibrary(lua_lib);
     shell_exe.root_module.link_libc = true;
@@ -487,11 +493,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     hist_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    hist_exe.root_module.addImport("shell_support", shell_support_mod);
-    // shell_support -> config.zig / script_engine.zig -> ziglua, even
-    // though gw-hist itself only reaches into shell_support.history and
-    // shell_support.fuzzy -- same reason ls_exe links it above.
-    hist_exe.root_module.linkLibrary(lua_lib);
+    // `applib.history` and `applib.fuzzy` -- the shell's history file and
+    // matcher, without the shell's Lua-embedding support module behind
+    // them.
+    hist_exe.root_module.addImport("applib", applib_mod);
     hist_exe.root_module.link_libc = true;
     b.installArtifact(hist_exe);
 

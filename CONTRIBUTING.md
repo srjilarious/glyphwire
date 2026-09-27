@@ -90,7 +90,7 @@ under is decided by the directory you put it in**, not by you — see
 
 | Directory | Licence |
 |---|---|
-| `src/`, `host/`, `host_eng/`, `server/`, `client/`, `agent/`, `notify/`, `debug/`, `demo/`, `table-demo/` | `MPL-2.0` |
+| `src/`, `applib/`, `host/`, `host_eng/`, `server/`, `client/`, `agent/`, `notify/`, `debug/`, `demo/`, `table-demo/` | `MPL-2.0` |
 | `shell/`, `gmux/`, `ls/`, `view/`, `zoe/`, `tests/` | `GPL-3.0-or-later` |
 | `docs/`, `README.md` | `CC-BY-4.0` |
 
@@ -109,7 +109,7 @@ A `//!` module doc comment goes *after* it; Zig accepts a plain comment
 before one.
 
 **2. No MPL file may import a GPL module.** The dependency graph runs one
-way only. Nothing in `src/`, `host/`, `host_eng/`, `server/`, `client/`,
+way only. Nothing in `src/`, `applib/`, `host/`, `host_eng/`, `server/`, `client/`,
 `agent/`, `notify/`, `debug/`, `demo/` or `table-demo/` may reach into
 `shell/`, `gmux/`, `ls/`, `view/` or `zoe/`. The GPL programs linking the
 MPL core is fine and deliberate; the reverse would make the MPL core

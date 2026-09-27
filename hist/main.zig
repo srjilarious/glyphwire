@@ -39,8 +39,8 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const history = @import("shell_support").history;
-const fuzzy = @import("shell_support").fuzzy;
+const history = @import("applib").history;
+const fuzzy = @import("applib").fuzzy;
 
 /// Rows the header block occupies: title, search field, hint line.
 const header_rows: usize = 3;

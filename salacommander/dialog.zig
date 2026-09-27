@@ -65,7 +65,7 @@ pub const ok_only = [_]Button{.ok};
 /// same Home/Ctrl+A, End/Ctrl+E, word jumps and Ctrl+Backspace the
 /// shell prompt does. `.drop` (the default `ControlPolicy`) because a
 /// pasted newline in a destination path is a mistake, not a separator.
-pub const LineEdit = glyphwire.LineEdit;
+pub const LineEdit = @import("applib").LineEdit;
 
 pub const Dialog = struct {
     /// Owned.

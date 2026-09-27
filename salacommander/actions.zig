@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Everything salacommander can be told to do, by name. A key press is
-//! looked up in a `glyphwire.keybind.Keymap(Action)` and the UI switches on
+//! looked up in an `applib.keybind.Keymap(Action)` and the UI switches on
 //! the result, so a new command is one enum tag, one default chord here
 //! and one arm in `Ui.perform` -- and `salacommander.conf.lua` can rebind
 //! it by the same name without any further code:
@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const keybind = glyphwire.keybind;
+const keybind = @import("applib").keybind;
 
 pub const Action = enum {
     cursorUp,
@@ -59,7 +59,7 @@ pub const Action = enum {
     delete,
 
     /// Open or close the shell panel across the bottom (see
-    /// `src/shellpanel.zig`). Closing it leaves the shell running.
+    /// `applib/shellpanel.zig`). Closing it leaves the shell running.
     toggleShell,
 
     /// Re-order the active pane. Directories still lead; picking the

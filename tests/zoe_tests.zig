@@ -2302,7 +2302,7 @@ pub fn tabLabelIsTheBasenameTest(_: std.Io, _: std.mem.Allocator) !void {
 
 // ── Ctrl+P file finder ──────────────────────────────────────────────────
 //
-// The scan is the only part of `zoe/finder.zig` that touches a
+// The scan is the only part of `applib/finder.zig` that touches a
 // filesystem, so these build the listing directly and exercise the
 // ranking, the cursor and the scroll -- which is what the popup is.
 

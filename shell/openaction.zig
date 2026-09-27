@@ -30,7 +30,7 @@
 //! command just ignores the selection.
 
 const std = @import("std");
-const wordsplit = @import("wordsplit.zig");
+const wordsplit = @import("applib").wordsplit;
 
 /// The metadata a single activated entry contributes -- the fields
 /// glyphwire-ls's `entryMetadataJson` writes. `mimetype` is null for

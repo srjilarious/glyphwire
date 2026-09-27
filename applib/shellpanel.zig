@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! Ctrl+` -- a `gw-shell` running across the bottom of a client's own
 //! context, in a layer that client created for it. salacommander and zoe
@@ -34,8 +34,7 @@
 //! and leaves.
 
 const std = @import("std");
-const client_mod = @import("client.zig");
-const core = @import("core.zig");
+const glyphwire = @import("glyphwire");
 
 const c = struct {
     extern "c" fn pipe2(fds: *[2]i32, flags: i32) i32;
@@ -76,13 +75,13 @@ pub const WinSize = struct { cols: usize, rows: usize };
 pub const Panel = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
-    client: *client_mod.Client,
+    client: *glyphwire.Client,
     /// The panel's layer. Created with the rest of the UI's layers and
     /// kept hidden until the panel is first opened -- a layer costs
     /// nothing while it's invisible, and creating it up front keeps the
     /// compositing order fixed.
-    layer: core.LayerHandle,
-    context: core.ContextHandle,
+    layer: glyphwire.LayerHandle,
+    context: glyphwire.ContextHandle,
 
     /// The running shell, once Ctrl+` has started one.
     child: ?std.process.Child = null,
@@ -98,9 +97,9 @@ pub const Panel = struct {
     pub fn init(
         alloc: std.mem.Allocator,
         io: std.Io,
-        client: *client_mod.Client,
-        context: core.ContextHandle,
-        layer: core.LayerHandle,
+        client: *glyphwire.Client,
+        context: glyphwire.ContextHandle,
+        layer: glyphwire.LayerHandle,
     ) Panel {
         return .{ .alloc = alloc, .io = io, .client = client, .context = context, .layer = layer };
     }

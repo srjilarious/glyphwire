@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! The model behind zoe's Ctrl+P file finder and salacommander's F3
 //! search: every file under a root, the query typed against it, and the
-//! ranked subset that answers. It lives in `shell_support` rather than
+//! ranked subset that answers. It lives in `applib` rather than
 //! either program so the two rank and hide paths identically; the popup
 //! each one draws around it is its own.
 //!
@@ -13,7 +13,7 @@
 //! costs a few milliseconds on the repositories zoe is used on. Reopening
 //! is therefore also how you pick up a file that appeared since.
 //!
-//! Matching is `shell_support.fuzzy`, the same subsequence matcher
+//! Matching is `applib.fuzzy`, the same subsequence matcher
 //! `gw-hist`'s Ctrl+R search uses -- there is no reason for zoe to rank
 //! differently from the shell, and one matcher is one set of surprises.
 //! Ranking is over the whole path relative to the root, so `zoeui`
@@ -29,9 +29,9 @@
 //! the cursor without touching a filesystem.
 
 const std = @import("std");
-const glyphwire = @import("glyphwire");
 const fuzzy = @import("fuzzy.zig");
 const gitignore = @import("gitignore.zig");
+const lineedit = @import("lineedit.zig");
 
 /// The walk stops after this many files and says so (`truncated`), rather
 /// than spending an unbounded amount of time and memory on a root that
@@ -69,7 +69,7 @@ pub const Finder = struct {
     paths: std.ArrayList([]u8) = .empty,
     /// The current answer: indices into `paths`, best first.
     matches: std.ArrayList(Match) = .empty,
-    query: glyphwire.LineEdit = .empty,
+    query: lineedit.LineEdit = .empty,
     /// The highlighted row, in `matches` indices.
     cursor: usize = 0,
     /// The first match drawn in the list's row 0 -- the popup's own

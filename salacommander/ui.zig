@@ -19,9 +19,9 @@
 //!
 //! More layers sit over those: the Ctrl+` shell panel -- a `gw-shell
 //! --embed` drawing its own prompt into a layer of ours across the bottom
-//! (see `src/shellpanel.zig`) -- then F3's finder popup, a header layer
+//! (see `applib/shellpanel.zig`) -- then F3's finder popup, a header layer
 //! and a host-scrolled result list built on the same `Finder` model as
-//! zoe's Ctrl+P (`shell/finder.zig`), and the modal dialog layer on top.
+//! zoe's Ctrl+P (`applib/finder.zig`), and the modal dialog layer on top.
 //!
 //! A server-side `Table` would sort and paint for us, but it paints every
 //! row and scrolls its layer the way terminal output does; a file pane
@@ -53,10 +53,10 @@ const fileops = @import("fileops.zig");
 const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
-const shellpanel = glyphwire.shellpanel;
-const wordsplit = @import("shell_support").wordsplit;
-const filetype = @import("shell_support").filetype;
-const finder_mod = @import("shell_support").finder;
+const shellpanel = @import("applib").shellpanel;
+const wordsplit = @import("applib").wordsplit;
+const filetype = @import("applib").filetype;
+const finder_mod = @import("applib").finder;
 const Finder = finder_mod.Finder;
 
 const Pane = pane_mod.Pane;
@@ -65,7 +65,7 @@ pub const Action = actions.Action;
 const Dialog = dialog_mod.Dialog;
 const Button = dialog_mod.Button;
 const LineEdit = dialog_mod.LineEdit;
-const lineedit = glyphwire.lineedit;
+const lineedit = @import("applib").lineedit;
 const Color = glyphwire.Color;
 const Batch = glyphwire.Client.Batch;
 const lsfmt = ls.format;
@@ -235,7 +235,7 @@ pub const Ui = struct {
     finder_list_layer: glyphwire.LayerHandle,
     /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom. It
     /// takes every keystroke but Ctrl+` while it's open, and follows the
-    /// active pane's directory. See `src/shellpanel.zig`.
+    /// active pane's directory. See `applib/shellpanel.zig`.
     shell: shellpanel.Panel,
 
     win: struct { cols: usize, rows: usize },
@@ -258,7 +258,7 @@ pub const Ui = struct {
     name_edit: ?NameEdit = null,
     /// F3: the search popup, non-null exactly while it is open. It is
     /// modal -- keys, typing and clicks all go to it -- and is walked
-    /// afresh on every open, as zoe's Ctrl+P is (see shell/finder.zig).
+    /// afresh on every open, as zoe's Ctrl+P is (see applib/finder.zig).
     finder: ?Finder = null,
     /// Where the popup was last drawn, in window cells, for a click to
     /// hit, and how many result rows fit in it.
@@ -347,7 +347,7 @@ pub const Ui = struct {
         const bar_layer = try client.createLayer(size.cols, 1, 0);
         // The Ctrl+` shell panel. `gw-shell --embed` draws its prompt and
         // its commands' output here, so it carries scrollback of its own
-        // for the shell's Ctrl+Up browsing -- see `src/shellpanel.zig`.
+        // for the shell's Ctrl+Up browsing -- see `applib/shellpanel.zig`.
         const shell_layer = try client.createLayer(size.cols, 1, shellpanel.scrollback_rows);
         // F3's popup, over the panes and the panel (it can't be opened
         // while the panel has the keyboard, but the panel stays drawn
