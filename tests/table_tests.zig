@@ -489,7 +489,7 @@ pub fn destroyTableBlanksItsRegionTest(io: std.Io, alloc: std.mem.Allocator) !vo
 /// *scrolls* the layer first so its whole height ends up visible, the
 /// same "make room for new output" a real terminal gives anything else
 /// drawn near the bottom -- not the fixed-anchor "clip whatever falls
-/// off the edge" behavior a `draw_box`/`draw_image` rectangle gets.
+/// off the edge" behavior a `draw_image` rectangle gets.
 /// Table.render` resolves this once per render (`Layer.resolveRow`
 /// against the table's *bottom* row, see that method's doc comment), not
 /// once per cell the way the client-composited prototype this replaced
@@ -606,7 +606,7 @@ fn serveForeverThread(server: *glyphwire.server.Server, alloc: std.mem.Allocator
 }
 
 /// `create_table` with `row`/`col` omitted anchors at the layer's
-/// *current* cursor, same convention `draw_box`/`draw_icon` already use
+/// *current* cursor, same convention `draw_icon` already uses
 /// (`resolveAnchor` in dispatch.zig) -- exercised here across two
 /// separate connections, not just one, since that's the shape
 /// `glyphwire-shell` + `glyphwire-ls` actually have: the shell positions

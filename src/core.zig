@@ -99,7 +99,7 @@ pub const ImageSrcRect = struct {
 ///   into neighboring cells' *pixels* -- a pure rendering overlay, see
 ///   `IconBg`'s doc comment, so it never marks/claims those cells.
 /// - `stretch`: fills the cell exactly on both axes, aspect *not*
-///   preserved. Used by `Layer.drawBox`'s tiles rather than `fit`: a
+///   preserved. Used by table border tiles rather than `fit`: a
 ///   non-square cell (this project's terminal cells usually are, since
 ///   glyph advance and line height rarely match) leaves `fit`-and-center
 ///   padding on whichever axis isn't the limiting one, breaking a
@@ -138,23 +138,10 @@ pub const IconBg = struct {
     /// has anything left to cap.
     max_w: ?u32 = null,
     max_h: ?u32 = null,
-    /// Normalized (0..1) sub-rectangle of the source image this cell
-    /// samples, defaulting to the whole image. A plain `draw_icon` never
-    /// sets these -- a single icon is always one complete picture (this
-    /// struct's own doc comment). The one caller that does is
-    /// `Layer.drawBox`'s `BoxMode.stretch`: it gives each cell along a
-    /// multi-cell edge/fill run its own slice of one logical tile image,
-    /// so the whole run (e.g. a vertical gradient) reads as that one image
-    /// scaled continuously across the run rather than repeated per cell
-    /// (`BoxMode.tile`'s behavior, which leaves these at the default).
-    src_l: f32 = 0,
-    src_t: f32 = 0,
-    src_r: f32 = 1,
-    src_b: f32 = 1,
 };
 
 /// A cell's background: a flat color, a reference to a loaded image tile
-/// (`draw_image`/`draw_box`, clipped rather than stretched -- see
+/// (`draw_image`, clipped rather than stretched -- see
 /// `ImageBg`), or a reference to a loaded icon (`draw_icon`, see
 /// `IconBg`). Mutually exclusive per decisions.md.
 pub const Background = union(enum) {
@@ -1066,10 +1053,11 @@ pub const Cell = struct {
     /// variant), which is itself one of `Background`'s mutually exclusive
     /// cases and so necessarily replaces whatever background was there.
     /// Set by `Layer.drawIconOver` (`draw_icon`'s `foreground: true`),
-    /// for content that needs to sit on top of an already-drawn background
-    /// -- e.g. `glyphwire-notify`'s type icon over its `"dialog"` 9-patch
-    /// panel, which `draw_icon`'s normal background-replacing behavior
-    /// would otherwise punch a flat hole through.
+    /// for content that needs to sit on top of an already-drawn cell
+    /// background, which `draw_icon`'s normal background-replacing
+    /// behavior would otherwise punch a flat hole through. (A nine-patch
+    /// panel isn't one: it's drawn under the cells, so a plain icon's
+    /// transparent pixels already show it.)
     fg_icon: ?IconBg = null,
 
     pub fn setGrapheme(self: *Cell, bytes: []const u8) void {
@@ -1696,6 +1684,13 @@ pub const Layer = struct {
     /// the cell grid at all), so there's no "which one wins" question to
     /// answer.
     rects: std.AutoHashMap(RectHandle, Rect),
+    /// Nine-patch panels drawn on this layer (`create_nine_patch`), keyed
+    /// by handle -- a component of the layer like `rects`, with the same
+    /// shared-counter handles (`Context.next_nine_patch_handle`). No
+    /// ordering list either: they're drawn under every cell background,
+    /// and two overlapping panels on one layer isn't something any client
+    /// does.
+    nine_patches: std.AutoHashMap(NinePatchHandle, NinePatch),
     /// Collapsible outlines painted onto this layer (`create_outline`),
     /// keyed by handle -- a component of the layer exactly like `tables`,
     /// from the shared `Context.next_outline_handle` counter. Like a
@@ -1787,6 +1782,7 @@ pub const Layer = struct {
             .height = height,
             .tables = std.AutoHashMap(TableHandle, Table).init(alloc),
             .rects = std.AutoHashMap(RectHandle, Rect).init(alloc),
+            .nine_patches = std.AutoHashMap(NinePatchHandle, NinePatch).init(alloc),
             .outlines = std.AutoHashMap(OutlineHandle, Outline).init(alloc),
             .owners = std.AutoHashMap(ConnId, void).init(alloc),
             .scrollback_rows = scrollback_rows,
@@ -1803,6 +1799,7 @@ pub const Layer = struct {
         self.tables.deinit();
         self.table_order.deinit(self.alloc);
         self.rects.deinit();
+        self.nine_patches.deinit();
         var outline_it = self.outlines.valueIterator();
         while (outline_it.next()) |o| o.deinit();
         self.outlines.deinit();
@@ -2430,7 +2427,7 @@ pub const Layer = struct {
     }
 
     /// Resolves an absolute row a caller named (an explicit
-    /// `set_property(cursor)`, or `drawImage`/`drawBox`/`drawIcon`'s
+    /// `set_property(cursor)`, or `drawImage`/`drawIcon`'s
     /// anchor row) against the current viewport, scrolling first if it's
     /// at or past the bottom -- the same rule `putAtCursor` already
     /// applies when text advances past the edge. Without this, a client
@@ -3590,7 +3587,7 @@ pub const Layer = struct {
 
     /// Same as `drawIcon`, but sets `Cell.fg_icon` instead of `style.bg`
     /// -- see that field's doc comment. Leaves `style.bg` (and whatever
-    /// background is already there, e.g. a `drawBox` fill) untouched, so
+    /// background is already there, e.g. a table border tile) untouched, so
     /// the host's render pass draws this icon over it rather than instead
     /// of it.
     pub fn drawIconOver(self: *Layer, handle: ImageHandle, row: usize, col: usize, opts: IconDrawOpts) void {
@@ -3631,145 +3628,6 @@ pub const Layer = struct {
         const c = self.cell(resolved_row, col);
         c.metadata_id = metadata_id;
         c.meta_focus = focus;
-        self.revision += 1;
-        self.render_gen +%= 1;
-    }
-
-    /// The 9 resolved tiles a `draw_box` call needs -- corners, edges, and
-    /// a fill, per decisions.md's Icon section / roadmap.md's Phase 3.6.
-    /// Just handles, same as `draw_icon`: each tile is drawn with the
-    /// `.icon` Background variant (`scale: .stretch` -- see `IconScale`'s
-    /// doc comment for why tiles stretch to fill their cell exactly rather
-    /// than `drawIcon`'s default aspect-preserved `fit`), not `.image`'s
-    /// clip-and-offset scheme, so there's no per-tile width/height to
-    /// carry here either. Resolving these (by
-    /// `"{style}-tl"` etc. against the icon catalog) is dispatch.zig's
-    /// job; `Layer.drawBox` just consumes the result, so it's testable
-    /// headlessly without going through name resolution.
-    pub const BoxTiles = struct {
-        tl: ImageHandle,
-        t: ImageHandle,
-        tr: ImageHandle,
-        l: ImageHandle,
-        fill: ImageHandle,
-        r: ImageHandle,
-        bl: ImageHandle,
-        b: ImageHandle,
-        br: ImageHandle,
-    };
-
-    /// How `drawBox` composes its 9 tiles across a rectangle bigger than
-    /// 3x3 cells:
-    /// - `tile` (the original, still-default behavior): every cell gets
-    ///   one full copy of its role's tile, independently stretched to fill
-    ///   just that cell -- fine for a border/fill that's meant to repeat,
-    ///   but a repeated slice of a gradient image bands rather than fades.
-    /// - `stretch`: corners are still one full tile each (they're always
-    ///   exactly one cell), but each edge/fill role's *single* source
-    ///   image is treated as one continuous picture spanning the whole
-    ///   run it appears in -- `t`/`b` across every interior column,
-    ///   `l`/`r` across every interior row, `fill` across the whole
-    ///   interior rectangle -- so a cell partway along the run gets that
-    ///   fraction of the image (`IconBg.src_l/src_t/src_r/src_b`)
-    ///   stretched to fill it, reassembling into one smooth image (e.g. a
-    ///   top-to-bottom gradient) across however many cells the box turns
-    ///   out to span.
-    pub const BoxMode = enum { tile, stretch };
-
-    /// Draws a `rows x cols` box anchored at `(row, col)` (clamped to the
-    /// layer's own bounds) using `tiles`: each cell gets exactly one tile,
-    /// chosen by whether it's on the box's top/bottom row and/or
-    /// left/right column, stretched to fill that cell exactly (`IconScale`'s
-    /// `.stretch`). The bundled tile art is drawn with its border line
-    /// hugging the tile's own outer edge rather than centered, so a
-    /// caller can still put a character in a border cell (`write_text`
-    /// only touches `Cell.grapheme`/`fg`, independent of `bg`) without it
-    /// colliding with the line -- see decisions.md's Icon section on why
-    /// `draw_box` gets this treatment now, same as icons. A 1x1 or
-    /// 1xN/Nx1 box collapses reasonably: the top/left role is checked
-    /// before bottom/right, so a single-row or single-column box shows
-    /// corners/top/left tiles rather than picking arbitrarily.
-    pub fn drawBox(
-        self: *Layer,
-        tiles: BoxTiles,
-        mode: BoxMode,
-        row: usize,
-        col: usize,
-        rows: usize,
-        cols: usize,
-    ) void {
-        if (rows == 0 or cols == 0) return;
-
-        const anchor_row = self.resolveRow(row);
-        const row_end = @min(anchor_row + rows, self.height);
-        const col_end = @min(col + cols, self.width);
-        const last_row = anchor_row + rows - 1;
-        const last_col = col + cols - 1;
-
-        // Interior span sizes, for `.stretch`'s per-cell fractions below --
-        // only ever consulted by a branch reached when there's at least
-        // one interior row/col on that axis (see the branches' comments),
-        // so this never divides by 0 despite looking unguarded.
-        const interior_h: f32 = @floatFromInt(last_col -| col -| 1);
-        const interior_v: f32 = @floatFromInt(last_row -| anchor_row -| 1);
-
-        var r = anchor_row;
-        while (r < row_end) : (r += 1) {
-            const is_top = r == anchor_row;
-            const is_bottom = r == last_row;
-            const v_index: f32 = @floatFromInt(r - anchor_row -| 1);
-
-            var c = col;
-            while (c < col_end) : (c += 1) {
-                const is_left = c == col;
-                const is_right = c == last_col;
-                const h_index: f32 = @floatFromInt(c - col -| 1);
-                const is_corner = (is_top or is_bottom) and (is_left or is_right);
-
-                const tile = if (is_top and is_left)
-                    tiles.tl
-                else if (is_top and is_right)
-                    tiles.tr
-                else if (is_bottom and is_left)
-                    tiles.bl
-                else if (is_bottom and is_right)
-                    tiles.br
-                else if (is_top)
-                    tiles.t
-                else if (is_bottom)
-                    tiles.b
-                else if (is_left)
-                    tiles.l
-                else if (is_right)
-                    tiles.r
-                else
-                    tiles.fill;
-
-                // A corner is always exactly one cell, so it never gets
-                // sliced regardless of mode. `t`/`b` (reached only when
-                // not a corner, i.e. `interior_h >= 1`) slice horizontally;
-                // `l`/`r` (only reached when `interior_v >= 1`) slice
-                // vertically; `fill` (only reached when both are `>= 1`)
-                // slices both.
-                const src: [4]f32 = if (mode == .tile or is_corner)
-                    .{ 0, 0, 1, 1 }
-                else if (is_top or is_bottom)
-                    .{ h_index / interior_h, 0, (h_index + 1) / interior_h, 1 }
-                else if (is_left or is_right)
-                    .{ 0, v_index / interior_v, 1, (v_index + 1) / interior_v }
-                else
-                    .{ h_index / interior_h, v_index / interior_v, (h_index + 1) / interior_h, (v_index + 1) / interior_v };
-
-                self.cell(r, c).style.bg = .{ .icon = .{
-                    .handle = tile,
-                    .scale = .stretch,
-                    .src_l = src[0],
-                    .src_t = src[1],
-                    .src_r = src[2],
-                    .src_b = src[3],
-                } };
-            }
-        }
         self.revision += 1;
         self.render_gen +%= 1;
     }
@@ -4272,6 +4130,189 @@ pub const RectUpdate = struct {
     filled: ?bool = null,
 };
 
+// ─── Nine-patch ─────────────────────────────────────────────────────────
+//
+// A panel background built from one image: the four corners are drawn at
+// their native pixel size, the four edges stretch along their long axis,
+// and the center stretches both ways. The art is an Android-style
+// `.9.png` -- a 1px guide border around the real image whose black pixels
+// on the top row and left column mark the stretchable span (see
+// `parseNinePatch`). Replaced `draw_box`'s nine-separate-tiles model,
+// where every piece was one whole cell: a corner there took the cell's
+// aspect ratio (usually ~1:2), so rounded or alpha-feathered corners
+// squashed, and nothing could line up finer than a cell.
+//
+// Placed by cell rect (`row`/`col`/`rows`/`cols`) rather than pixels,
+// because the thing a client wants framed is a run of cells; the host
+// turns it into pixels at render time with the live cell metrics, so a
+// font resize keeps the frame on its cells with the corners still at
+// native size. A component of the layer it's drawn on (`Layer.nine_patches`),
+// like `Rect`, and drawn under every cell background -- see decisions.md's
+// Nine-patch section.
+pub const NinePatchHandle = u32;
+
+pub const NinePatchError = error{UnknownNinePatch};
+
+/// Why `parseNinePatch` rejected an image.
+pub const NinePatchParseError = error{
+    /// Smaller than 3x3: no room for a guide border and any art.
+    NinePatchTooSmall,
+    /// The top row or left column has no black guide pixel, so there is
+    /// no stretchable span on that axis.
+    NinePatchMissingStretch,
+    /// A guide row/column has more than one black run. Android allows
+    /// several stretch segments; one is all glyphwire's art needs.
+    NinePatchSplitStretch,
+};
+
+/// The fixed (non-stretching) border widths of a nine-patch's art, in
+/// source pixels: `left`/`right` are the corner widths, `top`/`bottom`
+/// the corner heights. Everything between them stretches.
+pub const NinePatchInsets = struct {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+};
+
+/// A registered nine-patch: the loaded `.9.png` (guide border and all --
+/// the renderer samples only inside it) plus what `parseNinePatch` read
+/// out of the guides. `width`/`height` are the art's size *without* the
+/// 1px guide border.
+pub const NinePatchStyle = struct {
+    image: ImageHandle,
+    width: u32,
+    height: u32,
+    insets: NinePatchInsets,
+};
+
+/// Reads a `.9.png`'s stretch guides from its decoded RGBA8 pixels
+/// (`w * h * 4` bytes). A guide pixel is opaque black; the top row
+/// (excluding its two corner pixels) marks the horizontal stretch span and
+/// the left column the vertical one. The right/bottom guides (Android's
+/// content padding) are ignored -- placement is by cell rect, so there is
+/// no content box to pad. Pure so it can be tested headlessly; the host
+/// decodes the PNG and calls this (the core never decodes pixels).
+pub fn parseNinePatch(rgba: []const u8, w: u32, h: u32) NinePatchParseError!NinePatchStyle {
+    if (w < 3 or h < 3) return NinePatchParseError.NinePatchTooSmall;
+    const h_span = try guideSpan(rgba, w, 1, w - 1, .row);
+    const v_span = try guideSpan(rgba, w, 1, h - 1, .column);
+    const inner_w = w - 2;
+    const inner_h = h - 2;
+    return .{
+        .image = 0,
+        .width = inner_w,
+        .height = inner_h,
+        .insets = .{
+            .left = h_span.first - 1,
+            .right = inner_w - h_span.last,
+            .top = v_span.first - 1,
+            .bottom = inner_h - v_span.last,
+        },
+    };
+}
+
+/// The single run of black guide pixels between `from` and `to`
+/// (exclusive) along the top row or the left column, as `[first, last]`
+/// inclusive in full-image coordinates.
+fn guideSpan(rgba: []const u8, w: u32, from: u32, to: u32, axis: enum { row, column }) NinePatchParseError!struct { first: u32, last: u32 } {
+    var first: ?u32 = null;
+    var last: u32 = 0;
+    var i = from;
+    while (i < to) : (i += 1) {
+        const px: usize = if (axis == .row) i else @as(usize, i) * w;
+        const p = rgba[px * 4 .. px * 4 + 4];
+        const is_guide = p[0] == 0 and p[1] == 0 and p[2] == 0 and p[3] == 255;
+        if (!is_guide) continue;
+        if (first != null and i != last + 1) return NinePatchParseError.NinePatchSplitStretch;
+        if (first == null) first = i;
+        last = i;
+    }
+    return .{ .first = first orelse return NinePatchParseError.NinePatchMissingStretch, .last = last };
+}
+
+/// One nine-patch drawn on a layer: which style, and the cell rect it
+/// frames, in the layer's own content coordinates (so, like `Rect`, it
+/// pans with `scroll_offset`).
+pub const NinePatch = struct {
+    style: NinePatchStyle,
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+};
+
+/// `update_nine_patch`'s partial patch, same "`null` leaves it unchanged"
+/// convention as `RectUpdate`.
+pub const NinePatchUpdate = struct {
+    style: ?NinePatchStyle = null,
+    row: ?usize = null,
+    col: ?usize = null,
+    rows: ?usize = null,
+    cols: ?usize = null,
+};
+
+/// One of the up to nine quads a nine-patch splits into: `src` is in the
+/// `.9.png`'s own pixels (guide border included, so the renderer can
+/// normalize by the whole texture), `dst` is relative to the patch's
+/// top-left corner. Either may be zero-sized, which the renderer skips.
+pub const NinePatchQuad = struct {
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    dst_x: u32,
+    dst_y: u32,
+    dst_w: u32,
+    dst_h: u32,
+};
+
+/// Splits `style` over a `dst_w x dst_h` pixel rect: corners at native
+/// size, edges and center stretched to fill what's left. When the rect
+/// is narrower (or shorter) than the two corners together, both corners
+/// shrink in proportion and the middle column (row) disappears, rather
+/// than the corners overlapping. Row-major, top-left first.
+pub fn ninePatchQuads(style: NinePatchStyle, dst_w: u32, dst_h: u32) [9]NinePatchQuad {
+    const src_cols = [3]u32{ style.insets.left, style.width -| (style.insets.left + style.insets.right), style.insets.right };
+    const src_rows = [3]u32{ style.insets.top, style.height -| (style.insets.top + style.insets.bottom), style.insets.bottom };
+    const dst_cols = ninePatchSplit(style.insets.left, style.insets.right, dst_w);
+    const dst_rows = ninePatchSplit(style.insets.top, style.insets.bottom, dst_h);
+
+    var out: [9]NinePatchQuad = undefined;
+    var sy: u32 = 1; // skip the guide row
+    var dy: u32 = 0;
+    for (0..3) |r| {
+        var sx: u32 = 1; // skip the guide column
+        var dx: u32 = 0;
+        for (0..3) |c| {
+            out[r * 3 + c] = .{
+                .src_x = sx,
+                .src_y = sy,
+                .src_w = src_cols[c],
+                .src_h = src_rows[r],
+                .dst_x = dx,
+                .dst_y = dy,
+                .dst_w = dst_cols[c],
+                .dst_h = dst_rows[r],
+            };
+            sx += src_cols[c];
+            dx += dst_cols[c];
+        }
+        sy += src_rows[r];
+        dy += dst_rows[r];
+    }
+    return out;
+}
+
+/// `ninePatchQuads`' per-axis split of `total` destination pixels into
+/// `[start corner, middle, end corner]`.
+fn ninePatchSplit(start: u32, end: u32, total: u32) [3]u32 {
+    const corners = start + end;
+    if (corners <= total) return .{ start, total - corners, end };
+    const scaled_start: u32 = @intCast(@as(u64, total) * start / corners);
+    return .{ scaled_start, 0, total - scaled_start };
+}
+
 // ─── Table ───────────────────────────────────────────────────────────────
 //
 // A table is structured, server-owned data (columns, rows of typed cells,
@@ -4719,7 +4760,7 @@ pub const Table = struct {
     /// bookkeeping lives here, in one place, so nothing downstream triggers
     /// another. Horizontal overflow just clips (`self.col` never moves) --
     /// there's no horizontal-scroll concept for a cell grid, same as
-    /// `drawBox`/`drawImage` clamping their own rectangles to the layer's
+    /// `drawImage` clamping its own rectangle to the layer's
     /// width.
     pub fn render(self: *Table, layer: *Layer, ctx: *const Context) !void {
         clearExtent(layer, self.painted);
@@ -5183,9 +5224,8 @@ fn fillRowBg(layer: *Layer, top_row: i64, content_start_col: usize, content_widt
 fn borderTileHandle(ctx: *const Context, box_style: []const u8, piece: []const u8, name_buf: []u8) ?ImageHandle {
     // Tiles are catalog entries `"<style>/<piece>"` -- the `assets/icons/`
     // scan names an icon by its path under that directory (see
-    // `iconName`), so the bundled `box`/`dialog` styles live in
-    // `assets/icons/box/` and `assets/icons/dialog/` and resolve as
-    // `box/tl`, `dialog/fill`, and so on.
+    // `iconName`), so the bundled `box` style lives in
+    // `assets/icons/box/` and resolves as `box/tl`, `box/t`, and so on.
     const name = std.fmt.bufPrint(name_buf, "{s}/{s}", .{ box_style, piece }) catch return null;
     return ctx.iconHandle(name);
 }
@@ -5954,9 +5994,10 @@ pub const default_context_id = "0";
 /// the LobeHub Claude marks -- used by `glyphwire-ls`), `distro/` (Devicon
 /// distro logos, for prompts), `notify/` (`glyphwire-notify` type icons),
 /// `status/` (prompt status
-/// glyphs), and `box/` + `dialog/` (the two `draw_box` 9-patch styles --
-/// `draw_box`'s `style` param is the subdirectory name, so its pieces
-/// resolve as `box/tl`, `dialog/fill`, and so on).
+/// glyphs), and `box/` (the table border tiles -- `TableStyle.box_style`
+/// is the subdirectory name, so its pieces resolve as `box/tl` and so
+/// on). Panel backgrounds are nine-patches instead, loaded from
+/// `assets/ninepatch/` -- see `parseNinePatch`.
 pub fn iconName(rel_path: []const u8) ?[]const u8 {
     if (!std.ascii.endsWithIgnoreCase(rel_path, ".png")) return null;
     return rel_path[0 .. rel_path.len - ".png".len];
@@ -6206,6 +6247,12 @@ pub const Context = struct {
     /// (`glyphwire-host`, scanning `assets/icons/` -- see `iconName`) --
     /// empty until then, same as `images` before any `load_image` call.
     icons: std.StringHashMap(ImageHandle),
+    /// Name -> nine-patch, for `create_nine_patch`. Seeded by
+    /// glyphwire-host from `assets/ninepatch/` (and the user's
+    /// `~/.config/glyphwire/ninepatch/`), exactly the way `icons` is from
+    /// `assets/icons/`; a `create_context` context resolves it through
+    /// `asset_fallback`.
+    nine_patch_styles: std.StringHashMap(NinePatchStyle),
     metadata: std.AutoHashMap(MetadataHandle, Metadata),
     next_metadata_handle: MetadataHandle = 1,
     /// The session's fixed cell pixel metrics -- decisions.md's "one
@@ -6222,6 +6269,9 @@ pub const Context = struct {
     /// Shared across every layer's `rects` map, same reasoning as
     /// `next_table_handle`.
     next_rect_handle: RectHandle = 1,
+    /// Shared across every layer's `nine_patches` map, same reasoning as
+    /// `next_table_handle`.
+    next_nine_patch_handle: NinePatchHandle = 1,
     /// Shared across every layer's `outlines` map, same reasoning as
     /// `next_table_handle`.
     next_outline_handle: OutlineHandle = 1,
@@ -6296,6 +6346,7 @@ pub const Context = struct {
             .splits = std.AutoHashMap(SplitHandle, Split).init(alloc),
             .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
             .icons = std.StringHashMap(ImageHandle).init(alloc),
+            .nine_patch_styles = std.StringHashMap(NinePatchStyle).init(alloc),
             .metadata = std.AutoHashMap(MetadataHandle, Metadata).init(alloc),
             .owners = std.AutoHashMap(ConnId, void).init(alloc),
         };
@@ -6317,6 +6368,9 @@ pub const Context = struct {
         var icon_it = self.icons.keyIterator();
         while (icon_it.next()) |k| self.alloc.free(k.*);
         self.icons.deinit();
+        var np_it = self.nine_patch_styles.keyIterator();
+        while (np_it.next()) |k| self.alloc.free(k.*);
+        self.nine_patch_styles.deinit();
         var metadata_it = self.metadata.valueIterator();
         while (metadata_it.next()) |m| self.alloc.free(m.json);
         self.metadata.deinit();
@@ -6965,7 +7019,7 @@ pub const Context = struct {
     /// so there's nothing to render until `table_set_rows`. `row`/`col`
     /// are the resolved anchor (cursor-defaulted by the caller,
     /// `handleCreateTable`, same convention `resolveAnchor` already gives
-    /// `draw_icon`/`draw_box`), not optional here.
+    /// `draw_icon`), not optional here.
     pub fn createTable(self: *Context, layer_handle: ?LayerHandle, row: usize, col: usize, columns: []TableColumn, style: TableStyle) !TableHandle {
         const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
 
@@ -7026,6 +7080,57 @@ pub const Context = struct {
                 break;
             }
         }
+        layer.touchRender();
+    }
+
+    /// Registers `style` under `name` for `create_nine_patch` to resolve.
+    /// `name` is duped; an existing registration is replaced, same as
+    /// `registerIcon`, so a user `.9.png` overrides a bundled one.
+    pub fn registerNinePatchStyle(self: *Context, name: []const u8, style: NinePatchStyle) !void {
+        if (self.nine_patch_styles.fetchRemove(name)) |kv| self.alloc.free(kv.key);
+        const owned = try self.alloc.dupe(u8, name);
+        errdefer self.alloc.free(owned);
+        try self.nine_patch_styles.put(owned, style);
+    }
+
+    /// `create_nine_patch`'s name lookup, falling back to `asset_fallback`
+    /// like `iconHandle`.
+    pub fn ninePatchStyle(self: *const Context, name: []const u8) ?NinePatchStyle {
+        if (self.nine_patch_styles.get(name)) |st| return st;
+        if (self.asset_fallback) |f| return f.nine_patch_styles.get(name);
+        return null;
+    }
+
+    /// `create_nine_patch`: adds a nine-patch panel to the resolved layer
+    /// under a fresh handle. Renders immediately, like `createRect`.
+    pub fn createNinePatch(self: *Context, layer_handle: ?LayerHandle, patch: NinePatch) !NinePatchHandle {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+
+        const handle = self.next_nine_patch_handle;
+        try layer.nine_patches.put(handle, patch);
+        self.next_nine_patch_handle += 1;
+        layer.touchRender();
+        return handle;
+    }
+
+    /// `update_nine_patch`: merges `patch`'s non-null fields into the
+    /// existing nine-patch -- moving or resizing a panel doesn't re-send
+    /// its style.
+    pub fn updateNinePatch(self: *Context, layer_handle: ?LayerHandle, handle: NinePatchHandle, patch: NinePatchUpdate) !void {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+        const np = layer.nine_patches.getPtr(handle) orelse return NinePatchError.UnknownNinePatch;
+        if (patch.style) |v| np.style = v;
+        if (patch.row) |v| np.row = v;
+        if (patch.col) |v| np.col = v;
+        if (patch.rows) |v| np.rows = v;
+        if (patch.cols) |v| np.cols = v;
+        layer.touchRender();
+    }
+
+    /// `destroy_nine_patch`: removes the panel and stops it painting.
+    pub fn destroyNinePatch(self: *Context, layer_handle: ?LayerHandle, handle: NinePatchHandle) !void {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+        _ = layer.nine_patches.fetchRemove(handle) orelse return NinePatchError.UnknownNinePatch;
         layer.touchRender();
     }
 
@@ -7156,6 +7261,9 @@ pub const Context = struct {
     pub fn isIconHandle(self: *const Context, handle: ImageHandle) bool {
         var it = self.icons.valueIterator();
         while (it.next()) |h| if (h.* == handle) return true;
+        // A nine-patch's `.9.png` is catalog art the same way.
+        var np_it = self.nine_patch_styles.valueIterator();
+        while (np_it.next()) |st| if (st.image == handle) return true;
         return false;
     }
 

@@ -34,6 +34,28 @@ fn rgb(r: u8, g: u8, b: u8) glyphwire.Color {
     return .{ .r = r, .g = g, .b = b, .a = 255 };
 }
 
+/// Frames a `rows x cols` cell rect with the bundled `box/*` border tiles
+/// (the ones table borders use), one stretched tile per border cell. The
+/// panel sits in the root layer's scrollback, so it has to be cells that
+/// scroll with the text: a `create_nine_patch` panel is a layer object
+/// and would stay put while the shell output moved past it.
+fn drawTileFrame(client: *glyphwire.Client, row: usize, col: usize, rows: usize, cols: usize) !void {
+    const last_row = row + rows - 1;
+    const last_col = col + cols - 1;
+    var r = row;
+    while (r <= last_row) : (r += 1) {
+        var c = col;
+        while (c <= last_col) : (c += 1) {
+            const top = r == row;
+            const bottom = r == last_row;
+            const left = c == col;
+            const right = c == last_col;
+            const piece: []const u8 = if (top and left) "box/tl" else if (top and right) "box/tr" else if (bottom and left) "box/bl" else if (bottom and right) "box/br" else if (top) "box/t" else if (bottom) "box/b" else if (left) "box/l" else if (right) "box/r" else continue;
+            try client.drawIconStyled(r, c, piece, .{ .scale = .stretch });
+        }
+    }
+}
+
 // The box/icon panel's region -- named so the final cursor placement (see
 // `run`) can stay in sync with wherever the panel actually is instead of
 // duplicating its row/col/rows/cols as separate magic numbers. Tall/wide
@@ -88,15 +110,15 @@ fn run(init: std.process.Init) !void {
         try client.writeText(r.text, r.fg, r.bg);
     }
 
-    // Images/icons/box-drawing showcase (Phase 3/3.5/3.6) -- a panel built
-    // from the bundled "box" tile style, holding two strips of the same
+    // Images/icons/box-drawing showcase (Phase 3/3.5/3.6) -- a panel framed
+    // with the bundled "box" border tiles (`drawTileFrame`), holding two strips of the same
     // default icons: one drawn "fill" style (`.natural`, capped to one
     // cell-height, the way glyphwire-ls's small listings and the shell
     // prompt's `{icon:...}` draw them) and one drawn large (`.natural`,
     // capped to three cell-heights). Both need the session's cell pixel
     // size (`get_cell_metrics`); without it the strip falls back to a
     // plain one-cell `.fit` `draw_icon`.
-    try client.drawBox(panel_row, panel_col, panel_rows, panel_cols, "box");
+    try drawTileFrame(&client, panel_row, panel_col, panel_rows, panel_cols);
     try client.setCursor(panel_row + 1, panel_col + 2);
     try client.writeText("icons + box tiles", rgb(255, 255, 255), null);
 
@@ -196,8 +218,8 @@ fn run(init: std.process.Init) !void {
         .{ .row = ul_row + 2 + styles.len, .col = 2, .fg = rgb(220, 220, 228) },
     );
 
-    // Leaves the cursor a couple of blank rows below the last text: none of
-    // draw_box/draw_icon move the cursor, so without this it would still
+    // Leaves the cursor a couple of blank rows below the last text:
+    // draw_icon doesn't move the cursor, so without this it would still
     // sit wherever the last write_text call left it. glyphwire-shell draws
     // its next prompt one row below wherever the cursor ends up after a
     // child runs (see Prompt.submitLine), so leaving it higher up made the

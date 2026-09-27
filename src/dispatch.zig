@@ -59,6 +59,12 @@ pub const DispatchError = error{
     /// `update_rect`/`destroy_rect` named a rect that doesn't exist (or
     /// already existed and was destroyed).
     UnknownRect,
+    /// `update_nine_patch`/`destroy_nine_patch` named a nine-patch that
+    /// doesn't exist.
+    UnknownNinePatch,
+    /// `create_nine_patch`/`update_nine_patch`'s `style` isn't a
+    /// registered `.9.png`.
+    UnknownNinePatchStyle,
     UnknownOutline,
     OutlineNodeOutOfRange,
     TableRowShapeMismatch,
@@ -153,7 +159,7 @@ const WriteTextParams = struct {
     /// `core.default_style.bg`" -- the original, still-default behavior.
     /// `true`: leaves each touched cell's existing background untouched
     /// instead (`bg` is ignored either way when this is set), for writing
-    /// text over a background drawn some other way -- e.g. `draw_box`'s
+    /// text over a background drawn some other way -- e.g. a nine-patch's
     /// fill -- that needs to stay visible through it rather than being
     /// approximated with a matching flat color.
     transparent_bg: bool = false,
@@ -673,7 +679,7 @@ const DrawIconParams = struct {
     /// `false` (default): draws into `Cell.style.bg`, replacing whatever
     /// background was there, same as always. `true`: draws into
     /// `Cell.fg_icon` instead -- see that field's doc comment -- so it
-    /// composites over an existing background (e.g. a `draw_box` fill)
+    /// composites over an existing background (e.g. a table border tile)
     /// rather than replacing it.
     foreground: bool = false,
 };
@@ -720,17 +726,6 @@ fn parseUnderline(style: ?[]const u8, color: ?protocol.Color) !core.UnderlineSty
     const c: ?core.Color = if (color) |v| .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a } else null;
     return .{ .style = s, .color = c };
 }
-
-const DrawBoxParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: ?usize = null,
-    col: ?usize = null,
-    rows: usize,
-    cols: usize,
-    style: []const u8,
-    /// "tile" (default) or "stretch" -- see `core.Layer.BoxMode`.
-    mode: ?[]const u8 = null,
-};
 
 // ─── Table ───────────────────────────────────────────────────────────────
 //
@@ -895,6 +890,38 @@ const UpdateRectParams = struct {
 const DestroyRectParams = struct {
     layer: ?core.LayerHandle = null,
     rect: core.RectHandle,
+};
+
+// ─── Nine-patch ──────────────────────────────────────────────────────────
+//
+// See core.zig's Nine-patch section. Same create/update/destroy shape as
+// the Rect messages, placed by cell rect instead of pixels.
+
+const CreateNinePatchParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+    style: []const u8,
+};
+
+const CreateNinePatchResult = struct { handle: core.NinePatchHandle };
+
+/// `null` means "leave unchanged" -- see `core.NinePatchUpdate`.
+const UpdateNinePatchParams = struct {
+    layer: ?core.LayerHandle = null,
+    nine_patch: core.NinePatchHandle,
+    row: ?usize = null,
+    col: ?usize = null,
+    rows: ?usize = null,
+    cols: ?usize = null,
+    style: ?[]const u8 = null,
+};
+
+const DestroyNinePatchParams = struct {
+    layer: ?core.LayerHandle = null,
+    nine_patch: core.NinePatchHandle,
 };
 
 /// `rows`/`cols` are optional: omitted means "the rest of the layer from
@@ -1657,7 +1684,6 @@ pub const Dispatcher = struct {
         .{ "draw_image", catVoid(handleDrawImage) },
         .{ "draw_icon", catVoid(handleDrawIcon) },
         .{ "tag_metadata", catVoid(handleTagMetadata) },
-        .{ "draw_box", catVoid(handleDrawBox) },
         .{ "clear", catVoid(handleClear) },
         .{ "set_bg", catVoid(handleSetBg) },
         .{ "set_underline", catVoid(handleSetUnderline) },
@@ -1682,6 +1708,9 @@ pub const Dispatcher = struct {
         .{ "create_rect", catResultId(handleCreateRect) },
         .{ "update_rect", catVoid(handleUpdateRect) },
         .{ "destroy_rect", catVoid(handleDestroyRect) },
+        .{ "create_nine_patch", catResultId(handleCreateNinePatch) },
+        .{ "update_nine_patch", catVoid(handleUpdateNinePatch) },
+        .{ "destroy_nine_patch", catVoid(handleDestroyNinePatch) },
         .{ "set_selection", catResult(handleSetSelection) },
         .{ "update_selection", catResult(handleUpdateSelection) },
         .{ "clear_selection", catResult(handleClearSelection) },
@@ -3329,11 +3358,11 @@ pub const Dispatcher = struct {
     }
 
     /// Resolves an optional `row`/`col` pair against `layer`'s current
-    /// cursor -- shared by `draw_image`/`draw_icon`/`draw_box`, matching
+    /// cursor -- shared by `draw_image`/`draw_icon`, matching
     /// `write_text`'s documented (if not yet wired in there) convention:
     /// omitted means "at the cursor," same as it would for text. Doesn't
     /// itself scroll or otherwise validate -- `Layer.resolveRow` (called
-    /// downstream by `drawImage`/`drawIcon`/`drawBox` themselves) still
+    /// downstream by `drawImage`/`drawIcon` themselves) still
     /// handles a resulting row that's out of bounds.
     fn resolveAnchor(layer: *const core.Layer, row: ?usize, col: ?usize) struct { row: usize, col: usize } {
         return .{ .row = row orelse layer.cursor.row, .col = col orelse layer.cursor.col };
@@ -3410,49 +3439,6 @@ pub const Dispatcher = struct {
         const layer = try self.resolveLayer(p.layer);
         const metadata_id = try self.resolveMetadata(p.metadata_id);
         layer.tagMetadata(p.row, p.col, metadata_id, p.focus);
-    }
-
-    /// `draw_box`: resolves `style`'s 9 pieces against the icon catalog
-    /// (`"{style}/tl"`, `"{style}/t"`, ... `"{style}/br"`/`"{style}/fill"`
-    /// — the bundled `assets/icons/box/` and `assets/icons/dialog/`
-    /// subtrees) and draws them via
-    /// `Layer.drawBox`. Errors (missing name, or a registered name that
-    /// somehow isn't in `ctx.images`) abort before drawing anything,
-    /// rather than leaving a box half-drawn with some pieces missing.
-    /// `mode` ("tile"/"stretch", default "tile") selects `core.Layer.BoxMode`
-    /// -- reuses the same `InvalidIconOption` error `scale`/`h_align`/
-    /// `v_align` already get for a bad value.
-    fn handleDrawBox(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DrawBoxParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
-        defer parsed.deinit();
-        const p = parsed.value;
-        const layer = try self.resolveLayer(p.layer);
-
-        const piece_names = [_][]const u8{ "tl", "t", "tr", "l", "fill", "r", "bl", "b", "br" };
-        var pieces: [piece_names.len]core.ImageHandle = undefined;
-
-        var name_buf: [64]u8 = undefined;
-        for (piece_names, 0..) |piece, i| {
-            const name = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ p.style, piece });
-            pieces[i] = self.ctx.iconHandle(name) orelse return DispatchError.UnknownIcon;
-        }
-
-        const tiles: core.Layer.BoxTiles = .{
-            .tl = pieces[0],
-            .t = pieces[1],
-            .tr = pieces[2],
-            .l = pieces[3],
-            .fill = pieces[4],
-            .r = pieces[5],
-            .bl = pieces[6],
-            .b = pieces[7],
-            .br = pieces[8],
-        };
-        const mode = try parseIconOption(core.Layer.BoxMode, p.mode, .tile);
-        const anchor = resolveAnchor(layer, p.row, p.col);
-        layer.drawBox(tiles, mode, anchor.row, anchor.col, p.rows, p.cols);
     }
 
     /// `clear`: resets a region of the given layer's (default: root's)
@@ -3542,7 +3528,7 @@ pub const Dispatcher = struct {
     /// `create_table`: builds the table's columns and style, then
     /// `Context.createTable` stores it on the resolved layer (root when
     /// omitted) at the resolved anchor (cursor-defaulted, same convention
-    /// `draw_box`/`draw_icon` already use). No rows yet -- nothing to
+    /// `draw_icon` already uses). No rows yet -- nothing to
     /// paint until `table_set_rows`.
     fn handleCreateTable(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
         const parsed = try std.json.parseFromValue(CreateTableParams, alloc, params_value, .{
@@ -3873,6 +3859,60 @@ pub const Dispatcher = struct {
         self.ctx.destroyRect(self.surfaceOr(p.layer), p.rect) catch |err| switch (err) {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             error.UnknownRect => return DispatchError.UnknownRect,
+        };
+    }
+
+    fn handleCreateNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(CreateNinePatchParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const style = self.ctx.ninePatchStyle(p.style) orelse return DispatchError.UnknownNinePatchStyle;
+        const np_handle = self.ctx.createNinePatch(self.surfaceOr(p.layer), .{
+            .style = style,
+            .row = p.row,
+            .col = p.col,
+            .rows = p.rows,
+            .cols = p.cols,
+        }) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
+            else => |e| return e,
+        };
+        return .{ .response = try rpc.response(alloc, id, CreateNinePatchResult{ .handle = np_handle }) };
+    }
+
+    fn handleUpdateNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(UpdateNinePatchParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const style: ?core.NinePatchStyle = if (p.style) |name|
+            self.ctx.ninePatchStyle(name) orelse return DispatchError.UnknownNinePatchStyle
+        else
+            null;
+        self.ctx.updateNinePatch(self.surfaceOr(p.layer), p.nine_patch, .{
+            .style = style,
+            .row = p.row,
+            .col = p.col,
+            .rows = p.rows,
+            .cols = p.cols,
+        }) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
+            error.UnknownNinePatch => return DispatchError.UnknownNinePatch,
+        };
+    }
+
+    fn handleDestroyNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DestroyNinePatchParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        self.ctx.destroyNinePatch(self.surfaceOr(p.layer), p.nine_patch) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
+            error.UnknownNinePatch => return DispatchError.UnknownNinePatch,
         };
     }
 

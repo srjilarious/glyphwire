@@ -52,7 +52,7 @@ pub fn writeTextNullBgLeavesExistingBackgroundUntouchedTest(io: std.Io, alloc: s
     var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
-    // As `drawBox`'s fill would leave a cell -- `write_text`'s
+    // As an icon background would leave a cell -- `write_text`'s
     // `transparent_bg: true` (a `null` `bg` at this layer) has to survive
     // it, not reset it to `default_style.bg` the way omitting `bg`
     // otherwise does (`writeTextAppliesStyleTest`'s sibling case).
@@ -1100,7 +1100,7 @@ pub fn layerDrawIconOverSetsFgIconWithoutTouchingBgTest(io: std.Io, alloc: std.m
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    // An existing background (as `drawBox`'s fill would leave) survives a
+    // An existing background (as `drawIcon` would leave) survives a
     // `drawIconOver` call on top of it -- the whole point of `fg_icon`
     // over `draw_icon`'s ordinary background-replacing behavior.
     layer.drawIcon(3, 1, 2, .{});
@@ -1369,127 +1369,150 @@ pub fn contextDestroyMetadataFreesItAndErrorsOnUnknownIdTest(io: std.Io, alloc: 
     try testz.expectError(ctx.destroyMetadata(id), glyphwire.MetadataError.UnknownMetadata);
 }
 
-fn testBoxTiles() glyphwire.Layer.BoxTiles {
-    // Distinct handles per piece so a test can tell which piece landed
-    // where purely from the handle number -- drawBox draws each with the
-    // .icon Background variant (scale-to-fit, same as draw_icon), which
-    // is just a handle, not a real loaded image lookup.
-    return .{
-        .tl = 1,
-        .t = 2,
-        .tr = 3,
-        .l = 4,
-        .fill = 5,
-        .r = 6,
-        .bl = 7,
-        .b = 8,
-        .br = 9,
-    };
+/// A `w x h` RGBA8 `.9.png` stand-in: transparent everywhere except
+/// black guide pixels on the top row over `[h_first, h_last]` and on the
+/// left column over `[v_first, v_last]` (full-image coordinates).
+fn ninePatchPixels(alloc: std.mem.Allocator, w: u32, h: u32, h_first: u32, h_last: u32, v_first: u32, v_last: u32) ![]u8 {
+    const px = try alloc.alloc(u8, w * h * 4);
+    @memset(px, 0);
+    var x = h_first;
+    while (x <= h_last) : (x += 1) px[x * 4 + 3] = 255;
+    var y = v_first;
+    while (y <= v_last) : (y += 1) px[y * w * 4 + 3] = 255;
+    return px;
 }
 
-pub fn layerDrawBoxPlacesEachPieceByRoleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn parseNinePatchReadsInsetsFromGuidesTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 10, 10, 0);
-    defer layer.deinit();
+    // 12x10 with its guide border: a 10x8 image. Top guide covers x 4..7
+    // (inner 3..6), left guide covers y 3..5 (inner 2..4).
+    const px = try ninePatchPixels(alloc, 12, 10, 4, 7, 3, 5);
+    defer alloc.free(px);
 
-    // A 4x5 box anchored at (1, 1): rows 1..4, cols 1..5.
-    layer.drawBox(testBoxTiles(), .tile, 1, 1, 4, 5);
-
-    try testz.expectEqual(layer.cell(1, 1).style.bg.icon.handle, 1); // tl
-    try testz.expectEqual(layer.cell(1, 3).style.bg.icon.handle, 2); // t (interior top col)
-    try testz.expectEqual(layer.cell(1, 5).style.bg.icon.handle, 3); // tr
-    try testz.expectEqual(layer.cell(2, 1).style.bg.icon.handle, 4); // l
-    try testz.expectEqual(layer.cell(2, 3).style.bg.icon.handle, 5); // fill
-    try testz.expectEqual(layer.cell(2, 5).style.bg.icon.handle, 6); // r
-    try testz.expectEqual(layer.cell(4, 1).style.bg.icon.handle, 7); // bl
-    try testz.expectEqual(layer.cell(4, 3).style.bg.icon.handle, 8); // b
-    try testz.expectEqual(layer.cell(4, 5).style.bg.icon.handle, 9); // br
-
-    // Every tile stretches to fill its cell exactly, not the aspect-
-    // preserved `.fit` a bare `drawIcon` call defaults to -- see
-    // `IconScale`'s doc comment on why tiles need this to stay gap-free.
-    try testz.expectEqual(layer.cell(1, 1).style.bg.icon.scale, .stretch);
-    try testz.expectEqual(layer.cell(2, 3).style.bg.icon.scale, .stretch);
-
-    // Outside the box entirely: untouched.
-    switch (layer.cell(0, 0).style.bg) {
-        .color => {},
-        .image, .icon => return error.TestUnexpectedResult,
-    }
+    const style = try glyphwire.parseNinePatch(px, 12, 10);
+    try testz.expectEqual(style.width, 10);
+    try testz.expectEqual(style.height, 8);
+    try testz.expectEqual(style.insets.left, 3);
+    try testz.expectEqual(style.insets.right, 3); // inner 7..9
+    try testz.expectEqual(style.insets.top, 2);
+    try testz.expectEqual(style.insets.bottom, 3); // inner 5..7
 }
 
-pub fn layerDrawBoxStretchModeSlicesFillAcrossInteriorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn parseNinePatchIgnoresNonBlackAndCornerPixelsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 10, 10, 0);
-    defer layer.deinit();
+    const px = try ninePatchPixels(alloc, 8, 8, 3, 4, 3, 4);
+    defer alloc.free(px);
+    // The shared corner pixel and a translucent-black one on the guide
+    // row aren't guides.
+    px[3] = 255; // (0, 0)
+    px[1 * 4 + 3] = 128; // (1, 0), alpha 128
 
-    // A 6x6 box anchored at (0, 0): a 4x4 interior (rows 1..4, cols 1..4)
-    // -- quarter fractions land on exact f32 values, so this can compare
-    // with plain equality instead of an epsilon.
-    layer.drawBox(testBoxTiles(), .stretch, 0, 0, 6, 6);
-
-    // Corners never slice, `.stretch` or not.
-    const tl = layer.cell(0, 0).style.bg.icon;
-    try testz.expectEqual(tl.src_l, 0);
-    try testz.expectEqual(tl.src_t, 0);
-    try testz.expectEqual(tl.src_r, 1);
-    try testz.expectEqual(tl.src_b, 1);
-
-    // Fill's interior is 4x4 (rows 1..4, cols 1..4) -- cell (2, 2) is
-    // index (1, 1) of 4 on both axes, so it gets the second quarter of
-    // the source image both horizontally and vertically.
-    const fill_mid = layer.cell(2, 2).style.bg.icon;
-    try testz.expectEqual(fill_mid.src_l, 0.25);
-    try testz.expectEqual(fill_mid.src_r, 0.5);
-    try testz.expectEqual(fill_mid.src_t, 0.25);
-    try testz.expectEqual(fill_mid.src_b, 0.5);
-
-    // Top edge only slices horizontally -- full height regardless of
-    // position along the run. Cell (0, 1) is the first interior column,
-    // index 0 of 4.
-    const top_first = layer.cell(0, 1).style.bg.icon;
-    try testz.expectEqual(top_first.src_l, 0);
-    try testz.expectEqual(top_first.src_r, 0.25);
-    try testz.expectEqual(top_first.src_t, 0);
-    try testz.expectEqual(top_first.src_b, 1);
-
-    // Left edge only slices vertically -- full width regardless of
-    // position along the run. Cell (4, 0) is the last interior row,
-    // index 3 of 4.
-    const left_last = layer.cell(4, 0).style.bg.icon;
-    try testz.expectEqual(left_last.src_l, 0);
-    try testz.expectEqual(left_last.src_r, 1);
-    try testz.expectEqual(left_last.src_t, 0.75);
-    try testz.expectEqual(left_last.src_b, 1);
+    const style = try glyphwire.parseNinePatch(px, 8, 8);
+    try testz.expectEqual(style.insets.left, 2);
+    try testz.expectEqual(style.insets.top, 2);
 }
 
-pub fn layerDrawBoxClipsToLayerBoundsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn parseNinePatchRejectsBadGuidesTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
-    defer layer.deinit();
+    const tiny: [2 * 2 * 4]u8 = @splat(0);
+    try testz.expectError(glyphwire.parseNinePatch(&tiny, 2, 2), glyphwire.NinePatchParseError.NinePatchTooSmall);
 
-    // A box requesting more rows/cols than the layer has past its anchor
-    // shouldn't panic or write out of bounds.
-    layer.drawBox(testBoxTiles(), .tile, 3, 3, 10, 10);
+    // No top guide at all.
+    const no_h = try ninePatchPixels(alloc, 8, 8, 1, 0, 3, 4);
+    defer alloc.free(no_h);
+    try testz.expectError(glyphwire.parseNinePatch(no_h, 8, 8), glyphwire.NinePatchParseError.NinePatchMissingStretch);
 
-    try testz.expectEqual(layer.cell(3, 3).style.bg.icon.handle, 1); // tl, still placed
-    try testz.expectEqual(layer.cell(4, 4).style.bg.icon.handle, 5); // clamped corner lands as fill, not br
+    // Two runs on the left guide.
+    const split = try ninePatchPixels(alloc, 8, 8, 3, 4, 2, 5);
+    defer alloc.free(split);
+    split[4 * 8 * 4 + 3] = 0; // gap at y 4
+    try testz.expectError(glyphwire.parseNinePatch(split, 8, 8), glyphwire.NinePatchParseError.NinePatchSplitStretch);
 }
 
-pub fn layerDrawBoxZeroSizeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+fn testNinePatchStyle() glyphwire.NinePatchStyle {
+    // A 10x8 image (12x10 with guides) with 3/2/3/3 corners -- the
+    // shape `parseNinePatchReadsInsetsFromGuidesTest` reads.
+    return .{ .image = 7, .width = 10, .height = 8, .insets = .{ .left = 3, .top = 2, .right = 3, .bottom = 3 } };
+}
+
+pub fn ninePatchQuadsKeepCornersNativeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
-    defer layer.deinit();
-    const revision_before = layer.revision;
+    _ = alloc;
+    const q = glyphwire.ninePatchQuads(testNinePatchStyle(), 40, 30);
 
-    layer.drawBox(testBoxTiles(), .tile, 0, 0, 0, 5);
-    layer.drawBox(testBoxTiles(), .tile, 0, 0, 5, 0);
+    // Corners: native size, sampled from just inside the guide border.
+    try testz.expectEqual(q[0].src_x, 1);
+    try testz.expectEqual(q[0].src_y, 1);
+    try testz.expectEqual(q[0].dst_w, 3);
+    try testz.expectEqual(q[0].dst_h, 2);
+    try testz.expectEqual(q[8].dst_x, 37);
+    try testz.expectEqual(q[8].dst_y, 27);
+    try testz.expectEqual(q[8].dst_w, 3);
+    try testz.expectEqual(q[8].dst_h, 3);
+    try testz.expectEqual(q[8].src_x, 8); // 1 + 3 + 4
+    try testz.expectEqual(q[8].src_y, 6); // 1 + 2 + 3
 
-    try testz.expectEqual(layer.revision, revision_before);
-    switch (layer.cell(0, 0).style.bg) {
-        .color => {},
-        .image, .icon => return error.TestUnexpectedResult,
-    }
+    // Center: the 4x3 stretch span, stretched over what's left.
+    try testz.expectEqual(q[4].src_w, 4);
+    try testz.expectEqual(q[4].src_h, 3);
+    try testz.expectEqual(q[4].dst_x, 3);
+    try testz.expectEqual(q[4].dst_y, 2);
+    try testz.expectEqual(q[4].dst_w, 34);
+    try testz.expectEqual(q[4].dst_h, 25);
+}
+
+pub fn ninePatchQuadsShrinkCornersWhenTooSmallTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    // 4px wide: narrower than the 3+3 corners, so they split 4 in
+    // proportion (2/2) and the middle column goes away.
+    const q = glyphwire.ninePatchQuads(testNinePatchStyle(), 4, 30);
+    try testz.expectEqual(q[0].dst_w, 2);
+    try testz.expectEqual(q[1].dst_w, 0);
+    try testz.expectEqual(q[2].dst_x, 2);
+    try testz.expectEqual(q[2].dst_w, 2);
+    // The vertical axis still had room.
+    try testz.expectEqual(q[3].dst_h, 25);
+}
+
+pub fn contextNinePatchLifecycleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    try ctx.registerNinePatchStyle("dialog", testNinePatchStyle());
+    try testz.expectTrue(ctx.ninePatchStyle("dialog") != null);
+    try testz.expectTrue(ctx.ninePatchStyle("nope") == null);
+
+    const h = try ctx.createNinePatch(null, .{ .style = ctx.ninePatchStyle("dialog").?, .row = 1, .col = 2, .rows = 3, .cols = 4 });
+    const layer = ctx.layerPtr(null).?;
+    try testz.expectEqual(layer.nine_patches.get(h).?.cols, 4);
+
+    // A move leaves the size and style alone.
+    try ctx.updateNinePatch(null, h, .{ .row = 5 });
+    const moved = layer.nine_patches.get(h).?;
+    try testz.expectEqual(moved.row, 5);
+    try testz.expectEqual(moved.rows, 3);
+    try testz.expectEqual(moved.style.image, 7);
+
+    try ctx.destroyNinePatch(null, h);
+    try testz.expectEqual(layer.nine_patches.count(), 0);
+    try testz.expectError(ctx.destroyNinePatch(null, h), glyphwire.NinePatchError.UnknownNinePatch);
+    try testz.expectError(ctx.updateNinePatch(null, h, .{}), glyphwire.NinePatchError.UnknownNinePatch);
+}
+
+pub fn ninePatchImageIsProtectedLikeAnIconTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    // Any valid PNG header will do: the core only reads its dimensions.
+    const png = [_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, 'I', 'H', 'D', 'R', 0, 0, 0, 12, 0, 0, 0, 10, 8, 6, 0, 0, 0 };
+    var style = testNinePatchStyle();
+    style.image = try ctx.loadImage(.png, &png);
+    try ctx.registerNinePatchStyle("dialog", style);
+
+    try testz.expectError(ctx.destroyImage(style.image), glyphwire.ImageResourceError.ImageIsIcon);
 }
 
 pub fn layerClearResetsRegionToBlankTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1497,7 +1520,7 @@ pub fn layerClearResetsRegionToBlankTest(io: std.Io, alloc: std.mem.Allocator) !
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
     try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    layer.drawBox(testBoxTiles(), .tile, 1, 1, 3, 3);
+    layer.drawIcon(1, 1, 1, .{});
 
     layer.clear(0, 0, 1, 5);
 
@@ -1511,7 +1534,7 @@ pub fn layerClearWholeLayerViaFullSpanTest(io: std.Io, alloc: std.mem.Allocator)
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
     try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    layer.drawBox(testBoxTiles(), .tile, 2, 2, 3, 3);
+    layer.drawIcon(1, 2, 2, .{});
 
     layer.clear(0, 0, layer.height, layer.width);
 
