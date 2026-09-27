@@ -3183,6 +3183,8 @@ pub const Ui = struct {
             .diagnostics => |d| self.applyDiagnostics(d.path, d.server, d.items),
             .hover => |h| self.applyHover(h.request_id, h.text),
             .definition => |d| self.applyDefinition(d.request_id, d.target),
+            // Nothing asks for completions yet.
+            .completion => {},
             .timed_out => |t| self.applyTimeout(t.request_id, t.server, t.kind),
             .died => |d| {
                 // Its marks will never be refreshed again, so they go
@@ -3203,7 +3205,7 @@ pub const Ui = struct {
         const slot: *?i64 = switch (kind) {
             .hover => &self.hover_request,
             .definition => &self.definition_request,
-            .initialize, .shutdown => return,
+            .completion, .initialize, .shutdown => return,
         };
         if (slot.* != request_id) return;
         slot.* = null;

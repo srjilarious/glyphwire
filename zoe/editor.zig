@@ -579,6 +579,18 @@ pub const Editor = struct {
         self.moveTo(motion.clampNormal(&self.buf, @min(offset, self.buf.len())), true);
     }
 
+    /// Accepting a completion: replaces `[start, cursor)` with `text` and
+    /// leaves the cursor after it. Insert mode only, and part of the insert
+    /// session's undo group -- the word typed and the completion that
+    /// finished it are one `u`, the same as if it had all been typed.
+    pub fn replaceBeforeCursor(self: *Editor, start: usize, text: []const u8) !void {
+        if (self.mode != .insert) return;
+        const lo = @min(start, self.cursor);
+        if (self.cursor > lo) try self.buf.delete(lo, self.cursor - lo);
+        self.cursor = lo;
+        try self.insertText(text);
+    }
+
     /// Moves the cursor, refreshing the sticky column for a horizontal
     /// move and preserving it for a vertical one.
     fn moveTo(self: *Editor, offset: usize, horizontal: bool) void {

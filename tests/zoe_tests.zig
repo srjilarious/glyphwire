@@ -3431,3 +3431,124 @@ pub fn hoverColorRunsFillGapsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqualStr(") ", runs.items[2].text);
     try testz.expectEqualStr("vo", runs.items[3].text);
 }
+
+// ── Completion ─────────────────────────────────────────────────────────────
+
+const complete = zoe.complete;
+
+/// An owned item the way `lsp.Pool` builds one.
+fn makeItem(alloc: std.mem.Allocator, label: []const u8, sort: []const u8) !lsp.CompletionItem {
+    return .{
+        .label = try alloc.dupe(u8, label),
+        .insert = try alloc.dupe(u8, label),
+        .filter = try alloc.dupe(u8, label),
+        .sort = try alloc.dupe(u8, sort),
+    };
+}
+
+fn makeMenu(alloc: std.mem.Allocator, specs: []const [2][]const u8) !complete.Menu {
+    const items = try alloc.alloc(lsp.CompletionItem, specs.len);
+    for (specs, items) |s, *it| it.* = try makeItem(alloc, s[0], s[1]);
+    return complete.Menu.init(alloc, items, 0, 0, false);
+}
+
+fn currentLabel(m: *const complete.Menu) []const u8 {
+    return if (m.current()) |it| it.label else "";
+}
+
+pub fn completeMatchTiersTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(complete.match("String", "Str").?, .prefix);
+    try testz.expectEqual(complete.match("String", "str").?, .prefix_nocase);
+    try testz.expectEqual(complete.match("getCellLength", "gcl").?, .subsequence);
+    try testz.expectEqual(complete.match("abc", "abd"), null);
+    // Longer than the candidate can't match.
+    try testz.expectEqual(complete.match("ab", "abc"), null);
+    // Nothing typed matches everything, as a prefix.
+    try testz.expectEqual(complete.match("anything", "").?, .prefix);
+}
+
+pub fn completeMenuRanksByTierThenSortTextTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var m = try makeMenu(alloc, &.{
+        .{ "getCellLength", "0" },
+        .{ "Get", "2" },
+        .{ "get", "3" },
+        .{ "getter", "1" },
+        .{ "unrelated", "0" },
+    });
+    defer m.deinit();
+
+    try m.refilter("get");
+    // Exact-case prefixes first, in the server's sortText order; then the
+    // case-insensitive prefix; the non-match is gone.
+    try testz.expectEqual(m.count(), 4);
+    const want = [_][]const u8{ "getCellLength", "getter", "get", "Get" };
+    for (want, 0..) |w, i| try testz.expectEqualStr(w, m.items[m.matches.items[i]].label);
+
+    // A subsequence match ranks below every prefix match whatever its
+    // sortText says.
+    try m.refilter("gcl");
+    try testz.expectEqual(m.count(), 1);
+    try testz.expectEqualStr("getCellLength", currentLabel(&m));
+
+    try m.refilter("zzz");
+    try testz.expectEqual(m.count(), 0);
+    try testz.expectEqual(m.current(), null);
+}
+
+pub fn completeMenuSelectionWrapsAndScrollsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var m = try makeMenu(alloc, &.{
+        .{ "a1", "1" }, .{ "a2", "2" }, .{ "a3", "3" }, .{ "a4", "4" }, .{ "a5", "5" },
+    });
+    defer m.deinit();
+    try m.refilter("a");
+
+    // Three rows visible.
+    m.move(1, 3);
+    m.move(1, 3);
+    try testz.expectEqualStr("a3", currentLabel(&m));
+    try testz.expectEqual(m.top, 0);
+    // Past the bottom row scrolls one.
+    m.move(1, 3);
+    try testz.expectEqual(m.top, 1);
+    try testz.expectEqualStr("a2", m.visible(0).?.label);
+    // Up from the first wraps to the last...
+    m.move(-4, 3);
+    try testz.expectEqualStr("a5", currentLabel(&m));
+    // ...and down from the last wraps to the first, scrolling back up.
+    m.move(1, 3);
+    try testz.expectEqualStr("a1", currentLabel(&m));
+    try testz.expectEqual(m.top, 0);
+    // Refiltering puts the selection back on the best match.
+    m.move(2, 3);
+    try m.refilter("a");
+    try testz.expectEqual(m.selected, 0);
+}
+
+pub fn completeWordStartTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(complete.wordStart("foo.bar", 7), 4);
+    try testz.expectEqual(complete.wordStart("foo.", 4), 4);
+    try testz.expectEqual(complete.wordStart("  snake_case1", 13), 2);
+    // A non-ASCII identifier is one word.
+    try testz.expectEqual(complete.wordStart("x = 名前", 9), 4);
+    try testz.expectEqual(complete.wordStart("", 0), 0);
+    try testz.expectEqualStr("fn", complete.kindLabel(3));
+    try testz.expectEqualStr("", complete.kindLabel(0));
+    try testz.expectEqualStr("", complete.kindLabel(200));
+}
+
+pub fn completeAcceptIsOneUndoWithTheTypingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x = \n", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "A");
+    _ = try ed.feedText("ap");
+    // Accepting replaces the word typed so far.
+    try ed.replaceBeforeCursor(4, "append(item)");
+    try expectText(alloc, &ed.buf, "x = append(item)\n");
+    try testz.expectEqual(ed.cursor, 16);
+    // Typing continues after it.
+    _ = try ed.feedText(";");
+    try expectText(alloc, &ed.buf, "x = append(item);\n");
+    // And one `u` takes back the whole insert session, completion included.
+    _ = try keys.feed(&ed, "<Esc>u");
+    try expectText(alloc, &ed.buf, "x = \n");
+}
