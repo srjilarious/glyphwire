@@ -126,6 +126,8 @@ fn run(io: std.Io, client: *glyphwire.Client, notify_type: NotifyType, message: 
 
     const handle = try client.createLayer(box_cols, box_rows, 0);
     errdefer client.destroyLayer(handle) catch {};
+    // Host-drawn, so it slides in with the layer.
+    try client.setLayerShadow(handle, glyphwire.Shadow.dialog);
 
     // Starts fully past the grid's right edge (off-screen) and slides to
     // its resting spot flush against the top-right corner.

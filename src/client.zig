@@ -1515,6 +1515,35 @@ pub const Client = struct {
         try self.notify("set_property", .{ .layer = layer, .property = "background", .color = colorToJson(color) });
     }
 
+    /// `set_property(layer, "shadow", {shadow})` -- a notification. Gives
+    /// the layer a soft drop shadow drawn by the host under its bounds, or
+    /// removes it with `null`. See `core.Shadow`.
+    pub fn setLayerShadow(self: *Client, layer: core.LayerHandle, shadow: ?core.Shadow) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "shadow", .shadow = shadowToJson(shadow) });
+    }
+
+    /// `core.Shadow` in its wire shape. Shared with `Batch.setLayerShadow`.
+    fn shadowToJson(shadow: ?core.Shadow) ?ShadowWire {
+        const sh = shadow orelse return null;
+        return .{
+            .x = sh.x,
+            .y = sh.y,
+            .blur = sh.blur,
+            .radius = sh.radius,
+            .spread = sh.spread,
+            .color = .{ .r = sh.color.r, .g = sh.color.g, .b = sh.color.b, .a = sh.color.a },
+        };
+    }
+
+    const ShadowWire = struct {
+        x: i32,
+        y: i32,
+        blur: u32,
+        radius: u32,
+        spread: i32,
+        color: protocol.Color,
+    };
+
     /// `set_property(layer, "pty_mode", {enabled})` -- a notification.
     /// Turns on cross-`write_text`-call persistence of the layer's
     /// escape-sequence / charset / SGR-pen state, so a sequence a PTY
@@ -2794,6 +2823,11 @@ pub const Client = struct {
         /// Batched `Client.setLayerBackground`.
         pub fn setLayerBackground(self: *Batch, layer: core.LayerHandle, color: ?core.Color) !void {
             try self.notify("set_property", .{ .layer = layer, .property = "background", .color = colorToJson(color) });
+        }
+
+        /// Batched `Client.setLayerShadow`.
+        pub fn setLayerShadow(self: *Batch, layer: core.LayerHandle, shadow: ?core.Shadow) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "shadow", .shadow = Client.shadowToJson(shadow) });
         }
 
         /// Batched `Client.raiseLayer`.

@@ -471,6 +471,11 @@ pub const Ui = struct {
         try client.setLayerBackground(dialog_layer, bg_dialog);
         try client.setLayerBackground(dict_layer, bg_dialog);
         try client.setLayerBackground(dict_build_layer, bg_dialog);
+        // Every floating panel stands off the page on the same host-drawn
+        // shadow, which follows each one as it moves and resizes.
+        for ([_]glyphwire.LayerHandle{ help_layer, dialog_layer, dict_layer, dict_build_layer }) |l| {
+            try client.setLayerShadow(l, glyphwire.Shadow.dialog);
+        }
 
         try client.setLayerVisible(help_layer, false);
         try client.setLayerVisible(dialog_layer, false);

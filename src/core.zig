@@ -1331,6 +1331,59 @@ pub const PropertyName = enum {
     /// selections on this layer (`{enabled: bool}`, default off). See
     /// `Layer.mouse_select`.
     mouse_select,
+    /// A soft drop shadow the host draws under the layer's bounds
+    /// (`{shadow: {x, y, blur, radius, spread, color}}`, or no `shadow`
+    /// for none -- the default). See `Shadow`.
+    shadow,
+};
+
+/// A layer's drop shadow (`PropertyName.shadow`): a rounded rect the size
+/// of the layer's visible bounds, moved by `x`/`y`, grown on every side by
+/// `spread` (negative shrinks it), with corner `radius`, blurred by
+/// `blur` -- all in pixels -- and filled with `color` (its alpha is the
+/// shadow's darkest point). Drawn by the host directly under the layer, so
+/// it darkens whatever the layers beneath show and nothing of the layer's
+/// own; it is not part of the layer's bounds, so it never takes a click.
+///
+/// The shape follows the layer's rectangle, not its pixels: set `radius`
+/// to the corner radius of a nine-patch panel the layer draws, and a
+/// negative `spread` if the panel doesn't reach the layer's edge. See
+/// docs/api.md's Shadow section for why this isn't cast from the layer's
+/// real alpha.
+pub const Shadow = struct {
+    x: i32 = 0,
+    y: i32 = 0,
+    blur: u32 = 0,
+    radius: u32 = 0,
+    spread: i32 = 0,
+    color: Color = .{ .r = 0, .g = 0, .b = 0, .a = 128 },
+
+    /// The largest `blur` / `radius` the host honours; anything bigger is
+    /// clamped to it on the way in. They size a texture the host builds
+    /// per distinct shadow (`2 * (radius + 2 * blur)` pixels across), so
+    /// an unbounded value would be an unbounded allocation.
+    pub const max_blur: u32 = 64;
+    pub const max_radius: u32 = 64;
+
+    /// The shadow glyphwire's own programs give a floating dialog, so
+    /// zoe's popups, salacommander's questions, gw-read's panels and the
+    /// notify toast all stand off the screen the same way. Dropped more
+    /// than it's pushed sideways, as if lit from slightly above; `radius`
+    /// matches the bundled `panel`/`dialog` nine-patches' corners.
+    pub const dialog: Shadow = .{
+        .x = 2,
+        .y = 6,
+        .blur = 12,
+        .radius = 6,
+        .color = .{ .r = 0, .g = 0, .b = 0, .a = 150 },
+    };
+
+    pub fn clamped(self: Shadow) Shadow {
+        var out = self;
+        out.blur = @min(self.blur, max_blur);
+        out.radius = @min(self.radius, max_radius);
+        return out;
+    }
 };
 
 pub const PropertyValue = union(PropertyName) {
@@ -1350,6 +1403,7 @@ pub const PropertyValue = union(PropertyName) {
     background: ?Color,
     pty_mode: bool,
     mouse_select: bool,
+    shadow: ?Shadow,
 };
 
 /// See `PropertyName.scroll_mode`.
@@ -1748,6 +1802,8 @@ pub const Layer = struct {
     scroll_mode: ScrollMode = .host,
     /// See `PropertyName.background`.
     background: ?Color = null,
+    /// See `PropertyName.shadow`. Stored already `Shadow.clamped`.
+    shadow: ?Shadow = null,
     /// The virtual scroll position of a `.client` scroll-mode layer --
     /// `scroll_off` stays put (the real grid never moves) and this is
     /// what `set_property(scroll_offset)`, the scrollbar and the wheel
@@ -3750,6 +3806,7 @@ pub const Layer = struct {
             .background => .{ .background = self.background },
             .pty_mode => .{ .pty_mode = self.pty_mode },
             .mouse_select => .{ .mouse_select = self.mouse_select },
+            .shadow => .{ .shadow = self.shadow },
         };
     }
 
@@ -3797,6 +3854,7 @@ pub const Layer = struct {
                 self.pen = .{};
             },
             .mouse_select => |v| self.mouse_select = v,
+            .shadow => |v| self.shadow = if (v) |sh| sh.clamped() else null,
         }
         // `.position` moves where the layer composites; `.cursor` can scroll
         // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
@@ -6647,7 +6705,7 @@ pub const Context = struct {
                 if (layer.scroll_mode != .client) return PropertyError.WrongScrollMode;
                 layer.setProperty(value);
             },
-            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select => layer.setProperty(value),
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select, .shadow => layer.setProperty(value),
         }
     }
 

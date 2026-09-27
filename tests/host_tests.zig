@@ -622,3 +622,55 @@ pub fn contextSigMovesWhenTheWindowScrollbarIsToggledTest(_: std.Io, alloc: std.
     const off = redraw.contextSig(&ctx);
     try testz.expectFalse(std.meta.eql(on, off));
 }
+
+// ─── shadow.build ─────────────────────────────────────────────────────
+
+fn shadowAlpha(px: []const u8, side: u32, x: u32, y: u32) u8 {
+    return px[(@as(usize, y) * side + x) * 4 + 3];
+}
+
+pub fn shadowTextureIsSolidInsideAndClearOutsideTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const sh: glyphwire.Shadow = .{ .blur = 6, .radius = 4, .color = .{ .r = 0, .g = 0, .b = 0, .a = 200 } };
+    const g = hs.shadow.geometry(sh);
+    try testz.expectEqual(g.corner, 16); // radius + 2 * blur
+    const px = try hs.shadow.build(alloc, sh);
+    defer alloc.free(px);
+    try testz.expectEqual(px.len, @as(usize, g.side) * g.side * 4);
+
+    // The 1px ring `ninePatchQuads` skips is empty, as is the art's own
+    // outer corner, which is past the blur's reach.
+    try testz.expectEqual(shadowAlpha(px, g.side, 0, 0), 0);
+    try testz.expectEqual(shadowAlpha(px, g.side, g.side / 2, 0), 0);
+    try testz.expectEqual(shadowAlpha(px, g.side, 1, 1), 0);
+    // The middle is the full colour.
+    try testz.expectEqual(shadowAlpha(px, g.side, g.side / 2, g.side / 2), 200);
+}
+
+pub fn shadowTextureMiddleStripIsUniformTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Every texel of the stretchable strip must match its neighbours
+    // along the strip, or stretching it would smear the corners' shape
+    // into the edges.
+    const sh: glyphwire.Shadow = .{ .blur = 5, .radius = 7 };
+    const g = hs.shadow.geometry(sh);
+    const px = try hs.shadow.build(alloc, sh);
+    defer alloc.free(px);
+
+    const first = 1 + g.corner;
+    var y: u32 = 1;
+    while (y < 1 + g.corner) : (y += 1) {
+        const a = shadowAlpha(px, g.side, first, y);
+        var x = first;
+        while (x < first + g.middle) : (x += 1) try testz.expectEqual(shadowAlpha(px, g.side, x, y), a);
+    }
+}
+
+pub fn shadowWithoutBlurIsASharpRoundedRectTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const sh: glyphwire.Shadow = .{ .radius = 0, .color = .{ .r = 10, .g = 20, .b = 30, .a = 255 } };
+    const g = hs.shadow.geometry(sh);
+    const px = try hs.shadow.build(alloc, sh);
+    defer alloc.free(px);
+    // No blur and no radius: every art pixel is fully covered.
+    try testz.expectEqual(shadowAlpha(px, g.side, 1, 1), 255);
+    try testz.expectEqual(px[((1 * @as(usize, g.side)) + 1) * 4 + 2], 30);
+    try testz.expectEqual(hs.shadow.outset(sh), 0);
+}
