@@ -29,6 +29,8 @@
 //!   `gitignore`  `.gitignore` matching + hidden-file rule (zoe,
 //!                salacommander)
 //!   `finder`     the fuzzy file finder model (zoe, salacommander)
+//!   `finderpopup` the framed popup drawn around a `finder` (zoe's
+//!                Ctrl+P, salacommander's F3)
 //!   `filetype`   "is this text?" (zoe, salacommander)
 //!   `entries`    directory scanning and per-entry classification
 //!                (gw-ls, salacommander)
@@ -45,6 +47,7 @@ pub const history = @import("history.zig");
 pub const fuzzy = @import("fuzzy.zig");
 pub const gitignore = @import("gitignore.zig");
 pub const finder = @import("finder.zig");
+pub const finderpopup = @import("finderpopup.zig");
 pub const filetype = @import("filetype.zig");
 pub const entries = @import("entries.zig");
 pub const format = @import("format.zig");
