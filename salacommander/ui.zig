@@ -134,6 +134,18 @@ const PathEdit = struct {
     view_start: usize = 0,
 };
 
+/// F2: the entry under the cursor being renamed where it's listed.
+const NameEdit = struct {
+    pane: usize,
+    /// The listing row the field sits on. Nothing that could re-order
+    /// or re-read the listing leaves the field open, so it stays valid.
+    row: usize,
+    /// The entry's name when the field opened -- what it's renamed from.
+    /// Owned.
+    original: []u8,
+    line: LineEdit,
+};
+
 /// Where one pane's columns fall, for its current width and view.
 const Columns = struct {
     icon_col: usize,
@@ -200,6 +212,10 @@ pub const Ui = struct {
     /// open its pane draws the field instead of its directory, and keys
     /// go there rather than through the keymap.
     path_edit: ?PathEdit = null,
+    /// F2: an entry's name turned into a text field, in the name column
+    /// of its row. Keys go there, as for `path_edit`; the two are never
+    /// open at once.
+    name_edit: ?NameEdit = null,
     /// Type-to-find: what's been typed so far, moving the cursor to the
     /// first entry that starts with it. Cleared by anything that moves
     /// the cursor or changes the listing -- see `clearFind`.
@@ -340,6 +356,7 @@ pub const Ui = struct {
         // and closing its control pipe is what tells it to leave.
         self.shell.deinit();
         self.endPathEdit();
+        self.endNameEdit();
         for (&self.panes) |*p| p.deinit();
         self.keymap.deinit(alloc);
         self.cfg.deinit(alloc);
@@ -374,6 +391,7 @@ pub const Ui = struct {
                 for (self.pane_layers, 0..) |l, i| {
                     if (so.layer != l) continue;
                     self.clearFind();
+                    self.endNameEdit();
                     const p = &self.panes[i];
                     p.scrollTo(so.row / p.view.rowHeight(), self.visibleRows(i));
                     self.pushed_scroll[i][1] = so.row;
@@ -386,6 +404,9 @@ pub const Ui = struct {
             // Typed text is the shell's while its panel is up -- it has
             // a line editor, and this one has type-to-find.
             .text, .paste => |t| if (self.shell.isOpen()) {} else if (self.path_edit) |*e| {
+                _ = try e.line.insert(self.alloc, t.text);
+                self.markDirty(e.pane, .full);
+            } else if (self.name_edit) |*e| {
                 _ = try e.line.insert(self.alloc, t.text);
                 self.markDirty(e.pane, .full);
             } else {
@@ -426,6 +447,7 @@ pub const Ui = struct {
 
         self.clearMessage();
         if (self.path_edit != null) return self.pathEditKey(k);
+        if (self.name_edit != null) return self.nameEditKey(k);
 
         // Editing the find prefix comes before the keymap: with one up,
         // Backspace takes a character back off it and Escape drops it.
@@ -540,6 +562,7 @@ pub const Ui = struct {
             .unmarkAll => p.unmarkAll(),
             .invertMarks => p.invertMarks(),
 
+            .rename => try self.beginNameEdit(),
             .copy => try self.transfer(.copy),
             .move => try self.transfer(.move),
             .makeDir => try self.makeDir(),
@@ -713,6 +736,7 @@ pub const Ui = struct {
     /// shown, and until Enter or Escape every key goes to the field.
     fn beginPathEdit(self: *Ui) !void {
         self.endPathEdit(); // Alt+D on the other side moves the field.
+        self.endNameEdit();
         const p = &self.panes[self.active];
         self.path_edit = .{ .pane = self.active, .line = try LineEdit.init(self.alloc, p.path) };
         self.markDirty(self.active, .full);
@@ -780,6 +804,83 @@ pub const Ui = struct {
         }
     }
 
+    // ── Renaming in place ───────────────────────────────────────────────
+
+    /// F2: turn the name of the entry under the cursor into a text field
+    /// in its row, the caret before the extension (see `renameCaret`).
+    /// The `..` row has no name of its own to change.
+    fn beginNameEdit(self: *Ui) !void {
+        self.endPathEdit();
+        self.endNameEdit();
+        const p = &self.panes[self.active];
+        const e = p.current() orelse return;
+        const original = try self.alloc.dupe(u8, e.name);
+        errdefer self.alloc.free(original);
+        var line = try LineEdit.init(self.alloc, e.name);
+        _ = line.moveTo(renameCaret(e.name, (e.link_target_kind orelse e.kind) == .directory));
+        self.name_edit = .{ .pane = self.active, .row = p.cursor, .original = original, .line = line };
+        self.markDirty(self.active, .full);
+    }
+
+    /// Closes the field and puts the name back, renaming nothing.
+    fn endNameEdit(self: *Ui) void {
+        if (self.name_edit) |*e| {
+            e.line.deinit(self.alloc);
+            self.alloc.free(e.original);
+            self.markDirty(e.pane, .full);
+        }
+        self.name_edit = null;
+    }
+
+    /// Keys while a name is a field: the shared `LineEdit`'s editing
+    /// keys, Enter to rename and Escape to leave it be. Any other key
+    /// that is a command -- Tab, an arrow, F5, Alt+D -- drops the rename
+    /// and then does what it would have; one that types a character
+    /// (Space marks, keypad `+` marks all) is the field's, since its
+    /// text is on its way down the `text` stream.
+    fn nameEditKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        const e = if (self.name_edit) |*ne| ne else return;
+        switch (e.line.handleKey(k.key, k.mods)) {
+            .moved, .edited => self.markDirty(e.pane, .full),
+            .cancel => self.endNameEdit(),
+            .ignored => {
+                if (typesText(k.key, k.mods)) return;
+                const action = self.keymap.lookup(k.key, k.mods) orelse return;
+                self.endNameEdit();
+                try self.perform(action);
+            },
+            .submit => try self.commitNameEdit(),
+        }
+    }
+
+    /// Enter in the F2 field. An unchanged or blank name just closes it;
+    /// a name that can't be used, or that's taken, says so in the bar and
+    /// leaves the field open to fix. After a rename the cursor follows
+    /// the entry to wherever the sort puts its new name.
+    fn commitNameEdit(self: *Ui) !void {
+        const e = if (self.name_edit) |*ne| ne else return;
+        const p = &self.panes[e.pane];
+        const typed = e.line.text();
+        if (typed.len == 0 or std.mem.eql(u8, typed, e.original)) return self.endNameEdit();
+
+        fileops.renameInDir(self.io, self.alloc, p.path, e.original, typed) catch |err| {
+            switch (err) {
+                error.PathAlreadyExists => try self.setMessage("{s} already exists", .{typed}),
+                error.InvalidName => try self.setMessage("can't rename to {s}: a name only, no '/'", .{typed}),
+                else => try self.setMessage("rename {s}: {t}", .{ e.original, err }),
+            }
+            return;
+        };
+
+        // Copied: closing the field frees the text it's read from.
+        const new_name = try self.alloc.dupe(u8, typed);
+        defer self.alloc.free(new_name);
+        self.endNameEdit();
+        try self.reloadBoth();
+        if (p.rowOf(new_name)) |row| p.setCursor(row);
+        try self.setMessage("renamed to {s}", .{new_name});
+    }
+
     fn reloadBoth(self: *Ui) !void {
         for (&self.panes, 0..) |*p, i| {
             p.reload() catch |err| try self.setMessage("{s}: {t}", .{ p.path, err });
@@ -814,7 +915,10 @@ pub const Ui = struct {
             return;
         }
         // Clicking anywhere else is leaving the field, not typing in it.
+        // The F2 field is left the same way even when the click lands on
+        // it: only Enter renames.
         self.endPathEdit();
+        self.endNameEdit();
         self.clearFind();
 
         const p = &self.panes[i];
@@ -1203,6 +1307,14 @@ pub const Ui = struct {
         return null;
     }
 
+    /// The F2 field, if it's open in pane `i`.
+    fn nameEditFor(self: *Ui, i: usize) ?*NameEdit {
+        if (self.name_edit) |*e| {
+            if (e.pane == i) return e;
+        }
+        return null;
+    }
+
     /// How many entries fit in pane `i`'s list area.
     fn visibleRows(self: *const Ui, i: usize) usize {
         const list_rows = self.paneHeight() -| chrome_rows;
@@ -1289,7 +1401,7 @@ pub const Ui = struct {
         const p = &self.panes[i];
         const visible = self.visibleRows(i);
         p.scrollIntoView(visible);
-        if (self.pathEditFor(i) != null) return self.renderPane(i);
+        if (self.pathEditFor(i) != null or self.nameEditFor(i) != null) return self.renderPane(i);
 
         const old_top = self.drawn_top[i];
         const scrolled_down = p.top > old_top;
@@ -1420,15 +1532,7 @@ pub const Ui = struct {
             const fg = if (active) fg_title_active else fg_title_inactive;
             try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = bg });
             if (self.pathEditFor(i)) |e| {
-                const in = &e.line;
-                const field_w = w -| 2;
-                const view = fieldView(in.text(), in.caret, field_w);
-                e.view_start = view.start;
-                try b.writeTextOpts(in.text()[view.start..], .{ .layer = layer, .row = 0, .col = 1, .fg = fg_dialog, .bg = bg_input, .max_cols = field_w, .pad = true });
-                // The caret: the character under it (or a blank past the
-                // end) in reverse, as a dialog's field draws it.
-                const under = if (in.caret < in.text().len) in.text()[in.caret..nextCodepoint(in.text(), in.caret)] else " ";
-                try b.writeTextOpts(under, .{ .layer = layer, .row = 0, .col = 1 + view.caret_col, .fg = bg_input, .bg = fg_dialog });
+                e.view_start = try writeField(&b, layer, &e.line, 0, 1, w -| 2);
             } else {
                 var pbuf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
                 const shown = self.displayPath(&pbuf, p.path, w -| 2);
@@ -1453,6 +1557,11 @@ pub const Ui = struct {
         // foreground icon, and a tall icon spills into the row below.
         const end = @min(p.top + visible, p.rowCount());
         for (p.top..end) |row| try writeRow(&b, layer, p, row, list_top + (row - p.top) * rh, w, cols, active);
+        // The F2 field over its row's name, before the icons for the
+        // same reason the rows are.
+        if (self.nameEditFor(i)) |e| {
+            if (e.row >= p.top and e.row < end) _ = try writeField(&b, layer, &e.line, list_top + (e.row - p.top) * rh, cols.name_col, cols.name_w);
+        }
         const icon_px = self.iconPx(p.view);
         for (p.top..end) |row| {
             const icon = if (p.entryAt(row)) |e| lsentries.iconForEntry(e.*) else "file/folder";
@@ -1752,6 +1861,41 @@ const nextCodepoint = lineedit.nextBoundary;
 /// shared field's, re-exported because it is also what a click in the
 /// Alt+D row resolves through and the tests reach for it by name.
 pub const offsetAtCol = lineedit.offsetAtCol;
+
+/// Draws a one-row text field at (`row`, `col`), `width` cells wide,
+/// scrolled so the caret stays in it: the text on the input background
+/// and the caret as the character under it (or a blank past the end) in
+/// reverse, as a dialog's field draws it. Returns the byte the text was
+/// drawn from, which a click in the field needs to find its offset.
+fn writeField(b: *Batch, layer: glyphwire.LayerHandle, in: *const LineEdit, row: usize, col: usize, width: usize) !usize {
+    const view = fieldView(in.text(), in.caret, width);
+    try b.writeTextOpts(in.text()[view.start..], .{ .layer = layer, .row = row, .col = col, .fg = fg_dialog, .bg = bg_input, .max_cols = width, .pad = true });
+    const under = if (in.caret < in.text().len) in.text()[in.caret..nextCodepoint(in.text(), in.caret)] else " ";
+    try b.writeTextOpts(under, .{ .layer = layer, .row = row, .col = col + view.caret_col, .fg = bg_input, .bg = fg_dialog });
+    return view.start;
+}
+
+/// Where F2 puts the caret in `name`: before the extension, so the part
+/// usually changed is right there and the extension is kept by default.
+/// At the end for a directory (`src.old` is a name, not a type), for a
+/// dotfile with no second dot, and for a name with no dot at all.
+pub fn renameCaret(name: []const u8, is_dir: bool) usize {
+    if (is_dir) return name.len;
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name.len;
+    if (dot == 0) return name.len;
+    return dot;
+}
+
+/// True when a key event is one half of a keystroke whose text arrives
+/// separately on the `text` stream -- a letter, Space, a keypad digit or
+/// operator -- as opposed to a command key. The F2 field lets these
+/// through untouched rather than reading Space as "mark" and giving up.
+pub fn typesText(key: []const u8, mods: glyphwire.Mods) bool {
+    if (mods.ctrl or mods.alt or mods.super) return false;
+    if ((std.unicode.utf8CountCodepoints(key) catch 0) == 1) return true;
+    if (std.mem.eql(u8, key, "space")) return true;
+    return std.mem.startsWith(u8, key, "kp_") and !std.mem.eql(u8, key, "kp_enter");
+}
 
 /// Which part of a text field's contents to show so the caret stays in a
 /// `width`-cell field: the byte to start drawing from, and the caret's

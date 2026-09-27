@@ -563,6 +563,68 @@ pub fn makeDirCreatesParentsAndRefusesExistingTest(io: std.Io, alloc: std.mem.Al
     try testz.expectError(fileops.makeDir(io, nested), error.PathAlreadyExists);
 }
 
+pub fn renameInDirRenamesInPlaceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "f2");
+    defer s.deinit();
+    try s.file("old.txt", "body");
+    try fileops.renameInDir(io, alloc, s.path, "old.txt", "new.txt");
+    try testz.expectFalse(s.exists("old.txt"));
+    const got = try s.read("new.txt");
+    defer alloc.free(got);
+    try testz.expectEqualStr(got, "body");
+}
+
+pub fn renameInDirNeverReplacesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    // F6 onto an existing file asks; F2 just refuses, and both files are
+    // left exactly as they were.
+    var s = try Scratch.init(io, alloc, "f2-taken");
+    defer s.deinit();
+    try s.file("a.txt", "a");
+    try s.file("b.txt", "b");
+    try testz.expectError(fileops.renameInDir(io, alloc, s.path, "a.txt", "b.txt"), error.PathAlreadyExists);
+    const got = try s.read("b.txt");
+    defer alloc.free(got);
+    try testz.expectEqualStr(got, "b");
+    try testz.expectTrue(s.exists("a.txt"));
+}
+
+pub fn renameInDirTakesANameNotAPathTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "f2-name");
+    defer s.deinit();
+    try s.file("a.txt", "a");
+    try s.mkdir("sub");
+    try testz.expectError(fileops.renameInDir(io, alloc, s.path, "a.txt", "sub/a.txt"), error.InvalidName);
+    try testz.expectError(fileops.renameInDir(io, alloc, s.path, "a.txt", ".."), error.InvalidName);
+    try testz.expectError(fileops.renameInDir(io, alloc, s.path, "a.txt", ""), error.EmptyName);
+    try testz.expectTrue(s.exists("a.txt"));
+    try testz.expectFalse(s.exists("sub/a.txt"));
+}
+
+pub fn renameCaretSitsBeforeTheExtensionTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(sala.ui.renameCaret("photo.jpg", false), 5);
+    try testz.expectEqual(sala.ui.renameCaret("notes.tar.gz", false), 9);
+    // No extension to keep: the caret goes to the end.
+    try testz.expectEqual(sala.ui.renameCaret("Makefile", false), 8);
+    try testz.expectEqual(sala.ui.renameCaret(".bashrc", false), 7);
+    // A dot in a directory name isn't an extension.
+    try testz.expectEqual(sala.ui.renameCaret("src.old", true), 7);
+}
+
+pub fn renameFieldKeepsTextKeysTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Keys whose text arrives on the `text` stream stay in the F2 field
+    // instead of being read as their bindings (Space marks, keypad `+`
+    // marks all) -- those would drop the rename mid-word.
+    try testz.expectTrue(sala.ui.typesText("a", .{}));
+    try testz.expectTrue(sala.ui.typesText("A", .{ .shift = true }));
+    try testz.expectTrue(sala.ui.typesText("space", .{}));
+    try testz.expectTrue(sala.ui.typesText("kp_add", .{}));
+    try testz.expectFalse(sala.ui.typesText("kp_enter", .{}));
+    try testz.expectFalse(sala.ui.typesText("tab", .{}));
+    try testz.expectFalse(sala.ui.typesText("F5", .{}));
+    try testz.expectFalse(sala.ui.typesText("d", .{ .alt = true }));
+    try testz.expectFalse(sala.ui.typesText("`", .{ .ctrl = true }));
+}
+
 pub fn isWithinComparesWholeComponentsTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectTrue(fileops.isWithin("/a/b", "/a/b"));
     try testz.expectTrue(fileops.isWithin("/a/b/c", "/a/b"));
@@ -662,7 +724,7 @@ pub fn ListingChangesTakeTheFullRepaintTest(_: std.Io, _: std.mem.Allocator) !vo
         .activate,     .upToParentDir, .editPath,   .switchPane,
         .swapPanes,    .markAll,       .unmarkAll,  .invertMarks,
         .sortByName,   .sortBySize,    .toggleView, .toggleHidden,
-        .refresh,      .otherPaneToSameDir,
+        .refresh,      .otherPaneToSameDir, .rename,
     };
     for (full) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .full);
 }
@@ -673,6 +735,7 @@ pub fn defaultBindingsCoverTheBasicsTest(_: std.Io, alloc: std.mem.Allocator) !v
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
     try testz.expectEqual(km.lookup("up", .{ .alt = true }).?, actions.Action.upToParentDir);
+    try testz.expectEqual(km.lookup("F2", .{}).?, actions.Action.rename);
     try testz.expectEqual(km.lookup("F5", .{}).?, actions.Action.copy);
     try testz.expectEqual(km.lookup("F6", .{}).?, actions.Action.move);
     try testz.expectEqual(km.lookup("F8", .{}).?, actions.Action.delete);
@@ -691,7 +754,7 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
         \\  keys = {
         \\    ["ctrl+up"] = "upToParentDir",
         \\    ["F10"] = false,
-        \\    ["F2"] = "noSuchAction",
+        \\    ["F1"] = "noSuchAction",
         \\  },
         \\}
     );
@@ -708,7 +771,7 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
     // The default Alt+Up binding is still there alongside it.
     try testz.expectEqual(km.lookup("up", .{ .alt = true }).?, actions.Action.upToParentDir);
     try testz.expectTrue(km.lookup("F10", .{}) == null);
-    try testz.expectTrue(km.lookup("F2", .{}) == null);
+    try testz.expectTrue(km.lookup("F1", .{}) == null);
 }
 
 /// `page_lines` is how far PageUp/PageDown move, defaulting to 6. A

@@ -115,6 +115,7 @@
 --     --   markAll             kp_add, ctrl+a
 --     --   unmarkAll           kp_subtract, ctrl+d
 --     --   invertMarks         kp_multiply
+--     --   rename              F2      (renames the entry in place)
 --     --   copy                F5
 --     --   move                F6
 --     --   makeDir             F7

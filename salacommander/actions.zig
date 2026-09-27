@@ -42,6 +42,10 @@ pub const Action = enum {
     unmarkAll,
     invertMarks,
 
+    /// Turn the name of the entry under the cursor into a text field
+    /// where it's listed: Enter renames it, Escape (or any key that does
+    /// something else) leaves it alone. Same directory only -- F6 moves.
+    rename,
     copy,
     move,
     makeDir,
@@ -93,6 +97,7 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "ctrl+d", .action = .unmarkAll },
     .{ .chord = "kp_multiply", .action = .invertMarks },
 
+    .{ .chord = "F2", .action = .rename },
     .{ .chord = "F5", .action = .copy },
     .{ .chord = "F6", .action = .move },
     .{ .chord = "F7", .action = .makeDir },
@@ -119,6 +124,7 @@ pub const defaults = [_]keybind.Default(Action){
 /// A short label for the function-key bar along the bottom.
 pub fn barLabel(action: Action) []const u8 {
     return switch (action) {
+        .rename => "Rename",
         .copy => "Copy",
         .move => "RenMov",
         .makeDir => "Mkdir",
@@ -132,4 +138,4 @@ pub fn barLabel(action: Action) []const u8 {
 }
 
 /// The actions the function-key bar shows, in order.
-pub const bar_actions = [_]Action{ .copy, .move, .makeDir, .delete, .toggleView, .toggleHidden, .refresh, .quit };
+pub const bar_actions = [_]Action{ .rename, .copy, .move, .makeDir, .delete, .toggleView, .toggleHidden, .refresh, .quit };
