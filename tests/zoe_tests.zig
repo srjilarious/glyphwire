@@ -2509,6 +2509,25 @@ pub fn finderWalksTheTreeAndSkipsDotfilesTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr(path, want);
 }
 
+pub fn finderListsDirectoriesWhenAskedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "scandirs");
+    defer s.deinit();
+    try s.file("a.txt", "");
+    try s.file("sub/deep/c.zig", "");
+    try s.file(".hidden/x.txt", "");
+
+    // salacommander's F3: directories are results too, each with a
+    // trailing `/` so the popup (and `findTarget`) can tell them apart.
+    var f = try zoe.Finder.init(alloc, io, s.path, .{ .include_dirs = true });
+    defer f.deinit();
+    try expectMatches(&f, &.{ "a.txt", "sub/", "sub/deep/", "sub/deep/c.zig" });
+
+    // The hidden flag still decides what's walked, directories included.
+    var all = try zoe.Finder.init(alloc, io, s.path, .{ .visible = .{ .show_hidden = true }, .include_dirs = true });
+    defer all.deinit();
+    try expectMatches(&all, &.{ ".hidden/", ".hidden/x.txt", "a.txt", "sub/", "sub/deep/", "sub/deep/c.zig" });
+}
+
 // ─── Search ─────────────────────────────────────────────────────────────
 
 pub fn searchSmartcaseFoldsOnlyLowercasePatternsTest(_: std.Io, alloc: std.mem.Allocator) !void {

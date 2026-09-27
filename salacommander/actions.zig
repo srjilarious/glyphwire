@@ -7,7 +7,7 @@
 //! and one arm in `Ui.perform` -- and `salacommander.conf.lua` can rebind
 //! it by the same name without any further code:
 //!
-//!     config = { keys = { ["alt+up"] = "upToParentDir", ["F3"] = false } }
+//!     config = { keys = { ["alt+up"] = "upToParentDir", ["F7"] = false } }
 //!
 //! The tag names are the config names, so they're camelCase on purpose
 //! and renaming one breaks users' configs.
@@ -46,6 +46,13 @@ pub const Action = enum {
     /// where it's listed: Enter renames it, Escape (or any key that does
     /// something else) leaves it alone. Same directory only -- F6 moves.
     rename,
+    /// Search every path under the active pane's directory, the popup
+    /// zoe's Ctrl+P is. Picking one points the pane at it rather than
+    /// opening it: Enter (or F4) is one more key from there.
+    find,
+    /// Open the file under the cursor in the configured `editor` (zoe by
+    /// default). A binary file or a directory is refused in the bar.
+    edit,
     copy,
     move,
     makeDir,
@@ -98,6 +105,8 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "kp_multiply", .action = .invertMarks },
 
     .{ .chord = "F2", .action = .rename },
+    .{ .chord = "F3", .action = .find },
+    .{ .chord = "F4", .action = .edit },
     .{ .chord = "F5", .action = .copy },
     .{ .chord = "F6", .action = .move },
     .{ .chord = "F7", .action = .makeDir },
@@ -125,6 +134,8 @@ pub const defaults = [_]keybind.Default(Action){
 pub fn barLabel(action: Action) []const u8 {
     return switch (action) {
         .rename => "Rename",
+        .find => "Find",
+        .edit => "Edit",
         .copy => "Copy",
         .move => "RenMov",
         .makeDir => "Mkdir",
@@ -138,4 +149,4 @@ pub fn barLabel(action: Action) []const u8 {
 }
 
 /// The actions the function-key bar shows, in order.
-pub const bar_actions = [_]Action{ .rename, .copy, .move, .makeDir, .delete, .toggleView, .toggleHidden, .refresh, .quit };
+pub const bar_actions = [_]Action{ .rename, .find, .edit, .copy, .move, .makeDir, .delete, .toggleView, .toggleHidden, .refresh, .quit };

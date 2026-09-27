@@ -403,6 +403,14 @@ pub const Pane = struct {
         return .{ .file = e.abs_path };
     }
 
+    /// Lists `dir` with the cursor on the entry called `name` -- where F3
+    /// lands on a file it found. A name the listing doesn't have (it went
+    /// away since the search walked) leaves the cursor at the top.
+    pub fn reveal(self: *Pane, dir: []const u8, name: []const u8) !void {
+        try self.load(dir);
+        if (self.rowOf(name)) |row| self.cursor = row;
+    }
+
     /// Goes to the parent directory with the cursor on the directory just
     /// left, the way every two-pane commander does. False at `/`.
     pub fn upToParentDir(self: *Pane) !bool {

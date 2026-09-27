@@ -70,6 +70,14 @@
 --         -- ["png"] = false,       -- back to xdg-open
 --     },
 --
+--     -- What F4 opens the file under the cursor with. Same rules as an
+--     -- open_actions command ({sel}, or the path appended), and it has
+--     -- to be a glyphwire client too: it runs in this session with no
+--     -- terminal of its own, so vim or nano here would get no screen.
+--     -- A file with a NUL byte in its first 8 KiB counts as binary and
+--     -- is refused before anything starts, the same test zoe uses.
+--     editor = "zoe",
+--
 --     ---- The shell panel -------------------------------------------
 --
 --     -- Ctrl+` opens a gw-shell across the bottom of the window and
@@ -116,6 +124,8 @@
 --     --   unmarkAll           kp_subtract, ctrl+d
 --     --   invertMarks         kp_multiply
 --     --   rename              F2      (renames the entry in place)
+--     --   find                F3      (searches below the pane's dir)
+--     --   edit                F4      (the `editor` above)
 --     --   copy                F5
 --     --   move                F6
 --     --   makeDir             F7

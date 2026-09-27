@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `.gitignore` matching, for the file tree and the two searches over it.
+//! `.gitignore` matching, for zoe's file tree and the two searches over
+//! it, and salacommander's F3 finder.
 //!
 //! A `Stack` is the set of ignore files in scope while a walk is somewhere
 //! in the tree: one frame per directory that had a `.gitignore`, pushed on
@@ -330,3 +331,38 @@ fn classMatches(body: []const u8, c: u8) bool {
     }
     return hit != negate;
 }
+
+/// What a listing or a walk is allowed to show. Off, both dotfiles and
+/// anything `.gitignore` excludes are skipped; Ctrl+H turns it on and
+/// every path appears.
+///
+/// One flag for both, deliberately: "show me everything" is a single
+/// intention, and two toggles would mean remembering which of them is
+/// hiding the file you are looking for. `.git/` stays out either way
+/// until you ask, since it is a dotfile.
+pub const Visibility = struct {
+    show_hidden: bool = false,
+
+    /// Whether an entry is one the tree hides by default -- a dotfile, or
+    /// a path the `.gitignore` files in scope exclude.
+    ///
+    /// Deliberately independent of `show_hidden`: with the flag on the
+    /// entry is listed, but it is still *a hidden one*, and the pane draws
+    /// it dim (`Entry.hidden`) so the toggle explains itself rather than
+    /// silently doubling the size of the listing.
+    pub fn isHidden(
+        _: Visibility,
+        ignores: *const Stack,
+        name: []const u8,
+        rel: []const u8,
+        is_dir: bool,
+    ) bool {
+        if (name.len > 0 and name[0] == '.') return true;
+        return ignores.isIgnored(rel, is_dir);
+    }
+
+    /// Whether to leave it out of the listing entirely.
+    pub fn skips(self: Visibility, hidden: bool) bool {
+        return hidden and !self.show_hidden;
+    }
+};

@@ -10,7 +10,8 @@
 //! chord to an action name, or to `false` to unbind that chord. Entries
 //! are applied over the built-in defaults, so a config only lists what it
 //! changes. `open_actions` works the same way over
-//! `openaction.defaults`, keyed by file extension.
+//! `openaction.defaults`, keyed by file extension. `editor` is the one
+//! command F4 runs, with the same template rules.
 
 const std = @import("std");
 const ziglua = @import("ziglua");
@@ -36,6 +37,9 @@ pub const OpenAction = struct {
     command: ?[]u8,
 };
 
+/// F4's editor when the config names none.
+pub const default_editor = "zoe";
+
 pub const Config = struct {
     view: pane_mod.ViewMode = .small,
     show_hidden: bool = false,
@@ -51,6 +55,11 @@ pub const Config = struct {
     /// Applied over `openaction.defaults`; a later entry for the same
     /// extension wins, as `openaction.resolve` scans last-match.
     open_actions: []OpenAction = &.{},
+    /// F4's command template, owned, or null for `default_editor`. Same
+    /// rules as an `open_actions` command (`{sel}`, or the path appended),
+    /// and the same limit: it must be a glyphwire client, since it runs
+    /// in the session with no terminal of its own (see `Ui.runInSession`).
+    editor: ?[]u8 = null,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         for (self.keys) |k| {
@@ -65,6 +74,13 @@ pub const Config = struct {
         }
         alloc.free(self.open_actions);
         self.open_actions = &.{};
+        if (self.editor) |e| alloc.free(e);
+        self.editor = null;
+    }
+
+    /// The template F4 runs. Borrowed from the config.
+    pub fn editorCommand(self: *const Config) []const u8 {
+        return self.editor orelse default_editor;
     }
 
     /// `open_actions` as `openaction.resolve` wants it. Borrowed from the
@@ -138,6 +154,13 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     }
     result.config.keys = readKeys(alloc, lua) catch &.{};
     result.config.open_actions = readOpenActions(alloc, lua) catch &.{};
+    if (stringField(lua, "editor")) |v| {
+        if (std.mem.trim(u8, v, " ").len == 0) {
+            std.log.warn("salacommander: {s} `editor` is empty; ignored", .{conf_name});
+        } else {
+            result.config.editor = alloc.dupe(u8, v) catch null;
+        }
+    }
 
     return result;
 }

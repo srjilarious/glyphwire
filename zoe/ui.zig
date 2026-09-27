@@ -53,8 +53,8 @@ const editor = @import("editor.zig");
 const display = @import("display.zig");
 const search = @import("search.zig");
 const tree_mod = @import("tree.zig");
-const finder_mod = @import("finder.zig");
-const filetype = @import("filetype.zig");
+const finder_mod = @import("shell_support").finder;
+const filetype = @import("shell_support").filetype;
 const syntax = @import("syntax.zig");
 const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
@@ -2640,7 +2640,7 @@ pub const Ui = struct {
         // The popup is modal, so a tree search underneath it would have
         // the statusline to itself with no way left to type into it.
         self.cancelFind();
-        self.finder = Finder.init(self.alloc, self.io, self.tree.root, self.tree.visible) catch |err| {
+        self.finder = Finder.init(self.alloc, self.io, self.tree.root, .{ .visible = self.tree.visible }) catch |err| {
             self.finder = null;
             self.buf.ed.setStatus("E484: Can't scan {s}: {s}", .{ self.tree.root, @errorName(err) });
             self.status_dirty = true;

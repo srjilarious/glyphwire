@@ -17,9 +17,11 @@
 //!     last row     a summary: what's marked (or the cursor entry) on the
 //!                  left, the directory's item count and total on the right
 //!
-//! Two more layers sit over those: the modal dialog layer, and the
-//! Ctrl+` shell panel -- a `gw-shell --embed` drawing its own prompt
-//! into a layer of ours across the bottom (see `src/shellpanel.zig`).
+//! More layers sit over those: the Ctrl+` shell panel -- a `gw-shell
+//! --embed` drawing its own prompt into a layer of ours across the bottom
+//! (see `src/shellpanel.zig`) -- then F3's finder popup, a header layer
+//! and a host-scrolled result list built on the same `Finder` model as
+//! zoe's Ctrl+P (`shell/finder.zig`), and the modal dialog layer on top.
 //!
 //! A server-side `Table` would sort and paint for us, but it paints every
 //! row and scrolls its layer the way terminal output does; a file pane
@@ -53,6 +55,9 @@ const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
 const shellpanel = glyphwire.shellpanel;
 const wordsplit = @import("shell_support").wordsplit;
+const filetype = @import("shell_support").filetype;
+const finder_mod = @import("shell_support").finder;
+const Finder = finder_mod.Finder;
 
 const Pane = pane_mod.Pane;
 const FileEntry = pane_mod.FileEntry;
@@ -110,6 +115,24 @@ const fg_bar_label = rgb(16, 18, 22);
 const fg_message = rgb(229, 192, 123);
 const fg_dialog = rgb(220, 223, 228);
 
+// The F3 finder popup: zoe's Ctrl+P palette, so the two read as the same
+// tool. The selected row is the panes' own cursor blue.
+const bg_finder = rgb(38, 38, 46);
+const bg_finder_header = rgb(40, 90, 170);
+const fg_finder_header = rgb(235, 240, 250);
+const bg_finder_selected = bg_cursor;
+const fg_finder_selected = rgb(245, 250, 255);
+
+/// Rows the finder popup spends on its title bar and query line.
+const finder_header_rows: usize = 2;
+/// The popup's preferred size, shrunk to fit the pane area
+/// (`finderRect`). Wider than zoe's: a file manager's search is rooted
+/// wherever the pane happens to be, so its paths run longer.
+const finder_max_cols: usize = 100;
+const finder_max_rows: usize = 20;
+const finder_min_cols: usize = 24;
+const finder_min_rows: usize = 4;
+
 /// Rows every pane spends on chrome: title, column header, footer.
 const chrome_rows = 3;
 /// The column-header row, between the title and the listing. Clicking it
@@ -144,6 +167,19 @@ const NameEdit = struct {
     /// Owned.
     original: []u8,
     line: LineEdit,
+};
+
+/// A block of window cells.
+const Rect = struct {
+    row: usize = 0,
+    col: usize = 0,
+    cols: usize = 0,
+    rows: usize = 0,
+
+    fn contains(self: Rect, cell: glyphwire.CellPos) bool {
+        return cell.row >= self.row and cell.row < self.row + self.rows and
+            cell.col >= self.col and cell.col < self.col + self.cols;
+    }
 };
 
 /// Where one pane's columns fall, for its current width and view.
@@ -193,6 +229,10 @@ pub const Ui = struct {
     pane_layers: [2]glyphwire.LayerHandle,
     bar_layer: glyphwire.LayerHandle,
     dialog_layer: glyphwire.LayerHandle,
+    /// F3's popup: a title bar and query line, and the result list under
+    /// them in its own layer so the host can scroll it (see `finder`).
+    finder_layer: glyphwire.LayerHandle,
+    finder_list_layer: glyphwire.LayerHandle,
     /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom. It
     /// takes every keystroke but Ctrl+` while it's open, and follows the
     /// active pane's directory. See `src/shellpanel.zig`.
@@ -216,6 +256,15 @@ pub const Ui = struct {
     /// of its row. Keys go there, as for `path_edit`; the two are never
     /// open at once.
     name_edit: ?NameEdit = null,
+    /// F3: the search popup, non-null exactly while it is open. It is
+    /// modal -- keys, typing and clicks all go to it -- and is walked
+    /// afresh on every open, as zoe's Ctrl+P is (see shell/finder.zig).
+    finder: ?Finder = null,
+    /// Where the popup was last drawn, in window cells, for a click to
+    /// hit, and how many result rows fit in it.
+    finder_rect: Rect = .{},
+    finder_list_rows: usize = 0,
+    finder_dirty: bool = false,
     /// Type-to-find: what's been typed so far, moving the cursor to the
     /// first entry that starts with it. Cleared by anything that moves
     /// the cursor or changes the listing -- see `clearFind`.
@@ -300,6 +349,11 @@ pub const Ui = struct {
         // its commands' output here, so it carries scrollback of its own
         // for the shell's Ctrl+Up browsing -- see `src/shellpanel.zig`.
         const shell_layer = try client.createLayer(size.cols, 1, shellpanel.scrollback_rows);
+        // F3's popup, over the panes and the panel (it can't be opened
+        // while the panel has the keyboard, but the panel stays drawn
+        // underneath). Sized and placed per frame by `renderFinder`.
+        const finder_layer = try client.createLayer(finder_min_cols, finder_header_rows, 0);
+        const finder_list_layer = try client.createLayer(finder_min_cols, 1, 0);
         // Created last so it composites over everything else, the panel
         // included: a modal question belongs on top of a shell.
         const dialog_layer = try client.createLayer(10, 5, 0);
@@ -331,6 +385,15 @@ pub const Ui = struct {
         // question and hides with it.
         try client.setLayerShadow(dialog_layer, glyphwire.Shadow.dialog);
         try client.setLayerVisible(dialog_layer, false);
+        for ([_]glyphwire.LayerHandle{ finder_layer, finder_list_layer }) |l| {
+            try client.setLayerBackground(l, bg_finder);
+            try client.setLayerVisible(l, false);
+        }
+        // The list layer is only ever its visible rows; the host is told
+        // the real total (`renderFinder`) so its scrollbar is to scale and
+        // a wheel over the list comes back as a `scroll_offset`.
+        try client.setLayerScrollMode(finder_list_layer, .client);
+        try client.setLayerScrollbars(finder_list_layer, true, false);
 
         self.* = .{
             .alloc = alloc,
@@ -343,6 +406,8 @@ pub const Ui = struct {
             .pane_layers = .{ left_layer, right_layer },
             .bar_layer = bar_layer,
             .dialog_layer = dialog_layer,
+            .finder_layer = finder_layer,
+            .finder_list_layer = finder_list_layer,
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
@@ -361,6 +426,7 @@ pub const Ui = struct {
         self.shell.deinit();
         self.endPathEdit();
         self.endNameEdit();
+        if (self.finder) |*f| f.deinit();
         for (&self.panes) |*p| p.deinit();
         self.keymap.deinit(alloc);
         self.cfg.deinit(alloc);
@@ -392,6 +458,16 @@ pub const Ui = struct {
         switch (ev) {
             .resize => |r| try self.handleResize(r),
             .scroll_offset => |so| {
+                // A wheel or thumb drag over the popup's list: follow it
+                // without moving the highlight -- scrolling past a row and
+                // picking it are two different gestures.
+                if (so.layer == self.finder_list_layer) {
+                    if (self.finder) |*f| {
+                        f.scrollTo(so.row, self.finder_list_rows);
+                        self.finder_dirty = true;
+                    }
+                    return;
+                }
                 for (self.pane_layers, 0..) |l, i| {
                     if (so.layer != l) continue;
                     self.clearFind();
@@ -407,7 +483,9 @@ pub const Ui = struct {
             .key => |k| if (k.pressed) try self.handleKey(k),
             // Typed text is the shell's while its panel is up -- it has
             // a line editor, and this one has type-to-find.
-            .text, .paste => |t| if (self.shell.isOpen()) {} else if (self.path_edit) |*e| {
+            .text, .paste => |t| if (self.shell.isOpen()) {} else if (self.finder != null) {
+                try self.finderText(t.text);
+            } else if (self.path_edit) |*e| {
                 _ = try e.line.insert(self.alloc, t.text);
                 self.markDirty(e.pane, .full);
             } else if (self.name_edit) |*e| {
@@ -436,6 +514,7 @@ pub const Ui = struct {
     fn markAllDirty(self: *Ui) void {
         self.pane_dirty = .{ .full, .full };
         self.bar_dirty = true;
+        self.finder_dirty = self.finder != null;
     }
 
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
@@ -450,6 +529,7 @@ pub const Ui = struct {
         }
 
         self.clearMessage();
+        if (self.finder != null) return self.finderKey(k);
         if (self.path_edit != null) return self.pathEditKey(k);
         if (self.name_edit != null) return self.nameEditKey(k);
 
@@ -567,6 +647,8 @@ pub const Ui = struct {
             .invertMarks => p.invertMarks(),
 
             .rename => try self.beginNameEdit(),
+            .find => try self.openFinder(),
+            .edit => try self.editCurrent(),
             .copy => try self.transfer(.copy),
             .move => try self.transfer(.move),
             .makeDir => try self.makeDir(),
@@ -616,6 +698,9 @@ pub const Ui = struct {
             .toggleMark,
             .toggleMarkAndDown,
             => .rows,
+            // Opening the popup leaves the pane behind it alone; picking
+            // a result marks the pane itself (`acceptFinder`).
+            .find => .none,
             else => .full,
         };
     }
@@ -731,6 +816,289 @@ pub const Ui = struct {
         };
         _ = child.wait(self.io) catch {};
         try self.setMessage("opening {s}", .{std.fs.path.basename(path)});
+    }
+
+    // ── F4: edit ────────────────────────────────────────────────────────
+
+    /// F4: the file under the cursor in the configured `editor`. Only the
+    /// cursor's entry, never the marks -- an editor takes one file. A
+    /// directory, the `..` row and a file that isn't text are refused in
+    /// the bar before anything starts: zoe would refuse a binary file
+    /// too, but only after taking the screen to say so.
+    fn editCurrent(self: *Ui) !void {
+        const p = &self.panes[self.active];
+        const e = p.current() orelse return;
+        if ((e.link_target_kind orelse e.kind) == .directory) {
+            return self.setMessage("{s} is a directory", .{e.name});
+        }
+        // `runInSession` rereads both panes when the editor exits, which
+        // frees the listing `e` points into.
+        const path = try self.alloc.dupe(u8, e.abs_path);
+        defer self.alloc.free(path);
+        const name = std.fs.path.basename(path);
+
+        const binary = filetype.fileLooksBinary(self.io, path) catch |err| {
+            return self.setMessage("{s}: {t}", .{ name, err });
+        };
+        if (binary) return self.setMessage("{s} is not a text file", .{name});
+
+        const template = self.cfg.editorCommand();
+        var argv_buf: [openaction.max_args][]const u8 = undefined;
+        const argv = openaction.buildArgv(&argv_buf, template, path) catch |err| {
+            return self.setMessage("editor \"{s}\": {t}", .{ template, err });
+        };
+        try self.runInSession(argv);
+    }
+
+    // ── F3: find ────────────────────────────────────────────────────────
+
+    /// F3: walks everything under the active pane's directory and opens
+    /// the popup over the panes. Hidden entries follow the pane's own
+    /// Ctrl+H, and with it off `.gitignore`d paths stay out too -- the
+    /// rule zoe's Ctrl+P has, and what keeps a built tree searchable.
+    fn openFinder(self: *Ui) !void {
+        self.endPathEdit();
+        self.endNameEdit();
+        self.clearFind();
+        if (self.finder) |*f| f.deinit();
+        const p = &self.panes[self.active];
+        self.finder = Finder.init(self.alloc, self.io, p.path, .{
+            .visible = .{ .show_hidden = p.show_hidden },
+            .include_dirs = true,
+        }) catch |err| {
+            self.finder = null;
+            return self.setMessage("can't search {s}: {t}", .{ p.path, err });
+        };
+        self.finder_dirty = true;
+    }
+
+    fn closeFinder(self: *Ui) void {
+        if (self.finder) |*f| f.deinit();
+        self.finder = null;
+        self.finder_dirty = false;
+        self.client.setLayerVisible(self.finder_layer, false) catch {};
+        self.client.setLayerVisible(self.finder_list_layer, false) catch {};
+    }
+
+    /// Enter on a result: point the active pane at it and close the
+    /// popup. A file lands the cursor on it in its own directory; a
+    /// directory is entered. Nothing is opened -- Enter or F4 from there
+    /// is one more key, and a search that opened things would need a
+    /// second way to just go somewhere.
+    fn acceptFinder(self: *Ui) !void {
+        const f = if (self.finder) |*open| open else return;
+        const rel = f.selected() orelse return self.closeFinder();
+        const target = try findTarget(self.alloc, f.root, rel);
+        defer target.deinit(self.alloc);
+        self.closeFinder();
+
+        const i = self.active;
+        const p = &self.panes[i];
+        const result = if (target.name) |name| p.reveal(target.dir, name) else p.load(target.dir);
+        result catch |err| try self.setMessage("{s}: {t}", .{ target.dir, err });
+        self.markDirty(i, .full);
+        self.bar_dirty = true;
+        self.shell.setCwd(p.path);
+    }
+
+    /// A keystroke while the popup is open. It takes every key it knows
+    /// and swallows the rest: it is modal, and an F8 that deleted
+    /// something in the pane behind it is the last thing anyone wants.
+    fn finderKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        const f = if (self.finder) |*open| open else return;
+        const eq = std.mem.eql;
+        const ctrl = k.ctrl();
+        const rows = @max(self.finder_list_rows, 1);
+
+        // F3 again closes it, the way Ctrl+` toggles the shell panel.
+        const toggles = if (self.keymap.lookup(k.key, k.mods)) |a| a == .find else false;
+        if (eq(u8, k.key, "escape") or (ctrl and eq(u8, k.key, "c")) or toggles) {
+            return self.closeFinder();
+        }
+        if (eq(u8, k.key, "enter") or eq(u8, k.key, "kp_enter")) return self.acceptFinder();
+
+        // Ctrl+N / Ctrl+P as zoe's popup has them (Ctrl+K is the field's
+        // kill-to-end, so not the vim-ish pair).
+        const step: ?isize = if (eq(u8, k.key, "up") or (ctrl and eq(u8, k.key, "p")))
+            -1
+        else if (eq(u8, k.key, "down") or (ctrl and eq(u8, k.key, "n")))
+            1
+        else if (eq(u8, k.key, "page_up"))
+            -@as(isize, @intCast(rows))
+        else if (eq(u8, k.key, "page_down"))
+            @as(isize, @intCast(rows))
+        else
+            null;
+        if (step) |d| {
+            f.moveCursor(d);
+            f.follow(rows);
+            self.finder_dirty = true;
+            return;
+        }
+
+        switch (f.query.handleKey(k.key, k.mods)) {
+            .edited => {
+                try f.refilter();
+                f.follow(rows);
+                self.finder_dirty = true;
+            },
+            .moved => self.finder_dirty = true,
+            .ignored, .submit, .cancel => {},
+        }
+    }
+
+    /// Typed characters (and a paste) while the popup is open: the query.
+    fn finderText(self: *Ui, text: []const u8) !void {
+        const f = if (self.finder) |*open| open else return;
+        if (try f.query.insert(self.alloc, text)) {
+            try f.refilter();
+            f.follow(@max(self.finder_list_rows, 1));
+            self.finder_dirty = true;
+        }
+    }
+
+    /// A left click while the popup is open: a result row picks it,
+    /// anywhere outside the popup dismisses it.
+    fn finderClick(self: *Ui, cell: glyphwire.CellPos) !void {
+        const f = if (self.finder) |*open| open else return;
+        const r = self.finder_rect;
+        if (!r.contains(cell)) return self.closeFinder();
+
+        const list_row0 = r.row + finder_header_rows;
+        if (cell.row < list_row0) return; // The title bar or the query line.
+        const row = f.top + (cell.row - list_row0);
+        if (row >= f.matchCount()) return;
+        f.cursor = row;
+        try self.acceptFinder();
+    }
+
+    /// Where the popup goes: centred over the pane area (everything but
+    /// the bar), at its preferred size or as much of it as fits.
+    fn finderRect(self: *const Ui) Rect {
+        const area_cols = self.win.cols;
+        const area_rows = self.paneHeight();
+        const cols = @min(@max(finder_min_cols, @min(finder_max_cols, area_cols -| 4)), area_cols);
+        const rows = @min(@max(finder_min_rows, @min(finder_max_rows, area_rows -| 2)), area_rows);
+        return .{
+            .row = (area_rows -| rows) / 2,
+            .col = (area_cols -| cols) / 2,
+            .cols = cols,
+            .rows = rows,
+        };
+    }
+
+    fn renderFinder(self: *Ui) !void {
+        self.finder_dirty = false;
+        const f = if (self.finder) |*open| open else return;
+        const r = self.finderRect();
+        self.finder_rect = r;
+
+        var b = self.client.batch();
+        defer b.deinit();
+
+        // A window with no room for the header and one result draws
+        // nothing rather than something unreadable. The popup stays
+        // open, so growing the window brings it back.
+        if (r.cols == 0 or r.rows <= finder_header_rows) {
+            self.finder_list_rows = 0;
+            try b.setLayerVisible(self.finder_layer, false);
+            try b.setLayerVisible(self.finder_list_layer, false);
+            var hidden = try b.send();
+            hidden.deinit();
+            return;
+        }
+
+        const list_rows = r.rows - finder_header_rows;
+        self.finder_list_rows = list_rows;
+        // Clamped, not followed: whatever moved the cursor already
+        // dragged the view onto it, and doing it again here would undo a
+        // wheel scroll on the frame that drew it.
+        f.clampScroll(list_rows);
+
+        try b.setLayerSize(self.finder_layer, r.cols, finder_header_rows);
+        try b.setLayerCellPosition(self.finder_layer, r.row, r.col);
+        try b.setLayerSize(self.finder_list_layer, r.cols, list_rows);
+        try b.setLayerCellPosition(self.finder_list_layer, r.row + finder_header_rows, r.col);
+
+        try self.renderFinderHeader(&b, f, r.cols);
+        try self.renderFinderList(&b, f, r.cols, list_rows);
+
+        try b.setLayerContentExtent(self.finder_list_layer, r.cols, f.matchCount());
+        try b.setLayerScrollOffset(self.finder_list_layer, f.top, 0);
+        try b.setLayerVisible(self.finder_layer, true);
+        try b.setLayerVisible(self.finder_list_layer, true);
+        var sent = try b.send();
+        sent.deinit();
+    }
+
+    /// The title bar -- where the search is rooted, and the count -- and
+    /// the query line under it.
+    fn renderFinderHeader(self: *Ui, b: *Batch, f: *const Finder, cols: usize) !void {
+        var right: [48]u8 = undefined;
+        const tail = std.fmt.bufPrint(&right, "{s}{d}/{d} ", .{
+            if (f.truncated) "partial " else "",
+            if (f.matchCount() == 0) 0 else f.cursor + 1,
+            f.matchCount(),
+        }) catch "";
+        // The count stays right-aligned so it never shifts as you type;
+        // the root is cut from the left to make room for it.
+        const lead = " Find in ";
+        const room = cols -| (lead.len + glyphwire.stringWidth(tail) + 1);
+        var pbuf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        const root = self.displayPath(&pbuf, f.root, room);
+        const title_w = lead.len + glyphwire.stringWidth(root);
+        const gap = cols -| (title_w + glyphwire.stringWidth(tail));
+        try b.writeSpans(&.{
+            .{ .text = lead },
+            .{ .text = root },
+        }, .{ .layer = self.finder_layer, .row = 0, .col = 0, .fg = fg_finder_header, .bg = bg_finder_header, .max_cols = cols, .pad = true });
+        try b.writeTextOpts(tail, .{ .layer = self.finder_layer, .row = 0, .col = title_w + gap, .fg = fg_finder_header, .bg = bg_finder_header, .max_cols = cols -| (title_w + gap) });
+
+        // The query behind a `> ` prompt, with a drawn caret (the host
+        // caret is off for this whole context).
+        const prompt = "> ";
+        try b.writeTextOpts(prompt, .{ .layer = self.finder_layer, .row = 1, .col = 0, .fg = fg_detail, .bg = bg_finder });
+        try b.writeTextOpts(f.query.text(), .{ .layer = self.finder_layer, .row = 1, .col = prompt.len, .fg = fg_file, .bg = bg_finder, .max_cols = cols -| prompt.len, .pad = true });
+        const caret_col = prompt.len + f.query.caretCol();
+        if (caret_col < cols) {
+            const q = f.query.text();
+            const under = if (f.query.caret < q.len) q[f.query.caret..lineedit.nextBoundary(q, f.query.caret)] else " ";
+            try b.writeTextOpts(under, .{ .layer = self.finder_layer, .row = 1, .col = caret_col, .fg = bg_finder, .bg = fg_file });
+        }
+    }
+
+    /// The visible slice of the results, one path per row: the directory
+    /// part dimmed, the name in the pane's own colour for its kind.
+    fn renderFinderList(self: *Ui, b: *Batch, f: *const Finder, cols: usize, rows: usize) !void {
+        try b.clearArea(.{ .layer = self.finder_list_layer, .bg = bg_finder });
+        if (f.matchCount() == 0) {
+            try b.writeTextOpts("  Nothing matches", .{ .layer = self.finder_list_layer, .row = 0, .col = 0, .fg = fg_detail, .bg = bg_finder, .max_cols = cols });
+            return;
+        }
+        for (0..rows) |i| {
+            const path = f.matchAt(f.top + i) orelse break;
+            const selected = f.top + i == f.cursor;
+            const is_dir = std.mem.endsWith(u8, path, "/");
+            // The name is everything after the last separator that isn't
+            // a directory's own trailing one.
+            const body = if (is_dir) path[0 .. path.len - 1] else path;
+            const split = if (std.mem.lastIndexOfScalar(u8, body, '/')) |at| at + 1 else 0;
+            const dir_fg = if (selected) fg_finder_selected else fg_detail;
+            const name_fg = if (selected) fg_finder_selected else if (is_dir) fg_dir else fg_file;
+            try b.writeSpans(&.{
+                .{ .text = " " },
+                .{ .text = path[0..split], .fg = dir_fg },
+                .{ .text = path[split..], .fg = name_fg },
+            }, .{
+                .layer = self.finder_list_layer,
+                .row = i,
+                .col = 0,
+                .fg = name_fg,
+                .bg = if (selected) bg_finder_selected else bg_finder,
+                .max_cols = cols,
+                .pad = true,
+            });
+        }
     }
 
     // ── Editing a pane's path ───────────────────────────────────────────
@@ -900,6 +1268,12 @@ pub const Ui = struct {
         // cursor move in a pane nobody is looking at.
         if (self.shell.isOpen()) return;
         if (!m.pressed) return;
+        // The popup owns the pointer while it's up: a click picks a row
+        // or dismisses it, and never reaches a pane behind it.
+        if (self.finder != null) {
+            if (std.mem.eql(u8, m.button, "left")) try self.finderClick(m.cell);
+            return;
+        }
         const left = std.mem.eql(u8, m.button, "left");
         const right = std.mem.eql(u8, m.button, "right");
         if (!left and !right) return;
@@ -1379,6 +1753,7 @@ pub const Ui = struct {
             }
         }
         if (self.bar_dirty) try self.renderBar();
+        if (self.finder_dirty) try self.renderFinder();
     }
 
     /// The cheap repaint, for a move that left the listing itself alone:
@@ -1933,4 +2308,31 @@ pub fn pathsLine(alloc: std.mem.Allocator, paths: []const []const u8) ![]u8 {
         try line.appendSlice(alloc, tok);
     }
     return line.toOwnedSlice(alloc);
+}
+
+/// Where an F3 result sends the pane: the directory to list and, for a
+/// file, the name to put the cursor on. `dir` and `name` borrow `buf`.
+pub const FindTarget = struct {
+    buf: []u8,
+    dir: []const u8,
+    /// Null for a directory result, which is entered rather than shown.
+    name: ?[]const u8,
+
+    pub fn deinit(self: FindTarget, alloc: std.mem.Allocator) void {
+        alloc.free(self.buf);
+    }
+};
+
+/// Resolves a finder result (`rel`, relative to `root`, a directory with
+/// the trailing `/` the finder gives it) into a `FindTarget`.
+pub fn findTarget(alloc: std.mem.Allocator, root: []const u8, rel: []const u8) !FindTarget {
+    const is_dir = std.mem.endsWith(u8, rel, "/");
+    const body = if (is_dir) rel[0 .. rel.len - 1] else rel;
+    const full = try std.fs.path.join(alloc, &.{ root, body });
+    if (is_dir) return .{ .buf = full, .dir = full, .name = null };
+    return .{
+        .buf = full,
+        .dir = std.fs.path.dirname(full) orelse "/",
+        .name = std.fs.path.basename(full),
+    };
 }

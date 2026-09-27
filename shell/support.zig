@@ -12,6 +12,11 @@
 //! than living here: the prompt's editing keys are the same ones
 //! salacommander's path row and zoe's `:` line want, so the field itself
 //! is shared (see `src/lineedit.zig`).
+//! `fuzzy`, `gitignore`, `finder` and `filetype` aren't the shell's at
+//! all: they are the GPL programs' shared file-search pieces (zoe's
+//! Ctrl+P, salacommander's F3/F4, gw-hist's matcher). They sit here
+//! because every one of those programs already imports this module, and
+//! moving them into `src/` would relicense them to MPL-2.0.
 //! `config` and `script_engine` are the exceptions: they embed a Lua
 //! state (via ziglua) -- `config` for a one-shot `shell.conf.lua` parse,
 //! `script_engine` for the shell's session-long interpreter -- so this
@@ -19,6 +24,9 @@
 
 pub const wordsplit = @import("wordsplit.zig");
 pub const fuzzy = @import("fuzzy.zig");
+pub const gitignore = @import("gitignore.zig");
+pub const finder = @import("finder.zig");
+pub const filetype = @import("filetype.zig");
 pub const parse = @import("parse.zig");
 pub const envassign = @import("envassign.zig");
 pub const complete = @import("complete.zig");

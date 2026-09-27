@@ -715,16 +715,19 @@ pub fn navigationKeysTakeTheCheapRepaintTest(_: std.Io, _: std.mem.Allocator) !v
     // the two toggles still need the rows themselves -- but not the pane.
     const rows = [_]sala.ui.Action{ .toggleMark, .toggleMarkAndDown };
     for (rows) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .rows);
+
+    // Opening the F3 popup draws over the pane and changes nothing in it.
+    try testz.expectEqual(sala.ui.Ui.dirtyFor(.find), .none);
 }
 
 pub fn ListingChangesTakeTheFullRepaintTest(_: std.Io, _: std.mem.Allocator) !void {
     // Anything that can reorder, refilter or replace the listing -- or
     // turn the title row into a text field -- has to redraw all of it.
     const full = [_]sala.ui.Action{
-        .activate,     .upToParentDir, .editPath,   .switchPane,
-        .swapPanes,    .markAll,       .unmarkAll,  .invertMarks,
-        .sortByName,   .sortBySize,    .toggleView, .toggleHidden,
-        .refresh,      .otherPaneToSameDir, .rename,
+        .activate,   .upToParentDir,      .editPath,   .switchPane,
+        .swapPanes,  .markAll,            .unmarkAll,  .invertMarks,
+        .sortByName, .sortBySize,         .toggleView, .toggleHidden,
+        .refresh,    .otherPaneToSameDir, .rename,     .edit,
     };
     for (full) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .full);
 }
@@ -736,6 +739,8 @@ pub fn defaultBindingsCoverTheBasicsTest(_: std.Io, alloc: std.mem.Allocator) !v
     defer km.deinit(alloc);
     try testz.expectEqual(km.lookup("up", .{ .alt = true }).?, actions.Action.upToParentDir);
     try testz.expectEqual(km.lookup("F2", .{}).?, actions.Action.rename);
+    try testz.expectEqual(km.lookup("F3", .{}).?, actions.Action.find);
+    try testz.expectEqual(km.lookup("F4", .{}).?, actions.Action.edit);
     try testz.expectEqual(km.lookup("F5", .{}).?, actions.Action.copy);
     try testz.expectEqual(km.lookup("F6", .{}).?, actions.Action.move);
     try testz.expectEqual(km.lookup("F8", .{}).?, actions.Action.delete);
@@ -795,6 +800,28 @@ pub fn configReadsPageLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
         var bad = config.load(alloc, src);
         defer bad.deinit(alloc);
         try testz.expectEqual(bad.config.page_lines, 6);
+    }
+}
+
+/// `editor` is F4's command template: zoe unless the config names one,
+/// and a blank one is ignored rather than leaving F4 with nothing to run.
+pub fn configReadsEditorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var def = config.load(alloc, "config = {}");
+    defer def.deinit(alloc);
+    try testz.expectEqualStr(def.config.editorCommand(), "zoe");
+
+    var set = config.load(alloc, "config = { editor = \"zoe --quiet {sel}\" }");
+    defer set.deinit(alloc);
+    try testz.expectEqualStr(set.config.editorCommand(), "zoe --quiet {sel}");
+
+    for ([_][:0]const u8{
+        "config = { editor = \"\" }",
+        "config = { editor = \"   \" }",
+        "config = { editor = 3 }",
+    }) |src| {
+        var bad = config.load(alloc, src);
+        defer bad.deinit(alloc);
+        try testz.expectEqualStr(bad.config.editorCommand(), "zoe");
     }
 }
 
@@ -967,4 +994,86 @@ pub fn copiedPathsLineQuotesOnlyWhatNeedsItTest(io: std.Io, alloc: std.mem.Alloc
     const none = try sala.ui.pathsLine(alloc, &.{});
     defer alloc.free(none);
     try testz.expectEqualStr(none, "");
+}
+
+// ─── F3 find / F4 edit ──────────────────────────────────────────────────
+
+/// An F3 result is relative to the pane it was searched from: a file
+/// sends the pane to its directory with the cursor on it, a directory
+/// (trailing `/`, as the finder lists them) is entered.
+pub fn findTargetSplitsFilesAndEntersDirsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const file = try sala.ui.findTarget(alloc, "/home/j", "src/deep/main.zig");
+    defer file.deinit(alloc);
+    try testz.expectEqualStr(file.dir, "/home/j/src/deep");
+    try testz.expectEqualStr(file.name.?, "main.zig");
+
+    const dir = try sala.ui.findTarget(alloc, "/home/j", "src/deep/");
+    defer dir.deinit(alloc);
+    try testz.expectEqualStr(dir.dir, "/home/j/src/deep");
+    try testz.expectTrue(dir.name == null);
+
+    // Searched from `/`: the parent is `/` itself, not an empty string.
+    const top = try sala.ui.findTarget(alloc, "/", "etc");
+    defer top.deinit(alloc);
+    try testz.expectEqualStr(top.dir, "/");
+    try testz.expectEqualStr(top.name.?, "etc");
+}
+
+pub fn paneRevealPutsTheCursorOnTheFoundEntryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "reveal");
+    defer s.deinit();
+    try s.mkdir("sub");
+    try s.file("sub/a.txt", "");
+    try s.file("sub/b.txt", "");
+    try s.file("sub/c.txt", "");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    const sub = try s.abs("sub");
+    defer alloc.free(sub);
+
+    try p.reveal(sub, "c.txt");
+    try testz.expectEqualStr(p.path, sub);
+    try testz.expectEqualStr(rowName(&p, p.cursor), "c.txt");
+
+    // Gone since the walk: the pane still goes there, cursor at the top.
+    try p.reveal(sub, "vanished.txt");
+    try testz.expectEqual(p.cursor, 0);
+}
+
+/// F4's refusal: the same NUL-in-the-head test zoe applies, read from the
+/// file rather than from a buffer already loaded. Empty is text (a new
+/// file), and a file that can't be opened is an error, not "binary".
+pub fn fileLooksBinaryReadsOnlyTheHeadTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const filetype = @import("shell_support").filetype;
+    var s = try Scratch.init(io, alloc, "sniff");
+    defer s.deinit();
+    try s.file("text.zig", "const std = @import(\"std\");\n");
+    try s.file("empty", "");
+    try s.file("image.png", "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR");
+
+    // A NUL past the sniffed head doesn't count: only the head is read.
+    const late = try alloc.alloc(u8, filetype.sniff_bytes + 16);
+    defer alloc.free(late);
+    @memset(late, 'x');
+    late[filetype.sniff_bytes + 4] = 0;
+    try s.file("late-nul.txt", late);
+
+    const cases = [_]struct { name: []const u8, binary: bool }{
+        .{ .name = "text.zig", .binary = false },
+        .{ .name = "empty", .binary = false },
+        .{ .name = "image.png", .binary = true },
+        .{ .name = "late-nul.txt", .binary = false },
+    };
+    for (cases) |case| {
+        const path = try s.abs(case.name);
+        defer alloc.free(path);
+        try testz.expectEqual(try filetype.fileLooksBinary(io, path), case.binary);
+    }
+
+    const missing = try s.abs("nope");
+    defer alloc.free(missing);
+    if (filetype.fileLooksBinary(io, missing)) |_| {
+        return error.ExpectedAnError;
+    } else |err| try testz.expectEqual(err, error.FileNotFound);
 }
