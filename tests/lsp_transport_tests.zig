@@ -291,6 +291,120 @@ pub fn lspUnansweredRequestTimesOutTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(try pool.nextEvent(), null);
 }
 
+pub fn lspCompletionCapabilityAndTriggersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var counter: Counter = .{};
+    var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");
+    defer pool.deinit();
+    const server = try pool.addForTest(.{ .name = "zls", .languages = &.{"zig"}, .cmd = &.{"zls"} });
+    try handshake(alloc, &pool, server);
+
+    try testz.expectTrue(server.caps.completion);
+    try testz.expectEqual(server.caps.completion_triggers.len, 2);
+    try testz.expectTrue(server.isCompletionTrigger("."));
+    // What was typed *ends* in a trigger: a chunk of text counts too.
+    try testz.expectTrue(server.isCompletionTrigger("foo."));
+    try testz.expectTrue(server.isCompletionTrigger("@"));
+    try testz.expectFalse(server.isCompletionTrigger("a"));
+
+    // A request is recorded and expires like any other the user waits on.
+    _ = (try server.completionRequest("file:///tmp/root/a.zig", .{ .line = 0, .character = 4 }, ".")).?;
+    try testz.expectTrue(pool.nextDeadlineMs() != null);
+}
+
+/// A `CompletionList` in basedpyright's shape (`labelDetails`, a text edit)
+/// and zls's (`detail`, a snippet despite `snippetSupport: false`).
+pub fn lspCompletionReplyParsesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var counter: Counter = .{};
+    var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");
+    defer pool.deinit();
+    const server = try pool.addForTest(.{ .name = "zls", .languages = &.{"zig"}, .cmd = &.{"zls"} });
+    try handshake(alloc, &pool, server);
+
+    const id = (try server.completionRequest("file:///tmp/root/a.zig", .{ .line = 2, .character = 7 }, null)).?;
+    const body = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","id":{d},"result":{{"isIncomplete":true,"items":[
+        \\{{"label":"append","kind":2,"detail":"fn (self: *Self, item: T) !void","insertText":"append(${{1:item}})$0","insertTextFormat":2,"sortText":"1"}},
+        \\{{"label":"items","kind":5,"labelDetails":{{"description":"[]T"}},"filterText":"itemsF","textEdit":{{"range":{{"start":{{"line":2,"character":5}},"end":{{"line":2,"character":7}}}},"newText":"items"}},"sortText":"0"}},
+        \\{{"kind":3}},
+        \\{{"label":"weird","kind":99}}
+        \\]}}}}
+    , .{id});
+    defer alloc.free(body);
+    const f = try frame(alloc, body);
+    defer alloc.free(f);
+    try server.feedBytes(f);
+
+    const ev = (try pool.nextEvent()).?;
+    defer ev.deinit(alloc);
+    try testz.expectTrue(ev == .completion);
+    const c = ev.completion;
+    try testz.expectEqual(c.request_id, id);
+    try testz.expectTrue(c.incomplete);
+    // The item with no label is skipped, not fatal.
+    try testz.expectEqual(c.items.len, 3);
+
+    const append = c.items[0];
+    try testz.expectEqualStr("append", append.label);
+    try testz.expectEqual(append.kind, 2);
+    // The snippet is flattened to its default text.
+    try testz.expectEqualStr("append(item)", append.insert);
+    try testz.expectEqualStr("fn (self: *Self, item: T) !void", append.detail.?);
+    try testz.expectEqualStr("append", append.filter);
+    try testz.expectEqual(append.edit_range, null);
+
+    const items = c.items[1];
+    try testz.expectEqualStr("items", items.insert);
+    try testz.expectEqualStr("itemsF", items.filter);
+    try testz.expectEqualStr("[]T", items.detail.?);
+    try testz.expectEqual(items.edit_range.?.start.character, 5);
+
+    // An out-of-range kind is "unknown", not a crash in the kind table.
+    try testz.expectEqual(c.items[2].kind, 0);
+}
+
+pub fn lspCompletionNullResultIsEmptyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var counter: Counter = .{};
+    var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");
+    defer pool.deinit();
+    const server = try pool.addForTest(.{ .name = "zls", .languages = &.{"zig"}, .cmd = &.{"zls"} });
+    try handshake(alloc, &pool, server);
+
+    const id = (try server.completionRequest("file:///tmp/root/a.zig", .{}, null)).?;
+    const body = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","id":{d},"result":null}}
+    , .{id});
+    defer alloc.free(body);
+    const f = try frame(alloc, body);
+    defer alloc.free(f);
+    try server.feedBytes(f);
+
+    // "Nothing here" is still an answer, so the editor can stop asking.
+    const ev = (try pool.nextEvent()).?;
+    defer ev.deinit(alloc);
+    try testz.expectTrue(ev == .completion);
+    try testz.expectEqual(ev.completion.items.len, 0);
+    try testz.expectFalse(ev.completion.incomplete);
+}
+
+pub fn lspFlattenSnippetTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const cases = [_][2][]const u8{
+        .{ "foo(${1:a}, ${2:b})$0", "foo(a, b)" },
+        .{ "${1|one,two|}", "one" },
+        .{ "if ${1:cond} {\n\t$0\n}", "if cond {\n\t\n}" },
+        // A placeholder nested in another keeps both defaults.
+        .{ "${1:outer ${2:inner}}", "outer inner" },
+        .{ "cost \\$5", "cost $5" },
+        .{ "$TM_FILENAME here", " here" },
+        .{ "plain", "plain" },
+        .{ "trailing $", "trailing $" },
+    };
+    for (cases) |c| {
+        const got = try lsp.flattenSnippet(alloc, c[0]);
+        defer alloc.free(got);
+        try testz.expectEqualStr(c[1], got);
+    }
+}
+
 pub fn lspHandshakeNeverTimesOutTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var counter: Counter = .{};
     var pool = try lsp.Pool.init(alloc, io, counter.waker(), "/tmp/root");
