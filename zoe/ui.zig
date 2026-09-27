@@ -53,6 +53,7 @@ const display = @import("display.zig");
 const search = @import("search.zig");
 const tree_mod = @import("tree.zig");
 const finder_mod = @import("applib").finder;
+const finderpopup = @import("applib").finderpopup;
 const filetype = @import("applib").filetype;
 const syntax = @import("syntax.zig");
 const langconf = @import("langconf.zig");
@@ -154,30 +155,15 @@ const bg_tab = Color{ .r = 34, .g = 34, .b = 41, .a = 255 };
 // same reason -- the shell only writes the cells it uses.
 const bg_shell = Color{ .r = 14, .g = 15, .b = 18, .a = 255 };
 
-// The Ctrl+P finder popup. Lighter than the panes it floats over, so it
-// reads as being in front of them rather than as another pane -- the
-// same trick salacommander's dialogs use. Its background is normally the
-// `panel` nine-patch on the frame layer behind it (`finder_frame_style`);
-// `bg_finder` is the flat fallback for a host without that style, and the
-// colour the query caret's inverted character is drawn in.
-const bg_finder = Color{ .r = 38, .g = 38, .b = 46, .a = 255 };
-const finder_frame_style = "panel";
-const bg_finder_header = Color{ .r = 40, .g = 90, .b = 170, .a = 255 };
-const fg_finder_header = Color{ .r = 235, .g = 240, .b = 250, .a = 255 };
-const bg_finder_selected = Color{ .r = 70, .g = 120, .b = 200, .a = 255 };
-const fg_finder_selected = Color{ .r = 245, .g = 250, .b = 255, .a = 255 };
-
-/// Rows the finder popup spends on its header: the title/count bar and
-/// the query line under it. The rest of its height is the match list.
-const finder_header_rows: usize = 2;
-
-/// The popup's preferred size, in cells. Clamped down to what the buffer
-/// pane can actually hold (`finderRect`), so a narrow window shrinks it
-/// rather than pushing it off the edge.
-const finder_max_cols: usize = 84;
-const finder_max_rows: usize = 20;
-const finder_min_cols: usize = 24;
-const finder_min_rows: usize = 4;
+// The Ctrl+P finder popup (`applib/finderpopup.zig`, shared with
+// salacommander's F3): the `panel` nine-patch and a drop shadow, with
+// zoe's text colours.
+const finder_style: finderpopup.Style = .{
+    .text_fg = fg_text,
+    .dim_fg = fg_dim,
+    .max_cols = 84,
+    .max_rows = 20,
+};
 
 /// Diagnostic colours: the squiggle under the text, and the mark in the
 /// sign column. Red/amber/blue/grey by severity, which is the convention
@@ -660,22 +646,10 @@ pub const Ui = struct {
     /// click). Null when no button is down over the pane.
     drag: ?struct { anchor: usize, moved: bool } = null,
 
-    /// The Ctrl+P file finder, non-null exactly while the popup is open.
-    /// Its two layers float *outside* the split tree -- they are
-    /// hand-positioned over the buffer pane and hidden the rest of the
-    /// time, which is why no `layout` notification ever mentions them and
-    /// `finderRect` has to work their geometry out itself.
-    finder: ?Finder = null,
-    finder_layer: glyphwire.LayerHandle,
-    finder_list_layer: glyphwire.LayerHandle,
-    /// Under both finder layers and one cell bigger all round: it carries
-    /// the popup's border and background as a nine-patch, which the two
-    /// layers above leave showing through their transparent cells.
-    finder_frame_layer: glyphwire.LayerHandle,
-    /// The frame's nine-patch, or null when the host has no
-    /// `finder_frame_style` -- the finder layers then paint `bg_finder`
-    /// themselves and the popup has no border.
-    finder_frame_patch: ?glyphwire.NinePatchHandle,
+    /// The Ctrl+P file finder popup. Its layers float *outside* the split
+    /// tree -- placed over the buffer pane by `render`, hidden the rest of
+    /// the time -- which is why no `layout` notification mentions them.
+    finder: finderpopup.Popup,
 
     /// The language servers, and everything they have said. The pool is
     /// null when `config.lsp.enabled` is false; it exists but holds no
@@ -764,8 +738,6 @@ pub const Ui = struct {
     key_repeat_shell: bool = false,
     /// Where the popup last landed, for hit-testing a click, and how many
     /// list rows that left. Recomputed every time it is drawn.
-    finder_rect: Bounds = .{},
-    finder_list_rows: usize = 0,
 
     focus: Focus = .buffer,
     tree_visible: bool = true,
@@ -783,7 +755,6 @@ pub const Ui = struct {
     tree_dirty: TreeDirty = .full,
     tabs_dirty: bool = true,
     status_dirty: bool = true,
-    finder_dirty: bool = false,
     quit: bool = false,
 
     /// The process environment, kept for `:cd` (`$HOME`) and passed on
@@ -903,29 +874,12 @@ pub const Ui = struct {
         // (`glyphwire.Shadow.dialog`): it follows the layer as it moves and
         // resizes and hides with it, so nothing here tracks it again.
         //
-        // The finder popup, created last so it composites over every
+        // The finder popup, created here so it composites over every
         // pane (creation order is the initial stacking -- see
-        // `raise_layer` in docs/api.md). Neither layer joins the split
-        // tree: the popup floats, so it is placed by cell position and
-        // sized by `renderFinder`, and stays invisible until Ctrl+P. The
-        // frame goes first so it stacks under the other two.
-        const finder_frame_layer = try client.createLayer(finder_min_cols + 2, finder_min_rows + 2, 0);
-        const finder_frame_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(
-            finder_frame_layer,
-            0,
-            0,
-            finder_min_rows + 2,
-            finder_min_cols + 2,
-            finder_frame_style,
-        ) catch |err| blk: {
-            std.log.warn("zoe: no '{s}' nine-patch for the finder frame ({t}); drawing it flat", .{ finder_frame_style, err });
-            break :blk null;
-        };
-        // The shadow goes on the frame, the popup's outline, when there is
-        // one; a borderless fallback popup is two layers and gets none.
-        if (finder_frame_patch != null) try client.setLayerShadow(finder_frame_layer, glyphwire.Shadow.dialog);
-        const finder_layer = try client.createLayer(finder_min_cols, finder_header_rows, 0);
-        const finder_list_layer = try client.createLayer(finder_min_cols, 1, 0);
+        // `raise_layer` in docs/api.md) but under the hover and completion
+        // popups below. It stays invisible until Ctrl+P.
+        var finder = try finderpopup.Popup.init(alloc, client, finder_style);
+        errdefer finder.deinit();
         // The hover popup, floating like the finder's layers and placed
         // against the cursor rather than the pane -- `hoverRect`.
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
@@ -942,19 +896,6 @@ pub const Ui = struct {
         try client.setLayerVisible(completion_layer, false);
         try client.setLayerBackground(completion_layer, bg_complete);
         try client.setLayerShadow(completion_layer, glyphwire.Shadow.dialog);
-        try client.setLayerVisible(finder_frame_layer, false);
-        try client.setLayerVisible(finder_layer, false);
-        try client.setLayerVisible(finder_list_layer, false);
-        if (finder_frame_patch == null) {
-            try client.setLayerBackground(finder_layer, bg_finder);
-            try client.setLayerBackground(finder_list_layer, bg_finder);
-        }
-        // The list is sized to its visible rows and reports the match
-        // count as its `content_extent`, so the host's bar is
-        // proportional to the whole answer rather than to the dozen rows
-        // on screen -- the arrangement gw-hist's result list uses.
-        try client.setLayerScrollMode(finder_list_layer, .client);
-        try client.setLayerScrollbars(finder_list_layer, true, false);
 
         // The tree|buffer split stays user-resizable. The two column
         // splits are not: what they stack above and below is a single
@@ -980,10 +921,7 @@ pub const Ui = struct {
             .tabs_layer = tabs_layer,
             .buffer_layer = buffer_layer,
             .status_layer = status_layer,
-            .finder_layer = finder_layer,
-            .finder_list_layer = finder_list_layer,
-            .finder_frame_layer = finder_frame_layer,
-            .finder_frame_patch = finder_frame_patch,
+            .finder = finder,
             .hover_layer = hover_layer,
             .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
@@ -1361,7 +1299,7 @@ pub const Ui = struct {
         self.jumps.deinit(self.alloc);
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
-        if (self.finder) |*f| f.deinit();
+        self.finder.deinit();
         if (self.find) |*f| f.deinit(self.alloc);
         if (self.prev_cwd) |p| self.alloc.free(p);
 
@@ -1499,7 +1437,7 @@ pub const Ui = struct {
             // frame it arrived for rather than the one after.
             self.drainLsp();
             if (self.buffer_dirty or self.tree_dirty != .none or self.tabs_dirty or
-                self.status_dirty or self.finder_dirty or self.hover_dirty or self.completion_dirty or
+                self.status_dirty or self.finder.dirty or self.hover_dirty or self.completion_dirty or
                 self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
@@ -1584,7 +1522,7 @@ pub const Ui = struct {
                 // The popup is outside the split tree, so this
                 // notification never mentions it -- but it is placed
                 // against the buffer pane, which just moved.
-                self.finder_dirty = self.finder != null;
+                if (self.finder.isOpen()) self.finder.dirty = true;
                 self.replaceShell();
             },
             // The window (or this pane) changed size. Repaint, but take
@@ -1613,20 +1551,13 @@ pub const Ui = struct {
                 self.markTreeDirty(.full);
                 self.tabs_dirty = true;
                 self.status_dirty = true;
-                self.finder_dirty = self.finder != null;
+                if (self.finder.isOpen()) self.finder.dirty = true;
                 self.replaceShell();
             },
             .scroll_offset => |so| {
-                // A wheel or thumb drag over the finder popup: follow it
-                // without moving the cursor, the way gw-hist's list does
-                // -- scrolling past a row and picking it are two
-                // different gestures.
-                if (so.layer == self.finder_list_layer) {
-                    if (self.finder) |*f| {
-                        f.scrollTo(so.row, self.finder_list_rows);
-                        self.finder_dirty = true;
-                    }
-                }
+                // A wheel or thumb drag over the finder popup's list (the
+                // checks below are for other layers, so it falls through).
+                _ = self.finder.scrolled(so);
                 if (so.layer == self.tree_layer) self.tree_scroll = .{ .row = so.row, .col = so.col };
                 // A wheel or thumb drag over the buffer pane: the host moved
                 // the virtual offset and told us where. Follow it, and drag
@@ -1701,7 +1632,7 @@ pub const Ui = struct {
 
                 // The Ctrl+P popup is modal: while it is open it is the
                 // only thing reading keys, so nothing below here runs.
-                if (self.finder != null) {
+                if (self.finder.isOpen()) {
                     try self.finderKey(k);
                     return;
                 }
@@ -1842,8 +1773,8 @@ pub const Ui = struct {
                 // Typed text is the shell's while its panel is up -- it
                 // has a line editor of its own.
                 if (self.shell.isOpen()) return;
-                if (self.finder != null) {
-                    try self.finderText(t.text);
+                if (self.finder.isOpen()) {
+                    try self.finder.text(t.text);
                     return;
                 }
                 if (self.swallow_space_text) {
@@ -1862,8 +1793,8 @@ pub const Ui = struct {
             },
             .paste => |t| {
                 if (self.shell.isOpen()) return;
-                if (self.finder != null) {
-                    try self.finderText(t.text);
+                if (self.finder.isOpen()) {
+                    try self.finder.text(t.text);
                     return;
                 }
                 self.buf.ed.status.clearRetainingCapacity();
@@ -2373,11 +2304,14 @@ pub const Ui = struct {
         }
         if (!std.mem.eql(u8, ev.button, "left")) return;
 
-        // While the finder is up it owns the pointer too -- see
-        // `finderClick`. The release that follows lands here with the
-        // popup already closed and nothing dragging, so it does nothing.
-        if (self.finder != null) {
-            if (ev.pressed) try self.finderClick(ev.cell);
+        // While the finder is up it owns the pointer too: a result row
+        // opens that file, anywhere outside the popup dismisses it, and
+        // the click is swallowed either way -- a modal popup whose buffer
+        // moves its cursor behind it is a trap. The release that follows
+        // lands here with the popup already closed and nothing dragging,
+        // so it does nothing.
+        if (self.finder.isOpen()) {
+            if (ev.pressed and self.finder.click(ev.cell) == .accept) try self.acceptFinder();
             return;
         }
 
@@ -2631,27 +2565,17 @@ pub const Ui = struct {
 
     /// Ctrl+P. Walks the tree root and opens the popup over the buffer
     /// pane. The walk happens here, on every open, rather than being kept
-    /// up to date in the background -- see finder.zig.
+    /// up to date in the background -- see applib/finder.zig.
     fn openFinder(self: *Ui) !void {
-        if (self.finder) |*f| f.deinit();
         // The popup is modal, so a tree search underneath it would have
         // the statusline to itself with no way left to type into it.
         self.cancelFind();
-        self.finder = Finder.init(self.alloc, self.io, self.tree.root, .{ .visible = self.tree.visible }) catch |err| {
-            self.finder = null;
+        const f = Finder.init(self.alloc, self.io, self.tree.root, .{ .visible = self.tree.visible }) catch |err| {
             self.buf.ed.setStatus("E484: Can't scan {s}: {s}", .{ self.tree.root, @errorName(err) });
             self.status_dirty = true;
             return;
         };
-        self.finder_dirty = true;
-    }
-
-    fn closeFinder(self: *Ui) void {
-        if (self.finder) |*f| f.deinit();
-        self.finder = null;
-        self.client.setLayerVisible(self.finder_layer, false) catch {};
-        self.client.setLayerVisible(self.finder_list_layer, false) catch {};
-        self.client.setLayerVisible(self.finder_frame_layer, false) catch {};
+        try self.finder.open(f, "Find file");
     }
 
     /// Opens whatever the popup is on and closes it. A file that isn't
@@ -2659,296 +2583,18 @@ pub const Ui = struct {
     /// tree -- the popup still closes, and the error lands in the
     /// statusline behind it.
     fn acceptFinder(self: *Ui) !void {
-        const f = if (self.finder) |*open| open else return;
-        const path = try f.selectedPath(self.alloc);
-        self.closeFinder();
-        const p = path orelse return;
-        defer self.alloc.free(p);
-        try self.openFile(p);
+        const rel = self.finder.selected() orelse return self.finder.close();
+        const path = try std.fs.path.join(self.alloc, &.{ self.finder.root().?, rel });
+        defer self.alloc.free(path);
+        self.finder.close();
+        try self.openFile(path);
         self.setFocus(.buffer);
     }
 
-    /// A keystroke while the popup is open. It takes every key it knows
-    /// and swallows the rest: the popup is modal, and letting a stray
-    /// chord through to the buffer underneath -- which you cannot see
-    /// well enough to check -- is worse than it doing nothing.
+    /// A keystroke while the popup is open. It takes every key; see
+    /// `finderpopup.applyKey`.
     fn finderKey(self: *Ui, k: glyphwire.KeyEvent) !void {
-        const f = if (self.finder) |*open| open else return;
-        const eq = std.mem.eql;
-        const ctrl = k.ctrl();
-        const rows = @max(self.finder_list_rows, 1);
-
-        if (eq(u8, k.key, "escape") or (ctrl and eq(u8, k.key, "c"))) {
-            self.closeFinder();
-            return;
-        }
-        if (eq(u8, k.key, "enter") or eq(u8, k.key, "kp_enter")) {
-            try self.acceptFinder();
-            return;
-        }
-
-        // Moving the cursor is tested before the field gets the key:
-        // Ctrl+N / Ctrl+P are the vertical pair (Ctrl+K is the field's
-        // own kill-to-end, so the vim-ish Ctrl+J / Ctrl+K can't be), and
-        // a page is however many rows the popup ended up with.
-        const step: ?isize = if (eq(u8, k.key, "up") or (ctrl and eq(u8, k.key, "p")))
-            -1
-        else if (eq(u8, k.key, "down") or (ctrl and eq(u8, k.key, "n")))
-            1
-        else if (eq(u8, k.key, "page_up"))
-            -@as(isize, @intCast(rows))
-        else if (eq(u8, k.key, "page_down"))
-            @as(isize, @intCast(rows))
-        else
-            null;
-        if (step) |d| {
-            f.moveCursor(d);
-            f.follow(rows);
-            self.finder_dirty = true;
-            return;
-        }
-
-        // Everything else is the query field's: backspace, the word
-        // deletes, Ctrl+U, the caret motions. Enter and Escape never
-        // reach it -- they are answered above.
-        switch (f.query.handleKey(k.key, k.mods)) {
-            .edited => {
-                try f.refilter();
-                f.follow(rows);
-                self.finder_dirty = true;
-            },
-            .moved => self.finder_dirty = true,
-            .ignored, .submit, .cancel => {},
-        }
-    }
-
-    /// Typed characters (and a paste) while the popup is open: the query,
-    /// never the buffer.
-    fn finderText(self: *Ui, text: []const u8) !void {
-        const f = if (self.finder) |*open| open else return;
-        if (try f.query.insert(self.alloc, text)) {
-            try f.refilter();
-            f.follow(@max(self.finder_list_rows, 1));
-            self.finder_dirty = true;
-        }
-    }
-
-    /// A left click while the popup is open: a list row picks that file,
-    /// anywhere outside the popup (its frame included) dismisses it. The
-    /// click is swallowed either way -- a modal popup whose buffer moves
-    /// its cursor behind it is a trap.
-    fn finderClick(self: *Ui, cell: glyphwire.CellPos) !void {
-        const f = if (self.finder) |*open| open else return;
-        const r = self.finder_rect;
-        const fr = finderFrameRect(r) orelse r;
-        const inside = cell.row >= fr.row and cell.row < fr.row + fr.rows and
-            cell.col >= fr.col and cell.col < fr.col + fr.cols;
-        if (!inside) {
-            self.closeFinder();
-            return;
-        }
-
-        const list_row0 = r.row + finder_header_rows;
-        if (cell.row < list_row0) return; // The title bar or the query line.
-        const row = f.top + (cell.row - list_row0);
-        if (row >= f.matchCount()) return;
-        f.cursor = row;
-        try self.acceptFinder();
-    }
-
-    /// Where the popup goes: centred over the buffer pane, at its
-    /// preferred size or as much of it as the pane can hold. Recomputed
-    /// per frame rather than cached, so a resize or a divider drag moves
-    /// it with the pane without any bookkeeping of its own -- the popup
-    /// is outside the split tree, so nothing else would tell it.
-    fn finderRect(self: *const Ui) Bounds {
-        const b = self.buffer_bounds;
-        // Never bigger than the pane, and never below the minimum unless
-        // the pane itself is smaller than that -- in which case the popup
-        // is the pane, which at least stays readable.
-        const cols = @min(@max(finder_min_cols, @min(finder_max_cols, b.cols -| 4)), b.cols);
-        const rows = @min(@max(finder_min_rows, @min(finder_max_rows, b.rows -| 2)), b.rows);
-        return .{
-            .row = b.row + (b.rows -| rows) / 2,
-            .col = b.col + (b.cols -| cols) / 2,
-            .cols = cols,
-            .rows = rows,
-        };
-    }
-
-    /// The frame around the popup rect `r`: one cell out on every side,
-    /// or null when `r` touches the window's top or left edge and there
-    /// is no cell to put it in (only in a pane too small for the popup's
-    /// preferred size, since `finderRect` otherwise leaves a margin).
-    fn finderFrameRect(r: Bounds) ?Bounds {
-        if (r.row == 0 or r.col == 0) return null;
-        return .{ .row = r.row - 1, .col = r.col - 1, .rows = r.rows + 2, .cols = r.cols + 2 };
-    }
-
-    fn renderFinder(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
-        const f = if (self.finder) |*open| open else return;
-        const r = self.finderRect();
-        self.finder_rect = r;
-
-        // A pane with no room for a title bar, a query line and a row of
-        // results: draw nothing rather than something unreadable. The
-        // finder stays open, so widening the window brings it back.
-        if (r.cols == 0 or r.rows <= finder_header_rows) {
-            self.finder_list_rows = 0;
-            try batch.setLayerVisible(self.finder_layer, false);
-            try batch.setLayerVisible(self.finder_list_layer, false);
-            try batch.setLayerVisible(self.finder_frame_layer, false);
-            return;
-        }
-
-        const list_rows = r.rows - finder_header_rows;
-        self.finder_list_rows = list_rows;
-        // Clamped, not `follow`ed: the view is dragged onto the cursor by
-        // whatever moved the cursor. Doing it here as well would undo a
-        // wheel scroll on the very frame it was drawn.
-        f.clampScroll(list_rows);
-
-        try batch.setLayerSize(self.finder_layer, r.cols, finder_header_rows);
-        try batch.setLayerCellPosition(self.finder_layer, r.row, r.col);
-        try batch.setLayerSize(self.finder_list_layer, r.cols, list_rows);
-        try batch.setLayerCellPosition(self.finder_list_layer, r.row + finder_header_rows, r.col);
-
-        const frame = if (self.finder_frame_patch != null) finderFrameRect(r) else null;
-        if (frame) |fr| {
-            try batch.setLayerSize(self.finder_frame_layer, fr.cols, fr.rows);
-            try batch.setLayerCellPosition(self.finder_frame_layer, fr.row, fr.col);
-            try batch.updateNinePatch(self.finder_frame_layer, self.finder_frame_patch.?, .{ .rows = fr.rows, .cols = fr.cols });
-        }
-
-        try self.renderFinderHeader(batch, f, r.cols);
-        try self.renderFinderList(batch, f, r.cols, list_rows);
-
-        // The list layer is exactly its visible rows; the host is told
-        // the real total so its scrollbar is proportional to the whole
-        // answer and a wheel over the popup comes back as a
-        // `scroll_offset` (the `.client` scroll mode set in `init`).
-        try batch.setLayerContentExtent(self.finder_list_layer, r.cols, f.matchCount());
-        try batch.setLayerScrollOffset(self.finder_list_layer, f.top, 0);
-
-        try batch.setLayerVisible(self.finder_frame_layer, frame != null);
-        try batch.setLayerVisible(self.finder_layer, true);
-        try batch.setLayerVisible(self.finder_list_layer, true);
-    }
-
-    /// The title bar and the query line under it.
-    fn renderFinderHeader(
-        self: *Ui,
-        batch: *glyphwire.client.Client.Batch,
-        f: *const Finder,
-        cols: usize,
-    ) !void {
-        var title: std.ArrayList(u8) = .empty;
-        defer title.deinit(self.alloc);
-        try title.print(self.alloc, " Find file{s}", .{if (f.truncated) " (partial)" else ""});
-        // The count, right-aligned, so the title beside it never shifts
-        // as you type -- the same reasoning as the statusline's position.
-        var right: [48]u8 = undefined;
-        const tail = std.fmt.bufPrint(&right, "{d}/{d} ", .{
-            if (f.matchCount() == 0) 0 else f.cursor + 1,
-            f.matchCount(),
-        }) catch "";
-        const used = glyphwire.stringWidth(title.items) + glyphwire.stringWidth(tail);
-        if (used < cols) try title.appendNTimes(self.alloc, ' ', cols - used);
-        try title.appendSlice(self.alloc, tail);
-        try batch.writeTextOpts(title.items, .{
-            .layer = self.finder_layer,
-            .row = 0,
-            .col = 0,
-            .fg = fg_finder_header,
-            .bg = bg_finder_header,
-            .max_cols = cols,
-            .pad = true,
-        });
-
-        // The query, behind a `> ` prompt. The caret is drawn rather than
-        // asked for: a text layer's cursor property is the next *write*
-        // position, not a visual marker (same as the `:` line).
-        const prompt = "> ";
-        // No `bg` from here on (the default transparent one): the panel
-        // behind the popup is its background.
-        try batch.writeTextOpts(prompt, .{
-            .layer = self.finder_layer,
-            .row = 1,
-            .col = 0,
-            .fg = fg_dim,
-        });
-        const field_cols = cols -| prompt.len;
-        try batch.writeTextOpts(f.query.text(), .{
-            .layer = self.finder_layer,
-            .row = 1,
-            .col = prompt.len,
-            .fg = fg_text,
-            .max_cols = field_cols,
-            .pad = true,
-        });
-        const caret_col = prompt.len + f.query.caretCol();
-        if (caret_col < cols) {
-            const q = f.query.text();
-            const under = if (f.query.caret < q.len)
-                q[f.query.caret..lineedit.nextBoundary(q, f.query.caret)]
-            else
-                " ";
-            try batch.writeTextOpts(under, .{
-                .layer = self.finder_layer,
-                .row = 1,
-                .col = caret_col,
-                .fg = bg_finder,
-                .bg = fg_text,
-            });
-        }
-    }
-
-    /// The visible slice of the answer, one path per row.
-    fn renderFinderList(
-        self: *Ui,
-        batch: *glyphwire.client.Client.Batch,
-        f: *const Finder,
-        cols: usize,
-        rows: usize,
-    ) !void {
-        try batch.clearArea(.{ .layer = self.finder_list_layer });
-
-        if (f.matchCount() == 0) {
-            try batch.writeTextOpts("  No matching files", .{
-                .layer = self.finder_list_layer,
-                .row = 0,
-                .col = 0,
-                .fg = fg_dim,
-                .max_cols = cols,
-            });
-            return;
-        }
-
-        var i: usize = 0;
-        while (i < rows) : (i += 1) {
-            const path = f.matchAt(f.top + i) orelse break;
-            const selected = f.top + i == f.cursor;
-            const bg: ?Color = if (selected) bg_finder_selected else null;
-            // The directory part is dimmed and the filename isn't: what
-            // you are looking for is nearly always the name, and the
-            // directories are there to tell two of them apart.
-            const split = if (std.mem.lastIndexOfScalar(u8, path, '/')) |at| at + 1 else 0;
-            const dir_fg = if (selected) fg_finder_selected else fg_dim;
-            const name_fg = if (selected) fg_finder_selected else fg_text;
-            try batch.writeSpans(&.{
-                .{ .text = " " },
-                .{ .text = path[0..split], .fg = dir_fg },
-                .{ .text = path[split..], .fg = name_fg },
-            }, .{
-                .layer = self.finder_list_layer,
-                .row = i,
-                .col = 0,
-                .fg = name_fg,
-                .bg = bg,
-                .max_cols = cols,
-                .pad = true,
-            });
-        }
+        if (try self.finder.key(k) == .accept) try self.acceptFinder();
     }
 
     // ── Buffers ─────────────────────────────────────────────────────────
@@ -3619,7 +3265,7 @@ pub const Ui = struct {
     /// cursor has to remember the popup exists.
     fn syncCompletion(self: *Ui) void {
         const in_insert = self.buf.ed.mode == .insert and self.focus == .buffer and
-            self.finder == null and !self.shell.isOpen();
+            !self.finder.isOpen() and !self.shell.isOpen();
         if (!in_insert) {
             self.completion_due = null;
             self.completion_request = null;
@@ -4107,7 +3753,10 @@ pub const Ui = struct {
         // Last in the frame, as they are last in the compositing order. The
         // hover popup after the finder: both float, and a hover raised while
         // the finder is open is the newer of the two.
-        if (self.finder_dirty) try self.renderFinder(&batch);
+        if (self.finder.dirty) {
+            const b = self.buffer_bounds;
+            try self.finder.render(&batch, .{ .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows });
+        }
         if (self.hover_dirty) try self.renderHover(&batch);
         // Placed against the word being typed, so it follows a buffer
         // repaint (a scroll, a wrap) as well as its own changes.
@@ -4120,7 +3769,6 @@ pub const Ui = struct {
         self.tree_dirty = .none;
         self.tabs_dirty = false;
         self.status_dirty = false;
-        self.finder_dirty = false;
         self.hover_dirty = false;
         self.completion_dirty = false;
     }
