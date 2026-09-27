@@ -667,7 +667,7 @@ real alpha would mean rendering the layer off screen and blurring the
 result every time it changed -- possible later, not needed while every
 dialog is a rectangle or a panel that fills its layer.
 
-`glyphwire.Shadow.dialog` (x 2, y 6, blur 12, radius 6, black at alpha
+`glyphwire.Shadow.dialog` (x 4, y 12, blur 12, radius 6, black at alpha
 150) is the look glyphwire's own programs use: zoe's Ctrl+P finder, hover
 and completion popups, salacommander's dialogs, gw-read's help, OCR text,
 dictionary and dictionary-build panels, and the notify toast.
