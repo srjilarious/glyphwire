@@ -99,6 +99,7 @@ pub const Ui = struct {
         const context = try client.createContext(null, null, 0, false);
         errdefer client.destroyContext(context) catch {};
         try listener.attachContext(context);
+        try client.setContextTitle("gw-view");
         // Nothing here takes typed text at a caret.
         try client.setCaretVisible(false);
 

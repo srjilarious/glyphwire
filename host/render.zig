@@ -36,6 +36,15 @@ const hud_bg = host_eng.Color.from(12, 14, 20, 232);
 const hud_head = host_eng.Color.from(255, 220, 120, 255);
 const hud_fg = host_eng.Color.from(210, 215, 225, 255);
 
+// Context switcher overlay (Super+F12) -- see `drawSwitcher`.
+const switcher_bg = host_eng.Color.from(24, 27, 36, 245);
+const switcher_border = host_eng.Color.from(90, 104, 140, 255);
+const switcher_head = host_eng.Color.from(255, 220, 120, 255);
+const switcher_fg = host_eng.Color.from(225, 228, 235, 255);
+const switcher_dim = host_eng.Color.from(135, 140, 155, 255);
+const switcher_sel_bg = host_eng.Color.from(58, 78, 120, 255);
+const switcher_border_px = 1;
+
 // ── Static quad batches ───────────────────────────────────────────────
 //
 // Each layer's composited output is cached as a small set of
@@ -1549,6 +1558,10 @@ pub const Renderer = struct {
         self.renderScrollbar(eng);
         eng.renderer.end();
 
+        // Over everything a program drew, dividers and scrollbar included:
+        // it is a modal the host owns.
+        self.drawSwitcher(eng);
+
         // `--screenshot`: everything for this frame is drawn but not yet
         // swapped, so GL_BACK holds exactly what's about to be shown. The
         // HUD is drawn *after* the capture so it never lands in a
@@ -1648,6 +1661,73 @@ pub const Renderer = struct {
                 divider_color,
             );
         }
+    }
+
+    /// Paints the context switcher (`host/switcher.zig`) while it is open:
+    /// a box centered on the pane it was opened from, one row per context
+    /// in that pane's stack (top first), the selected row highlighted.
+    /// Cell-aligned like `drawPreedit`, so its text sits on the same grid
+    /// as the content around it. A list longer than the pane scrolls to
+    /// keep the selection in view.
+    fn drawSwitcher(self: *Renderer, eng: *Engine) void {
+        const sw = &self.app.switcher;
+        if (!sw.open) return;
+        const rows = sw.rows();
+        if (rows.len == 0) return;
+
+        const pane_rect = blk: {
+            const server = self.app.server;
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            const pane = server.session.panePtr(sw.pane) orelse return;
+            break :blk pane.rect;
+        };
+
+        const head = "Switch to";
+        const foot = "Enter switch  Esc close";
+        const current_tag = "  (current)";
+
+        // Width: the longest line plus a cell of margin each side, never
+        // wider than the pane.
+        var want: usize = glyphwire.stringWidth(foot);
+        for (rows, 0..) |e, i| {
+            var w = 4 + glyphwire.stringWidth(e.title());
+            if (i == 0) w += current_tag.len;
+            want = @max(want, w);
+        }
+        const cols = @min(want + 2, pane_rect.cols);
+        // Height: header, entries, footer -- entries trimmed to fit.
+        if (pane_rect.rows < 4 or cols < 8) return;
+        const visible = @min(rows.len, pane_rect.rows - 2);
+        const first = if (sw.selected >= visible) sw.selected - visible + 1 else 0;
+        const height = visible + 2;
+
+        const col0 = pane_rect.col + (pane_rect.cols - cols) / 2;
+        const row0 = pane_rect.row + (pane_rect.rows - height) / 3;
+        const box = geometry.cellRectPx(.{ .row = row0, .col = col0, .rows = height, .cols = cols });
+
+        eng.renderer.begin(eng.projMat);
+        defer eng.renderer.end();
+
+        const bp: f32 = switcher_border_px;
+        eng.renderer.drawFilledRect(host_eng.RectF{ .l = box.x - bp, .t = box.y - bp, .r = box.x + box.w + bp, .b = box.y + box.h + bp }, switcher_border);
+        eng.renderer.drawFilledRect(host_eng.RectF{ .l = box.x, .t = box.y, .r = box.x + box.w, .b = box.y + box.h }, switcher_bg);
+
+        const inner = cols - 2;
+        _ = drawCellText(eng, head, col0 + 1, row0, inner, switcher_head);
+        for (rows[first .. first + visible], first..) |e, i| {
+            const r = row0 + 1 + (i - first);
+            if (i == sw.selected) {
+                const sel = geometry.cellRectPx(.{ .row = r, .col = col0, .rows = 1, .cols = cols });
+                eng.renderer.drawFilledRect(host_eng.RectF{ .l = sel.x, .t = sel.y, .r = sel.x + sel.w, .b = sel.y + sel.h }, switcher_sel_bg);
+            }
+            var num_buf: [4]u8 = undefined;
+            const num = if (i < 9) std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch " " else " ";
+            _ = drawCellText(eng, num, col0 + 1, r, inner, switcher_dim);
+            const used = drawCellText(eng, e.title(), col0 + 4, r, inner -| 3, switcher_fg);
+            if (i == 0) _ = drawCellText(eng, current_tag, col0 + 4 + used, r, inner -| (3 + used), switcher_dim);
+        }
+        _ = drawCellText(eng, foot, col0 + 1, row0 + height - 1, inner, switcher_dim);
     }
 
     /// Paints the profiler overlay in the top-right corner while the HUD
@@ -2021,6 +2101,28 @@ pub const Renderer = struct {
     /// the layer's batches (under `ctx_mutex`), so it composites in layer
     /// order: gw-read's page bars used to show through the OCR dialog
     /// floating over them when this was a final pass over everything.
+    /// Draws `text` along window row `row` from window column `col`, one
+    /// codepoint per cell boundary (the grid's own East Asian Width rules,
+    /// as `drawPreedit` does), stopping before it would pass `max_cols`.
+    /// Returns the columns used. For host-drawn chrome text; call between
+    /// `begin`/`end`.
+    fn drawCellText(eng: *Engine, text: []const u8, col: usize, row: usize, max_cols: usize, color: host_eng.Color) usize {
+        const y = @as(i32, @intCast(row)) * geometry.cell_h;
+        var used: usize = 0;
+        var it = (std.unicode.Utf8View.init(text) catch return 0).iterator();
+        while (it.nextCodepointSlice()) |cp_bytes| {
+            const cp = std.unicode.utf8Decode(cp_bytes) catch continue;
+            const w: usize = @max(1, glyphwire.codepointWidth(cp));
+            if (used + w > max_cols) break;
+            _ = eng.renderer.drawStringColored(cp_bytes, .{
+                .x = geometry.content_pad_px + @as(i32, @intCast(col + used)) * geometry.cell_w,
+                .y = y,
+            }, color);
+            used += w;
+        }
+        return used;
+    }
+
     fn drawLayerScrollbars(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin) void {
         const state = layer.scrollbarState();
         if (!state.vertical and !state.horizontal) return;

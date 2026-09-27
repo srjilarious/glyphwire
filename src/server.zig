@@ -685,6 +685,23 @@ pub const Server = struct {
         try self.reportContext(alloc);
     }
 
+    /// Brings `context` to the top of its pane's stack (the host's own
+    /// context switcher -- the in-process counterpart of the
+    /// `activate_context` message). A no-op for an unknown handle or one
+    /// already on screen. Returns whether anything changed.
+    pub fn activateContext(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle) !bool {
+        const changed = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const before = self.session.focusedContextHandle();
+            self.session.activateContext(context) catch break :blk false;
+            self.ctx = self.session.focusedContext();
+            break :blk self.session.focusedContextHandle() != before;
+        };
+        if (changed) try self.reportContext(alloc);
+        return changed;
+    }
+
     /// Re-lays-out the pane tree and tells everyone what moved. Called
     /// after any pane-tree edit (`HandleResult.panes_changed`), after the
     /// window resizes, and after a pane cull.

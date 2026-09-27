@@ -185,6 +185,7 @@ const Ui = struct {
         const context = try client.createContext(null, null, 0, false);
         errdefer client.destroyContext(context) catch {};
         try listener.attachContext(context);
+        try client.setContextTitle("gw-hist");
 
         const size = try client.getSize();
         const cols = size.cols;

@@ -293,9 +293,15 @@ const CreateContextParams = struct {
     /// for this context (see `core.Context.window_scrollbar`). Default
     /// on -- a pure-TUI client passes false.
     window_scrollbar: bool = true,
+    /// The context's display name (see `core.Context.title`). Optional:
+    /// `set_context_title` can name it, or rename it, later.
+    title: ?[]const u8 = null,
 };
 
 const CreateContextResult = struct { context: core.ContextHandle };
+
+/// `set_context_title`: names the issuing connection's active context.
+const SetContextTitleParams = struct { title: []const u8 };
 
 /// `destroy_context` / `activate_context` / `adopt_context` -- all just
 /// name one context handle.
@@ -1611,6 +1617,8 @@ pub const Dispatcher = struct {
         .{ "attach_context", catVoid(handleAttachContext) },
         .{ "attach_layer", catVoid(handleAttachLayer) },
         .{ "adopt_context", catVoid(handleAdoptContext) },
+        .{ "set_context_title", catVoid(handleSetContextTitle) },
+        .{ "list_contexts", catBytesIdNoParams(handleListContexts) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
         .{ "set_caret_visible", catVoid(handleSetCaretVisible) },
@@ -2260,6 +2268,7 @@ pub const Dispatcher = struct {
         self.active_ctx = new_handle;
         self.ctx = session.contextPtr(new_handle).?;
         self.ctx.window_scrollbar = p.window_scrollbar;
+        if (p.title) |t| try self.ctx.setTitle(t);
 
         var result = try self.contextBroadcast(alloc);
         result.response = try rpc.response(alloc, id, CreateContextResult{ .context = new_handle });
@@ -2379,6 +2388,38 @@ pub const Dispatcher = struct {
         if (self.conn_id) |cid| {
             session.addContextOwner(parsed.value.context, cid) catch return DispatchError.UnknownContext;
         }
+    }
+
+    /// `set_context_title`: renames this connection's active context (see
+    /// `core.Context.title`). Needs no ownership: naming what you are
+    /// drawing on is not a privilege, and a shell names the root context
+    /// it inherited this way.
+    fn handleSetContextTitle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetContextTitleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        try self.ctx.setTitle(parsed.value.title);
+    }
+
+    /// `list_contexts`: this connection's pane stack, top first, with
+    /// titles, plus its own active context handle. Only the connection's
+    /// own pane: a program inside a pane never learns what other panes
+    /// hold (see the Panes section of api.md).
+    fn handleListContexts(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        const session = self.session orelse return DispatchError.NoContextSession;
+        const stack = session.paneStack(self.active_pane) orelse return DispatchError.UnknownPane;
+        const entries = try alloc.alloc(protocol.ContextEntry, stack.len);
+        defer alloc.free(entries);
+        for (entries, 0..) |*e, i| {
+            const h = stack[stack.len - 1 - i];
+            const ctx = session.contextPtr(h).?;
+            e.* = .{ .context = h, .title = ctx.title.items, .visible = i == 0 };
+        }
+        return try rpc.response(alloc, id, protocol.ListContextsResult{
+            .current = self.active_ctx,
+            .contexts = entries,
+        });
     }
 
     // ── Panes ───────────────────────────────────────────────────────────
