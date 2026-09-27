@@ -247,6 +247,7 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `UnknownMetadata`, `InvalidMetadataDirection` | metadata messages |
 | `UnknownTable`, `InvalidTableOption`, `TableRowShapeMismatch` | table messages |
 | `UnknownRect` | rect messages |
+| `UnknownNinePatch`, `UnknownNinePatchStyle` | nine-patch messages |
 | `UnknownOutline`, `OutlineNodeOutOfRange` | outline messages |
 | `InvalidMoveDirection` | `move_content` |
 | `SpawnUnsupported`, `SpawnFailed` | `spawn_in_pane` |
@@ -264,6 +265,7 @@ Session
 │       ├── Layers ... created surfaces: popups, panes, sidebars
 │       │   ├── Cells (grid), scrollback ring, cursor, viewport
 │       │   ├── Tables ..... server-side table widgets
+│       │   ├── Rects, nine-patches ... pixel-space overlays and panels
 │       │   ├── Splits ..... layout tree over layers
 │       │   └── Selection, highlight set
 │       └── Image and icon catalogs, metadata store
@@ -282,7 +284,7 @@ All handles are unsigned 32-bit integers unless noted.
 | `ContextHandle` | `0` = the root context |
 | `PaneHandle` | `0` = the root pane |
 | `SplitHandle`, `PaneSplitHandle` | no root |
-| `ImageHandle`, `MetadataHandle`, `TableHandle`, `RectHandle`, `OutlineHandle` | no root |
+| `ImageHandle`, `MetadataHandle`, `TableHandle`, `RectHandle`, `NinePatchHandle`, `OutlineHandle` | no root |
 | remote session id | 64-bit |
 
 Handle `0` is the root for layers, contexts and panes and is **never**
@@ -405,6 +407,17 @@ drawing a highlight over a picture does not have to round it to cells.
 Rects composite last within their layer, after text — unlike the
 selection and highlight tints, which draw under it so text stays
 readable over them.
+
+A **nine-patch** is the other non-grid component: a panel background
+drawn from one `.9.png` image, placed on a cell rect. Its four corners
+keep their native pixel size, its edges stretch along their long axis and
+its centre stretches both ways, so rounded or alpha-feathered corners
+stay crisp at any cell shape or font size. It composites directly above
+the layer's `background` and **under every cell background**, so a
+selected or highlighted row inside a dialog still shows. Like a rect it
+lives in the layer's content frame and pans with `scroll_offset`; it does
+**not** move with the root layer's scrollback ring, so it belongs on a
+created layer rather than in the shell's scrolling output.
 
 ### 4.7 Outline
 
@@ -772,20 +785,38 @@ asset directory and registers every PNG by its path minus the extension —
 `foreground: true` composites the icon *over* the cell's background rather
 than becoming it, so an icon can sit on a coloured panel.
 
-### 6.7 Boxes
+### 6.7 Nine-patches
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `draw_box` | notification | `layer?`, `row?`, `col?`, `rows`, `cols`, `style`, `mode?` | — |
+| `create_nine_patch` | request | `layer?`, `row`, `col`, `rows`, `cols`, `style` | `{handle}` |
+| `update_nine_patch` | notification | `layer?`, `nine_patch`, `row?`, `col?`, `rows?`, `cols?`, `style?` | — |
+| `destroy_nine_patch` | notification | `layer?`, `nine_patch` | — |
 
-A 9-slice panel. `style` names a family in the icon catalog; the host
-resolves nine pieces from it — `{style}-tl`, `-t`, `-tr`, `-l`, `-fill`,
-`-r`, `-bl`, `-b`, `-br`. No separate registry.
+A panel background over the `rows` x `cols` cell rect at `row`/`col`
+(section 4.6). `style` names a registered nine-patch: the host loads
+every `<name>.9.png` in its bundled `ninepatch/` asset directory and then
+the user's `~/.config/glyphwire/ninepatch/` (a user file overrides a
+bundled one of the same name). The bundled styles are `dialog` (a
+gradient panel with a rounded white border) and `box` (a thin rounded
+outline over a transparent middle).
 
-`mode` is `"tile"` (default — each edge and fill piece repeats per cell) or
-`"stretch"` (each role's source image is treated as one continuous picture
-spanning its whole run, so a gradient blends across the box instead of
-banding).
+A `.9.png` is the image surrounded by a 1px guide border, as on Android.
+Opaque black pixels on the top row mark the columns that stretch, and on
+the left column the rows that stretch; each must be one contiguous run.
+Everything outside the runs is corner or edge and keeps its pixel size.
+The right and bottom guides (Android's content padding) are ignored,
+since placement is by cell rect. When the panel is smaller than its two
+corners together on an axis, the corners shrink in proportion and the
+middle disappears.
+
+The host converts the cell rect to pixels at render time, so a font
+resize keeps the panel on its cells with the corners still at native
+size. `update_nine_patch` merges only the fields sent, like
+`update_rect`. An unknown `style` reports `UnknownNinePatchStyle`, an
+unknown `nine_patch` reports `UnknownNinePatch`, an unresolvable `layer`
+reports `UnknownLayer`. All three are batchable, and destroying the
+layer destroys its nine-patches.
 
 ### 6.8 Metadata
 
@@ -1352,7 +1383,6 @@ client **SHOULD** ignore a name it does not recognise.
 |---|---|
 | icon `scale` | `fit`, `natural`, `stretch` |
 | icon / column `h_align`, icon `v_align` | `start`, `center`, `end` |
-| `draw_box` `mode` | `tile`, `stretch` |
 | split `axis` | `row`, `column` |
 | column `kind` | `text`, `number` |
 | sort `direction` | `none`, `ascending`, `descending` |

@@ -293,7 +293,7 @@ pub const Client = struct {
     /// but leaves whatever background is already on each cell touched
     /// untouched instead of resetting it to `core.default_style.bg` -- for
     /// writing text over a background drawn some other way (e.g.
-    /// `drawBoxStyled`'s fill) that needs to stay visible through it,
+    /// a nine-patch's fill) that needs to stay visible through it,
     /// rather than approximating it with a matching flat color. A separate
     /// method rather than a third `?bool` param on `writeText` since Zig
     /// has no default parameter values.
@@ -880,7 +880,7 @@ pub const Client = struct {
     }
 
     /// `draw_image(layer, ...)` -- the explicitly-targeted form of
-    /// `drawImage`, matching `writeTextOn` / `drawBoxOn` / `drawIconOn`.
+    /// `drawImage`, matching `writeTextOn` / `drawIconOn`.
     /// The wire message has always carried `layer?`; only the Zig helper
     /// was missing it, so a TUI drawing a picture into one of its own
     /// layers (gw-read's page layer) had no way to say which.
@@ -937,7 +937,7 @@ pub const Client = struct {
         metadata_id: ?core.MetadataHandle = null,
         /// `true` draws into `core.Cell.fg_icon` instead of `style.bg` --
         /// see that field's doc comment. For content meant to sit over an
-        /// already-drawn background (e.g. a `drawBoxStyled` fill) rather
+        /// already-drawn background (e.g. a table border tile) rather
         /// than replace it.
         foreground: bool = false,
     };
@@ -1017,62 +1017,6 @@ pub const Client = struct {
     /// can't know where the column landed.
     pub fn tagMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle, focus: bool) !void {
         try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id, .focus = focus });
-    }
-
-    /// `draw_box(row?, col?, rows, cols, style)` -- a notification. Draws a
-    /// `rows x cols` box using `style`'s 9 registered corner/edge/fill
-    /// tiles (`"{style}/tl"`, ... -- the bundled `assets/icons/box/`
-    /// subtree is the `"box"` style), one tile per cell, tiled rather
-    /// than stretched, anchored at the layer's cursor when `row`/`col` is
-    /// omitted.
-    pub fn drawBox(self: *Client, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
-        try self.notify("draw_box", .{ .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
-    }
-
-    /// `mode` for `drawBoxStyled`/`drawBoxOnStyled` -- see
-    /// `core.Layer.BoxMode`. Defaults match `drawBox`'s behavior. Shared
-    /// by `Client` and `Batch`.
-    pub const DrawBoxOpts = struct {
-        /// null = the root layer. Ignored by the `*On*` forms, whose
-        /// explicit `layer` argument wins.
-        layer: ?core.LayerHandle = null,
-        mode: core.Layer.BoxMode = .tile,
-    };
-
-    /// The wire params for a styled `draw_box`. `layer` is passed
-    /// separately so the `*On*` forms can override `opts.layer`. Shared
-    /// with `Batch`.
-    fn boxParams(layer: ?core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) DrawBoxWire {
-        return .{
-            .layer = layer,
-            .row = row,
-            .col = col,
-            .rows = rows,
-            .cols = cols,
-            .style = style,
-            .mode = @tagName(opts.mode),
-        };
-    }
-
-    const DrawBoxWire = struct {
-        layer: ?core.LayerHandle,
-        row: ?usize,
-        col: ?usize,
-        rows: usize,
-        cols: usize,
-        style: []const u8,
-        mode: []const u8,
-    };
-
-    /// `draw_box(row?, col?, rows, cols, style, mode)` -- like `drawBox`,
-    /// but lets the 9 pieces be composed with `opts.mode = .stretch`
-    /// (each edge/fill role's single tile stretched continuously across
-    /// however many cells it spans, rather than repeated per cell) instead
-    /// of the default `.tile`. A separate method rather than an extra
-    /// param on `drawBox` itself since Zig has no default parameter
-    /// values.
-    pub fn drawBoxStyled(self: *Client, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
-        try self.notify("draw_box", boxParams(opts.layer, row, col, rows, cols, style, opts));
     }
 
     /// `clear(layer?, row?, col?, rows?, cols?)` -- a notification.
@@ -1707,18 +1651,6 @@ pub const Client = struct {
         });
     }
 
-    /// `draw_box(layer, row?, col?, rows, cols, style)` on a non-root
-    /// layer -- see `drawBox` for the root-layer version.
-    pub fn drawBoxOn(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
-        try self.notify("draw_box", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
-    }
-
-    /// `draw_box(layer, row?, col?, rows, cols, style, mode)` on a
-    /// non-root layer -- see `drawBoxStyled` for the root-layer version.
-    pub fn drawBoxOnStyled(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
-        try self.notify("draw_box", boxParams(layer, row, col, rows, cols, style, opts));
-    }
-
     /// `get_cell_metrics` -- a request returning the session's fixed cell
     /// pixel size, for a client computing `draw_image`'s span from an
     /// image's natural pixel dimensions.
@@ -1801,7 +1733,7 @@ pub const Client = struct {
 
     /// `create_table(layer?, row?, col?, columns, style?)` -- a request.
     /// `row`/`col` default to the layer's current cursor, same convention
-    /// `drawBoxStyled`/`drawIconStyled` already use. Returns a fresh
+    /// `drawIconStyled` already uses. Returns a fresh
     /// handle for `tableSetRows`/`tableSetSort`/`tableSetStyle`/
     /// `destroyTable`/`tableGetState` -- the table has no rows yet, so
     /// nothing is painted until `tableSetRows`.
@@ -2234,6 +2166,80 @@ pub const Client = struct {
     /// it stops painting immediately.
     pub fn destroyRect(self: *Client, layer: ?core.LayerHandle, handle: core.RectHandle) !void {
         try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
+    }
+
+    /// `create_nine_patch(layer?, row, col, rows, cols, style)` -- a
+    /// request. Frames the `rows x cols` cell rect at `row`/`col` with the
+    /// registered `.9.png` named `style` (corners at native pixel size,
+    /// edges and center stretched) and returns a handle for
+    /// `updateNinePatch`/`destroyNinePatch`. Drawn under every cell
+    /// background on the layer -- see `core.NinePatch`.
+    pub fn createNinePatch(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) !core.NinePatchHandle {
+        var parsed = try self.request(struct { handle: core.NinePatchHandle }, "create_nine_patch", ninePatchParams(layer, row, col, rows, cols, style));
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    /// `create_nine_patch`'s wire params. Shared with
+    /// `Batch.createNinePatch`.
+    fn ninePatchParams(layer: ?core.LayerHandle, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) NinePatchWire {
+        return .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols, .style = style };
+    }
+
+    const NinePatchWire = struct {
+        layer: ?core.LayerHandle,
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+        style: []const u8,
+    };
+
+    /// `update_nine_patch`'s patch: a `null` field is left unchanged. The
+    /// client-side twin of `core.NinePatchUpdate`, carrying the style's
+    /// *name* (the server resolves it).
+    pub const NinePatchUpdate = struct {
+        row: ?usize = null,
+        col: ?usize = null,
+        rows: ?usize = null,
+        cols: ?usize = null,
+        style: ?[]const u8 = null,
+    };
+
+    /// `update_nine_patch(layer?, nine_patch, ...)` -- a notification.
+    /// Moves, resizes, or restyles a nine-patch; see `NinePatchUpdate`.
+    pub fn updateNinePatch(self: *Client, layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: NinePatchUpdate) !void {
+        try self.notify("update_nine_patch", ninePatchUpdateParams(layer, handle, patch));
+    }
+
+    /// `update_nine_patch`'s wire params. Shared with
+    /// `Batch.updateNinePatch`.
+    fn ninePatchUpdateParams(layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: NinePatchUpdate) NinePatchUpdateWire {
+        return .{
+            .layer = layer,
+            .nine_patch = handle,
+            .row = patch.row,
+            .col = patch.col,
+            .rows = patch.rows,
+            .cols = patch.cols,
+            .style = patch.style,
+        };
+    }
+
+    const NinePatchUpdateWire = struct {
+        layer: ?core.LayerHandle,
+        nine_patch: core.NinePatchHandle,
+        row: ?usize,
+        col: ?usize,
+        rows: ?usize,
+        cols: ?usize,
+        style: ?[]const u8,
+    };
+
+    /// `destroy_nine_patch(layer?, nine_patch)` -- a notification. Removes
+    /// the nine-patch; it stops painting immediately.
+    pub fn destroyNinePatch(self: *Client, layer: ?core.LayerHandle, handle: core.NinePatchHandle) !void {
+        try self.notify("destroy_nine_patch", .{ .layer = layer, .nine_patch = handle });
     }
 
     /// `create_metadata(json)` -- a request. Stores `json` verbatim (the
@@ -2696,26 +2702,6 @@ pub const Client = struct {
             try self.notify("draw_icon", iconParams(layer, row, col, name, opts));
         }
 
-        /// Batched `Client.drawBox`.
-        pub fn drawBox(self: *Batch, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
-            try self.notify("draw_box", .{ .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
-        }
-
-        /// Batched `Client.drawBoxStyled`. `opts.layer` picks the layer.
-        pub fn drawBoxStyled(self: *Batch, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
-            try self.notify("draw_box", boxParams(opts.layer, row, col, rows, cols, style, opts));
-        }
-
-        /// Batched `Client.drawBoxOn`.
-        pub fn drawBoxOn(self: *Batch, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8) !void {
-            try self.notify("draw_box", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols, .style = style });
-        }
-
-        /// Batched `Client.drawBoxOnStyled`.
-        pub fn drawBoxOnStyled(self: *Batch, layer: core.LayerHandle, row: ?usize, col: ?usize, rows: usize, cols: usize, style: []const u8, opts: DrawBoxOpts) !void {
-            try self.notify("draw_box", boxParams(layer, row, col, rows, cols, style, opts));
-        }
-
         /// Batched `Client.drawImageOn` (null `layer` = root).
         pub fn drawImageOn(
             self: *Batch,
@@ -2835,6 +2821,22 @@ pub const Client = struct {
         /// Batched `destroy_rect` -- see `Client.destroyRect`.
         pub fn destroyRect(self: *Batch, layer: ?core.LayerHandle, handle: core.RectHandle) !void {
             try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
+        }
+
+        /// Batched `create_nine_patch` -- see `Client.createNinePatch`.
+        /// Resolve the returned slot with `BatchResults.ninePatchHandle`.
+        pub fn createNinePatch(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) !Slot {
+            return self.request("create_nine_patch", Client.ninePatchParams(layer, row, col, rows, cols, style));
+        }
+
+        /// Batched `update_nine_patch` -- see `Client.updateNinePatch`.
+        pub fn updateNinePatch(self: *Batch, layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: Client.NinePatchUpdate) !void {
+            try self.notify("update_nine_patch", Client.ninePatchUpdateParams(layer, handle, patch));
+        }
+
+        /// Batched `destroy_nine_patch` -- see `Client.destroyNinePatch`.
+        pub fn destroyNinePatch(self: *Batch, layer: ?core.LayerHandle, handle: core.NinePatchHandle) !void {
+            try self.notify("destroy_nine_patch", .{ .layer = layer, .nine_patch = handle });
         }
 
         /// Batched `create_outline` -- see `Client.createOutline`.
@@ -3051,6 +3053,12 @@ pub const BatchResults = struct {
     /// The rect handle a batched `create_rect` returned.
     pub fn rectHandle(self: *BatchResults, slot: Client.Batch.Slot) !core.RectHandle {
         const r = try self.get(struct { handle: core.RectHandle }, slot);
+        return r.handle;
+    }
+
+    /// The nine-patch handle a batched `create_nine_patch` returned.
+    pub fn ninePatchHandle(self: *BatchResults, slot: Client.Batch.Slot) !core.NinePatchHandle {
+        const r = try self.get(struct { handle: core.NinePatchHandle }, slot);
         return r.handle;
     }
 

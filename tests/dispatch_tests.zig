@@ -1552,7 +1552,7 @@ pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !vo
 }
 
 /// `foreground: true` lands in `fg_icon`, not `style.bg` -- and leaves an
-/// already-drawn background (as `draw_box` would leave) alone, unlike a
+/// already-drawn background (as a plain `draw_icon` would leave) alone, unlike a
 /// plain `draw_icon` at the same cell.
 pub fn drawIconForegroundSetsFgIconOverExistingBgTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
@@ -1654,121 +1654,87 @@ pub fn drawIconOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqual(ctx.root.cell(2, 6).style.bg.icon.handle, 1);
 }
 
-/// Registers all 9 pieces of a `style`-prefixed box under distinct
-/// handles, reusing `fakePngBytes` so each is a real (if minimal) loaded
-/// image `ctx.imageInfo` can resolve.
-fn registerTestBoxStyle(d: *dispatch.Dispatcher, alloc: std.mem.Allocator, ctx: *glyphwire.Context, style: []const u8) !void {
-    const pieces = [_][]const u8{ "tl", "t", "tr", "l", "fill", "r", "bl", "b", "br" };
-    for (pieces) |piece| {
-        const png = fakePngBytes(12, 12);
-        const id: i64 = 1;
-        const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = id }, .format = .png, .bytes = png.len }, &png);
-        defer alloc.free(load_resp);
-
-        const parsed = try std.json.parseFromSlice(struct { result: struct { handle: glyphwire.ImageHandle } }, alloc, load_resp, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
-
-        var name_buf: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ style, piece });
-        try ctx.registerIcon(name, parsed.value.result.handle);
-    }
+/// Registers a `dialog` nine-patch style. The image handle is never
+/// resolved by dispatch, so any number does.
+fn registerTestNinePatch(ctx: *glyphwire.Context) !void {
+    try ctx.registerNinePatchStyle("dialog", .{ .image = 42, .width = 10, .height = 8, .insets = .{ .left = 3, .top = 2, .right = 3, .bottom = 3 } });
 }
 
-pub fn drawBoxPlacesAllNinePiecesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+/// `create_nine_patch` resolves `style` by name and stores the cell rect
+/// on the layer, answering with a fresh handle.
+pub fn createNinePatchReturnsHandleAndStoresItTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
-    try registerTestBoxStyle(&d, alloc, &ctx, "box");
+    try registerTestNinePatch(&ctx);
 
     const message =
-        \\{"jsonrpc":"2.0","method":"draw_box","params":{"row":1,"col":1,"rows":3,"cols":3,"style":"box"}}
+        \\{"jsonrpc":"2.0","id":1,"method":"create_nine_patch","params":{"row":1,"col":2,"rows":4,"cols":6,"style":"dialog"}}
     ;
     const result = try d.handle(alloc, message);
-    try testz.expectTrue(result.response == null);
+    defer if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"handle\":1") != null);
 
-    // All 9 cells got marked as icon-backed -- role-correctness is
-    // core_tests.zig's job (layerDrawBoxPlacesEachPieceByRoleTest); this
-    // just proves the name-resolution + dispatch wiring reaches Layer.drawBox.
-    var r: usize = 1;
-    while (r <= 3) : (r += 1) {
-        var c: usize = 1;
-        while (c <= 3) : (c += 1) {
-            switch (ctx.root.cell(r, c).style.bg) {
-                .icon => {},
-                .color, .image => return error.TestUnexpectedResult,
-            }
-        }
+    const np = ctx.root.nine_patches.get(1) orelse return error.TestUnexpectedResult;
+    try testz.expectEqual(np.row, 1);
+    try testz.expectEqual(np.col, 2);
+    try testz.expectEqual(np.rows, 4);
+    try testz.expectEqual(np.cols, 6);
+    try testz.expectEqual(np.style.image, 42);
+    // It's a layer object, not cells: nothing in the grid changed.
+    switch (ctx.root.cell(1, 2).style.bg) {
+        .color => {},
+        .image, .icon => return error.TestUnexpectedResult,
     }
 }
 
-pub fn drawBoxOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn createNinePatchUnknownStyleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
-    try registerTestBoxStyle(&d, alloc, &ctx, "box");
-    ctx.root.setProperty(.{ .cursor = .{ .row = 3, .col = 2 } });
 
     const message =
-        \\{"jsonrpc":"2.0","method":"draw_box","params":{"rows":2,"cols":2,"style":"box"}}
+        \\{"jsonrpc":"2.0","id":1,"method":"create_nine_patch","params":{"row":0,"col":0,"rows":3,"cols":3,"style":"not-a-style"}}
     ;
-    try testz.expectTrue((try d.handle(alloc, message)).response == null);
-
-    switch (ctx.root.cell(3, 2).style.bg) {
-        .icon => {},
-        .color, .image => return error.TestUnexpectedResult,
-    }
+    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownNinePatchStyle);
 }
 
-pub fn drawBoxUnknownStyleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+/// `update_nine_patch` merges only what was sent; `destroy_nine_patch`
+/// removes it, and a second destroy is `UnknownNinePatch`.
+pub fn updateAndDestroyNinePatchTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
+    try registerTestNinePatch(&ctx);
 
-    const message =
-        \\{"jsonrpc":"2.0","method":"draw_box","params":{"row":0,"col":0,"rows":3,"cols":3,"style":"not-a-style"}}
+    const create =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_nine_patch","params":{"row":1,"col":2,"rows":4,"cols":6,"style":"dialog"}}
     ;
-    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.UnknownIcon);
-}
+    const created = try d.handle(alloc, create);
+    defer if (created.response) |r| alloc.free(r);
 
-/// `mode: "stretch"` reaches `Layer.drawBox` -- role-correctness of the
-/// resulting per-cell UV slice is core_tests.zig's job
-/// (`layerDrawBoxStretchModeSlicesFillAcrossInteriorTest`); this just
-/// proves the wire string parses into `core.Layer.BoxMode` and flows
-/// through, unlike the default (omitted `mode`, "tile") which never
-/// slices.
-pub fn drawBoxStretchModeFlowsThroughTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
-    defer ctx.deinit();
-    var d = dispatch.Dispatcher.init(&ctx);
-    try registerTestBoxStyle(&d, alloc, &ctx, "box");
-
-    const message =
-        \\{"jsonrpc":"2.0","method":"draw_box","params":{"row":0,"col":0,"rows":6,"cols":6,"style":"box","mode":"stretch"}}
+    const update =
+        \\{"jsonrpc":"2.0","method":"update_nine_patch","params":{"nine_patch":1,"cols":9}}
     ;
-    try testz.expectTrue((try d.handle(alloc, message)).response == null);
+    try testz.expectTrue((try d.handle(alloc, update)).response == null);
+    const np = ctx.root.nine_patches.get(1).?;
+    try testz.expectEqual(np.cols, 9);
+    try testz.expectEqual(np.rows, 4);
 
-    // The fill cell in the middle of a 4x4 interior gets a quarter-slice,
-    // not the full 0..1 a "tile"-mode (or omitted-mode) draw would give it.
-    const fill_mid = ctx.root.cell(2, 2).style.bg.icon;
-    try testz.expectEqual(fill_mid.src_l, 0.25);
-    try testz.expectEqual(fill_mid.src_r, 0.5);
-}
-
-pub fn drawBoxInvalidModeErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    _ = io;
-    var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
-    defer ctx.deinit();
-    var d = dispatch.Dispatcher.init(&ctx);
-    try registerTestBoxStyle(&d, alloc, &ctx, "box");
-
-    const message =
-        \\{"jsonrpc":"2.0","method":"draw_box","params":{"row":0,"col":0,"rows":3,"cols":3,"style":"box","mode":"not-a-mode"}}
+    const bad_style =
+        \\{"jsonrpc":"2.0","method":"update_nine_patch","params":{"nine_patch":1,"style":"nope"}}
     ;
-    try testz.expectError(d.handle(alloc, message), dispatch.DispatchError.InvalidIconOption);
+    try testz.expectError(d.handle(alloc, bad_style), dispatch.DispatchError.UnknownNinePatchStyle);
+
+    const destroy =
+        \\{"jsonrpc":"2.0","method":"destroy_nine_patch","params":{"nine_patch":1}}
+    ;
+    try testz.expectTrue((try d.handle(alloc, destroy)).response == null);
+    try testz.expectEqual(ctx.root.nine_patches.count(), 0);
+    try testz.expectError(d.handle(alloc, destroy), dispatch.DispatchError.UnknownNinePatch);
 }
 
 pub fn getCellMetricsReturnsSessionDefaultsTest(io: std.Io, alloc: std.mem.Allocator) !void {

@@ -311,6 +311,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (!ok) std.log.warn("glyphwire: no file-type icon theme loaded under {s}/icons/filetype", .{asset_dir});
     }
+    // Nine-patch panel styles (`create_nine_patch`), bundled then user,
+    // the same override order as the icons.
+    const ninepatch_dir = try std.fs.path.join(arena, &.{ asset_dir, "ninepatch" });
+    icons.loadNinePatchesFromDir(io, alloc, &ctx, ninepatch_dir, true);
     // User icons: new names and overrides of the bundled set, from
     // `~/.config/glyphwire/icons/` (same config dir as `host.conf.lua`, see
     // `glyphwire.configDirPath`). Scanned last so a user file at a bundled
@@ -319,6 +323,8 @@ pub fn main(init: std.process.Init) !void {
     if (glyphwire.configDirPath(arena, init.environ_map)) |config_dir| {
         const user_icons = try std.fs.path.join(arena, &.{ config_dir, "icons" });
         icons.loadIconsFromDir(io, alloc, &ctx, user_icons, "", false);
+        const user_ninepatch = try std.fs.path.join(arena, &.{ config_dir, "ninepatch" });
+        icons.loadNinePatchesFromDir(io, alloc, &ctx, user_ninepatch, false);
     } else |_| {}
 
     // `.listen()` inside `bind` is synchronous -- the socket is already

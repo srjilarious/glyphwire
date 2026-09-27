@@ -60,7 +60,8 @@ terms wherever the package goes.
 | `icons/distro/` | Devicon | MIT (`DEVICON-LICENSE.txt`) |
 | `icons/status/` | KDE Oxygen | **LGPL-3.0** (`README.txt`) |
 | `icons/box/` | Generated for this project with Pillow | MPL-2.0, as project assets |
-| `icons/dialog/`, `icons/notify/` | Undocumented — see Open items | Unconfirmed |
+| `ninepatch/` | Generated for this project with Pillow (`scripts/gen-ninepatches.py`) | MPL-2.0, as project assets |
+| `icons/notify/` | Undocumented — see Open items | Unconfirmed |
 
 `scripts/fetch-oxygen.sh`, `scripts/fetch-devicons.sh` and
 `scripts/fetch-icon-themes.sh` are the provenance record for the fetched
@@ -93,9 +94,8 @@ closed before a public release.
 - **`assets/PowerlineSymbols-subset.ttf`** ships with no bundled license
   file. Upstream powerline is MIT; add `PowerlineSymbols-LICENSE.txt`
   alongside the other two font licenses.
-- **`assets/icons/dialog/` and `assets/icons/notify/`** have no `README.txt`
-  recording their origin, unlike every other icon directory. `dialog/` is a
-  9-slice gradient panel and looks generated the same way `box/` was; the
-  three 32x32 `notify/` glyphs match the size and era of the Oxygen-sourced
-  `status/` set. Confirm each and add a `README.txt` — if `notify/` is
-  Oxygen, it is LGPL-3.0 and belongs in the copyleft list above.
+- **`assets/icons/notify/`** has no `README.txt` recording its origin,
+  unlike every other icon directory. The three 32x32 glyphs match the size
+  and era of the Oxygen-sourced `status/` set. Confirm and add a
+  `README.txt` — if it is Oxygen, it is LGPL-3.0 and belongs in the
+  copyleft list above.

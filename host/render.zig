@@ -144,6 +144,10 @@ pub const LayerBatches = struct {
     /// here rather than only consumed during the build.
     built_opacity: f32 = 1.0,
 
+    /// The layer's own `background` property -- its own batch so the
+    /// nine-patches can sit between it and the cells' backgrounds (see
+    /// `drawLayerBatches`).
+    base: ShapeBatch,
     color_bg: ShapeBatch,
     icon_bg: SpriteBatch,
     icon_fg: SpriteBatch,
@@ -158,6 +162,8 @@ pub const LayerBatches = struct {
     /// text included.
     rects: ShapeBatch,
     images: std.ArrayList(TexBatch) = .empty,
+    /// `Layer.nine_patches`' quads, one batch per `.9.png` texture.
+    nine_patches: std.ArrayList(TexBatch) = .empty,
     icon_fallback: std.ArrayList(TexBatch) = .empty,
     /// `text_scale != .x1` glyphs -- see `ScaledTextBatch`.
     scaled_text: std.ArrayList(ScaledTextBatch) = .empty,
@@ -168,6 +174,8 @@ pub const LayerBatches = struct {
         sprite_shader: *host_eng.ManagedShader,
         glyph_shader: *host_eng.ManagedShader,
     ) !LayerBatches {
+        var base = try ShapeBatch.init(alloc, shape_shader);
+        errdefer base.deinit();
         var color_bg = try ShapeBatch.init(alloc, shape_shader);
         errdefer color_bg.deinit();
         var icon_bg = try SpriteBatch.init(alloc, sprite_shader);
@@ -180,6 +188,7 @@ pub const LayerBatches = struct {
         errdefer underline.deinit();
         const rects = try ShapeBatch.init(alloc, shape_shader);
         return .{
+            .base = base,
             .color_bg = color_bg,
             .icon_bg = icon_bg,
             .icon_fg = icon_fg,
@@ -190,6 +199,7 @@ pub const LayerBatches = struct {
     }
 
     fn deinit(self: *LayerBatches, alloc: std.mem.Allocator) void {
+        self.base.deinit();
         self.color_bg.deinit();
         self.icon_bg.deinit();
         self.icon_fg.deinit();
@@ -198,6 +208,8 @@ pub const LayerBatches = struct {
         self.rects.deinit();
         for (self.images.items) |*t| t.batch.deinit();
         self.images.deinit(alloc);
+        for (self.nine_patches.items) |*t| t.batch.deinit();
+        self.nine_patches.deinit(alloc);
         for (self.icon_fallback.items) |*t| t.batch.deinit();
         self.icon_fallback.deinit(alloc);
         for (self.scaled_text.items) |*t| t.batch.deinit();
@@ -949,11 +961,14 @@ pub const Renderer = struct {
         // actual change).
         for (lb.images.items) |*t| t.batch.deinit();
         lb.images.clearRetainingCapacity();
+        for (lb.nine_patches.items) |*t| t.batch.deinit();
+        lb.nine_patches.clearRetainingCapacity();
         for (lb.icon_fallback.items) |*t| t.batch.deinit();
         lb.icon_fallback.clearRetainingCapacity();
         for (lb.scaled_text.items) |*t| t.batch.deinit();
         lb.scaled_text.clearRetainingCapacity();
 
+        lb.base.beginBuild({});
         lb.color_bg.beginBuild({});
         lb.underline.beginBuild({});
         lb.rects.beginBuild({});
@@ -1023,12 +1038,13 @@ pub const Renderer = struct {
         const any_highlight = layer.highlighted_ids.items.len > 0;
 
         // `background` (see `core.PropertyName.background`): one rect
-        // under the whole viewport, emitted first so every cell's own
-        // background and glyph composite over it.
+        // under the whole viewport, in its own `base` batch so the
+        // nine-patches and every cell's own background and glyph
+        // composite over it.
         if (layer.background) |bg| {
             if (bg.a != 0) {
                 addRect(
-                    &lb.color_bg,
+                    &lb.base,
                     host_eng.RectF.fromPosSize(
                         origin_x,
                         origin_y,
@@ -1169,6 +1185,15 @@ pub const Renderer = struct {
             }
         }
 
+        // Nine-patches (`create_nine_patch`): each cell rect goes to
+        // pixels at the live cell size, then `ninePatchQuads` splits it --
+        // corners at native size, edges/center stretched -- and each piece
+        // samples its slice of the `.9.png`.
+        if (layer.nine_patches.count() > 0) {
+            var np_it = layer.nine_patches.valueIterator();
+            while (np_it.next()) |np| self.emitNinePatch(eng, lb, np.*, origin_x, origin_y, off.row, off.col);
+        }
+
         // Overlay rects (`create_rect`): pixel-space boxes in the layer's
         // own content coordinate frame, translated to screen pixels by
         // subtracting the same cell-based scroll offset every other pass
@@ -1202,6 +1227,7 @@ pub const Renderer = struct {
             }
         }
 
+        lb.base.endBuild();
         lb.color_bg.endBuild();
         lb.underline.endBuild();
         lb.rects.endBuild();
@@ -1211,8 +1237,46 @@ pub const Renderer = struct {
         }
         if (fa_tex != null) lb.text.endBuild();
         for (lb.images.items) |*t| t.batch.endBuild();
+        for (lb.nine_patches.items) |*t| t.batch.endBuild();
         for (lb.icon_fallback.items) |*t| t.batch.endBuild();
         for (lb.scaled_text.items) |*t| t.batch.endBuild();
+    }
+
+    /// Emits one nine-patch's quads into its texture's `nine_patches`
+    /// batch. `off_row`/`off_col` are the layer's scroll offset in cells,
+    /// subtracted the same way the rect pass does so a panel pans with the
+    /// content. The texture still carries the 1px guide border, so every
+    /// UV normalizes by the full image size (`ninePatchQuads`' `src` is in
+    /// those coordinates already).
+    fn emitNinePatch(self: *Renderer, eng: *Engine, lb: *LayerBatches, np: glyphwire.NinePatch, origin_x: i32, origin_y: i32, off_row: usize, off_col: usize) void {
+        if (np.rows == 0 or np.cols == 0) return;
+        const entry = self.imageEntryIn(lb.context, np.style.image) orelse return;
+        const tex = self.textureForImage(eng, lb.context, np.style.image) orelse return;
+        const batch = self.texBatchFor(&lb.nine_patches, np.style.image, tex) orelse return;
+
+        const x0 = origin_x + (@as(i32, @intCast(np.col)) - @as(i32, @intCast(off_col))) * geometry.cell_w;
+        const y0 = origin_y + (@as(i32, @intCast(np.row)) - @as(i32, @intCast(off_row))) * geometry.cell_h;
+        const w: u32 = @intCast(@as(i32, @intCast(np.cols)) * geometry.cell_w);
+        const h: u32 = @intCast(@as(i32, @intCast(np.rows)) * geometry.cell_h);
+
+        const tex_w: f32 = @floatFromInt(entry.width);
+        const tex_h: f32 = @floatFromInt(entry.height);
+        for (glyphwire.ninePatchQuads(np.style, w, h)) |q| {
+            if (q.dst_w == 0 or q.dst_h == 0 or q.src_w == 0 or q.src_h == 0) continue;
+            const dest = host_eng.RectF.fromPosSize(
+                x0 + @as(i32, @intCast(q.dst_x)),
+                y0 + @as(i32, @intCast(q.dst_y)),
+                @intCast(q.dst_w),
+                @intCast(q.dst_h),
+            );
+            const src = host_eng.RectF{
+                .l = @as(f32, @floatFromInt(q.src_x)) / tex_w,
+                .t = @as(f32, @floatFromInt(q.src_y)) / tex_h,
+                .r = @as(f32, @floatFromInt(q.src_x + q.src_w)) / tex_w,
+                .b = @as(f32, @floatFromInt(q.src_y + q.src_h)) / tex_h,
+            };
+            addSprite(batch, dest, src);
+        }
     }
 
     /// Finds (or lazily creates + `beginBuild`s) the per-handle sprite
@@ -1368,22 +1432,14 @@ pub const Renderer = struct {
         };
         const dest = host_eng.RectF{ .l = dest_x, .t = dest_y, .r = dest_x + dest_w, .b = dest_y + dest_h };
 
-        // `icon.src_*` is a fraction of the icon (0..1 for a plain
-        // `draw_icon`, a sub-rect only for a box tile). Map it through the
-        // atlas sub-rect when drawing from the atlas; use it directly on a
-        // fallback per-handle texture.
+        // The whole icon: its atlas sub-rect, or all of a fallback
+        // per-handle texture.
         if (atlas_uv) |a| {
-            const src = host_eng.RectF{
-                .l = a.l + icon.src_l * (a.r - a.l),
-                .t = a.t + icon.src_t * (a.b - a.t),
-                .r = a.l + icon.src_r * (a.r - a.l),
-                .b = a.t + icon.src_b * (a.b - a.t),
-            };
-            addSprite(if (foreground) &lb.icon_fg else &lb.icon_bg, dest, src);
+            addSprite(if (foreground) &lb.icon_fg else &lb.icon_bg, dest, a);
         } else {
             const tex = self.textureForImage(eng, lb.context, icon.handle) orelse return;
             const batch = self.texBatchFor(&lb.icon_fallback, icon.handle, tex) orelse return;
-            addSprite(batch, dest, host_eng.RectF{ .l = icon.src_l, .t = icon.src_t, .r = icon.src_r, .b = icon.src_b });
+            addSprite(batch, dest, host_eng.RectF{ .l = 0, .t = 0, .r = 1, .b = 1 });
         }
     }
 
@@ -1475,10 +1531,14 @@ pub const Renderer = struct {
         // vertex alpha, and applied to the textured ones here -- they have
         // no colour channel, so the shader's `tint` uniform carries it.
         const a = lb.built_opacity;
-        // Back to front: colour fills + tints, image cells, icon
+        // Back to front: the layer background, nine-patch panels (under
+        // every cell background, so a selected or highlighted row inside
+        // a dialog still shows), colour fills + tints, image cells, icon
         // backgrounds, foreground/overlay icons, non-atlas icons, text,
         // overlay rects (`create_rect`) last so they sit on top of
         // everything else the layer paints.
+        self.drawBatch(&lb.base, mvp);
+        for (lb.nine_patches.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatch(&lb.color_bg, mvp);
         for (lb.images.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatchTinted(&lb.icon_bg, mvp, a);

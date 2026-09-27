@@ -1228,9 +1228,10 @@ pub const Ui = struct {
     /// in a 40-column box would cover artwork for nothing.
     ///
     /// Border and fill are drawn the same way `buildHelp` draws the help
-    /// popup: a flat background colour and box-drawing characters, not the
-    /// bundled "dialog" 9-patch, whose gradient tiled badly at this scale
-    /// and whose per-cell background didn't survive text drawn over it.
+    /// popup: a flat background colour and box-drawing characters. (This
+    /// predates `create_nine_patch`; the old per-cell `draw_box` "dialog"
+    /// tiles banded their gradient at this scale and lost their per-cell
+    /// background under text drawn over it.)
     /// Every cell -- border, pad and text alike -- is written with an
     /// explicit `bg`, so there is no transparent gap for the page to show
     /// through and nothing depends on a *previous* write's background
@@ -2071,7 +2072,7 @@ pub const Ui = struct {
     /// rather than sending each piece as its own notification: a
     /// half-drawn dialog would otherwise be visible for a frame between
     /// round trips, which is what caused the flicker the character
-    /// border replaced the 9-patch with -- see `setHelp`, which folds
+    /// border replaced the old `draw_box` tiles with -- see `setHelp`, which folds
     /// the `visibility` flip into the same batch on open so the layer's
     /// very first visible frame is already the finished dialog.
     fn buildHelp(self: *Ui, b: *glyphwire.Client.Batch) !void {
