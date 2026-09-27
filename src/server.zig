@@ -1061,6 +1061,42 @@ pub const Server = struct {
         try self.applyPaneLayout(alloc);
     }
 
+    /// A font-size step: new cell pixel metrics for every context, and
+    /// the window's new size in cells now that the same pixels hold a
+    /// different number of them. Applied under one lock so no client can
+    /// read the new metrics against the old grid, or the reverse.
+    ///
+    /// Unlike `reportResize` this always tells every client, even when the
+    /// grid came out the same size: the cells themselves changed, and a
+    /// client that sizes anything in pixels (an image, a rect) has to
+    /// re-read `get_cell_metrics`. A `resize` is that signal -- there is
+    /// no separate cell-metrics notification, and every client that works
+    /// in pixels already re-reads the metrics on `resize`.
+    ///
+    /// Every context is caught up, backgrounded ones included: the metrics
+    /// through `Session.setCellMetricsAll`, and the size through the pane
+    /// layout, which resizes each context in a mapped pane whether or not
+    /// it is the one on screen. A context in an unmapped pane keeps its
+    /// cell size until its pane is laid out again, as with any resize.
+    pub fn reportFontStep(
+        self: *Server,
+        alloc: std.mem.Allocator,
+        cell_px_w: u32,
+        cell_px_h: u32,
+        cols: usize,
+        rows: usize,
+    ) !void {
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            self.session.setCellMetricsAll(cell_px_w, cell_px_h);
+            try self.session.resizeWindow(cols, rows);
+        }
+        // Idempotent over an unchanged grid, but its per-connection
+        // `resize` always goes out -- which is the point here.
+        try self.applyPaneLayout(alloc);
+    }
+
     /// Broadcasts a `focus` notification (`{focused}`) to every
     /// connection subscribed to `"focus"` -- the host's window gained or
     /// lost the keyboard. Sent by glyphwire-host on the edge only.

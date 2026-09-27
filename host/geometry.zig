@@ -60,6 +60,46 @@ pub fn resizeSettleStep(
     return .commit;
 }
 
+pub const PxSize = struct { w: i32, h: i32 };
+
+/// How many whole cells of `cell_px_w` x `cell_px_h` fit a framebuffer of
+/// `fb` pixels, after the right `gutter` and a `content_pad_px` margin on
+/// each side. A leftover fractional cell is floored away (the render
+/// letterboxes it), and the result never drops below `min_grid_*`, so a
+/// window too small for the minimum grid clips rather than collapsing.
+pub fn gridForFramebuffer(fb: PxSize, gutter: i32, cell_px_w: i32, cell_px_h: i32) GridSize {
+    return .{
+        .cols = @intCast(@max(@divTrunc(fb.w - 2 * content_pad_px - gutter, cell_px_w), min_grid_cols)),
+        .rows = @intCast(@max(@divTrunc(fb.h, cell_px_h), min_grid_rows)),
+    };
+}
+
+/// The framebuffer size that holds exactly `grid` -- the inverse of
+/// `gridForFramebuffer`, so feeding the result back in returns `grid`.
+pub fn framebufferForGrid(grid: GridSize, gutter: i32, cell_px_w: i32, cell_px_h: i32) PxSize {
+    return .{
+        .w = @as(i32, @intCast(grid.cols)) * cell_px_w + 2 * content_pad_px + gutter,
+        .h = @as(i32, @intCast(grid.rows)) * cell_px_h,
+    };
+}
+
+/// What a font-size step does to the window: the grid it now holds and
+/// the framebuffer it must grow to, if any. The window is kept as it is
+/// and the grid follows the new cell size, except where even
+/// `min_grid_*` no longer fits -- then only the short axis grows, just
+/// enough to hold the minimum. `grow` is null when the window can stay.
+pub const FontStepFit = struct {
+    grid: GridSize,
+    grow: ?PxSize,
+};
+
+pub fn fontStepFit(fb: PxSize, gutter: i32, cell_px_w: i32, cell_px_h: i32) FontStepFit {
+    const grid = gridForFramebuffer(fb, gutter, cell_px_w, cell_px_h);
+    const need = framebufferForGrid(grid, gutter, cell_px_w, cell_px_h);
+    if (need.w <= fb.w and need.h <= fb.h) return .{ .grid = grid, .grow = null };
+    return .{ .grid = grid, .grow = .{ .w = @max(fb.w, need.w), .h = @max(fb.h, need.h) } };
+}
+
 // Blank margin, in pixels, kept on both sides of the composited layers:
 // one strip against the window's left border, and one between the grid's
 // right edge and the always-on scrollbar. Every layer's screen origin is
@@ -99,9 +139,10 @@ pub const scrollbar_min_thumb_px: f32 = 24;
 /// foreground child never hearing about the new size -- was a missing
 /// `layout` notification on resize, since fixed.
 ///
-/// `syncWindowSize` (px -> cell count) and `resizeWindowForCells` (cell
-/// count -> px) both read this through `WindowSizing.gutterPx`, so the
-/// reserved width and the width the window is sized to always agree.
+/// `syncWindowSize` and `applyFontSize` (px -> cell count, and cell
+/// count -> px when a font step has to grow the window) both read this
+/// through `WindowSizing.gutterPx`, so the reserved width and the width
+/// the window is sized to always agree.
 pub fn rightGutterPx(bar_enabled: bool) i32 {
     return if (bar_enabled) scrollbar_width_px else 0;
 }

@@ -268,6 +268,51 @@ pub fn resizeSettleDebouncesADragTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(geometry.resizeSettleStep(committed, committed, b, 200), .settled);
 }
 
+// ─── geometry.gridForFramebuffer / fontStepFit ───────────────────────
+
+fn expectGrid(got: geometry.GridSize, cols: usize, rows: usize) !void {
+    try testz.expectEqual(got.cols, cols);
+    try testz.expectEqual(got.rows, rows);
+}
+
+pub fn gridForFramebufferRoundTripsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const gutter = geometry.scrollbar_width_px;
+    const grid: geometry.GridSize = .{ .cols = 80, .rows = 24 };
+    const fb = geometry.framebufferForGrid(grid, gutter, 10, 20);
+    try testz.expectEqual(fb.w, 800 + 2 * geometry.content_pad_px + gutter);
+    try testz.expectEqual(fb.h, 480);
+    try expectGrid(geometry.gridForFramebuffer(fb, gutter, 10, 20), 80, 24);
+    // A leftover part-cell is floored away, not rounded up.
+    try expectGrid(geometry.gridForFramebuffer(.{ .w = fb.w + 9, .h = fb.h + 19 }, gutter, 10, 20), 80, 24);
+}
+
+pub fn fontStepFitKeepsTheWindowAndReflowsTheGridTest(_: std.Io, _: std.mem.Allocator) !void {
+    const gutter = geometry.scrollbar_width_px;
+    const fb = geometry.framebufferForGrid(.{ .cols = 80, .rows = 24 }, gutter, 10, 20);
+
+    // Doubling the cell halves the grid; the window stays put.
+    const bigger = geometry.fontStepFit(fb, gutter, 20, 40);
+    try expectGrid(bigger.grid, 40, 12);
+    try testz.expectTrue(bigger.grow == null);
+
+    // Halving it doubles the grid.
+    const smaller = geometry.fontStepFit(fb, gutter, 5, 10);
+    try expectGrid(smaller.grid, 160, 48);
+    try testz.expectTrue(smaller.grow == null);
+}
+
+pub fn fontStepFitGrowsOnlyForTheMinimumGridTest(_: std.Io, _: std.mem.Allocator) !void {
+    const gutter = geometry.scrollbar_width_px;
+    // Wide enough for plenty of columns, but only 2 rows at 40px.
+    const fb: geometry.PxSize = .{ .w = 2000, .h = 80 };
+    const fit = geometry.fontStepFit(fb, gutter, 20, 40);
+    try testz.expectEqual(fit.grid.rows, geometry.min_grid_rows);
+    const grow = fit.grow orelse return error.TestExpectedGrow;
+    // Only the short axis grows, and just enough for the minimum.
+    try testz.expectEqual(grow.w, fb.w);
+    try testz.expectEqual(grow.h, @as(i32, geometry.min_grid_rows) * 40);
+}
+
 // ─── key_repeat: which keys repeat, and at what timing ───────────────
 
 pub fn keyRepeatNamedKeysRepeatUnmodifiedTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -416,7 +461,7 @@ pub fn rightGutterFollowsTheVisibleContextsBarTest(_: std.Io, _: std.mem.Allocat
     // gutter follows `Context.window_scrollbar`. The cost is a grid
     // reflow when such a context comes and goes -- see
     // `geometry.rightGutterPx`. Both sides of the px<->cell math
-    // (`syncWindowSize`, `resizeWindowForCells`) read this one value, so
+    // (`syncWindowSize`, `applyFontSize`) read this one value, so
     // the reserved width and the width the window is sized to agree.
     try testz.expectEqual(geometry.rightGutterPx(true), geometry.scrollbar_width_px);
     try testz.expectEqual(geometry.rightGutterPx(false), 0);
