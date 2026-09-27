@@ -46,7 +46,6 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const ls = @import("ls_support");
 const pane_mod = @import("pane.zig");
 const actions = @import("actions.zig");
 const fileops = @import("fileops.zig");
@@ -68,9 +67,9 @@ const LineEdit = dialog_mod.LineEdit;
 const lineedit = @import("applib").lineedit;
 const Color = glyphwire.Color;
 const Batch = glyphwire.Client.Batch;
-const lsfmt = ls.format;
-const lsentries = ls.entries;
-const gridlayout = ls.gridlayout;
+const lsfmt = @import("applib").format;
+const lsentries = @import("applib").entries;
+const gridlayout = @import("applib").gridlayout;
 
 fn rgb(r: u8, g: u8, b: u8) Color {
     return .{ .r = r, .g = g, .b = b };
@@ -1763,8 +1762,7 @@ pub const Ui = struct {
     ///
     /// This is what makes a remote pane usable. The full repaint below is
     /// a ~54 KB frame at 160x50; holding an arrow key sends one repaint
-    /// per keystroke either way, and this one is a couple of KB. See
-    /// docs/investigations/salacommander-remote-lag.md.
+    /// per keystroke either way, and this one is a couple of KB.
     ///
     /// `level` says what the two cursor rows owe. At `.bg` -- every plain
     /// cursor move -- only the highlight moved, so each is one `set_bg`
@@ -2215,7 +2213,6 @@ fn errorText(err: anyerror) []const u8 {
 /// reason moving the cursor in a remote session lagged -- at key-repeat
 /// rates it is over a megabyte a second of JSON through the ssh trunk.
 /// A cursor move changes two rows, so it sends those two instead: ~2 KB.
-/// See docs/investigations/salacommander-remote-lag.md.
 pub const PaneDirty = enum {
     /// Nothing changed; nothing is sent.
     none,

@@ -14,8 +14,7 @@
 //!
 //! That is the whole difference from the abandoned first version, which
 //! made panes out of *layers* in one context that gmux owned, and therefore
-//! had to be in the path of every byte of output and every keystroke. See
-//! `docs/investigations/context-panes.md`.
+//! had to be in the path of every byte of output and every keystroke.
 //!
 //! **The wire tree is edited minimally, not rebuilt.** glyphwire has no way
 //! to read a split's current (possibly mouse-dragged) child weights back,

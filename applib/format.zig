@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! Pure size / permission / timestamp formatting for glyphwire-ls's `-l`
-//! listing (and the plain stdout fallback). No IO, no libc -- everything
+//! listing (and the plain stdout fallback) and salacommander's size and
+//! date columns. No IO, no libc -- everything
 //! here works off values already in a `FileEntry`.
 
 const std = @import("std");

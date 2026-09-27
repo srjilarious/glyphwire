@@ -4,7 +4,7 @@
 //! Loads glyphwire-ls's startup config, `~/.config/glyphwire/ls.conf.lua`, a
 //! Lua script that assigns a global `config` table -- the same shape
 //! `host.conf.lua` uses. Running it yields an `LsConfig`. Split into the
-//! `ls_support` module (like `ls/icons.zig` / `ls/format.zig`) so
+//! `ls_support` module so
 //! `tests/ls_tests.zig` can exercise the parse without a running client.
 //!
 //! Right now `ls.conf.lua` only carries the on-screen icon sizes; colour

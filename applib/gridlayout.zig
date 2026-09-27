@@ -1,15 +1,13 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! Column-packing math for glyphwire-ls's plain (non `-l`) listing. Given
 //! the entry count, the widest entry's display width in *cells*, and the
 //! layer width in cells, it decides how many entry columns fit and where
 //! each entry lands (column-major, like `ls -C`). Kept in its own file --
 //! only `glyphwire.codepointWidth` (East Asian Width) is imported, no
-//! IO/client/server -- and exposed as the `ls_support` build module so
-//! both `ls/main.zig` and the test runner (`tests/ls_tests.zig`) can
-//! import it; a Zig module can't reach across directories with a relative
-//! `@import`.
+//! IO/client/server -- and in `applib` because salacommander's large-icon
+//! view packs its panes with it too.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");

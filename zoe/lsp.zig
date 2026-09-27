@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! zoe's Language Server Protocol client: the transport, the handshake, and
-//! the handful of requests the editor makes. See
-//! `docs/investigations/zoe-lsp.md` for the design and the phasing.
+//! the handful of requests the editor makes.
 //!
 //! **The framing is already ours.** An LSP message is a `Content-Length`
 //! header, a blank line, then that many body bytes -- which is glyphwire's
@@ -78,8 +77,8 @@ fn trace(comptime fmt: []const u8, args: anytype) void {
 /// server connection has no business knowing what a display server is -- and
 /// because `tests/zoe_tests.zig` can then drive the whole transport, the
 /// handshake and the message parsing with no process and no window, which is
-/// what `docs/investigations/zoe-lsp.md` promised: the transport is tested
-/// against bytes, not against an installed zls.
+/// the point: the transport is tested against bytes, not against an
+/// installed zls.
 pub const Waker = struct {
     ctx: ?*anyopaque = null,
     func: ?*const fn (?*anyopaque) void = null,
