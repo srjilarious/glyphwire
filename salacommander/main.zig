@@ -5,7 +5,9 @@
 //! Midnight Commander and Total Commander.
 //!
 //! Launched from a glyphwire-aware shell it opens a full-screen context
-//! with a directory listing on each side: F2 renames in place, F5 copies,
+//! with a directory listing on each side: F2 renames in place, F3
+//! searches everything below the pane's directory, F4 opens the file in
+//! the configured editor (zoe unless told otherwise), F5 copies,
 //! F6 moves or renames, F7 makes a directory, F8 deletes, Space/Insert
 //! mark, Alt+Up goes to the parent directory, Alt+D edits the pane's
 //! path where it's shown, Tab switches sides, Ctrl+F3..F6 (or a click

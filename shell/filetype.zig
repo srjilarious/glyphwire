@@ -14,6 +14,10 @@
 //! piece of work. This is the seam they will hang off when they land --
 //! the answer grows from "text or not" into "which viewer", and the
 //! callers in `ui.zig` are already the places that decide.
+//!
+//! salacommander's F4 asks the same question before starting the editor,
+//! so a file zoe would refuse is refused in the file manager instead of
+//! in an editor that opened only to say no.
 
 const std = @import("std");
 
@@ -35,4 +39,16 @@ pub const sniff_bytes: usize = 8 * 1024;
 pub fn looksBinary(head: []const u8) bool {
     const n = @min(head.len, sniff_bytes);
     return std.mem.indexOfScalar(u8, head[0..n], 0) != null;
+}
+
+/// `looksBinary` over the file at `path`, reading only its head -- for a
+/// caller that decides before loading anything (salacommander's F4),
+/// where zoe already has the whole file in hand.
+pub fn fileLooksBinary(io: std.Io, path: []const u8) !bool {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+    var buf: [sniff_bytes]u8 = undefined;
+    var r = file.reader(io, &.{});
+    const n = r.interface.readSliceShort(&buf) catch return error.ReadFailed;
+    return looksBinary(buf[0..n]);
 }
