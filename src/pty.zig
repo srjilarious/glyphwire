@@ -24,8 +24,8 @@
 //! `isatty()` is true (so `ls`/`grep`/`git` auto-colour and show
 //! progress), stdin actually works, and Ctrl-C reaches the child as a
 //! real SIGINT via the tty line discipline. Full-screen apps (`vim`,
-//! `htop`, `less`'s alternate screen) still need more -- see
-//! `docs/investigations/libghostty-vt-fallback.md` §7a, tiers B1/B2.
+//! `htop`, `less`'s alternate screen) still need more: the screen model
+//! `core.Layer` interprets on top of this.
 
 const std = @import("std");
 const builtin = @import("builtin");

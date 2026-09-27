@@ -30,6 +30,12 @@
 //!                salacommander)
 //!   `finder`     the fuzzy file finder model (zoe, salacommander)
 //!   `filetype`   "is this text?" (zoe, salacommander)
+//!   `entries`    directory scanning and per-entry classification
+//!                (gw-ls, salacommander)
+//!   `format`     ls-style size / permission / date formatting (gw-ls,
+//!                salacommander)
+//!   `gridlayout` column-major grid packing (gw-ls, salacommander)
+//!   `icons`      file name -> icon name (gw-ls, salacommander, zoe)
 
 pub const lineedit = @import("lineedit.zig");
 pub const keybind = @import("keybind.zig");
@@ -40,5 +46,9 @@ pub const fuzzy = @import("fuzzy.zig");
 pub const gitignore = @import("gitignore.zig");
 pub const finder = @import("finder.zig");
 pub const filetype = @import("filetype.zig");
+pub const entries = @import("entries.zig");
+pub const format = @import("format.zig");
+pub const gridlayout = @import("gridlayout.zig");
+pub const icons = @import("icons.zig");
 
 pub const LineEdit = lineedit.LineEdit;

@@ -4,13 +4,9 @@
 //! Helpers shared by glyphwire-ls (`ls/main.zig`) and its test runner
 //! (`tests/ls_tests.zig`), gathered as the `ls_support` build module -- a
 //! Zig module can't reach across directories with a relative `@import`,
-//! the same reason `shell_support` exists. `gridlayout` / `format` /
-//! `icons` are pure; `config` pulls in `ziglua` to parse `ls.conf.lua`
-//! (same as `shell_support`'s `shell/config.zig`). `entries` is the
-//! directory scanner, shared with salacommander.
+//! the same reason `shell_support` exists. Only `config` is gw-ls's
+//! alone; it pulls in `ziglua` to parse `ls.conf.lua`. The scanner, the
+//! formatting, the grid packing and the icon lookup are shared with
+//! salacommander and zoe, so they live in `applib`.
 
-pub const gridlayout = @import("gridlayout.zig");
-pub const format = @import("format.zig");
-pub const icons = @import("icons.zig");
 pub const config = @import("config.zig");
-pub const entries = @import("entries.zig");

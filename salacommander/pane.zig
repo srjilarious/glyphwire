@@ -19,9 +19,8 @@
 //! (`selection`).
 
 const std = @import("std");
-const ls = @import("ls_support");
 
-const lsentries = ls.entries;
+const lsentries = @import("applib").entries;
 pub const FileEntry = lsentries.FileEntry;
 pub const EntryKind = lsentries.EntryKind;
 

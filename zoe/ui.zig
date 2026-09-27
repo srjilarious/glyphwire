@@ -35,7 +35,6 @@
 //! a pure scroll of less than a screen it shifts the rows it already drew
 //! with one `move_content` and repaints only the exposed band
 //! (`planBufferRender`), rather than rewriting the whole pane every tick.
-//! See docs/investigations/zoe-editor.md for what a full diff would add.
 //!
 //! **The caret is drawn by two parties.** Insert mode uses the host's own
 //! caret as a thin bar on the buffer layer (`set_caret_shape`), the way
@@ -47,7 +46,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const ls_icons = @import("ls_support").icons;
+const ls_icons = @import("applib").icons;
 
 const editor = @import("editor.zig");
 const display = @import("display.zig");
@@ -550,8 +549,7 @@ const Slot = struct {
     /// The `Buffer.edits` value the language servers have been told about.
     /// A mismatch arms the `didChange` debounce -- deliberately a separate
     /// watermark from `hl_edits` rather than a second consumer of
-    /// `Buffer.pending_edits`, which the highlighter drains alone (see
-    /// `docs/investigations/zoe-lsp.md`).
+    /// `Buffer.pending_edits`, which the highlighter drains alone.
     lsp_sent_edits: u64 = 0,
     /// The LSP document version to send next. Monotonic per buffer, as the
     /// protocol requires; a server uses it to discard a stale reply.
@@ -682,8 +680,7 @@ pub const Ui = struct {
     /// The language servers, and everything they have said. The pool is
     /// null when `config.lsp.enabled` is false; it exists but holds no
     /// server when none of the configured binaries is installed, which is
-    /// the ordinary case on a machine with only one toolchain. See
-    /// `docs/investigations/zoe-lsp.md`.
+    /// the ordinary case on a machine with only one toolchain.
     lsp_pool: ?lsp.Pool = null,
     diags: diag.Store,
     /// Whether a sign column is reserved in the gutter. Decided once at
@@ -3143,7 +3140,7 @@ pub const Ui = struct {
 
     // ── Language servers ────────────────────────────────────────────────
     //
-    // See `docs/investigations/zoe-lsp.md`. The short version: `zoe/lsp.zig`
+    // `zoe/lsp.zig`
     // owns the processes and the protocol, `zoe/diag.zig` owns what they
     // said, and everything here is the editor's half -- when to tell them
     // about a buffer, what to do with an answer, and how a diagnostic gets

@@ -7,9 +7,9 @@ const testz = @import("testz");
 // glyphwire-ls is an executable (no importable module), but its pure
 // helpers are gathered into the `ls_support` module (see build.zig)
 // precisely so they can be exercised here.
-const gridlayout = @import("ls_support").gridlayout;
-const lsfmt = @import("ls_support").format;
-const lsicons = @import("ls_support").icons;
+const gridlayout = @import("applib").gridlayout;
+const lsfmt = @import("applib").format;
+const lsicons = @import("applib").icons;
 const lsconfig = @import("ls_support").config;
 
 const small_opts: gridlayout.Options = .{ .icon_cols = 2, .block_rows = 1 };
