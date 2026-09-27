@@ -157,8 +157,12 @@ const bg_shell = Color{ .r = 14, .g = 15, .b = 18, .a = 255 };
 
 // The Ctrl+P finder popup. Lighter than the panes it floats over, so it
 // reads as being in front of them rather than as another pane -- the
-// same trick salacommander's dialogs use.
+// same trick salacommander's dialogs use. Its background is normally the
+// `panel` nine-patch on the frame layer behind it (`finder_frame_style`);
+// `bg_finder` is the flat fallback for a host without that style, and the
+// colour the query caret's inverted character is drawn in.
 const bg_finder = Color{ .r = 38, .g = 38, .b = 46, .a = 255 };
+const finder_frame_style = "panel";
 const bg_finder_header = Color{ .r = 40, .g = 90, .b = 170, .a = 255 };
 const fg_finder_header = Color{ .r = 235, .g = 240, .b = 250, .a = 255 };
 const bg_finder_selected = Color{ .r = 70, .g = 120, .b = 200, .a = 255 };
@@ -666,6 +670,14 @@ pub const Ui = struct {
     finder: ?Finder = null,
     finder_layer: glyphwire.LayerHandle,
     finder_list_layer: glyphwire.LayerHandle,
+    /// Under both finder layers and one cell bigger all round: it carries
+    /// the popup's border and background as a nine-patch, which the two
+    /// layers above leave showing through their transparent cells.
+    finder_frame_layer: glyphwire.LayerHandle,
+    /// The frame's nine-patch, or null when the host has no
+    /// `finder_frame_style` -- the finder layers then paint `bg_finder`
+    /// themselves and the popup has no border.
+    finder_frame_patch: ?glyphwire.NinePatchHandle,
 
     /// The language servers, and everything they have said. The pool is
     /// null when `config.lsp.enabled` is false; it exists but holds no
@@ -893,7 +905,20 @@ pub const Ui = struct {
         // pane (creation order is the initial stacking -- see
         // `raise_layer` in docs/api.md). Neither layer joins the split
         // tree: the popup floats, so it is placed by cell position and
-        // sized by `renderFinder`, and stays invisible until Ctrl+P.
+        // sized by `renderFinder`, and stays invisible until Ctrl+P. The
+        // frame goes first so it stacks under the other two.
+        const finder_frame_layer = try client.createLayer(finder_min_cols + 2, finder_min_rows + 2, 0);
+        const finder_frame_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(
+            finder_frame_layer,
+            0,
+            0,
+            finder_min_rows + 2,
+            finder_min_cols + 2,
+            finder_frame_style,
+        ) catch |err| blk: {
+            std.log.warn("zoe: no '{s}' nine-patch for the finder frame ({t}); drawing it flat", .{ finder_frame_style, err });
+            break :blk null;
+        };
         const finder_layer = try client.createLayer(finder_min_cols, finder_header_rows, 0);
         const finder_list_layer = try client.createLayer(finder_min_cols, 1, 0);
         // The hover popup, floating like the finder's layers and placed
@@ -911,10 +936,13 @@ pub const Ui = struct {
         const completion_layer = try client.createLayer(complete_max_cols, 1, 0);
         try client.setLayerVisible(completion_layer, false);
         try client.setLayerBackground(completion_layer, bg_complete);
+        try client.setLayerVisible(finder_frame_layer, false);
         try client.setLayerVisible(finder_layer, false);
         try client.setLayerVisible(finder_list_layer, false);
-        try client.setLayerBackground(finder_layer, bg_finder);
-        try client.setLayerBackground(finder_list_layer, bg_finder);
+        if (finder_frame_patch == null) {
+            try client.setLayerBackground(finder_layer, bg_finder);
+            try client.setLayerBackground(finder_list_layer, bg_finder);
+        }
         // The list is sized to its visible rows and reports the match
         // count as its `content_extent`, so the host's bar is
         // proportional to the whole answer rather than to the dozen rows
@@ -948,6 +976,8 @@ pub const Ui = struct {
             .status_layer = status_layer,
             .finder_layer = finder_layer,
             .finder_list_layer = finder_list_layer,
+            .finder_frame_layer = finder_frame_layer,
+            .finder_frame_patch = finder_frame_patch,
             .hover_layer = hover_layer,
             .hover_shadow_layer = hover_shadow_layer,
             .completion_layer = completion_layer,
@@ -2615,6 +2645,7 @@ pub const Ui = struct {
         self.finder = null;
         self.client.setLayerVisible(self.finder_layer, false) catch {};
         self.client.setLayerVisible(self.finder_list_layer, false) catch {};
+        self.client.setLayerVisible(self.finder_frame_layer, false) catch {};
     }
 
     /// Opens whatever the popup is on and closes it. A file that isn't
@@ -2697,13 +2728,15 @@ pub const Ui = struct {
     }
 
     /// A left click while the popup is open: a list row picks that file,
-    /// anywhere else dismisses it. The click is swallowed either way --
-    /// a modal popup whose buffer moves its cursor behind it is a trap.
+    /// anywhere outside the popup (its frame included) dismisses it. The
+    /// click is swallowed either way -- a modal popup whose buffer moves
+    /// its cursor behind it is a trap.
     fn finderClick(self: *Ui, cell: glyphwire.CellPos) !void {
         const f = if (self.finder) |*open| open else return;
         const r = self.finder_rect;
-        const inside = cell.row >= r.row and cell.row < r.row + r.rows and
-            cell.col >= r.col and cell.col < r.col + r.cols;
+        const fr = finderFrameRect(r) orelse r;
+        const inside = cell.row >= fr.row and cell.row < fr.row + fr.rows and
+            cell.col >= fr.col and cell.col < fr.col + fr.cols;
         if (!inside) {
             self.closeFinder();
             return;
@@ -2737,6 +2770,15 @@ pub const Ui = struct {
         };
     }
 
+    /// The frame around the popup rect `r`: one cell out on every side,
+    /// or null when `r` touches the window's top or left edge and there
+    /// is no cell to put it in (only in a pane too small for the popup's
+    /// preferred size, since `finderRect` otherwise leaves a margin).
+    fn finderFrameRect(r: Bounds) ?Bounds {
+        if (r.row == 0 or r.col == 0) return null;
+        return .{ .row = r.row - 1, .col = r.col - 1, .rows = r.rows + 2, .cols = r.cols + 2 };
+    }
+
     fn renderFinder(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const f = if (self.finder) |*open| open else return;
         const r = self.finderRect();
@@ -2749,6 +2791,7 @@ pub const Ui = struct {
             self.finder_list_rows = 0;
             try batch.setLayerVisible(self.finder_layer, false);
             try batch.setLayerVisible(self.finder_list_layer, false);
+            try batch.setLayerVisible(self.finder_frame_layer, false);
             return;
         }
 
@@ -2764,6 +2807,13 @@ pub const Ui = struct {
         try batch.setLayerSize(self.finder_list_layer, r.cols, list_rows);
         try batch.setLayerCellPosition(self.finder_list_layer, r.row + finder_header_rows, r.col);
 
+        const frame = if (self.finder_frame_patch != null) finderFrameRect(r) else null;
+        if (frame) |fr| {
+            try batch.setLayerSize(self.finder_frame_layer, fr.cols, fr.rows);
+            try batch.setLayerCellPosition(self.finder_frame_layer, fr.row, fr.col);
+            try batch.updateNinePatch(self.finder_frame_layer, self.finder_frame_patch.?, .{ .rows = fr.rows, .cols = fr.cols });
+        }
+
         try self.renderFinderHeader(batch, f, r.cols);
         try self.renderFinderList(batch, f, r.cols, list_rows);
 
@@ -2774,6 +2824,7 @@ pub const Ui = struct {
         try batch.setLayerContentExtent(self.finder_list_layer, r.cols, f.matchCount());
         try batch.setLayerScrollOffset(self.finder_list_layer, f.top, 0);
 
+        try batch.setLayerVisible(self.finder_frame_layer, frame != null);
         try batch.setLayerVisible(self.finder_layer, true);
         try batch.setLayerVisible(self.finder_list_layer, true);
     }
@@ -2812,12 +2863,13 @@ pub const Ui = struct {
         // asked for: a text layer's cursor property is the next *write*
         // position, not a visual marker (same as the `:` line).
         const prompt = "> ";
+        // No `bg` from here on (the default transparent one): the panel
+        // behind the popup is its background.
         try batch.writeTextOpts(prompt, .{
             .layer = self.finder_layer,
             .row = 1,
             .col = 0,
             .fg = fg_dim,
-            .bg = bg_finder,
         });
         const field_cols = cols -| prompt.len;
         try batch.writeTextOpts(f.query.text(), .{
@@ -2825,7 +2877,6 @@ pub const Ui = struct {
             .row = 1,
             .col = prompt.len,
             .fg = fg_text,
-            .bg = bg_finder,
             .max_cols = field_cols,
             .pad = true,
         });
@@ -2854,7 +2905,7 @@ pub const Ui = struct {
         cols: usize,
         rows: usize,
     ) !void {
-        try batch.clearArea(.{ .layer = self.finder_list_layer, .bg = bg_finder });
+        try batch.clearArea(.{ .layer = self.finder_list_layer });
 
         if (f.matchCount() == 0) {
             try batch.writeTextOpts("  No matching files", .{
@@ -2862,7 +2913,6 @@ pub const Ui = struct {
                 .row = 0,
                 .col = 0,
                 .fg = fg_dim,
-                .bg = bg_finder,
                 .max_cols = cols,
             });
             return;
@@ -2872,7 +2922,7 @@ pub const Ui = struct {
         while (i < rows) : (i += 1) {
             const path = f.matchAt(f.top + i) orelse break;
             const selected = f.top + i == f.cursor;
-            const bg = if (selected) bg_finder_selected else bg_finder;
+            const bg: ?Color = if (selected) bg_finder_selected else null;
             // The directory part is dimmed and the filename isn't: what
             // you are looking for is nearly always the name, and the
             // directories are there to tell two of them apart.
