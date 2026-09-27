@@ -344,8 +344,12 @@ activates the pick. A context carries an optional `title` for that list
 The one party that has to notice is the shell that launched the program,
 because it is waiting on it. A shell learns its own context and what is
 on top of its pane from `list_contexts`, and treats its own context
-reaching the top again while its child still runs as "the child was put
-in the background": it stops waiting and returns to its prompt. It uses
+reaching the top again while its child still runs, *and the child's
+context is still in the stack behind it*, as "the child was put in the
+background": it stops waiting and returns to its prompt. A program that
+exits destroys its context before its process is reaped, which also
+brings the shell's context back on top; the child's context being gone
+is what tells that apart from a switch. It uses
 the pane stack rather than the `context` notification's handle because
 under a multiplexer that notification names the *focused* context, which
 changes whenever focus moves to another pane.

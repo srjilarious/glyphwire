@@ -4551,7 +4551,8 @@ const Prompt = struct {
 
     /// Reads this pane's stack after a visibility change while `job` holds
     /// the foreground. Returns true when this shell's own context is back
-    /// on top -- the job has been put in the background. Otherwise
+    /// on top with the job's context still behind it -- the job has been
+    /// put in the background. Otherwise
     /// remembers whatever else is on top as the job's screen the first
     /// time there is one, which is how `fg` later knows what to activate.
     ///
@@ -4568,7 +4569,16 @@ const Prompt = struct {
             if (job.context == null) job.context = top;
             return false;
         }
-        return job.context != null;
+        // Back on top, but only a switch away if the job's screen is still
+        // in the stack behind this one. A program on its way out destroys
+        // its context before it is reaped, which also puts this shell back
+        // on top; that is an exit in progress, and the loop keeps waiting
+        // for the reap instead of announcing a background job.
+        const ctx = job.context orelse return false;
+        for (entries[1..]) |entry| {
+            if (entry.context == ctx) return true;
+        }
+        return false;
     }
 
     /// The end of a foreground run: collects the reader thread and the
