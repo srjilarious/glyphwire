@@ -25,42 +25,12 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const gitignore = @import("gitignore.zig");
+const gitignore = @import("shell_support").gitignore;
 
-/// What a listing or a walk is allowed to show. Off, both dotfiles and
-/// anything `.gitignore` excludes are skipped; Ctrl+H turns it on and
-/// every path appears.
-///
-/// One flag for both, deliberately: "show me everything" is a single
-/// intention, and two toggles would mean remembering which of them is
-/// hiding the file you are looking for. `.git/` stays out either way
-/// until you ask, since it is a dotfile.
-pub const Visibility = struct {
-    show_hidden: bool = false,
-
-    /// Whether an entry is one the tree hides by default -- a dotfile, or
-    /// a path the `.gitignore` files in scope exclude.
-    ///
-    /// Deliberately independent of `show_hidden`: with the flag on the
-    /// entry is listed, but it is still *a hidden one*, and the pane draws
-    /// it dim (`Entry.hidden`) so the toggle explains itself rather than
-    /// silently doubling the size of the listing.
-    pub fn isHidden(
-        _: Visibility,
-        ignores: *const gitignore.Stack,
-        name: []const u8,
-        rel: []const u8,
-        is_dir: bool,
-    ) bool {
-        if (name.len > 0 and name[0] == '.') return true;
-        return ignores.isIgnored(rel, is_dir);
-    }
-
-    /// Whether to leave it out of the listing entirely.
-    pub fn skips(self: Visibility, hidden: bool) bool {
-        return hidden and !self.show_hidden;
-    }
-};
+/// What a listing or a walk is allowed to show. Lives with the ignore
+/// matcher it consults, in `shell_support`, so salacommander's F3 finder
+/// applies the same rule the sidebar does.
+pub const Visibility = gitignore.Visibility;
 
 /// Cells of indent per nesting level.
 pub const indent_cols: usize = 2;

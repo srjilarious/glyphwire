@@ -1,8 +1,11 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The model behind zoe's Ctrl+P file finder: every file under the tree
-//! root, the query typed against it, and the ranked subset that answers.
+//! The model behind zoe's Ctrl+P file finder and salacommander's F3
+//! search: every file under a root, the query typed against it, and the
+//! ranked subset that answers. It lives in `shell_support` rather than
+//! either program so the two rank and hide paths identically; the popup
+//! each one draws around it is its own.
 //!
 //! The listing is read **once**, when the popup opens, and thrown away
 //! when it closes. A finder that stayed live would need a directory
@@ -16,14 +19,18 @@
 //! Ranking is over the whole path relative to the root, so `zoeui`
 //! finds `zoe/ui.zig`.
 //!
+//! Directories are left out unless `Options.include_dirs` says otherwise:
+//! an editor opens files, but a file manager's search is as often after a
+//! folder. A listed directory carries a trailing `/`, which is what tells
+//! the two apart in the popup and in `selected`.
+//!
 //! Everything here is pure apart from `scan`, so `tests/zoe_tests.zig`
 //! can build a finder out of `addPath` calls and exercise the ranking and
 //! the cursor without touching a filesystem.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const fuzzy = @import("shell_support").fuzzy;
-const tree_mod = @import("tree.zig");
+const fuzzy = @import("fuzzy.zig");
 const gitignore = @import("gitignore.zig");
 
 /// The walk stops after this many files and says so (`truncated`), rather
@@ -41,6 +48,16 @@ pub const max_depth: usize = 16;
 pub const Match = struct {
     index: usize,
     score: usize,
+};
+
+pub const Options = struct {
+    /// Which paths the walk may collect -- the caller's own hidden-file
+    /// flag, so the popup and the listing behind it agree about which
+    /// files exist.
+    visible: gitignore.Visibility = .{},
+    /// List directories too, each with a trailing `/`. They are walked
+    /// into either way.
+    include_dirs: bool = false,
 };
 
 pub const Finder = struct {
@@ -63,16 +80,15 @@ pub const Finder = struct {
     /// header: a finder that silently can't see half your files is worse
     /// than one that admits it.
     truncated: bool = false,
-    /// What the walk was allowed to collect -- the tree pane's flag, so
-    /// Ctrl+P and the sidebar agree about which files exist.
-    visible: tree_mod.Visibility = .{},
+    /// What the walk was allowed to collect. See `Options`.
+    opts: Options = .{},
 
     /// Walks `root` and builds the listing. A directory that can't be
     /// read is skipped rather than failing the whole scan, the same rule
     /// the file tree uses -- an unreadable folder should read as an empty
     /// one, not stop the finder opening.
-    pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8, visible: tree_mod.Visibility) !Finder {
-        var self: Finder = .{ .alloc = alloc, .root = try alloc.dupe(u8, root), .visible = visible };
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8, opts: Options) !Finder {
+        var self: Finder = .{ .alloc = alloc, .root = try alloc.dupe(u8, root), .opts = opts };
         errdefer self.deinit();
 
         // Pushed on the way into each directory and popped on the way out,
@@ -142,8 +158,8 @@ pub const Finder = struct {
             // `zig-out/` out without it having to know what zig is. An
             // ignored directory is not walked either, which is most of
             // what makes this scan cheap on a tree that has been built.
-            const hidden = self.visible.isHidden(ignores, raw.name, child_rel, raw.kind == .directory);
-            if (self.visible.skips(hidden)) {
+            const hidden = self.opts.visible.isHidden(ignores, raw.name, child_rel, raw.kind == .directory);
+            if (self.opts.visible.skips(hidden)) {
                 self.alloc.free(child_rel);
                 continue;
             }
@@ -154,6 +170,11 @@ pub const Finder = struct {
             // the tree can't turn the walk into a loop.
             if (raw.kind == .directory) {
                 defer self.alloc.free(child_rel);
+                if (self.opts.include_dirs) {
+                    const listed = try std.fmt.allocPrint(self.alloc, "{s}/", .{child_rel});
+                    errdefer self.alloc.free(listed);
+                    try self.paths.append(self.alloc, listed);
+                }
                 const child_dir = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
                 defer self.alloc.free(child_dir);
                 try self.scan(io, ignores, child_dir, child_rel, depth + 1);
