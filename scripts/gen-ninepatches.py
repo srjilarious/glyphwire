@@ -54,25 +54,36 @@ def with_guides(art, h_span, v_span):
     return out
 
 
-def dialog():
-    # Light-to-dark blue, left to right, under a white rounded border. The
-    # gradient lives in the horizontal stretch span, so it spreads across
-    # the whole panel however wide it is while the corners stay crisp.
-    w, h, corner, radius = 40, 24, 8, 6
-    light, dark = (134, 168, 196), (20, 36, 90)
+def vertical_panel(w, h, corner, radius, top, bottom, border):
+    """A rounded panel whose fill runs `top` to `bottom` down the vertical
+    stretch span (flat under each corner), under a 1px `border`. The ramp
+    stretches with the panel's height at pixel precision, so it reads as
+    one smooth gradient however many rows the panel covers."""
     fill = Image.new("RGBA", (w * SS, h * SS))
     px = fill.load()
-    for x in range(w * SS):
-        # Flat colour under each corner, the ramp across the middle.
-        t = min(max((x / SS - corner) / (w - 2 * corner), 0.0), 1.0)
-        c = tuple(round(a + (b - a) * t) for a, b in zip(light, dark)) + (255,)
-        for y in range(h * SS):
+    for y in range(h * SS):
+        t = min(max((y / SS - corner) / (h - 2 * corner), 0.0), 1.0)
+        c = tuple(round(a + (b - a) * t) for a, b in zip(top, bottom)) + (255,)
+        for x in range(w * SS):
             px[x, y] = c
     art = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
     art.paste(fill, (0, 0), rounded_mask(w, h, radius))
-    art.alpha_composite(rounded_outline(w, h, radius, 1, 0, (255, 255, 255, 255)))
+    art.alpha_composite(rounded_outline(w, h, radius, 1, 0, border))
     art = art.resize((w, h), Image.BOX)
     return with_guides(art, (corner, w - corner - 1), (corner, h - corner - 1))
+
+
+def dialog():
+    # Light blue at the top to dark navy at the bottom, under a white
+    # rounded border -- glyphwire-notify's toast.
+    return vertical_panel(24, 40, 8, 6, (134, 168, 196), (20, 36, 90), (255, 255, 255, 255))
+
+
+def panel():
+    # A dark popup background with a muted rounded border: zoe's finder
+    # frame. The fill falls off slightly towards the bottom so a tall
+    # panel doesn't read as a flat slab.
+    return vertical_panel(24, 40, 8, 6, (44, 44, 54), (30, 30, 38), (104, 112, 140, 255))
 
 
 def box():
@@ -86,7 +97,7 @@ def box():
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    for name, make in (("dialog", dialog), ("box", box)):
+    for name, make in (("dialog", dialog), ("panel", panel), ("box", box)):
         path = OUT / f"{name}.9.png"
         make().save(path)
         print(f"wrote {path}")
