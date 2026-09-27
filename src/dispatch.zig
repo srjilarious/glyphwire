@@ -238,6 +238,41 @@ const PropertyParams = struct {
     mode: ?[]const u8 = null,
     /// `"background"`'s colour; omitted clears it back to transparent.
     color: ?protocol.Color = null,
+    /// `"shadow"`'s shape; omitted removes the shadow.
+    shadow: ?ShadowJson = null,
+};
+
+/// `core.Shadow` on the wire. Every field is optional with the core's
+/// default, so `{"shadow": {"y": 6, "blur": 10}}` is a whole shadow.
+const ShadowJson = struct {
+    x: i32 = 0,
+    y: i32 = 0,
+    blur: u32 = 0,
+    radius: u32 = 0,
+    spread: i32 = 0,
+    color: protocol.Color = .{ .r = 0, .g = 0, .b = 0, .a = 128 },
+
+    fn toCore(self: ShadowJson) core.Shadow {
+        return .{
+            .x = self.x,
+            .y = self.y,
+            .blur = self.blur,
+            .radius = self.radius,
+            .spread = self.spread,
+            .color = colorFromJson(self.color),
+        };
+    }
+
+    fn fromCore(sh: core.Shadow) ShadowJson {
+        return .{
+            .x = sh.x,
+            .y = sh.y,
+            .blur = sh.blur,
+            .radius = sh.radius,
+            .spread = sh.spread,
+            .color = .{ .r = sh.color.r, .g = sh.color.g, .b = sh.color.b, .a = sh.color.a },
+        };
+    }
 };
 
 const CursorResult = struct { row: usize, col: usize };
@@ -251,6 +286,7 @@ const OpacityResult = struct { value: f32 };
 const PtyModeResult = struct { enabled: bool };
 const ScrollModeResult = struct { mode: []const u8 };
 const BackgroundResult = struct { color: ?protocol.Color };
+const ShadowResult = struct { shadow: ?ShadowJson };
 const ScrollOffsetResult = struct { row: usize, col: usize, max_row: usize, max_col: usize };
 const ScrollbarsResult = struct {
     vertical: bool,
@@ -2071,6 +2107,8 @@ pub const Dispatcher = struct {
             .{ .pty_mode = p.enabled }
         else if (std.mem.eql(u8, p.property, "mouse_select"))
             .{ .mouse_select = p.enabled }
+        else if (std.mem.eql(u8, p.property, "shadow"))
+            .{ .shadow = if (p.shadow) |sh| sh.toCore() else null }
         else
             return DispatchError.UnknownProperty;
 
@@ -2191,6 +2229,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "opacity")) {
             const v = layer.getProperty(.opacity).opacity;
             return try rpc.response(alloc, id, OpacityResult{ .value = v });
+        } else if (std.mem.eql(u8, p.property, "shadow")) {
+            const sh: ?ShadowJson = if (layer.getProperty(.shadow).shadow) |v| ShadowJson.fromCore(v) else null;
+            return try rpc.response(alloc, id, ShadowResult{ .shadow = sh });
         }
         return DispatchError.UnknownProperty;
     }

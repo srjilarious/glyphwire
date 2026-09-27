@@ -176,6 +176,7 @@ pub const RectHandle = core.RectHandle;
 pub const RectError = core.RectError;
 pub const Rect = core.Rect;
 pub const RectUpdate = core.RectUpdate;
+pub const Shadow = core.Shadow;
 pub const NinePatchHandle = core.NinePatchHandle;
 pub const NinePatchError = core.NinePatchError;
 pub const NinePatchParseError = core.NinePatchParseError;

@@ -590,6 +590,7 @@ takes the value as **flat sibling fields**, not a nested `value` object —
 | `visibility` | `{visible}` | get; set on non-root layers only |
 | `pty_mode` | `{enabled}` | get / set |
 | `mouse_select` | `{enabled}` — let the host drag-select on this layer | get / set |
+| `shadow` | `{shadow: {x?, y?, blur?, radius?, spread?, color?}}` — a soft drop shadow the host draws under the layer: a rounded rect of the layer's bounds moved by `x`/`y`, grown by `spread`, corner `radius`, blurred by `blur` (pixels; `blur`/`radius` clamp to 64), in `color` (default black, alpha 128). No `shadow` removes it. Not part of the layer's bounds | get / set |
 | `profile` | profiler state | get |
 
 `size` on the **root** layer is what answers "how big is my window": a

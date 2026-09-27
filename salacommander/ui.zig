@@ -327,6 +327,9 @@ pub const Ui = struct {
         try client.setLayerMouseSelect(shell_layer, true);
         try client.setLayerVisible(shell_layer, false);
         try client.setLayerBackground(dialog_layer, bg_dialog);
+        // Host-drawn, so it follows the dialog as it's resized for each
+        // question and hides with it.
+        try client.setLayerShadow(dialog_layer, glyphwire.Shadow.dialog);
         try client.setLayerVisible(dialog_layer, false);
 
         self.* = .{
