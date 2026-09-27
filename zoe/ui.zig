@@ -96,6 +96,16 @@ const tree_scroll_margin: usize = 3;
 /// text for as long as it is open, so this is also the per-tab ceiling.
 const max_file_bytes: usize = 64 * 1024 * 1024;
 
+/// How long a whole-buffer parse may hold up the frame that needs it
+/// before zoe draws a highlighted prefix instead and finishes the parse
+/// in the background (`Highlighter.beginParse`). Files that parse inside
+/// it -- most of them -- are drawn once, fully coloured.
+const first_parse_budget_ms: i64 = 8;
+
+/// One slice of a background parse, run between events: short enough
+/// that a key typed meanwhile waits no longer than this.
+const parse_slice_ms: i64 = 10;
+
 // The palette. Flat and dark; the panes have to paint their own
 // background because a cell whose background is pure black draws nothing
 // (see `host/render.zig`), which would leave the shell's scrollback
@@ -1377,18 +1387,25 @@ pub const Ui = struct {
             //
             // The one timed wait is the `didChange` debounce: while one is
             // armed, wait no longer than its deadline (see `armLspChange`).
+            //
+            // A background parse (a big file's highlighting) turns the wait
+            // into a poll: take what has queued, then give the parse one
+            // slice, so keys never sit behind more than one slice of it.
             self.armLspChange();
             const timeout: std.Io.Timeout = if (self.lsp_change_due) |due|
                 .{ .deadline = due }
             else
                 .none;
-            if (try self.listener.next(timeout)) |first| {
+            const parsing = self.highlightPending();
+            const next = if (parsing) self.listener.pollNext() else try self.listener.next(timeout);
+            if (next) |first| {
                 try self.handleEvent(first);
                 while (!self.quit) {
                     const ev = self.listener.pollNext() orelse break;
                     try self.handleEvent(ev);
                 }
             }
+            if (parsing and !self.quit) self.stepHighlight();
             // A wake with nothing queued, or the deadline passing: either way
             // this is where the debounced change goes out.
             if (self.lspChangeDue()) self.lspFlushChange();
@@ -3674,8 +3691,13 @@ pub const Ui = struct {
         const buf = &self.buf.ed.buf;
         self.hl_dirty_lines.clearRetainingCapacity();
 
-        if (!h.ready() or buf.edits_overflowed or buf.pending_edits.items.len == 0) {
-            try h.reparse(buf);
+        // A whole-buffer parse: the first one, or one an edit journal can't
+        // be replayed onto -- including a prefix tree from a staged parse
+        // still running, which an edit restarts. Staged, so a big file
+        // draws its first screen highlighted without waiting for the rest
+        // (see `beginParse`); `run` finishes it between events.
+        if (!h.ready() or h.parsing() or buf.edits_overflowed or buf.pending_edits.items.len == 0) {
+            _ = try h.beginParse(buf, self.parsePrefixEnd(), self.parseBudget(first_parse_budget_ms));
             self.buf.full_redraw = true;
             return false;
         }
@@ -3721,6 +3743,45 @@ pub const Ui = struct {
             }
         }
         return true;
+    }
+
+    /// Where a staged parse's provisional prefix ends: the end of the line
+    /// one whole screen below the bottom of the pane, so a first scroll
+    /// stays coloured and a construct the cut splits (an unterminated
+    /// block comment) mis-colours rows nobody is looking at.
+    fn parsePrefixEnd(self: *const Ui) usize {
+        const buf = &self.buf.ed.buf;
+        const last = self.buf.top_line + 2 * @as(usize, self.buffer_bounds.rows);
+        return buf.lineEnd(@min(last, buf.lineCount() -| 1));
+    }
+
+    fn parseBudget(self: *const Ui, ms: i64) syntax.ParseBudget {
+        return .{ .time = .{ .io = self.io, .ms = ms } };
+    }
+
+    /// Any buffer, shown or not, with a staged parse still running.
+    fn highlightPending(self: *const Ui) bool {
+        for (self.buffers.items) |slot| {
+            if (slot.hl) |*h| if (h.parsing()) return true;
+        }
+        return false;
+    }
+
+    /// Gives every buffer's parked parse one more slice. One that
+    /// finishes on the active buffer repaints the pane: rows past the
+    /// prefix were drawn plain, and rows near the cut may change colour.
+    /// A background buffer that finishes just has its full tree ready for
+    /// when it is next shown (`setActive` repaints then anyway).
+    fn stepHighlight(self: *Ui) void {
+        for (self.buffers.items) |slot| {
+            const h = if (slot.hl) |*x| x else continue;
+            if (!h.parsing()) continue;
+            const progress = h.continueParse(self.parseBudget(parse_slice_ms)) catch .done;
+            if (progress == .done and slot == self.buf) {
+                slot.full_redraw = true;
+                self.buffer_dirty = true;
+            }
+        }
     }
 
     /// Adds `line` to `hl_dirty_lines` if it isn't already there. The set

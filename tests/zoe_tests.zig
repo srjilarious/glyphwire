@@ -1972,6 +1972,152 @@ pub fn syntaxIncrementalReparseMatchesFullTest(io: std.Io, alloc: std.mem.Alloca
     }
 }
 
+// ─── Staged (budgeted) parsing ─────────────────────────────────────────
+
+/// A JSON array long enough that a full parse runs through many of
+/// tree-sitter's progress checks, so a `.checks` budget can stop it.
+fn bigJson(alloc: std.mem.Allocator) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "[\n");
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        try out.appendSlice(alloc, if (i + 1 < 2000) "  {\"k\": 1},\n" else "  {\"k\": 1}\n");
+    }
+    try out.appendSlice(alloc, "]\n");
+    return out.toOwnedSlice(alloc);
+}
+
+fn expectSameSpans(alloc: std.mem.Allocator, buf: *const Buffer, a: *syntax.Highlighter, b: *syntax.Highlighter) !void {
+    var sa: std.ArrayList(syntax.Span) = .empty;
+    defer sa.deinit(alloc);
+    var sb: std.ArrayList(syntax.Span) = .empty;
+    defer sb.deinit(alloc);
+
+    var line: usize = 0;
+    while (line < buf.lineCount()) : (line += 1) {
+        try a.lineSpans(buf.lineStart(line), buf.lineEnd(line), &sa);
+        try b.lineSpans(buf.lineStart(line), buf.lineEnd(line), &sb);
+        try testz.expectEqual(sa.items.len, sb.items.len);
+        for (sa.items, sb.items) |x, y| {
+            try testz.expectEqual(x.start, y.start);
+            try testz.expectEqual(x.end, y.end);
+            try testz.expectEqual(x.color.r, y.color.r);
+        }
+    }
+}
+
+pub fn syntaxStagedParseFinishesSmallFileInOneStepTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const g = reg.get("json") orelse return error.GrammarMissing;
+
+    var buf = try Buffer.initFromText(alloc, "{\"a\": 12}\n");
+    defer buf.deinit();
+
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer hl.deinit();
+    try hl.setLanguage("json", g);
+
+    // Far too few operations to reach a progress check: never staged.
+    try testz.expectTrue(try hl.beginParse(&buf, 0, .{ .checks = 0 }) == .done);
+    try testz.expectFalse(hl.parsing());
+    try testz.expectTrue(hl.ready());
+}
+
+pub fn syntaxStagedParseShowsPrefixThenFullTreeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const g = reg.get("json") orelse return error.GrammarMissing;
+
+    const src = try bigJson(alloc);
+    defer alloc.free(src);
+    var buf = try Buffer.initFromText(alloc, src);
+    defer buf.deinit();
+
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer hl.deinit();
+    try hl.setLanguage("json", g);
+
+    // Two checks is a few hundred operations: nowhere near the whole
+    // array, but plenty for the three-line prefix.
+    const prefix_end = buf.lineEnd(3);
+    try testz.expectTrue(try hl.beginParse(&buf, prefix_end, .{ .checks = 2 }) == .pending);
+    try testz.expectTrue(hl.parsing());
+    try testz.expectTrue(hl.ready());
+
+    var spans: std.ArrayList(syntax.Span) = .empty;
+    defer spans.deinit(alloc);
+    // Inside the prefix: coloured already.
+    try hl.lineSpans(buf.lineStart(1), buf.lineEnd(1), &spans);
+    try testz.expectTrue(spans.items.len > 0);
+    // Past it: plain until the full parse lands.
+    try hl.lineSpans(buf.lineStart(1500), buf.lineEnd(1500), &spans);
+    try testz.expectEqual(spans.items.len, 0);
+
+    // Small slices resume where the last stopped rather than restarting,
+    // so they get there.
+    var slices: usize = 0;
+    while (try hl.continueParse(.{ .checks = 2 }) == .pending) : (slices += 1) {
+        try testz.expectTrue(slices < 10_000);
+    }
+    try testz.expectTrue(slices > 0);
+    try testz.expectFalse(hl.parsing());
+
+    // The finished tree is exactly a plain full parse's.
+    var full = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer full.deinit();
+    try full.setLanguage("json", g);
+    try full.reparse(&buf);
+    try expectSameSpans(alloc, &buf, &hl, &full);
+}
+
+pub fn syntaxStagedParseCancelledByReparseTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const g = reg.get("json") orelse return error.GrammarMissing;
+
+    const src = try bigJson(alloc);
+    defer alloc.free(src);
+    var buf = try Buffer.initFromText(alloc, src);
+    defer buf.deinit();
+    buf.track_edits = true;
+
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer hl.deinit();
+    try hl.setLanguage("json", g);
+    try testz.expectTrue(try hl.beginParse(&buf, buf.lineEnd(3), .{ .checks = 2 }) == .pending);
+
+    // An edit lands mid-parse. The prefix tree is not a tree of the
+    // pre-edit buffer, so the incremental path must not build on it: it
+    // drops the parked parse and parses the new text whole.
+    try buf.insert(buf.lineStart(1), "  {\"new\": 2},\n");
+    for (buf.pending_edits.items) |e| hl.applyEdit(e);
+    var changed: std.ArrayList(syntax.ByteRange) = .empty;
+    defer changed.deinit(alloc);
+    try testz.expectFalse(try hl.reparseIncremental(&buf, &changed));
+    buf.clearEdits();
+    try testz.expectFalse(hl.parsing());
+
+    var full = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer full.deinit();
+    try full.setLanguage("json", g);
+    try full.reparse(&buf);
+    try expectSameSpans(alloc, &buf, &hl, &full);
+
+    // And a restarted staged parse starts from the top, not from where
+    // the cancelled one stopped.
+    try testz.expectTrue(try hl.beginParse(&buf, buf.lineEnd(3), .{ .checks = 2 }) == .pending);
+    while (try hl.continueParse(.{ .checks = 1_000_000 }) == .pending) {}
+    try expectSameSpans(alloc, &buf, &hl, &full);
+}
+
 // ─── Injection queries ────────────────────────────────────────────────
 
 fn markdownStackInstalled(io: std.Io) bool {
