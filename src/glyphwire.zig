@@ -34,6 +34,7 @@ pub const HighlightSnapshot = client.HighlightSnapshot;
 pub const ErrorReport = client.ErrorReport;
 pub const InputListener = client.InputListener;
 pub const InputStateSnapshot = client.InputStateSnapshot;
+pub const ContextList = client.ContextList;
 pub const ResizeEvent = client.ResizeEvent;
 pub const ShutdownEvent = client.ShutdownEvent;
 pub const FocusEvent = client.FocusEvent;

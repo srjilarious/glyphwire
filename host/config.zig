@@ -5,6 +5,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const geometry = @import("geometry.zig");
 const key_repeat = @import("key_repeat.zig");
+const host_eng = @import("host_eng");
 
 // Font defaults. `host.conf.lua` (a global `config` table with
 // `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
@@ -166,6 +167,66 @@ pub const ProfileConfig = struct {
     log_interval_ms: f64 = profile_log_ms_default,
 };
 
+/// A host-owned key chord: one key plus the modifiers that must be held
+/// with it, exactly (an extra modifier held is a different chord). What
+/// `host.conf.lua`'s `context_switcher_key` parses into.
+pub const Chord = struct {
+    key: host_eng.input.Key,
+    ctrl: bool = false,
+    alt: bool = false,
+    shift: bool = false,
+    super: bool = false,
+
+    pub fn matches(self: Chord, ctrl: bool, alt: bool, shift: bool, super: bool) bool {
+        return self.ctrl == ctrl and self.alt == alt and self.shift == shift and self.super == super;
+    }
+};
+
+/// Super+F12: a chord no program binds (Ctrl+Z stays free for undo, and
+/// the Super modifier is otherwise unused inside the window).
+pub const context_switcher_default: Chord = .{ .key = .F12, .super = true };
+
+/// Parses a chord written `"super+f12"` / `"ctrl+alt+tab"`: `+`-separated,
+/// case-insensitive, modifiers (`ctrl`/`control`, `alt`, `shift`,
+/// `super`/`win`/`meta`) in any order and the key last, named as
+/// `host_eng.input.Key` names it (`f12`, `grave_accent`, `a`). Null for
+/// anything malformed: an unknown name, no key, or two keys.
+pub fn parseChord(text: []const u8) ?Chord {
+    var chord: Chord = .{ .key = .unknown };
+    var have_key = false;
+    var it = std.mem.splitScalar(u8, text, '+');
+    while (it.next()) |raw| {
+        const part = std.mem.trim(u8, raw, " ");
+        if (part.len == 0) return null;
+        if (std.ascii.eqlIgnoreCase(part, "ctrl") or std.ascii.eqlIgnoreCase(part, "control")) {
+            chord.ctrl = true;
+        } else if (std.ascii.eqlIgnoreCase(part, "alt")) {
+            chord.alt = true;
+        } else if (std.ascii.eqlIgnoreCase(part, "shift")) {
+            chord.shift = true;
+        } else if (std.ascii.eqlIgnoreCase(part, "super") or std.ascii.eqlIgnoreCase(part, "win") or std.ascii.eqlIgnoreCase(part, "meta")) {
+            chord.super = true;
+        } else {
+            if (have_key) return null;
+            chord.key = keyFromName(part) orelse return null;
+            have_key = true;
+        }
+    }
+    if (!have_key) return null;
+    return chord;
+}
+
+/// `host_eng.input.Key` by name, ignoring case (`f12` finds `F12`).
+fn keyFromName(name: []const u8) ?host_eng.input.Key {
+    inline for (@typeInfo(host_eng.input.Key).@"enum".field_names) |field| {
+        if (std.ascii.eqlIgnoreCase(name, field)) {
+            const key = @field(host_eng.input.Key, field);
+            return if (key == .unknown) null else key;
+        }
+    }
+    return null;
+}
+
 /// Everything `config_load.loadConfig` resolves from `host.conf.lua`.
 pub const HostConfig = struct {
     font: FontConfig = .{},
@@ -183,6 +244,10 @@ pub const HostConfig = struct {
     /// warns and falls back to `oxygen`. `arena`-owned when set from
     /// `host.conf.lua`, otherwise this literal.
     icon_theme: []const u8 = default_icon_theme,
+    /// The chord that opens the context switcher (`host/switcher.zig`),
+    /// or null when `host.conf.lua` turned it off with
+    /// `context_switcher_key = false`.
+    context_switcher: ?Chord = context_switcher_default,
 };
 
 /// Maps `config.cursor_shape`'s string to a `CursorShape`, or null for an

@@ -285,6 +285,7 @@ pub const Ui = struct {
         const context = try client.createContext(null, null, 0, false);
         errdefer client.destroyContext(context) catch {};
         try listener.attachContext(context);
+        try client.setContextTitle("salacommander");
         // Nothing here takes text at a host caret; the dialog's field
         // draws its own.
         try client.setCaretVisible(false);

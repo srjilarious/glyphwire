@@ -88,12 +88,21 @@ pub const KeyInput = struct {
         if (profile_toggle and kb.pressed(.p)) _ = self.app.profiler.toggleHud();
         if (profile_toggle and kb.pressed(.r)) _ = self.app.profiler.toggleForceRedraw();
 
+        // The context switcher holds this frame's presses back, but never
+        // a release: a key already down when it opened has to be let up in
+        // `Session.input`, or its down-set dedupes every later press of it
+        // into nothing (the same wedge `mouse_down` guards against). A
+        // release of a press the switcher kept is a no-op there.
+        const switcher_took = self.app.switcher.consumed;
+
         var any_pressed = false;
         const field_names = @typeInfo(app_mod.Key).@"enum".field_names;
         inline for (field_names) |field_name| {
             const key = @field(app_mod.Key, field_name);
             if (self.swallowsKey(key, kb, profile_toggle)) {
                 // Consumed elsewhere; don't forward it.
+            } else if (kb.pressed(key) and switcher_took) {
+                // The switcher's.
             } else if (kb.pressed(key)) {
                 any_pressed = true;
                 self.app.server.reportKey(self.app.alloc, field_name, true) catch |err| {
@@ -174,6 +183,8 @@ pub const KeyInput = struct {
     /// The 256-byte buffer bounds one frame's worth of committed text;
     /// `Keyboard`'s own per-frame text buffer is capped well below that.
     pub fn reportTextInput(self: *KeyInput, eng: *Engine) bool {
+        // A digit picking a row in the context switcher arrives here too.
+        if (self.app.switcher.consumed) return false;
         var buf: [256]u8 = undefined;
         const n = eng.inputs.keyboard.text(&buf);
         if (n > 0) {
@@ -294,6 +305,8 @@ pub const KeyInput = struct {
         // (they move the selection, not the shell's line) -- don't
         // synthesize repeats the shell would act on.
         if (self.app.selection.mode) return;
+        // Nor while the context switcher has the keyboard.
+        if (self.app.switcher.open or self.app.switcher.consumed) return;
         // The host never moves the caret itself on an arrow key: whoever
         // has the screen positions it. There used to be a local Left/Right
         // "preview" nudge here to hide the round trip, but the host can't

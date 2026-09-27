@@ -330,6 +330,24 @@ owning connection has disconnected, so a full-screen program that dies
 without `destroy_context` does not leave its surface stuck on screen. The
 same rule governs layers (`create_layer` / `adopt_layer`).
 
+**Switching between programs (job control).** Because a context that is
+not on top keeps running and keeps its screen, putting a full-screen
+program "in the background" is nothing more than changing which context
+is on top of its pane: no signal, no suspend. The host owns a switcher
+for this (Super+F12 by default) that lists the focused pane's stack and
+activates the pick. A context carries an optional `title` for that list
+(`create_context`'s `title`, or `set_context_title`); a client
+**SHOULD** name its context after itself.
+
+The one party that has to notice is the shell that launched the program,
+because it is waiting on it. A shell learns its own context and what is
+on top of its pane from `list_contexts`, and treats its own context
+reaching the top again while its child still runs as "the child was put
+in the background": it stops waiting and returns to its prompt. It uses
+the pane stack rather than the `context` notification's handle because
+under a multiplexer that notification names the *focused* context, which
+changes whenever focus moves to another pane.
+
 ### 4.3 Layer
 
 A layer is a grid of cells with a cursor, a viewport, an optional
@@ -435,12 +453,14 @@ Each entry gives the method, its kind, its params and its result.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `create_context` | request | `width?`, `height?`, `scrollback_rows?` = 0, `window_scrollbar?` = true | `{context}` |
+| `create_context` | request | `width?`, `height?`, `scrollback_rows?` = 0, `window_scrollbar?` = true, `title?` | `{context}` |
 | `destroy_context` | notification | `context` | — |
 | `activate_context` | notification | `context` | — |
 | `attach_context` | notification | `context` | — |
 | `attach_layer` | notification | `layer?` | — |
 | `adopt_context` | notification | `context` | — |
+| `set_context_title` | notification | `title` | — |
+| `list_contexts` | request | — | `{current, contexts: [{context, title, visible}]}` |
 | `set_window_scrollbar` | notification | `visible` | — |
 | `set_caret_layer` | notification | `layer?` | — |
 | `set_caret_visible` | notification | `visible` | — |
@@ -462,6 +482,17 @@ auto-restore. Ownership-checked. The root context reports
 `activate_context` makes a context visible **without** changing what the
 issuing connection draws on. A client backgrounds itself by activating
 context `0` and restores itself by activating its own handle.
+
+`set_context_title` names the issuing connection's current context
+(`create_context`'s `title` does the same at creation). Display only: the
+host's context switcher lists it and a shell's `jobs` prints it. No
+ownership needed, so a shell can name the context it inherited. Capped at
+128 bytes, cut on a UTF-8 boundary.
+
+`list_contexts` returns the issuing connection's **own pane's** stack, top
+(on screen) first, each with its `title` (empty if never set) and
+`visible` (true for the first only), plus `current`: the connection's own
+current context. It never reveals other panes.
 
 `attach_context` retargets the issuing connection onto an existing
 context; ownership is untouched. This is how a paired input listener joins

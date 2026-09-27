@@ -21,6 +21,7 @@ const panes_mod = @import("panes.zig");
 const pane_proc_mod = @import("pane_proc.zig");
 const redraw_mod = @import("redraw.zig");
 const profiler_mod = @import("profiler.zig");
+const switcher_mod = @import("switcher.zig");
 
 const CursorConfig = config.CursorConfig;
 const CursorShape = config.CursorShape;
@@ -62,6 +63,9 @@ const RedrawSig = struct {
     divider_preview_x: f32,
     divider_preview_y: f32,
     divider_preview_on: bool,
+    /// The context switcher's change-counter -- opening, closing and
+    /// moving the selection repaint an overlay no cell knows about.
+    switcher_gen: u64,
 };
 
 pub const EngOptions: host_eng.EngineOptions = .{
@@ -176,6 +180,9 @@ pub const App = struct {
     table_sort: table_sort_mod.TableSort,
     outline_toggle: outline_toggle_mod.OutlineToggle,
     panes: panes_mod.Panes,
+    /// Super+F12's context switcher. Its chord comes from `host.conf.lua`;
+    /// `main` sets it after `init`.
+    switcher: switcher_mod.Switcher,
     /// The programs `spawn_in_pane` started, one per pane. Null when
     /// nothing has ever asked for a pane, which is every session without a
     /// window manager -- so the common case pays nothing for this.
@@ -216,6 +223,7 @@ pub const App = struct {
             .table_sort = .{ .app = undefined },
             .outline_toggle = .{ .app = undefined },
             .panes = .{ .app = undefined },
+            .switcher = .{ .app = undefined },
             .window_sizing = .{
                 .app = undefined,
                 .font_path = font.path,
@@ -240,6 +248,7 @@ pub const App = struct {
         app.table_sort.app = app;
         app.outline_toggle.app = app;
         app.panes.app = app;
+        app.switcher.app = app;
         app.window_sizing.app = app;
         app.renderer.app = app;
 
@@ -281,11 +290,16 @@ pub const App = struct {
         // and then resizes the window) is only reconciled against the
         // framebuffer on the *next* frame, once both have settled.
         self.window_sizing.handleFontZoom(eng);
+        // The context switcher's chord and, while it is open, every key
+        // press: first, so nothing below -- selection shortcuts included
+        // -- acts on a key meant for the switcher. `reportKeyEvents` and
+        // `reportTextInput` ask it whether to hold presses back.
+        const switcher_took = self.switcher.handleKeys(eng);
         // Ctrl+Shift+C / +V / +Space and, in keyboard selection mode, the
         // arrow/Home/End/Escape/Enter motions. Runs before
         // `reportKeyEvents`, which swallows the same keys so the shell
         // never sees them (see `Selection.swallows`).
-        self.selection.handleKeys(eng);
+        if (!switcher_took) self.selection.handleKeys(eng);
         // Push the session clipboard buffer to the OS clipboard if it
         // changed (a client's `set_clipboard`, or a selection copy just
         // above). Main-thread SDL call.
@@ -492,6 +506,7 @@ pub const App = struct {
             .divider_preview_x = if (self.panes.preview) |p| p.x else 0,
             .divider_preview_y = if (self.panes.preview) |p| p.y else 0,
             .divider_preview_on = self.panes.preview != null,
+            .switcher_gen = self.switcher.gen,
         };
     }
 

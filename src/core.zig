@@ -6278,6 +6278,15 @@ pub const Context = struct {
     /// why every existing client is unaffected by panes existing at all.
     origin_row: usize = 0,
     origin_col: usize = 0,
+    /// A short human name for what this context is showing ("zoe
+    /// main.zig", "salacommander"), set by `create_context`'s `title` or
+    /// `set_context_title`. Empty until a program names itself. Only
+    /// read for display: glyphwire-host's context switcher lists it, and
+    /// `list_contexts` hands it to a shell's `jobs`. Capped at
+    /// `max_title_len` bytes, cut on a UTF-8 boundary.
+    title: std.ArrayList(u8) = .empty,
+
+    pub const max_title_len = 128;
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Context {
         return .{
@@ -6312,6 +6321,21 @@ pub const Context = struct {
         while (metadata_it.next()) |m| self.alloc.free(m.json);
         self.metadata.deinit();
         self.clipboard.deinit(self.alloc);
+        self.title.deinit(self.alloc);
+    }
+
+    /// `set_context_title`: replaces the title (see `title`), truncated to
+    /// `max_title_len` bytes without splitting a UTF-8 sequence.
+    pub fn setTitle(self: *Context, text: []const u8) !void {
+        var len = @min(text.len, max_title_len);
+        // Back off any continuation bytes so the cut lands on a codepoint
+        // start; a title is only ever drawn, and half a character draws as
+        // a replacement glyph.
+        if (len < text.len) {
+            while (len > 0 and (text[len] & 0xC0) == 0x80) len -= 1;
+        }
+        self.title.clearRetainingCapacity();
+        try self.title.appendSlice(self.alloc, text[0..len]);
     }
 
     /// `set_clipboard`: replaces the clipboard buffer with `text` (copied
@@ -8525,6 +8549,15 @@ pub const Session = struct {
             if (p.base == handle) return true;
         }
         return false;
+    }
+
+    /// `pane`'s context stack, bottom (its base) to top (on screen), or
+    /// null for an unknown pane. Borrowed: valid until the next pane or
+    /// context mutation. What the context switcher and `list_contexts`
+    /// show -- the programs a pane is holding, in the order they came up.
+    pub fn paneStack(self: *Session, pane_handle: PaneHandle) ?[]const ContextHandle {
+        const pane = self.panes.getPtr(pane_handle) orelse return null;
+        return pane.stack.items;
     }
 
     /// `activate_context`: brings `handle` to the top of *its own pane's*

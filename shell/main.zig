@@ -36,6 +36,11 @@ const default_prompt_left = "{cwd_full} > ";
 /// The red glyphwire-shell uses for every error line it prints onto the
 /// grid itself (a bad `cd`, a spawn failure, a pipeline syntax error).
 const err_color = glyphwire.Color{ .r = 255, .g = 85, .b = 85 };
+/// `[1] zoe main.zig  (background)` and the other job notices.
+const job_color = glyphwire.Color{ .r = 135, .g = 175, .b = 215 };
+/// How long `hangUpJobs` waits after SIGHUP before SIGKILL, when the shell
+/// exits with jobs still in the background.
+const job_hangup_grace_ms = 500;
 
 /// Rows of context kept between the browse cursor and the top/bottom of
 /// the window while walking scrollback with the arrow keys, when
@@ -509,7 +514,7 @@ fn runPrompt(
     // arrives here, not on the `Client` that asked for it. Free to
     // subscribe to always -- nothing broadcasts it in a session with no
     // remote panes.
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "shutdown", "clipboard", "terminal", "remote" }) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "shutdown", "clipboard", "terminal", "remote", "context" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -1053,7 +1058,7 @@ const CompletionPickerState = struct {
 /// precedence comment there). Offered by Tab completion in command
 /// position alongside aliases and script builtins. `alias` is handled a
 /// step earlier than the rest but is still a name worth completing.
-const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "gwssh", "reload", "unalias", "unset", "zj" };
+const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "fg", "gwssh", "jobs", "reload", "unalias", "unset", "zj" };
 
 /// Where `assets/scripts/provision_remote.lua` puts the remote-side
 /// binaries. Deliberately *not* on the remote `PATH` -- the minimal one a
@@ -1199,6 +1204,15 @@ const Prompt = struct {
     /// (`runPrompt`'s key loop) checks this after every submitted line and
     /// returns instead of drawing another prompt, ending this process.
     should_exit: bool = false,
+    /// Programs put in the background (see `foregroundJob`), oldest
+    /// first. Each is heap-owned; `reportFinishedJobs` reaps and frees the
+    /// ones that exit, `hangUpJobs` the rest on the way out.
+    jobs: std.ArrayList(*Job) = .empty,
+    /// The last `[n]` handed out. Numbers aren't reused within a session,
+    /// so `fg 2` never means a different program than it did a minute ago.
+    next_job_id: u32 = 0,
+    /// Scratch `jobTitle` copies a context title into.
+    job_title_buf: [glyphwire.Context.max_title_len]u8 = undefined,
     /// Every non-empty line ever submitted, oldest first -- `submitLine`
     /// appends to it, `historyUp`/`historyDown` read from it. Each entry
     /// is an owned dupe (the submitted line's `buffer` gets cleared by the
@@ -1448,6 +1462,7 @@ const Prompt = struct {
         // through the explicit `shutdown` flush. `.due` rather than
         // `.force` so an untouched session writes nothing.
         self.flushPersistentState(.due);
+        self.hangUpJobs();
         for (self.history.items) |line| alloc.free(line);
         self.history.deinit(alloc);
         self.clearHistoryPending();
@@ -3411,6 +3426,10 @@ const Prompt = struct {
         // it before anything below reads `grid_*` or `line_start_row`.
         self.adoptPendingResize();
 
+        // Background jobs that ended while this line ran, reported under
+        // its output and above the next prompt.
+        self.reportFinishedJobs();
+
         const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
         try self.drawSetCursor(promptrow.afterCommand(cur.row, cur.col), 0);
         try self.showPrompt();
@@ -3601,6 +3620,10 @@ const Prompt = struct {
             _ = try self.doGwssh(argv[1..]);
         } else if (std.mem.eql(u8, argv[0], "reload")) {
             _ = try self.doReload(argv[1..]);
+        } else if (std.mem.eql(u8, argv[0], "jobs")) {
+            _ = try self.doJobs();
+        } else if (std.mem.eql(u8, argv[0], "fg")) {
+            _ = try self.doFg(argv[1..]);
         } else if (self.runScriptBuiltin(argv)) {
             // handled by the persistent Lua engine
         } else {
@@ -3711,7 +3734,8 @@ const Prompt = struct {
             std.mem.eql(u8, name, "cd") or std.mem.eql(u8, name, "alias") or
             std.mem.eql(u8, name, "export") or std.mem.eql(u8, name, "unset") or
             std.mem.eql(u8, name, "zj") or std.mem.eql(u8, name, "gwssh") or
-            std.mem.eql(u8, name, "reload")) return true;
+            std.mem.eql(u8, name, "reload") or std.mem.eql(u8, name, "jobs") or
+            std.mem.eql(u8, name, "fg")) return true;
         if (self.script_engine) |eng| return eng.hasCommand(name);
         return false;
     }
@@ -3748,6 +3772,12 @@ const Prompt = struct {
         }
         if (std.mem.eql(u8, argv[0], "reload")) {
             return self.doReload(argv[1..]);
+        }
+        if (std.mem.eql(u8, argv[0], "jobs")) {
+            return self.doJobs();
+        }
+        if (std.mem.eql(u8, argv[0], "fg")) {
+            return self.doFg(argv[1..]);
         }
         if (std.mem.eql(u8, argv[0], "alias")) {
             try self.drawText("alias: only supported as a standalone command", err_color, null);
@@ -4236,7 +4266,7 @@ const Prompt = struct {
             try glyphwire.pty.buildEnvWith(alloc, &.{result_fd_var});
         defer alloc.free(envp);
 
-        var pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows), envp) catch |err| {
+        const pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows), envp) catch |err| {
             _ = c.close(result_pipe[0]);
             _ = c.close(result_pipe[1]);
             var buf: [160]u8 = undefined;
@@ -4252,21 +4282,16 @@ const Prompt = struct {
             self.have_status = true;
             return;
         };
-        defer pty.deinit();
         // The child now holds its own copy of the write end (or, if it
         // never touches it, will simply exit and close it); this process
-        // only ever reads (`readResultPipe`, after the child is reaped,
-        // below). Closing the parent's own write-end copy now is what
-        // lets that read see EOF once every process holding the write
-        // end -- just the child -- has exited.
+        // only ever reads (`readResultPipe`, once the child is reaped).
+        // Closing the parent's own write-end copy now is what lets that
+        // read see EOF once every process holding the write end -- just
+        // the child -- has exited.
         _ = c.close(result_pipe[1]);
-        // Closed on every exit from here on, including the early
-        // returns below (a failed reader-thread spawn, no `self.listener`)
-        // -- `readResultPipe` itself only reads, it doesn't close.
-        defer _ = c.close(result_pipe[0]);
 
         // A foreground child's output is the only thing this layer draws
-        // for the rest of `runCommand` -- turn on cross-call VT state
+        // until it exits -- turn on cross-call VT state
         // (`core.Layer.pty_mode`) so a `CSI`/OSC sequence split across two
         // master reads still parses as one and a colour it sets stays set
         // until it resets it, instead of the shell's usual call-scoped
@@ -4275,38 +4300,94 @@ const Prompt = struct {
         // here just means this run keeps the old call-scoped behaviour.
         self.drawSetPtyMode(true) catch {};
 
-        // Record the run's outcome for the next prompt's `{exit}` / `{dur}`.
-        // Runs before `pty.deinit` (defers are LIFO) so `pty` is still
-        // valid; `pty.exit_code` is set by whichever of `reaped`/`wait`
-        // reaped the child below.
-        defer {
-            const elapsed_ms = started.untilNow(self.client.io).raw.toMilliseconds();
-            self.last_dur_ms = if (elapsed_ms > 0) @intCast(elapsed_ms) else 0;
-            self.last_status = pty.exit_code;
-            self.have_status = true;
-        }
-
-        // Sniffed from the child's own output by the reader thread; read
-        // by the key/mouse encoding below to match the modes the child
-        // turned on (application cursor keys, bracketed paste, mouse
-        // reporting). See `glyphwire.ModeTracker`.
-        var modes: ModeTracker = .{};
-
-        var reader_ctx = PtyReaderCtx{ .prompt = self, .master = pty.master, .modes = &modes };
-        const reader = std.Thread.spawn(.{}, ptyReaderThread, .{&reader_ctx}) catch |err| {
-            // Can't mirror output -- tear the child down rather than leak it.
-            pty.signalGroup(std.posix.SIG.KILL);
-            pty.wait();
-            return err;
-        };
+        // From here the job owns the pty, the result pipe's read end and
+        // the reader thread -- on the heap, since a job put in the
+        // background outlives this call.
+        const job = try self.startJob(expanded.items, pty, result_pipe[0], started);
 
         // No listener means this isn't the interactive prompt (shouldn't
         // happen -- the exec path in `main` never calls here). Just wait.
-        const listener = self.listener orelse {
-            pty.wait();
-            reader.join();
+        if (self.listener == null) {
+            job.pty.wait();
+            self.finishForegroundJob(job);
             return;
-        };
+        }
+
+        switch (self.foregroundJob(job)) {
+            .exited => self.finishForegroundJob(job),
+            .backgrounded => try self.parkJob(job),
+        }
+    }
+
+    /// A program started from this prompt, from spawn until it is reaped.
+    /// Heap-owned, because one that is put in the background (see
+    /// `foregroundJob`) keeps running while the prompt takes the next
+    /// line, and its pty, reader thread and result pipe go with it.
+    const Job = struct {
+        /// `jobs` / `fg` number, assigned when it first goes to the
+        /// background; 0 while it never has.
+        id: u32 = 0,
+        /// The command line, space-joined, for `jobs` when the program
+        /// never named its context.
+        name: []u8,
+        pty: Pty,
+        modes: ModeTracker = .{},
+        reader_ctx: PtyReaderCtx = undefined,
+        reader: std.Thread = undefined,
+        /// The result pipe's read end -- see `result_fd_env`.
+        result_fd: c_int,
+        started: std.Io.Clock.Timestamp,
+        /// The context the program drew its screen on, learned from this
+        /// pane's stack while it ran (see `noteVisibleContext`). Null for a
+        /// program that never made one: that includes every plain PTY
+        /// program, which draws on the shell's own layer and so can't be
+        /// put behind it.
+        context: ?glyphwire.ContextHandle = null,
+    };
+
+    /// Wraps a just-spawned child as a `Job` and starts its output reader.
+    /// On failure the child is killed and everything is released, the
+    /// same as the old inline path did for a failed reader spawn.
+    fn startJob(self: *Prompt, argv: []const []const u8, pty: Pty, result_fd: c_int, started: std.Io.Clock.Timestamp) !*Job {
+        const alloc = self.client.alloc;
+        errdefer {
+            var p = pty;
+            p.signalGroup(std.posix.SIG.KILL);
+            p.wait();
+            p.deinit();
+            _ = c.close(result_fd);
+        }
+        const job = try alloc.create(Job);
+        errdefer alloc.destroy(job);
+        const name = try std.mem.join(alloc, " ", argv);
+        errdefer alloc.free(name);
+        job.* = .{ .name = name, .pty = pty, .result_fd = result_fd, .started = started };
+        job.reader_ctx = .{ .prompt = self, .master = job.pty.master, .modes = &job.modes };
+        job.reader = try std.Thread.spawn(.{}, ptyReaderThread, .{&job.reader_ctx});
+        return job;
+    }
+
+    /// How a stretch of `foregroundJob` ended.
+    const ForegroundEnd = enum {
+        /// The child was reaped (or the host is going away).
+        exited,
+        /// This shell's own context came back on top of its pane while
+        /// the child was still running -- the context switcher, or the
+        /// program deactivating itself. The child keeps running behind.
+        backgrounded,
+    };
+
+    /// Forwards input to `job`'s pty until the child exits or is put in
+    /// the background, in the order the host sent it -- a click, a resize
+    /// and a keystroke reach the child in the sequence they happened.
+    /// `pty.reaped()` polls (WNOHANG) once per loop; every event wakes
+    /// the wait, so its timeout only bounds how long an exit-with-no-input
+    /// waits. `fg` re-enters this for a job it brings back.
+    fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
+        const alloc = self.client.alloc;
+        const listener = self.listener.?;
+        const pty = &job.pty;
+        const modes = &job.modes;
 
         // Where the surface's top-left cell sits in the context, so a
         // click can be reported to the child in *its* screen's
@@ -4317,11 +4398,6 @@ const Prompt = struct {
         // every pointer move.
         var mouse_origin = self.surfaceOrigin();
 
-        // Foreground: forward input to the pty until the child exits, in
-        // the order the host sent it -- a click, a resize and a keystroke
-        // reach the child in the sequence they happened. `pty.reaped()`
-        // polls (WNOHANG) once per loop; every event wakes the wait, so
-        // its timeout only bounds how long an exit-with-no-input waits.
         while (!pty.reaped()) {
             // Once the handshake resolves an aware child, it's drawing
             // over its own wire connection and never reads its own stdin
@@ -4330,7 +4406,7 @@ const Prompt = struct {
             // pty's termios is never put in raw/no-echo mode for it) that
             // the block below would then pass straight through to this
             // process's own real stdout as if the child had printed it.
-            const is_aware = awareState(&reader_ctx) orelse false;
+            const is_aware = awareState(&job.reader_ctx) orelse false;
 
             const any_ev = (listener.next(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
             const input_ev = any_ev.asInput() orelse {
@@ -4358,10 +4434,14 @@ const Prompt = struct {
                         // re-placed, so the click origin moves with it.
                         mouse_origin = self.surfaceOrigin();
                     },
+                    // Visibility moved. Only a program with a context of
+                    // its own can be put behind the shell; a plain PTY
+                    // child draws on this very layer.
+                    .context => if (is_aware and self.noteVisibleContext(job)) return .backgrounded,
                     // Mouse: encoded to the child when it asked for
                     // reporting, dropped otherwise.
-                    .mouse_button => |mev| if (!is_aware) ptyMouseButton(&pty, &modes, mev, mouse_origin),
-                    .mouse_move => |mev| if (!is_aware) ptyMouseMove(listener, &pty, &modes, mev, mouse_origin),
+                    .mouse_button => |mev| if (!is_aware) ptyMouseButton(pty, modes, mev, mouse_origin),
+                    .mouse_move => |mev| if (!is_aware) ptyMouseMove(listener, pty, modes, mev, mouse_origin),
                     // Terminal query replies (`CSI 6n` / DA / DECRQM) the
                     // host parsed out of the child's own output on the way
                     // to the grid.
@@ -4380,7 +4460,7 @@ const Prompt = struct {
                     .shutdown => {
                         self.should_exit = true;
                         pty.signalGroup(std.posix.SIG.HUP);
-                        break;
+                        return .exited;
                     },
                     // A window manager's own commands (see `InputEvent.window_key`).
                     // Never delivered here: this program is not one.
@@ -4420,7 +4500,7 @@ const Prompt = struct {
                 .shutdown => {
                     self.should_exit = true;
                     pty.signalGroup(std.posix.SIG.HUP);
-                    break;
+                    return .exited;
                 },
                 // A window manager's own commands (see
                 // `InputEvent.window_key`). Never delivered here.
@@ -4446,15 +4526,45 @@ const Prompt = struct {
             var kb: [8]u8 = undefined;
             if (keyencode.toPtyBytes(ev.key, mods, cursor_mode, &kb)) |seq| pty.writeAll(seq);
         }
+        return .exited;
+    }
+
+    /// Reads this pane's stack after a visibility change while `job` holds
+    /// the foreground. Returns true when this shell's own context is back
+    /// on top -- the job has been put in the background. Otherwise
+    /// remembers whatever else is on top as the job's screen the first
+    /// time there is one, which is how `fg` later knows what to activate.
+    ///
+    /// The pane's stack rather than the event's own `context`: the event
+    /// names the *focused* context, and under a multiplexer that moves
+    /// every time focus changes pane, which says nothing about this one.
+    fn noteVisibleContext(self: *Prompt, job: *Job) bool {
+        var list = self.client.listContexts() catch return false;
+        defer list.deinit();
+        const entries = list.entries();
+        if (entries.len == 0) return false;
+        const top = entries[0].context;
+        if (top != list.current()) {
+            if (job.context == null) job.context = top;
+            return false;
+        }
+        return job.context != null;
+    }
+
+    /// The end of a foreground run: collects the reader thread and the
+    /// result pipe, puts the layer back in prompt mode, records `{exit}`
+    /// and `{dur}`, and frees the job. `job` has been reaped.
+    fn finishForegroundJob(self: *Prompt, job: *Job) void {
+        const alloc = self.client.alloc;
 
         // Child reaped -> its slave is closed -> the reader's next master
         // read returns EOF/EIO and the thread exits on its own.
-        reader.join();
+        job.reader.join();
 
         // Every process that held the write end (just the child) has now
         // exited, so this is a bounded read to EOF, not a block -- see
         // `readResultPipe`.
-        if (try self.readResultPipe(result_pipe[0])) |line| {
+        if (self.readResultPipe(job.result_fd) catch null) |line| {
             if (self.pending_result_line) |old| alloc.free(old);
             self.pending_result_line = line;
         }
@@ -4476,6 +4586,175 @@ const Prompt = struct {
         // alt screen) and would otherwise leave `regionActive()` stuck,
         // freezing scrollback and making the host wheel page the shell.
         self.drawText("\x1b[?1049l\x1b[!p", null, null) catch {};
+
+        // Record the run's outcome for the next prompt's `{exit}` / `{dur}`.
+        const elapsed_ms = job.started.untilNow(self.client.io).raw.toMilliseconds();
+        self.last_dur_ms = if (elapsed_ms > 0) @intCast(elapsed_ms) else 0;
+        self.last_status = job.pty.exit_code;
+        self.have_status = true;
+
+        self.freeJob(job);
+    }
+
+    /// Closes what `job` still holds and frees it. The reader thread must
+    /// already be joined.
+    fn freeJob(self: *Prompt, job: *Job) void {
+        const alloc = self.client.alloc;
+        _ = c.close(job.result_fd);
+        job.pty.deinit();
+        alloc.free(job.name);
+        alloc.destroy(job);
+    }
+
+    /// Puts `job` on the background list and says so, bash-style:
+    /// `[1] zoe main.zig`. It keeps its number if it had one (`fg` then
+    /// back again).
+    fn parkJob(self: *Prompt, job: *Job) !void {
+        const alloc = self.client.alloc;
+        if (job.id == 0) {
+            self.next_job_id += 1;
+            job.id = self.next_job_id;
+        }
+        self.jobs.append(alloc, job) catch |err| {
+            // Nowhere to keep it: stop it rather than lose track of a
+            // running child.
+            job.pty.signalGroup(std.posix.SIG.HUP);
+            job.pty.wait();
+            job.reader.join();
+            self.freeJob(job);
+            return err;
+        };
+        // The child isn't writing this layer any more; the prompt is.
+        self.drawSetPtyMode(false) catch {};
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "[{d}] {s}  (background)", .{ job.id, self.jobTitle(job) }) catch "[?] (background)";
+        try self.drawText(msg, job_color, null);
+    }
+
+    /// What `jobs` and the background notice call `job`: its context's
+    /// title when the program named one, else the command line. The
+    /// returned slice may point into `job_title_buf`, so use it before the
+    /// next call.
+    fn jobTitle(self: *Prompt, job: *const Job) []const u8 {
+        const ctx = job.context orelse return job.name;
+        var list = self.client.listContexts() catch return job.name;
+        defer list.deinit();
+        const title = list.title(ctx) orelse return job.name;
+        if (title.len == 0) return job.name;
+        const n = @min(title.len, self.job_title_buf.len);
+        @memcpy(self.job_title_buf[0..n], title[0..n]);
+        return self.job_title_buf[0..n];
+    }
+
+    /// Reaps every background job that has exited, printing a `[1] done`
+    /// line for each (bash reports these just before the next prompt,
+    /// which is where this runs). The exit status goes in the line, not in
+    /// `{exit}` -- that belongs to whatever was run in the foreground.
+    fn reportFinishedJobs(self: *Prompt) void {
+        var fresh_row = false;
+        var i: usize = 0;
+        while (i < self.jobs.items.len) {
+            const job = self.jobs.items[i];
+            if (!job.pty.reaped()) {
+                i += 1;
+                continue;
+            }
+            _ = self.jobs.orderedRemove(i);
+            job.reader.join();
+            // Onto a row of its own, not the tail of the last command's
+            // output.
+            if (!fresh_row) {
+                fresh_row = true;
+                const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
+                if (cur.col != 0) self.drawText("\n", null, null) catch {};
+            }
+            var buf: [256]u8 = undefined;
+            const msg = if (job.pty.exit_code == 0)
+                std.fmt.bufPrint(&buf, "[{d}] done  {s}\n", .{ job.id, job.name }) catch "[?] done\n"
+            else
+                std.fmt.bufPrint(&buf, "[{d}] exit {d}  {s}\n", .{ job.id, job.pty.exit_code, job.name }) catch "[?] done\n";
+            self.drawText(msg, job_color, null) catch {};
+            self.freeJob(job);
+        }
+    }
+
+    /// Stops every background job on the way out, the way a closing
+    /// terminal hangs up its session: SIGHUP, a short grace period to save
+    /// and exit, then SIGKILL for anything still there.
+    fn hangUpJobs(self: *Prompt) void {
+        const alloc = self.client.alloc;
+        for (self.jobs.items) |job| job.pty.signalGroup(std.posix.SIG.HUP);
+        var waited_ms: u32 = 0;
+        while (waited_ms < job_hangup_grace_ms) : (waited_ms += 20) {
+            var all = true;
+            for (self.jobs.items) |job| {
+                if (!job.pty.reaped()) all = false;
+            }
+            if (all) break;
+            std.Io.sleep(self.client.io, .fromMilliseconds(20), .awake) catch break;
+        }
+        for (self.jobs.items) |job| {
+            if (!job.pty.reaped()) {
+                job.pty.signalGroup(std.posix.SIG.KILL);
+                job.pty.wait();
+            }
+            job.reader.join();
+            self.freeJob(job);
+        }
+        self.jobs.deinit(alloc);
+    }
+
+    /// `jobs`: one line per background job, `[n] title`, newest last.
+    fn doJobs(self: *Prompt) !u8 {
+        self.reportFinishedJobs();
+        for (self.jobs.items) |job| {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "[{d}] {s}\n", .{ job.id, self.jobTitle(job) }) catch continue;
+            try self.drawText(msg, null, null);
+        }
+        return 0;
+    }
+
+    /// `fg [n]` (`%n` also accepted): brings a background job's screen
+    /// back and gives it the keyboard again, until it exits or is put in
+    /// the background once more. With no argument, the newest job.
+    fn doFg(self: *Prompt, args: []const []const u8) !u8 {
+        self.reportFinishedJobs();
+        if (self.jobs.items.len == 0) {
+            try self.drawText("fg: no current job", err_color, null);
+            return 1;
+        }
+        const index: usize = if (args.len == 0) self.jobs.items.len - 1 else blk: {
+            const spec = std.mem.trimStart(u8, args[0], "%");
+            const id = std.fmt.parseInt(u32, spec, 10) catch {
+                try self.drawText("fg: usage: fg [n]", err_color, null);
+                return 2;
+            };
+            for (self.jobs.items, 0..) |job, i| {
+                if (job.id == id) break :blk i;
+            }
+            var buf: [64]u8 = undefined;
+            try self.drawText(std.fmt.bufPrint(&buf, "fg: {d}: no such job", .{id}) catch "fg: no such job", err_color, null);
+            return 1;
+        };
+        const job = self.jobs.items[index];
+        const ctx = job.context orelse {
+            try self.drawText("fg: that job has no screen to bring back", err_color, null);
+            return 1;
+        };
+        _ = self.jobs.orderedRemove(index);
+        self.client.activateContext(ctx) catch {};
+
+        switch (self.foregroundJob(job)) {
+            .exited => {
+                self.finishForegroundJob(job);
+                return self.last_status;
+            },
+            .backgrounded => {
+                try self.parkJob(job);
+                return 0;
+            },
+        }
     }
 
     /// Drains `read_fd` (the result pipe's read end) to EOF and returns

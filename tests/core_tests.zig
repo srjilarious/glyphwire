@@ -4065,6 +4065,48 @@ pub fn sessionActivateMovesAnExistingContextToTheTopTest(io: std.Io, alloc: std.
     try testz.expectError(session.activateContext(999), glyphwire.ContextError.UnknownContext);
 }
 
+fn expectStack(got: []const glyphwire.ContextHandle, want: []const glyphwire.ContextHandle) !void {
+    try testz.expectEqual(got.len, want.len);
+    for (got, want) |g, w| try testz.expectEqual(g, w);
+}
+
+pub fn sessionPaneStackRunsBaseToTopAndFollowsActivateTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const a = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    const b = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    try expectStack(session.paneStack(glyphwire.root_pane_handle).?, &.{ glyphwire.root_context_handle, a, b });
+
+    try session.activateContext(glyphwire.root_context_handle);
+    try expectStack(session.paneStack(glyphwire.root_pane_handle).?, &.{ a, b, glyphwire.root_context_handle });
+
+    try testz.expectTrue(session.paneStack(999) == null);
+}
+
+pub fn contextSetTitleReplacesAndCutsOnACodepointBoundaryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+
+    try ctx.setTitle("zoe main.zig");
+    try testz.expectEqualStr(ctx.title.items, "zoe main.zig");
+    try ctx.setTitle("gw-read");
+    try testz.expectEqualStr(ctx.title.items, "gw-read");
+
+    // `max_title_len - 1` ASCII bytes then a 3-byte kana: the cap lands
+    // inside the kana, which is dropped whole rather than split.
+    var long: [glyphwire.Context.max_title_len + 2]u8 = undefined;
+    @memset(long[0 .. glyphwire.Context.max_title_len - 1], 'a');
+    @memcpy(long[glyphwire.Context.max_title_len - 1 ..], "あ");
+    try ctx.setTitle(&long);
+    try testz.expectEqual(ctx.title.items.len, glyphwire.Context.max_title_len - 1);
+    try testz.expectTrue(std.unicode.utf8ValidateSlice(ctx.title.items));
+}
+
 pub fn sessionDestroyVisibleContextFallsBackToWhatWasUnderItTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 20, 5, 0);

@@ -3527,6 +3527,93 @@ pub fn adoptContextLetsASecondConnectionDestroyItTest(io: std.Io, alloc: std.mem
     try testz.expectTrue(session.contextPtr(1) == null);
 }
 
+const ListContextsResponse = struct { result: glyphwire.protocol.ListContextsResult };
+
+/// Runs `list_contexts` on `d` and returns the parsed result.
+fn listContexts(d: *dispatch.Dispatcher, alloc: std.mem.Allocator) !std.json.Parsed(ListContextsResponse) {
+    const res = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":9,"method":"list_contexts"}
+    );
+    if (res.broadcast) |b| alloc.free(b.body);
+    const body = res.response.?;
+    defer alloc.free(body);
+    return std.json.parseFromSlice(ListContextsResponse, alloc, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
+}
+
+pub fn createContextTitleIsListedTopFirstWithTheCallersOwnContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    // The shell: inherits the root context and names it.
+    var shell = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+    _ = try shell.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_context_title","params":{"title":"gw-shell"}}
+    );
+
+    // An editor started from it: its own context, named at creation.
+    var editor = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
+    const created = try editor.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"title":"zoe main.zig"}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    var list = try listContexts(&shell, alloc);
+    defer list.deinit();
+    const r = list.value.result;
+    // `current` is the *asking* connection's context, not what's on top.
+    try testz.expectEqual(r.current, glyphwire.root_context_handle);
+    try testz.expectEqual(r.contexts.len, 2);
+    try testz.expectEqual(r.contexts[0].context, 1);
+    try testz.expectEqualStr(r.contexts[0].title, "zoe main.zig");
+    try testz.expectTrue(r.contexts[0].visible);
+    try testz.expectEqual(r.contexts[1].context, glyphwire.root_context_handle);
+    try testz.expectEqualStr(r.contexts[1].title, "gw-shell");
+    try testz.expectFalse(r.contexts[1].visible);
+}
+
+pub fn activateContextReordersListContextsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var a = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+    var b = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
+    inline for (.{ &a, &b }) |d| {
+        const created = try d.handle(alloc,
+            \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{}}
+        );
+        if (created.response) |r| alloc.free(r);
+        if (created.broadcast) |bc| alloc.free(bc.body);
+    }
+
+    // Bringing the first one back moves it above the second, and the
+    // second keeps running underneath -- nothing is destroyed.
+    const act = try b.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"activate_context","params":{"context":1}}
+    );
+    if (act.broadcast) |bc| alloc.free(bc.body);
+
+    var list = try listContexts(&b, alloc);
+    defer list.deinit();
+    const r = list.value.result;
+    try testz.expectEqual(r.current, 2);
+    try testz.expectEqual(r.contexts.len, 3);
+    try testz.expectEqual(r.contexts[0].context, 1);
+    try testz.expectEqual(r.contexts[1].context, 2);
+    try testz.expectEqual(r.contexts[2].context, glyphwire.root_context_handle);
+    // Nobody named these.
+    try testz.expectEqualStr(r.contexts[0].title, "");
+}
+
 pub fn contextMessagesOnASessionlessDispatcherReportNoContextSessionTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);

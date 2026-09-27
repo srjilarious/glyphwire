@@ -109,6 +109,24 @@ pub const InputStateResult = struct {
     cursor_cell: CellPos,
 };
 
+/// One row of a `list_contexts` response.
+pub const ContextEntry = struct {
+    context: core.ContextHandle,
+    /// Empty when the program never named its context.
+    title: []const u8,
+    /// Whether this is the one on screen in the pane (always the first).
+    visible: bool,
+};
+
+/// The `list_contexts` response body: the issuing connection's pane
+/// stack, top (on screen) first, plus which of them is the connection's
+/// own active context -- the one thing a client can't otherwise learn
+/// about itself when it inherited its context rather than creating it.
+pub const ListContextsResult = struct {
+    current: core.ContextHandle,
+    contexts: []const ContextEntry,
+};
+
 // ─── Table ───────────────────────────────────────────────────────────────
 
 /// A column as sent to `create_table`. `kind`/`h_align` are optional

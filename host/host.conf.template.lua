@@ -91,6 +91,18 @@
 --     key_repeat_delay_ms = 500.0,
 --     key_repeat_interval_ms = 40.0,
 --
+--     ---- Context switcher ---------------------------------------------
+--
+--     -- The chord that opens the switcher: a list of the programs the
+--     -- focused pane is holding (the shell, zoe, salacommander, ...).
+--     -- Pick one with Up/Down + Enter or its number; Escape closes. It
+--     -- opens on the second row, so the chord then Enter flips between
+--     -- the two most recent. Modifiers are ctrl/alt/shift/super, the key
+--     -- is named as the host names keys ("f12", "grave_accent", "a").
+--     -- false turns it off. Some desktops grab Super chords for
+--     -- themselves; pick another here if this one never arrives.
+--     context_switcher_key = "super+f12",
+--
 --     ---- Grid --------------------------------------------------------
 --
 --     -- Initial grid size in cells. The window opens this many cells
