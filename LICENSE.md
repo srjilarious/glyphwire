@@ -49,6 +49,7 @@ people embed. They are GPL-3.0-or-later.
 | Path | Produces |
 |---|---|
 | `src/` | the `glyphwire` module: protocol core, wire framing, JSON-RPC dispatch, server, client library, pty and mux |
+| `applib/` | the `applib` module: helpers shared by two or more applications (line editor, keymaps, fuzzy finder, shell panel, history) |
 | `host/` | `glyphwire` — the reference display host |
 | `host_eng/` | glyphwire's in-tree SDL3 / OpenGL backend |
 | `server/` | `glyphwire-server` — the headless server |

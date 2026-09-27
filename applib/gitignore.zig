@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! `.gitignore` matching, for zoe's file tree and the two searches over
 //! it, and salacommander's F3 finder.

@@ -138,7 +138,7 @@ pub fn expandValue(
 }
 
 /// Peels the leading `NAME=VALUE` run off `line`. Word boundaries follow
-/// the same quote / escape rules as `shell/wordsplit.zig`; scanning stops
+/// the same quote / escape rules as `applib/wordsplit.zig`; scanning stops
 /// at the first word that is not a clean `NAME=VALUE`, or at an unquoted
 /// shell operator (`| & ; < > ( )`), whichever comes first. Each peeled
 /// value is `expandValue`'d against `env`.
