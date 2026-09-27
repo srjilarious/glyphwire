@@ -1592,7 +1592,12 @@ pub const Ui = struct {
                 // the cursor along so it stays on screen (like vim's Ctrl-E /
                 // Ctrl-Y). `pushed_bar` is updated so `syncBufferScrollbar`
                 // doesn't immediately echo this straight back.
-                if (so.layer == self.buffer_layer) self.scrollBufferTo(so.row, so.col);
+                if (so.layer == self.buffer_layer) {
+                    // The hover is placed against the line it describes;
+                    // scrolled, it would be left pointing at another one.
+                    if (so.row != self.buf.top_line) _ = self.closeHover();
+                    self.scrollBufferTo(so.row, so.col);
+                }
                 // A shift+wheel or thumb drag over the tab strip. Only the
                 // column matters -- the strip is one row tall -- and the
                 // offset is recorded as already pushed so `syncTabScrollbar`
@@ -2320,6 +2325,12 @@ pub const Ui = struct {
     /// it only keeps drags that land on its own chrome (dividers,
     /// scrollbars).
     fn handleMouseButton(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
+        // A click dismisses the popups the way a keystroke does, with any
+        // button, and then does whatever it was going to do.
+        if (ev.pressed) {
+            _ = self.closeHover();
+            self.closeCompletion();
+        }
         if (!std.mem.eql(u8, ev.button, "left")) return;
 
         // While the finder is up it owns the pointer too -- see
