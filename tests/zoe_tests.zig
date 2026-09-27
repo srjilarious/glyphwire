@@ -3297,3 +3297,137 @@ pub fn diagStoreForgetsAClosedFileTest(_: std.Io, alloc: std.mem.Allocator) !voi
     store.clearPath("/p/main.py");
     try testz.expectEqual(store.counts("/p/main.py").errors, 0);
 }
+
+// ── Hover markdown ─────────────────────────────────────────────────────────
+
+const hover = zoe.hover;
+
+/// What zls sends for a function: a fenced signature, a rule, then docs.
+pub fn hoverSplitsFencedCodeFromProseTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var doc = try hover.parse(alloc,
+        \\```zig
+        \\fn add(a: u32, b: u32) u32
+        \\```
+        \\
+        \\---
+        \\
+        \\Adds **two** numbers, see `sub`.
+        \\
+        \\
+        \\Second paragraph.
+        \\
+    );
+    defer doc.deinit();
+
+    try testz.expectEqual(doc.blocks.len, 1);
+    try testz.expectEqualStr("zig", doc.blocks[0].lang);
+    try testz.expectEqual(doc.blocks[0].first, 0);
+    try testz.expectEqual(doc.blocks[0].count, 1);
+
+    // code, blank, rule, blank, prose, blank (the run of two collapsed),
+    // prose -- and no trailing blank.
+    const kinds = [_]hover.Kind{ .code, .prose, .rule, .prose, .prose, .prose, .prose };
+    try testz.expectEqual(doc.lines.len, kinds.len);
+    for (kinds, doc.lines) |k, l| try testz.expectEqual(l.kind, k);
+    try testz.expectEqualStr("fn add(a: u32, b: u32) u32", doc.lines[0].text);
+    try testz.expectEqualStr("Adds two numbers, see sub.", doc.lines[4].text);
+    try testz.expectEqualStr("Second paragraph.", doc.lines[6].text);
+}
+
+pub fn hoverFenceEdgeCasesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A bare fence has no language (the caller falls back to the buffer's),
+    // `~~~` fences work, a longer closing fence closes, and an info string
+    // is cut at its first space and lowercased.
+    var doc = try hover.parse(alloc,
+        \\```
+        \\bare
+        \\```
+        \\~~~Python extra words
+        \\    indented = 1
+        \\~~~~
+        \\````
+        \\unterminated
+    );
+    defer doc.deinit();
+
+    try testz.expectEqual(doc.blocks.len, 3);
+    try testz.expectEqualStr("", doc.blocks[0].lang);
+    try testz.expectEqualStr("python", doc.blocks[1].lang);
+    // Code is verbatim, indentation included.
+    try testz.expectEqualStr("    indented = 1", doc.lines[doc.blocks[1].first].text);
+    // An unterminated fence runs to the end.
+    try testz.expectEqual(doc.blocks[2].count, 1);
+    try testz.expectEqualStr("unterminated", doc.lines[doc.blocks[2].first].text);
+
+    const src = try doc.blockSource(alloc, doc.blocks[1]);
+    defer alloc.free(src);
+    try testz.expectEqualStr("    indented = 1", src);
+}
+
+pub fn hoverProseLosesMarkdownPunctuationTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try testz.expectEqualStr("Heading", try hover.cleanProse(a, "## Heading"));
+    // pyright escapes underscores in identifiers.
+    try testz.expectEqualStr("my_var = __init__", try hover.cleanProse(a, "my\\_var = \\_\\_init\\_\\_"));
+    // A `__` inside a word is a name, not emphasis.
+    try testz.expectEqualStr("a__b", try hover.cleanProse(a, "a__b"));
+    try testz.expectEqualStr("bold and code", try hover.cleanProse(a, "__bold__ and `code`"));
+    try testz.expectEqualStr("see the docs now", try hover.cleanProse(a, "see [the docs](https://x.y/z) now"));
+    // A lone `*` stays: it is as likely a glob as emphasis.
+    try testz.expectEqualStr("*.zig files", try hover.cleanProse(a, "*.zig files"));
+    // `#` not followed by a space is not a heading.
+    try testz.expectEqualStr("#tag", try hover.cleanProse(a, "#tag"));
+}
+
+pub fn hoverRowsWrapAndKeepIndentTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var doc = try hover.parse(alloc,
+        \\```zig
+        \\    fn f(alpha: u32, beta: u32) void
+        \\```
+    );
+    defer doc.deinit();
+
+    var rows: std.ArrayList(zoe.ui.HoverRow) = .empty;
+    defer rows.deinit(alloc);
+    try zoe.ui.wrapHover(alloc, &doc, 24, &rows);
+
+    const text = doc.lines[0].text;
+    try testz.expectTrue(rows.items.len >= 2);
+    // The first row carries its own indentation...
+    try testz.expectEqual(rows.items[0].start, 0);
+    try testz.expectEqual(rows.items[0].indent, 0);
+    // ...and each continuation is indented to match it, pointing into the
+    // same line so the syntax colours still line up.
+    try testz.expectEqual(rows.items[1].indent, 4);
+    try testz.expectTrue(rows.items[1].start > 4);
+    // Every byte but the spaces a wrap swallowed is on some row.
+    try testz.expectEqual(rows.items[rows.items.len - 1].end, text.len);
+}
+
+pub fn hoverColorRunsFillGapsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const Color = @import("glyphwire").Color;
+    const kw = Color{ .r = 1, .g = 0, .b = 0, .a = 255 };
+    const ty = Color{ .r = 0, .g = 1, .b = 0, .a = 255 };
+    const plain = Color{ .r = 9, .g = 9, .b = 9, .a = 255 };
+    const text = "fn f(a: u32) void";
+    const spans = [_]zoe.syntax.Span{
+        .{ .start = 0, .end = 2, .color = kw },
+        .{ .start = 8, .end = 11, .color = ty },
+        .{ .start = 13, .end = 17, .color = ty },
+    };
+
+    var runs: std.ArrayList(@import("glyphwire").client.Client.Span) = .empty;
+    defer runs.deinit(alloc);
+    // A window that starts mid-gap and ends mid-span.
+    try zoe.ui.colorRuns(alloc, text, &spans, 3, 15, plain, &runs);
+
+    try testz.expectEqual(runs.items.len, 4);
+    try testz.expectEqualStr("f(a: ", runs.items[0].text);
+    try testz.expectEqualStr("u32", runs.items[1].text);
+    try testz.expectEqual(runs.items[1].fg.?.g, 1);
+    try testz.expectEqualStr(") ", runs.items[2].text);
+    try testz.expectEqualStr("vo", runs.items[3].text);
+}

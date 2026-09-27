@@ -230,6 +230,14 @@ machinery. Hover content is markdown; slice 1 strips it to plain text with
 code fences kept verbatim. Rendering it properly means the `md/` zmd
 renderer, which is a later slice.
 
+*Since slice 1:* `zoe/hover.zig` cuts the reply into prose, `---` rules and
+fenced code. Each fenced block is parsed on its own with the grammar its
+fence names (a bare fence means the hovered buffer's language) by a
+highlighter the popup owns, and drawn in those colours on a darker band.
+Prose loses its markdown punctuation (`**`, backticks, heading `#`s, link
+targets, pyright's `\_` escapes) but gets no styling of its own; that part
+is still the `md/` renderer's.
+
 **`gd` -- goto-definition.** `textDocument/definition`. `g` is already a
 prefix in `editor.zig` (`prefix = 'g'` for `gg`, `gv`), so this is another
 case in an existing switch. Same buffer: move the cursor. Another file:

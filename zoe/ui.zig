@@ -60,6 +60,8 @@ const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
 const lsp = @import("lsp.zig");
 const diag = @import("diag.zig");
+const hover_mod = @import("hover.zig");
+const buffer_mod = @import("buffer.zig");
 const shellpanel = glyphwire.shellpanel;
 
 const Editor = editor.Editor;
@@ -194,6 +196,10 @@ const hover_max_cols: usize = 76;
 const hover_max_rows: usize = 14;
 const bg_hover = Color{ .r = 34, .g = 34, .b = 42, .a = 255 };
 const fg_hover = Color{ .r = 214, .g = 214, .b = 222, .a = 255 };
+/// A fenced code block in the popup sits on a slightly darker band, so a
+/// signature reads as a unit apart from the prose under it.
+const bg_hover_code = Color{ .r = 26, .g = 26, .b = 32, .a = 255 };
+const fg_hover_rule = Color{ .r = 80, .g = 80, .b = 96, .a = 255 };
 
 /// How long after the last edit a `didChange` goes out. Long enough that a
 /// burst of typing is one message and a server isn't re-analysing the file
@@ -265,14 +271,21 @@ const JumpList = struct {
     }
 };
 
-/// An open hover popup. `text` is owned; `scroll` is the first line shown,
-/// since a hover on a documented function easily runs past the popup.
+/// An open hover popup: the reply cut into prose, rules and code lines
+/// (`zoe/hover.zig`), with each code line's syntax colours worked out once
+/// when the reply lands rather than on every redraw. `scroll` is the first
+/// wrapped row shown, since a hover on a documented function easily runs
+/// past the popup.
 const Hover = struct {
-    text: []const u8,
+    doc: hover_mod.Doc,
+    /// One entry per `doc.lines`: the colour spans of a code line, empty for
+    /// anything else (or for a block whose language has no grammar). In the
+    /// doc's arena, so `doc.deinit` frees them.
+    spans: []const []const syntax.Span,
     scroll: usize = 0,
 
-    fn deinit(self: *Hover, alloc: std.mem.Allocator) void {
-        alloc.free(self.text);
+    fn deinit(self: *Hover) void {
+        self.doc.deinit();
     }
 };
 
@@ -653,6 +666,11 @@ pub const Ui = struct {
     /// that is two jumps old.
     hover_request: ?i64 = null,
     definition_request: ?i64 = null,
+    /// The highlighter hover code blocks are coloured with: its own, since a
+    /// buffer's is bound to that buffer's text and tree. Built on the first
+    /// hover with a fenced block; its language is set per block and cleared
+    /// again afterwards.
+    hover_hl: ?syntax.Highlighter = null,
     jumps: JumpList = .{},
     /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom, above
     /// the statusline, for running builds and tests without leaving the
@@ -1232,7 +1250,8 @@ pub const Ui = struct {
         // server that has stopped listening. See `lsp.Server.deinit`.
         if (self.lsp_pool) |*p| p.deinit();
         self.diags.deinit();
-        if (self.hover) |*h| h.deinit(self.alloc);
+        if (self.hover) |*h| h.deinit();
+        if (self.hover_hl) |*h| h.deinit();
         self.jumps.deinit(self.alloc);
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
@@ -3280,11 +3299,74 @@ pub const Ui = struct {
             self.status_dirty = true;
             return;
         };
-        // Owned by the event, which frees it on return -- take a copy.
-        const owned = self.alloc.dupe(u8, t) catch return;
-        if (self.hover) |*h| h.deinit(self.alloc);
-        self.hover = .{ .text = owned };
+        // Parsed into the doc's own arena, so nothing is borrowed from the
+        // event, which frees `t` on return.
+        var doc = hover_mod.parse(self.alloc, t) catch return;
+        if (doc.lines.len == 0) {
+            doc.deinit();
+            self.buf.ed.setStatus("No hover information", .{});
+            self.status_dirty = true;
+            return;
+        }
+        const spans = self.highlightHoverBlocks(&doc) catch {
+            doc.deinit();
+            return;
+        };
+        if (self.hover) |*h| h.deinit();
+        self.hover = .{ .doc = doc, .spans = spans };
         self.hover_dirty = true;
+    }
+
+    /// Colours every fenced block in a hover with the grammar its fence
+    /// names -- or, for a bare fence, the grammar of the buffer being
+    /// hovered, which is what a language server means by one. A block whose
+    /// language has no grammar installed stays plain; so does everything
+    /// when highlighting is off.
+    ///
+    /// Each block is parsed on its own, as a tiny buffer, rather than as
+    /// part of the whole reply: a signature is a complete fragment in its
+    /// language, and the prose around it is not.
+    fn highlightHoverBlocks(self: *Ui, doc: *hover_mod.Doc) ![]const []const syntax.Span {
+        const a = doc.arena.allocator();
+        const out = try a.alloc([]const syntax.Span, doc.lines.len);
+        @memset(out, &.{});
+        if (doc.blocks.len == 0) return out;
+
+        const cfg = self.hl_config orelse return out;
+        const reg = if (self.grammars) |*g| g else return out;
+        const fallback: ?[]const u8 = if (self.buf.hl) |*bh| bh.lang_name else null;
+        if (self.hover_hl == null) {
+            self.hover_hl = syntax.Highlighter.init(self.alloc, cfg.theme) catch return out;
+            // No injections: a hover's code block is a signature, and a
+            // grammar nested in one is not worth the second parse.
+            self.hover_hl.?.configureInjections(reg, false);
+        }
+        const h = &self.hover_hl.?;
+        // The language borrows the block's name out of the doc's arena, so
+        // it must not outlive this call.
+        defer h.clearLanguage();
+
+        var scratch: std.ArrayList(syntax.Span) = .empty;
+        defer scratch.deinit(self.alloc);
+        for (doc.blocks) |b| {
+            if (b.count == 0) continue;
+            const lang = if (b.lang.len > 0) b.lang else fallback orelse continue;
+            const grammar = reg.get(lang) orelse continue;
+            h.setLanguage(lang, grammar) catch continue;
+
+            const src = try doc.blockSource(self.alloc, b);
+            defer self.alloc.free(src);
+            var buf = try buffer_mod.Buffer.initFromText(self.alloc, src);
+            defer buf.deinit();
+            h.reparse(&buf) catch continue;
+
+            for (b.first..b.first + b.count) |i| {
+                const line = i - b.first;
+                h.lineSpans(buf.lineStart(line), buf.lineEnd(line), &scratch) catch continue;
+                out[i] = try a.dupe(syntax.Span, scratch.items);
+            }
+        }
+        return out;
     }
 
     /// A definition reply: jump, recording where we came from so Ctrl+O
@@ -4053,10 +4135,11 @@ pub const Ui = struct {
 
     /// Draws the hover popup, or hides its layer when there is none.
     ///
-    /// The content is markdown; this slice renders it as plain text with its
-    /// blank lines kept, which is what makes a type signature and a sentence
-    /// of documentation readable. Running it through the `md/` renderer is a
-    /// later slice -- and a bigger one than it looks, since that renderer
+    /// The reply arrives as markdown and is drawn as three kinds of row (see
+    /// `zoe/hover.zig`): fenced code in its grammar's colours on a darker
+    /// band, prose with the markdown punctuation taken off, and a `---` rule
+    /// as a line across. Headings, lists and emphasis are not styled -- that
+    /// is the `md/` renderer's job, and a bigger one than it looks, since it
     /// draws into a layer of its own.
     fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const h = if (self.hover) |*open| open else {
@@ -4066,51 +4149,62 @@ pub const Ui = struct {
 
         // Wrapped to the popup's width first, so the height is the height of
         // what will actually be drawn rather than of the source text.
-        var lines: std.ArrayList([]const u8) = .empty;
-        defer lines.deinit(self.alloc);
         const wrap_cols = @min(hover_max_cols, self.buffer_bounds.cols) -| 2;
         if (wrap_cols == 0) {
             try batch.setLayerVisible(self.hover_layer, false);
             return;
         }
-        var it = std.mem.splitScalar(u8, h.text, '\n');
-        while (it.next()) |raw| {
-            if (raw.len == 0) {
-                try lines.append(self.alloc, "");
-                continue;
-            }
-            var wrap = glyphwire.WrapIterator.init(raw, wrap_cols);
-            while (wrap.next()) |piece| try lines.append(self.alloc, piece);
-        }
+        var rows: std.ArrayList(HoverRow) = .empty;
+        defer rows.deinit(self.alloc);
+        try wrapHover(self.alloc, &h.doc, wrap_cols, &rows);
 
-        const r = self.hoverRect(lines.items.len);
+        const r = self.hoverRect(rows.items.len);
         self.hover_rect = r;
         if (r.cols == 0 or r.rows == 0) {
             try batch.setLayerVisible(self.hover_layer, false);
             return;
         }
-        if (h.scroll >= lines.items.len) h.scroll = lines.items.len -| 1;
+        if (h.scroll >= rows.items.len) h.scroll = rows.items.len -| 1;
 
         try batch.setLayerSize(self.hover_layer, r.cols, r.rows);
         try batch.setLayerCellPosition(self.hover_layer, r.row, r.col);
 
-        var row: usize = 0;
-        while (row < r.rows) : (row += 1) {
+        var runs: std.ArrayList(glyphwire.client.Client.Span) = .empty;
+        defer runs.deinit(self.alloc);
+        var rule: std.ArrayList(u8) = .empty;
+        defer rule.deinit(self.alloc);
+        for (0..r.cols -| 2) |_| try rule.appendSlice(self.alloc, "\u{2500}");
+
+        for (0..r.rows) |row| {
             const idx = h.scroll + row;
-            const body: []const u8 = if (idx < lines.items.len) lines.items[idx] else "";
+            const hr: ?HoverRow = if (idx < rows.items.len) rows.items[idx] else null;
+            const kind: hover_mod.Kind = if (hr) |x| h.doc.lines[x.line].kind else .prose;
+            const bg = if (kind == .code) bg_hover_code else bg_hover;
+
+            runs.clearRetainingCapacity();
+            if (hr) |x| {
+                const line = h.doc.lines[x.line];
+                switch (kind) {
+                    .rule => try runs.append(self.alloc, .{ .text = rule.items, .fg = fg_hover_rule }),
+                    .prose, .code => {
+                        if (x.indent > 0) try runs.append(self.alloc, .{ .text = spaces[0..@min(x.indent, spaces.len)] });
+                        try colorRuns(self.alloc, line.text, h.spans[x.line], x.start, x.end, fg_hover, &runs);
+                    },
+                }
+            }
             // One padded write per row: the leading space is the popup's
             // margin and `pad` fills the rest, so the panel reads as a solid
             // block whatever the text length.
-            try batch.writeTextOpts(body, .{
+            try batch.writeSpans(runs.items, .{
                 .layer = self.hover_layer,
                 .row = row,
                 .col = 1,
                 .fg = fg_hover,
-                .bg = bg_hover,
+                .bg = bg,
                 .max_cols = r.cols -| 1,
                 .pad = true,
             });
-            try writeAt(batch, self.hover_layer, row, 0, " ", fg_hover, bg_hover);
+            try writeAt(batch, self.hover_layer, row, 0, " ", fg_hover, bg);
         }
         try batch.setLayerVisible(self.hover_layer, true);
     }
@@ -4119,7 +4213,7 @@ pub const Ui = struct {
     /// swallowed by the closing (Escape) or fall through (anything else).
     fn closeHover(self: *Ui) bool {
         if (self.hover) |*h| {
-            h.deinit(self.alloc);
+            h.deinit();
             self.hover = null;
             self.hover_dirty = true;
             return true;
@@ -4979,4 +5073,84 @@ fn colorOptEql(a: ?Color, b: ?Color) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
     return a.?.r == b.?.r and a.?.g == b.?.g and a.?.b == b.?.b and a.?.a == b.?.a;
+}
+
+// ── Hover rows ─────────────────────────────────────────────────────────────
+
+/// One drawn row of the hover popup: bytes `[start, end)` of
+/// `doc.lines[line]`, shown after `indent` blank cells.
+pub const HoverRow = struct {
+    line: usize,
+    start: usize = 0,
+    end: usize = 0,
+    indent: usize = 0,
+};
+
+const spaces: [32]u8 = @splat(' ');
+
+/// Cuts a hover doc into rows `cols` wide. A line keeps its leading
+/// indentation on its first row, and its continuation rows are indented to
+/// match, so wrapped code still lines up under the line it came from.
+/// Wrapping is on spaces (`WrapIterator`), code included: a long signature
+/// is a list of parameters, and breaking between them reads better than
+/// clipping it.
+pub fn wrapHover(
+    alloc: std.mem.Allocator,
+    doc: *const hover_mod.Doc,
+    cols: usize,
+    out: *std.ArrayList(HoverRow),
+) !void {
+    for (doc.lines, 0..) |line, i| {
+        if (line.kind == .rule or line.text.len == 0) {
+            try out.append(alloc, .{ .line = i });
+            continue;
+        }
+        var indent: usize = 0;
+        while (indent < line.text.len and line.text[indent] == ' ') indent += 1;
+        // Deep indentation gives up its alignment rather than the text.
+        if (indent > cols / 2) indent = 0;
+        const body = line.text[indent..];
+        var wrap = glyphwire.WrapIterator.init(body, cols - indent);
+        var first = true;
+        while (wrap.next()) |piece| {
+            const start = indent + (@intFromPtr(piece.ptr) - @intFromPtr(body.ptr));
+            try out.append(alloc, .{
+                .line = i,
+                // The first row carries its own indentation in its bytes.
+                .start = if (first) 0 else start,
+                .end = start + piece.len,
+                .indent = if (first) 0 else indent,
+            });
+            first = false;
+        }
+        // All spaces: still a row.
+        if (first) try out.append(alloc, .{ .line = i });
+    }
+}
+
+/// Bytes `[start, end)` of `text` as client spans, coloured by `spans`
+/// (offsets into the whole of `text`, sorted, non-overlapping -- what
+/// `Highlighter.lineSpans` produces) and `default_fg` in the gaps.
+pub fn colorRuns(
+    alloc: std.mem.Allocator,
+    text: []const u8,
+    spans: []const syntax.Span,
+    start: usize,
+    end: usize,
+    default_fg: Color,
+    out: *std.ArrayList(glyphwire.client.Client.Span),
+) !void {
+    var at = start;
+    for (spans) |s| {
+        if (s.end <= at) continue;
+        if (s.start >= end) break;
+        if (s.start > at) {
+            try out.append(alloc, .{ .text = text[at..s.start], .fg = default_fg });
+            at = s.start;
+        }
+        const stop = @min(s.end, end);
+        try out.append(alloc, .{ .text = text[at..stop], .fg = s.color });
+        at = stop;
+    }
+    if (at < end) try out.append(alloc, .{ .text = text[at..end], .fg = default_fg });
 }
