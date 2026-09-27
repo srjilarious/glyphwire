@@ -154,6 +154,39 @@ pub const Location = struct {
     }
 };
 
+/// One `CompletionItem`, reduced to what the popup shows and what accepting
+/// it does. Every string owned (freed by `deinit`).
+pub const CompletionItem = struct {
+    label: []const u8,
+    /// LSP's `CompletionItemKind` (1 = Text ... 25 = TypeParameter), 0 when
+    /// the server didn't say. `complete.kindLabel` names it.
+    kind: u8 = 0,
+    /// The type or signature shown after the label, when the server sends
+    /// one (`detail`, else `labelDetails.detail` + `.description`).
+    detail: ?[]const u8 = null,
+    /// What accepting inserts: `textEdit.newText`, else `insertText`, else
+    /// the label -- with snippet placeholders already flattened to their
+    /// default text, since zoe has no snippet engine to tab through them.
+    insert: []const u8,
+    /// What typed text is matched against: `filterText`, else the label.
+    filter: []const u8,
+    /// The server's ordering key: `sortText`, else the label.
+    sort: []const u8,
+    /// `textEdit`'s range (an `InsertReplaceEdit`'s `insert` range): the
+    /// text accepting replaces. Null means "the word before the cursor",
+    /// which is what an item without one leaves to the client. In the
+    /// server's position encoding until the editor converts it.
+    edit_range: ?Range = null,
+
+    pub fn deinit(self: *const CompletionItem, alloc: std.mem.Allocator) void {
+        alloc.free(self.label);
+        if (self.detail) |d| alloc.free(d);
+        alloc.free(self.insert);
+        alloc.free(self.filter);
+        alloc.free(self.sort);
+    }
+};
+
 /// What a reply is a reply *to*. Recorded per outstanding request id so a
 /// response can be routed without the caller having stashed a continuation
 /// -- and so a stale reply (the user has since moved on) can be recognised
@@ -162,6 +195,7 @@ pub const RequestKind = enum {
     initialize,
     hover,
     definition,
+    completion,
     shutdown,
 
     /// Whether an unanswered request of this kind is given up on after
@@ -170,7 +204,7 @@ pub const RequestKind = enum {
     /// meanwhile), and `shutdown` is on the way out anyway.
     pub fn expires(self: RequestKind) bool {
         return switch (self) {
-            .hover, .definition => true,
+            .hover, .definition, .completion => true,
             .initialize, .shutdown => false,
         };
     }
@@ -206,6 +240,15 @@ pub const Event = union(enum) {
     /// A `textDocument/definition` reply; `target` null for "no definition
     /// found", also a normal answer.
     definition: struct { request_id: i64, server: []const u8, target: ?Location },
+    /// A `textDocument/completion` reply. `incomplete` is the server saying
+    /// its list was cut short (`CompletionList.isIncomplete`), so typing
+    /// more should ask again rather than only filter what came back.
+    completion: struct {
+        request_id: i64,
+        server: []const u8,
+        incomplete: bool,
+        items: []CompletionItem,
+    },
     /// A request went `request_timeout_ms` without an answer and has been
     /// forgotten; a reply that turns up later is dropped as unknown. The
     /// server itself is left alone -- slow once is not dead.
@@ -223,10 +266,16 @@ pub const Event = union(enum) {
             },
             .hover => |h| if (h.text) |t| alloc.free(t),
             .definition => |d| if (d.target) |*t| t.deinit(alloc),
+            .completion => |c| freeCompletionItems(alloc, c.items),
             .timed_out, .died => {},
         }
     }
 };
+
+pub fn freeCompletionItems(alloc: std.mem.Allocator, items: []CompletionItem) void {
+    for (items) |*it| it.deinit(alloc);
+    alloc.free(items);
+}
 
 /// One configured server: what to run, and what it is for. Owned by the
 /// caller (`langconf.Config`'s arena in practice) and only read here.
@@ -414,6 +463,11 @@ fn unreserved(c: u8) bool {
 pub const Caps = struct {
     hover: bool = false,
     definition: bool = false,
+    completion: bool = false,
+    /// `completionProvider.triggerCharacters`: typing one of these asks for
+    /// completions straight away (`.` for a field, `@` for a zig builtin).
+    /// Owned by the server's allocator.
+    completion_triggers: []const []const u8 = &.{},
 };
 
 const State = enum {
@@ -614,6 +668,7 @@ pub const Server = struct {
         self.pending_opens.deinit(alloc);
         freeListStrings(alloc, &self.open_docs);
         self.in_flight.deinit(alloc);
+        freeStrings(alloc, self.caps.completion_triggers);
         freeStrings(alloc, self.languages);
         alloc.free(self.name);
         alloc.destroy(self);
@@ -820,7 +875,12 @@ pub const Server = struct {
             \\"capabilities":{"general":{"positionEncodings":["utf-8","utf-16"]},
         );
         try params.appendSlice(self.alloc,
-            \\"textDocument":{"synchronization":{"didSave":true},"publishDiagnostics":{},"hover":{"contentFormat":["markdown","plaintext"]},"definition":{}}}
+            \\"textDocument":{"synchronization":{"didSave":true},"publishDiagnostics":{},"hover":{"contentFormat":["markdown","plaintext"]},"definition":{},
+        );
+        // `snippetSupport: false` asks for plain text to insert; a server
+        // that sends a snippet anyway gets it flattened (`flattenSnippet`).
+        try params.appendSlice(self.alloc,
+            \\"completion":{"contextSupport":true,"completionItem":{"snippetSupport":false,"labelDetailsSupport":true}}}}
         );
         if (cfg.settings_json) |s| try params.print(self.alloc, ",\"initializationOptions\":{s}", .{s});
         try params.append(self.alloc, '}');
@@ -840,6 +900,13 @@ pub const Server = struct {
                 };
                 self.caps.hover = providerEnabled(c.object.get("hoverProvider"));
                 self.caps.definition = providerEnabled(c.object.get("definitionProvider"));
+                const cp = c.object.get("completionProvider");
+                self.caps.completion = providerEnabled(cp);
+                if (cp) |v| if (v == .object) {
+                    if (v.object.get("triggerCharacters")) |tc| if (tc == .array) {
+                        self.caps.completion_triggers = self.dupeTriggers(tc.array.items) catch &.{};
+                    };
+                };
             };
         }
         self.state = .ready;
@@ -861,6 +928,25 @@ pub const Server = struct {
             self.alloc.free(p.text);
         }
         self.pending_opens.clearRetainingCapacity();
+    }
+
+    fn dupeTriggers(self: *Server, items: []const std.json.Value) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        errdefer freeListStrings(self.alloc, &out);
+        for (items) |v| {
+            if (v != .string or v.string.len == 0) continue;
+            try out.append(self.alloc, try self.alloc.dupe(u8, v.string));
+        }
+        return out.toOwnedSlice(self.alloc);
+    }
+
+    /// Whether typing `text` should ask this server for completions at
+    /// once: it ends with one of the server's trigger characters.
+    pub fn isCompletionTrigger(self: *const Server, text: []const u8) bool {
+        for (self.caps.completion_triggers) |t| {
+            if (std.mem.endsWith(u8, text, t)) return true;
+        }
+        return false;
     }
 
     /// A capability is either a bool or an options object; both mean yes,
@@ -946,7 +1032,8 @@ pub const Server = struct {
         const method = switch (kind) {
             .hover => "textDocument/hover",
             .definition => "textDocument/definition",
-            .initialize, .shutdown => return null,
+            // Has a `context` of its own: `completionRequest`.
+            .completion, .initialize, .shutdown => return null,
         };
         switch (kind) {
             .hover => if (!self.caps.hover) return null,
@@ -959,6 +1046,34 @@ pub const Server = struct {
         }, .{});
         defer self.alloc.free(params);
         return try self.request(kind, method, params);
+    }
+
+    /// `textDocument/completion` at `pos`. `trigger` is the trigger
+    /// character that prompted it, or null for an explicit request (Ctrl+
+    /// Space) or one made because an identifier is being typed -- LSP's
+    /// `TriggerKind.Invoked`. Returns the id, or null when this server
+    /// can't complete.
+    pub fn completionRequest(
+        self: *Server,
+        uri: []const u8,
+        pos: Position,
+        trigger: ?[]const u8,
+    ) !?i64 {
+        if (self.state != .ready or !self.caps.completion) return null;
+        const params = if (trigger) |t|
+            try std.json.Stringify.valueAlloc(self.alloc, .{
+                .textDocument = .{ .uri = uri },
+                .position = .{ .line = pos.line, .character = pos.character },
+                .context = .{ .triggerKind = @as(u8, 2), .triggerCharacter = t },
+            }, .{})
+        else
+            try std.json.Stringify.valueAlloc(self.alloc, .{
+                .textDocument = .{ .uri = uri },
+                .position = .{ .line = pos.line, .character = pos.character },
+                .context = .{ .triggerKind = @as(u8, 1) },
+            }, .{});
+        defer self.alloc.free(params);
+        return try self.request(.completion, "textDocument/completion", params);
     }
 
     fn isOpen(self: *const Server, uri: []const u8) bool {
@@ -1231,7 +1346,110 @@ pub const Pool = struct {
                 .server = s.name,
                 .target = try self.parseDefinition(result),
             } },
+            .completion => {
+                var incomplete = false;
+                const items = try self.parseCompletion(result, &incomplete);
+                return .{ .completion = .{
+                    .request_id = id,
+                    .server = s.name,
+                    .incomplete = incomplete,
+                    .items = items,
+                } };
+            },
         }
+    }
+
+    /// A completion result is `CompletionItem[]`, a `CompletionList`
+    /// (`{isIncomplete, items}`), or null for "nothing here" -- which is an
+    /// answer too, and comes back as an empty list so the editor can stop
+    /// asking about this word.
+    fn parseCompletion(self: *Pool, result: std.json.Value, incomplete: *bool) ![]CompletionItem {
+        const list: []const std.json.Value = switch (result) {
+            .array => |a| a.items,
+            .object => |o| blk: {
+                if (o.get("isIncomplete")) |v| if (v == .bool) {
+                    incomplete.* = v.bool;
+                };
+                const items = o.get("items") orelse break :blk &.{};
+                break :blk if (items == .array) items.array.items else &.{};
+            },
+            else => &.{},
+        };
+
+        var out: std.ArrayList(CompletionItem) = .empty;
+        errdefer {
+            for (out.items) |*it| it.deinit(self.alloc);
+            out.deinit(self.alloc);
+        }
+        for (list) |v| {
+            if (v != .object) continue;
+            const item = (try self.parseCompletionItem(v.object)) orelse continue;
+            out.append(self.alloc, item) catch |err| {
+                item.deinit(self.alloc);
+                return err;
+            };
+        }
+        return out.toOwnedSlice(self.alloc);
+    }
+
+    fn parseCompletionItem(self: *Pool, o: std.json.ObjectMap) !?CompletionItem {
+        const alloc = self.alloc;
+        const label = stringField(o, "label") orelse return null;
+
+        // `textEdit` is a `TextEdit` (`range`) or an `InsertReplaceEdit`
+        // (`insert` / `replace`). The insert range is the one that doesn't
+        // eat the rest of the identifier after the cursor, which is what
+        // typing-then-accepting expects.
+        var edit_range: ?Range = null;
+        var edit_text: ?[]const u8 = null;
+        if (o.get("textEdit")) |te| if (te == .object) {
+            edit_text = stringField(te.object, "newText");
+            edit_range = parseRange(te.object.get("range") orelse te.object.get("insert"));
+        };
+        const raw_insert = edit_text orelse stringField(o, "insertText") orelse label;
+        const is_snippet = if (o.get("insertTextFormat")) |f| f == .integer and f.integer == 2 else false;
+
+        const insert = if (is_snippet)
+            try flattenSnippet(alloc, raw_insert)
+        else
+            try alloc.dupe(u8, raw_insert);
+        errdefer alloc.free(insert);
+
+        const label_owned = try alloc.dupe(u8, label);
+        errdefer alloc.free(label_owned);
+        const filter = try alloc.dupe(u8, stringField(o, "filterText") orelse label);
+        errdefer alloc.free(filter);
+        const sort = try alloc.dupe(u8, stringField(o, "sortText") orelse label);
+        errdefer alloc.free(sort);
+
+        // `detail` is the classic field; `labelDetails` is the newer split
+        // into a signature-ish `detail` and a type-ish `description`.
+        // basedpyright sends the second, zls the first.
+        const detail: ?[]const u8 = if (stringField(o, "detail")) |d|
+            try alloc.dupe(u8, d)
+        else if (o.get("labelDetails")) |ld| blk: {
+            if (ld != .object) break :blk null;
+            const a = stringField(ld.object, "detail") orelse "";
+            const b = stringField(ld.object, "description") orelse "";
+            if (a.len == 0 and b.len == 0) break :blk null;
+            const sep: []const u8 = if (a.len > 0 and b.len > 0) " " else "";
+            break :blk try std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ a, sep, b });
+        } else null;
+
+        const kind: u8 = if (o.get("kind")) |k|
+            (if (k == .integer and k.integer > 0 and k.integer <= 25) @intCast(k.integer) else 0)
+        else
+            0;
+
+        return .{
+            .label = label_owned,
+            .kind = kind,
+            .detail = detail,
+            .insert = insert,
+            .filter = filter,
+            .sort = sort,
+            .edit_range = edit_range,
+        };
     }
 
     fn parseDiagnostics(self: *Pool, s: *Server, params: std.json.Value) !?Event {
@@ -1352,6 +1570,77 @@ pub const Pool = struct {
         return .{ .path = path, .range = range };
     }
 };
+
+fn stringField(o: std.json.ObjectMap, name: []const u8) ?[]const u8 {
+    const v = o.get(name) orelse return null;
+    return if (v == .string) v.string else null;
+}
+
+/// A snippet (`insertTextFormat: 2`) as the plain text accepting it should
+/// insert: every placeholder replaced by its default text, choices by their
+/// first option, tab stops and variables dropped, escapes undone.
+/// `foo(${1:a}, ${2:b})$0` becomes `foo(a, b)`.
+///
+/// zoe advertises `snippetSupport: false`, and servers mostly honour it; this
+/// is for the ones that send a snippet anyway, where inserting the raw `${1:`
+/// syntax into the buffer would be the worst of the options.
+pub fn flattenSnippet(alloc: std.mem.Allocator, snippet: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    _ = try flattenInto(alloc, &out, snippet, 0, false);
+    return out.toOwnedSlice(alloc);
+}
+
+/// Copies `s[i..]` into `out`, flattening as it goes, until the end or --
+/// when `nested` -- the `}` that closes the placeholder being read. Returns
+/// the index just past what it consumed.
+fn flattenInto(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8, start: usize, nested: bool) !usize {
+    var i = start;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == '\\' and i + 1 < s.len) {
+            try out.append(alloc, s[i + 1]);
+            i += 2;
+            continue;
+        }
+        if (nested and c == '}') return i + 1;
+        if (c != '$') {
+            try out.append(alloc, c);
+            i += 1;
+            continue;
+        }
+        // `$1`, `$name`: a bare tab stop or variable, which inserts nothing.
+        if (i + 1 < s.len and (std.ascii.isAlphanumeric(s[i + 1]) or s[i + 1] == '_')) {
+            i += 1;
+            while (i < s.len and (std.ascii.isAlphanumeric(s[i]) or s[i] == '_')) i += 1;
+            continue;
+        }
+        if (i + 1 >= s.len or s[i + 1] != '{') {
+            try out.append(alloc, c);
+            i += 1;
+            continue;
+        }
+        // `${...}`: skip the number or name, then `:default}`, `|a,b|}` or
+        // just `}`.
+        i += 2;
+        while (i < s.len and (std.ascii.isAlphanumeric(s[i]) or s[i] == '_')) i += 1;
+        if (i >= s.len) break;
+        switch (s[i]) {
+            ':' => i = try flattenInto(alloc, out, s, i + 1, true),
+            '|' => {
+                const end = std.mem.indexOfScalarPos(u8, s, i + 1, '|') orelse s.len;
+                const first = std.mem.indexOfScalarPos(u8, s[0..end], i + 1, ',') orelse end;
+                try out.appendSlice(alloc, s[i + 1 .. first]);
+                i = @min(end + 2, s.len); // past `|}`
+            },
+            '}' => i += 1,
+            // Something this doesn't understand (a regex transform on a
+            // variable): skip to its closing brace rather than inserting it.
+            else => i = if (std.mem.indexOfScalarPos(u8, s, i, '}')) |e| e + 1 else s.len,
+        }
+    }
+    return i;
+}
 
 fn parseRange(v: ?std.json.Value) ?Range {
     const val = v orelse return null;
