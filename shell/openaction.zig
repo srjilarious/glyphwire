@@ -64,7 +64,7 @@ pub const default_actions = [_]Action{
     .{ .key = "image/jpeg", .commands = &.{"gw-view {selections}"} },
     .{ .key = "image/gif", .commands = &.{"gw-view {selections}"} },
     .{ .key = "image/bmp", .commands = &.{"gw-view {selections}"} },
-    .{ .key = "text/*", .commands = &.{"zoe +{line} {sel}"} },
+    .{ .key = "text/*", .commands = &.{"zoe --line {line} {sel}"} },
 };
 
 fn matchExact(key: []const u8, entry: Entry) bool {

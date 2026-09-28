@@ -384,7 +384,7 @@ const TreeFind = struct {
 /// empty buffer named after it that `:w` would then refuse.
 pub const FileTarget = struct {
     path: []const u8,
-    /// 1-based line to start the cursor on (`zoe +N` / `--line N`), or
+    /// 1-based line to start the cursor on (`zoe --line N`), or
     /// null for the top.
     line: ?usize = null,
 };

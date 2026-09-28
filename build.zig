@@ -510,6 +510,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     zoe_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    zoe_exe.root_module.addImport("applib", applib_mod);
     zoe_exe.root_module.addImport("zoe_support", zoe_support_mod);
     zoe_exe.root_module.addImport("zargunaught", zargunaught_mod);
     // zoe_support -> langconf.zig -> ziglua, and -> syntax.zig ->
@@ -542,6 +543,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     gmux_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    gmux_exe.root_module.addImport("applib", applib_mod);
     gmux_exe.root_module.addImport("gmux_support", gmux_support_mod);
     // gmux_support -> config.zig -> ziglua (gmux.conf.lua), so the final
     // binary needs the Lua C lib and libc, same as gw-shell / gw-ls / zoe.
@@ -629,6 +631,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     sala_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    sala_exe.root_module.addImport("applib", applib_mod);
     sala_exe.root_module.addImport("zargunaught", zargunaught_mod);
     sala_exe.root_module.addImport("salacommander_support", salacommander_support_mod);
     // salacommander.conf.lua needs the Lua C lib, and the owner-name lookup
