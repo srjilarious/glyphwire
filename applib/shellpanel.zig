@@ -251,6 +251,10 @@ pub const Panel = struct {
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
+            // A group of its own: the shell that started this program
+            // SIGINTs our whole group on Ctrl+C, and the panel's shell is
+            // not ours to have killed that way (see `applib.interrupt`).
+            .pgid = 0,
         }) catch |err| {
             return err;
         };

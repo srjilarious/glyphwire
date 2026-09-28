@@ -4506,7 +4506,18 @@ const Prompt = struct {
                 switch (input_ev) {
                     .text => |tev| alloc.free(tev.text),
                     .paste => |tev| alloc.free(tev.text),
-                    .key => |kev| alloc.free(kev.key),
+                    // Ctrl+C interrupts an aware child the way the tty line
+                    // discipline does a plain one: SIGINT to its whole
+                    // group (a `gw-grep` and its `rg`). Nothing reaches its
+                    // pty to be turned into one. A program that wants
+                    // Ctrl+C as a key of its own (zoe, gw-hist) ignores
+                    // SIGINT -- see `applib.interrupt` -- and still gets
+                    // the key on its own listener. Ctrl+Shift+C is copy.
+                    .key => |kev| {
+                        defer alloc.free(kev.key);
+                        if (kev.pressed and kev.ctrl() and !kev.shift() and std.mem.eql(u8, kev.key, "c"))
+                            pty.signalGroup(std.posix.SIG.INT);
+                    },
                     .copy_request => {},
                     .shutdown => {
                         self.should_exit = true;
