@@ -70,17 +70,9 @@ pub const OutlineToggle = struct {
             // reporting. Only root can be taken over that way.
             if (target.is_root and scroll_mod.rootOwned(layer)) return false;
 
-            // Paint order = last drawn wins where two overlap, matching
-            // how the renderer composites them.
-            var found: ?*glyphwire.Outline = null;
-            var found_node: usize = 0;
-            for (layer.outline_order.items) |handle| {
-                const outline = layer.outlines.getPtr(handle) orelse continue;
-                const node = outline.toggleAt(target.row, target.col, layer.view_scroll) orelse continue;
-                found = outline;
-                found_node = node;
-            }
-            const outline = found orelse return false;
+            const outline_hit = layer.outlineNodeAt(target.row, target.col, layer.view_scroll, .marker) orelse return false;
+            const outline = outline_hit.outline;
+            const found_node = outline_hit.node;
 
             outline.setNodeCollapsed(layer, ctx, found_node, null) catch |err| {
                 std.log.err("outline marker toggle failed: {t}", .{err});

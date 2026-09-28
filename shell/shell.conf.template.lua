@@ -65,12 +65,19 @@
 --     ["image/jpeg"] = "gw-view {selections}",
 --     ["image/gif"]  = "gw-view {selections}",
 --     ["image/bmp"]  = "gw-view {selections}",
+--     ["text/*"]     = "zoe +{line} {sel}",
 --   }
 --
 -- The command is a template. `{sel}` expands to one shell-quoted path
 -- and is an error if more than one entry is selected; `{selections}`
--- expands to one or more, space-separated. A template with neither runs
--- as-is. A value can also be a list of commands (`{ "ark {sel}",
+-- expands to one or more, space-separated. `{line}` is the line an entry
+-- points at: gw-grep tags every hit and context line with its own, so
+-- activating one opens the file there; a plain gw-ls entry gives 1. A
+-- template with no placeholder runs as-is.
+--
+-- A mimetype group beats a kind keyword, so the `text/*` default wins
+-- over a `["file"]` catch-all for text files; set `["text/*"]` yourself
+-- to change the editor (`"code -g {sel}:{line}"`, `"nvim +{line} {sel}"`). A value can also be a list of commands (`{ "ark {sel}",
 -- "unzip {sel}" }`) -- only the first runs today, the rest are reserved
 -- for a future action menu.
 --
@@ -80,7 +87,7 @@
 --
 -- open_actions{
 --   ["application/zip"] = "ark {selections}",
---   ["text/*"]          = "code {sel}",   -- any text/* file into an editor
+--   ["text/*"]          = "code -g {sel}:{line}", -- text into VS Code instead
 --   ["file"]            = "xdg-open {sel}", -- catch-all for other files
 -- }
 

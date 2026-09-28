@@ -1753,6 +1753,7 @@ pub const Dispatcher = struct {
         .{ "get_selection", catBytesId(handleGetSelection) },
         .{ "get_selection_text", catBytesId(handleGetSelectionText) },
         .{ "toggle_highlight", catBytesId(handleToggleHighlight) },
+        .{ "activate_at", catResultId(handleActivateAt) },
         .{ "set_highlight", catBytesId(handleSetHighlight) },
         .{ "clear_highlight", catBytesId(handleClearHighlight) },
         .{ "get_highlight", catBytesId(handleGetHighlight) },
@@ -4245,6 +4246,57 @@ pub const Dispatcher = struct {
         if (metadata_id) |mid| try layer.toggleHighlightId(mid);
 
         return try self.highlightStateResponse(alloc, id, layer);
+    }
+
+    /// `activate_at`: the keyboard twin of glyphwire-host's table header
+    /// and outline marker clicks. A sortable header under the cell cycles
+    /// its sort; otherwise an outline node picked by
+    /// `core.Outline.activateAt` toggles (with the same view-follow and
+    /// `scroll` broadcast as `outline_set_collapsed`). Reports which, or
+    /// `"none"` so the caller can fall back to its own action. Server-side
+    /// so glyphwire-shell never scans the grid to find a header or node.
+    fn handleActivateAt(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
+        const parsed = try std.json.parseFromValue(protocol.ActivateAtParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+
+        if (layer.sortableHeaderAt(p.row, p.col, p.view_offset)) |hit| {
+            hit.table.cycleSortOnColumn(hit.col);
+            try hit.table.repaint(layer, self.ctx);
+            return .{ .response = try rpc.response(alloc, id, protocol.ActivateAtResult{
+                .action = "sorted",
+                .offset = layer.view_scroll,
+            }) };
+        }
+
+        if (layer.outlineNodeAt(p.row, p.col, p.view_offset, .activate)) |hit| {
+            try hit.outline.setNodeCollapsed(layer, self.ctx, hit.node, null);
+            var result = try self.outlineViewFollow(alloc, p.layer, layer, hit.outline, hit.node);
+            errdefer if (result.broadcast) |b| alloc.free(b.body);
+
+            // Where the node landed after the reflow and any view follow:
+            // live row `top_live + span.row`, shown at that plus the
+            // view offset.
+            var node_row: ?usize = null;
+            if (hit.outline.visibleSpan(hit.node)) |span| {
+                const screen = hit.outline.top_live + @as(i64, @intCast(span.row)) + @as(i64, @intCast(layer.view_scroll));
+                if (screen >= 0 and screen < @as(i64, @intCast(layer.height))) node_row = @intCast(screen);
+            }
+            result.response = try rpc.response(alloc, id, protocol.ActivateAtResult{
+                .action = "toggled",
+                .offset = layer.view_scroll,
+                .row = node_row,
+            });
+            return result;
+        }
+
+        return .{ .response = try rpc.response(alloc, id, protocol.ActivateAtResult{
+            .action = "none",
+            .offset = layer.view_scroll,
+        }) };
     }
 
     fn handleSetHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
