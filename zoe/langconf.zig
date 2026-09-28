@@ -8,7 +8,8 @@
 //! extra languages / extension remaps, extra grammar directories,
 //! capture-group colour overrides, an `injections` on/off switch, and
 //! the editor's display options (`page_lines`, `line_numbers`,
-//! `tab_width`, `expand_tab`, `show_whitespace`). With no file present
+//! `tab_width`, `expand_tab`, `show_whitespace`, `tab_tooltip_delay_ms`).
+//! With no file present
 //! zoe runs on the built-in languages, the dark theme, injection
 //! enabled, and a 4-cell expanding Tab.
 //!
@@ -53,6 +54,11 @@ pub const key_repeat_delay_ms_default: f64 = 300;
 pub const key_repeat_interval_ms_default: f64 = 30;
 pub const key_repeat_insert_delay_ms_default: f64 = 300;
 pub const key_repeat_insert_interval_ms_default: f64 = 30;
+
+/// The tab tooltip's hover delay. Long enough that sweeping the pointer
+/// across the strip on the way to somewhere else doesn't flash a popup
+/// per tab, short enough that resting on one to ask feels answered.
+pub const tab_tooltip_delay_ms_default: f64 = 400;
 
 /// The language servers zoe knows about without being told. Each is started
 /// only if its binary is on `PATH`, so having all three listed costs nothing
@@ -136,6 +142,10 @@ pub const Config = struct {
     /// a faint middle dot on each space, a faint arrow on each tab.
     /// Default false; `:set whitespace=…` overrides.
     show_whitespace: bool = false,
+    /// `config.tab_tooltip_delay_ms` -- how long the pointer rests on a
+    /// tab before its file's full path pops up under it. Zero shows it
+    /// at once; a negative value or a non-number is ignored.
+    tab_tooltip_delay_ms: f64 = tab_tooltip_delay_ms_default,
     /// `config.lsp.enabled` -- the master switch. False stops every
     /// language server from starting, whatever `lsp_servers` says.
     lsp_enabled: bool = true,
@@ -229,6 +239,7 @@ pub fn parseSource(
     cfg.tab_width = readTabWidth(lua, cfg.tab_width);
     cfg.expand_tab = readFlag(lua, "expand_tab", cfg.expand_tab);
     cfg.show_whitespace = readFlag(lua, "show_whitespace", cfg.show_whitespace);
+    cfg.tab_tooltip_delay_ms = readMs(lua, "tab_tooltip_delay_ms", 0, cfg.tab_tooltip_delay_ms);
     readLsp(lua, a, &cfg);
     return cfg;
 }

@@ -2300,6 +2300,80 @@ pub fn tabLabelIsTheBasenameTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr(tabs.labelFor(null), "[No Name]");
 }
 
+// ── Tab path tooltip ────────────────────────────────────────────────────
+
+const tip_area: tabs.TipArea = .{ .strip_row = 0, .strip_col = 30, .scroll = 0, .area_col = 0, .area_cols = 100 };
+
+pub fn tabTipHangsUnderTheTabsLeftEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
+    const r = tabs.tipRect(.{ .start = 10, .end = 20, .close = 18 }, 20, tip_area).?;
+    try testz.expectEqual(r.row, 1);
+    try testz.expectEqual(r.col, 40);
+    // The path plus the frame and a margin each side.
+    try testz.expectEqual(r.cols, 24);
+}
+
+pub fn tabTipFollowsTheStripScrollTest(_: std.Io, _: std.mem.Allocator) !void {
+    var area = tip_area;
+    area.scroll = 5;
+    try testz.expectEqual(tabs.tipRect(.{ .start = 10, .end = 20, .close = 18 }, 20, area).?.col, 35);
+    // A tab scrolled partly off the strip's left edge: the strip's edge.
+    area.scroll = 15;
+    try testz.expectEqual(tabs.tipRect(.{ .start = 10, .end = 20, .close = 18 }, 20, area).?.col, 30);
+}
+
+pub fn tabTipIsPulledLeftAtTheWindowEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A 40-column path on a tab at column 90 would end at 134.
+    const r = tabs.tipRect(.{ .start = 60, .end = 70, .close = 68 }, 40, tip_area).?;
+    try testz.expectEqual(r.col, 56);
+    try testz.expectEqual(r.col + r.cols, 100);
+}
+
+pub fn tabTipNeverOutgrowsTheWindowTest(_: std.Io, _: std.mem.Allocator) !void {
+    const r = tabs.tipRect(.{ .start = 0, .end = 10, .close = 8 }, 500, tip_area).?;
+    try testz.expectEqual(r.col, 0);
+    try testz.expectEqual(r.cols, 100);
+    // Too narrow for even one column of path: no tooltip.
+    var tiny = tip_area;
+    tiny.area_cols = 4;
+    try testz.expectTrue(tabs.tipRect(.{ .start = 0, .end = 10, .close = 8 }, 20, tiny) == null);
+}
+
+pub fn tabTipClipsThePathsHeadTest(_: std.Io, _: std.mem.Allocator) !void {
+    const fits = tabs.clipHead("~/code/ui.zig", 13);
+    try testz.expectTrue(!fits.ellipsis);
+    try testz.expectEqualStr(fits.tail, "~/code/ui.zig");
+    // The file name survives; the head is what goes, behind a `…`.
+    const cut = tabs.clipHead("~/code/glyphwire/zoe/ui.zig", 12);
+    try testz.expectTrue(cut.ellipsis);
+    try testz.expectEqualStr(cut.tail, "/zoe/ui.zig");
+}
+
+pub fn tabTipClipNeverSplitsACharacterTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Each kana is two columns and three bytes: with 5 columns, the `…`
+    // and two of them fit, and the cut lands on a character boundary.
+    const cut = tabs.clipHead("/あいうえ", 5);
+    try testz.expectTrue(cut.ellipsis);
+    try testz.expectEqualStr(cut.tail, "うえ");
+}
+
+pub fn tabTooltipDelayIsConfigurableTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    {
+        var cfg = try parseConf(alloc, "config = {}");
+        defer cfg.deinit();
+        try testz.expectEqual(cfg.tab_tooltip_delay_ms, 400);
+    }
+    {
+        var cfg = try parseConf(alloc, "config = { tab_tooltip_delay_ms = 0 }");
+        defer cfg.deinit();
+        try testz.expectEqual(cfg.tab_tooltip_delay_ms, 0);
+    }
+    {
+        var cfg = try parseConf(alloc, "config = { tab_tooltip_delay_ms = -5 }");
+        defer cfg.deinit();
+        try testz.expectEqual(cfg.tab_tooltip_delay_ms, 400);
+    }
+}
+
 // ── Ctrl+P file finder ──────────────────────────────────────────────────
 //
 // The scan is the only part of `applib/finder.zig` that touches a

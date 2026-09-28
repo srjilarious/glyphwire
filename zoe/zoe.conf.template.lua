@@ -135,6 +135,10 @@
 --     -- differently. `:set whitespace=on|off` changes it live.
 --     show_whitespace = false,
 --
+--     -- Milliseconds the pointer rests on a tab before the file's full
+--     -- path pops up under it. 0 shows it at once.
+--     tab_tooltip_delay_ms = 400,
+--
 --     ---- Language servers (LSP) ---------------------------------------
 --
 --     -- zoe talks to language servers for diagnostics, hover (K) and

@@ -116,3 +116,77 @@ pub fn labelFor(path: ?[]const u8) []const u8 {
     const base = std.fs.path.basename(p);
     return if (base.len == 0) p else base;
 }
+
+// ── Path tooltip ─────────────────────────────────────────────────────
+//
+// Resting the pointer on a tab pops up that buffer's full path under it,
+// since the tab itself only shows the basename. The popup is a one-line
+// framed panel: the frame ring plus a one-cell margin inside it each side.
+
+/// The tooltip's height: frame, the path, frame.
+pub const tip_rows: usize = 3;
+/// The columns the frame and its inner margin take from the tooltip.
+pub const tip_chrome_cols: usize = 4;
+/// Where a clipped path's missing head is marked.
+pub const tip_ellipsis = "…";
+
+/// Where a tab's tooltip goes, in window cells. Always `tip_rows` tall.
+pub const TipRect = struct {
+    row: usize,
+    col: usize,
+    cols: usize,
+};
+
+/// The strip and window geometry `tipRect` places against.
+pub const TipArea = struct {
+    /// The tab strip's row and first column on screen.
+    strip_row: usize,
+    strip_col: usize,
+    /// The strip's horizontal scroll, as in `Ui.tab_scroll`.
+    scroll: usize,
+    /// The columns the tooltip must stay inside -- the whole window, so a
+    /// long path can extend left over the file tree.
+    area_col: usize,
+    area_cols: usize,
+};
+
+/// The tooltip for the tab at `span`, holding a path `text_cols` wide:
+/// on the row under the strip, left-aligned with the tab's left edge (or
+/// the strip's, for a tab scrolled partly off it), and pulled left when
+/// it would run off the window's right edge. As wide as the path needs,
+/// up to the window; null when not even one column of path would fit.
+pub fn tipRect(span: Span, text_cols: usize, area: TipArea) ?TipRect {
+    const cols = @min(text_cols + tip_chrome_cols, area.area_cols);
+    if (cols <= tip_chrome_cols) return null;
+    const tab_col = area.strip_col + (span.start -| area.scroll);
+    const right_most = area.area_col + (area.area_cols - cols);
+    return .{
+        .row = area.strip_row + 1,
+        .col = @max(area.area_col, @min(tab_col, right_most)),
+        .cols = cols,
+    };
+}
+
+/// `path` cut to fit `max_cols` display columns. A path that doesn't fit
+/// loses its *head*, marked with `tip_ellipsis`: the file name and the
+/// directories nearest it are what tell two tabs of the same name apart.
+pub const Clipped = struct {
+    ellipsis: bool,
+    /// The part of the path that is shown: all of it, or a suffix.
+    tail: []const u8,
+};
+
+pub fn clipHead(path: []const u8, max_cols: usize) Clipped {
+    if (glyphwire.stringWidth(path) <= max_cols) return .{ .ellipsis = false, .tail = path };
+    const mark_cols = glyphwire.stringWidth(tip_ellipsis);
+    if (max_cols <= mark_cols) return .{ .ellipsis = true, .tail = "" };
+    const room = max_cols - mark_cols;
+    // The longest suffix that fits, starting on a UTF-8 lead byte so a
+    // multi-byte character is never split.
+    var i: usize = 1;
+    while (i < path.len) : (i += 1) {
+        if (path[i] & 0xC0 == 0x80) continue;
+        if (glyphwire.stringWidth(path[i..]) <= room) break;
+    }
+    return .{ .ellipsis = true, .tail = path[i..] };
+}

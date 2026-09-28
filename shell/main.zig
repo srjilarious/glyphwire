@@ -14,6 +14,7 @@ const hs = @import("shell_support").handshake;
 const config = @import("shell_support").config;
 const script_engine = @import("shell_support").script_engine;
 const history = @import("applib").history;
+const homepath = @import("applib").homepath;
 const zjump = @import("shell_support").zjump;
 const flushgate = @import("shell_support").flushgate;
 const keyencode = @import("shell_support").keyencode;
@@ -2442,7 +2443,7 @@ const Prompt = struct {
     /// too small. The rule itself lives in `logicalpath` so it can be
     /// tested without a prompt; this just supplies `$HOME`.
     fn collapseHome(self: *Prompt, path: []const u8, buf: []u8) []const u8 {
-        return logicalpath.collapseHome(path, self.environ_map.get("HOME"), buf);
+        return homepath.collapseHome(path, self.environ_map.get("HOME"), buf);
     }
 
     /// The caret's column offset from `line_start_col` -- the display
