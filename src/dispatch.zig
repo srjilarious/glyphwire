@@ -3673,23 +3673,17 @@ pub const Dispatcher = struct {
     /// Builds the owned `core.OutlineNode` list from the wire shape,
     /// resolving each node's icon name against the catalog at this point
     /// (the "fail loud on an unknown name where it's used" rule
-    /// `draw_icon` and `table_set_rows` already follow). Every node built
-    /// so far is freed if a later one fails, so a bad node can't leave a
-    /// half-built list behind.
-    fn buildOutlineNodes(self: *Dispatcher, talloc: std.mem.Allocator, in: []const protocol.OutlineNode) ![]core.OutlineNode {
+    /// `draw_icon` and `table_set_rows` already follow). Everything lands
+    /// in one fresh arena (`core.OutlineNodes`), dropped whole if a later
+    /// node fails, so a bad node can't leave a half-built list behind.
+    fn buildOutlineNodes(self: *Dispatcher, in: []const protocol.OutlineNode) !core.OutlineNodes {
+        var storage = std.heap.ArenaAllocator.init(self.ctx.alloc);
+        errdefer storage.deinit();
+        const talloc = storage.allocator();
+
         const nodes = try talloc.alloc(core.OutlineNode, in.len);
-        var built: usize = 0;
-        errdefer {
-            for (nodes[0..built]) |n| n.deinit(talloc);
-            talloc.free(nodes);
-        }
         for (in, 0..) |nj, i| {
             const runs = try talloc.alloc(core.Layer.TextRun, nj.runs.len);
-            var runs_built: usize = 0;
-            errdefer {
-                for (runs[0..runs_built]) |r| talloc.free(@constCast(r.text));
-                talloc.free(runs);
-            }
             for (nj.runs, 0..) |rj, ri| {
                 runs[ri] = .{
                     .text = try talloc.dupe(u8, rj.text),
@@ -3697,7 +3691,6 @@ pub const Dispatcher = struct {
                     .bg = if (rj.bg) |c| core.Background{ .color = colorFromJson(c) } else null,
                     .metadata_id = rj.metadata_id,
                 };
-                runs_built = ri + 1;
             }
             const icon: ?core.ImageHandle = if (nj.icon) |name|
                 self.ctx.iconHandle(name) orelse return DispatchError.UnknownIcon
@@ -3711,9 +3704,8 @@ pub const Dispatcher = struct {
                 .collapsible = nj.collapsible,
                 .collapsed = nj.collapsed,
             };
-            built = i + 1;
         }
-        return nodes;
+        return .{ .storage = storage, .nodes = nodes };
     }
 
     /// `outline_set_nodes`: replaces the node list wholesale and draws
@@ -3728,7 +3720,7 @@ pub const Dispatcher = struct {
         const layer = try self.resolveLayer(p.layer);
         const outline = layer.outlines.getPtr(p.outline) orelse return DispatchError.UnknownOutline;
 
-        const nodes = try self.buildOutlineNodes(self.ctx.alloc, p.nodes);
+        const nodes = try self.buildOutlineNodes(p.nodes);
         outline.setNodes(nodes);
         try outline.render(layer, self.ctx);
     }
