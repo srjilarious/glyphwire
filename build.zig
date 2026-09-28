@@ -827,13 +827,19 @@ fn installGrammars(
                 .link_libc = true,
             }),
         });
+        // C23, not C11: most scanners declare `..._external_scanner_create()`,
+        // which before C23 is an unprototyped function, while libtree-sitter
+        // calls it through a `void *(*)(void)`. Zig builds C with
+        // `-fsanitize=function` in safe modes, so under C11 a ReleaseSafe
+        // zoe trapped (SIGILL) on the first parse of any grammar with a
+        // scanner. In C23 `()` means `(void)` and the types agree.
         lib.root_module.addCSourceFile(.{
             .file = ctx.srcPath("src/parser.c"),
-            .flags = &.{"-std=c11"},
+            .flags = &.{"-std=c23"},
         });
         if (g.scanner) lib.root_module.addCSourceFile(.{
             .file = ctx.srcPath("src/scanner.c"),
-            .flags = &.{"-std=c11"},
+            .flags = &.{"-std=c23"},
         });
         lib.root_module.addIncludePath(ctx.srcPath("src"));
 

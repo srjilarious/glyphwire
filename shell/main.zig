@@ -17,6 +17,7 @@ const history = @import("applib").history;
 const homepath = @import("applib").homepath;
 const zjump = @import("shell_support").zjump;
 const flushgate = @import("shell_support").flushgate;
+const crashlog = @import("shell_support").crashlog;
 const keyencode = @import("shell_support").keyencode;
 const lineedit = @import("applib").lineedit;
 const prompt_template = @import("shell_support").prompt_template;
@@ -4660,6 +4661,8 @@ const Prompt = struct {
         // freezing scrollback and making the host wheel page the shell.
         self.drawText("\x1b[?1049l\x1b[!p", null, null) catch {};
 
+        self.reportCrash(job);
+
         // Record the run's outcome for the next prompt's `{exit}` / `{dur}`.
         const elapsed_ms = job.started.untilNow(self.client.io).raw.toMilliseconds();
         self.last_dur_ms = if (elapsed_ms > 0) @intCast(elapsed_ms) else 0;
@@ -4747,8 +4750,103 @@ const Prompt = struct {
             else
                 std.fmt.bufPrint(&buf, "[{d}] exit {d}  {s}\n", .{ job.id, job.pty.exit_code, job.name }) catch "[?] done\n";
             self.drawText(msg, job_color, null) catch {};
+            self.reportCrash(job);
             self.freeJob(job);
         }
+    }
+
+    /// Lines of a crashed program's output shown in the scrollback; the
+    /// log file keeps all of `crashlog.Tail`.
+    const crash_report_lines = 40;
+
+    /// When a glyphwire-aware `job` died badly (see
+    /// `crashlog.shouldReport`), puts what it last wrote to its pty where
+    /// someone will see it: a banner and the tail of that output in the
+    /// scrollback, and the whole of it in a log file under
+    /// `crashlog.logDir`. A plain child needs none of this -- its output
+    /// was on the grid all along. `job` has been reaped and its reader
+    /// joined. Best-effort throughout.
+    fn reportCrash(self: *Prompt, job: *Job) void {
+        const alloc = self.client.alloc;
+        if (awareState(&job.reader_ctx) != true) return;
+        const exit: crashlog.Exit = if (job.pty.term_signal != 0)
+            .{ .signal = job.pty.term_signal }
+        else
+            .{ .code = job.pty.exit_code };
+        const tail = &job.reader_ctx.tail;
+        if (!crashlog.shouldReport(exit, tail.len)) return;
+
+        const raw = alloc.alloc(u8, crashlog.Tail.capacity) catch return;
+        defer alloc.free(raw);
+        const clean_buf = alloc.alloc(u8, crashlog.Tail.capacity) catch return;
+        defer alloc.free(clean_buf);
+        const output = crashlog.stripAnsi(tail.contents(raw), clean_buf);
+
+        var program_it = std.mem.tokenizeScalar(u8, job.name, ' ');
+        const program = std.fs.path.basename(program_it.next() orelse job.name);
+        var what_buf: [128]u8 = undefined;
+        const what = crashlog.describe(&what_buf, program, exit);
+
+        const log_path = self.writeCrashLog(job, program, what, output);
+        defer if (log_path) |p| alloc.free(p);
+
+        // Onto a row of its own, not the tail of whatever was last drawn.
+        const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
+        if (cur.col != 0) self.drawText("\n", null, null) catch {};
+        var banner_buf: [192]u8 = undefined;
+        const banner = std.fmt.bufPrint(&banner_buf, "{s}; its last output:\n", .{what}) catch "crashed; its last output:\n";
+        self.drawText(banner, err_color, null) catch {};
+
+        const shown = crashlog.lastLines(output, crash_report_lines);
+        if (shown.len > 0) {
+            self.drawText(shown, null, null) catch {};
+            if (shown[shown.len - 1] != '\n') self.drawText("\n", null, null) catch {};
+        } else {
+            self.drawText("(nothing)\n", null, null) catch {};
+        }
+
+        if (log_path) |p| {
+            var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+            const line = std.fmt.bufPrint(&line_buf, "full log: {s}\n", .{p}) catch "";
+            self.drawText(line, err_color, null) catch {};
+        }
+    }
+
+    /// Writes a crash report for `job` into `crashlog.logDir`, creating
+    /// the directory as needed. Returns the file's path (owned), or null
+    /// when there is nowhere to put it or the write failed -- the
+    /// scrollback report stands on its own either way.
+    fn writeCrashLog(self: *Prompt, job: *const Job, program: []const u8, what: []const u8, output: []const u8) ?[]u8 {
+        const alloc = self.client.alloc;
+        const io = self.client.io;
+
+        const dir = (crashlog.logDir(alloc, self.environ_map) catch return null) orelse return null;
+        defer alloc.free(dir);
+        std.Io.Dir.cwd().createDirPath(io, dir) catch |err| {
+            std.log.warn("gw-shell: cannot create crash log dir {s}: {t}", .{ dir, err });
+            return null;
+        };
+
+        var stamp_buf: [32]u8 = undefined;
+        const stamp = self.formatTime(&stamp_buf, "%Y%m%d-%H%M%S");
+        var name_buf: [std.fs.max_name_bytes]u8 = undefined;
+        const name = crashlog.logName(&name_buf, program, stamp, job.pty.pid);
+        const path = std.fs.path.join(alloc, &.{ dir, name }) catch return null;
+
+        var when_buf: [64]u8 = undefined;
+        const when = self.formatTime(&when_buf, "%Y-%m-%d %H:%M:%S %z");
+        const body = std.fmt.allocPrint(alloc, "command: {s}\nresult: {s}\ntime: {s}\n\n{s}", .{ job.name, what, when, output }) catch {
+            alloc.free(path);
+            return null;
+        };
+        defer alloc.free(body);
+
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body }) catch |err| {
+            std.log.warn("gw-shell: cannot write crash log {s}: {t}", .{ path, err });
+            alloc.free(path);
+            return null;
+        };
+        return path;
     }
 
     /// Stops every background job on the way out, the way a closing
@@ -4869,6 +4967,11 @@ const Prompt = struct {
         /// forwarding keystrokes/mouse/replies into an aware child's pty
         /// -- see `runCommand`'s use of `awareState`.
         aware: std.atomic.Value(u8) = .init(0),
+        /// An aware child's output after the handshake, which goes to this
+        /// process's real stdout where nobody sees it. Kept so a crash can
+        /// be reported (see `reportCrash`). Written only by the reader
+        /// thread and read only after it is joined.
+        tail: crashlog.Tail = .{},
     };
 
     fn awareState(ctx: *const PtyReaderCtx) ?bool {
@@ -4924,26 +5027,28 @@ const Prompt = struct {
                 if (aware == null) continue; // still a prefix of the marker
                 ctx.aware.store(if (aware.?) 1 else 2, .release);
                 const body = if (aware.?) pending.items[hs.marker.len..] else pending.items;
-                emitChunk(self, &real_out, aware.?, body);
+                emitChunk(ctx, &real_out, aware.?, body);
                 pending.clearRetainingCapacity();
                 continue;
             }
-            emitChunk(self, &real_out, aware.?, chunk);
+            emitChunk(ctx, &real_out, aware.?, chunk);
         }
 
         // EOF before the handshake could resolve (total output shorter
         // than the marker) -> treat as a plain child, flush what we held.
         if (aware == null and pending.items.len > 0) {
-            emitChunk(self, &real_out, false, pending.items);
+            emitChunk(ctx, &real_out, false, pending.items);
         }
     }
 
     /// One chunk from `ptyReaderThread`: onto the grid (plain child) or to
-    /// this process's real stdout (aware child). Best-effort -- a write
-    /// failure here has nowhere useful to go.
-    fn emitChunk(self: *Prompt, real_out: *std.Io.File.Writer, aware: bool, bytes: []const u8) void {
+    /// this process's real stdout and the crash tail (aware child).
+    /// Best-effort -- a write failure here has nowhere useful to go.
+    fn emitChunk(ctx: *PtyReaderCtx, real_out: *std.Io.File.Writer, aware: bool, bytes: []const u8) void {
         if (bytes.len == 0) return;
+        const self = ctx.prompt;
         if (aware) {
+            ctx.tail.append(bytes);
             real_out.interface.writeAll(bytes) catch {};
             real_out.interface.flush() catch {};
         } else {

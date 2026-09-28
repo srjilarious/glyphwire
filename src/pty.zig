@@ -41,6 +41,7 @@ const PtyStub = struct {
     master: c.fd_t = -1,
     pid: c.pid_t = -1,
     exit_code: u8 = 0,
+    term_signal: u8 = 0,
 
     pub fn spawn(_: [*:null]const ?[*:0]const u8, _: u16, _: u16, _: ?[*:null]const ?[*:0]const u8) SpawnError!PtyStub {
         return error.Unsupported;
@@ -135,6 +136,16 @@ fn decodeWaitStatus(status: c_int) u8 {
     return 0; // 0x7f = stopped; not expected with our waitpid flags
 }
 
+/// The signal that killed the child, or 0 for a normal exit -- the part
+/// of the status `decodeWaitStatus` folds into `128 + signal`, which a
+/// program calling `exit(134)` could also produce.
+fn waitSignal(status: c_int) u8 {
+    const s: u32 = @bitCast(status);
+    const term_sig = s & 0x7f;
+    if (term_sig == 0 or term_sig == 0x7f) return 0;
+    return @intCast(term_sig);
+}
+
 const PtyLinux = struct {
     master: c.fd_t,
     pid: c.pid_t,
@@ -143,6 +154,9 @@ const PtyLinux = struct {
     /// signalled death, `0` before either has reaped it. `shell/main.zig`
     /// reads this for the prompt's `{exit}` token.
     exit_code: u8 = 0,
+    /// The signal that killed the child, 0 if it exited normally (or
+    /// hasn't been reaped). Lets gw-shell tell a crash from `exit(134)`.
+    term_signal: u8 = 0,
     /// True once the child has actually been reaped, by whichever of
     /// `reaped`/`wait` got there first. Makes both idempotent: without
     /// it, a second reap attempt on an already-reaped pid (e.g. `gmux`'s
@@ -264,6 +278,7 @@ const PtyLinux = struct {
         var status: c_int = undefined;
         if (c.waitpid(self.pid, &status, 1) != self.pid) return false; // WNOHANG
         self.exit_code = decodeWaitStatus(status);
+        self.term_signal = waitSignal(status);
         self.exited = true;
         return true;
     }
@@ -282,6 +297,7 @@ const PtyLinux = struct {
         var status: c_int = undefined;
         while (c.waitpid(self.pid, &status, 0) < 0) {}
         self.exit_code = decodeWaitStatus(status);
+        self.term_signal = waitSignal(status);
         self.exited = true;
     }
 
