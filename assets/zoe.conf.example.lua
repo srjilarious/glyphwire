@@ -44,6 +44,9 @@ config = {
     -- tab. `:set whitespace=on|off` changes it live.
     show_whitespace = false,
 
+    -- How long the pointer rests on a tab before its full path pops up.
+    tab_tooltip_delay_ms = 400,
+
     -- A few capture-group colors; unset groups keep the built-in value.
     theme = {
         comment = "#6a7a86",
