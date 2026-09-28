@@ -186,6 +186,7 @@ pub const ninePatchQuads = core.ninePatchQuads;
 pub const OutlineHandle = core.OutlineHandle;
 pub const OutlineError = core.OutlineError;
 pub const OutlineNode = core.OutlineNode;
+pub const OutlineNodes = core.OutlineNodes;
 pub const OutlineStyle = core.OutlineStyle;
 pub const Outline = core.Outline;
 pub const outline_marker_cols = core.outline_marker_cols;

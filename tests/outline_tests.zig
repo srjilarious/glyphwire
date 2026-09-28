@@ -38,15 +38,18 @@ fn node(alloc: std.mem.Allocator, depth: u8, text: []const u8, collapsible: bool
 ///   hit 20        depth 1, collapsible
 ///     ctx 21      depth 2
 /// ```
-fn grepNodes(alloc: std.mem.Allocator, collapsed: bool) ![]glyphwire.OutlineNode {
-    const nodes = try alloc.alloc(glyphwire.OutlineNode, 6);
-    nodes[0] = try node(alloc, 0, "file.zig", true, false);
-    nodes[1] = try node(alloc, 1, "hit 10", true, collapsed);
-    nodes[2] = try node(alloc, 2, "ctx 11", false, false);
-    nodes[3] = try node(alloc, 2, "ctx 12", false, false);
-    nodes[4] = try node(alloc, 1, "hit 20", true, collapsed);
-    nodes[5] = try node(alloc, 2, "ctx 21", false, false);
-    return nodes;
+fn grepNodes(alloc: std.mem.Allocator, collapsed: bool) !glyphwire.OutlineNodes {
+    var storage = std.heap.ArenaAllocator.init(alloc);
+    errdefer storage.deinit();
+    const a = storage.allocator();
+    const nodes = try a.alloc(glyphwire.OutlineNode, 6);
+    nodes[0] = try node(a, 0, "file.zig", true, false);
+    nodes[1] = try node(a, 1, "hit 10", true, collapsed);
+    nodes[2] = try node(a, 2, "ctx 11", false, false);
+    nodes[3] = try node(a, 2, "ctx 12", false, false);
+    nodes[4] = try node(a, 1, "hit 20", true, collapsed);
+    nodes[5] = try node(a, 2, "ctx 21", false, false);
+    return .{ .storage = storage, .nodes = nodes };
 }
 
 /// The text of live-viewport row `row`, trailing blanks trimmed.
@@ -293,13 +296,15 @@ pub fn outlineNodeRunsKeepTheirOwnColoursTest(io: std.Io, alloc: std.mem.Allocat
 
     // A grep hit's row: line number dim, the matched bytes highlighted,
     // the rest plain -- the reason nodes carry runs rather than one string.
-    const runs = try alloc.alloc(glyphwire.Layer.TextRun, 3);
-    runs[0] = .{ .text = try alloc.dupe(u8, "12 "), .fg = .{ .r = 90, .g = 90, .b = 90 }, .bg = null };
-    runs[1] = .{ .text = try alloc.dupe(u8, "init"), .fg = .{ .r = 255, .g = 200, .b = 0 }, .bg = null };
-    runs[2] = .{ .text = try alloc.dupe(u8, "()"), .fg = .{ .r = 200, .g = 200, .b = 200 }, .bg = null };
-    const nodes = try alloc.alloc(glyphwire.OutlineNode, 1);
+    var storage = std.heap.ArenaAllocator.init(alloc);
+    const a = storage.allocator();
+    const runs = try a.alloc(glyphwire.Layer.TextRun, 3);
+    runs[0] = .{ .text = try a.dupe(u8, "12 "), .fg = .{ .r = 90, .g = 90, .b = 90 }, .bg = null };
+    runs[1] = .{ .text = try a.dupe(u8, "init"), .fg = .{ .r = 255, .g = 200, .b = 0 }, .bg = null };
+    runs[2] = .{ .text = try a.dupe(u8, "()"), .fg = .{ .r = 200, .g = 200, .b = 200 }, .bg = null };
+    const nodes = try a.alloc(glyphwire.OutlineNode, 1);
     nodes[0] = .{ .depth = 0, .runs = runs, .collapsible = false };
-    outline.setNodes(nodes);
+    outline.setNodes(.{ .storage = storage, .nodes = nodes });
     try outline.render(&ctx.root, &ctx);
 
     // Two blank marker cells, then the runs back to back.
@@ -317,10 +322,12 @@ pub fn outlineRowIsClippedNotWrappedTest(io: std.Io, alloc: std.mem.Allocator) !
 
     const h = try ctx.createOutline(null, 0, 0, 20, try style(alloc, null));
     const outline = ctx.root.outlines.getPtr(h).?;
-    const nodes = try alloc.alloc(glyphwire.OutlineNode, 2);
-    nodes[0] = try node(alloc, 0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false, false);
-    nodes[1] = try node(alloc, 0, "second", false, false);
-    outline.setNodes(nodes);
+    var storage = std.heap.ArenaAllocator.init(alloc);
+    const a = storage.allocator();
+    const nodes = try a.alloc(glyphwire.OutlineNode, 2);
+    nodes[0] = try node(a, 0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false, false);
+    nodes[1] = try node(a, 0, "second", false, false);
+    outline.setNodes(.{ .storage = storage, .nodes = nodes });
     try outline.render(&ctx.root, &ctx);
 
     // One source line is one row: a long line is cut at the outline's
@@ -520,28 +527,34 @@ pub fn outlineUnknownHandleAndBadNodeAreReportedTest(io: std.Io, alloc: std.mem.
 
 /// A file node with `hits` hits under it, each carrying `ctx_lines`
 /// context lines -- enough rows to overflow a short window.
-fn tallNodes(alloc: std.mem.Allocator, hits: usize, ctx_lines: usize) ![]glyphwire.OutlineNode {
+fn tallNodes(alloc: std.mem.Allocator, hits: usize, ctx_lines: usize) !glyphwire.OutlineNodes {
+    var storage = std.heap.ArenaAllocator.init(alloc);
+    errdefer storage.deinit();
+    const a = storage.allocator();
     var list: std.ArrayList(glyphwire.OutlineNode) = .empty;
-    try list.append(alloc, try node(alloc, 0, "file.zig", true, false));
+    try list.append(a, try node(a, 0, "file.zig", true, false));
     for (0..hits) |_| {
-        try list.append(alloc, try node(alloc, 1, "hit", true, true));
-        for (0..ctx_lines) |_| try list.append(alloc, try node(alloc, 2, "ctx", false, false));
+        try list.append(a, try node(a, 1, "hit", true, true));
+        for (0..ctx_lines) |_| try list.append(a, try node(a, 2, "ctx", false, false));
     }
-    return list.toOwnedSlice(alloc);
+    return .{ .storage = storage, .nodes = try list.toOwnedSlice(a) };
 }
 
 /// `files` files, each with `hits` hits, each hit carrying `ctx_lines`
 /// context lines -- a whole `gw-grep` run rather than one file's worth.
-fn manyFileNodes(alloc: std.mem.Allocator, files: usize, hits: usize, ctx_lines: usize) ![]glyphwire.OutlineNode {
+fn manyFileNodes(alloc: std.mem.Allocator, files: usize, hits: usize, ctx_lines: usize) !glyphwire.OutlineNodes {
+    var storage = std.heap.ArenaAllocator.init(alloc);
+    errdefer storage.deinit();
+    const a = storage.allocator();
     var list: std.ArrayList(glyphwire.OutlineNode) = .empty;
     for (0..files) |_| {
-        try list.append(alloc, try node(alloc, 0, "file.zig", true, false));
+        try list.append(a, try node(a, 0, "file.zig", true, false));
         for (0..hits) |_| {
-            try list.append(alloc, try node(alloc, 1, "hit", true, true));
-            for (0..ctx_lines) |_| try list.append(alloc, try node(alloc, 2, "ctx", false, false));
+            try list.append(a, try node(a, 1, "hit", true, true));
+            for (0..ctx_lines) |_| try list.append(a, try node(a, 2, "ctx", false, false));
         }
     }
-    return list.toOwnedSlice(alloc);
+    return .{ .storage = storage, .nodes = try list.toOwnedSlice(a) };
 }
 
 pub fn outlineVisibleSpanCoversANodeAndItsShownChildrenTest(io: std.Io, alloc: std.mem.Allocator) !void {

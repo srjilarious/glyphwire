@@ -5456,11 +5456,22 @@ pub const OutlineNode = struct {
     /// it simply has nothing to hide.
     collapsible: bool = false,
     collapsed: bool = false,
+};
 
-    pub fn deinit(self: OutlineNode, alloc: std.mem.Allocator) void {
-        for (self.runs) |r| alloc.free(@constCast(r.text));
-        alloc.free(self.runs);
-    }
+/// A whole node list plus the arena it was built in: `nodes`, each
+/// node's `runs`, and every run's `text` all come out of `storage`.
+/// `Outline.setNodes` takes both.
+///
+/// An arena because the list is only ever replaced whole. A big `gw-grep`
+/// run is ~100k nodes with a few runs each, so per-allocation ownership
+/// meant half a million allocations to build it and as many frees to
+/// replace it. The arena makes that a handful of chunk allocations and
+/// one `deinit`. Building into a fresh arena and handing it over only
+/// once complete also means a list that fails halfway leaves the
+/// outline's current one untouched.
+pub const OutlineNodes = struct {
+    storage: std.heap.ArenaAllocator,
+    nodes: []OutlineNode,
 };
 
 pub const OutlineStyle = struct {
@@ -5501,6 +5512,9 @@ pub const Outline = struct {
     /// click (which arrives as a *screen* row) map back to a node however
     /// far the outline has scrolled since it was drawn.
     top_live: i64 = 0,
+    /// The arena `nodes` (runs and run text included) lives in, handed
+    /// over by `setNodes`; null until the first one. See `OutlineNodes`.
+    storage: ?std.heap.ArenaAllocator = null,
 
     /// Takes ownership of `style` outright, the same "caller hands over a
     /// fully-built value" shape `Table.init` has.
@@ -5509,25 +5523,24 @@ pub const Outline = struct {
     }
 
     pub fn deinit(self: *Outline) void {
-        self.freeNodes();
+        if (self.storage) |*s| s.deinit();
+        self.storage = null;
+        self.nodes = &.{};
         self.style.deinit(self.alloc);
     }
 
-    fn freeNodes(self: *Outline) void {
-        for (self.nodes) |n| n.deinit(self.alloc);
-        self.alloc.free(self.nodes);
-        self.nodes = &.{};
-    }
-
     /// `outline_set_nodes`: replaces every node wholesale, taking
-    /// ownership of `new_nodes` the same way `Table.setRows` takes rows.
-    /// Collapse state travels *with* the new nodes rather than being
-    /// carried over from the old ones -- a client replacing the list knows
-    /// what it wants shown, and matching old state onto new nodes would
-    /// need an identity the flat list doesn't have.
-    pub fn setNodes(self: *Outline, new_nodes: []OutlineNode) void {
-        self.freeNodes();
-        self.nodes = new_nodes;
+    /// ownership of `new_nodes.storage` -- the arena every node, run and
+    /// run text in `new_nodes.nodes` was allocated from. The old list goes
+    /// in one arena `deinit`, not a walk freeing each run. Collapse state
+    /// travels *with* the new nodes rather than being carried over from
+    /// the old ones -- a client replacing the list knows what it wants
+    /// shown, and matching old state onto new nodes would need an identity
+    /// the flat list doesn't have.
+    pub fn setNodes(self: *Outline, new_nodes: OutlineNodes) void {
+        if (self.storage) |*s| s.deinit();
+        self.storage = new_nodes.storage;
+        self.nodes = new_nodes.nodes;
     }
 
     pub fn setStyle(self: *Outline, new_style: OutlineStyle) void {

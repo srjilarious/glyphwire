@@ -303,12 +303,14 @@ pub fn grepBuiltNodesDriveARealOutlineTest(io: std.Io, alloc: std.mem.Allocator)
 
     // Convert the client-side node inputs to core nodes the same way the
     // dispatcher would, minus the JSON hop.
-    const core_nodes = try alloc.alloc(glyphwire.OutlineNode, built.nodes.len);
+    var storage = std.heap.ArenaAllocator.init(alloc);
+    const a = storage.allocator();
+    const core_nodes = try a.alloc(glyphwire.OutlineNode, built.nodes.len);
     for (built.nodes, 0..) |n, i| {
-        const runs = try alloc.alloc(glyphwire.Layer.TextRun, n.runs.len);
+        const runs = try a.alloc(glyphwire.Layer.TextRun, n.runs.len);
         for (n.runs, 0..) |r, ri| {
             runs[ri] = .{
-                .text = try alloc.dupe(u8, r.text),
+                .text = try a.dupe(u8, r.text),
                 .fg = r.fg orelse glyphwire.default_style.fg,
                 .bg = null,
             };
@@ -320,7 +322,7 @@ pub fn grepBuiltNodesDriveARealOutlineTest(io: std.Io, alloc: std.mem.Allocator)
             .collapsed = n.collapsed,
         };
     }
-    outline.setNodes(core_nodes);
+    outline.setNodes(.{ .storage = storage, .nodes = core_nodes });
     try outline.render(&ctx.root, &ctx);
 
     // Files open, hits closed: two files and three hits = 5 rows.
