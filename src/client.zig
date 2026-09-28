@@ -3077,21 +3077,36 @@ pub const BatchResults = struct {
         self.arena.deinit();
     }
 
+    /// The response for `slot`. The server answers in add order, so slot
+    /// `n` is normally at index `n - 1`; that is checked first. A failed
+    /// sub-message is dropped rather than left as a hole, which shifts
+    /// every later response down, so a miss falls back to scanning for the
+    /// id. Without the direct check, reading back every slot of an
+    /// N-request batch was N^2 lookups -- most of `gw-grep`'s time on a
+    /// large search, at 1000 `create_metadata`s per batch.
     fn element(self: *const BatchResults, slot: Client.Batch.Slot) ?std.json.Value {
         const p = self.parsed orelse return null;
-        for (p.value.result.responses) |resp| {
-            const obj = switch (resp) {
-                .object => |o| o,
-                else => continue,
-            };
-            const id_value = obj.get("id") orelse continue;
-            const id_int: i64 = switch (id_value) {
-                .integer => |n| n,
-                else => continue,
-            };
-            if (id_int == @as(i64, slot.id)) return resp;
+        const responses = p.value.result.responses;
+        const want: i64 = slot.id;
+        if (slot.id >= 1 and slot.id <= responses.len) {
+            const resp = responses[slot.id - 1];
+            if (responseId(resp) == want) return resp;
+        }
+        for (responses) |resp| {
+            if (responseId(resp) == want) return resp;
         }
         return null;
+    }
+
+    fn responseId(resp: std.json.Value) ?i64 {
+        const obj = switch (resp) {
+            .object => |o| o,
+            else => return null,
+        };
+        return switch (obj.get("id") orelse return null) {
+            .integer => |n| n,
+            else => null,
+        };
     }
 
     /// Re-parses the response element for `slot` as `{result: T}` and
