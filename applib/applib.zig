@@ -56,5 +56,6 @@ pub const entries = @import("entries.zig");
 pub const format = @import("format.zig");
 pub const gridlayout = @import("gridlayout.zig");
 pub const icons = @import("icons.zig");
+pub const homepath = @import("homepath.zig");
 
 pub const LineEdit = lineedit.LineEdit;

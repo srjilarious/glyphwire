@@ -20,6 +20,7 @@ const promptrow = @import("shell_support").promptrow;
 const embed = @import("shell_support").embed;
 const logicalpath = @import("shell_support").logicalpath;
 const fuzzy = @import("applib").fuzzy;
+const homepath = @import("applib").homepath;
 
 // ─── wordsplit.split ────────────────────────────────────────────────────
 
@@ -826,21 +827,21 @@ pub fn resolveMultiSegmentRelativeTargetTest(_: std.Io, alloc: std.mem.Allocator
     try testz.expectEqualStr("/home/jeff/projects/glyphwire", p);
 }
 
-// ─── logicalpath.collapseHome: the `~` the prompt and alt+d both show ───
+// ─── homepath.collapseHome: the `~` the prompt, alt+d and zoe's tab tooltip show
 
 pub fn collapseHomeRewritesHomePrefixAsTildeTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [256]u8 = undefined;
-    try testz.expectEqualStr("~/code/glyphwire", logicalpath.collapseHome("/home/jeff/code/glyphwire", "/home/jeff", &buf));
+    try testz.expectEqualStr("~/code/glyphwire", homepath.collapseHome("/home/jeff/code/glyphwire", "/home/jeff", &buf));
 }
 
 pub fn collapseHomeRewritesExactHomeAsBareTildeTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [256]u8 = undefined;
-    try testz.expectEqualStr("~", logicalpath.collapseHome("/home/jeff", "/home/jeff", &buf));
+    try testz.expectEqualStr("~", homepath.collapseHome("/home/jeff", "/home/jeff", &buf));
 }
 
 pub fn collapseHomeLeavesPathsOutsideHomeAloneTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [256]u8 = undefined;
-    try testz.expectEqualStr("/etc/hosts", logicalpath.collapseHome("/etc/hosts", "/home/jeff", &buf));
+    try testz.expectEqualStr("/etc/hosts", homepath.collapseHome("/etc/hosts", "/home/jeff", &buf));
 }
 
 pub fn collapseHomeRequiresAWholePathComponentTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -848,22 +849,22 @@ pub fn collapseHomeRequiresAWholePathComponentTest(_: std.Io, _: std.mem.Allocat
     // `/home/jeff` but is not under it, so it must come back untouched
     // rather than as `~rey`.
     var buf: [256]u8 = undefined;
-    try testz.expectEqualStr("/home/jeffrey/notes", logicalpath.collapseHome("/home/jeffrey/notes", "/home/jeff", &buf));
+    try testz.expectEqualStr("/home/jeffrey/notes", homepath.collapseHome("/home/jeffrey/notes", "/home/jeff", &buf));
 }
 
 pub fn collapseHomeWithoutHomeSetLeavesPathAloneTest(_: std.Io, _: std.mem.Allocator) !void {
     // No `$HOME` at all, and a `$HOME=""` that would otherwise prefix
     // every path in existence.
     var buf: [256]u8 = undefined;
-    try testz.expectEqualStr("/home/jeff/code", logicalpath.collapseHome("/home/jeff/code", null, &buf));
-    try testz.expectEqualStr("/home/jeff/code", logicalpath.collapseHome("/home/jeff/code", "", &buf));
+    try testz.expectEqualStr("/home/jeff/code", homepath.collapseHome("/home/jeff/code", null, &buf));
+    try testz.expectEqualStr("/home/jeff/code", homepath.collapseHome("/home/jeff/code", "", &buf));
 }
 
 pub fn collapseHomeFallsBackWhenBufferIsTooSmallTest(_: std.Io, _: std.mem.Allocator) !void {
     // `~/code` needs 6 bytes; give it 3. Falls back to the original
     // rather than truncating into a path that names somewhere else.
     var buf: [3]u8 = undefined;
-    try testz.expectEqualStr("/home/jeff/code", logicalpath.collapseHome("/home/jeff/code", "/home/jeff", &buf));
+    try testz.expectEqualStr("/home/jeff/code", homepath.collapseHome("/home/jeff/code", "/home/jeff", &buf));
 }
 
 // ─── history merge (concurrent shells sharing one file) ─────────────────

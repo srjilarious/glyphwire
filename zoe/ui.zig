@@ -55,6 +55,7 @@ const tree_mod = @import("tree.zig");
 const finder_mod = @import("applib").finder;
 const finderpopup = @import("applib").finderpopup;
 const filetype = @import("applib").filetype;
+const homepath = @import("applib").homepath;
 const syntax = @import("syntax.zig");
 const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
@@ -200,6 +201,12 @@ const hover_panel_style = "panel";
 /// the host) reaches below it: `hoverRect` keeps that row clear of the line
 /// being described when the popup goes above the cursor.
 const hover_shadow_rows: usize = 1;
+
+/// The tab tooltip (a hovered tab's full path, `zoe/tabs.zig`): the hover
+/// popup's panel and text colour, so the two read as the same kind of
+/// thing. Its layer is created with room for this many columns and
+/// resized to fit each path.
+const tab_tip_initial_cols: usize = 40;
 
 /// The completion popup. Narrower and shorter than the hover: it sits under
 /// the line being typed, and every row of it covers code.
@@ -696,6 +703,21 @@ pub const Ui = struct {
     /// again afterwards.
     hover_hl: ?syntax.Highlighter = null,
 
+    /// The tab tooltip. `tab_tip_index` is the tab the pointer is resting
+    /// on (only tabs with a file behind them count), whether or not its
+    /// tooltip is up yet; `tab_tip_due` is when it goes up, armed on the
+    /// move onto the tab. A keystroke or click takes it down and disarms
+    /// it without forgetting the tab, so it stays down until the pointer
+    /// moves onto another one.
+    tab_tip_layer: glyphwire.LayerHandle,
+    /// The layer's `hover_panel_style` nine-patch, as for the hover popup;
+    /// null draws it flat in `bg_hover`.
+    tab_tip_patch: ?glyphwire.NinePatchHandle,
+    tab_tip_index: ?usize = null,
+    tab_tip_due: ?std.Io.Clock.Timestamp = null,
+    tab_tip_shown: bool = false,
+    tab_tip_dirty: bool = false,
+
     /// The completion popup, non-null while it is up (insert mode only).
     /// See `zoe/complete.zig` for the model and `afterInsertEdit` for when
     /// it opens, narrows and closes.
@@ -903,6 +925,17 @@ pub const Ui = struct {
         try client.setLayerVisible(completion_layer, false);
         try client.setLayerBackground(completion_layer, bg_complete);
         try client.setLayerShadow(completion_layer, glyphwire.Shadow.dialog);
+        // The tab tooltip, last so it sits over everything: it hangs from
+        // the tab strip over the top of the buffer and, for a long path,
+        // over the file tree.
+        const tab_tip_layer = try client.createLayer(tab_tip_initial_cols, tabs.tip_rows, 0);
+        try client.setLayerVisible(tab_tip_layer, false);
+        try client.setLayerShadow(tab_tip_layer, glyphwire.Shadow.dialog);
+        const tab_tip_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(tab_tip_layer, 0, 0, tabs.tip_rows, tab_tip_initial_cols, hover_panel_style) catch |err| blk: {
+            std.log.warn("zoe: no '{s}' nine-patch for the tab tooltip ({t}); drawing it flat", .{ hover_panel_style, err });
+            break :blk null;
+        };
+        if (tab_tip_patch == null) try client.setLayerBackground(tab_tip_layer, bg_hover);
 
         // The tree|buffer split stays user-resizable. The two column
         // splits are not: what they stack above and below is a single
@@ -932,6 +965,8 @@ pub const Ui = struct {
             .hover_layer = hover_layer,
             .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
+            .tab_tip_layer = tab_tip_layer,
+            .tab_tip_patch = tab_tip_patch,
             .diags = diag.Store.init(alloc),
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
             .pane_split = pane_split,
@@ -1449,7 +1484,7 @@ pub const Ui = struct {
             self.drainLsp();
             if (self.buffer_dirty or self.tree_dirty != .none or self.tabs_dirty or
                 self.status_dirty or self.finder.dirty or self.hover_dirty or self.completion_dirty or
-                self.tree_scroll_pending != null)
+                self.tab_tip_dirty or self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
             // After the frame, not before: entering insert mode's frame
@@ -1503,6 +1538,7 @@ pub const Ui = struct {
             // gets the chance to reopen it.
             self.syncCompletion();
             if (self.completionDue()) self.requestCompletion(null, false);
+            if (self.tabTipDue()) self.showTabTip();
             // After the events, before the frame they produced: a mode
             // change in that batch retimes the host's key repeat before
             // the user can hold anything down in the new mode.
@@ -1603,7 +1639,12 @@ pub const Ui = struct {
                 self.buf.full_redraw = true;
                 self.buffer_dirty = true;
             },
-            .mouse_move => |m| if (!self.shell.isOpen()) try self.handleMouseDrag(m),
+            .mouse_move => |m| {
+                if (!self.shell.isOpen()) try self.handleMouseDrag(m);
+                // The strip is never under the shell panel, so hovering a
+                // tab works with it open too.
+                self.trackTabHover(m.cell);
+            },
             // `defer ev.deinit` above frees the button string.
             .mouse_button => |m| if (!self.shell.isOpen()) try self.handleMouseButton(m),
             else => if (ev.asInput()) |input| try self.handleInput(input),
@@ -1666,6 +1707,9 @@ pub const Ui = struct {
                 // keystroke dismisses it and then does whatever it was going
                 // to do. Escape is the exception -- it only dismisses, so
                 // it doesn't also leave insert mode on the way out.
+                // The tab tooltip goes the same way, without swallowing
+                // anything: it was never what the keystroke was for.
+                self.dismissTabTip();
                 if (self.hover != null) {
                     _ = self.closeHover();
                     if (std.mem.eql(u8, k.key, "escape")) return;
@@ -2312,6 +2356,7 @@ pub const Ui = struct {
         if (ev.pressed) {
             _ = self.closeHover();
             self.closeCompletion();
+            self.dismissTabTip();
         }
         if (!std.mem.eql(u8, ev.button, "left")) return;
 
@@ -2388,6 +2433,72 @@ pub const Ui = struct {
         if (cell.row < b.row or cell.row >= b.row + b.rows) return null;
         if (cell.col < b.col or cell.col >= b.col + b.cols) return null;
         return tabs.hit(self.tab_spans.items, cell.col - b.col + self.tab_scroll);
+    }
+
+    /// Follows the pointer for the tab tooltip. Moving onto a tab arms its
+    /// tooltip after `tab_tooltip_delay_ms`; moving off one takes it down.
+    /// Moving straight from one tab to the next while a tooltip is up
+    /// shows the next one at once -- the user is already reading paths, so
+    /// making them wait again for each is only slower.
+    ///
+    /// The host has no pointer-left-the-window event, so a pointer that
+    /// leaves the window from the strip leaves the tooltip up until the
+    /// next move, key or click.
+    fn trackTabHover(self: *Ui, cell: glyphwire.CellPos) void {
+        const over: ?usize = blk: {
+            // A drag and the finder both own the pointer while they last.
+            if (self.drag != null or self.finder.isOpen()) break :blk null;
+            const h = self.tabAt(cell) orelse break :blk null;
+            if (h.index >= self.buffers.items.len) break :blk null;
+            // `[No Name]` has no path to show.
+            if (self.buffers.items[h.index].ed.path == null) break :blk null;
+            break :blk h.index;
+        };
+        if (over == self.tab_tip_index) return;
+        const was_shown = self.tab_tip_shown;
+        self.tab_tip_index = over;
+        self.tab_tip_due = null;
+        if (was_shown) {
+            self.tab_tip_shown = false;
+            self.tab_tip_dirty = true;
+        }
+        if (over == null) return;
+        const delay = self.tabTipDelayMs();
+        if (was_shown or delay == 0) {
+            self.showTabTip();
+            return;
+        }
+        self.tab_tip_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
+            .raw = .fromMilliseconds(delay),
+            .clock = .awake,
+        });
+    }
+
+    fn tabTipDelayMs(self: *const Ui) i64 {
+        const ms = if (self.hl_config) |cfg| cfg.tab_tooltip_delay_ms else langconf.tab_tooltip_delay_ms_default;
+        return @intFromFloat(ms);
+    }
+
+    fn tabTipDue(self: *Ui) bool {
+        const due = self.tab_tip_due orelse return false;
+        return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() >= 0;
+    }
+
+    fn showTabTip(self: *Ui) void {
+        self.tab_tip_due = null;
+        if (self.tab_tip_index == null) return;
+        self.tab_tip_shown = true;
+        self.tab_tip_dirty = true;
+    }
+
+    /// Takes the tooltip down (or stops it going up) for a key or click. The
+    /// hovered tab is kept, so it doesn't come straight back on the next
+    /// pointer move within the same tab.
+    fn dismissTabTip(self: *Ui) void {
+        self.tab_tip_due = null;
+        if (!self.tab_tip_shown) return;
+        self.tab_tip_shown = false;
+        self.tab_tip_dirty = true;
     }
 
     /// The buffer byte offset under grid cell `cell`, or null if the
@@ -2945,11 +3056,11 @@ pub const Ui = struct {
         self.buf.lsp_sent_edits = self.buf.ed.buf.edits;
     }
 
-    /// The earlier of the `didChange` debounce and the oldest outstanding
-    /// request's timeout, or null for neither -- the loop's whole notion of
-    /// time.
+    /// The earliest of the `didChange` debounce, the completion and tab
+    /// tooltip delays, and the oldest outstanding request's timeout, or null
+    /// for none -- the loop's whole notion of time.
     fn nextLspDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
-        var best = earlier(self.lsp_change_due, self.completion_due);
+        var best = earlier(earlier(self.lsp_change_due, self.completion_due), self.tab_tip_due);
         const pool = if (self.lsp_pool) |*p| p else return best;
         if (pool.nextDeadlineMs()) |req_ms| {
             best = earlier(best, .{
@@ -3759,7 +3870,12 @@ pub const Ui = struct {
             .selection => try self.renderTreeSelection(&batch),
             .full => try self.renderTree(&batch),
         };
-        if (self.tabs_dirty) try self.renderTabs(&batch);
+        if (self.tabs_dirty) {
+            try self.renderTabs(&batch);
+            // The strip was laid out or scrolled again, and the tooltip
+            // hangs from its tab.
+            if (self.tab_tip_shown) self.tab_tip_dirty = true;
+        }
         if (self.status_dirty) try self.renderStatus(&batch);
         // Last in the frame, as they are last in the compositing order. The
         // hover popup after the finder: both float, and a hover raised while
@@ -3773,6 +3889,7 @@ pub const Ui = struct {
         // repaint (a scroll, a wrap) as well as its own changes.
         if (self.completion_dirty or (self.completion != null and self.buffer_dirty))
             try self.renderCompletion(&batch);
+        if (self.tab_tip_dirty) try self.renderTabTip(&batch);
 
         _ = try batch.send();
 
@@ -3782,6 +3899,7 @@ pub const Ui = struct {
         self.status_dirty = false;
         self.hover_dirty = false;
         self.completion_dirty = false;
+        self.tab_tip_dirty = false;
     }
 
     /// Raises the tree pane's pending repaint to at least `level`. Never
@@ -4419,6 +4537,59 @@ pub const Ui = struct {
 
     fn hideHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         try batch.setLayerVisible(self.hover_layer, false);
+    }
+
+    /// Draws the tab tooltip, or hides its layer: the hovered buffer's
+    /// absolute path with `$HOME` as `~`, on the hover popup's panel,
+    /// hanging from the tab (`tabs.tipRect`). A path wider than the window
+    /// loses its head rather than its file name (`tabs.clipHead`).
+    fn renderTabTip(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
+        const hide = !self.tab_tip_shown or self.tab_tip_index == null;
+        const index = self.tab_tip_index orelse 0;
+        // The buffer list or the strip may have changed under a tooltip
+        // that is still up.
+        if (hide or index >= self.buffers.items.len or index >= self.tab_spans.items.len)
+            return batch.setLayerVisible(self.tab_tip_layer, false);
+        const slot = self.buffers.items[index];
+        const abs = self.slotAbs(slot) orelse return batch.setLayerVisible(self.tab_tip_layer, false);
+
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = homepath.collapseHome(abs, self.environ.get("HOME"), &home_buf);
+
+        // The window's full width: the statusline spans it.
+        const area: tabs.TipArea = .{
+            .strip_row = self.tabs_bounds.row,
+            .strip_col = self.tabs_bounds.col,
+            .scroll = self.tab_scroll,
+            .area_col = self.status_bounds.col,
+            .area_cols = self.status_bounds.cols,
+        };
+        const r = tabs.tipRect(self.tab_spans.items[index], glyphwire.stringWidth(path), area) orelse
+            return batch.setLayerVisible(self.tab_tip_layer, false);
+        const clipped = tabs.clipHead(path, r.cols - tabs.tip_chrome_cols);
+
+        try batch.setLayerSize(self.tab_tip_layer, r.cols, tabs.tip_rows);
+        try batch.setLayerCellPosition(self.tab_tip_layer, r.row, r.col);
+        if (self.tab_tip_patch) |np| try batch.updateNinePatch(self.tab_tip_layer, np, .{ .rows = tabs.tip_rows, .cols = r.cols });
+        // A resize keeps whatever the old cells held, so the frame ring
+        // (which is otherwise never written) is blanked every time.
+        try batch.clearArea(.{ .layer = self.tab_tip_layer });
+        // Transparent, so the panel is the text's background; the margin
+        // either side is the leading space and the pad.
+        const spans = [_]glyphwire.client.Client.Span{
+            .{ .text = " " },
+            .{ .text = if (clipped.ellipsis) tabs.tip_ellipsis else "" },
+            .{ .text = clipped.tail },
+        };
+        try batch.writeSpans(&spans, .{
+            .layer = self.tab_tip_layer,
+            .row = 1,
+            .col = 1,
+            .fg = fg_hover,
+            .max_cols = r.cols - 2,
+            .pad = true,
+        });
+        try batch.setLayerVisible(self.tab_tip_layer, true);
     }
 
     /// Draws the completion popup, or hides it. Each row is the item's kind,
