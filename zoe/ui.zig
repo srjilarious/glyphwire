@@ -382,12 +382,19 @@ const TreeFind = struct {
 /// buffer, but `zoe src/` is a place to work -- there is nothing to read
 /// out of a directory, and treating it as a file used to leave you in an
 /// empty buffer named after it that `:w` would then refuse.
+pub const FileTarget = struct {
+    path: []const u8,
+    /// 1-based line to start the cursor on (`zoe +N` / `--line N`), or
+    /// null for the top.
+    line: ?usize = null,
+};
+
 pub const Target = union(enum) {
     /// No argument: an empty scratch buffer, tree on the cwd.
     none,
     /// A file to open -- or a name that doesn't exist yet, which is how
     /// `zoe newfile.txt` creates one.
-    file: []const u8,
+    file: FileTarget,
     /// A directory. `main` has already changed into it, so it *is* the
     /// cwd by the time the UI starts and there is nothing left to carry
     /// here: the tree roots on it like any other cwd, and the buffer
@@ -816,7 +823,7 @@ pub const Ui = struct {
         switch (target) {
             .file => |f| {
                 var title_buf: [glyphwire.Context.max_title_len]u8 = undefined;
-                const title = std.fmt.bufPrint(&title_buf, "zoe {s}", .{std.fs.path.basename(f)}) catch "zoe";
+                const title = std.fmt.bufPrint(&title_buf, "zoe {s}", .{std.fs.path.basename(f.path)}) catch "zoe";
                 try client.setContextTitle(title);
             },
             else => try client.setContextTitle("zoe"),
@@ -946,7 +953,7 @@ pub const Ui = struct {
 
 
         const target_path: ?[]const u8 = switch (target) {
-            .file => |p| p,
+            .file => |f| f.path,
             .none, .directory => null,
         };
         // `zoe some.png` is refused the same way opening it later would
@@ -962,6 +969,10 @@ pub const Ui = struct {
         };
         errdefer first.deinit(alloc);
         if (refused) |p| first.ed.setStatus("E484: \"{s}\" is not a text file", .{p});
+        if (refused == null) switch (target) {
+            .file => |f| if (f.line) |line| first.ed.gotoStartLine(line),
+            .none, .directory => {},
+        };
         try self.buffers.append(alloc, first);
         self.buf = first;
         self.active = 0;

@@ -1129,6 +1129,7 @@ const Mark = struct {
     path: []const u8,
     kind: []const u8,
     mimetype: ?[]const u8,
+    line: ?u64 = null,
 };
 
 /// Where the in-flight directory change came from -- read by
@@ -2108,6 +2109,10 @@ const Prompt = struct {
         return self.client.toggleHighlight(self.layer, row, col, view_offset);
     }
 
+    fn drawActivateAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !glyphwire.Client.ActivateResult {
+        return self.client.activateAt(self.layer, row, col, view_offset);
+    }
+
     fn drawClearHighlight(self: *Prompt) !glyphwire.HighlightSnapshot {
         return self.client.clearHighlight(self.layer);
     }
@@ -3081,11 +3086,34 @@ const Prompt = struct {
     }
 
     /// Enter while browsing: looks up whatever cell the browse cursor is
-    /// over and acts on it. With entries marked (Space / Ctrl+click), Enter
-    /// runs the marked set (`runMarkedAction`); otherwise it acts on the
-    /// single entry under the cursor (`activateSelectionAt`).
+    /// over and acts on it. A sortable table header or an outline node the
+    /// host resolves there (`activate_at`) comes first -- the keyboard form
+    /// of clicking a header or a ▸/▾ marker. Failing that, with entries
+    /// marked (Space / Ctrl+click), Enter runs the marked set
+    /// (`runMarkedAction`); otherwise it acts on the single entry under the
+    /// cursor (`activateSelectionAt`).
     fn browseEnter(self: *Prompt) !void {
         const bp = self.browse_pos orelse return;
+
+        const act = try self.drawActivateAt(bp.row, bp.col, self.view_scroll);
+        switch (act.action) {
+            // Re-sorted in place: the header row doesn't move.
+            .sorted => return,
+            .toggled => {
+                // The reflow changed how much history there is and may
+                // have moved the view to keep the node on screen; the
+                // node itself moved with its rows. Follow it so the
+                // cursor stays on what was just toggled.
+                try self.syncScrollState();
+                var moved = bp;
+                if (act.row) |r| moved.row = @min(r, self.line_start_row -| 1);
+                self.browse_pos = moved;
+                try self.drawSetCursor(moved.row, moved.col);
+                return;
+            },
+            .none => {},
+        }
+
         if (self.marks.items.len > 0) {
             try self.runMarkedAction();
         } else {
@@ -3095,8 +3123,9 @@ const Prompt = struct {
 
     /// The metadata blob glyphwire-ls tags every listed entry with (see
     /// `ls/main.zig`'s `entryMetadataJson`). `kind` and `path` are always
-    /// present; `mimetype` only for a regular file.
-    const MetaEntry = struct { kind: ?[]const u8 = null, path: ?[]const u8 = null, mimetype: ?[]const u8 = null };
+    /// present; `mimetype` only for a regular file; `line` only from
+    /// `gw-grep`, which tags each hit and context line with its own.
+    const MetaEntry = struct { kind: ?[]const u8 = null, path: ?[]const u8 = null, mimetype: ?[]const u8 = null, line: ?u64 = null };
 
     /// Parses the metadata at `(row, col)` in the view scrolled back by
     /// `view_offset`, or null if there's no tag there / it doesn't parse /
@@ -3147,6 +3176,7 @@ const Prompt = struct {
             .kind = got.parsed.value.kind.?,
             .path = got.parsed.value.path.?,
             .mimetype = got.parsed.value.mimetype,
+            .line = got.parsed.value.line,
         }}) catch return orelse return;
         defer alloc.free(line);
 
@@ -3164,7 +3194,8 @@ const Prompt = struct {
     /// The first entry decides which action runs; `{sel}` / `{selections}`
     /// in its template expand to the shell-quoted path(s) -- a `{sel}`
     /// template given more than one entry surfaces an error line and
-    /// returns null (nothing runs). Owned result; free with `alloc`.
+    /// returns null (nothing runs). `{line}` comes from the first entry
+    /// too. Owned result; free with `alloc`.
     fn openActionLine(self: *Prompt, alloc: std.mem.Allocator, entries: []const openaction.Entry) !?[]u8 {
         std.debug.assert(entries.len >= 1);
         const user: []const openaction.Action = if (self.prompt_config) |pc| pc.open_actions.items else &.{};
@@ -3174,7 +3205,7 @@ const Prompt = struct {
         defer alloc.free(paths);
         for (entries, paths) |e, *p| p.* = e.path;
 
-        return openaction.expand(alloc, action.commands[0], paths) catch |err| switch (err) {
+        return openaction.expand(alloc, action.commands[0], paths, entries[0].line) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NeedsSingle => {
                 try self.drawText(
@@ -3224,7 +3255,7 @@ const Prompt = struct {
             const mime_owned: ?[]const u8 = if (parsed.value.mimetype) |mt| try alloc.dupe(u8, mt) else null;
             errdefer if (mime_owned) |mt| alloc.free(mt);
 
-            try self.marks.append(alloc, .{ .path = path_owned, .kind = kind_owned, .mimetype = mime_owned });
+            try self.marks.append(alloc, .{ .path = path_owned, .kind = kind_owned, .mimetype = mime_owned, .line = parsed.value.line });
         }
     }
 
@@ -3278,7 +3309,7 @@ const Prompt = struct {
         const entries = try alloc.alloc(openaction.Entry, self.marks.items.len);
         defer alloc.free(entries);
         for (self.marks.items, entries) |m, *e| {
-            e.* = .{ .kind = m.kind, .path = m.path, .mimetype = m.mimetype };
+            e.* = .{ .kind = m.kind, .path = m.path, .mimetype = m.mimetype, .line = m.line };
         }
 
         const line = (try self.openActionLine(alloc, entries)) orelse return;

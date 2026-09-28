@@ -68,8 +68,11 @@ pub const Built = struct {
 };
 
 /// Builds the node list. `tagger` is either `null` or anything with a
-/// `tag(path, line)` method returning the metadata handle a hit's row
-/// should carry (so a click on the row's text opens the file). Taken as
+/// `tag(path, line)` method returning the metadata handle a row should
+/// carry (so a click on the row's text opens the file at that line).
+/// Every source line gets its own tag -- a context line opens where *it*
+/// is, not at its hit -- and a line shared by two hits' overlapping
+/// windows is tagged once, since each tag is a round trip. Taken as
 /// `anytype` rather than a function pointer so the caller can hand over
 /// its client and allocator without a global -- `tests/grep_tests.zig`
 /// passes `null` and gets untagged nodes.
@@ -102,13 +105,12 @@ pub fn build(
         var num_width: usize = 1;
         for (file.lines) |l| num_width = @max(num_width, digits(l.number));
 
+        var line_tags: std.AutoHashMapUnmanaged(u64, glyphwire.MetadataHandle) = .empty;
+
         for (file.lines, 0..) |line, i| {
             if (line.submatches.len == 0) continue;
 
-            const id: ?glyphwire.MetadataHandle = if (@TypeOf(tagger) == @TypeOf(null))
-                null
-            else
-                try tagger.tag(file.path, line.number);
+            const id = try tagFor(alloc, &line_tags, tagger, file.path, line.number);
 
             try nodes.append(alloc, .{
                 .depth = 1,
@@ -122,6 +124,7 @@ pub fn build(
             for (window.start..window.end) |w| {
                 const cl = file.lines[w];
                 const is_hit = w == i;
+                const line_id = try tagFor(alloc, &line_tags, tagger, file.path, cl.number);
                 try nodes.append(alloc, .{
                     .depth = 2,
                     .runs = try lineRuns(
@@ -132,13 +135,28 @@ pub fn build(
                         if (is_hit) opts.colors.match else opts.colors.line_number,
                         if (is_hit) opts.colors.text else opts.colors.context,
                     ),
-                    .metadata_id = id,
+                    .metadata_id = line_id,
                 });
             }
         }
     }
 
     return .{ .nodes = try nodes.toOwnedSlice(alloc), .arena = arena };
+}
+
+/// The metadata handle for `path`'s line `number`, reusing one already
+/// made for this file (`cache`), or null with no tagger.
+fn tagFor(
+    alloc: std.mem.Allocator,
+    cache: *std.AutoHashMapUnmanaged(u64, glyphwire.MetadataHandle),
+    tagger: anytype,
+    path: []const u8,
+    number: u64,
+) !?glyphwire.MetadataHandle {
+    if (@TypeOf(tagger) == @TypeOf(null)) return null;
+    const got = try cache.getOrPut(alloc, number);
+    if (!got.found_existing) got.value_ptr.* = try tagger.tag(path, number);
+    return got.value_ptr.*;
 }
 
 /// One source line as a row: right-aligned line number in `number_fg`,

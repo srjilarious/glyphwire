@@ -2411,6 +2411,38 @@ pub const Client = struct {
         }) };
     }
 
+    pub const ActivateAction = enum { sorted, toggled, none };
+
+    pub const ActivateResult = struct {
+        action: ActivateAction,
+        /// The layer's view offset after the call.
+        offset: usize,
+        /// `.toggled` only: the toggled node's screen row at `offset`, or
+        /// null when it ended up off screen.
+        row: ?usize,
+    };
+
+    /// `activate_at(layer?, row, col, view_offset)` -- a request. The
+    /// keyboard form of glyphwire-host's table header / outline marker
+    /// click: sorts a header or toggles an outline node under the cell,
+    /// reporting which (`.none` when there was nothing to act on). See
+    /// `Dispatcher.handleActivateAt`.
+    pub fn activateAt(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, view_offset: usize) !ActivateResult {
+        var parsed = try self.request(protocol.ActivateAtResult, "activate_at", .{
+            .layer = layer,
+            .row = row,
+            .col = col,
+            .view_offset = view_offset,
+        });
+        defer parsed.deinit();
+        const r = parsed.value.result;
+        return .{
+            .action = std.meta.stringToEnum(ActivateAction, r.action) orelse .none,
+            .offset = r.offset,
+            .row = r.row,
+        };
+    }
+
     /// `set_highlight(layer?, ids)` -- a request. Replaces the layer's
     /// whole highlighted-id set with `ids` (empty clears it) and returns
     /// the resulting `HighlightState`. Caller owns the snapshot.

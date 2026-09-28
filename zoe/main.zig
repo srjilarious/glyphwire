@@ -52,6 +52,8 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\A directory argument changes into it (as `:cd` would) and starts on
         \\the file tree with an empty buffer; anything else is a file to open.
+        \\`+N` (or --line N) before or after the file starts on line N, as in
+        \\vim.
         \\
         \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
         \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
@@ -70,6 +72,12 @@ pub fn main(init: std.process.Init) !void {
             .{
                 .longName = "keys",
                 .description = "Headless: replay a vim-notation key script against the buffer, e.g. 'ihello<esc>dd' or ':w<cr>'.",
+                .minNumParams = 1,
+                .maxNumParams = 1,
+            },
+            .{
+                .longName = "line",
+                .description = "Start the cursor on this 1-based line (same as a `+N` argument).",
                 .minNumParams = 1,
                 .maxNumParams = 1,
             },
@@ -101,9 +109,20 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const script: ?[]const u8 = args.optionVal("keys");
+    // `+N` is vim's start-line argument, and what glyphwire-shell's
+    // default text `open_actions` entry passes (`zoe +{line} {sel}`) so a
+    // `gw-grep` hit opens on its match. It can sit either side of the file.
     var path: ?[]const u8 = null;
-    if (args.positional.items.len > 0) {
-        path = args.positional.items[0];
+    var start_line: ?usize = null;
+    for (args.positional.items) |arg| {
+        if (plusLine(arg)) |n| {
+            start_line = n;
+        } else if (path == null) {
+            path = arg;
+        }
+    }
+    if (args.optionVal("line")) |text| {
+        start_line = std.fmt.parseInt(usize, text, 10) catch return fail(io, "zoe: --line needs a number\n");
     }
     const quiet = args.hasOption("quiet");
 
@@ -119,7 +138,7 @@ pub fn main(init: std.process.Init) !void {
             std.process.setCurrentPath(io, p) catch return fail(io, "zoe: cannot change directory\n");
             target = .directory;
         } else {
-            target = .{ .file = p };
+            target = .{ .file = .{ .path = p, .line = start_line } };
         }
     }
 
@@ -135,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
     // is how you create one. A directory target has already been changed
     // into and leaves nothing to read.
     const file_path: ?[]const u8 = switch (target) {
-        .file => |p| p,
+        .file => |f| f.path,
         .none, .directory => null,
     };
     const text: []u8 = if (file_path) |p|
@@ -152,6 +171,7 @@ pub fn main(init: std.process.Init) !void {
 
     var ed = try zoe.Editor.initFromText(alloc, text, file_path);
     defer ed.deinit();
+    if (start_line) |line| ed.gotoStartLine(line);
 
     if (script) |s| {
         switch (try zoe.keys.feed(&ed, s)) {
@@ -188,6 +208,13 @@ pub fn main(init: std.process.Init) !void {
         try write(io, ed.status.items);
         try write(io, "\n");
     }
+}
+
+/// The line number in a vim-style `+N` argument, or null when `arg` isn't
+/// one (a file can't usefully be named `+12` here, same as in vim).
+fn plusLine(arg: []const u8) ?usize {
+    if (arg.len < 2 or arg[0] != '+') return null;
+    return std.fmt.parseInt(usize, arg[1..], 10) catch null;
 }
 
 /// Whether `path` names a directory, following symlinks -- a link to one

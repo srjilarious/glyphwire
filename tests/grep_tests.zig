@@ -172,6 +172,42 @@ pub fn grepBuildsThreeLevelNodesTest(io: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectTrue(!built.nodes[2].collapsible);
 }
 
+/// Stands in for gw-grep's session-backed tagger: the handle is the line
+/// number (plus 1000 for `src/b.zig`), and every call is counted.
+const FakeTagger = struct {
+    calls: usize = 0,
+
+    pub fn tag(self: *FakeTagger, path: []const u8, line: u64) !glyphwire.MetadataHandle {
+        self.calls += 1;
+        const base: u64 = if (std.mem.eql(u8, path, "src/b.zig")) 1000 else 0;
+        return @intCast(base + line);
+    }
+};
+
+pub fn grepEachLineIsTaggedWithItsOwnLineOnceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const files = try parseSample(alloc, sample);
+    defer freeFiles(alloc, files);
+
+    var tagger = FakeTagger{};
+    var built = try nodes_mod.build(alloc, files, .{ .ctx = .{ .before = 1, .after = 2 } }, &tagger);
+    defer built.deinit();
+
+    // Layout as in `grepBuildsThreeLevelNodesTest`: a.zig file, hit 10,
+    // body 9/10/11/12, hit 40, body 40, b.zig file, hit 7, body 7.
+    try testz.expectTrue(built.nodes[0].metadata_id == null); // file rows open nothing
+    try testz.expectEqual(built.nodes[1].metadata_id.?, 10);
+    try testz.expectEqual(built.nodes[2].metadata_id.?, 9); // context opens at its own line
+    try testz.expectEqual(built.nodes[3].metadata_id.?, 10); // the hit's repeat shares the hit's tag
+    try testz.expectEqual(built.nodes[4].metadata_id.?, 11);
+    try testz.expectEqual(built.nodes[5].metadata_id.?, 12);
+    try testz.expectEqual(built.nodes[7].metadata_id.?, 40);
+    try testz.expectEqual(built.nodes[10].metadata_id.?, 1007);
+
+    // One tag per distinct (file, line): 9, 10, 11, 12, 40 and b's 7.
+    try testz.expectEqual(tagger.calls, 6);
+}
+
 pub fn grepHitRowSplitsTheMatchIntoItsOwnRunTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     const files = try parseSample(alloc, sample);

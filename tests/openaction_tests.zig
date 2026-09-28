@@ -76,10 +76,23 @@ pub fn resolveLastMatchingUserEntryWinsTest(_: std.Io, _: std.mem.Allocator) !vo
 }
 
 pub fn resolveFallsBackToKindKeyTest(_: std.Io, _: std.mem.Allocator) !void {
-    // No exact / group match for text/plain, so the "file" kind key wins.
+    // No exact / group match for application/pdf, so the "file" kind key wins.
     const user = [_]Action{.{ .key = "file", .commands = &.{"$EDITOR {sel}"} }};
-    const a = openaction.resolve(&user, .{ .kind = "file", .path = "/n.txt", .mimetype = "text/plain" });
+    const a = openaction.resolve(&user, .{ .kind = "file", .path = "/n.pdf", .mimetype = "application/pdf" });
     try expectCommand(a, "$EDITOR {sel}");
+}
+
+pub fn resolveDefaultTextOpensZoeAtLineTest(_: std.Io, _: std.mem.Allocator) !void {
+    const a = openaction.resolve(&.{}, .{ .kind = "file", .path = "/n.txt", .mimetype = "text/plain" });
+    try expectCommand(a, "zoe +{line} {sel}");
+}
+
+pub fn resolveDefaultTextBeatsUserKindKeyTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A group match outranks a kind match, even a user one -- the same
+    // rule that lets the built-in image/png beat a user image/*.
+    const user = [_]Action{.{ .key = "file", .commands = &.{"xdg-open {sel}"} }};
+    const a = openaction.resolve(&user, .{ .kind = "file", .path = "/n.txt", .mimetype = "text/plain" });
+    try expectCommand(a, "zoe +{line} {sel}");
 }
 
 pub fn resolveGroupDoesNotMatchAcrossSlashTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -92,35 +105,47 @@ pub fn resolveGroupDoesNotMatchAcrossSlashTest(_: std.Io, _: std.mem.Allocator) 
 // ─── expand ───────────────────────────────────────────────────────────
 
 pub fn expandSelQuotesSinglePathTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    const out = try openaction.expand(alloc, "cd {sel}", &.{"/tmp/my dir"});
+    const out = try openaction.expand(alloc, "cd {sel}", &.{"/tmp/my dir"}, null);
     defer alloc.free(out);
     try testz.expectEqualStr(out, "cd '/tmp/my dir'");
 }
 
 pub fn expandSelectionsJoinsQuotedPathsTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    const out = try openaction.expand(alloc, "gw-view {selections}", &.{ "/a.png", "/b c.png" });
+    const out = try openaction.expand(alloc, "gw-view {selections}", &.{ "/a.png", "/b c.png" }, null);
     defer alloc.free(out);
     try testz.expectEqualStr(out, "gw-view '/a.png' '/b c.png'");
 }
 
 pub fn expandSelectionsAcceptsASinglePathTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    const out = try openaction.expand(alloc, "v {selections}", &.{"/only"});
+    const out = try openaction.expand(alloc, "v {selections}", &.{"/only"}, null);
     defer alloc.free(out);
     try testz.expectEqualStr(out, "v '/only'");
 }
 
 pub fn expandSelWithMultipleIsAnErrorTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    try testz.expectError(openaction.expand(alloc, "cd {sel}", &.{ "/a", "/b" }), error.NeedsSingle);
+    try testz.expectError(openaction.expand(alloc, "cd {sel}", &.{ "/a", "/b" }, null), error.NeedsSingle);
 }
 
 pub fn expandTemplateWithoutTokensIsCopiedTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    const out = try openaction.expand(alloc, "sync-now", &.{ "/a", "/b" });
+    const out = try openaction.expand(alloc, "sync-now", &.{ "/a", "/b" }, null);
     defer alloc.free(out);
     try testz.expectEqualStr(out, "sync-now");
 }
 
+pub fn expandLineFillsLineNumberTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try openaction.expand(alloc, "zoe +{line} {sel}", &.{"/src/a b.zig"}, 42);
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "zoe +42 '/src/a b.zig'");
+}
+
+pub fn expandLineDefaultsToOneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try openaction.expand(alloc, "code -g {sel}:{line}", &.{"/n.txt"}, null);
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "code -g '/n.txt':1");
+}
+
 pub fn expandQuotesEmbeddedApostropheTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    const out = try openaction.expand(alloc, "cd {sel}", &.{"/it's here"});
+    const out = try openaction.expand(alloc, "cd {sel}", &.{"/it's here"}, null);
     defer alloc.free(out);
     try testz.expectEqualStr(out, "cd '/it'\\''s here'");
 }

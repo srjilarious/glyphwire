@@ -73,20 +73,10 @@ pub const TableSort = struct {
         // Only root can be taken over that way.
         if (target.is_root and scroll_mod.rootOwned(layer)) return false;
 
-        // Paint order (`table_order`) = last drawn wins where two tables
-        // overlap, matching how the renderer composites them.
-        var hit_table: ?*glyphwire.Table = null;
-        var hit_col: usize = 0;
-        for (layer.table_order.items) |handle| {
-            const table = layer.tables.getPtr(handle) orelse continue;
-            const col = table.headerColumnAt(target.row, target.col, layer.view_scroll) orelse continue;
-            if (!table.columns[col].sortable) continue;
-            hit_table = table;
-            hit_col = col;
-        }
-        const table = hit_table orelse return false;
+        const header_hit = layer.sortableHeaderAt(target.row, target.col, layer.view_scroll) orelse return false;
+        const table = header_hit.table;
 
-        table.cycleSortOnColumn(hit_col);
+        table.cycleSortOnColumn(header_hit.col);
         table.repaint(layer, ctx) catch |err| {
             std.log.err("table header sort repaint failed: {t}", .{err});
         };

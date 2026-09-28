@@ -25,20 +25,24 @@
 //!
 //!   {sel}         exactly one shell-quoted path (errors on 0 or >1)
 //!   {selections}  one or more shell-quoted paths, space-joined
+//!   {line}        the first entry's line number (`gw-grep` hits carry
+//!                 one), or 1 when it has none
 //!
-//! A template with neither placeholder is returned unchanged -- the
-//! command just ignores the selection.
+//! A template with no placeholder is returned unchanged -- the command
+//! just ignores the selection.
 
 const std = @import("std");
 const wordsplit = @import("applib").wordsplit;
 
 /// The metadata a single activated entry contributes -- the fields
 /// glyphwire-ls's `entryMetadataJson` writes. `mimetype` is null for
-/// anything that isn't a regular file.
+/// anything that isn't a regular file. `line` is only set by producers
+/// that point *into* a file (`gw-grep`); it fills `{line}`.
 pub const Entry = struct {
     kind: []const u8,
     path: []const u8,
     mimetype: ?[]const u8 = null,
+    line: ?u64 = null,
 };
 
 /// One `open_actions` mapping. `commands` is a list so a later feature --
@@ -50,15 +54,17 @@ pub const Action = struct {
 };
 
 /// Shipped defaults, overridable per key by a `shell.conf.lua` `open_actions`
-/// entry. Kept intentionally small: auto-`cd` into a directory, and hand
+/// entry. Kept intentionally small: auto-`cd` into a directory, hand
 /// an image to gw-view (only the formats it actually decodes --
-/// PNG / JPEG / GIF / BMP, not svg or webp).
+/// PNG / JPEG / GIF / BMP, not svg or webp), and open text in zoe at the
+/// entry's line, so a `gw-grep` hit lands on the match.
 pub const default_actions = [_]Action{
     .{ .key = "directory", .commands = &.{"cd {sel}"} },
     .{ .key = "image/png", .commands = &.{"gw-view {selections}"} },
     .{ .key = "image/jpeg", .commands = &.{"gw-view {selections}"} },
     .{ .key = "image/gif", .commands = &.{"gw-view {selections}"} },
     .{ .key = "image/bmp", .commands = &.{"gw-view {selections}"} },
+    .{ .key = "text/*", .commands = &.{"zoe +{line} {sel}"} },
 };
 
 fn matchExact(key: []const u8, entry: Entry) bool {
@@ -104,12 +110,15 @@ pub const ExpandError = error{ NeedsSingle, OutOfMemory };
 
 const sel_token = "{sel}";
 const selections_token = "{selections}";
+const line_token = "{line}";
 
 /// Fills `{sel}` / `{selections}` in `template` with the shell-quoted
-/// `paths`. `{sel}` requires `paths.len == 1` (else `error.NeedsSingle`);
-/// `{selections}` accepts any non-empty count, joined with a single
-/// space. Returns an owned string; free it with `alloc`.
-pub fn expand(alloc: std.mem.Allocator, template: []const u8, paths: []const []const u8) ExpandError![]u8 {
+/// `paths`, and `{line}` with `line` (1 when null, so a template written
+/// for `gw-grep` hits still works on a plain `gw-ls` entry). `{sel}`
+/// requires `paths.len == 1` (else `error.NeedsSingle`); `{selections}`
+/// accepts any non-empty count, joined with a single space. Returns an
+/// owned string; free it with `alloc`.
+pub fn expand(alloc: std.mem.Allocator, template: []const u8, paths: []const []const u8, line: ?u64) ExpandError![]u8 {
     std.debug.assert(paths.len >= 1);
 
     const wants_single = std.mem.indexOf(u8, template, sel_token) != null;
@@ -134,7 +143,12 @@ pub fn expand(alloc: std.mem.Allocator, template: []const u8, paths: []const []c
     // `{sel}` earlier would corrupt it.
     const step1 = try replaceOwned(alloc, template, selections_token, joined);
     defer alloc.free(step1);
-    return try replaceOwned(alloc, step1, sel_token, quoted[0]);
+    const step2 = try replaceOwned(alloc, step1, sel_token, quoted[0]);
+    defer alloc.free(step2);
+
+    var line_buf: [20]u8 = undefined;
+    const line_text = std.fmt.bufPrint(&line_buf, "{d}", .{line orelse 1}) catch unreachable;
+    return try replaceOwned(alloc, step2, line_token, line_text);
 }
 
 /// Every non-overlapping occurrence of `needle` in `haystack` replaced by
