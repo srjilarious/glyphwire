@@ -495,6 +495,31 @@ pub const ToggleHighlightParams = struct {
     view_offset: usize = 0,
 };
 
+/// `activate_at` params: the cell a keyboard "activate" (glyphwire-shell's
+/// Enter while browsing scrollback) landed on. Same coordinates as
+/// `toggle_highlight`.
+pub const ActivateAtParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: usize,
+    col: usize,
+    view_offset: usize = 0,
+};
+
+/// What `activate_at` did: `"sorted"` (cycled a table header's sort),
+/// `"toggled"` (expanded/collapsed an outline node) or `"none"` (nothing
+/// there to act on -- the caller falls back to its own action, e.g. the
+/// cell's metadata open action).
+///
+/// `offset` is the layer's view offset afterwards. For `"toggled"`, `row`
+/// is the toggled node's screen row at that offset (null if it ended up
+/// off screen): the reflow moves the node, so a caller with a cursor on it
+/// needs to know where it went.
+pub const ActivateAtResult = struct {
+    action: []const u8,
+    offset: usize = 0,
+    row: ?usize = null,
+};
+
 /// `set_highlight` params: the full highlighted-id set for the layer,
 /// replacing whatever was there. An empty `ids` is the same as
 /// `clear_highlight`.

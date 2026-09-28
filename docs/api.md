@@ -557,8 +557,29 @@ scrolled the view back to reach it. Like table header clicks it works on
 **any layer of the visible context**, resolved against the top-most
 visible layer whose bounds contain the pointer (`host/hit.zig`).
 
-There is no keyboard path in the host: a client that wants one binds a key
-and sends `outline_set_collapsed` itself.
+There is no keyboard path in the host itself. A client that wants one
+either binds a key and sends `outline_set_collapsed`, or names a cell with
+`activate_at` (below) and lets the server work out what is there.
+
+### `activate_at`: the keyboard form of both clicks
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `activate_at` | request | `layer?, row, col, view_offset?` | `{action, offset, row?}` | ✅ resolves the **screen** cell `(row, col)`, with the layer scrolled back `view_offset` rows (same coordinates as `get_metadata` / `toggle_highlight`). A sortable table header there cycles its sort and repaints in place (`action: "sorted"`). Otherwise an outline node picked there toggles (`"toggled"`), with the same reflow, view follow and `scroll` broadcast as `outline_set_collapsed`. Nothing to act on is `"none"`. `offset` is the layer's view offset afterwards; for `"toggled"`, `row` is the toggled node's screen row at that offset (absent when it ended up off screen) |
+
+glyphwire-shell sends this on **Enter while browsing scrollback**, before
+it looks at marks or the cell's open action, so a `gw-ls -l` header sorts
+and a `gw-grep` run expands from the keyboard exactly as they do with the
+mouse. The shell uses `row` to put its browse cursor back on the node,
+since the reflow moved it.
+
+Picking a node is slightly **wider than a click**. A collapsible node
+toggles when the cell is on its marker, as a click does, **or anywhere on
+a row with no `metadata_id`**. A `gw-grep` file row has nothing to open,
+so Enter anywhere on it means "expand this". A tagged row (a hit) only
+toggles from its marker; anywhere else Enter falls through to its open
+action. Server-side for the same reason `toggle_highlight` is: the client
+never scans the grid to find a header or a node.
 
 ## Rect
 

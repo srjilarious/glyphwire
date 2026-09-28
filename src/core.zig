@@ -3902,6 +3902,46 @@ pub const Layer = struct {
         return false;
     }
 
+    pub const HeaderHit = struct { table: *Table, col: usize };
+
+    /// The sortable table header column painted at **screen** cell
+    /// `(row, col)` with the view scrolled back `view_scroll` rows, or
+    /// null. Paint order (`table_order`) decides overlaps -- last drawn
+    /// wins, as it does on screen. Shared by glyphwire-host's header click
+    /// (`host/table_sort.zig`) and the `activate_at` wire op.
+    pub fn sortableHeaderAt(self: *Layer, row: usize, col: usize, view_scroll: usize) ?HeaderHit {
+        var found: ?HeaderHit = null;
+        for (self.table_order.items) |handle| {
+            const table = self.tables.getPtr(handle) orelse continue;
+            const c = table.headerColumnAt(row, col, view_scroll) orelse continue;
+            if (!table.columns[c].sortable) continue;
+            found = .{ .table = table, .col = c };
+        }
+        return found;
+    }
+
+    pub const OutlineHit = struct { outline: *Outline, node: usize };
+
+    /// How a cell picks an outline node to toggle: `.marker` is a mouse
+    /// click (`Outline.toggleAt`), `.activate` is keyboard Enter
+    /// (`Outline.activateAt`, which also takes an untagged row anywhere).
+    pub const OutlinePick = enum { marker, activate };
+
+    /// The outline node `(row, col)` would toggle under `pick`, or null.
+    /// Same paint-order rule as `sortableHeaderAt`.
+    pub fn outlineNodeAt(self: *Layer, row: usize, col: usize, view_scroll: usize, pick: OutlinePick) ?OutlineHit {
+        var found: ?OutlineHit = null;
+        for (self.outline_order.items) |handle| {
+            const outline = self.outlines.getPtr(handle) orelse continue;
+            const node = switch (pick) {
+                .marker => outline.toggleAt(row, col, view_scroll),
+                .activate => outline.activateAt(row, col, view_scroll),
+            } orelse continue;
+            found = .{ .outline = outline, .node = node };
+        }
+        return found;
+    }
+
     /// Adds `id` to the highlight set if absent, removes it if present
     /// (`toggle_highlight`).
     pub fn toggleHighlightId(self: *Layer, id: MetadataHandle) !void {
@@ -5721,18 +5761,43 @@ pub const Outline = struct {
     /// click lands however far output has pushed the outline up, or the
     /// user has scrolled the view back to reach it.
     pub fn toggleAt(self: *const Outline, screen_row: usize, screen_col: usize, view_scroll: usize) ?usize {
+        const v = self.visibleAtScreenRow(screen_row, view_scroll) orelse return null;
+        if (!v.node.collapsible) return null;
+        if (!self.onMarker(v, screen_col)) return null;
+        return v.index;
+    }
+
+    /// The keyboard counterpart of `toggleAt`, for glyphwire-shell's Enter
+    /// while browsing scrollback (`activate_at`). A collapsible node
+    /// toggles when the cell is on its marker, as a click does, **or**
+    /// anywhere on a row with no `metadata_id` -- a `gw-grep` file row has
+    /// nothing to open, so Enter anywhere on it is plainly "expand this".
+    /// A tagged row off the marker is left alone so Enter still opens it.
+    pub fn activateAt(self: *const Outline, screen_row: usize, screen_col: usize, view_scroll: usize) ?usize {
+        const v = self.visibleAtScreenRow(screen_row, view_scroll) orelse return null;
+        if (!v.node.collapsible) return null;
+        if (v.node.metadata_id != null and !self.onMarker(v, screen_col)) return null;
+        if (screen_col < self.col or screen_col >= self.col + self.width) return null;
+        return v.index;
+    }
+
+    /// The visible node painted on **screen** row `screen_row` with the
+    /// layer scrolled back by `view_scroll`, or null. See `toggleAt` for
+    /// the coordinate mapping.
+    fn visibleAtScreenRow(self: *const Outline, screen_row: usize, view_scroll: usize) ?Visible {
         const scroll: i64 = @intCast(view_scroll);
         const sr: i64 = @intCast(screen_row);
         var it = self.visibleIter();
         while (it.next()) |v| {
-            if (!v.node.collapsible) continue;
             const live = self.top_live + @as(i64, @intCast(v.row));
-            if (live + scroll != sr) continue;
-            const start = self.col + v.node.depth * self.style.indent;
-            if (screen_col >= start and screen_col < start + outline_marker_cols) return v.index;
-            return null;
+            if (live + scroll == sr) return v;
         }
         return null;
+    }
+
+    fn onMarker(self: *const Outline, v: Visible, screen_col: usize) bool {
+        const start = self.col + v.node.depth * self.style.indent;
+        return screen_col >= start and screen_col < start + outline_marker_cols;
     }
 
     /// First draw: lays the outline out at its anchor, scrolling the layer

@@ -172,8 +172,8 @@ pub fn main(init: std.process.Init) !void {
 /// Tags each hit's row with a metadata blob, so a click on the row's
 /// *text* (rather than its marker, which glyphwire-host takes for the
 /// toggle) resolves through glyphwire-shell's open actions the same way a
-/// `gw-ls` entry does. `line` rides along for a future open-at-line;
-/// `shell/openaction.zig` reads only `kind`/`path`/`mimetype` today.
+/// `gw-ls` entry does. `line` fills the open action's `{line}`, so the
+/// default `zoe +{line} {sel}` opens on the row that was clicked.
 const Tagger = struct {
     client: *glyphwire.Client,
     alloc: std.mem.Allocator,

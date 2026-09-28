@@ -4279,3 +4279,128 @@ pub fn writeTextRejectsUnknownUnderlineNameTest(io: std.Io, alloc: std.mem.Alloc
     ;
     try testz.expectError(d.handle(alloc, msg), dispatch.DispatchError.InvalidUnderline);
 }
+
+/// Frees a `HandleResult`'s response and any broadcast body.
+fn freeResult(alloc: std.mem.Allocator, r: dispatch.HandleResult) void {
+    if (r.response) |b| alloc.free(b);
+    if (r.broadcast) |b| alloc.free(b.body);
+}
+
+const ActivateResponse = struct {
+    result: struct { action: []const u8, offset: usize = 0, row: ?usize = null },
+};
+
+fn activateAt(d: *dispatch.Dispatcher, alloc: std.mem.Allocator, row: usize, col: usize, view_offset: usize) !std.json.Parsed(ActivateResponse) {
+    const msg = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","id":9,"method":"activate_at","params":{{"row":{d},"col":{d},"view_offset":{d}}}}}
+    , .{ row, col, view_offset });
+    defer alloc.free(msg);
+    const r = try d.handle(alloc, msg);
+    defer freeResult(alloc, r);
+    return std.json.parseFromSlice(ActivateResponse, alloc, r.response.?, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+}
+
+/// `activate_at` on a sortable header cycles that column's sort, the
+/// keyboard twin of glyphwire-host's header click. A header that isn't
+/// sortable, or a body cell, is `"none"` so the shell falls back to the
+/// cell's open action.
+pub fn activateAtSortsASortableHeaderTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 6, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    freeResult(alloc, try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_table","params":{"row":0,"col":0,"columns":[{"name":"Name","width":4},{"name":"Num","width":4,"sortable":true}],"style":{"borders":false,"header_separator":false}}}
+    ));
+    const handle = ctx.root.table_order.items[0];
+    const set_rows = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","method":"table_set_rows","params":{{"table":{d},"rows":[[{{"display":"c"}},{{"display":"3"}}],[{{"display":"a"}},{{"display":"1"}}]]}}}}
+    , .{handle});
+    defer alloc.free(set_rows);
+    freeResult(alloc, try d.handle(alloc, set_rows));
+    const table = ctx.root.tables.getPtr(handle).?;
+
+    // "Num" header starts at column 5 (4 wide + 1 gap).
+    {
+        const got = try activateAt(&d, alloc, 0, 5, 0);
+        defer got.deinit();
+        try testz.expectEqualStr("sorted", got.value.result.action);
+    }
+    try testz.expectEqual(table.sort_column.?, 1);
+    try testz.expectTrue(table.sort_dir == .ascending);
+    try testz.expectEqualStr("a", ctx.root.cell(1, 0).grapheme());
+
+    // "Name" isn't sortable, and a body row isn't a header.
+    {
+        const got = try activateAt(&d, alloc, 0, 0, 0);
+        defer got.deinit();
+        try testz.expectEqualStr("none", got.value.result.action);
+    }
+    {
+        const got = try activateAt(&d, alloc, 1, 5, 0);
+        defer got.deinit();
+        try testz.expectEqualStr("none", got.value.result.action);
+    }
+    try testz.expectTrue(table.sort_dir == .ascending);
+}
+
+/// `activate_at` on an outline: an untagged collapsible row (a gw-grep
+/// file row) toggles from anywhere on it; a tagged row toggles only from
+/// its marker and is otherwise `"none"`, leaving Enter to open it. The
+/// response's `offset`/`row` point at wherever the toggled node landed.
+pub fn activateAtTogglesOutlineNodesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 6, 20);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    freeResult(alloc, try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_metadata","params":{"json":"{\"kind\":\"file\",\"path\":\"/a\"}"}}
+    ));
+    freeResult(alloc, try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"create_outline","params":{"row":0,"col":0}}
+    ));
+    const handle = ctx.root.outline_order.items[0];
+    const set_nodes = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","method":"outline_set_nodes","params":{{"outline":{d},"nodes":[
+        \\{{"depth":0,"runs":[{{"text":"file"}}],"collapsible":true}},
+        \\{{"depth":1,"runs":[{{"text":"hit"}}],"metadata_id":1,"collapsible":true,"collapsed":true}},
+        \\{{"depth":2,"runs":[{{"text":"ctx"}}],"metadata_id":1}}]}}}}
+    , .{handle});
+    defer alloc.free(set_nodes);
+    freeResult(alloc, try d.handle(alloc, set_nodes));
+    const outline = ctx.root.outlines.getPtr(handle).?;
+
+    // Hit row text (tagged, off the marker): left for the open action.
+    {
+        const got = try activateAt(&d, alloc, 1, 5, 0);
+        defer got.deinit();
+        try testz.expectEqualStr("none", got.value.result.action);
+    }
+    try testz.expectTrue(outline.nodes[1].collapsed);
+
+    // Hit row marker (depth 1 -> columns 2-3): expands it.
+    {
+        const got = try activateAt(&d, alloc, 1, 2, 0);
+        defer got.deinit();
+        try testz.expectEqualStr("toggled", got.value.result.action);
+        try testz.expectTrue(!outline.nodes[1].collapsed);
+        // Wherever the reflow put it, the reported cell shows the hit.
+        const row = got.value.result.row.?;
+        try testz.expectEqualStr("h", ctx.root.viewRow(got.value.result.offset, row)[4].grapheme());
+    }
+
+    // File row text (untagged): Enter anywhere on it collapses the file.
+    // The expansion grew upward and pushed the file row into scrollback,
+    // so look at it scrolled back far enough to put it on screen row 0.
+    try testz.expectTrue(outline.top_live < 0);
+    const back: usize = @intCast(-outline.top_live);
+    {
+        const got = try activateAt(&d, alloc, 0, 3, back);
+        defer got.deinit();
+        try testz.expectEqualStr("toggled", got.value.result.action);
+    }
+    try testz.expectTrue(outline.nodes[0].collapsed);
+    try testz.expectEqual(outline.visibleRows(), 1);
+}
