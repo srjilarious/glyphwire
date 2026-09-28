@@ -30,7 +30,7 @@ const sample =
 ;
 
 fn parseSample(alloc: std.mem.Allocator, text: []const u8) ![]rg.FileHits {
-    var p = rg.Parser.init(alloc);
+    var p = rg.Parser.init(alloc, null);
     defer p.deinit();
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| try p.feedLine(line);
@@ -114,7 +114,7 @@ pub fn grepBinaryLinesAreCountedNotDrawnTest(io: std.Io, alloc: std.mem.Allocato
         \\{"type":"match","data":{"path":{"text":"blob.bin"},"lines":{"bytes":"AAEC"},"line_number":1,"submatches":[]}}
         \\{"type":"end","data":{"path":{"text":"blob.bin"}}}
     ;
-    var p = rg.Parser.init(alloc);
+    var p = rg.Parser.init(alloc, null);
     defer p.deinit();
     var it = std.mem.splitScalar(u8, binary, '\n');
     while (it.next()) |line| try p.feedLine(line);
@@ -170,6 +170,32 @@ pub fn grepBuildsThreeLevelNodesTest(io: std.Io, alloc: std.mem.Allocator) !void
     // Its context rows are leaves.
     try testz.expectEqual(built.nodes[2].depth, 2);
     try testz.expectTrue(!built.nodes[2].collapsible);
+}
+
+/// `max_hits` keeps the first N matches across files and flags the run as
+/// truncated when the next one arrives, so gw-grep can stop ripgrep and
+/// say so. The kept hit's after-context still lands before the cut.
+pub fn grepMaxHitsStopsAtTheCapTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var p = rg.Parser.init(alloc, 1);
+    defer p.deinit();
+    var it = std.mem.splitScalar(u8, sample, '\n');
+    while (it.next()) |line| {
+        if (p.truncated) break;
+        try p.feedLine(line);
+    }
+    try p.finish();
+    try testz.expectTrue(p.truncated);
+    try testz.expectEqual(p.total_matches, 1);
+
+    const files = try p.take();
+    defer freeFiles(alloc, files);
+    // Only a.zig, with the line-10 hit and its context (9, 11, 12) but not
+    // the line-40 hit that tripped the cap.
+    try testz.expectEqual(files.len, 1);
+    try testz.expectEqual(files[0].match_count, 1);
+    try testz.expectEqual(files[0].lines.len, 4);
+    try testz.expectEqual(files[0].lines[3].number, 12);
 }
 
 /// Stands in for gw-grep's session-backed tagger: the handle is the line

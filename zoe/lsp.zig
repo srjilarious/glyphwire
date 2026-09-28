@@ -572,6 +572,10 @@ pub const Server = struct {
             // something goes wrong, and it has nowhere to go that isn't
             // over the top of the editor. `:lsp log` is the follow-up.
             .stderr = .ignore,
+            // A group of its own, so the shell's Ctrl+C SIGINT to zoe's
+            // group doesn't take the server with it (see
+            // `applib.interrupt`).
+            .pgid = 0,
         });
         errdefer child.kill(io);
 

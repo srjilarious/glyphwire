@@ -15,6 +15,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const zoe = @import("zoe_support");
+const interrupt = @import("applib").interrupt;
 
 // const usage =
 //     \\usage: zoe [--keys <script>] [--quiet] [file|directory]
@@ -45,6 +46,11 @@ pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
 
+    // Ctrl+C is a vim-style cancel here, and a SIGINT from the shell
+    // would throw away unsaved buffers.
+    // See `applib.interrupt`.
+    interrupt.keep();
+
     var parser = try zargs.ArgParser.init(alloc, .{
         .name = "zoe",
         .description =
@@ -52,8 +58,7 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\A directory argument changes into it (as `:cd` would) and starts on
         \\the file tree with an empty buffer; anything else is a file to open.
-        \\`+N` (or --line N) before or after the file starts on line N, as in
-        \\vim.
+        \\--line N (before the file) starts the cursor on line N.
         \\
         \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
         \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
@@ -77,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .{
                 .longName = "line",
-                .description = "Start the cursor on this 1-based line (same as a `+N` argument).",
+                .description = "Start the cursor on this 1-based line.",
                 .minNumParams = 1,
                 .maxNumParams = 1,
             },
@@ -109,18 +114,15 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const script: ?[]const u8 = args.optionVal("keys");
-    // `+N` is vim's start-line argument, and what glyphwire-shell's
-    // default text `open_actions` entry passes (`zoe +{line} {sel}`) so a
-    // `gw-grep` hit opens on its match. It can sit either side of the file.
     var path: ?[]const u8 = null;
-    var start_line: ?usize = null;
-    for (args.positional.items) |arg| {
-        if (plusLine(arg)) |n| {
-            start_line = n;
-        } else if (path == null) {
-            path = arg;
-        }
+    if (args.positional.items.len > 0) {
+        path = args.positional.items[0];
     }
+    // What glyphwire-shell's default text `open_actions` entry passes
+    // (`zoe --line {line} {sel}`), so a `gw-grep` hit opens on its match.
+    // An option rather than vim's `+N`: zargunaught takes a bare `+N` as
+    // the file name.
+    var start_line: ?usize = null;
     if (args.optionVal("line")) |text| {
         start_line = std.fmt.parseInt(usize, text, 10) catch return fail(io, "zoe: --line needs a number\n");
     }
@@ -208,13 +210,6 @@ pub fn main(init: std.process.Init) !void {
         try write(io, ed.status.items);
         try write(io, "\n");
     }
-}
-
-/// The line number in a vim-style `+N` argument, or null when `arg` isn't
-/// one (a file can't usefully be named `+12` here, same as in vim).
-fn plusLine(arg: []const u8) ?usize {
-    if (arg.len < 2 or arg[0] != '+') return null;
-    return std.fmt.parseInt(usize, arg[1..], 10) catch null;
 }
 
 /// Whether `path` names a directory, following symlinks -- a link to one

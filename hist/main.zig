@@ -41,6 +41,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const history = @import("applib").history;
 const fuzzy = @import("applib").fuzzy;
+const interrupt = @import("applib").interrupt;
 
 /// Rows the header block occupies: title, search field, hint line.
 const header_rows: usize = 3;
@@ -57,6 +58,11 @@ const fg_selected = glyphwire.Color{ .r = 245, .g = 250, .b = 255 };
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
+
+    // Ctrl+C dismisses the search itself, handing the shell its
+    // cancelled result rather than dying without one.
+    // See `applib.interrupt`.
+    interrupt.keep();
     const arena = init.arena.allocator();
 
     const seed = try seedQuery(arena, try init.minimal.args.toSlice(arena));

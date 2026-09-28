@@ -16,10 +16,17 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const gmux = @import("gmux_support");
+const interrupt = @import("applib").interrupt;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
+
+    // A Ctrl+C typed into a pane is that pane's program's business;
+    // the shell that started gmux sees the key too and must not take the
+    // whole multiplexer down with it.
+    // See `applib.interrupt`.
+    interrupt.keep();
 
     var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
         try write(io, "gmux: no glyphwire session (GLYPHWIRE_SOCK not set)\n");

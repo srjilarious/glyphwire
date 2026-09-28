@@ -82,9 +82,20 @@ pub const Parser = struct {
     /// Lines ripgrep reported that we could not decode as text (a binary
     /// file, or a non-UTF-8 path). Counted rather than guessed at.
     skipped: usize = 0,
+    /// Stop keeping matches after this many (null: no limit). A common
+    /// word across a whole tree is tens of thousands of hits, far more
+    /// than anyone reads, and every one costs a metadata tag and outline
+    /// rows. The match that would go over the limit sets `truncated`
+    /// instead of being kept, and the caller stops reading.
+    max_hits: ?usize = null,
+    /// Matches kept so far, across every file.
+    total_matches: usize = 0,
+    /// Set once a match past `max_hits` arrived: there were more hits than
+    /// were kept, so the caller should stop ripgrep and say so.
+    truncated: bool = false,
 
-    pub fn init(alloc: std.mem.Allocator) Parser {
-        return .{ .alloc = alloc };
+    pub fn init(alloc: std.mem.Allocator, max_hits: ?usize) Parser {
+        return .{ .alloc = alloc, .max_hits = max_hits };
     }
 
     pub fn deinit(self: *Parser) void {
@@ -121,6 +132,10 @@ pub const Parser = struct {
         if (std.mem.eql(u8, kind, "begin")) {
             try self.beginFile(data);
         } else if (std.mem.eql(u8, kind, "match")) {
+            if (self.max_hits) |max| if (self.total_matches >= max) {
+                self.truncated = true;
+                return;
+            };
             try self.addLine(data, true);
         } else if (std.mem.eql(u8, kind, "context")) {
             try self.addLine(data, false);
@@ -188,6 +203,7 @@ pub const Parser = struct {
         if (is_match) {
             ranges = try self.parseSubmatches(data, text.len);
             self.cur_matches += 1;
+            self.total_matches += 1;
         }
         errdefer self.alloc.free(ranges);
 

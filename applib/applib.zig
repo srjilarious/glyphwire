@@ -38,8 +38,11 @@
 //!                salacommander)
 //!   `gridlayout` column-major grid packing (gw-ls, salacommander)
 //!   `icons`      file name -> icon name (gw-ls, salacommander, zoe)
+//!   `interrupt`  keeping Ctrl+C from killing an interactive program
+//!                (zoe, gw-hist, salacommander, gmux)
 
 pub const lineedit = @import("lineedit.zig");
+pub const interrupt = @import("interrupt.zig");
 pub const keybind = @import("keybind.zig");
 pub const shellpanel = @import("shellpanel.zig");
 pub const wordsplit = @import("wordsplit.zig");

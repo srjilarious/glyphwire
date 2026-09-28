@@ -84,7 +84,7 @@ pub fn resolveFallsBackToKindKeyTest(_: std.Io, _: std.mem.Allocator) !void {
 
 pub fn resolveDefaultTextOpensZoeAtLineTest(_: std.Io, _: std.mem.Allocator) !void {
     const a = openaction.resolve(&.{}, .{ .kind = "file", .path = "/n.txt", .mimetype = "text/plain" });
-    try expectCommand(a, "zoe +{line} {sel}");
+    try expectCommand(a, "zoe --line {line} {sel}");
 }
 
 pub fn resolveDefaultTextBeatsUserKindKeyTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -92,7 +92,7 @@ pub fn resolveDefaultTextBeatsUserKindKeyTest(_: std.Io, _: std.mem.Allocator) !
     // rule that lets the built-in image/png beat a user image/*.
     const user = [_]Action{.{ .key = "file", .commands = &.{"xdg-open {sel}"} }};
     const a = openaction.resolve(&user, .{ .kind = "file", .path = "/n.txt", .mimetype = "text/plain" });
-    try expectCommand(a, "zoe +{line} {sel}");
+    try expectCommand(a, "zoe --line {line} {sel}");
 }
 
 pub fn resolveGroupDoesNotMatchAcrossSlashTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -133,9 +133,9 @@ pub fn expandTemplateWithoutTokensIsCopiedTest(_: std.Io, alloc: std.mem.Allocat
 }
 
 pub fn expandLineFillsLineNumberTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    const out = try openaction.expand(alloc, "zoe +{line} {sel}", &.{"/src/a b.zig"}, 42);
+    const out = try openaction.expand(alloc, "zoe --line {line} {sel}", &.{"/src/a b.zig"}, 42);
     defer alloc.free(out);
-    try testz.expectEqualStr(out, "zoe +42 '/src/a b.zig'");
+    try testz.expectEqualStr(out, "zoe --line 42 '/src/a b.zig'");
 }
 
 pub fn expandLineDefaultsToOneTest(_: std.Io, alloc: std.mem.Allocator) !void {

@@ -26,10 +26,16 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const sala = @import("salacommander_support");
+const interrupt = @import("applib").interrupt;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
+
+    // Ctrl+C cancels F3's finder popup, and the embedded shell panel
+    // is ours to keep alive.
+    // See `applib.interrupt`.
+    interrupt.keep();
 
     var parser = try zargs.ArgParser.init(alloc, .{
         .name = "salacommander",

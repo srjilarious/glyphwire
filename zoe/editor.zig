@@ -579,7 +579,7 @@ pub const Editor = struct {
         self.moveTo(motion.clampNormal(&self.buf, @min(offset, self.buf.len())), true);
     }
 
-    /// `zoe +N` / `--line N`: the cursor onto 1-based line `line`'s first
+    /// `zoe --line N`: the cursor onto 1-based line `line`'s first
     /// non-blank, clamped to the last line -- where `:N` lands.
     pub fn gotoStartLine(self: *Editor, line: usize) void {
         self.setCursor(motion.gotoLine(&self.buf, line -| 1));
