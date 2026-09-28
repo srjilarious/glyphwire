@@ -4571,22 +4571,22 @@ pub const Ui = struct {
         try batch.setLayerSize(self.tab_tip_layer, r.cols, tabs.tip_rows);
         try batch.setLayerCellPosition(self.tab_tip_layer, r.row, r.col);
         if (self.tab_tip_patch) |np| try batch.updateNinePatch(self.tab_tip_layer, np, .{ .rows = tabs.tip_rows, .cols = r.cols });
-        // A resize keeps whatever the old cells held, so the frame ring
-        // (which is otherwise never written) is blanked every time.
+        // A resize keeps whatever the old cells held, so the corner cells
+        // (which are otherwise never written) are blanked every time.
         try batch.clearArea(.{ .layer = self.tab_tip_layer });
-        // Transparent, so the panel is the text's background; the margin
-        // either side is the leading space and the pad.
+        // Transparent, so the panel is the text's background. Between the
+        // two corner cells, and padded so a shorter path than last time
+        // leaves nothing behind.
         const spans = [_]glyphwire.client.Client.Span{
-            .{ .text = " " },
             .{ .text = if (clipped.ellipsis) tabs.tip_ellipsis else "" },
             .{ .text = clipped.tail },
         };
         try batch.writeSpans(&spans, .{
             .layer = self.tab_tip_layer,
-            .row = 1,
+            .row = 0,
             .col = 1,
             .fg = fg_hover,
-            .max_cols = r.cols - 2,
+            .max_cols = r.cols - tabs.tip_chrome_cols,
             .pad = true,
         });
         try batch.setLayerVisible(self.tab_tip_layer, true);

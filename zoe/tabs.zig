@@ -120,13 +120,15 @@ pub fn labelFor(path: ?[]const u8) []const u8 {
 // ── Path tooltip ─────────────────────────────────────────────────────
 //
 // Resting the pointer on a tab pops up that buffer's full path under it,
-// since the tab itself only shows the basename. The popup is a one-line
-// framed panel: the frame ring plus a one-cell margin inside it each side.
+// since the tab itself only shows the basename. The popup is a single row
+// with the panel drawn over just that row: its border is a pixel thin and
+// sits in the row's top and bottom pixels, which glyphs never reach, and
+// its rounded corners fit in a one-cell margin either side of the path.
 
-/// The tooltip's height: frame, the path, frame.
-pub const tip_rows: usize = 3;
-/// The columns the frame and its inner margin take from the tooltip.
-pub const tip_chrome_cols: usize = 4;
+/// The tooltip's height: just the path's row.
+pub const tip_rows: usize = 1;
+/// The columns the panel's corners take, one each side of the path.
+pub const tip_chrome_cols: usize = 2;
 /// Where a clipped path's missing head is marked.
 pub const tip_ellipsis = "…";
 
