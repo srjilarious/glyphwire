@@ -2308,8 +2308,8 @@ pub fn tabTipHangsUnderTheTabsLeftEdgeTest(_: std.Io, _: std.mem.Allocator) !voi
     const r = tabs.tipRect(.{ .start = 10, .end = 20, .close = 18 }, 20, tip_area).?;
     try testz.expectEqual(r.row, 1);
     try testz.expectEqual(r.col, 40);
-    // The path plus the frame and a margin each side.
-    try testz.expectEqual(r.cols, 24);
+    // The path plus a corner cell each side.
+    try testz.expectEqual(r.cols, 22);
 }
 
 pub fn tabTipFollowsTheStripScrollTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -2322,9 +2322,9 @@ pub fn tabTipFollowsTheStripScrollTest(_: std.Io, _: std.mem.Allocator) !void {
 }
 
 pub fn tabTipIsPulledLeftAtTheWindowEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
-    // A 40-column path on a tab at column 90 would end at 134.
+    // A 40-column path on a tab at column 90 would end at 132.
     const r = tabs.tipRect(.{ .start = 60, .end = 70, .close = 68 }, 40, tip_area).?;
-    try testz.expectEqual(r.col, 56);
+    try testz.expectEqual(r.col, 58);
     try testz.expectEqual(r.col + r.cols, 100);
 }
 
@@ -2334,7 +2334,7 @@ pub fn tabTipNeverOutgrowsTheWindowTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(r.cols, 100);
     // Too narrow for even one column of path: no tooltip.
     var tiny = tip_area;
-    tiny.area_cols = 4;
+    tiny.area_cols = 2;
     try testz.expectTrue(tabs.tipRect(.{ .start = 0, .end = 10, .close = 8 }, 20, tiny) == null);
 }
 
