@@ -22,7 +22,8 @@ const Engine = app_mod.Engine;
 /// stay expandable afterwards, the same way `glyphwire-ls -l`'s table
 /// stays sortable.
 ///
-/// Only the two marker cells take the click (`core.outline_marker_cols`).
+/// Only the marker gutter (`core.outline_marker_cols`) and the indent
+/// step to its left take the click (`Outline.onMarker`).
 /// A press anywhere else on the row is left unconsumed so it still
 /// reaches glyphwire-shell as a grid click, where the node's
 /// `metadata_id` resolves it: the marker expands the hit, the text opens
