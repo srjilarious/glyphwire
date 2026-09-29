@@ -54,6 +54,7 @@ const usage =
     \\  -C, --context <n>      Shorthand for the same value before and after
     \\      --expand           Start with every hit expanded
     \\      --collapse         Start with every file collapsed
+    \\      --no-syntax        Skip syntax highlighting (no file re-reads)
     \\  -m, --max <n>          Stop after n hits (default 1000, 0 for no limit)
     \\  -h, --help             Show this help
     \\
@@ -72,17 +73,24 @@ pub fn main(init: std.process.Init) !void {
     var parser = try zargs.ArgParser.init(alloc, .{
         .name = "gw-grep",
         .banner = "Search with ripgrep, browse the hits as a collapsible outline",
+        // Every flag says `.maxNumParams = 0`: zargunaught's default is
+        // unlimited, so `gw-grep -i foo src` would hand `foo src` to `-i`
+        // and leave no pattern.
         .opts = &.{
-            .{ .longName = "help", .shortName = "h", .description = "Show this help" },
-            .{ .longName = "ignore-case", .shortName = "i", .description = "Case-insensitive search" },
-            .{ .longName = "word", .shortName = "w", .description = "Match whole words only" },
-            .{ .longName = "fixed-strings", .shortName = "F", .description = "Literal pattern, not a regex" },
-            .{ .longName = "hidden", .description = "Search hidden files and directories" },
+            .{ .longName = "help", .shortName = "h", .description = "Show this help", .maxNumParams = 0 },
+            .{ .longName = "ignore-case", .shortName = "i", .description = "Case-insensitive search", .maxNumParams = 0 },
+            .{ .longName = "word", .shortName = "w", .description = "Match whole words only", .maxNumParams = 0 },
+            .{ .longName = "fixed-strings", .shortName = "F", .description = "Literal pattern, not a regex", .maxNumParams = 0 },
+            .{ .longName = "hidden", .description = "Search hidden files and directories", .maxNumParams = 0 },
             .{ .longName = "after", .shortName = "A", .description = "Context lines after a hit", .maxNumParams = 1 },
             .{ .longName = "before", .shortName = "B", .description = "Context lines before a hit", .maxNumParams = 1 },
             .{ .longName = "context", .shortName = "C", .description = "Context lines either side", .maxNumParams = 1 },
-            .{ .longName = "expand", .description = "Start with every hit expanded" },
-            .{ .longName = "collapse", .description = "Start with every file collapsed" },
+            .{ .longName = "expand", .description = "Start with every hit expanded", .maxNumParams = 0 },
+            .{ .longName = "collapse", .description = "Start with every file collapsed", .maxNumParams = 0 },
+            // On by default. zargunaught turns `--no-syntax` into "unset
+            // `syntax`" itself -- it reserves the `no-` prefix for that, so
+            // an option can't be *named* `no-syntax`.
+            .{ .longName = "syntax", .description = "Syntax-highlight the results (--no-syntax to skip)", .maxNumParams = 0, .default = zargs.DefaultValue.set() },
             .{ .longName = "max", .shortName = "m", .description = "Stop after this many hits (0: no limit)", .maxNumParams = 1 },
         },
     });
@@ -177,6 +185,17 @@ pub fn main(init: std.process.Init) !void {
         var client = connected;
         defer client.deinit();
 
+        var opts: nodes_mod.Options = .{
+            .ctx = .{ .before = before, .after = after },
+            .hits_collapsed = !args.hasOption("expand"),
+            .files_collapsed = args.hasOption("collapse"),
+        };
+
+        if (!args.hasOption("syntax")) {
+            try draw(&client, io, alloc, files, opts, cap);
+            return;
+        }
+
         // The same grammar search path zoe uses, so a grammar installed
         // for one colours the other.
         const dirs = try syntax.searchDirs(alloc, io, init.environ_map, &.{});
@@ -189,12 +208,7 @@ pub fn main(init: std.process.Init) !void {
         var colours = try highlight.compute(alloc, io, &registry, syntax.Theme.initDefault(), files);
         defer colours.deinit();
 
-        const opts: nodes_mod.Options = .{
-            .ctx = .{ .before = before, .after = after },
-            .hits_collapsed = !args.hasOption("expand"),
-            .files_collapsed = args.hasOption("collapse"),
-            .spans = colours.files,
-        };
+        opts.spans = colours.files;
         try draw(&client, io, alloc, files, opts, cap);
     } else |_| {
         try writePlain(io, alloc, files, cap);
