@@ -195,6 +195,10 @@ pub fn outlineMarkerHitTestResolvesTheNodeTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(outline.toggleAt(0, 1, 0).?, 0);
     try testz.expectEqual(outline.toggleAt(1, 2, 0).?, 1);
     try testz.expectEqual(outline.toggleAt(1, 3, 0).?, 1);
+    // The hit's indent step to the left of its marker is part of the
+    // target too, so the lone ▸ isn't the only thing to aim at.
+    try testz.expectEqual(outline.toggleAt(1, 0, 0).?, 1);
+    try testz.expectEqual(outline.toggleAt(1, 1, 0).?, 1);
 
     // Past the two marker cells the row belongs to the text, so a click
     // there falls through to glyphwire-shell's metadata activation.

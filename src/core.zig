@@ -5432,11 +5432,12 @@ pub const OutlineError = error{
 };
 
 /// Cells reserved for a node's ▸/▾ marker, at the node's own indent
-/// column: the marker glyph plus one space. This is also exactly the
-/// click target `toggleAt` reports, which is what leaves the rest of the
-/// row free for glyphwire-shell's metadata click-through -- the marker
-/// expands the node, the text opens the file, the same split table header
-/// clicks already have.
+/// column: the marker glyph plus one space. Together with the indent step
+/// to its left this is the click target `toggleAt` reports (see
+/// `Outline.onMarker`), which is what leaves the rest of the row free for
+/// glyphwire-shell's metadata click-through -- the marker expands the
+/// node, the text opens the file, the same split table header clicks
+/// already have.
 pub const outline_marker_cols: usize = 2;
 
 /// One row of an outline. `runs` is `write_text`'s `spans` shape
@@ -5808,9 +5809,16 @@ pub const Outline = struct {
         return null;
     }
 
+    /// Whether `screen_col` is in `v`'s click target: its marker gutter
+    /// (the glyph and the space after it) plus the one indent step to its
+    /// left. A lone ▸ is a small thing to hit, and the blank either side
+    /// of it is whitespace no other click wants -- the indent sits under
+    /// the parent's marker column, not on anyone's text. A depth-0 node
+    /// has no indent, so its target is just the gutter.
     fn onMarker(self: *const Outline, v: Visible, screen_col: usize) bool {
         const start = self.col + v.node.depth * self.style.indent;
-        return screen_col >= start and screen_col < start + outline_marker_cols;
+        const left = start - @min(v.node.depth * self.style.indent, self.style.indent);
+        return screen_col >= left and screen_col < start + outline_marker_cols;
     }
 
     /// First draw: lays the outline out at its anchor, scrolling the layer

@@ -541,12 +541,15 @@ repaint with **no client running**. That is the whole point of the
 component — `gw-grep` paints its results into the shell's scrollback and
 exits, and the hits stay expandable afterwards.
 
-Only the **two marker cells** take the click. A press anywhere else on the
-row is left unconsumed, so it still reaches glyphwire-shell as a grid
-click where the node's `metadata_id` resolves it: the marker expands the
-hit, the text opens the file. This is the same split table header clicks
-already have, and it is why the marker gutter is a fixed two cells rather
-than a style knob.
+Only the **two marker cells plus the indent step to their left** take the
+click: a lone ▸ is a small target, and the blank cells either side of it
+are whitespace no other click wants (a depth-0 node has no indent, so it
+is just the two cells). A press anywhere else on the row is left
+unconsumed, so it still reaches glyphwire-shell as a grid click where the
+node's `metadata_id` resolves it: the marker expands the hit, the text
+opens the file. This is the same split table header clicks already have,
+and it is why the marker gutter is a fixed two cells rather than a style
+knob.
 
 The click resolves through the outline's pinned `top_live` (which
 `Layer.scrollOne` / `unscrollOne` / `resize` / `reflowAt` all keep
