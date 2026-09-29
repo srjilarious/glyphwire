@@ -1753,6 +1753,223 @@ pub const Client = struct {
         try self.notify("destroy_table", .{ .layer = layer, .table = table });
     }
 
+    /// One styled run of an outline node's row, in renderer-friendly form
+    /// (real `core.Color`s) -- flattened to `protocol.OutlineRun` on the
+    /// way out, the same glue `TableStyleInput` gets.
+    pub const OutlineRunInput = struct {
+        text: []const u8,
+        fg: ?core.Color = null,
+        bg: ?core.Color = null,
+        metadata_id: ?core.MetadataHandle = null,
+    };
+
+    pub const OutlineNodeInput = struct {
+        depth: u8 = 0,
+        runs: []const OutlineRunInput,
+        /// An icon-registry name, resolved server-side like `draw_icon`'s.
+        icon: ?[]const u8 = null,
+        metadata_id: ?core.MetadataHandle = null,
+        collapsible: bool = false,
+        collapsed: bool = false,
+    };
+
+    pub const OutlineStyleInput = struct {
+        indent: usize = 2,
+        marker_collapsed: ?[]const u8 = null,
+        marker_expanded: ?[]const u8 = null,
+        marker_fg: ?core.Color = null,
+        alt_row_bg: ?core.Color = null,
+    };
+
+    fn outlineStyleToJson(st: OutlineStyleInput) protocol.OutlineStyle {
+        return .{
+            .indent = st.indent,
+            .marker_collapsed = st.marker_collapsed,
+            .marker_expanded = st.marker_expanded,
+            .marker_fg = colorToJson(st.marker_fg),
+            .alt_row_bg = colorToJson(st.alt_row_bg),
+        };
+    }
+
+    /// `create_outline(layer?, row?, col?, width?, style?)`. `row`/`col`
+    /// default to the layer's cursor and `width` to the rest of the
+    /// layer, so the common "draw a result list right here" call passes
+    /// none of them.
+    pub fn createOutline(
+        self: *Client,
+        layer: ?core.LayerHandle,
+        row: ?usize,
+        col: ?usize,
+        width: ?usize,
+        style: OutlineStyleInput,
+    ) !core.OutlineHandle {
+        var parsed = try self.request(struct { handle: core.OutlineHandle }, "create_outline", .{
+            .layer = layer,
+            .row = row,
+            .col = col,
+            .width = width,
+            .style = outlineStyleToJson(style),
+        });
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
+    pub fn destroyOutline(self: *Client, layer: ?core.LayerHandle, outline: core.OutlineHandle) !void {
+        try self.notify("destroy_outline", .{ .layer = layer, .outline = outline });
+    }
+
+    /// Flattens the node list to its wire shape. The caller frees the
+    /// returned slice (and the per-node run slices) -- both
+    /// `Client.outlineSetNodes` and `Batch.outlineSetNodes` need the same
+    /// conversion, and the batch form has to keep it alive until `send`.
+    fn outlineNodesToJson(alloc: std.mem.Allocator, nodes: []const OutlineNodeInput) ![]protocol.OutlineNode {
+        const out = try alloc.alloc(protocol.OutlineNode, nodes.len);
+        var built: usize = 0;
+        errdefer {
+            for (out[0..built]) |n| alloc.free(@constCast(n.runs));
+            alloc.free(out);
+        }
+        for (nodes, 0..) |n, i| {
+            const runs = try alloc.alloc(protocol.OutlineRun, n.runs.len);
+            for (n.runs, 0..) |r, ri| {
+                runs[ri] = .{
+                    .text = r.text,
+                    .fg = colorToJson(r.fg),
+                    .bg = colorToJson(r.bg),
+                    .metadata_id = r.metadata_id,
+                };
+            }
+            out[i] = .{
+                .depth = n.depth,
+                .runs = runs,
+                .icon = n.icon,
+                .metadata_id = n.metadata_id,
+                .collapsible = n.collapsible,
+                .collapsed = n.collapsed,
+            };
+            built = i + 1;
+        }
+        return out;
+    }
+
+    fn freeOutlineNodesJson(alloc: std.mem.Allocator, nodes: []protocol.OutlineNode) void {
+        for (nodes) |n| alloc.free(@constCast(n.runs));
+        alloc.free(nodes);
+    }
+
+    /// `outline_set_nodes(layer?, outline, nodes)` -- replaces the node
+    /// list wholesale and repaints, like `table_set_rows`.
+    pub fn outlineSetNodes(
+        self: *Client,
+        layer: ?core.LayerHandle,
+        outline: core.OutlineHandle,
+        nodes: []const OutlineNodeInput,
+    ) !void {
+        const wire_nodes = try outlineNodesToJson(self.alloc, nodes);
+        defer freeOutlineNodesJson(self.alloc, wire_nodes);
+        try self.notify("outline_set_nodes", .{ .layer = layer, .outline = outline, .nodes = wire_nodes });
+    }
+
+    /// `outline_set_collapsed(layer?, outline, node, collapsed?)`.
+    /// A null `collapsed` toggles.
+    pub fn outlineSetCollapsed(
+        self: *Client,
+        layer: ?core.LayerHandle,
+        outline: core.OutlineHandle,
+        node: usize,
+        collapsed: ?bool,
+    ) !void {
+        try self.notify("outline_set_collapsed", .{
+            .layer = layer,
+            .outline = outline,
+            .node = node,
+            .collapsed = collapsed,
+        });
+    }
+
+    /// `outline_set_all_collapsed(layer?, outline, collapsed, depth?)` --
+    /// every collapsible node, or every one at `depth`, in one reflow.
+    pub fn outlineSetAllCollapsed(
+        self: *Client,
+        layer: ?core.LayerHandle,
+        outline: core.OutlineHandle,
+        collapsed: bool,
+        depth: ?u8,
+    ) !void {
+        try self.notify("outline_set_all_collapsed", .{
+            .layer = layer,
+            .outline = outline,
+            .collapsed = collapsed,
+            .depth = depth,
+        });
+    }
+
+    pub fn outlineSetStyle(
+        self: *Client,
+        layer: ?core.LayerHandle,
+        outline: core.OutlineHandle,
+        style: OutlineStyleInput,
+    ) !void {
+        try self.notify("outline_set_style", .{
+            .layer = layer,
+            .outline = outline,
+            .style = outlineStyleToJson(style),
+        });
+    }
+
+    pub const OutlineNodeState = struct {
+        depth: u8,
+        collapsible: bool,
+        collapsed: bool,
+        /// On screen right now, i.e. no collapsed node above it in the
+        /// list is shallower.
+        visible: bool,
+    };
+
+    /// `outlineGetState`'s result. `nodes` is owned by the caller --
+    /// unlike `TableState`, which is all scalars, this carries a slice,
+    /// so it has a `deinit`.
+    pub const OutlineState = struct {
+        nodes: []OutlineNodeState,
+        node_count: usize,
+        visible_rows: usize,
+        painted: TablePainted,
+        revision: u64,
+
+        pub fn deinit(self: OutlineState, alloc: std.mem.Allocator) void {
+            alloc.free(self.nodes);
+        }
+    };
+
+    /// `outline_get_state(layer?, outline)` -- a request. Reads back each
+    /// node's depth and collapse state plus the painted extent, not the
+    /// rendered cells (already readable through the layer's `getCells`).
+    /// Call `deinit` on the result.
+    pub fn outlineGetState(self: *Client, layer: ?core.LayerHandle, outline: core.OutlineHandle) !OutlineState {
+        var parsed = try self.request(protocol.OutlineStateResult, "outline_get_state", .{
+            .layer = layer,
+            .outline = outline,
+        });
+        defer parsed.deinit();
+        const r = parsed.value.result;
+        const nodes = try self.alloc.alloc(OutlineNodeState, r.nodes.len);
+        for (r.nodes, 0..) |n, i| {
+            nodes[i] = .{
+                .depth = n.depth,
+                .collapsible = n.collapsible,
+                .collapsed = n.collapsed,
+                .visible = n.visible,
+            };
+        }
+        return .{
+            .nodes = nodes,
+            .node_count = r.node_count,
+            .visible_rows = r.visible_rows,
+            .painted = .{ .row = r.painted.row, .col = r.painted.col, .rows = r.painted.rows, .cols = r.painted.cols },
+            .revision = r.revision,
+        };
+    }
+
     fn sortKeyToJson(key: ?SortKeyInput) ?std.json.Value {
         const k = key orelse return null;
         return switch (k) {
@@ -2520,6 +2737,78 @@ pub const Client = struct {
             try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
         }
 
+        /// Batched `create_outline` -- see `Client.createOutline`.
+        /// Resolve the returned slot with `BatchResults.outlineHandle`.
+        pub fn createOutline(
+            self: *Batch,
+            layer: ?core.LayerHandle,
+            row: ?usize,
+            col: ?usize,
+            width: ?usize,
+            style: Client.OutlineStyleInput,
+        ) !Slot {
+            return self.request("create_outline", .{
+                .layer = layer,
+                .row = row,
+                .col = col,
+                .width = width,
+                .style = Client.outlineStyleToJson(style),
+            });
+        }
+
+        /// Batched `outline_set_nodes` -- see `Client.outlineSetNodes`.
+        /// This is the one worth batching: `gw-grep` sends its whole
+        /// result list in a single frame alongside the metadata handles
+        /// its nodes are tagged with.
+        pub fn outlineSetNodes(
+            self: *Batch,
+            layer: ?core.LayerHandle,
+            outline: core.OutlineHandle,
+            nodes: []const Client.OutlineNodeInput,
+        ) !void {
+            const wire_nodes = try Client.outlineNodesToJson(self.client.alloc, nodes);
+            defer Client.freeOutlineNodesJson(self.client.alloc, wire_nodes);
+            try self.notify("outline_set_nodes", .{ .layer = layer, .outline = outline, .nodes = wire_nodes });
+        }
+
+        /// Batched `outline_set_collapsed` -- see `Client.outlineSetCollapsed`.
+        pub fn outlineSetCollapsed(
+            self: *Batch,
+            layer: ?core.LayerHandle,
+            outline: core.OutlineHandle,
+            node: usize,
+            collapsed: ?bool,
+        ) !void {
+            try self.notify("outline_set_collapsed", .{
+                .layer = layer,
+                .outline = outline,
+                .node = node,
+                .collapsed = collapsed,
+            });
+        }
+
+        /// Batched `outline_set_all_collapsed` -- see
+        /// `Client.outlineSetAllCollapsed`.
+        pub fn outlineSetAllCollapsed(
+            self: *Batch,
+            layer: ?core.LayerHandle,
+            outline: core.OutlineHandle,
+            collapsed: bool,
+            depth: ?u8,
+        ) !void {
+            try self.notify("outline_set_all_collapsed", .{
+                .layer = layer,
+                .outline = outline,
+                .collapsed = collapsed,
+                .depth = depth,
+            });
+        }
+
+        /// Batched `destroy_outline` -- see `Client.destroyOutline`.
+        pub fn destroyOutline(self: *Batch, layer: ?core.LayerHandle, outline: core.OutlineHandle) !void {
+            try self.notify("destroy_outline", .{ .layer = layer, .outline = outline });
+        }
+
         /// Batched `create_metadata` -- see `Client.createMetadata`.
         /// Resolve the returned slot with `BatchResults.metadataHandle`.
         pub fn createMetadata(self: *Batch, json: []const u8) !Slot {
@@ -2662,6 +2951,11 @@ pub const BatchResults = struct {
     /// The rect handle a batched `create_rect` returned.
     pub fn rectHandle(self: *BatchResults, slot: Client.Batch.Slot) !core.RectHandle {
         const r = try self.get(struct { handle: core.RectHandle }, slot);
+        return r.handle;
+    }
+
+    pub fn outlineHandle(self: *BatchResults, slot: Client.Batch.Slot) !core.OutlineHandle {
+        const r = try self.get(struct { handle: core.OutlineHandle }, slot);
         return r.handle;
     }
 };

@@ -198,6 +198,71 @@ pub const TableStateResult = struct {
     revision: u64,
 };
 
+// ─── Outline ───────────────────────────────────────────────
+
+/// One styled run of a node's row -- `write_text`'s `spans` shape, so a
+/// grep hit's line number, its matched bytes and its tail can each carry
+/// their own colour inside one row. `fg`/`bg` omitted take the layer's
+/// default foreground and the row's own background (an `alt_row_bg`
+/// stripe, or transparent).
+pub const OutlineRun = struct {
+    text: []const u8,
+    fg: ?Color = null,
+    bg: ?Color = null,
+    /// Overrides the node's `metadata_id` for just this run's cells.
+    metadata_id: ?core.MetadataHandle = null,
+};
+
+/// A node as sent to `outline_set_nodes`. The list is flat: `depth` is
+/// what makes it a tree, and a collapsed node hides the contiguous run of
+/// following nodes with a greater depth.
+pub const OutlineNode = struct {
+    depth: u8 = 0,
+    runs: []const OutlineRun,
+    /// An icon-registry name, resolved like `draw_icon`'s `name`.
+    icon: ?[]const u8 = null,
+    /// Tags every cell the row paints, so a click off the marker resolves
+    /// through `get_metadata` like any other span.
+    metadata_id: ?core.MetadataHandle = null,
+    collapsible: bool = false,
+    collapsed: bool = false,
+};
+
+/// An outline's style, shared by `create_outline`'s `style`,
+/// `outline_set_style`'s, and what `outline_get_state` reports back.
+pub const OutlineStyle = struct {
+    /// Cells of indent per depth level, on top of the marker gutter.
+    indent: usize = 2,
+    /// The marker glyphs. Omitted, they default to the pointing triangles.
+    marker_collapsed: ?[]const u8 = null,
+    marker_expanded: ?[]const u8 = null,
+    marker_fg: ?Color = null,
+    alt_row_bg: ?Color = null,
+};
+
+/// One node as reported by `outline_get_state`. `visible` is whether the
+/// node is on screen right now, i.e. no collapsed node above it in the
+/// list is shallower -- derived state a client would otherwise have to
+/// re-walk the list for.
+pub const OutlineNodeState = struct {
+    depth: u8,
+    collapsible: bool,
+    collapsed: bool,
+    visible: bool,
+};
+
+/// The `outline_get_state` response body. `painted` is the same shape and
+/// purpose `table_get_state`'s has: where the outline actually drew, for a
+/// caller placing its own content below it.
+pub const OutlineStateResult = struct {
+    nodes: []const OutlineNodeState,
+    node_count: usize,
+    visible_rows: usize,
+    style: OutlineStyle,
+    painted: TablePainted,
+    revision: u64,
+};
+
 // ─── Notification params ─────────────────────────────────────────────────
 //
 // The `params` object of each server->client input notification. The

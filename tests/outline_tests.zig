@@ -329,3 +329,179 @@ pub fn outlineRowIsClippedNotWrappedTest(io: std.Io, alloc: std.mem.Allocator) !
     try expectRow(alloc, &ctx.root, 0, "  aaaaaaaaaaaaaaaaaa");
     try expectRow(alloc, &ctx.root, 1, "  second");
 }
+
+// ─── Over the wire ─────────────────────────────────────────────────────
+//
+// The model tests above drive `core.Outline` directly. These go through a
+// real socket, so they also cover the dispatch handlers, the client SDK
+// and the JSON shapes -- the same harness `table_tests.zig` uses.
+
+fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
+    server.acceptOne(alloc) catch |err| {
+        std.debug.print("test server connection failed: {t}\n", .{err});
+    };
+}
+
+/// The wire form of `grepNodes`: a file node with two hits, each hit
+/// carrying two context lines.
+const wire_nodes = [_]glyphwire.Client.OutlineNodeInput{
+    .{ .depth = 0, .runs = &.{.{ .text = "file.zig" }}, .collapsible = true },
+    .{ .depth = 1, .runs = &.{.{ .text = "hit 10" }}, .collapsible = true, .collapsed = true },
+    .{ .depth = 2, .runs = &.{.{ .text = "ctx 11" }} },
+    .{ .depth = 2, .runs = &.{.{ .text = "ctx 12" }} },
+    .{ .depth = 1, .runs = &.{.{ .text = "hit 20" }}, .collapsible = true, .collapsed = true },
+    .{ .depth = 2, .runs = &.{.{ .text = "ctx 21" }} },
+};
+
+pub fn outlineOverTheWirePaintsAndTogglesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 10, 20);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-outline-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const outline = try client.createOutline(null, 0, 0, null, .{});
+    try client.outlineSetNodes(null, outline, &wire_nodes);
+
+    {
+        var snap = try client.getCells();
+        defer snap.deinit();
+        // Row 0 is the file node's marker; row 1 the first (collapsed) hit.
+        try testz.expectEqualStr("\u{25BE}", snap.cellAt(0, 0).grapheme);
+        try testz.expectEqualStr("f", snap.cellAt(0, 2).grapheme);
+        try testz.expectEqualStr("\u{25B8}", snap.cellAt(1, 2).grapheme);
+        try testz.expectEqualStr("h", snap.cellAt(1, 4).grapheme);
+        // The second hit follows immediately: its context is hidden.
+        try testz.expectEqualStr("\u{25B8}", snap.cellAt(2, 2).grapheme);
+    }
+
+    // Expanding node 1 reveals its two context rows, pushing the outline
+    // up into scrollback rather than down over whatever follows it.
+    try client.outlineSetCollapsed(null, outline, 1, false);
+
+    var state = try client.outlineGetState(null, outline);
+    defer state.deinit(alloc);
+    try testz.expectEqual(state.node_count, 6);
+    try testz.expectEqual(state.visible_rows, 5);
+    try testz.expectTrue(state.nodes[2].visible);
+    try testz.expectTrue(!state.nodes[5].visible);
+    try testz.expectTrue(!state.nodes[1].collapsed);
+    try testz.expectTrue(state.nodes[4].collapsed);
+}
+
+pub fn outlineSetAllCollapsedOverTheWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 10, 20);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-outline-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const outline = try client.createOutline(null, 0, 0, null, .{});
+    try client.outlineSetNodes(null, outline, &wire_nodes);
+
+    // Open everything, then close just the hits, then everything.
+    try client.outlineSetAllCollapsed(null, outline, false, null);
+    {
+        var state = try client.outlineGetState(null, outline);
+        defer state.deinit(alloc);
+        try testz.expectEqual(state.visible_rows, 6);
+    }
+    try client.outlineSetAllCollapsed(null, outline, true, 1);
+    {
+        var state = try client.outlineGetState(null, outline);
+        defer state.deinit(alloc);
+        try testz.expectEqual(state.visible_rows, 3);
+    }
+    try client.outlineSetAllCollapsed(null, outline, true, null);
+    {
+        var state = try client.outlineGetState(null, outline);
+        defer state.deinit(alloc);
+        try testz.expectEqual(state.visible_rows, 1);
+    }
+}
+
+pub fn outlineRunColoursSurviveTheWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 10, 20);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-outline-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const outline = try client.createOutline(null, 0, 0, null, .{});
+    try client.outlineSetNodes(null, outline, &.{
+        .{ .depth = 0, .runs = &.{
+            .{ .text = "12 ", .fg = .{ .r = 90, .g = 90, .b = 90 } },
+            .{ .text = "init", .fg = .{ .r = 255, .g = 200, .b = 0 } },
+        } },
+    });
+
+    var snap = try client.getCells();
+    defer snap.deinit();
+    // Two blank marker cells, then the runs with their own colours.
+    try testz.expectEqualStr("1", snap.cellAt(0, 2).grapheme);
+    try testz.expectEqual(snap.cellAt(0, 2).fg.r, 90);
+    try testz.expectEqualStr("i", snap.cellAt(0, 5).grapheme);
+    try testz.expectEqual(snap.cellAt(0, 5).fg.r, 255);
+    try testz.expectEqual(snap.cellAt(0, 5).fg.g, 200);
+}
+
+pub fn outlineUnknownHandleAndBadNodeAreReportedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 30, 10, 20);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-outline-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    try client.subscribe(&.{"error"});
+    const outline = try client.createOutline(null, 0, 0, null, .{});
+    try client.outlineSetNodes(null, outline, &wire_nodes);
+
+    // Both are notifications, so they are logged into the error ring
+    // rather than severing the connection -- see the protocol's error
+    // model. The session stays usable afterwards.
+    try client.outlineSetCollapsed(null, 9999, 0, true);
+    try client.outlineSetCollapsed(null, outline, 99, true);
+
+    var report = try client.getErrors();
+    defer report.deinit();
+    const entries = report.entries();
+    try testz.expectEqual(entries.len, 2);
+    try testz.expectEqualStr("UnknownOutline", entries[0].code);
+    try testz.expectEqualStr("OutlineNodeOutOfRange", entries[1].code);
+}

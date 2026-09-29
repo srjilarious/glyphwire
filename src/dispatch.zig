@@ -57,6 +57,8 @@ pub const DispatchError = error{
     /// `update_rect`/`destroy_rect` named a rect that doesn't exist (or
     /// already existed and was destroyed).
     UnknownRect,
+    UnknownOutline,
+    OutlineNodeOutOfRange,
     TableRowShapeMismatch,
     UnsupportedImageFormat,
     UnknownSplit,
@@ -762,6 +764,65 @@ const TableSetStyleParams = struct {
 const TableGetStateParams = struct {
     layer: ?core.LayerHandle = null,
     table: core.TableHandle,
+};
+
+// ─── Outline ────────────────────────────────────────────────
+//
+// See core.zig's Outline section for the object model. Same handle
+// convention tables use: every message carries the optional `layer`
+// alongside a required `outline`, because an outline lives in that
+// layer's own `outlines` map rather than being globally addressable.
+
+const CreateOutlineParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: ?usize = null,
+    col: ?usize = null,
+    /// Cells across. Omitted, the outline takes the rest of the layer's
+    /// width from `col` -- the overwhelmingly common case, and it keeps a
+    /// caller from having to read the layer size just to fill a line.
+    width: ?usize = null,
+    style: protocol.OutlineStyle = .{},
+};
+
+const CreateOutlineResult = struct { handle: core.OutlineHandle };
+
+const DestroyOutlineParams = struct {
+    layer: ?core.LayerHandle = null,
+    outline: core.OutlineHandle,
+};
+
+const OutlineSetNodesParams = struct {
+    layer: ?core.LayerHandle = null,
+    outline: core.OutlineHandle,
+    nodes: []const protocol.OutlineNode,
+};
+
+const OutlineSetCollapsedParams = struct {
+    layer: ?core.LayerHandle = null,
+    outline: core.OutlineHandle,
+    node: usize,
+    /// Omitted means toggle -- the host's own marker click and a client
+    /// binding both want "flip it" far more often than a set.
+    collapsed: ?bool = null,
+};
+
+const OutlineSetAllCollapsedParams = struct {
+    layer: ?core.LayerHandle = null,
+    outline: core.OutlineHandle,
+    collapsed: bool,
+    /// Only nodes at this depth; omitted means every depth.
+    depth: ?u8 = null,
+};
+
+const OutlineSetStyleParams = struct {
+    layer: ?core.LayerHandle = null,
+    outline: core.OutlineHandle,
+    style: protocol.OutlineStyle,
+};
+
+const OutlineGetStateParams = struct {
+    layer: ?core.LayerHandle = null,
+    outline: core.OutlineHandle,
 };
 
 // ─── Rect ────────────────────────────────────────────────────────────────
@@ -1554,6 +1615,13 @@ pub const Dispatcher = struct {
         .{ "table_set_sort", catVoid(handleTableSetSort) },
         .{ "table_set_style", catVoid(handleTableSetStyle) },
         .{ "table_get_state", catBytesId(handleTableGetState) },
+        .{ "create_outline", catBytesId(handleCreateOutline) },
+        .{ "destroy_outline", catVoid(handleDestroyOutline) },
+        .{ "outline_set_nodes", catVoid(handleOutlineSetNodes) },
+        .{ "outline_set_collapsed", catVoid(handleOutlineSetCollapsed) },
+        .{ "outline_set_all_collapsed", catVoid(handleOutlineSetAllCollapsed) },
+        .{ "outline_set_style", catVoid(handleOutlineSetStyle) },
+        .{ "outline_get_state", catBytesId(handleOutlineGetState) },
         .{ "create_rect", catResultId(handleCreateRect) },
         .{ "update_rect", catVoid(handleUpdateRect) },
         .{ "destroy_rect", catVoid(handleDestroyRect) },
@@ -3388,6 +3456,210 @@ pub const Dispatcher = struct {
             error.UnknownTable => return DispatchError.UnknownTable,
             else => return err,
         };
+    }
+
+    /// Builds a `core.OutlineStyle`, duping the marker glyphs so the
+    /// outline owns them (same treatment `resolveTableStyle` gives
+    /// `box_style`). Omitted markers default to the pointing triangles.
+    fn resolveOutlineStyle(talloc: std.mem.Allocator, js: protocol.OutlineStyle) !core.OutlineStyle {
+        const collapsed = try talloc.dupe(u8, js.marker_collapsed orelse "\u{25B8}");
+        errdefer talloc.free(collapsed);
+        const expanded = try talloc.dupe(u8, js.marker_expanded orelse "\u{25BE}");
+        return .{
+            .indent = js.indent,
+            .marker_collapsed = collapsed,
+            .marker_expanded = expanded,
+            .marker_fg = if (js.marker_fg) |c| colorFromJson(c) else null,
+            .alt_row_bg = if (js.alt_row_bg) |c| colorFromJson(c) else null,
+        };
+    }
+
+    fn handleCreateOutline(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(CreateOutlineParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const anchor = resolveAnchor(layer, p.row, p.col);
+        const width = p.width orelse (layer.width -| anchor.col);
+
+        const style = try resolveOutlineStyle(self.ctx.alloc, p.style);
+        errdefer style.deinit(self.ctx.alloc);
+        const outline_handle = try self.ctx.createOutline(self.surfaceOr(p.layer), anchor.row, anchor.col, width, style);
+
+        return try rpc.response(alloc, id, CreateOutlineResult{ .handle = outline_handle });
+    }
+
+    fn handleDestroyOutline(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(DestroyOutlineParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        self.ctx.destroyOutline(self.surfaceOr(p.layer), p.outline) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
+            error.UnknownOutline => return DispatchError.UnknownOutline,
+            else => return err,
+        };
+    }
+
+    /// Builds the owned `core.OutlineNode` list from the wire shape,
+    /// resolving each node's icon name against the catalog at this point
+    /// (the "fail loud on an unknown name where it's used" rule
+    /// `draw_icon` and `table_set_rows` already follow). Every node built
+    /// so far is freed if a later one fails, so a bad node can't leave a
+    /// half-built list behind.
+    fn buildOutlineNodes(self: *Dispatcher, talloc: std.mem.Allocator, in: []const protocol.OutlineNode) ![]core.OutlineNode {
+        const nodes = try talloc.alloc(core.OutlineNode, in.len);
+        var built: usize = 0;
+        errdefer {
+            for (nodes[0..built]) |n| n.deinit(talloc);
+            talloc.free(nodes);
+        }
+        for (in, 0..) |nj, i| {
+            const runs = try talloc.alloc(core.Layer.TextRun, nj.runs.len);
+            var runs_built: usize = 0;
+            errdefer {
+                for (runs[0..runs_built]) |r| talloc.free(@constCast(r.text));
+                talloc.free(runs);
+            }
+            for (nj.runs, 0..) |rj, ri| {
+                runs[ri] = .{
+                    .text = try talloc.dupe(u8, rj.text),
+                    .fg = if (rj.fg) |c| colorFromJson(c) else core.default_style.fg,
+                    .bg = if (rj.bg) |c| core.Background{ .color = colorFromJson(c) } else null,
+                    .metadata_id = rj.metadata_id,
+                };
+                runs_built = ri + 1;
+            }
+            const icon: ?core.ImageHandle = if (nj.icon) |name|
+                self.ctx.iconHandle(name) orelse return DispatchError.UnknownIcon
+            else
+                null;
+            nodes[i] = .{
+                .depth = nj.depth,
+                .runs = runs,
+                .icon = icon,
+                .metadata_id = nj.metadata_id,
+                .collapsible = nj.collapsible,
+                .collapsed = nj.collapsed,
+            };
+            built = i + 1;
+        }
+        return nodes;
+    }
+
+    /// `outline_set_nodes`: replaces the node list wholesale and draws
+    /// fresh at the anchor, scrolling the layer terminal-style -- the
+    /// `render` path, same as `table_set_rows`.
+    fn handleOutlineSetNodes(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(OutlineSetNodesParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const outline = layer.outlines.getPtr(p.outline) orelse return DispatchError.UnknownOutline;
+
+        const nodes = try self.buildOutlineNodes(self.ctx.alloc, p.nodes);
+        outline.setNodes(nodes);
+        try outline.render(layer, self.ctx);
+    }
+
+    /// `outline_set_collapsed`: the height-changing mutation. Reflows the
+    /// layer around the outline (`core.Layer.reflowAt`) and redraws it --
+    /// see `core.Outline.setNodeCollapsed` for why this can't be the
+    /// in-place repaint a table re-sort gets.
+    fn handleOutlineSetCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(OutlineSetCollapsedParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const outline = layer.outlines.getPtr(p.outline) orelse return DispatchError.UnknownOutline;
+
+        outline.setNodeCollapsed(layer, self.ctx, p.node, p.collapsed) catch |err| switch (err) {
+            error.OutlineNodeOutOfRange => return DispatchError.OutlineNodeOutOfRange,
+            else => return err,
+        };
+    }
+
+    /// `outline_set_all_collapsed`: one reflow and one repaint for the
+    /// whole list, rather than the N a client would pay sending one
+    /// `outline_set_collapsed` per node.
+    fn handleOutlineSetAllCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(OutlineSetAllCollapsedParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const outline = layer.outlines.getPtr(p.outline) orelse return DispatchError.UnknownOutline;
+
+        try outline.setAllCollapsed(layer, self.ctx, p.collapsed, p.depth);
+    }
+
+    fn handleOutlineSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(OutlineSetStyleParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const outline = layer.outlines.getPtr(p.outline) orelse return DispatchError.UnknownOutline;
+
+        const style = try resolveOutlineStyle(self.ctx.alloc, p.style);
+        outline.setStyle(style);
+        try outline.render(layer, self.ctx);
+    }
+
+    /// `outline_get_state`: structured config, not rendered cells -- those
+    /// are already readable through the layer's `get_cells`, exactly as
+    /// for a table. `visible` per node saves a client re-deriving the
+    /// collapse walk to find out what is actually on screen.
+    fn handleOutlineGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+        const parsed = try std.json.parseFromValue(OutlineGetStateParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+        const layer = try self.resolveLayer(p.layer);
+        const outline = layer.outlines.getPtr(p.outline) orelse return DispatchError.UnknownOutline;
+
+        const nodes = try alloc.alloc(protocol.OutlineNodeState, outline.nodes.len);
+        defer alloc.free(nodes);
+        for (outline.nodes, 0..) |n, i| {
+            nodes[i] = .{
+                .depth = n.depth,
+                .collapsible = n.collapsible,
+                .collapsed = n.collapsed,
+                .visible = false,
+            };
+        }
+        var it = outline.visibleIter();
+        while (it.next()) |v| nodes[v.index].visible = true;
+
+        return try rpc.response(alloc, id, protocol.OutlineStateResult{
+            .nodes = nodes,
+            .node_count = outline.nodes.len,
+            .visible_rows = outline.visibleRows(),
+            .style = .{
+                .indent = outline.style.indent,
+                .marker_collapsed = outline.style.marker_collapsed,
+                .marker_expanded = outline.style.marker_expanded,
+                .marker_fg = if (outline.style.marker_fg) |c| colorToJson(c) else null,
+                .alt_row_bg = if (outline.style.alt_row_bg) |c| colorToJson(c) else null,
+            },
+            .painted = .{
+                .row = outline.painted.row,
+                .col = outline.painted.col,
+                .rows = outline.painted.rows,
+                .cols = outline.painted.cols,
+            },
+            .revision = outline.revision,
+        });
     }
 
     fn handleCreateRect(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
