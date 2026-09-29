@@ -290,7 +290,12 @@ pub fn build(b: *std.Build) void {
     tests_exe.root_module.linkLibrary(lua_lib);
     tests_exe.root_module.link_libc = true;
 
-    const testz_dep = b.dependency("testz", .{});
+    // testz pulls in its own `tree_sitter` dependency (for highlighting
+    // failure output). Passing it the same target/optimize makes that
+    // resolve to the very module `applib` already imports; with testz's
+    // defaults (Debug) a release build would see `tree_sitter/root.zig`
+    // in two modules and refuse to compile.
+    const testz_dep = b.dependency("testz", .{ .target = target, .optimize = optimize });
     tests_exe.root_module.addImport("testz", testz_dep.module("testz"));
 
     // The `e2e` group spawns the real `gw-shell` / `gw-ls` binaries and
