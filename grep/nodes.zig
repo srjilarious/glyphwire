@@ -20,6 +20,14 @@
 //! lines stop reading as a contiguous piece of the file; the lit number
 //! is what says which of them you searched for.
 //!
+//! Every row is syntax-highlighted when `Options.spans` carries colours
+//! for it (see `highlight.zig`). A hit's rows draw at full strength and
+//! its context rows in a dimmed copy of the same colours, so the hit
+//! reads as the focus without the context losing its structure. The
+//! matched bytes keep their syntax colour and get a background instead,
+//! which is what lets a highlighted keyword that was also the match
+//! still read as both.
+//!
 //! Every node's content is built up front rather than filled in when it
 //! expands, because the whole point is that `gw-grep` exits and the
 //! results stay expandable in the shell's scrollback -- a process that
@@ -27,6 +35,8 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+
+const syntax = @import("applib").syntax;
 
 const rg = @import("rg.zig");
 
@@ -37,12 +47,41 @@ pub const Colors = struct {
     path: glyphwire.Color = .{ .r = 130, .g = 180, .b = 255 },
     count: glyphwire.Color = .{ .r = 110, .g = 110, .b = 120 },
     line_number: glyphwire.Color = .{ .r = 120, .g = 120, .b = 130 },
+    /// Source text with no syntax colour of its own (no grammar, or a
+    /// byte no capture covers).
     text: glyphwire.Color = .{ .r = 210, .g = 210, .b = 215 },
-    /// The matched bytes. The one thing on the row that should catch the
-    /// eye, so it is the only saturated colour in a hit's line.
+    /// The hit's line number where it repeats inside its own context, the
+    /// "this is the one" marker.
     match: glyphwire.Color = .{ .r = 255, .g = 190, .b = 60 },
-    context: glyphwire.Color = .{ .r = 150, .g = 150, .b = 158 },
+    /// Behind the matched bytes. A background rather than a foreground so
+    /// the syntax colour underneath survives.
+    match_bg: glyphwire.Color = .{ .r = 92, .g = 72, .b = 24 },
+    /// Context rows blend every colour they use (syntax, text, match
+    /// background) this far towards `dim_toward`: 0 is no dimming, 1 is
+    /// all the way. Aimed at a dark terminal background.
+    dim_toward: glyphwire.Color = .{ .r = 28, .g = 28, .b = 32 },
+    dim_amount: f32 = 0.35,
+
+    /// `c` as a context row draws it.
+    pub fn dim(self: Colors, c: glyphwire.Color) glyphwire.Color {
+        return .{
+            .r = blend(c.r, self.dim_toward.r, self.dim_amount),
+            .g = blend(c.g, self.dim_toward.g, self.dim_amount),
+            .b = blend(c.b, self.dim_toward.b, self.dim_amount),
+            .a = c.a,
+        };
+    }
+
+    fn blend(from: u8, to: u8, t: f32) u8 {
+        const f: f32 = @floatFromInt(from);
+        const g: f32 = @floatFromInt(to);
+        return @intFromFloat(@round(f + (g - f) * std.math.clamp(t, 0, 1)));
+    }
 };
+
+/// Syntax spans laid out like `highlight.Highlights.files`: indexed by
+/// file (matching the `files` given to `build`), then by line within it.
+pub const FileSpans = []const []const []const syntax.Span;
 
 pub const Options = struct {
     ctx: rg.Context,
@@ -53,6 +92,8 @@ pub const Options = struct {
     hits_collapsed: bool = true,
     /// Everything closed, files included.
     files_collapsed: bool = false,
+    /// Syntax colours for the lines, or null to draw them all plain.
+    spans: ?FileSpans = null,
 };
 
 /// Owns everything the node list points at. The wire types hold borrowed
@@ -88,7 +129,8 @@ pub fn build(
 
     var nodes: std.ArrayList(NodeInput) = .empty;
 
-    for (files) |file| {
+    for (files, 0..) |file, fi| {
+        const file_spans: ?[]const []const syntax.Span = if (opts.spans) |sp| sp[fi] else null;
         const count_text = try std.fmt.allocPrint(alloc, "  ({d})", .{file.match_count});
         const file_runs = try alloc.alloc(RunInput, 2);
         file_runs[0] = .{ .text = try alloc.dupe(u8, file.path), .fg = opts.colors.path };
@@ -114,7 +156,7 @@ pub fn build(
 
             try nodes.append(alloc, .{
                 .depth = 1,
-                .runs = try lineRuns(alloc, line, num_width, opts.colors, opts.colors.line_number, opts.colors.text),
+                .runs = try lineRuns(alloc, line, spansFor(file_spans, i), num_width, opts.colors, opts.colors.line_number, .full),
                 .metadata_id = id,
                 .collapsible = true,
                 .collapsed = opts.hits_collapsed,
@@ -130,10 +172,11 @@ pub fn build(
                     .runs = try lineRuns(
                         alloc,
                         cl,
+                        spansFor(file_spans, w),
                         num_width,
                         opts.colors,
                         if (is_hit) opts.colors.match else opts.colors.line_number,
-                        if (is_hit) opts.colors.text else opts.colors.context,
+                        if (is_hit) .full else .dimmed,
                     ),
                     .metadata_id = line_id,
                 });
@@ -160,26 +203,29 @@ fn tagFor(
 }
 
 /// One source line as a row: right-aligned line number in `number_fg`,
-/// then the text split so each matched range gets its own run in the
-/// match colour and everything between it stays `base_fg`. This is what
-/// `spans` on a node buys -- the match stands out without the server
-/// knowing what a match is.
+/// then the text cut into runs wherever its style changes. A byte's
+/// foreground is its syntax colour from `spans` (`colors.text` where no
+/// span covers it), and a matched byte also gets `colors.match_bg`
+/// behind it. This is what runs on a node buy -- the match stands out
+/// without the server knowing what a match is.
 ///
-/// The three callers differ only in those two colours:
+/// The three callers differ only in the number colour and `strength`:
 ///
-/// - a hit's own label: plain number, `text` base
+/// - a hit's own label: plain number, full strength
 /// - that hit repeated inside its body: **number in the match colour**,
-///   `text` base -- the "this is the one" marker
-/// - a context line: plain number, dimmer `context` base. It still
-///   splits on submatches, so a second hit that happens to fall inside
-///   this hit's window is visibly another hit rather than a plain line.
+///   full strength -- the "this is the one" marker
+/// - a context line: plain number, every colour dimmed. It still splits
+///   on submatches, so a second hit that happens to fall inside this
+///   hit's window is visibly another hit (a dimmed background) rather
+///   than a plain line.
 fn lineRuns(
     alloc: std.mem.Allocator,
     line: rg.Line,
+    spans: []const syntax.Span,
     num_width: usize,
     colors: Colors,
     number_fg: glyphwire.Color,
-    base_fg: glyphwire.Color,
+    strength: Strength,
 ) ![]RunInput {
     var runs: std.ArrayList(RunInput) = .empty;
     try runs.append(alloc, .{
@@ -187,28 +233,60 @@ fn lineRuns(
         .fg = number_fg,
     });
 
-    var cursor: usize = 0;
-    for (line.submatches) |m| {
-        if (m.start > cursor) {
-            try runs.append(alloc, .{
-                .text = try alloc.dupe(u8, line.text[cursor..m.start]),
-                .fg = base_fg,
-            });
-        }
+    const match_bg = if (strength == .dimmed) colors.dim(colors.match_bg) else colors.match_bg;
+    var styler: Styler = .{ .spans = spans, .matches = line.submatches, .default_fg = colors.text };
+    var start: usize = 0;
+    while (start < line.text.len) {
+        const style = styler.at(start);
+        var end = start + 1;
+        while (end < line.text.len and style.eql(styler.at(end))) end += 1;
         try runs.append(alloc, .{
-            .text = try alloc.dupe(u8, line.text[m.start..m.end]),
-            .fg = colors.match,
+            .text = try alloc.dupe(u8, line.text[start..end]),
+            .fg = if (strength == .dimmed) colors.dim(style.fg) else style.fg,
+            .bg = if (style.matched) match_bg else null,
         });
-        cursor = m.end;
-    }
-    if (cursor < line.text.len) {
-        try runs.append(alloc, .{
-            .text = try alloc.dupe(u8, line.text[cursor..]),
-            .fg = base_fg,
-        });
+        start = end;
     }
     return runs.toOwnedSlice(alloc);
 }
+
+const Strength = enum { full, dimmed };
+
+fn spansFor(file_spans: ?[]const []const syntax.Span, line_index: usize) []const syntax.Span {
+    const sp = file_spans orelse return &.{};
+    return sp[line_index];
+}
+
+/// A byte's style, found by walking the sorted syntax spans and
+/// submatches alongside the line. `at` must be called with non-decreasing
+/// offsets, which is how `lineRuns` scans.
+const Styler = struct {
+    spans: []const syntax.Span,
+    matches: []const rg.Range,
+    default_fg: glyphwire.Color,
+    span_i: usize = 0,
+    match_i: usize = 0,
+
+    const Style = struct {
+        fg: glyphwire.Color,
+        matched: bool,
+
+        fn eql(a: Style, b: Style) bool {
+            return a.matched == b.matched and
+                a.fg.r == b.fg.r and a.fg.g == b.fg.g and a.fg.b == b.fg.b and a.fg.a == b.fg.a;
+        }
+    };
+
+    fn at(self: *Styler, pos: usize) Style {
+        while (self.span_i < self.spans.len and self.spans[self.span_i].end <= pos) self.span_i += 1;
+        while (self.match_i < self.matches.len and self.matches[self.match_i].end <= pos) self.match_i += 1;
+        const in_span = self.span_i < self.spans.len and self.spans[self.span_i].start <= pos;
+        return .{
+            .fg = if (in_span) self.spans[self.span_i].color else self.default_fg,
+            .matched = self.match_i < self.matches.len and self.matches[self.match_i].start <= pos,
+        };
+    }
+};
 
 fn digits(n: u64) usize {
     var d: usize = 1;

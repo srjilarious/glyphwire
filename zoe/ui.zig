@@ -56,7 +56,7 @@ const finder_mod = @import("applib").finder;
 const finderpopup = @import("applib").finderpopup;
 const filetype = @import("applib").filetype;
 const homepath = @import("applib").homepath;
-const syntax = @import("syntax.zig");
+const syntax = @import("applib").syntax;
 const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
 const lsp = @import("lsp.zig");
@@ -798,7 +798,7 @@ pub const Ui = struct {
     /// grammar directory resolved, or the config failed to load -- and
     /// every buffer then renders in plain `fg_text`. `hl_config`'s arena
     /// backs `grammars`' language table, so it outlives the registry.
-    /// Each buffer's own parse tree lives in its `Slot`. See syntax.zig.
+    /// Each buffer's own parse tree lives in its `Slot`. See applib/syntax.zig.
     hl_config: ?langconf.Config = null,
     grammars: ?syntax.Registry = null,
     hl_search_dirs: []const []const u8 = &.{},
@@ -3648,7 +3648,7 @@ pub const Ui = struct {
             defer self.alloc.free(src);
             var buf = try buffer_mod.Buffer.initFromText(self.alloc, src);
             defer buf.deinit();
-            h.reparse(&buf) catch continue;
+            h.reparse(src) catch continue;
 
             for (b.first..b.first + b.count) |i| {
                 const line = i - b.first;
@@ -4094,7 +4094,9 @@ pub const Ui = struct {
         // draws its first screen highlighted without waiting for the rest
         // (see `beginParse`); `run` finishes it between events.
         if (!h.ready() or h.parsing() or buf.edits_overflowed or buf.pending_edits.items.len == 0) {
-            _ = try h.beginParse(buf, self.parsePrefixEnd(), self.parseBudget(first_parse_budget_ms));
+            const text = try buf.text(self.alloc);
+            defer self.alloc.free(text);
+            _ = try h.beginParse(text, self.parsePrefixEnd(), self.parseBudget(first_parse_budget_ms));
             self.buf.full_redraw = true;
             return false;
         }
@@ -4105,13 +4107,15 @@ pub const Ui = struct {
         // reparse incrementally (still the win) but repaint in full.
         var line_count_stable = true;
         for (buf.pending_edits.items) |e| {
-            h.applyEdit(e);
+            h.applyEdit(e.toSyntax());
             if (e.start_point.line != e.old_end_point.line or
                 e.start_point.line != e.new_end_point.line) line_count_stable = false;
         }
 
         self.hl_changed.clearRetainingCapacity();
-        const localized = h.reparseIncremental(buf, &self.hl_changed) catch {
+        const text = try buf.text(self.alloc);
+        defer self.alloc.free(text);
+        const localized = h.reparseIncremental(text, &self.hl_changed) catch {
             self.buf.full_redraw = true;
             return false;
         };

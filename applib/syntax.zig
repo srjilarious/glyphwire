@@ -1,26 +1,27 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
-//! zoe's tree-sitter syntax highlighting: a registry that `dlopen`s
-//! language parsers at runtime, and a `Highlighter` that keeps a parse
-//! tree for the current buffer and turns it into per-line colour spans.
+//! tree-sitter syntax highlighting shared by zoe and gw-grep: a registry
+//! that `dlopen`s language parsers at runtime, and a `Highlighter` that
+//! keeps a parse tree for a piece of source text and turns it into
+//! per-line colour spans.
 //!
-//! **No grammar is compiled into zoe.** A "language" is a directory on
-//! the grammar search path holding a `parser.so` -- a standalone
-//! tree-sitter parser shared library exporting `tree_sitter_<name>` --
-//! and a `highlights.scm` query. Adding a language is dropping such a
-//! directory next to the others; see docs/decisions.md's zoe syntax
-//! section. zoe links only libtree-sitter itself (the parse runtime and
-//! the query engine) -- the grammars are data.
+//! **No grammar is compiled into any program.** A "language" is a
+//! directory on the grammar search path holding a `parser.so` -- a
+//! standalone tree-sitter parser shared library exporting
+//! `tree_sitter_<name>` -- and a `highlights.scm` query. Adding a
+//! language is dropping such a directory next to the others. The
+//! programs link only libtree-sitter itself (the parse runtime and the
+//! query engine) -- the grammars are data.
 //!
-//! **Highlighting is derived state, not editor state.** `editor.zig` /
-//! `buffer.zig` stay pure and know nothing about colours. `Buffer` does
-//! keep a small journal of the byte/point ranges it mutated (`Edit`) --
-//! generic edit bookkeeping, not a highlighting hook -- and `ui.zig`
-//! replays that journal onto the retained parse tree before each
-//! reparse, so an edit is an incremental `Tree.edit` + reparse against
-//! the old tree, not a whole-buffer parse. A full parse is still the
-//! fallback (first parse, language switch, a journal that overflowed).
+//! **Highlighting is derived state, not editor state.** The highlighter
+//! takes plain bytes and knows nothing about zoe's `Buffer`. zoe's
+//! `Buffer` keeps a small journal of the byte/point ranges it mutated,
+//! which zoe converts to `Edit`s and replays onto the retained parse
+//! tree before each reparse, so an edit is an incremental `Tree.edit` +
+//! reparse against the old tree, not a whole-buffer parse. A full parse
+//! is still the fallback (first parse, language switch, a journal that
+//! overflowed). gw-grep only ever does the full parse, once per file.
 //!
 //! **A full parse is staged.** `beginParse` gives it a small time budget
 //! through tree-sitter's progress callback; a file that doesn't finish
@@ -39,7 +40,7 @@
 //! `max_injection_depth` (Markdown block -> markdown_inline -> html).
 //! Child trees are rebuilt from scratch each reparse -- they are small.
 //!
-//! Deliberate limitations, all documented in decisions.md:
+//! Deliberate limitations:
 //!   - No `locals.scm` (so no scope-aware local/parameter distinction).
 //!   - Every content region of a given injected language is parsed on
 //!     its own; there is no `injection.combined` handling.
@@ -52,10 +53,6 @@
 const std = @import("std");
 const ts = @import("tree_sitter");
 const glyphwire = @import("glyphwire");
-const buffer = @import("buffer.zig");
-
-const Buffer = buffer.Buffer;
-const Edit = buffer.Edit;
 const Color = glyphwire.Color;
 
 /// How many times injection recursion nests before it stops: a Markdown
@@ -69,7 +66,23 @@ pub const max_injection_depth: u8 = 3;
 /// just those rows instead of the whole pane.
 pub const ByteRange = struct { start: usize, end: usize };
 
-fn pointOf(p: buffer.Pos) ts.Point {
+/// A zero-based line and byte column, as tree-sitter counts them.
+pub const Point = struct { line: usize = 0, col: usize = 0 };
+
+/// One applied mutation, in the shape tree-sitter's `TSInputEdit` wants:
+/// byte offsets and points for the edit's start, its old end and its new
+/// end. zoe builds these from its `Buffer`'s edit journal and hands them
+/// to `applyEdit`.
+pub const Edit = struct {
+    start_byte: usize,
+    old_end_byte: usize,
+    new_end_byte: usize,
+    start_point: Point,
+    old_end_point: Point,
+    new_end_point: Point,
+};
+
+fn pointOf(p: Point) ts.Point {
     return .{ .row = @intCast(p.line), .column = @intCast(p.col) };
 }
 
@@ -347,7 +360,7 @@ pub const Theme = struct {
 
 /// One `dlopen`ed grammar. The library and language pointer live for the
 /// process -- tree-sitter language pointers must outlive every tree and
-/// query built from them, and zoe only ever loads a grammar once, so it
+/// query built from them, and a program only ever loads a grammar once, so it
 /// is never closed.
 pub const LoadedGrammar = struct {
     lib: std.DynLib,
@@ -541,7 +554,7 @@ pub const Registry = struct {
             };
             return box;
         } else |err| {
-            std.log.warn("zoe: no usable '{s}' grammar on the search path ({t})", .{ name, err });
+            std.log.warn("syntax: no usable '{s}' grammar on the search path ({t})", .{ name, err });
             const key = self.alloc.dupe(u8, name) catch return null;
             self.failed.put(self.alloc, key, {}) catch self.alloc.free(key);
             return null;
@@ -580,7 +593,7 @@ pub const Registry = struct {
                 const abi = language.abiVersion();
                 if (abi < ts.MIN_COMPATIBLE_LANGUAGE_VERSION or abi > ts.LANGUAGE_VERSION) {
                     std.log.warn(
-                        "zoe: '{s}' grammar ABI {d} unsupported (need {d}..{d}); rebuild it",
+                        "syntax: '{s}' grammar ABI {d} unsupported (need {d}..{d}); rebuild it",
                         .{ name, abi, ts.MIN_COMPATIBLE_LANGUAGE_VERSION, ts.LANGUAGE_VERSION },
                     );
                     lib.close();
@@ -860,13 +873,13 @@ pub const Highlighter = struct {
         self.clearLanguage();
 
         self.parser.setLanguage(grammar.language) catch |e| {
-            std.log.warn("zoe: parser rejected '{s}' grammar ({t})", .{ name, e });
+            std.log.warn("syntax: parser rejected '{s}' grammar ({t})", .{ name, e });
             return error.IncompatibleGrammar;
         };
 
         var err_off: u32 = 0;
         const q = ts.Query.create(grammar.language, grammar.highlights, &err_off) catch |e| {
-            std.log.warn("zoe: '{s}' highlights.scm rejected ({t}) at byte {d}", .{ name, e, err_off });
+            std.log.warn("syntax: '{s}' highlights.scm rejected ({t}) at byte {d}", .{ name, e, err_off });
             self.parser.setLanguage(null) catch {};
             return error.BadQuery;
         };
@@ -891,21 +904,22 @@ pub const Highlighter = struct {
             if (grammar.injections) |src| {
                 var ie: u32 = 0;
                 self.inj_query = ts.Query.create(grammar.language, src, &ie) catch |e| blk: {
-                    std.log.warn("zoe: '{s}' injections.scm rejected ({t}) at byte {d}", .{ name, e, ie });
+                    std.log.warn("syntax: '{s}' injections.scm rejected ({t}) at byte {d}", .{ name, e, ie });
                     break :blk null;
                 };
             }
         }
     }
 
-    /// Reparse the whole buffer from scratch (no tree reuse) and rebuild
+    /// Reparse all of `text` from scratch (no tree reuse) and rebuild
     /// every injection. The fallback path: first parse, language switch,
-    /// or an edit journal that overflowed.
-    pub fn reparse(self: *Highlighter, buf: *const Buffer) !void {
+    /// or an edit journal that overflowed. `text` is copied; the caller
+    /// keeps its own.
+    pub fn reparse(self: *Highlighter, text: []const u8) !void {
         if (self.query == null) return;
         self.cancelParse();
 
-        const src = try buf.text(self.alloc);
+        const src = try self.alloc.dupe(u8, text);
         errdefer self.alloc.free(src);
 
         const new_tree = self.parser.parseString(src, null) orelse return error.ParseFailed;
@@ -935,11 +949,11 @@ pub const Highlighter = struct {
     /// colour its last lines differently from the full parse; the caller
     /// repaints once the full tree lands, and cutting a screen or so past
     /// what is visible keeps that out of sight.
-    pub fn beginParse(self: *Highlighter, buf: *const Buffer, prefix_end: usize, budget: ParseBudget) !ParseProgress {
+    pub fn beginParse(self: *Highlighter, text: []const u8, prefix_end: usize, budget: ParseBudget) !ParseProgress {
         if (self.query == null) return .done;
         self.cancelParse();
 
-        const src = try buf.text(self.alloc);
+        const src = try self.alloc.dupe(u8, text);
         if (self.tree) |t| t.destroy();
         self.tree = null;
         self.clearInjections();
@@ -1030,22 +1044,22 @@ pub const Highlighter = struct {
     /// edited-line set, is a complete account of what must be redrawn.
     pub fn reparseIncremental(
         self: *Highlighter,
-        buf: *const Buffer,
+        text: []const u8,
         changed: *std.ArrayList(ByteRange),
     ) !bool {
         if (self.query == null) return false;
         // The retained tree is a provisional prefix, not a tree of the
         // pre-edit buffer: nothing incremental can be built on it.
         if (self.parse_pending) {
-            try self.reparse(buf);
+            try self.reparse(text);
             return false;
         }
         const old = self.tree orelse {
-            try self.reparse(buf);
+            try self.reparse(text);
             return false;
         };
 
-        const src = try buf.text(self.alloc);
+        const src = try self.alloc.dupe(u8, text);
         errdefer self.alloc.free(src);
 
         const new_tree = self.parser.parseString(src, old) orelse return error.ParseFailed;

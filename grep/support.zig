@@ -8,3 +8,4 @@
 
 pub const rg = @import("rg.zig");
 pub const nodes = @import("nodes.zig");
+pub const highlight = @import("highlight.zig");
