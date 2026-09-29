@@ -20,7 +20,7 @@
 const std = @import("std");
 const ziglua = @import("ziglua");
 const glyphwire = @import("glyphwire");
-const syntax = @import("syntax.zig");
+const syntax = @import("applib").syntax;
 const editor = @import("editor.zig");
 const lsp = @import("lsp.zig");
 

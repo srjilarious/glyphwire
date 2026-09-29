@@ -12,6 +12,8 @@ const testz = @import("testz");
 const glyphwire = @import("glyphwire");
 const rg = @import("grep_support").rg;
 const nodes_mod = @import("grep_support").nodes;
+const syntax = @import("applib").syntax;
+const highlight_mod = @import("grep_support").highlight;
 
 /// Real `rg --json -B1 -A2 'fn init' two files` output, trimmed to the
 /// fields the parser reads. Two files, three matches, context either side.
@@ -244,14 +246,18 @@ pub fn grepHitRowSplitsTheMatchIntoItsOwnRunTest(io: std.Io, alloc: std.mem.Allo
 
     // "pub fn init() void {" with the match at bytes 4..11 becomes
     // number / "pub " / "fn init" / "() void {" -- the split that lets
-    // the matched bytes carry their own colour.
+    // the matched bytes carry their own background. With no syntax spans
+    // every byte keeps the plain text colour.
+    const colors = nodes_mod.Colors{};
     const hit = built.nodes[1];
     try testz.expectEqual(hit.runs.len, 4);
     try testz.expectEqualStr("pub ", hit.runs[1].text);
     try testz.expectEqualStr("fn init", hit.runs[2].text);
     try testz.expectEqualStr("() void {", hit.runs[3].text);
-    try testz.expectEqual(hit.runs[2].fg.?.r, 255);
-    try testz.expectEqual(hit.runs[1].fg.?.r, 210);
+    try testz.expectEqual(hit.runs[2].fg.?.r, colors.text.r);
+    try testz.expectEqual(hit.runs[2].bg.?.r, colors.match_bg.r);
+    try testz.expectEqual(hit.runs[1].fg.?.r, colors.text.r);
+    try testz.expectTrue(hit.runs[1].bg == null);
 
     // The line-40 match, which starts at byte 0, so it has no leading
     // run before the highlight. It follows the first hit's four body
@@ -362,12 +368,151 @@ pub fn grepHitLineIsRepeatedInItsBodyWithALitNumberTest(io: std.Io, alloc: std.m
     try testz.expectEqual(built.nodes[4].runs[0].fg.?.r, colors.line_number.r);
 
     // And the repeated line still splits on its match, so the matched
-    // bytes stay highlighted inside the body too.
+    // bytes stay highlighted inside the body too, at full strength.
     try testz.expectEqual(built.nodes[3].runs.len, 4);
     try testz.expectEqualStr("fn init", built.nodes[3].runs[2].text);
-    try testz.expectEqual(built.nodes[3].runs[2].fg.?.r, colors.match.r);
+    try testz.expectEqual(built.nodes[3].runs[2].bg.?.r, colors.match_bg.r);
+    try testz.expectEqual(built.nodes[3].runs[1].fg.?.r, colors.text.r);
 
-    // A plain context row is one run of text in the dimmer colour.
+    // A plain context row is one run of text in the dimmed colour.
     try testz.expectEqual(built.nodes[2].runs.len, 2);
-    try testz.expectEqual(built.nodes[2].runs[1].fg.?.r, colors.context.r);
+    try testz.expectEqual(built.nodes[2].runs[1].fg.?.r, colors.dim(colors.text).r);
+}
+
+pub fn grepSyntaxSpansColourRunsAndKeepTheMatchBackgroundTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const kw: glyphwire.Color = .{ .r = 200, .g = 100, .b = 220 };
+    const fnc: glyphwire.Color = .{ .r = 90, .g = 170, .b = 240 };
+
+    // "pub fn init() {" -- `pub`/`fn` keywords, `init` a function name,
+    // and the match covering "fn init", straddling two syntax colours.
+    var sub = [_]rg.Range{.{ .start = 4, .end = 11 }};
+    var lines = [_]rg.Line{.{ .number = 1, .text = @constCast("pub fn init() {"), .submatches = &sub }};
+    var files = [_]rg.FileHits{.{ .path = @constCast("a.zig"), .lines = &lines, .match_count = 1 }};
+    const line_spans = [_]syntax.Span{
+        .{ .start = 0, .end = 3, .color = kw },
+        .{ .start = 4, .end = 6, .color = kw },
+        .{ .start = 7, .end = 11, .color = fnc },
+    };
+    const per_line = [_][]const syntax.Span{&line_spans};
+    const per_file = [_][]const []const syntax.Span{&per_line};
+
+    var built = try nodes_mod.build(alloc, &files, .{
+        .ctx = .{ .before = 0, .after = 0 },
+        .spans = &per_file,
+    }, null);
+    defer built.deinit();
+
+    const colors = nodes_mod.Colors{};
+    // number / "pub" kw / " " plain / "fn" kw+bg / " " plain+bg /
+    // "init" fn+bg / "() {" plain.
+    const hit = built.nodes[1];
+    try testz.expectEqual(hit.runs.len, 7);
+    try testz.expectEqualStr("pub", hit.runs[1].text);
+    try testz.expectEqual(hit.runs[1].fg.?.r, kw.r);
+    try testz.expectTrue(hit.runs[1].bg == null);
+    try testz.expectEqualStr("fn", hit.runs[3].text);
+    try testz.expectEqual(hit.runs[3].fg.?.r, kw.r);
+    try testz.expectEqual(hit.runs[3].bg.?.r, colors.match_bg.r);
+    try testz.expectEqualStr(" ", hit.runs[4].text);
+    try testz.expectEqual(hit.runs[4].fg.?.r, colors.text.r);
+    try testz.expectEqual(hit.runs[4].bg.?.r, colors.match_bg.r);
+    try testz.expectEqualStr("init", hit.runs[5].text);
+    try testz.expectEqual(hit.runs[5].fg.?.b, fnc.b);
+    try testz.expectEqualStr("() {", hit.runs[6].text);
+    try testz.expectTrue(hit.runs[6].bg == null);
+
+    // The same line inside its own body is the hit, so full strength.
+    try testz.expectEqual(built.nodes[2].runs[1].fg.?.r, kw.r);
+}
+
+pub fn grepContextRowsDimTheirSyntaxColoursTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const kw: glyphwire.Color = .{ .r = 200, .g = 100, .b = 220 };
+
+    // A hit on line 1 with line 2 as its after-context; line 2 also holds
+    // a match of its own, which should get the dimmed background.
+    var sub1 = [_]rg.Range{.{ .start = 0, .end = 2 }};
+    var sub2 = [_]rg.Range{.{ .start = 4, .end = 6 }};
+    var lines = [_]rg.Line{
+        .{ .number = 1, .text = @constCast("fn a() {}"), .submatches = &sub1 },
+        .{ .number = 2, .text = @constCast("pub fn b() {}"), .submatches = &sub2 },
+    };
+    var files = [_]rg.FileHits{.{ .path = @constCast("a.zig"), .lines = &lines, .match_count = 2 }};
+    const spans1 = [_]syntax.Span{.{ .start = 0, .end = 2, .color = kw }};
+    const spans2 = [_]syntax.Span{
+        .{ .start = 0, .end = 3, .color = kw },
+        .{ .start = 4, .end = 6, .color = kw },
+    };
+    const per_line = [_][]const syntax.Span{ &spans1, &spans2 };
+    const per_file = [_][]const []const syntax.Span{&per_line};
+
+    var built = try nodes_mod.build(alloc, &files, .{
+        .ctx = .{ .before = 0, .after = 1 },
+        .spans = &per_file,
+    }, null);
+    defer built.deinit();
+
+    const colors = nodes_mod.Colors{};
+    // nodes: file, hit 1, [line 1, line 2], hit 2, [line 2]
+    const ctx_row = built.nodes[3];
+    try testz.expectEqualStr("pub", ctx_row.runs[1].text);
+    try testz.expectEqual(ctx_row.runs[1].fg.?.r, colors.dim(kw).r);
+    try testz.expectEqual(ctx_row.runs[1].fg.?.g, colors.dim(kw).g);
+    try testz.expectTrue(ctx_row.runs[1].bg == null);
+    try testz.expectEqualStr("fn", ctx_row.runs[3].text);
+    try testz.expectEqual(ctx_row.runs[3].bg.?.r, colors.dim(colors.match_bg).r);
+    try testz.expectEqual(ctx_row.runs[2].fg.?.r, colors.dim(colors.text).r);
+
+    // Dimming actually moves a colour, and towards the dark target.
+    try testz.expectTrue(colors.dim(kw).r < kw.r);
+}
+
+/// Where `zig build` installs the grammars; the highlight test no-ops
+/// without them, the same way zoe's syntax tests do.
+const grammar_test_dir = "zig-out/share/glyphwire/grammars";
+const highlight_test_dir = ".zig-cache/tmp/gw-grep-highlight-test";
+
+pub fn grepHighlightParsesTheWholeFileTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    std.Io.Dir.cwd().access(io, grammar_test_dir ++ "/c/libtree-sitter-c.so", .{}) catch return;
+
+    try std.Io.Dir.cwd().createDirPath(io, highlight_test_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, highlight_test_dir) catch {};
+    const path = highlight_test_dir ++ "/a.c";
+    // Line 2 sits inside a block comment that opened on line 1, which
+    // only a parse of the whole file can know.
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = "/* start\nint not_code = 1;\n*/\nint x = 2;\n",
+    });
+
+    var sub = [_]rg.Range{.{ .start = 4, .end = 5 }};
+    var lines = [_]rg.Line{
+        .{ .number = 2, .text = @constCast("int not_code = 1;") },
+        .{ .number = 4, .text = @constCast("int x = 2;"), .submatches = &sub },
+        // Not what line 4 says on disk any more: left plain.
+        .{ .number = 4, .text = @constCast("int y = 2;") },
+    };
+    var files = [_]rg.FileHits{.{ .path = @constCast(path), .lines = &lines, .match_count = 1 }};
+
+    var registry = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer registry.deinit();
+    const theme = syntax.Theme.initDefault();
+    var got = try highlight_mod.compute(alloc, io, &registry, theme, &files);
+    defer got.deinit();
+
+    const comment = theme.colorFor("comment").?;
+    const in_comment = got.files[0][0];
+    try testz.expectEqual(in_comment.len, 1);
+    try testz.expectEqual(in_comment[0].start, 0);
+    try testz.expectEqual(in_comment[0].end, 17);
+    try testz.expectEqual(in_comment[0].color.r, comment.r);
+
+    // Real code: `int` gets the type colour, not the comment one.
+    const code = got.files[0][1];
+    try testz.expectTrue(code.len > 0);
+    try testz.expectEqual(code[0].start, 0);
+    try testz.expectEqual(code[0].color.r, theme.colorFor("type").?.r);
+
+    try testz.expectEqual(got.files[0][2].len, 0);
 }

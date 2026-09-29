@@ -5,8 +5,16 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 
+const syntax = @import("applib").syntax;
+
 const rg = @import("rg.zig");
 const nodes_mod = @import("nodes.zig");
+const highlight = @import("highlight.zig");
+
+// The grammar registry warns once for every language it can't load. A
+// grep's output lands in the shell's scrollback, where a warning about a
+// missing grammar is noise: those files just draw plain.
+pub const std_options: std.Options = .{ .log_level = .err };
 
 /// gw-grep: a ripgrep front-end that draws its results as a collapsible
 /// `Outline` and then exits.
@@ -25,6 +33,10 @@ const nodes_mod = @import("nodes.zig");
 /// show; `-B 3 -A 10` is the default. The hit's own line sits among that
 /// window with its line number in the match colour, so the block reads as
 /// a contiguous piece of the file rather than one with a hole in it.
+///
+/// Rows are syntax-highlighted with zoe's tree-sitter grammars
+/// (`highlight.zig`), context rows dimmed, the matched bytes on a
+/// background so their syntax colour still shows.
 ///
 /// Without a session it falls back to plain stdout, like `gw-ls` does.
 const usage =
@@ -159,16 +171,30 @@ pub fn main(init: std.process.Init) !void {
         return fail(io, "gw-grep: no matches\n");
     }
 
-    const opts: nodes_mod.Options = .{
-        .ctx = .{ .before = before, .after = after },
-        .hits_collapsed = !args.hasOption("expand"),
-        .files_collapsed = args.hasOption("collapse"),
-    };
     const cap: ?usize = if (p.truncated) max_hits else null;
 
     if (glyphwire.Client.connectFromEnv(io, alloc, init.environ_map)) |connected| {
         var client = connected;
         defer client.deinit();
+
+        // The same grammar search path zoe uses, so a grammar installed
+        // for one colours the other.
+        const dirs = try syntax.searchDirs(alloc, io, init.environ_map, &.{});
+        defer {
+            for (dirs) |d| alloc.free(d);
+            alloc.free(dirs);
+        }
+        var registry = syntax.Registry.init(alloc, io, dirs, &syntax.default_langs);
+        defer registry.deinit();
+        var colours = try highlight.compute(alloc, io, &registry, syntax.Theme.initDefault(), files);
+        defer colours.deinit();
+
+        const opts: nodes_mod.Options = .{
+            .ctx = .{ .before = before, .after = after },
+            .hits_collapsed = !args.hasOption("expand"),
+            .files_collapsed = args.hasOption("collapse"),
+            .spans = colours.files,
+        };
         try draw(&client, io, alloc, files, opts, cap);
     } else |_| {
         try writePlain(io, alloc, files, cap);

@@ -68,6 +68,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("grep/support.zig"),
     });
     grep_support_mod.addImport("glyphwire", glyphwire_mod);
+    grep_support_mod.addImport("applib", applib_mod);
 
     // Windowless pieces of glyphwire-host (pixel/cell geometry, scrollbar
     // math, `host.conf.lua` value clamps, the key-repeat policy) so the
@@ -244,16 +245,17 @@ pub fn build(b: *std.Build) void {
     // salacommander/config.zig (salacommander.conf.lua parser) is the sixth.
     salacommander_support_mod.addImport("ziglua", ziglua_mod);
 
-    // ── zoe syntax highlighting ──
+    // ── syntax highlighting (zoe, gw-grep) ──
     //
     // `tree_sitter` is the Zig binding *plus* the vendored libtree-sitter
     // C runtime (its module links the static lib in), so importing it
-    // into `zoe_support` is enough to reach the `zoe` binary and the test
-    // runner. The grammars themselves are NOT linked in: `installGrammars`
-    // compiles each to a standalone `parser.so` that zoe `dlopen`s at
-    // runtime from the grammar search path (see zoe/syntax.zig).
+    // into `applib` (for `applib/syntax.zig`) is enough to reach zoe,
+    // gw-grep and the test runner. The grammars themselves are NOT linked
+    // in: `installGrammars` compiles each to a standalone `parser.so`
+    // that the highlighter `dlopen`s at runtime from the grammar search
+    // path (see applib/syntax.zig).
     const tree_sitter_dep = b.dependency("tree_sitter", .{ .target = target, .optimize = optimize });
-    zoe_support_mod.addImport("tree_sitter", tree_sitter_dep.module("tree_sitter"));
+    applib_mod.addImport("tree_sitter", tree_sitter_dep.module("tree_sitter"));
 
     const grammars_install_dir = "share/glyphwire/grammars";
     const grammars_step = installGrammars(b, target, optimize, grammars_install_dir);
@@ -513,7 +515,7 @@ pub fn build(b: *std.Build) void {
     zoe_exe.root_module.addImport("applib", applib_mod);
     zoe_exe.root_module.addImport("zoe_support", zoe_support_mod);
     zoe_exe.root_module.addImport("zargunaught", zargunaught_mod);
-    // zoe_support -> langconf.zig -> ziglua, and -> syntax.zig ->
+    // zoe_support -> langconf.zig -> ziglua, and -> applib/syntax.zig ->
     // tree_sitter (which links the vendored libtree-sitter C runtime).
     // Both need libc and the Lua C lib on the final binary, same as
     // gw-shell / gw-ls do for their own configs.
@@ -613,10 +615,19 @@ pub fn build(b: *std.Build) void {
     });
     grep_exe.root_module.addImport("glyphwire", glyphwire_mod);
     grep_exe.root_module.addImport("zargunaught", zargunaught_mod);
+    grep_exe.root_module.addImport("applib", applib_mod);
+    // applib/syntax.zig -> tree_sitter (the vendored C runtime) and the
+    // `dlopen` of each grammar both need libc.
+    grep_exe.root_module.link_libc = true;
     b.installArtifact(grep_exe);
 
     const run_grep = b.addRunArtifact(grep_exe);
     run_grep.step.dependOn(b.getInstallStep());
+    // Same just-installed grammars `zig build zoe` points zoe at.
+    run_grep.setEnvironmentVariable(
+        "GLYPHWIRE_ZOE_GRAMMAR_DIR",
+        b.pathJoin(&.{ "zig-out", "share", "glyphwire", "grammars" }),
+    );
     run_grep.addPassthruArgs();
 
     const grep_step = b.step("gw-grep", "Run the glyphwire ripgrep browser (gw-grep <pattern> [path...])");

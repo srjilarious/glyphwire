@@ -20,6 +20,7 @@
 //! decode without corrupting it on save.
 
 const std = @import("std");
+const syntax = @import("applib").syntax;
 
 /// A line/column pair. `col` is a **byte** offset within the line, not a
 /// display column -- `motion.zig` is what steps it by whole codepoints,
@@ -183,9 +184,9 @@ pub const GapBuffer = struct {
 /// `G` land where vim puts it.
 /// One applied mutation, in the shape tree-sitter's `TSInputEdit` wants:
 /// byte offsets and row/column points for the edit's start, its old end
-/// and its new end. `syntax.zig` replays these onto the retained parse
-/// tree (`Tree.edit`) so a reparse can reuse it instead of starting from
-/// scratch.
+/// and its new end. `toSyntax` hands one to `applib.syntax`, which
+/// replays it onto the retained parse tree (`Tree.edit`) so a reparse can
+/// reuse it instead of starting from scratch.
 ///
 /// It lives on `Buffer`, not on the highlighter, because only `Buffer`
 /// sees each individual mutation -- `editor.zig` routinely issues several
@@ -197,6 +198,19 @@ pub const Edit = struct {
     start_point: Pos,
     old_end_point: Pos,
     new_end_point: Pos,
+
+    /// The same edit in the highlighter's own types, which don't know
+    /// about `Buffer`.
+    pub fn toSyntax(e: Edit) syntax.Edit {
+        return .{
+            .start_byte = e.start_byte,
+            .old_end_byte = e.old_end_byte,
+            .new_end_byte = e.new_end_byte,
+            .start_point = .{ .line = e.start_point.line, .col = e.start_point.col },
+            .old_end_point = .{ .line = e.old_end_point.line, .col = e.old_end_point.col },
+            .new_end_point = .{ .line = e.new_end_point.line, .col = e.new_end_point.col },
+        };
+    }
 };
 
 /// Cap on `pending_edits`. Past this the log is cleared and
