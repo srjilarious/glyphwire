@@ -1720,7 +1720,7 @@ pub fn gutterCellTextRelativeKeepsTheCaretLineAbsoluteTest(_: std.Io, _: std.mem
 
 // ─── Syntax highlighting (tree-sitter) ──────────────────────────────────
 
-const syntax = zoe.syntax;
+const syntax = @import("applib").syntax;
 
 pub fn themeColorForWalksDottedPrefixesTest(_: std.Io, _: std.mem.Allocator) !void {
     var theme = syntax.Theme.initDefault();
@@ -1741,6 +1741,26 @@ pub fn themeColorForWalksDottedPrefixesTest(_: std.Io, _: std.mem.Allocator) !vo
 }
 
 const grammar_test_dir = "zig-out/share/glyphwire/grammars";
+
+// The highlighter takes plain bytes; these hand it a `Buffer`'s text the
+// way `ui.zig` does.
+fn reparseBuf(hl: *syntax.Highlighter, buf: *const Buffer) !void {
+    const text = try buf.text(hl.alloc);
+    defer hl.alloc.free(text);
+    try hl.reparse(text);
+}
+
+fn beginParseBuf(hl: *syntax.Highlighter, buf: *const Buffer, prefix_end: usize, budget: syntax.ParseBudget) !syntax.ParseProgress {
+    const text = try buf.text(hl.alloc);
+    defer hl.alloc.free(text);
+    return hl.beginParse(text, prefix_end, budget);
+}
+
+fn reparseIncrementalBuf(hl: *syntax.Highlighter, buf: *const Buffer, changed: *std.ArrayList(syntax.ByteRange)) !bool {
+    const text = try buf.text(hl.alloc);
+    defer hl.alloc.free(text);
+    return hl.reparseIncremental(text, changed);
+}
 
 /// The grammar `.so`s only exist after `zig build` has run the install
 /// step; when they don't, the two tests below no-op rather than fail (a
@@ -1777,7 +1797,7 @@ pub fn syntaxHighlightsJsonSpansTest(io: std.Io, alloc: std.mem.Allocator) !void
     const src = "{\"a\": 12}";
     var buf = try Buffer.initFromText(alloc, src);
     defer buf.deinit();
-    try hl.reparse(&buf);
+    try reparseBuf(&hl, &buf);
     try testz.expectTrue(hl.ready());
 
     var spans: std.ArrayList(syntax.Span) = .empty;
@@ -1838,7 +1858,7 @@ pub fn syntaxHighlightsLuaAndShellTest(io: std.Io, alloc: std.mem.Allocator) !vo
 
         var buf = try Buffer.initFromText(alloc, c.src);
         defer buf.deinit();
-        try hl.reparse(&buf);
+        try reparseBuf(&hl, &buf);
         try testz.expectTrue(hl.ready());
 
         var spans: std.ArrayList(syntax.Span) = .empty;
@@ -1930,17 +1950,17 @@ pub fn syntaxIncrementalReparseMatchesFullTest(io: std.Io, alloc: std.mem.Alloca
     var inc = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
     defer inc.deinit();
     try inc.setLanguage("json", g);
-    try inc.reparse(&buf);
+    try reparseBuf(&inc, &buf);
 
     // Widen the `1` to `123`, an edit contained in one line.
     const at = std.mem.indexOfScalar(u8, src, '1').?;
     try buf.delete(at, 1);
     try buf.insert(at, "123");
-    for (buf.pending_edits.items) |e| inc.applyEdit(e);
+    for (buf.pending_edits.items) |e| inc.applyEdit(e.toSyntax());
 
     var changed: std.ArrayList(syntax.ByteRange) = .empty;
     defer changed.deinit(alloc);
-    _ = try inc.reparseIncremental(&buf, &changed);
+    _ = try reparseIncrementalBuf(&inc, &buf, &changed);
     buf.clearEdits();
     try testz.expectTrue(changed.items.len >= 1);
 
@@ -1948,7 +1968,7 @@ pub fn syntaxIncrementalReparseMatchesFullTest(io: std.Io, alloc: std.mem.Alloca
     var full = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
     defer full.deinit();
     try full.setLanguage("json", g);
-    try full.reparse(&buf);
+    try reparseBuf(&full, &buf);
 
     var a: std.ArrayList(syntax.Span) = .empty;
     defer a.deinit(alloc);
@@ -2022,7 +2042,7 @@ pub fn syntaxStagedParseFinishesSmallFileInOneStepTest(io: std.Io, alloc: std.me
     try hl.setLanguage("json", g);
 
     // Far too few operations to reach a progress check: never staged.
-    try testz.expectTrue(try hl.beginParse(&buf, 0, .{ .checks = 0 }) == .done);
+    try testz.expectTrue(try beginParseBuf(&hl, &buf, 0, .{ .checks = 0 }) == .done);
     try testz.expectFalse(hl.parsing());
     try testz.expectTrue(hl.ready());
 }
@@ -2046,7 +2066,7 @@ pub fn syntaxStagedParseShowsPrefixThenFullTreeTest(io: std.Io, alloc: std.mem.A
     // Two checks is a few hundred operations: nowhere near the whole
     // array, but plenty for the three-line prefix.
     const prefix_end = buf.lineEnd(3);
-    try testz.expectTrue(try hl.beginParse(&buf, prefix_end, .{ .checks = 2 }) == .pending);
+    try testz.expectTrue(try beginParseBuf(&hl, &buf, prefix_end, .{ .checks = 2 }) == .pending);
     try testz.expectTrue(hl.parsing());
     try testz.expectTrue(hl.ready());
 
@@ -2072,7 +2092,7 @@ pub fn syntaxStagedParseShowsPrefixThenFullTreeTest(io: std.Io, alloc: std.mem.A
     var full = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
     defer full.deinit();
     try full.setLanguage("json", g);
-    try full.reparse(&buf);
+    try reparseBuf(&full, &buf);
     try expectSameSpans(alloc, &buf, &hl, &full);
 }
 
@@ -2092,28 +2112,28 @@ pub fn syntaxStagedParseCancelledByReparseTest(io: std.Io, alloc: std.mem.Alloca
     var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
     defer hl.deinit();
     try hl.setLanguage("json", g);
-    try testz.expectTrue(try hl.beginParse(&buf, buf.lineEnd(3), .{ .checks = 2 }) == .pending);
+    try testz.expectTrue(try beginParseBuf(&hl, &buf, buf.lineEnd(3), .{ .checks = 2 }) == .pending);
 
     // An edit lands mid-parse. The prefix tree is not a tree of the
     // pre-edit buffer, so the incremental path must not build on it: it
     // drops the parked parse and parses the new text whole.
     try buf.insert(buf.lineStart(1), "  {\"new\": 2},\n");
-    for (buf.pending_edits.items) |e| hl.applyEdit(e);
+    for (buf.pending_edits.items) |e| hl.applyEdit(e.toSyntax());
     var changed: std.ArrayList(syntax.ByteRange) = .empty;
     defer changed.deinit(alloc);
-    try testz.expectFalse(try hl.reparseIncremental(&buf, &changed));
+    try testz.expectFalse(try reparseIncrementalBuf(&hl, &buf, &changed));
     buf.clearEdits();
     try testz.expectFalse(hl.parsing());
 
     var full = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
     defer full.deinit();
     try full.setLanguage("json", g);
-    try full.reparse(&buf);
+    try reparseBuf(&full, &buf);
     try expectSameSpans(alloc, &buf, &hl, &full);
 
     // And a restarted staged parse starts from the top, not from where
     // the cancelled one stopped.
-    try testz.expectTrue(try hl.beginParse(&buf, buf.lineEnd(3), .{ .checks = 2 }) == .pending);
+    try testz.expectTrue(try beginParseBuf(&hl, &buf, buf.lineEnd(3), .{ .checks = 2 }) == .pending);
     while (try hl.continueParse(.{ .checks = 1_000_000 }) == .pending) {}
     try expectSameSpans(alloc, &buf, &hl, &full);
 }
@@ -2161,7 +2181,7 @@ pub fn syntaxInjectionHighlightsFencedCodeTest(io: std.Io, alloc: std.mem.Alloca
     defer on.deinit();
     on.configureInjections(&reg, true);
     try on.setLanguage("markdown", md);
-    try on.reparse(&buf);
+    try reparseBuf(&on, &buf);
     try on.lineSpans(ls, le, &spans);
     const on_span = spanAt(spans.items, 7) orelse return error.NoSpanOverNumber;
     try testz.expectEqual(on_span.color.r, number.r);
@@ -2172,7 +2192,7 @@ pub fn syntaxInjectionHighlightsFencedCodeTest(io: std.Io, alloc: std.mem.Alloca
     defer off.deinit();
     off.configureInjections(&reg, false);
     try off.setLanguage("markdown", md);
-    try off.reparse(&buf);
+    try reparseBuf(&off, &buf);
     try off.lineSpans(ls, le, &spans);
     if (spanAt(spans.items, 7)) |s| {
         try testz.expectFalse(s.color.r == number.r and s.color.g == number.g and s.color.b == number.b);
@@ -2195,7 +2215,7 @@ pub fn syntaxInjectionSurvivesIncrementalEditTest(io: std.Io, alloc: std.mem.All
     defer hl.deinit();
     hl.configureInjections(&reg, true);
     try hl.setLanguage("markdown", md);
-    try hl.reparse(&buf);
+    try reparseBuf(&hl, &buf);
 
     var spans: std.ArrayList(syntax.Span) = .empty;
     defer spans.deinit(alloc);
@@ -2207,10 +2227,10 @@ pub fn syntaxInjectionSurvivesIncrementalEditTest(io: std.Io, alloc: std.mem.All
     // rebuilt and the JSON grammar still colours the line.
     const at = std.mem.indexOfScalar(u8, src, '1').?;
     try buf.insert(at, "23");
-    for (buf.pending_edits.items) |e| hl.applyEdit(e);
+    for (buf.pending_edits.items) |e| hl.applyEdit(e.toSyntax());
     var changed: std.ArrayList(syntax.ByteRange) = .empty;
     defer changed.deinit(alloc);
-    _ = try hl.reparseIncremental(&buf, &changed);
+    _ = try reparseIncrementalBuf(&hl, &buf, &changed);
     buf.clearEdits();
 
     try hl.lineSpans(buf.lineStart(1), buf.lineEnd(1), &spans);
@@ -3506,7 +3526,7 @@ pub fn hoverColorRunsFillGapsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const ty = Color{ .r = 0, .g = 1, .b = 0, .a = 255 };
     const plain = Color{ .r = 9, .g = 9, .b = 9, .a = 255 };
     const text = "fn f(a: u32) void";
-    const spans = [_]zoe.syntax.Span{
+    const spans = [_]syntax.Span{
         .{ .start = 0, .end = 2, .color = kw },
         .{ .start = 8, .end = 11, .color = ty },
         .{ .start = 13, .end = 17, .color = ty },

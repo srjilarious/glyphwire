@@ -40,6 +40,8 @@
 //!   `icons`      file name -> icon name (gw-ls, salacommander, zoe)
 //!   `interrupt`  keeping Ctrl+C from killing an interactive program
 //!                (zoe, gw-hist, salacommander, gmux)
+//!   `syntax`     tree-sitter highlighting: grammar registry, theme,
+//!                per-line colour spans (zoe, gw-grep)
 
 pub const lineedit = @import("lineedit.zig");
 pub const interrupt = @import("interrupt.zig");
@@ -57,5 +59,6 @@ pub const format = @import("format.zig");
 pub const gridlayout = @import("gridlayout.zig");
 pub const icons = @import("icons.zig");
 pub const homepath = @import("homepath.zig");
+pub const syntax = @import("syntax.zig");
 
 pub const LineEdit = lineedit.LineEdit;
