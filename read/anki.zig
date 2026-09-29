@@ -765,14 +765,19 @@ pub const Job = struct {
             self.alloc.dupe(u8, self.url) catch return .unknown;
         defer self.alloc.free(probe_url);
 
+        // Not `client.fetch`: for a HEAD it drains the body through
+        // `Reader.ending`, a `const` that lands in read-only memory, and
+        // `discardRemaining` writes to it -- a segfault in ReleaseSafe.
+        // `receiveHead` returns a HEAD response before touching any body
+        // reader, and the status is all that's needed.
+        const uri = std.Uri.parse(probe_url) catch return .unknown;
         var client: std.http.Client = .{ .allocator = self.alloc, .io = self.io };
         defer client.deinit();
-        const res = client.fetch(.{
-            .location = .{ .url = probe_url },
-            .method = .HEAD,
-            .redirect_behavior = .unhandled,
-        }) catch return .unknown;
-        return switch (res.status.class()) {
+        var req = client.request(.HEAD, uri, .{ .redirect_behavior = .unhandled }) catch return .unknown;
+        defer req.deinit();
+        req.sendBodiless() catch return .unknown;
+        const res = req.receiveHead(&.{}) catch return .unknown;
+        return switch (res.head.status.class()) {
             .redirect => .available,
             .success => .missing,
             else => .unknown,
