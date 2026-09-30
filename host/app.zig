@@ -13,6 +13,7 @@ const key_repeat_mod = @import("key_repeat.zig");
 const selection_mod = @import("selection.zig");
 const scroll_mod = @import("scroll.zig");
 const table_sort_mod = @import("table_sort.zig");
+const outline_toggle_mod = @import("outline_toggle.zig");
 const window_sizing_mod = @import("window_sizing.zig");
 const preedit_mod = @import("preedit.zig");
 const render_mod = @import("render.zig");
@@ -173,6 +174,7 @@ pub const App = struct {
     selection: selection_mod.Selection,
     scroll: scroll_mod.Scroll,
     table_sort: table_sort_mod.TableSort,
+    outline_toggle: outline_toggle_mod.OutlineToggle,
     panes: panes_mod.Panes,
     /// The programs `spawn_in_pane` started, one per pane. Null when
     /// nothing has ever asked for a pane, which is every session without a
@@ -212,6 +214,7 @@ pub const App = struct {
             .selection = .{ .app = undefined },
             .scroll = .{ .app = undefined },
             .table_sort = .{ .app = undefined },
+            .outline_toggle = .{ .app = undefined },
             .panes = .{ .app = undefined },
             .window_sizing = .{
                 .app = undefined,
@@ -235,6 +238,7 @@ pub const App = struct {
         app.selection.app = app;
         app.scroll.app = app;
         app.table_sort.app = app;
+        app.outline_toggle.app = app;
         app.panes.app = app;
         app.window_sizing.app = app;
         app.renderer.app = app;
@@ -305,7 +309,13 @@ pub const App = struct {
         // repaints the table in place; it's consumed so it isn't also
         // delivered to glyphwire-shell as a grid click.
         const table_took_left = !chrome_or_bar_took_left and self.table_sort.handleHeaderClick(eng);
-        const took_left = chrome_or_bar_took_left or table_took_left;
+        // Then an outline's expand/collapse marker, the same deal: real
+        // server-side state, so the toggle needs no client. Only the two
+        // marker cells are taken -- a click on the row's text falls
+        // through to glyphwire-shell's metadata activation.
+        const outline_took_left = !chrome_or_bar_took_left and !table_took_left and
+            self.outline_toggle.handleMarkerClick(eng);
+        const took_left = chrome_or_bar_took_left or table_took_left or outline_took_left;
         const select_took_left = self.selection.handleMouseSelection(eng, took_left);
         self.keys.reportMouseEvents(eng, took_left or select_took_left);
         self.keys.handleRepeatKeys(eng);

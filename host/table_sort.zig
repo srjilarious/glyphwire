@@ -5,7 +5,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 
 const app_mod = @import("app.zig");
-const geometry = @import("geometry.zig");
+const hit = @import("hit.zig");
 const scroll_mod = @import("scroll.zig");
 
 const App = app_mod.App;
@@ -66,7 +66,7 @@ pub const TableSort = struct {
         defer server.ctx_mutex.unlock(server.io);
 
         const ctx = server.ctx;
-        const target = layerUnder(ctx, pos.x, pos.y) orelse return false;
+        const target = hit.layerUnder(ctx, pos.x, pos.y) orelse return false;
         const layer = target.layer;
         // While a full-screen program owns the screen its own content is
         // on the grid, not a table -- leave the click for mouse reporting.
@@ -94,48 +94,3 @@ pub const TableSort = struct {
         return true;
     }
 };
-
-/// The layer a pixel lands on, with that pixel resolved to a cell in the
-/// layer's own **content** grid -- the coordinate space `Table.col` /
-/// `Table.top_live` live in, and so the one `headerColumnAt` expects.
-const LayerTarget = struct {
-    layer: *glyphwire.Layer,
-    row: usize,
-    col: usize,
-    is_root: bool,
-};
-
-/// Top-most visible `create_layer` layer whose bounds contain the pixel,
-/// else the root layer. The same walk `selection.layerAt` does, kept
-/// separate because this one wants the layer itself (to reach its tables)
-/// and a content cell rather than a `SelectionPoint`.
-///
-/// The caller holds `ctx_mutex`.
-fn layerUnder(ctx: *glyphwire.Context, px: f32, py: f32) ?LayerTarget {
-    const origin = geometry.contextOrigin(ctx);
-    var i = ctx.layer_order.items.len;
-    while (i > 0) {
-        i -= 1;
-        const layer = ctx.layers.getPtr(ctx.layer_order.items[i]) orelse continue;
-        if (!layer.visible) continue;
-        const cols = layer.viewportCols();
-        const rows = layer.viewportRows();
-        const rect = geometry.layerRectIn(origin, layer.pos, cols, rows);
-        if (!rect.contains(px, py)) continue;
-        // Viewport cell -> content cell: a host-scrolled pane shows the
-        // slice of its grid starting at `scroll_off`. A terminal-style
-        // layer (the shell panel) has `scroll_off` zero and uses
-        // `view_scroll` instead, which `headerColumnAt` applies itself.
-        const vcol: usize = @intFromFloat(@max(0, (px - rect.x) / @as(f32, @floatFromInt(geometry.cell_w))));
-        const vrow: usize = @intFromFloat(@max(0, (py - rect.y) / @as(f32, @floatFromInt(geometry.cell_h))));
-        if (vcol >= cols or vrow >= rows) return null;
-        return .{
-            .layer = layer,
-            .row = layer.scroll_off.row + vrow,
-            .col = layer.scroll_off.col + vcol,
-            .is_root = false,
-        };
-    }
-    const cell = geometry.cellFromPixel(px, py);
-    return .{ .layer = &ctx.root, .row = cell.row, .col = cell.col, .is_root = true };
-}
