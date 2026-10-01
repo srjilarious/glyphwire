@@ -61,9 +61,9 @@ pub const Box = struct {
 /// One speech bubble: where it is, which way it reads, and what it says.
 pub const Block = struct {
     box: Box = .{},
-    /// True for the vertical columns Japanese normally sets in. Only used
-    /// for the dialog's label today -- the text is rendered horizontally
-    /// either way, since a terminal grid has no vertical writing mode.
+    /// True for the vertical columns Japanese normally sets in. Decides
+    /// how the dialog lays the text out while the reader's `Layout` is
+    /// `auto` (see `Layout.isVertical`).
     vertical: bool = true,
     /// The OCR's own line split, in the order mokuro emitted it. For a
     /// vertical block that is right-to-left *columns*, not sentence
@@ -532,7 +532,33 @@ pub fn spanCells(
     rows: []const []const u8,
     start: usize,
     end: usize,
-) ?struct { first: TextCell, last: TextCell } {
+) ?Span {
+    return spanIn(joined, rows, start, end, displayWidth);
+}
+
+/// `spanCells` for text laid out in vertical columns (`wrapVertical`):
+/// `row` is the column, `col` the *character* within it, one per slot
+/// whatever its display width.
+pub fn spanChars(
+    joined: []const u8,
+    columns: []const []const u8,
+    start: usize,
+    end: usize,
+) ?Span {
+    return spanIn(joined, columns, start, end, charCount);
+}
+
+pub const Span = struct { first: TextCell, last: TextCell };
+
+/// The body of `spanCells` / `spanChars`: `measure` is how far into a
+/// row a byte prefix reaches, in that layout's units.
+fn spanIn(
+    joined: []const u8,
+    rows: []const []const u8,
+    start: usize,
+    end: usize,
+    comptime measure: fn ([]const u8) usize,
+) ?Span {
     if (end <= start or rows.len == 0) return null;
 
     // The last codepoint that starts inside the span.
@@ -548,7 +574,7 @@ pub fn spanCells(
         const rs = rowOffset(joined, row);
         if (start < rs + row.len) {
             const off = if (start > rs) start - rs else 0;
-            first = .{ .row = r, .col = displayWidth(row[0..off]) };
+            first = .{ .row = r, .col = measure(row[0..off]) };
             break;
         }
     }
@@ -563,10 +589,10 @@ pub fn spanCells(
         if (row.len == 0) continue;
         if (last_char < rs + row.len) {
             const off = last_char - rs;
-            const w = @max(displayWidth(joined[last_char..charEnd(joined, last_char)]), 1);
-            last = .{ .row = r, .col = displayWidth(row[0..off]) + w - 1 };
+            const w = @max(measure(joined[last_char..charEnd(joined, last_char)]), 1);
+            last = .{ .row = r, .col = measure(row[0..off]) + w - 1 };
         } else {
-            last = .{ .row = r, .col = displayWidth(row) -| 1 };
+            last = .{ .row = r, .col = measure(row) -| 1 };
         }
         break;
     }
@@ -638,4 +664,140 @@ pub fn wrap(alloc: std.mem.Allocator, text: []const u8, cols: usize) std.mem.All
     }
     if (start < text.len) try rows.append(alloc, text[start..]);
     return rows.toOwnedSlice(alloc);
+}
+
+// ── Vertical layout ─────────────────────────────────────────────────────
+
+/// How the dialog sets a bubble's text: `auto` follows each block's own
+/// `vertical` flag (most bubbles vertical, a sign or a caption
+/// horizontal), the other two force every block one way. `v` cycles it,
+/// and it is remembered per book by its name (`state.Bookmark.layout`).
+pub const Layout = enum {
+    auto,
+    vertical,
+    horizontal,
+
+    pub fn parse(name: []const u8) ?Layout {
+        return std.meta.stringToEnum(Layout, name);
+    }
+
+    pub fn next(self: Layout) Layout {
+        return switch (self) {
+            .auto => .vertical,
+            .vertical => .horizontal,
+            .horizontal => .auto,
+        };
+    }
+
+    /// Whether `block` is set in vertical columns under this layout.
+    pub fn isVertical(self: Layout, block: *const Block) bool {
+        return switch (self) {
+            .auto => block.vertical,
+            .vertical => true,
+            .horizontal => false,
+        };
+    }
+};
+
+/// Codepoints in `text`, counting an invalid byte as one -- a vertical
+/// column's length, where every character takes one slot whatever its
+/// display width.
+pub fn charCount(text: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (n += 1) i = charEnd(text, i);
+    return n;
+}
+
+/// Byte offset of the `idx`th character of `text` (`charCount`'s units),
+/// clamped to `text.len` past the end -- `columnToByte` for a vertical
+/// column.
+pub fn charToByte(text: []const u8, idx: usize) usize {
+    var i: usize = 0;
+    var n: usize = 0;
+    while (i < text.len and n < idx) : (n += 1) i = charEnd(text, i);
+    return i;
+}
+
+/// Punctuation that may not start a column, so it hangs off the bottom
+/// of the one before instead (kinsoku shori's *burasage*, simplified):
+/// the closing marks and the sentence enders.
+fn hangsOffColumn(cp: u21) bool {
+    return switch (cp) {
+        '。', '、', '，', '．', '」', '』', '）', '】', '〕', '〉', '》', '！', '？', '…', '‥' => true,
+        else => false,
+    };
+}
+
+/// Splits `text` into vertical columns of at most `chars` characters,
+/// first column first (the rightmost on screen). The columns are slices
+/// *into* `text`, like `wrap`'s rows, so every byte offset the dialog
+/// works with means the same thing in either layout; the slice holding
+/// them is the caller's to free.
+///
+/// One character per slot, so this counts codepoints rather than display
+/// columns. A column may run one over `chars` to keep a closing mark off
+/// the top of the next (`hangsOffColumn`), and a space that would start
+/// a column is dropped, as `wrap` drops the one it breaks at.
+pub fn wrapVertical(alloc: std.mem.Allocator, text: []const u8, chars: usize) std.mem.Allocator.Error![]const []const u8 {
+    var cols: std.ArrayList([]const u8) = .empty;
+    errdefer cols.deinit(alloc);
+    const limit = @max(chars, 1);
+
+    var start: usize = 0;
+    while (start < text.len) {
+        if (text[start] == ' ') {
+            start += 1;
+            continue;
+        }
+        var i = start;
+        var n: usize = 0;
+        while (i < text.len and n < limit) : (n += 1) i = charEnd(text, i);
+        if (i < text.len) {
+            const next = charEnd(text, i);
+            const cp = std.unicode.utf8Decode(text[i..next]) catch 0;
+            if (hangsOffColumn(cp)) i = next;
+        }
+        try cols.append(alloc, text[start..i]);
+        start = i;
+    }
+    return cols.toOwnedSlice(alloc);
+}
+
+/// The glyph a vertical column draws for codepoint `cp`, when it isn't
+/// `cp` itself: Unicode's vertical presentation forms (U+FE10..FE19,
+/// U+FE30..FE48) for the punctuation and brackets that sit or turn
+/// differently in vertical text, and the vertical bar for the long
+/// vowel mark and dashes, which would otherwise draw across the column.
+/// Only ever *drawn* -- the dialog writes the original as the cell's
+/// `copy_text`, and lookups and Anki read `joined`, so nothing
+/// downstream ever sees these.
+pub fn verticalForm(cp: u21) ?[]const u8 {
+    return switch (cp) {
+        '、' => "︑",
+        '。' => "︒",
+        '，' => "︐",
+        '：' => "︓",
+        '；' => "︔",
+        '「' => "﹁",
+        '」' => "﹂",
+        '『' => "﹃",
+        '』' => "﹄",
+        '（' => "︵",
+        '）' => "︶",
+        '｛' => "︷",
+        '｝' => "︸",
+        '〔' => "︹",
+        '〕' => "︺",
+        '【' => "︻",
+        '】' => "︼",
+        '《' => "︽",
+        '》' => "︾",
+        '〈' => "︿",
+        '〉' => "﹀",
+        '…' => "︙",
+        '‥' => "︰",
+        'ー', '―', '—', '－' => "︱",
+        else => null,
+    };
 }

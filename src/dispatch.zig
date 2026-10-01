@@ -31,6 +31,9 @@ pub const DispatchError = error{
     WrongScrollMode,
     /// `scroll_mode`'s `mode` wasn't `"host"` or `"client"`.
     InvalidScrollMode,
+    /// `set_property "selection_flow"` with a `mode` other than
+    /// `"horizontal"` / `"vertical_rl"`.
+    InvalidSelectionFlow,
     /// `write_text` carried both `text` and `spans`, or neither.
     InvalidSpans,
     NotARequest,
@@ -151,6 +154,9 @@ const WriteTextParams = struct {
     /// `false` marks every cell this write touches as outside any
     /// selection -- see `core.Cell.selectable`. Whole-write, like `pad`.
     selectable: bool = true,
+    /// What a selection copies for each glyph this write draws, instead
+    /// of the glyph -- see `core.Cell.copy_alt`. Whole-write, like `pad`.
+    copy_text: ?[]const u8 = null,
     fg: ?protocol.Color = null,
     bg: ?protocol.Color = null,
     /// See `core.Cell.metadata_id`'s doc comment.
@@ -285,6 +291,7 @@ const VisibilityResult = struct { visible: bool };
 const OpacityResult = struct { value: f32 };
 const PtyModeResult = struct { enabled: bool };
 const ScrollModeResult = struct { mode: []const u8 };
+const SelectionFlowResult = struct { mode: []const u8, cols: usize, col: usize };
 const BackgroundResult = struct { color: ?protocol.Color };
 const ShadowResult = struct { shadow: ?ShadowJson };
 const ScrollOffsetResult = struct { row: usize, col: usize, max_row: usize, max_col: usize };
@@ -2013,6 +2020,7 @@ pub const Dispatcher = struct {
             .pad_bg = bg,
             .pad_metadata_id = metadata_id,
             .selectable = p.selectable,
+            .copy_text = p.copy_text,
         });
 
         // A terminal query the text carried (`CSI 6n` / DA / DECRQM):
@@ -2110,6 +2118,15 @@ pub const Dispatcher = struct {
             .{ .mouse_select = p.enabled }
         else if (std.mem.eql(u8, p.property, "shadow"))
             .{ .shadow = if (p.shadow) |sh| sh.toCore() else null }
+        else if (std.mem.eql(u8, p.property, "selection_flow"))
+            // `mode` omitted means horizontal, so `{}` resets it; `cols`
+            // omitted (0) is one wide character's two cells.
+            .{ .selection_flow = .{
+                .mode = std.meta.stringToEnum(core.SelectionFlow.Mode, p.mode orelse "horizontal") orelse
+                    return DispatchError.InvalidSelectionFlow,
+                .column_cols = if (p.cols == 0) 2 else p.cols,
+                .origin_col = p.col,
+            } }
         else
             return DispatchError.UnknownProperty;
 
@@ -2233,6 +2250,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "shadow")) {
             const sh: ?ShadowJson = if (layer.getProperty(.shadow).shadow) |v| ShadowJson.fromCore(v) else null;
             return try rpc.response(alloc, id, ShadowResult{ .shadow = sh });
+        } else if (std.mem.eql(u8, p.property, "selection_flow")) {
+            const f = layer.getProperty(.selection_flow).selection_flow;
+            return try rpc.response(alloc, id, SelectionFlowResult{ .mode = @tagName(f.mode), .cols = f.column_cols, .col = f.origin_col });
         }
         return DispatchError.UnknownProperty;
     }

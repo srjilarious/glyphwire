@@ -333,6 +333,11 @@ pub const Client = struct {
         /// and copied text -- a panel's border and pad. See
         /// `core.Cell.selectable`.
         selectable: bool = true,
+        /// What a selection copies for each glyph this write draws, in
+        /// place of the glyph: a vertical presentation form (︒) drawn
+        /// for the punctuation it stands for (。). See
+        /// `core.Cell.copy_alt`.
+        copy_text: ?[]const u8 = null,
         /// Underline the text (`core.Underline`): `.curly` for a
         /// diagnostic squiggle, `.single` for a link. Never applied to
         /// `pad`'s blanks -- see `core.Layer.WriteOpts.underline`.
@@ -416,6 +421,7 @@ pub const Client = struct {
             .max_cols = opts.max_cols,
             .pad = opts.pad,
             .selectable = opts.selectable,
+            .copy_text = opts.copy_text,
             // Omitted entirely for the overwhelmingly common no-underline
             // write, so nothing grows on the wire for every existing
             // caller. Same reason `spans` is null for a plain write.
@@ -438,6 +444,7 @@ pub const Client = struct {
         max_cols: ?usize,
         pad: bool,
         selectable: bool,
+        copy_text: ?[]const u8,
         underline: ?[]const u8,
         underline_color: ?protocol.Color,
     };
@@ -1572,6 +1579,39 @@ pub const Client = struct {
     /// `core.Layer.mouse_select`.
     pub fn setLayerMouseSelect(self: *Client, layer: core.LayerHandle, enabled: bool) !void {
         try self.notify("set_property", .{ .layer = layer, .property = "mouse_select", .enabled = enabled });
+    }
+
+    /// `set_property(layer, "selection_flow", {mode, cols, col})` -- a
+    /// notification. Which way a selection on `layer` reads: the
+    /// ordinary horizontal stream, or vertical columns right to left,
+    /// each `flow.column_cols` cells wide starting at cell column
+    /// `flow.origin_col`. See `core.SelectionFlow`.
+    pub fn setLayerSelectionFlow(self: *Client, layer: core.LayerHandle, flow: core.SelectionFlow) !void {
+        try self.notify("set_property", selectionFlowParams(layer, flow));
+    }
+
+    fn selectionFlowParams(layer: core.LayerHandle, flow: core.SelectionFlow) SelectionFlowWire {
+        return .{ .layer = layer, .mode = @tagName(flow.mode), .cols = flow.column_cols, .col = flow.origin_col };
+    }
+
+    const SelectionFlowWire = struct {
+        layer: core.LayerHandle,
+        property: []const u8 = "selection_flow",
+        mode: []const u8,
+        cols: usize,
+        col: usize,
+    };
+
+    /// `get_property(layer?, "selection_flow")`.
+    pub fn getLayerSelectionFlow(self: *Client, layer: ?core.LayerHandle) !core.SelectionFlow {
+        var parsed = try self.request(struct { mode: []const u8, cols: usize, col: usize }, "get_property", .{ .layer = layer, .property = "selection_flow" });
+        defer parsed.deinit();
+        const r = parsed.value.result;
+        return .{
+            .mode = std.meta.stringToEnum(core.SelectionFlow.Mode, r.mode) orelse .horizontal,
+            .column_cols = r.cols,
+            .origin_col = r.col,
+        };
     }
 
     /// `get_property(layer?, "mouse_select")`.
@@ -2819,6 +2859,12 @@ pub const Client = struct {
         /// Batched `Client.setLayerOpacity`.
         pub fn setLayerOpacity(self: *Batch, layer: core.LayerHandle, value: f32) !void {
             try self.notify("set_property", .{ .layer = layer, .property = "opacity", .value = value });
+        }
+
+        /// Batched `Client.setLayerSelectionFlow`, so a panel's text and
+        /// the way a selection reads it change in the same frame.
+        pub fn setLayerSelectionFlow(self: *Batch, layer: core.LayerHandle, flow: core.SelectionFlow) !void {
+            try self.notify("set_property", selectionFlowParams(layer, flow));
         }
 
         /// Batched `Client.setLayerViewport`.

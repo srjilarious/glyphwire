@@ -306,6 +306,39 @@ pub fn stateRoundTripsABookmarkTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(mark.page, 42);
     try testz.expectEqualStr(mark.mode, "fit_width");
     try testz.expectEqualStr(mark.direction, "ltr");
+    // Not given, so the default -- and a file without the key reads the same.
+    try testz.expectEqualStr(mark.layout, "auto");
+}
+
+pub fn stateRoundTripsTheOcrLayoutTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var store: state.Store = .init(alloc);
+    defer store.deinit();
+    try store.record("/books/vol2.cbz", .{ .page = 1, .mode = "fit_screen", .direction = "rtl", .layout = "vertical" });
+
+    const json = try state.serialize(alloc, &store);
+    defer alloc.free(json);
+    var back = state.parse(alloc, json);
+    defer back.deinit();
+    try testz.expectEqualStr(back.get("/books/vol2.cbz").?.layout, "vertical");
+
+    var old = state.parse(alloc,
+        \\{ "/books/old.cbz": { "page": 4, "mode": "fit_screen", "direction": "rtl" } }
+    );
+    defer old.deinit();
+    try testz.expectEqualStr(old.get("/books/old.cbz").?.layout, "auto");
+}
+
+pub fn configReadsOcrLayoutKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc,
+        \\config = {
+        \\  ocr_layout = "vertical",
+        \\  ocr_dialog_rows = 500,
+        \\}
+    );
+    defer result.deinit(alloc);
+    try testz.expectTrue(result.err == null);
+    try testz.expectTrue(result.config.ocr_layout == .vertical);
+    try testz.expectEqual(result.config.ocr_dialog_rows, rconfig.ocr_dialog_rows_max);
 }
 
 pub fn stateEscapesPathsThatNeedItTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -1196,6 +1229,74 @@ pub fn mokuroSpanCellsRejectsAnEmptySpanTest(_: std.Io, alloc: std.mem.Allocator
     const rows = try mokuro.wrap(alloc, joined, 10);
     defer alloc.free(rows);
     try testz.expectTrue(mokuro.spanCells(joined, rows, 0, 0) == null);
+}
+
+// ─── mokuro: vertical layout ────────────────────────────────────────────
+//
+// A vertical dialog counts characters, not display columns: every
+// character takes one slot down a column, whatever its width.
+
+pub fn mokuroWrapVerticalSplitsIntoColumnsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const text = "面白いねabc";
+    const cols = try mokuro.wrapVertical(alloc, text, 3);
+    defer alloc.free(cols);
+    try testz.expectEqual(cols.len, 3);
+    try testz.expectEqualStr("面白い", cols[0]);
+    try testz.expectEqualStr("ねab", cols[1]);
+    try testz.expectEqualStr("c", cols[2]);
+    // Slices into the text, like `wrap`'s rows.
+    try testz.expectEqual(mokuro.rowOffset(text, cols[1]), 9);
+}
+
+pub fn mokuroWrapVerticalHangsClosingMarksTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // A full column followed by 。 keeps it rather than starting the next
+    // column with it; only one mark hangs.
+    const cols = try mokuro.wrapVertical(alloc, "そうだ。」ね", 3);
+    defer alloc.free(cols);
+    try testz.expectEqual(cols.len, 2);
+    try testz.expectEqualStr("そうだ。", cols[0]);
+    try testz.expectEqualStr("」ね", cols[1]);
+}
+
+pub fn mokuroCharToByteCountsCharactersTest(_: std.Io, _: std.mem.Allocator) !void {
+    const text = "猫aい";
+    try testz.expectEqual(mokuro.charCount(text), 3);
+    try testz.expectEqual(mokuro.charToByte(text, 0), 0);
+    try testz.expectEqual(mokuro.charToByte(text, 1), 3);
+    try testz.expectEqual(mokuro.charToByte(text, 2), 4);
+    try testz.expectEqual(mokuro.charToByte(text, 9), text.len);
+}
+
+pub fn mokuroSpanCharsCrossesAColumnTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Columns 面白 / いね; 白い runs from the end of one into the next,
+    // and a wide character is one slot, not two.
+    const joined = "面白いね";
+    const cols = try mokuro.wrapVertical(alloc, joined, 2);
+    defer alloc.free(cols);
+    const span = mokuro.spanChars(joined, cols, 3, 9).?;
+    try testz.expectEqual(span.first.row, 0);
+    try testz.expectEqual(span.first.col, 1);
+    try testz.expectEqual(span.last.row, 1);
+    try testz.expectEqual(span.last.col, 0);
+}
+
+pub fn mokuroVerticalFormsTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr("︒", mokuro.verticalForm('。').?);
+    try testz.expectEqualStr("﹁", mokuro.verticalForm('「').?);
+    try testz.expectEqualStr("︱", mokuro.verticalForm('ー').?);
+    try testz.expectTrue(mokuro.verticalForm('あ') == null);
+    try testz.expectTrue(mokuro.verticalForm('a') == null);
+}
+
+pub fn mokuroLayoutFollowsTheBlockOnlyWhenAutoTest(_: std.Io, _: std.mem.Allocator) !void {
+    const vertical_block: mokuro.Block = .{ .vertical = true };
+    const horizontal_block: mokuro.Block = .{ .vertical = false };
+    try testz.expectTrue(mokuro.Layout.auto.isVertical(&vertical_block));
+    try testz.expectFalse(mokuro.Layout.auto.isVertical(&horizontal_block));
+    try testz.expectTrue(mokuro.Layout.vertical.isVertical(&horizontal_block));
+    try testz.expectFalse(mokuro.Layout.horizontal.isVertical(&vertical_block));
+    try testz.expectTrue(mokuro.Layout.auto.next() == .vertical);
+    try testz.expectTrue(mokuro.Layout.horizontal.next() == .auto);
 }
 
 // ─── kana: Yomitan's text variants ──────────────────────────────────────

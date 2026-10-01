@@ -19,6 +19,7 @@ const cache = @import("cache.zig");
 const glyphwire = @import("glyphwire");
 const ai = @import("ai.zig");
 const anki = @import("anki.zig");
+const mokuro = @import("mokuro.zig");
 
 const conf_name = "read.conf.lua";
 
@@ -96,6 +97,17 @@ pub const ReadConfig = struct {
     /// bubble's own column length, which is what makes the re-wrap read
     /// naturally rather than as one long ribbon.
     ocr_dialog_cols: usize = 40,
+    /// Tallest a *vertical* dialog's column gets, in characters -- the
+    /// vertical counterpart of `ocr_dialog_cols`. A bubble longer than
+    /// this runs on into another column to the left. Clamped to the
+    /// window on screen, so a scaled dialog wraps sooner rather than
+    /// running off the bottom.
+    ocr_dialog_rows: usize = 12,
+    /// How the dialog sets a bubble's text when a book has no remembered
+    /// choice: `"auto"` (the default) follows each bubble's own vertical
+    /// flag from mokuro, `"vertical"` / `"horizontal"` force one way.
+    /// `v` cycles it, and the choice is remembered per book.
+    ocr_layout: mokuro.Layout = .auto,
 
     /// Path to an already-*unzipped* Yomitan-format dictionary directory
     /// (e.g. a Jitendex download, https://jitendex.org, extracted once
@@ -249,6 +261,11 @@ pub const zoom_max_ceiling: f32 = 16.0;
 /// before it stops being a panel.
 pub const ocr_dialog_cols_min: usize = 12;
 pub const ocr_dialog_cols_max: usize = 200;
+/// Bounds on `ocr_dialog_rows`, in characters a column. The floor keeps a
+/// column from being a few characters of a long bubble spread over a
+/// dozen columns.
+pub const ocr_dialog_rows_min: usize = 4;
+pub const ocr_dialog_rows_max: usize = 100;
 pub const pan_step_max: usize = 64;
 pub const jump_pages_max: usize = 1000;
 pub const prefetch_max: usize = 8;
@@ -335,6 +352,14 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     if (numberField(lua, "ocr_peek")) |v| result.config.ocr_peek = clampPeek(v);
     if (uintField(lua, "ocr_dialog_cols")) |v|
         result.config.ocr_dialog_cols = clampUint("ocr_dialog_cols", v, ocr_dialog_cols_min, ocr_dialog_cols_max);
+    if (uintField(lua, "ocr_dialog_rows")) |v|
+        result.config.ocr_dialog_rows = clampUint("ocr_dialog_rows", v, ocr_dialog_rows_min, ocr_dialog_rows_max);
+    if (stringField(lua, "ocr_layout")) |v| {
+        if (mokuro.Layout.parse(v)) |l| result.config.ocr_layout = l else std.log.warn(
+            "gw-read: {s} `ocr_layout` = '{s}' is not 'auto'/'vertical'/'horizontal'; ignored",
+            .{ conf_name, v },
+        );
+    }
     // Duped immediately, unlike `mode`/`direction`: `stringField`'s
     // result points into Lua's own string and doesn't outlive `load`.
     if (stringField(lua, "dictionary")) |v|

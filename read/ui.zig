@@ -30,6 +30,9 @@
 //! layer), and it gets out of the way on demand, because mokuro drops
 //! furigana often enough that checking the artwork is part of reading:
 //! hold `z` to fade the dialog to `ocr_peek`, or `\` to hide it outright.
+//! A vertical bubble can be set the way the page sets it, in columns read
+//! right to left (`v`, `renderVerticalDialog`); the dialog layer's
+//! `selection_flow` then makes a drag select down the columns.
 //!
 //! **The arrow keys do two jobs.** When the page overflows an axis they
 //! pan it; when it doesn't there's nothing to pan, so the horizontal pair
@@ -142,7 +145,19 @@ const Ocr = struct {
     /// `joined`. Kept so a stationary click on the panel (`Ui.wordLookupAt`)
     /// can turn its row/column back into source text without redoing the
     /// join/wrap `renderDialog` already did.
-    text: struct { joined: []u8 = &.{}, rows: []const []const u8 = &.{} } = .{},
+    ///
+    /// When `vertical`, `rows` are the panel's *columns* instead
+    /// (`mokuro.wrapVertical`), first (rightmost) first, and a position
+    /// within one counts characters rather than display columns. Byte
+    /// offsets into `joined` mean the same either way, which is what
+    /// lets a lookup survive `v`. `text_left` is the cell column the
+    /// leftmost column starts at (`Ui.renderVerticalDialog`).
+    text: struct {
+        joined: []u8 = &.{},
+        rows: []const []const u8 = &.{},
+        vertical: bool = false,
+        text_left: usize = 2,
+    } = .{},
     /// Cells per text row/column the last `renderDialog` drew at --
     /// `glyphwire.scaledPitch(Ui.ocr_scale)`. A panel point maps back to
     /// text by dividing by this (`Ui.dialogTextPos`).
@@ -311,6 +326,10 @@ pub const Ui = struct {
     page: usize = 0,
     mode: zoom.Mode,
     direction: Direction,
+    /// How the OCR dialog sets a bubble's text (`v`). On the `Ui` rather
+    /// than `Ocr` so a book's remembered choice survives a session where
+    /// OCR was off.
+    ocr_layout: mokuro.Layout = .auto,
     /// The `.free` mode's factor. Seeded from whatever the last fit
     /// resolved to so the first `+` zooms in from what's on screen rather
     /// than jumping to 1:1 first.
@@ -447,6 +466,7 @@ pub const Ui = struct {
             page: usize,
             mode: zoom.Mode,
             direction: Direction,
+            layout: mokuro.Layout = .auto,
             config_dir: ?[]const u8 = null,
             ai_api_key: ?[]const u8 = null,
         },
@@ -531,6 +551,7 @@ pub const Ui = struct {
             .page = @min(start.page, book.count() -| 1),
             .mode = start.mode,
             .direction = start.direction,
+            .ocr_layout = start.layout,
         };
 
         // After `self.*` is populated: the load reads `self.conf` and
@@ -719,6 +740,7 @@ pub const Ui = struct {
             .page = self.page,
             .mode = @tagName(self.mode),
             .direction = self.direction.name(),
+            .layout = @tagName(self.ocr_layout),
         };
     }
 
@@ -1290,7 +1312,11 @@ pub const Ui = struct {
         // Joined and re-wrapped: mokuro's lines follow the bubble's
         // columns, not the sentence. See `mokuro.joinLines`.
         const joined = try mokuro.joinLines(self.alloc, block.lines);
-        errdefer self.alloc.free(joined);
+        if (self.ocr_layout.isVertical(block)) return self.renderVerticalDialog(o, page, block.box, joined);
+        // Until `o.text` takes them over; after that, freeing them here
+        // would leave `o.text` pointing at freed memory.
+        var handed_over = false;
+        errdefer if (!handed_over) self.alloc.free(joined);
         // Two border columns and a one-column pad inside each of them.
         // `ocr_dialog_cols` is the wrap width at 1x: a scaled dialog wraps
         // to the same characters a line and is `pitch` times wider --
@@ -1298,7 +1324,7 @@ pub const Ui = struct {
         const pitch = glyphwire.scaledPitch(self.ocr_scale);
         const inner_max = @max(@min(self.conf.ocr_dialog_cols -| 4, (self.win.cols -| 4) / pitch), 2);
         const rows = try mokuro.wrap(self.alloc, joined, inner_max);
-        errdefer self.alloc.free(rows);
+        errdefer if (!handed_over) self.alloc.free(rows);
         if (rows.len == 0) {
             self.alloc.free(joined);
             self.alloc.free(rows);
@@ -1311,6 +1337,7 @@ pub const Ui = struct {
         // render above never leaves `o.text` pointing at freed memory.
         o.freeText(self.alloc);
         o.text = .{ .joined = joined, .rows = rows };
+        handed_over = true;
         o.pitch = pitch;
 
         // The widest row decides the panel's width, capped at the wrap
@@ -1343,6 +1370,7 @@ pub const Ui = struct {
         try b.setLayerSize(self.dialog_layer, box_cols, box_rows);
         try b.setLayerCellPosition(self.dialog_layer, at.row, at.col);
         try b.clearOn(self.dialog_layer, 0, 0, null, null);
+        try b.setLayerSelectionFlow(self.dialog_layer, .{});
 
         // Allocated rather than a fixed buffer: a scaled dialog is up to
         // the window's width, which has no fixed ceiling.
@@ -1397,6 +1425,122 @@ pub const Ui = struct {
 
         // The lookup's highlight is in panel cells, which a re-wrap or a
         // new text scale (`S`) just moved.
+        if (self.lookup != null) self.highlightLookup();
+    }
+
+    /// `renderDialog` for a bubble set vertically (`Ui.ocr_layout`): the text
+    /// in columns of at most `ocr_dialog_rows` characters, read top to
+    /// bottom and right to left, one character a slot. Takes ownership
+    /// of `joined`.
+    ///
+    /// Each column is two cells a pitch wide -- one wide character -- so
+    /// the grid is regular and a selection can be told its geometry
+    /// (`selection_flow`): the host then tints and copies down the
+    /// columns instead of across the rows. Punctuation and brackets are
+    /// drawn as their vertical forms (`mokuro.verticalForm`), each
+    /// written with the original as its `copy_text`, so Ctrl+Shift+C
+    /// still copies 。 and never ︒. Lookups and Anki never see the forms
+    /// at all: they read `joined`.
+    fn renderVerticalDialog(self: *Ui, o: *Ocr, page: *const mokuro.Page, box: mokuro.Box, joined: []u8) !void {
+        var handed_over = false;
+        errdefer if (!handed_over) self.alloc.free(joined);
+        const c = self.client;
+
+        const pitch = glyphwire.scaledPitch(self.ocr_scale);
+        const col_cells = 2 * pitch;
+        // Two border rows, and one slot held back for a closing mark
+        // hanging off a full column (`mokuro.wrapVertical`), so a scaled
+        // dialog wraps sooner rather than running off the window.
+        const max_chars = @max(@min(self.conf.ocr_dialog_rows, ((self.pageView().rows -| 2) / pitch) -| 1), 2);
+        const cols = try mokuro.wrapVertical(self.alloc, joined, max_chars);
+        errdefer if (!handed_over) self.alloc.free(cols);
+        if (cols.len == 0) {
+            self.alloc.free(joined);
+            self.alloc.free(cols);
+            handed_over = true;
+            try c.setLayerVisible(self.dialog_layer, false);
+            return;
+        }
+
+        var slots: usize = 1;
+        for (cols) |col| slots = @max(slots, mokuro.charCount(col));
+        const text_cells = cols.len * col_cells;
+        const tag_cols = mokuro.displayWidth(ai_tag);
+        var inner = text_cells;
+        if (self.conf.ai_lookup) inner = @max(inner, tag_cols + 2);
+        // The columns hug the right edge, where the text starts: a panel
+        // widened for the AI tag takes the slack on the left.
+        const text_left = 2 + inner - text_cells;
+
+        o.freeText(self.alloc);
+        o.text = .{ .joined = joined, .rows = cols, .vertical = true, .text_left = text_left };
+        handed_over = true;
+        o.pitch = pitch;
+
+        const interior = inner + 2;
+        const box_cols = interior + 2;
+        const box_rows = slots * pitch + 2;
+        const at = self.placeDialog(page, box, box_rows, box_cols);
+        o.rect = .{ .row = at.row, .col = at.col, .rows = box_rows, .cols = box_cols };
+        o.ai_tag = if (self.conf.ai_lookup) .{ .col = box_cols - 2 - tag_cols, .cols = tag_cols } else null;
+
+        var b = c.batch();
+        defer b.deinit();
+
+        try b.setLayerSize(self.dialog_layer, box_cols, box_rows);
+        try b.setLayerCellPosition(self.dialog_layer, at.row, at.col);
+        // Filled rather than cleared to transparent: a short column
+        // leaves slots no glyph paints, which would otherwise be holes.
+        try b.clearArea(.{ .layer = self.dialog_layer, .bg = bg_dialog });
+        try b.setLayerSelectionFlow(self.dialog_layer, .{ .mode = .vertical_rl, .column_cols = col_cells, .origin_col = text_left });
+
+        const h_line = try repeatAlloc(self.alloc, box_h, interior);
+        defer self.alloc.free(h_line);
+        try chromeAt(&b, self.dialog_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, self.dialog_layer, box_tr, fg_dialog_border, bg_dialog);
+        for (1..box_rows - 1) |row| {
+            try chromeAt(&b, self.dialog_layer, row, 0, box_v_pad, fg_dialog_border, bg_dialog);
+            try chromeAt(&b, self.dialog_layer, row, inner + 2, pad_box_v, fg_dialog_border, bg_dialog);
+        }
+
+        // One write per character: each sits on its own row.
+        for (cols, 0..) |column, k| {
+            const x = text_left + (cols.len - 1 - k) * col_cells;
+            var i: usize = 0;
+            var slot: usize = 0;
+            while (i < column.len) : (slot += 1) {
+                const end = mokuro.charEnd(column, i);
+                const ch = column[i..end];
+                i = end;
+                const cp = std.unicode.utf8Decode(ch) catch 0xFFFD;
+                const form = mokuro.verticalForm(cp);
+                // A narrow character (Latin, a digit) fills half a
+                // column; set it as near the middle as whole cells allow.
+                const nudge: usize = if (glyphwire.codepointWidth(cp) < 2) pitch / 2 else 0;
+                try b.writeTextOpts(form orelse ch, .{
+                    .layer = self.dialog_layer,
+                    .row = 1 + slot * pitch,
+                    .col = x + nudge,
+                    .fg = fg_dialog,
+                    .bg = bg_dialog,
+                    .scale = self.ocr_scale,
+                    .copy_text = if (form != null) ch else null,
+                });
+            }
+        }
+
+        try chromeAt(&b, self.dialog_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(&b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
+        if (o.ai_tag) |tag| try chromeAt(&b, self.dialog_layer, box_rows - 1, tag.col, ai_tag, fg_lookup_term, bg_dialog);
+
+        try b.setLayerOpacity(self.dialog_layer, if (o.peeking) self.conf.ocr_peek else 1.0);
+        try b.setLayerVisible(self.dialog_layer, true);
+
+        var results = try b.send();
+        results.deinit();
+
         if (self.lookup != null) self.highlightLookup();
     }
 
@@ -2019,7 +2163,12 @@ pub const Ui = struct {
             // 1-based, like the page counter next to it; 0 while the
             // dialog is closed, which reads as "none of the 5 open".
             const at = if (o.at) |i| i + 1 else 0;
-            break :blk std.fmt.bufPrint(&ocr_buf, "  ocr {d}/{d}", .{ at, n }) catch "  ocr";
+            const layout: []const u8 = switch (self.ocr_layout) {
+                .auto => "",
+                .vertical => " vert",
+                .horizontal => " horz",
+            };
+            break :blk std.fmt.bufPrint(&ocr_buf, "  ocr {d}/{d}{s}", .{ at, n, layout }) catch "  ocr";
         } else "";
         const right = std.fmt.bufPrint(&buf, "{s}  {s} {d:.0}%  ? help ", .{
             ocr_label,
@@ -2063,6 +2212,7 @@ pub const Ui = struct {
         "  click a bubble       show its text",
         "  tab / shift-tab      next / previous bubble",
         "  o                    outline every text region",
+        "  v                    text: auto / vertical / horiz.",
         "  z (hold)             fade the dialog to see the page",
         "  \\                    hide the dialog",
         "  S                    cycle the dialog's text size",
@@ -2329,6 +2479,7 @@ pub const Ui = struct {
         // -- OCR --
         if (eq(u8, key, "tab")) return self.stepBlock(if (shift) -1 else 1);
         if (eq(u8, key, "o")) return self.toggleHints();
+        if (eq(u8, key, "v")) return self.cycleLayout();
         if (eq(u8, key, "z")) return self.setPeek(true);
         // ── unambiguous page turns ──
         if (eq(u8, key, "space") or eq(u8, key, "page_down")) return self.stepPage(1);
@@ -2408,6 +2559,20 @@ pub const Ui = struct {
         o.hidden = !o.hidden;
         self.dialog_dirty = true;
         if (self.lookup != null or self.ai != null) self.side_dirty = true;
+    }
+
+    /// `v`: auto -> vertical -> horizontal -> auto (`mokuro.Layout`).
+    /// The open dialog redraws in the new layout; a lookup's highlight
+    /// follows it there (`renderDialog` re-runs `highlightLookup`, whose
+    /// span is a byte range and so means the same in either). A plain
+    /// selection's cell points don't survive the move, so it goes.
+    fn cycleLayout(self: *Ui) void {
+        self.ocr_layout = self.ocr_layout.next();
+        self.status_dirty = true;
+        const o = &(self.ocr orelse return);
+        if (o.at == null) return;
+        if (self.lookup == null) self.client.clearSelection(self.dialog_layer) catch {};
+        self.dialog_dirty = true;
     }
 
     /// `o`: outline every OCR region on the page.
@@ -2712,8 +2877,21 @@ pub const Ui = struct {
     /// on the border/pad or past the last row. Row 0 is the border and
     /// column 0/1 the border and pad, so text starts at (1, 2); a scaled
     /// dialog's rows and columns are `o.pitch` cells each.
+    ///
+    /// For a vertical dialog it is the *column* (`row_idx`, first =
+    /// rightmost) and the character slot down it (`col`) instead -- see
+    /// `Ocr.text`.
     fn dialogTextPos(o: *const Ocr, p: glyphwire.SelectionPoint) ?struct { row_idx: usize, col: usize } {
         const panel_row = -p.above;
+        if (o.text.vertical) {
+            if (panel_row < 1 or p.col < o.text.text_left) return null;
+            const from_left = (p.col - o.text.text_left) / (2 * o.pitch);
+            if (from_left >= o.text.rows.len) return null;
+            return .{
+                .row_idx = o.text.rows.len - 1 - from_left,
+                .col = @intCast(@divTrunc(panel_row - 1, @as(i64, @intCast(o.pitch)))),
+            };
+        }
         if (panel_row < 1 or p.col < 2) return null;
         const row_idx: usize = @intCast(@divTrunc(panel_row - 1, @as(i64, @intCast(o.pitch))));
         if (row_idx >= o.text.rows.len) return null;
@@ -2740,7 +2918,7 @@ pub const Ui = struct {
 
         const pos = dialogTextPos(o, p) orelse return self.clearLookup();
         const row = o.text.rows[pos.row_idx];
-        const byte_off = mokuro.columnToByte(row, pos.col);
+        const byte_off = textByte(o, row, pos.col);
         if (byte_off >= row.len) return self.clearLookup();
 
         const start = mokuro.rowOffset(o.text.joined, row) + byte_off;
@@ -2809,14 +2987,31 @@ pub const Ui = struct {
     /// width to its end. Used for selection endpoints, which -- unlike a
     /// plain click's exact point -- can legitimately land on the border
     /// or the pad when a drag overshoots the panel.
+    ///
+    /// Vertically, a point left or right of every column clamps to the
+    /// nearest one, and a slot past a column's end to that end.
     fn clampToText(o: *const Ocr, p: glyphwire.SelectionPoint) struct { row_idx: usize, byte_off: usize } {
         const pitch: i64 = @intCast(o.pitch);
         const panel_row = -p.above;
+        if (o.text.vertical) {
+            const n = o.text.rows.len;
+            const from_left = if (p.col < o.text.text_left) 0 else @min((p.col - o.text.text_left) / (2 * o.pitch), n - 1);
+            const row_idx = n - 1 - from_left;
+            const slot: usize = @intCast(@max(@divFloor(panel_row - 1, pitch), 0));
+            return .{ .row_idx = row_idx, .byte_off = mokuro.charToByte(o.text.rows[row_idx], slot) };
+        }
         const max_idx: i64 = @intCast(o.text.rows.len - 1);
         const row_idx: usize = @intCast(std.math.clamp(@divFloor(panel_row - 1, pitch), 0, max_idx));
         const row = o.text.rows[row_idx];
         const text_col: usize = if (p.col < 2) 0 else (p.col - 2) / o.pitch;
         return .{ .row_idx = row_idx, .byte_off = mokuro.columnToByte(row, text_col) };
+    }
+
+    /// Byte offset of position `at` within `row` of the dialog's text --
+    /// a display column across a horizontal row, a character slot down
+    /// a vertical column (see `Ocr.text`).
+    fn textByte(o: *const Ocr, row: []const u8, at: usize) usize {
+        return if (o.text.vertical) mokuro.charToByte(row, at) else mokuro.columnToByte(row, at);
     }
 
     /// Common tail of `wordLookupAt` and `lookupSelection`: keeps every
@@ -2845,14 +3040,27 @@ pub const Ui = struct {
         const lk = self.lookup orelse return;
         const o = &(self.ocr orelse return);
         const start = lk.source_start;
-        const span = mokuro.spanCells(o.text.joined, o.text.rows, start, start + lk.current().source_len) orelse return;
+        const end = start + lk.current().source_len;
+        const pitch = o.pitch;
+        if (o.text.vertical) {
+            // Ends on the first and last characters' own slots; the
+            // dialog layer's `selection_flow` makes everything between
+            // them read down the columns. `row` is the column here.
+            const span = mokuro.spanChars(o.text.joined, o.text.rows, start, end) orelse return;
+            const n = o.text.rows.len;
+            const col_cells = 2 * pitch;
+            const first: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.first.col * pitch + 1)), .col = o.text.text_left + (n - 1 - span.first.row) * col_cells };
+            const last: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.last.col * pitch + 1)), .col = o.text.text_left + (n - 1 - span.last.row) * col_cells };
+            self.client.setSelection(self.dialog_layer, first, last) catch {};
+            return;
+        }
+        const span = mokuro.spanCells(o.text.joined, o.text.rows, start, end) orelse return;
         // Text rows are 1-based on the panel (row 0 is the border) and
         // text columns start at 2 (border, then pad) -- see
         // `dialogTextPos`. At scale each display column is `pitch` cells,
         // and the inclusive end runs to the last of them. Both ends sit
         // on glyph rows; the host extends the tint down over the rows a
         // scaled glyph draws into (`core.Cell.under_scaled`).
-        const pitch = o.pitch;
         const first: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.first.row * pitch + 1)), .col = span.first.col * pitch + 2 };
         const last: glyphwire.SelectionPoint = .{ .above = -@as(i64, @intCast(span.last.row * pitch + 1)), .col = span.last.col * pitch + pitch - 1 + 2 };
         self.client.setSelection(self.dialog_layer, first, last) catch {};

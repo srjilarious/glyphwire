@@ -107,6 +107,22 @@
 --     -- Range 12..200.
 --     ocr_dialog_cols = 40,
 --
+--     -- Tallest a *vertical* dialog's column gets, in characters. A
+--     -- bubble longer than this continues in another column to the
+--     -- left. Clamped to the window, so a scaled dialog wraps sooner
+--     -- rather than running off the bottom. Range 4..100.
+--     ocr_dialog_rows = 12,
+--
+--     -- How the dialog sets a bubble's text for a book with no
+--     -- remembered choice: "auto" follows each bubble's own vertical
+--     -- flag from mokuro (most bubbles vertical, signs and captions
+--     -- often horizontal); "vertical" / "horizontal" force one way.
+--     -- `v` cycles it while reading, and the choice is remembered per
+--     -- book. Vertical columns read right to left, with punctuation and
+--     -- brackets drawn in their vertical forms; a copy still yields the
+--     -- original characters.
+--     ocr_layout = "auto",
+--
 --     -- Path to an already-*unzipped* Yomitan-format dictionary
 --     -- directory -- e.g. a Jitendex download
 --     -- (https://jitendex.org/pages/downloads.html) extracted once by

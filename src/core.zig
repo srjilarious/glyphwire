@@ -1027,6 +1027,14 @@ pub const Cell = struct {
     /// the tint on a row starts after any leading unselectable cells and
     /// ends at the last selectable non-blank one.
     selectable: bool = true,
+    /// What a selection copies for this cell instead of its grapheme:
+    /// `write_text`'s `copy_text`, as a 1-based index into the owning
+    /// layer's `Layer.copy_texts` (0 = copy the grapheme). For a glyph
+    /// drawn as something other than the text it stands for -- gw-read's
+    /// vertical OCR panel draws 。 as its vertical form ︒, and Ctrl+Shift+C
+    /// should still copy 。. An index rather than the bytes so every cell
+    /// doesn't pay for a second grapheme buffer.
+    copy_alt: u16 = 0,
     style: Style = default_style,
     /// Sibling of `style.bg`, not part of it -- a cell can be tagged
     /// regardless of whether its background is a color/image/icon. Set (or
@@ -1334,6 +1342,39 @@ pub const PropertyName = enum {
     /// (`{shadow: {x, y, blur, radius, spread, color}}`, or no `shadow`
     /// for none -- the default). See `Shadow`.
     shadow,
+    /// Which way a selection on this layer reads (`{mode, cols, col}`,
+    /// default `horizontal`). See `SelectionFlow`.
+    selection_flow,
+};
+
+/// How a selection reads the cells of a layer (`PropertyName.selection_flow`).
+///
+/// `horizontal` is the ordinary terminal stream: left to right along a
+/// row, then down to the next. `vertical_rl` is vertical CJK text set in
+/// columns -- top to bottom inside a column, columns right to left -- as
+/// gw-read's OCR panel draws a vertical speech bubble. A host selection
+/// is a pair of points either way; the flow only changes what lies
+/// *between* them, and so what the tint covers and what a copy yields.
+///
+/// A vertical layer's columns are a fixed grid: each is `column_cols`
+/// cells wide, the first starting at cell column `origin_col` (to the
+/// right of a panel's border and pad), so a point's column is
+/// `(col - origin_col) / column_cols`. A client sets them to match how
+/// it lays the text out -- a wide character at `scaledPitch(scale)` is
+/// `2 * pitch` cells. Cells left of `origin_col` belong to no column.
+///
+/// The tint needs no new renderer path: whatever the two ends, the
+/// cells a vertical selection covers on any one row are a single
+/// contiguous run (the whole columns between the ends, plus the start
+/// column on rows at or below the start and the end column on rows at or
+/// above the end), so `selectionColRange` still answers one range per
+/// row.
+pub const SelectionFlow = struct {
+    mode: Mode = .horizontal,
+    column_cols: usize = 2,
+    origin_col: usize = 0,
+
+    pub const Mode = enum { horizontal, vertical_rl };
 };
 
 /// A layer's drop shadow (`PropertyName.shadow`): a rounded rect the size
@@ -1403,6 +1444,7 @@ pub const PropertyValue = union(PropertyName) {
     pty_mode: bool,
     mouse_select: bool,
     shadow: ?Shadow,
+    selection_flow: SelectionFlow,
 };
 
 /// See `PropertyName.scroll_mode`.
@@ -1606,6 +1648,17 @@ pub const Layer = struct {
     /// `Layer` for the same reason `pen` does: `putAtCursor` is reached
     /// from deep inside the escape machine too.
     write_selectable: bool = true,
+    /// `Cell.copy_alt` for every glyph the `write_text` in progress
+    /// draws -- `RunsOpts.copy_text` interned, set by `writeRuns` for the
+    /// length of the call and back to 0 after it, exactly like
+    /// `write_selectable`.
+    write_copy_alt: u16 = 0,
+    /// The distinct `write_text` `copy_text` strings this layer has been
+    /// given, owned, indexed by `Cell.copy_alt - 1`. Interned rather than
+    /// reference counted: the callers substitute a handful of fixed
+    /// characters, so the table stays as small as that set, and a stale
+    /// entry costs a few bytes until the layer goes. Never shrinks.
+    copy_texts: std.ArrayList([]u8) = .empty,
     /// When set, the escape-sequence machine (`esc_state` / `csi_buf` /
     /// `csi_len`), the alternate-charset designation (`shift_out` /
     /// `g0_line_drawing` / `g1_line_drawing`) and the SGR `pen` are **kept
@@ -1649,6 +1702,8 @@ pub const Layer = struct {
     /// the whole context (`Context.connection_owned`). See
     /// `host/selection.zig`.
     mouse_select: bool = false,
+    /// Which way a selection on this layer reads. See `SelectionFlow`.
+    selection_flow: SelectionFlow = .{},
     /// --- B1 screen model (see `execCsi` / decisions.md's VT fallback) ---
     /// Alternate-screen buffer (xterm `?1049` / `?47` / `?1047`): a
     /// lazily-allocated `width * height` cell array, row-major, with **no
@@ -1861,6 +1916,29 @@ pub const Layer = struct {
         self.outline_order.deinit(self.alloc);
         self.highlighted_ids.deinit(self.alloc);
         self.owners.deinit();
+        for (self.copy_texts.items) |t| self.alloc.free(t);
+        self.copy_texts.deinit(self.alloc);
+    }
+
+    /// `text`'s 1-based index in `copy_texts`, added if it isn't there
+    /// yet -- what `Cell.copy_alt` stores. 0 (copy the grapheme as usual)
+    /// once the table is full, which no real caller gets near.
+    fn internCopyText(self: *Layer, text: []const u8) !u16 {
+        for (self.copy_texts.items, 0..) |t, i| {
+            if (std.mem.eql(u8, t, text)) return @intCast(i + 1);
+        }
+        if (self.copy_texts.items.len >= std.math.maxInt(u16)) return 0;
+        const owned = try self.alloc.dupe(u8, text);
+        errdefer self.alloc.free(owned);
+        try self.copy_texts.append(self.alloc, owned);
+        return @intCast(self.copy_texts.items.len);
+    }
+
+    /// The text a selection copies for `c`: its `copy_text` when it has
+    /// one, else its grapheme.
+    fn copyTextOf(self: *const Layer, c: *const Cell) []const u8 {
+        if (c.copy_alt != 0 and c.copy_alt <= self.copy_texts.items.len) return self.copy_texts.items[c.copy_alt - 1];
+        return c.grapheme();
     }
 
     pub fn capacity(self: *const Layer) usize {
@@ -2703,6 +2781,11 @@ pub const Layer = struct {
         /// `Cell.selectable` for every cell the write touches, padding
         /// and a scaled glyph's fill included.
         selectable: bool = true,
+        /// What a selection copies for each glyph this write draws, in
+        /// place of the glyph itself (`Cell.copy_alt`). Meant for a
+        /// one-glyph write drawing a stand-in for some other text; a
+        /// longer write repeats it for every glyph.
+        copy_text: ?[]const u8 = null,
         /// The underline every cell the *text* touches carries (see
         /// `Underline`). Deliberately not applied to `pad`'s blanks: a
         /// padded status bar or list row would otherwise draw its
@@ -2714,7 +2797,7 @@ pub const Layer = struct {
     /// `writeTextTaggedScaled` with `WriteOpts` -- a single styled run.
     pub fn writeTextOpts(self: *Layer, text: []const u8, fg: Color, bg: ?Background, opts: WriteOpts) !void {
         const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale, .underline = opts.underline }};
-        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable });
+        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable, .copy_text = opts.copy_text });
     }
 
     /// One styled piece of a `write_text`: its text and everything that
@@ -2746,6 +2829,8 @@ pub const Layer = struct {
         pad_metadata_id: ?MetadataHandle = null,
         /// See `WriteOpts.selectable` -- covers every run and the padding.
         selectable: bool = true,
+        /// See `WriteOpts.copy_text` -- every glyph of every run.
+        copy_text: ?[]const u8 = null,
     };
 
     /// Writes `runs` back to back as one `write_text` -- `write_text`'s
@@ -2756,6 +2841,8 @@ pub const Layer = struct {
     /// so a bad run can't leave the others half-written.
     pub fn writeRuns(self: *Layer, runs: []const TextRun, opts: RunsOpts) !void {
         for (runs) |r| _ = try std.unicode.Utf8View.init(r.text);
+        self.write_copy_alt = if (opts.copy_text) |t| try self.internCopyText(t) else 0;
+        defer self.write_copy_alt = 0;
         self.write_selectable = opts.selectable;
         defer self.write_selectable = true;
         // The clip limit is an absolute column on the starting row.
@@ -2794,6 +2881,8 @@ pub const Layer = struct {
         }
         if (clip_end) |end| {
             if (opts.pad) {
+                // Padding is not the glyph `copy_text` stands in for.
+                self.write_copy_alt = 0;
                 while (self.cursor.col < end) self.putAtCursor(" ", 1, opts.pad_fg, opts.pad_bg, opts.pad_metadata_id, .x1, .{});
             }
         }
@@ -3357,6 +3446,7 @@ pub const Layer = struct {
         c.text_scale = .x1;
         c.under_scaled = below;
         c.selectable = self.write_selectable;
+        c.copy_alt = 0;
     }
 
     /// Places one grapheme cluster at the cursor. `w` is its East Asian
@@ -3400,6 +3490,7 @@ pub const Layer = struct {
         c.text_scale = scale;
         c.under_scaled = 0;
         c.selectable = self.write_selectable;
+        c.copy_alt = self.write_copy_alt;
 
         if (w == 2) {
             // The spacer renders nothing of its own; give it the lead's
@@ -3806,6 +3897,7 @@ pub const Layer = struct {
             .pty_mode => .{ .pty_mode = self.pty_mode },
             .mouse_select => .{ .mouse_select = self.mouse_select },
             .shadow => .{ .shadow = self.shadow },
+            .selection_flow => .{ .selection_flow = self.selection_flow },
         };
     }
 
@@ -3854,6 +3946,7 @@ pub const Layer = struct {
             },
             .mouse_select => |v| self.mouse_select = v,
             .shadow => |v| self.shadow = if (v) |sh| sh.clamped() else null,
+            .selection_flow => |v| self.selection_flow = .{ .mode = v.mode, .column_cols = @max(v.column_cols, 1), .origin_col = v.origin_col },
         }
         // `.position` moves where the layer composites; `.cursor` can scroll
         // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
@@ -4014,8 +4107,38 @@ pub const Layer = struct {
     /// is resolved to glyph rows.
     fn selectionBounds(self: *const Layer, sel: Selection) struct { start: SelectionPoint, end: SelectionPoint } {
         const s: Selection = .{ .anchor = self.glyphRowPoint(sel.anchor), .active = self.glyphRowPoint(sel.active) };
+        if (self.selection_flow.mode == .vertical_rl) {
+            // Columns run right to left, so the earlier end is the one
+            // in the column further right, then the higher of two in
+            // the same column.
+            const ka = self.flowColumn(s.anchor.col);
+            const kb = self.flowColumn(s.active.col);
+            const a_first = ka > kb or (ka == kb and s.anchor.above >= s.active.above);
+            return if (a_first) .{ .start = s.anchor, .end = s.active } else .{ .start = s.active, .end = s.anchor };
+        }
         const o = s.ordered();
         return .{ .start = o.start, .end = o.end };
+    }
+
+    /// The vertical column (`SelectionFlow`) cell column `col` falls in,
+    /// counted from `origin_col`; -1 left of it.
+    fn flowColumn(self: *const Layer, col: usize) i64 {
+        const f = self.selection_flow;
+        if (col < f.origin_col) return -1;
+        return @intCast((col - f.origin_col) / f.column_cols);
+    }
+
+    /// Cell columns `[lo, hi)` of vertical columns `first_k` down to
+    /// `last_k` (`first_k >= last_k`), clipped to the layer; null when
+    /// that is empty.
+    fn flowColumnSpan(self: *const Layer, first_k: i64, last_k: i64) ?struct { lo: usize, hi: usize } {
+        if (first_k < last_k or first_k < 0) return null;
+        const f = self.selection_flow;
+        const lo_k: usize = @intCast(@max(last_k, 0));
+        const lo = f.origin_col + lo_k * f.column_cols;
+        const hi = @min(f.origin_col + (@as(usize, @intCast(first_k)) + 1) * f.column_cols, self.width);
+        if (lo >= hi) return null;
+        return .{ .lo = lo, .hi = hi };
     }
 
     /// For the renderer: the `[start, end)` column range selected on the
@@ -4031,7 +4154,9 @@ pub const Layer = struct {
         if (sel.isEmpty()) return null;
         const b = self.selectionBounds(sel);
         const glyph_above = if (self.rowForAbove(above)) |cells| above + underScaledRows(cells, null) else above;
-        if (glyph_above > b.start.above or glyph_above < b.end.above) return null;
+        // A vertical selection's middle columns run the full height, so
+        // any row can hold some of it; `selectedSpan` decides.
+        if (self.selection_flow.mode == .horizontal and (glyph_above > b.start.above or glyph_above < b.end.above)) return null;
         const span = self.selectedSpan(glyph_above, b.start, b.end) orelse return null;
         return .{ .start = span.lo, .end = span.hi };
     }
@@ -4049,17 +4174,37 @@ pub const Layer = struct {
     ///     fill to the right of a scaled glyph.
     /// Null when nothing is left. A row no longer retained keeps the raw
     /// span -- there are no cells to trim against.
+    ///
+    /// A `vertical_rl` layer (`SelectionFlow`) starts instead from the
+    /// whole columns the selection covers on this row -- every column
+    /// strictly between the ends, the start column on rows at or below
+    /// the start, the end column on rows at or above the end -- and trims
+    /// blanks off *both* sides, since a short last column leaves blanks
+    /// on the left of a row rather than the right.
     fn selectedSpan(self: *const Layer, above: i64, start: SelectionPoint, end: SelectionPoint) ?struct { lo: usize, hi: usize } {
-        var lo: usize = if (above == start.above) @min(start.col, self.width) else 0;
-        var hi: usize = if (above == end.above) end.col + 1 else self.width;
-        if (hi > self.width) hi = self.width;
-        if (lo >= hi) return null;
+        const vertical = self.selection_flow.mode == .vertical_rl;
+        var lo: usize = 0;
+        var hi: usize = 0;
+        if (vertical) {
+            const ks = self.flowColumn(start.col);
+            const ke = self.flowColumn(end.col);
+            const first_k = if (above <= start.above) ks else ks - 1;
+            const last_k = if (above >= end.above) ke else ke + 1;
+            const cols = self.flowColumnSpan(first_k, last_k) orelse return null;
+            lo = cols.lo;
+            hi = cols.hi;
+        } else {
+            lo = if (above == start.above) @min(start.col, self.width) else 0;
+            hi = if (above == end.above) end.col + 1 else self.width;
+            if (hi > self.width) hi = self.width;
+            if (lo >= hi) return null;
+        }
         const cells = self.rowForAbove(above) orelse return .{ .lo = lo, .hi = hi };
 
         var span = snapGlyphSpan(cells, lo, hi);
         lo = span.lo;
         hi = span.hi;
-        while (lo < hi and !cells[lo].selectable) lo += 1;
+        while (lo < hi and (!cells[lo].selectable or (vertical and isBlankCell(cells[lo])))) lo += 1;
         while (hi > lo and (!cells[hi - 1].selectable or isBlankCell(cells[hi - 1]))) hi -= 1;
         if (lo >= hi) return null;
         span = snapGlyphSpan(cells, lo, hi);
@@ -4133,10 +4278,15 @@ pub const Layer = struct {
     /// all (a panel's top or bottom border), contribute no line. A row no
     /// longer retained in scrollback contributes an empty line. Caller
     /// owns the result.
+    ///
+    /// A `vertical_rl` layer reads in its own order instead
+    /// (`verticalSelectionText`). Either way a cell written with a
+    /// `copy_text` copies that rather than its glyph.
     pub fn selectionText(self: *const Layer, alloc: std.mem.Allocator) !?[]u8 {
         const sel = self.selection orelse return null;
         if (sel.isEmpty()) return try alloc.dupe(u8, "");
         const b = self.selectionBounds(sel);
+        if (self.selection_flow.mode == .vertical_rl) return try self.verticalSelectionText(alloc, b.start, b.end);
 
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(alloc);
@@ -4161,12 +4311,60 @@ pub const Layer = struct {
                     col += 1;
                     continue;
                 }
-                const g = c.grapheme();
+                const g = self.copyTextOf(&c);
                 if (g.len == 0) try out.append(alloc, ' ') else try out.appendSlice(alloc, g);
                 col += glyphFootprint(c);
             }
         }
 
+        return try out.toOwnedSlice(alloc);
+    }
+
+    /// `selectionText` for a `vertical_rl` layer: column by column from
+    /// the start's column leftwards, each read top to bottom (from the
+    /// start's row in the first column, to the end's row in the last),
+    /// columns joined with `\n` the way a horizontal copy joins rows.
+    /// Blanks, spacers, unselectable cells and the rows a scaled glyph
+    /// draws down into contribute nothing, so a short column or a
+    /// panel's border never shows up as stray spaces.
+    fn verticalSelectionText(self: *const Layer, alloc: std.mem.Allocator, start: SelectionPoint, end: SelectionPoint) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+
+        const ks = self.flowColumn(start.col);
+        const ke = @max(self.flowColumn(end.col), 0);
+        const top: i64 = @intCast(self.history_len);
+        const bottom: i64 = -@as(i64, @intCast(self.height)) + 1;
+
+        var wrote_any = false;
+        var k = ks;
+        while (k >= ke) : (k -= 1) {
+            const cols = self.flowColumnSpan(k, k) orelse continue;
+            const row_hi = if (k == ks) start.above else top;
+            const row_lo = if (k == ke) end.above else bottom;
+            const mark = out.items.len;
+            if (wrote_any) try out.append(alloc, '\n');
+            const body = out.items.len;
+
+            var above = row_hi;
+            while (above >= row_lo) : (above -= 1) {
+                const cells = self.rowForAbove(above) orelse continue;
+                if (underScaledRows(cells, null) != 0) continue;
+                var col = cols.lo;
+                while (col < cols.hi) {
+                    const c = cells[col];
+                    if (!c.selectable or c.wide == .wide_spacer or isBlankCell(c)) {
+                        col += 1;
+                        continue;
+                    }
+                    try out.appendSlice(alloc, self.copyTextOf(&c));
+                    col += glyphFootprint(c);
+                }
+            }
+            // A column with nothing in it (a border, or past the text)
+            // takes its separator back with it.
+            if (out.items.len == body) out.shrinkRetainingCapacity(mark) else wrote_any = true;
+        }
         return try out.toOwnedSlice(alloc);
     }
 
@@ -5263,6 +5461,7 @@ fn setCellText(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Co
     c.wide = .narrow;
     c.under_scaled = 0;
     c.selectable = true;
+    c.copy_alt = 0;
 }
 
 /// Writes a 2-cell wide grapheme: the lead cell at `(row, col)` holds it,
@@ -5281,6 +5480,7 @@ fn setCellWide(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Co
     lead.wide = .wide_lead;
     lead.under_scaled = 0;
     lead.selectable = true;
+    lead.copy_alt = 0;
     cells[col + 1] = .{ .style = lead.style, .metadata_id = metadata_id, .wide = .wide_spacer };
 }
 
@@ -6788,7 +6988,7 @@ pub const Context = struct {
                 if (layer.scroll_mode != .client) return PropertyError.WrongScrollMode;
                 layer.setProperty(value);
             },
-            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select, .shadow => layer.setProperty(value),
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select, .shadow, .selection_flow => layer.setProperty(value),
         }
     }
 

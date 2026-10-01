@@ -2610,6 +2610,121 @@ pub fn selectionSkipsUnselectableChromeTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqualStr("hi\nyo", text);
 }
 
+/// A layer of vertical text for the `selection_flow` tests: one border
+/// cell each side, three two-cell columns between them, read right to
+/// left -- あいう in the rightmost column, えおか in the middle, and a
+/// short leftmost column holding only き.
+fn verticalTextLayer(alloc: std.mem.Allocator) !glyphwire.Layer {
+    var layer = try glyphwire.Layer.init(alloc, 8, 4, 0);
+    errdefer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+    const bg = glyphwire.default_style.bg;
+    const columns = [_][]const []const u8{ &.{ "あ", "い", "う" }, &.{ "え", "お", "か" }, &.{"き"} };
+    for (columns, 0..) |chars, i| {
+        const col = 5 - i * 2;
+        for (chars, 0..) |ch, row| {
+            layer.setProperty(.{ .cursor = .{ .row = row, .col = col } });
+            try layer.writeTextOpts(ch, fg, bg, .{});
+        }
+    }
+    for (0..4) |row| {
+        layer.setProperty(.{ .cursor = .{ .row = row, .col = 0 } });
+        try layer.writeTextOpts("|", fg, bg, .{ .selectable = false });
+        layer.setProperty(.{ .cursor = .{ .row = row, .col = 7 } });
+        try layer.writeTextOpts("|", fg, bg, .{ .selectable = false });
+    }
+    layer.setProperty(.{ .selection_flow = .{ .mode = .vertical_rl, .column_cols = 2, .origin_col = 1 } });
+    return layer;
+}
+
+/// A `vertical_rl` selection reads columns right to left, each top to
+/// bottom, and copies them one line per column; the short last column
+/// adds no blanks.
+pub fn verticalSelectionReadsColumnsRightToLeftTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try verticalTextLayer(alloc);
+    defer layer.deinit();
+
+    // あ (top of the right column) to き (top of the left one).
+    layer.setSelection(.{ .above = 0, .col = 5 }, .{ .above = 0, .col = 1 });
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("あいう\nえおか\nき", text);
+
+    const row0 = layer.selectionColRange(0).?;
+    try testz.expectEqual(row0.start, 1);
+    try testz.expectEqual(row0.end, 7);
+    // Below き the end column is out, and the blank under it is trimmed.
+    const row1 = layer.selectionColRange(-1).?;
+    try testz.expectEqual(row1.start, 3);
+    try testz.expectEqual(row1.end, 7);
+    try testz.expectTrue(layer.selectionColRange(-3) == null);
+}
+
+/// A vertical selection that starts and ends mid-column: the start
+/// column only from the start's row down, the end column only down to
+/// the end's row -- and still one contiguous range per row. Which end is
+/// the anchor doesn't matter.
+pub fn verticalSelectionClipsFirstAndLastColumnTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try verticalTextLayer(alloc);
+    defer layer.deinit();
+
+    // い (row 1, right column) to お (row 1, middle column), dragged
+    // backwards so the anchor is the later end.
+    layer.setSelection(.{ .above = -1, .col = 3 }, .{ .above = -1, .col = 6 });
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("いう\nえお", text);
+
+    const row0 = layer.selectionColRange(0).?;
+    try testz.expectEqual(row0.start, 3);
+    try testz.expectEqual(row0.end, 5);
+    const row1 = layer.selectionColRange(-1).?;
+    try testz.expectEqual(row1.start, 3);
+    try testz.expectEqual(row1.end, 7);
+    const row2 = layer.selectionColRange(-2).?;
+    try testz.expectEqual(row2.start, 5);
+    try testz.expectEqual(row2.end, 7);
+}
+
+/// A glyph written with `copy_text` is copied as that text -- a vertical
+/// presentation form drawn for punctuation copies as the punctuation --
+/// in both selection flows, while an ordinary glyph next to it copies as
+/// itself.
+pub fn selectionCopiesCopyTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+    const bg = glyphwire.default_style.bg;
+
+    try layer.writeTextOpts("あ", fg, bg, .{});
+    try layer.writeTextOpts("︒", fg, bg, .{ .copy_text = "。", .max_cols = 4, .pad = true });
+    try testz.expectEqualStr("︒", layer.cell(0, 2).grapheme());
+
+    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 9 });
+    const flat = (try layer.selectionText(alloc)).?;
+    defer alloc.free(flat);
+    try testz.expectEqualStr("あ。", flat);
+
+    // Overwriting the cell without a `copy_text` drops it.
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 2 } });
+    try layer.writeTextOpts("い", fg, bg, .{});
+    const plain = (try layer.selectionText(alloc)).?;
+    defer alloc.free(plain);
+    try testz.expectEqualStr("あい", plain);
+
+    // And the vertical reader honours it too.
+    layer.setProperty(.{ .cursor = .{ .row = 1, .col = 0 } });
+    try layer.writeTextOpts("︑", fg, bg, .{ .copy_text = "、" });
+    layer.setProperty(.{ .selection_flow = .{ .mode = .vertical_rl, .column_cols = 2, .origin_col = 0 } });
+    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = -1, .col = 0 });
+    const vertical = (try layer.selectionText(alloc)).?;
+    defer alloc.free(vertical);
+    try testz.expectEqualStr("あ、", vertical);
+}
+
 /// A selection whose ends land mid-character covers whole wide
 /// characters: a start on a spacer moves back to its lead, an end on a
 /// lead takes in its spacer -- in the tint and the copied text alike.
