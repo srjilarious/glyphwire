@@ -1271,6 +1271,88 @@ pub fn kanaVariantsOfPlainKanjiIsJustTheOriginalTest(_: std.Io, alloc: std.mem.A
     try testz.expectEqual(vs.len, 1);
 }
 
+pub fn kanaNormalizeConvertsHalfWidthKatakanaWithItsMarksTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try kana.normalize(alloc, "ｶﾞｯｺｳﾊﾟﾝ");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "ガッコウパン");
+}
+
+pub fn kanaNormalizeLeavesAMarkThatCannotAttachTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // ﾅ takes no dakuten, so the ﾞ is kept rather than swallowed.
+    const out = try kana.normalize(alloc, "ﾅﾞ");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "ナﾞ");
+}
+
+pub fn kanaNormalizeFoldsCombiningMarksTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try kana.normalize(alloc, "か\u{3099}は\u{309A}ト\u{3099}");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "がぱド");
+    // Half-width kana then a *combining* mark: converted, then folded.
+    const mixed = try kana.normalize(alloc, "ｶ\u{3099}");
+    defer alloc.free(mixed);
+    try testz.expectEqualStr(mixed, "ガ");
+}
+
+pub fn kanaNormalizeExpandsCompatibilitySquaresComposedTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // NFKC, not Yomitan's NFKD: パ comes back composed.
+    const out = try kana.normalize(alloc, "㌀と㍿");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "アパートと株式会社");
+}
+
+pub fn kanaNormalizeMapsRadicalsIncludingTheSupplementTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // ⼀ (KangXi, NFKD) and ⺼ (Radicals Supplement, which NFKD leaves
+    // alone and only Equivalent_Unified_Ideograph maps).
+    const out = try kana.normalize(alloc, "⼀⺼");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "一肉");
+}
+
+pub fn kanaNormalizeLeavesOrdinaryTextAloneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = try kana.normalize(alloc, "猫がすごいＴシャツA");
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "猫がすごいＴシャツA");
+}
+
+pub fn kanaAlphanumericWidthConvertsBothWaysTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const ascii = try kana.toAsciiAlphanumeric(alloc, "Ｔシャツ０９ａｚ");
+    defer alloc.free(ascii);
+    try testz.expectEqualStr(ascii, "Tシャツ09az");
+    const full = try kana.toFullWidthAlphanumeric(alloc, "Tシャツ09az!");
+    defer alloc.free(full);
+    try testz.expectEqualStr(full, "Ｔシャツ０９ａｚ!");
+}
+
+pub fn kanaVariantsStartFromTheNormalizedTextTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const vs = try kana.variants(arena.allocator(), "ｶﾞｯｺｳ");
+    try testz.expectEqualStr(vs[0].text, "ガッコウ");
+    try testz.expectEqual(vs[0].steps, 1);
+    // The half-width original is never searched as such.
+    for (vs) |v| try testz.expectFalse(std.mem.eql(u8, v.text, "ｶﾞｯｺｳ"));
+    var found = false;
+    for (vs) |v| if (std.mem.eql(u8, v.text, "がっこう")) {
+        found = true;
+        // Normalized, then hiragana.
+        try testz.expectEqual(v.steps, 2);
+    };
+    try testz.expectTrue(found);
+}
+
+pub fn kanaVariantsTryBothAlphanumericWidthsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const vs = try kana.variants(arena.allocator(), "Tシャツ");
+    var full = false;
+    for (vs) |v| if (std.mem.eql(u8, v.text, "Ｔシャツ")) {
+        full = true;
+        try testz.expectEqual(v.steps, 1);
+    };
+    try testz.expectTrue(full);
+}
+
 // ─── archive: recognising the sidecar's name ────────────────────────────
 
 pub fn mokuroSidecarNameIsRecognisedCaseInsensitivelyTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -1439,6 +1521,58 @@ pub fn dictLookupDeinflectsGodanRuVerbPastTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr(m.hits[0].reason.?, "past");
     try testz.expectEqual(m.hits.len, 1);
     try testz.expectEqualStr(m.hits[0].entry.term, "分かる");
+}
+
+// ─── dict: text normalization ───────────────────────────────────────────
+
+/// Spellings OCR produces and no dictionary files a word under:
+/// half-width katakana, radicals for kanji, compatibility squares, and
+/// an ASCII letter where JMdict writes a full-width one.
+const normalize_dict_json =
+    \\[
+    \\  ["学校","がっこう","","n",0,["school"],1,""],
+    \\  ["肉","にく","","n",0,["meat"],2,""],
+    \\  ["株式会社","かぶしきがいしゃ","","n",0,["stock company"],3,""],
+    \\  ["Ｔシャツ","ティーシャツ","","n",0,["T-shirt"],4,""]
+    \\]
+;
+
+pub fn dictLookupFindsHalfWidthKatakanaAndSpansTheOriginalBytesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{normalize_dict_json}, &.{}, null);
+    defer d.deinit();
+    const text = "ｶﾞｯｺｳへ";
+    const m = (try dict.lookup(alloc, &d, null, .rank, text)).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "学校");
+    // The match covers all five half-width codepoints as written, not
+    // the four-kana normalized spelling.
+    try testz.expectEqualStr(text[0..m.len()], "ｶﾞｯｺｳ");
+}
+
+pub fn dictLookupFindsAKanjiOcrReadAsARadicalTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{normalize_dict_json}, &.{}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, null, .rank, "⺼")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "肉");
+}
+
+pub fn dictLookupExpandsACompatibilitySquareTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{normalize_dict_json}, &.{}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, null, .rank, "㍿")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "株式会社");
+}
+
+pub fn dictLookupMatchesAsciiAgainstAFullWidthHeadwordTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{normalize_dict_json}, &.{}, null);
+    defer d.deinit();
+    const text = "Tシャツを";
+    const m = (try dict.lookup(alloc, &d, null, .rank, text)).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "Ｔシャツ");
+    try testz.expectEqualStr(text[0..m.len()], "Tシャツ");
 }
 
 // ─── dict: chained deinflection ─────────────────────────────────────────

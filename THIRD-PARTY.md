@@ -67,6 +67,15 @@ terms wherever the package goes.
 `scripts/fetch-icon-themes.sh` are the provenance record for the fetched
 sets; they refetch each theme from upstream.
 
+## Generated data
+
+Tables generated from someone else's data and committed as Zig source.
+The generator is glyphwire's; the facts in the table are the source's.
+
+| File | Generator | Source | License |
+|---|---|---|---|
+| `read/cjk_normalize_table.zig` | `scripts/gen-cjk-normalize.py` | Unicode Character Database (NFKC/NFKD decompositions, `EquivalentUnifiedIdeograph.txt`) | [Unicode License v3](https://www.unicode.org/license.txt) |
+
 ## Copyleft icons and embedding the host
 
 This is the one place a copyleft obligation reaches something otherwise
