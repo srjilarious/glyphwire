@@ -1450,6 +1450,104 @@ pub fn dictFallbackFlattenSkipsRubyAndBadgesTest(_: std.Io, alloc: std.mem.Alloc
     try testz.expectEqualStr(m.hits[0].entry.glossary[0], "正 honesty");
 }
 
+// ─── dict: tags ─────────────────────────────────────────────────────────
+
+/// Trimmed from Jitendex's 生 (なま): a sense group's part-of-speech tags
+/// ahead of its senses, a third sense with its own misc tag, and a forms
+/// table whose row labels are tag spans too.
+const tagged_sense_json =
+    \\[["生","なま","★","",0,[{"type":"structured-content","content":[
+    \\ {"tag":"ul","data":{"content":"sense-groups"},"content":[
+    \\  {"tag":"li","data":{"content":"sense-group"},"content":[
+    \\   {"tag":"span","data":{"class":"tag","code":"adj-no","content":"part-of-speech-info"},"content":"no-adj"},
+    \\   {"tag":"span","data":{"class":"tag","code":"n","content":"part-of-speech-info"},"content":"noun"},
+    \\   {"tag":"ol","content":[
+    \\    {"tag":"li","data":{"content":"sense"},"content":[
+    \\     {"tag":"ul","data":{"content":"glossary"},"content":[{"tag":"li","content":"raw"},{"tag":"li","content":"uncooked"}]}]},
+    \\    {"tag":"li","data":{"content":"sense"},"content":
+    \\     {"tag":"ul","data":{"content":"glossary"},"content":[{"tag":"li","content":"natural"}]}},
+    \\    {"tag":"li","data":{"content":"sense"},"content":[
+    \\     {"tag":"span","data":{"class":"tag","code":"col","content":"misc-info"},"content":"colloquial"},
+    \\     {"tag":"ul","data":{"content":"glossary"},"content":[{"tag":"li","content":"unprotected (sex)"}]}]}]}]}]},
+    \\ {"tag":"div","data":{"content":"forms"},"content":[
+    \\  {"tag":"span","data":{"class":"tag","content":"forms-label"},"content":"forms"}]}]}],1378450,""]]
+;
+
+pub fn dictGivesASenseGroupsTagsToItsFirstSenseTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{tagged_sense_json}, &.{}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, null, .rank, "生")).?;
+    defer m.deinit(alloc);
+    const e = m.hits[0].entry;
+    try testz.expectEqual(e.glossary.len, 3);
+    try testz.expectEqual(e.sense_tags.len, 3);
+
+    try testz.expectEqual(e.sense_tags[0].len, 2);
+    try testz.expectEqualStr(e.sense_tags[0][0].label, "no-adj");
+    try testz.expectEqualStr(e.sense_tags[0][0].category, "part-of-speech-info");
+    try testz.expectEqualStr(e.sense_tags[0][1].label, "noun");
+    // The group's tags are drawn once, not repeated on every sense.
+    try testz.expectEqual(e.sense_tags[1].len, 0);
+    try testz.expectEqual(e.sense_tags[2].len, 1);
+    try testz.expectEqualStr(e.sense_tags[2][0].label, "colloquial");
+    try testz.expectEqualStr(e.sense_tags[2][0].category, "misc-info");
+    // The text itself is unchanged: badges never leak into the glosses.
+    try testz.expectEqualStr(e.glossary[2], "unprotected (sex)");
+}
+
+pub fn dictLeavesPlainGlossariesWithEmptySenseTagsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{
+        \\[["猫","ねこ","","n",0,["cat","shamisen"],4,""]]
+    }, &.{}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, null, .rank, "猫")).?;
+    defer m.deinit(alloc);
+    const e = m.hits[0].entry;
+    try testz.expectEqual(e.sense_tags.len, 2);
+    try testz.expectEqual(e.sense_tags[0].len, 0);
+    try testz.expectEqual(e.sense_tags[1].len, 0);
+    try testz.expectEqual(e.tags.len, 0);
+}
+
+/// Jitendex's real `tag_bank_1.json` rows for the two tags used below --
+/// note the no-break spaces inside "rarely used form".
+const jitendex_tag_bank_json =
+    \\[["★","popular",2,"high priority entry",2],
+    \\ ["rarely used form","archaism",0,"rarely used form of this term",1]]
+;
+
+pub fn dictResolvesHeadwordTagsAgainstTheTagBankTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemoryWithTags(alloc, &.{
+        // definitionTags and termTags both land on the headword; a name
+        // in both is shown once, and one the bank doesn't list still shows.
+        \\[["生","なま","★ rarely used form","",0,["raw"],1,"★ mystery"]]
+    }, &.{}, &.{jitendex_tag_bank_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, null, .rank, "生")).?;
+    defer m.deinit(alloc);
+    const tags = m.hits[0].entry.tags;
+    try testz.expectEqual(tags.len, 3);
+    // Sorted by the bank's order (archaism 0, unknown 0, popular 2), then
+    // by name.
+    try testz.expectEqualStr(tags[0].label, "mystery");
+    try testz.expectEqualStr(tags[0].category, "");
+    try testz.expectEqualStr(tags[1].label, "rarely\u{a0}used\u{a0}form");
+    try testz.expectEqualStr(tags[1].category, "archaism");
+    try testz.expectEqualStr(tags[1].notes, "rarely used form of this term");
+    try testz.expectEqualStr(tags[2].label, "★");
+    try testz.expectEqualStr(tags[2].category, "popular");
+}
+
+pub fn dictKeepsHeadwordTagsWithoutATagBankTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{tagged_sense_json}, &.{}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, null, .rank, "生")).?;
+    defer m.deinit(alloc);
+    const tags = m.hits[0].entry.tags;
+    try testz.expectEqual(tags.len, 1);
+    try testz.expectEqualStr(tags[0].label, "★");
+}
+
 pub fn dictTreatsGarbageAsAnEmptyBankTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var d = try dict.openMemory(alloc, &.{ "", "not json", "{}", "[1,2,3]" }, &.{}, null);
     defer d.deinit();

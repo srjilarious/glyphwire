@@ -159,16 +159,58 @@
 //! word"; see `Group` for why term+reading is the wrong key and for the
 //! measurement that says merging by sequence loses nothing.
 //!
+//! **Tags come from two places**, and a real dictionary needs both. A term
+//! bank row's own `definitionTags`/`termTags` name entries in
+//! `tag_bank_*.json` (category, notes, sort order) and land on the
+//! headword (`Entry.tags`). Jitendex uses those for only eight form labels
+//! (★, old kanji form, rarely used form, ...) and leaves `termTags` empty
+//! on every row; its part of speech, `uk`, archaic, field and dialect
+//! tags are `data.class = "tag"` spans *inside* the structured glossary,
+//! mostly on a sense group rather than one sense. `parseGlossary` picks
+//! those up as it goes and gives each to the first sense after it
+//! (`Entry.sense_tags`), which is where the lookup panel draws them.
+//!
 //! Still on the list: pitch accent (`term_meta_bank`'s other row type, which
-//! is read past rather than read), `definitionTags`/`termTags` and
-//! `tag_bank_*.json`, several term dictionaries at once, and the condition
-//! system that would replace `rules_out` -- see
+//! is read past rather than read), several term dictionaries at once, and
+//! the condition system that would replace `rules_out` -- see
 //! `tech-notes/plans/glyphwire/2026-09-26-gw-read-yomitan-parity.md`.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const kana = @import("kana.zig");
 const config = @import("config.zig");
+
+/// One tag on a headword or a sense, as a badge: `label` is what to show,
+/// `category` what kind of tag it is. A headword tag's category is its
+/// `tag_bank` category (`popular`, `archaism`, ...), empty when the bank
+/// doesn't list it; a structured-content sense tag's is the span's
+/// `data.content` (`part-of-speech-info`, `misc-info`, `field-info`,
+/// `dialect-info`, ...). `notes` is the bank's long description, and is
+/// only ever set on a headword tag.
+pub const Tag = struct {
+    label: []const u8,
+    category: []const u8 = "",
+    notes: []const u8 = "",
+
+    pub fn deinit(self: Tag, alloc: std.mem.Allocator) void {
+        alloc.free(self.label);
+        alloc.free(self.category);
+        alloc.free(self.notes);
+    }
+
+    fn dupe(self: Tag, alloc: std.mem.Allocator) !Tag {
+        const label = try alloc.dupe(u8, self.label);
+        errdefer alloc.free(label);
+        const category = try alloc.dupe(u8, self.category);
+        errdefer alloc.free(category);
+        return .{ .label = label, .category = category, .notes = try alloc.dupe(u8, self.notes) };
+    }
+};
+
+fn freeTags(alloc: std.mem.Allocator, tags: []const Tag) void {
+    for (tags) |t| t.deinit(alloc);
+    alloc.free(tags);
+}
 
 /// One dictionary row, always fully owned by whatever allocator produced
 /// it (`lookup`'s caller-supplied `alloc`, or a test's) -- unlike the
@@ -185,6 +227,13 @@ pub const Entry = struct {
     reading: []const u8 = "",
     rules: []const u8 = "",
     glossary: []const []const u8 = &.{},
+    /// Parallel to `glossary`: the tags drawn at the start of each sense.
+    /// A sense group's tags go on its first sense only, the same place
+    /// Yomitan draws them, so most senses have none.
+    sense_tags: []const []const Tag = &.{},
+    /// The row's `definitionTags` and `termTags`, resolved against the
+    /// `tags` table and in its sort order -- see the module doc comment.
+    tags: []const Tag = &.{},
     sequence: i64 = 0,
     /// The dictionary's own ranking score for the row (field 4 of a term
     /// bank row); higher ranks first between otherwise equal hits.
@@ -196,6 +245,9 @@ pub const Entry = struct {
         alloc.free(self.rules);
         for (self.glossary) |g| alloc.free(g);
         alloc.free(self.glossary);
+        for (self.sense_tags) |st| freeTags(alloc, st);
+        alloc.free(self.sense_tags);
+        freeTags(alloc, self.tags);
     }
 };
 
@@ -217,6 +269,8 @@ pub const Dict = struct {
     /// the table always exists as of schema 4; it simply finds nothing in a
     /// dictionary that shipped no `term_meta_bank_*.json`.
     freq_stmt: sqlite.Stmt,
+    /// Looks one headword tag name up in `tags` (`tag_sql`).
+    tag_stmt: sqlite.Stmt,
     /// Backs `title` only -- everything else this module hands out is
     /// owned by whichever allocator the caller passed in.
     title_arena: std.heap.ArenaAllocator,
@@ -226,6 +280,7 @@ pub const Dict = struct {
     pub fn deinit(self: *Dict) void {
         self.lookup_stmt.finalize();
         self.freq_stmt.finalize();
+        self.tag_stmt.finalize();
         self.db.close();
         self.title_arena.deinit();
     }
@@ -1318,15 +1373,40 @@ fn dupeEntry(alloc: std.mem.Allocator, e: Entry) !Entry {
         glossary.deinit(alloc);
     }
     for (e.glossary) |g| try glossary.append(alloc, try alloc.dupe(u8, g));
+    var sense_tags: std.ArrayList([]const Tag) = .empty;
+    errdefer {
+        for (sense_tags.items) |st| freeTags(alloc, st);
+        sense_tags.deinit(alloc);
+    }
+    for (e.sense_tags) |st| try sense_tags.append(alloc, try dupeTags(alloc, st));
+    const tags = try dupeTags(alloc, e.tags);
+    errdefer freeTags(alloc, tags);
+    const owned_glossary = try glossary.toOwnedSlice(alloc);
+    errdefer {
+        for (owned_glossary) |g| alloc.free(g);
+        alloc.free(owned_glossary);
+    }
     return .{
         .id = e.id,
         .term = term,
         .reading = reading,
         .rules = rules,
-        .glossary = try glossary.toOwnedSlice(alloc),
+        .glossary = owned_glossary,
+        .sense_tags = try sense_tags.toOwnedSlice(alloc),
+        .tags = tags,
         .sequence = e.sequence,
         .score = e.score,
     };
+}
+
+fn dupeTags(alloc: std.mem.Allocator, tags: []const Tag) ![]const Tag {
+    var out: std.ArrayList(Tag) = .empty;
+    errdefer {
+        for (out.items) |t| t.deinit(alloc);
+        out.deinit(alloc);
+    }
+    for (tags) |t| try out.append(alloc, try t.dupe(alloc));
+    return out.toOwnedSlice(alloc);
 }
 
 /// Every entry whose `term` or `reading` is exactly `term`, or null when
@@ -1336,14 +1416,20 @@ fn queryTerm(alloc: std.mem.Allocator, dict: *Dict, term: []const u8) !?[]Entry 
     try dict.lookup_stmt.bindText(1, term);
 
     var out: std.ArrayList(Entry) = .empty;
-    errdefer freeEntries(alloc, out.items);
+    errdefer {
+        for (out.items) |e| e.deinit(alloc);
+        out.deinit(alloc);
+    }
     while (try dict.lookup_stmt.step()) {
+        const glossary = try splitGlossary(alloc, dict.lookup_stmt.columnText(4));
         try out.append(alloc, .{
             .id = dict.lookup_stmt.columnInt64(0),
             .term = try alloc.dupe(u8, dict.lookup_stmt.columnText(1)),
             .reading = try alloc.dupe(u8, dict.lookup_stmt.columnText(2)),
             .rules = try alloc.dupe(u8, dict.lookup_stmt.columnText(3)),
-            .glossary = try splitGlossary(alloc, dict.lookup_stmt.columnText(4)),
+            .glossary = glossary,
+            .sense_tags = try decodeSenseTags(alloc, dict.lookup_stmt.columnText(7), glossary.len),
+            .tags = try resolveTags(alloc, dict, dict.lookup_stmt.columnText(8)),
             .sequence = dict.lookup_stmt.columnInt64(5),
             .score = dict.lookup_stmt.columnInt64(6),
         });
@@ -1383,6 +1469,125 @@ fn splitGlossary(a: std.mem.Allocator, blob: []const u8) std.mem.Allocator.Error
     return out.toOwnedSlice(a);
 }
 
+// `entries.sense_tags` is one record per sense, in glossary order, each a
+// list of tags, each a label and a category -- three nested ASCII
+// separators, for the same reason `glossary_sep` is one. A row with no
+// sense tags at all stores "" rather than a run of empty records.
+const sense_sep: u8 = 0x1E;
+const tag_sep: u8 = 0x1F;
+const field_sep: u8 = 0x1D;
+
+fn encodeSenseTags(a: std.mem.Allocator, sense_tags: []const []const Tag) std.mem.Allocator.Error![]const u8 {
+    var any = false;
+    for (sense_tags) |st| any = any or st.len > 0;
+    if (!any) return "";
+    var buf: std.ArrayList(u8) = .empty;
+    for (sense_tags, 0..) |st, si| {
+        if (si > 0) try buf.append(a, sense_sep);
+        for (st, 0..) |t, ti| {
+            if (ti > 0) try buf.append(a, tag_sep);
+            try buf.appendSlice(a, t.label);
+            try buf.append(a, field_sep);
+            try buf.appendSlice(a, t.category);
+        }
+    }
+    return buf.toOwnedSlice(a);
+}
+
+/// `encodeSenseTags` undone, always exactly `senses` records long -- the
+/// glossary's length -- so `Entry.sense_tags` can be indexed alongside
+/// `Entry.glossary` without a bounds check.
+fn decodeSenseTags(alloc: std.mem.Allocator, blob: []const u8, senses: usize) ![]const []const Tag {
+    const out = try alloc.alloc([]const Tag, senses);
+    for (out) |*st| st.* = &.{};
+    errdefer {
+        for (out) |st| freeTags(alloc, st);
+        alloc.free(out);
+    }
+    if (blob.len == 0) return out;
+    var records = std.mem.splitScalar(u8, blob, sense_sep);
+    var si: usize = 0;
+    while (records.next()) |record| : (si += 1) {
+        if (si >= senses) break;
+        if (record.len == 0) continue;
+        var tags: std.ArrayList(Tag) = .empty;
+        errdefer {
+            for (tags.items) |t| t.deinit(alloc);
+            tags.deinit(alloc);
+        }
+        var it = std.mem.splitScalar(u8, record, tag_sep);
+        while (it.next()) |field| {
+            const cut = std.mem.indexOfScalar(u8, field, field_sep) orelse field.len;
+            const tag = try (Tag{
+                .label = field[0..cut],
+                .category = if (cut < field.len) field[cut + 1 ..] else "",
+            }).dupe(alloc);
+            errdefer tag.deinit(alloc);
+            try tags.append(alloc, tag);
+        }
+        out[si] = try tags.toOwnedSlice(alloc);
+    }
+    return out;
+}
+
+/// The headword tag names stored for a row (space-separated, as the term
+/// bank gives them), each looked up in `tags`, sorted by the bank's
+/// `order` and then name the way Yomitan sorts them. A name the bank
+/// doesn't list still shows, as a bare label.
+fn resolveTags(alloc: std.mem.Allocator, dict: *Dict, names: []const u8) ![]const Tag {
+    const Resolved = struct { tag: Tag, order: i64 };
+    var found: std.ArrayList(Resolved) = .empty;
+    defer found.deinit(alloc);
+    errdefer for (found.items) |r| r.tag.deinit(alloc);
+
+    var it = std.mem.tokenizeScalar(u8, names, ' ');
+    while (it.next()) |name| {
+        dict.tag_stmt.reset();
+        try dict.tag_stmt.bindText(1, name);
+        var tag: Tag = .{ .label = name };
+        var order: i64 = 0;
+        if (try dict.tag_stmt.step()) {
+            tag.category = dict.tag_stmt.columnText(0);
+            tag.notes = dict.tag_stmt.columnText(1);
+            order = dict.tag_stmt.columnInt64(2);
+        }
+        const owned = try tag.dupe(alloc);
+        errdefer owned.deinit(alloc);
+        try found.append(alloc, .{ .tag = owned, .order = order });
+    }
+    dict.tag_stmt.reset();
+
+    std.mem.sort(Resolved, found.items, {}, struct {
+        fn before(_: void, a: Resolved, b: Resolved) bool {
+            if (a.order != b.order) return a.order < b.order;
+            return std.mem.lessThan(u8, a.tag.label, b.tag.label);
+        }
+    }.before);
+    const out = try alloc.alloc(Tag, found.items.len);
+    for (found.items, out) |r, *t| t.* = r.tag;
+    return out;
+}
+
+/// A term bank row's `definitionTags` and `termTags` as one space-separated
+/// list, duplicates dropped -- both are drawn on the headword. Tag names
+/// never contain a plain space: Jitendex writes "old kanji form" with
+/// no-break spaces precisely so a space-split keeps it whole.
+fn joinRowTags(a: std.mem.Allocator, definition_tags: []const u8, term_tags: []const u8) std.mem.Allocator.Error![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{ definition_tags, term_tags }) |list| {
+        var it = std.mem.tokenizeScalar(u8, list, ' ');
+        while (it.next()) |name| {
+            var seen = false;
+            var have = std.mem.tokenizeScalar(u8, buf.items, ' ');
+            while (have.next()) |h| seen = seen or std.mem.eql(u8, h, name);
+            if (seen) continue;
+            if (buf.items.len > 0) try buf.append(a, ' ');
+            try buf.appendSlice(a, name);
+        }
+    }
+    return buf.toOwnedSlice(a);
+}
+
 /// Parses one `term_bank_N.json`'s rows and inserts each into `entries`
 /// via `insert_stmt` (`insert_sql`, already prepared by the caller). Returns how many rows were actually inserted -- `Builder`
 /// uses it to run a "N terms indexed" counter while building. Same
@@ -1417,21 +1622,21 @@ fn insertTermBank(
         if (row.items.len < 8) continue;
         const term = jsonString(row.items[0]) orelse continue;
         const glossary = try parseGlossary(sa, row.items[5]);
-        const joined = try joinGlossary(sa, glossary);
         // An empty reading means "reads as written" -- stored as the term
         // itself, the same as Yomitan's importer, so the `reading` index
         // covers kana-only headwords too.
         const reading = jsonString(row.items[1]) orelse "";
 
-        insertRow(
-            insert_stmt,
-            term,
-            if (reading.len == 0) term else reading,
-            jsonString(row.items[3]) orelse "",
-            joined,
-            jsonInt(row.items[6]) orelse 0,
-            jsonInt(row.items[4]) orelse 0,
-        ) catch {
+        insertRow(insert_stmt, .{
+            .term = term,
+            .reading = if (reading.len == 0) term else reading,
+            .rules = jsonString(row.items[3]) orelse "",
+            .glossary = try joinGlossary(sa, glossary.senses),
+            .sequence = jsonInt(row.items[6]) orelse 0,
+            .score = jsonInt(row.items[4]) orelse 0,
+            .sense_tags = try encodeSenseTags(sa, glossary.tags),
+            .tags = try joinRowTags(sa, jsonString(row.items[2]) orelse "", jsonString(row.items[7]) orelse ""),
+        }) catch {
             insert_stmt.reset();
             continue;
         };
@@ -1441,22 +1646,66 @@ fn insertTermBank(
     return inserted;
 }
 
-fn insertRow(
-    stmt: sqlite.Stmt,
+/// One `entries` row, already flattened into its column values.
+const Row = struct {
     term: []const u8,
     reading: []const u8,
     rules: []const u8,
     glossary: []const u8,
     sequence: i64,
     score: i64,
-) sqlite.Error!void {
-    try stmt.bindText(1, term);
-    try stmt.bindText(2, reading);
-    try stmt.bindText(3, rules);
-    try stmt.bindText(4, glossary);
-    try stmt.bindInt64(5, sequence);
-    try stmt.bindInt64(6, score);
+    sense_tags: []const u8,
+    tags: []const u8,
+};
+
+fn insertRow(stmt: sqlite.Stmt, row: Row) sqlite.Error!void {
+    try stmt.bindText(1, row.term);
+    try stmt.bindText(2, row.reading);
+    try stmt.bindText(3, row.rules);
+    try stmt.bindText(4, row.glossary);
+    try stmt.bindInt64(5, row.sequence);
+    try stmt.bindInt64(6, row.score);
+    try stmt.bindText(7, row.sense_tags);
+    try stmt.bindText(8, row.tags);
     _ = try stmt.step();
+}
+
+/// Parses one `tag_bank_N.json` -- rows of `[name, category, order, notes,
+/// score]` -- into `tags`, returning how many landed. Same drop-don't-fail
+/// policy as `insertTermBank`; a later bank's row for a name replaces an
+/// earlier one's.
+fn insertTagBank(
+    insert_stmt: sqlite.Stmt,
+    scratch_backing: std.mem.Allocator,
+    json: []const u8,
+) std.mem.Allocator.Error!usize {
+    var scratch: std.heap.ArenaAllocator = .init(scratch_backing);
+    defer scratch.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, scratch.allocator(), json, .{}) catch return 0;
+    const rows = switch (parsed.value) {
+        .array => |arr| arr,
+        else => return 0,
+    };
+    var inserted: usize = 0;
+    for (rows.items) |row_val| {
+        const row = switch (row_val) {
+            .array => |r| r,
+            else => continue,
+        };
+        if (row.items.len < 4) continue;
+        const name = jsonString(row.items[0]) orelse continue;
+        const ok = blk: {
+            insert_stmt.bindText(1, name) catch break :blk false;
+            insert_stmt.bindText(2, jsonString(row.items[1]) orelse "") catch break :blk false;
+            insert_stmt.bindInt64(3, jsonInt(row.items[2]) orelse 0) catch break :blk false;
+            insert_stmt.bindText(4, jsonString(row.items[3]) orelse "") catch break :blk false;
+            _ = insert_stmt.step() catch break :blk false;
+            break :blk true;
+        };
+        insert_stmt.reset();
+        if (ok) inserted += 1;
+    }
+    return inserted;
 }
 
 /// Parses one `term_meta_bank_N.json` and inserts its **frequency** rows,
@@ -1628,16 +1877,23 @@ fn jsonInt(v: std.json.Value) ?i64 {
 /// A structured entry with no glossary lists falls back to every text
 /// leaf in document order, minus the same badges, ruby readings and
 /// credit (`flattenText`).
-fn parseGlossary(a: std.mem.Allocator, v: std.json.Value) std.mem.Allocator.Error![]const []const u8 {
+///
+/// The badges left out of the text are not thrown away: each tag span
+/// met on the way is held until the next glossary list and becomes that
+/// sense's tags. Jitendex puts a sense group's part of speech before its
+/// `ol` of senses and a sense's own `uk`/field/dialect before that
+/// sense's list, so document order hands each tag to the right sense.
+fn parseGlossary(a: std.mem.Allocator, v: std.json.Value) std.mem.Allocator.Error!Glossary {
     const arr = switch (v) {
         .array => |arr| arr,
-        else => return &.{},
+        else => return .{},
     };
-    var out: std.ArrayList([]const u8) = .empty;
+    var g: GlossaryBuilder = .{};
     for (arr.items) |item| {
-        const before = out.items.len;
-        try collectGlossaryLists(a, item, &out);
-        if (out.items.len > before) continue;
+        const before = g.senses.items.len;
+        try g.collect(a, item);
+        g.pending.clearRetainingCapacity();
+        if (g.senses.items.len > before) continue;
 
         var buf: std.ArrayList(u8) = .empty;
         try flattenText(a, item, &buf);
@@ -1645,9 +1901,93 @@ fn parseGlossary(a: std.mem.Allocator, v: std.json.Value) std.mem.Allocator.Erro
             buf.deinit(a);
             continue;
         }
-        try out.append(a, try buf.toOwnedSlice(a));
+        try g.senses.append(a, try buf.toOwnedSlice(a));
+        try g.tags.append(a, &.{});
     }
-    return out.toOwnedSlice(a);
+    return .{ .senses = try g.senses.toOwnedSlice(a), .tags = try g.tags.toOwnedSlice(a) };
+}
+
+/// `parseGlossary`'s result: one string per sense, and that sense's tags.
+const Glossary = struct {
+    senses: []const []const u8 = &.{},
+    tags: []const []const Tag = &.{},
+};
+
+/// The walk behind `parseGlossary`. Everything lives in the caller's
+/// per-file scratch arena, so nothing here is freed individually.
+const GlossaryBuilder = struct {
+    senses: std.ArrayList([]const u8) = .empty,
+    tags: std.ArrayList([]const Tag) = .empty,
+    /// Tag spans seen since the last glossary list.
+    pending: std.ArrayList(Tag) = .empty,
+
+    /// Appends one string per `data.content = "glossary"` list under `v`,
+    /// each item flattened and joined with "; ", and gathers tag spans
+    /// into `pending` for the next one.
+    fn collect(self: *GlossaryBuilder, a: std.mem.Allocator, v: std.json.Value) std.mem.Allocator.Error!void {
+        switch (v) {
+            .array => |arr| for (arr.items) |item| try self.collect(a, item),
+            .object => |obj| {
+                const role = dataContent(obj);
+                // The forms table labels its rows with tag spans too, but
+                // those describe spellings, not senses.
+                if (std.mem.eql(u8, role, "forms")) return;
+                if (tagSpan(obj)) |tag| {
+                    var label: std.ArrayList(u8) = .empty;
+                    if (obj.get("content")) |c| try flattenTagLabel(a, c, &label);
+                    if (label.items.len > 0) try self.pending.append(a, .{ .label = label.items, .category = tag });
+                    return;
+                }
+                const content = obj.get("content") orelse return;
+                if (!std.mem.eql(u8, role, "glossary")) return self.collect(a, content);
+
+                var buf: std.ArrayList(u8) = .empty;
+                const items: []const std.json.Value = switch (content) {
+                    .array => |arr| arr.items,
+                    else => &.{content},
+                };
+                for (items) |item| {
+                    var gloss: std.ArrayList(u8) = .empty;
+                    defer gloss.deinit(a);
+                    try flattenText(a, item, &gloss);
+                    if (gloss.items.len == 0) continue;
+                    if (buf.items.len > 0) try buf.appendSlice(a, "; ");
+                    try buf.appendSlice(a, gloss.items);
+                }
+                if (buf.items.len == 0) {
+                    buf.deinit(a);
+                    return;
+                }
+                try self.senses.append(a, try buf.toOwnedSlice(a));
+                try self.tags.append(a, try a.dupe(Tag, self.pending.items));
+                self.pending.clearRetainingCapacity();
+            },
+            else => {},
+        }
+    }
+};
+
+/// The span's `data.content` when `obj` is a structured-content tag badge
+/// (`data.class = "tag"`), else null.
+fn tagSpan(obj: std.json.ObjectMap) ?[]const u8 {
+    const data = obj.get("data") orelse return null;
+    if (data != .object) return null;
+    const cls = data.object.get("class") orelse return null;
+    if (cls != .string or !std.mem.eql(u8, cls.string, "tag")) return null;
+    return dataContent(obj);
+}
+
+/// A badge's text: its string leaves run together, ruby readings left out.
+fn flattenTagLabel(a: std.mem.Allocator, v: std.json.Value, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+    switch (v) {
+        .string => |s| try out.appendSlice(a, s),
+        .array => |arr| for (arr.items) |item| try flattenTagLabel(a, item, out),
+        .object => |obj| {
+            if (obj.get("tag")) |t| if (t == .string and std.mem.eql(u8, t.string, "rt")) return;
+            if (obj.get("content")) |c| try flattenTagLabel(a, c, out);
+        },
+        else => {},
+    }
 }
 
 /// `data.content` of a structured-content node, or "".
@@ -1656,38 +1996,6 @@ fn dataContent(obj: std.json.ObjectMap) []const u8 {
     if (data != .object) return "";
     const c = data.object.get("content") orelse return "";
     return if (c == .string) c.string else "";
-}
-
-/// Appends one string per `data.content = "glossary"` list under `v`,
-/// each item flattened and joined with "; ".
-fn collectGlossaryLists(a: std.mem.Allocator, v: std.json.Value, out: *std.ArrayList([]const u8)) std.mem.Allocator.Error!void {
-    switch (v) {
-        .array => |arr| for (arr.items) |item| try collectGlossaryLists(a, item, out),
-        .object => |obj| {
-            const content = obj.get("content") orelse return;
-            if (!std.mem.eql(u8, dataContent(obj), "glossary")) return collectGlossaryLists(a, content, out);
-
-            var buf: std.ArrayList(u8) = .empty;
-            const items: []const std.json.Value = switch (content) {
-                .array => |arr| arr.items,
-                else => &.{content},
-            };
-            for (items) |item| {
-                var gloss: std.ArrayList(u8) = .empty;
-                defer gloss.deinit(a);
-                try flattenText(a, item, &gloss);
-                if (gloss.items.len == 0) continue;
-                if (buf.items.len > 0) try buf.appendSlice(a, "; ");
-                try buf.appendSlice(a, gloss.items);
-            }
-            if (buf.items.len == 0) {
-                buf.deinit(a);
-                return;
-            }
-            try out.append(a, try buf.toOwnedSlice(a));
-        },
-        else => {},
-    }
 }
 
 /// Every text leaf under `v`, space-separated, in document order --
@@ -1716,10 +2024,15 @@ fn flattenText(a: std.mem.Allocator, v: std.json.Value, out: *std.ArrayList(u8))
 }
 
 /// True for a file name that is a term bank -- `term_bank_1.json` and
-/// friends, but not `term_meta_bank_*` (frequency/pitch data) or
-/// `kanji_bank_*`/`tag_bank_*`, neither of which this module reads yet.
+/// friends, but not `term_meta_bank_*` (frequency/pitch data),
+/// `tag_bank_*` or `kanji_bank_*` (which this module doesn't read).
 fn isTermBankName(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "term_bank_") and std.ascii.endsWithIgnoreCase(name, ".json");
+}
+
+/// `tag_bank_*.json` -- what the tag names in term bank rows mean.
+fn isTagBankName(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "tag_bank_") and std.ascii.endsWithIgnoreCase(name, ".json");
 }
 
 /// `term_meta_bank_*.json` -- frequency (and pitch accent, which this
@@ -1745,6 +2058,7 @@ const schema_sql =
     \\DROP TABLE IF EXISTS entries;
     \\DROP TABLE IF EXISTS term_meta;
     \\DROP TABLE IF EXISTS meta;
+    \\DROP TABLE IF EXISTS tags;
     \\CREATE TABLE entries (
     \\  id INTEGER PRIMARY KEY,
     \\  term TEXT NOT NULL,
@@ -1752,7 +2066,15 @@ const schema_sql =
     \\  rules TEXT NOT NULL,
     \\  glossary TEXT NOT NULL,
     \\  sequence INTEGER NOT NULL,
-    \\  score INTEGER NOT NULL
+    \\  score INTEGER NOT NULL,
+    \\  sense_tags TEXT NOT NULL,
+    \\  tags TEXT NOT NULL
+    \\);
+    \\CREATE TABLE tags (
+    \\  name TEXT PRIMARY KEY,
+    \\  category TEXT NOT NULL,
+    \\  ord INTEGER NOT NULL,
+    \\  notes TEXT NOT NULL
     \\);
     \\CREATE TABLE term_meta (
     \\  id INTEGER PRIMARY KEY,
@@ -1770,9 +2092,16 @@ const schema_sql =
 /// empty readings stored as the term. 3 stores structured glossaries as
 /// one string per sense list, without badges, examples or credits. 4 adds
 /// `term_meta`, the frequency table built from `term_meta_bank_*.json`.
-pub const schema_version = "4";
+/// 5 adds `sense_tags` (the structured glossary's badges), `tags` (a row's
+/// `definitionTags` + `termTags`) and the `tags` table from
+/// `tag_bank_*.json`.
+pub const schema_version = "5";
 
-const insert_sql = "INSERT INTO entries (term, reading, rules, glossary, sequence, score) VALUES (?, ?, ?, ?, ?, ?)";
+const insert_sql = "INSERT INTO entries (term, reading, rules, glossary, sequence, score, sense_tags, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+
+const insert_tag_sql = "INSERT OR REPLACE INTO tags (name, category, ord, notes) VALUES (?, ?, ?, ?)";
+
+const tag_sql = "SELECT category, notes, ord FROM tags WHERE name = ?1";
 
 const insert_meta_sql = "INSERT INTO term_meta (term, reading, frequency, display) VALUES (?, ?, ?, ?)";
 
@@ -1784,7 +2113,7 @@ const freq_sql = "SELECT term, reading, frequency, display FROM term_meta WHERE 
 
 /// Matches on the headword *or* its reading -- see `lookup` for why the
 /// reading half is essential.
-const lookup_sql = "SELECT id, term, reading, rules, glossary, sequence, score FROM entries WHERE term = ?1 OR reading = ?1";
+const lookup_sql = "SELECT id, term, reading, rules, glossary, sequence, score, sense_tags, tags FROM entries WHERE term = ?1 OR reading = ?1";
 
 const index_sql =
     \\CREATE INDEX IF NOT EXISTS idx_entries_term ON entries(term);
@@ -1842,7 +2171,9 @@ pub const Builder = struct {
     db: sqlite.Db,
     insert_stmt: sqlite.Stmt,
     insert_meta_stmt: sqlite.Stmt,
-    /// Every `term_bank_*.json` **and** `term_meta_bank_*.json` name found
+    insert_tag_stmt: sqlite.Stmt,
+    /// Every `term_bank_*.json`, `term_meta_bank_*.json` and
+    /// `tag_bank_*.json` name found
     /// in the directory, resolved up front (during `beginBuild`) so
     /// `total_files` is known from the very first `step`. `step` dispatches
     /// on the name, which is what lets one `Builder` index a term
@@ -1878,6 +2209,8 @@ pub const Builder = struct {
         // kept afterward -- every row is inserted straight into `db`.
         if (isTermMetaBankName(name)) {
             self.freqs_indexed += try insertTermMetaBank(self.insert_meta_stmt, self.alloc, bytes);
+        } else if (isTagBankName(name)) {
+            _ = try insertTagBank(self.insert_tag_stmt, self.alloc, bytes);
         } else {
             self.terms_indexed += try insertTermBank(self.insert_stmt, self.alloc, bytes);
         }
@@ -1889,6 +2222,7 @@ pub const Builder = struct {
     pub fn finish(self: *Builder) !Dict {
         self.insert_stmt.finalize();
         self.insert_meta_stmt.finalize();
+        self.insert_tag_stmt.finalize();
         try self.db.exec("COMMIT");
         try self.db.exec(index_sql);
         try writeMeta(&self.db, self.title_buf.items);
@@ -1898,17 +2232,7 @@ pub const Builder = struct {
         self.files.deinit(self.alloc);
         self.title_buf.deinit(self.alloc);
 
-        const lookup_stmt = try self.db.prepare(lookup_sql);
-        const freq_stmt = try self.db.prepare(freq_sql);
-        var title_arena: std.heap.ArenaAllocator = .init(self.alloc);
-        const title = readTitle(title_arena.allocator(), &self.db) catch "";
-        return .{
-            .db = self.db,
-            .lookup_stmt = lookup_stmt,
-            .freq_stmt = freq_stmt,
-            .title_arena = title_arena,
-            .title = title,
-        };
+        return openExisting(self.alloc, self.db);
     }
 
     /// Releases everything without finishing -- e.g. the reader quit, or
@@ -1917,6 +2241,7 @@ pub const Builder = struct {
     pub fn deinit(self: *Builder) void {
         self.insert_stmt.finalize();
         self.insert_meta_stmt.finalize();
+        self.insert_tag_stmt.finalize();
         self.db.exec("ROLLBACK") catch {};
         self.db.close();
         self.dir.close(self.io);
@@ -1947,6 +2272,8 @@ fn beginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Builder {
     errdefer insert_stmt.finalize();
     const insert_meta_stmt = try db.prepare(insert_meta_sql);
     errdefer insert_meta_stmt.finalize();
+    const insert_tag_stmt = try db.prepare(insert_tag_sql);
+    errdefer insert_tag_stmt.finalize();
 
     var files: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -1967,7 +2294,7 @@ fn beginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Builder {
             } else |_| {}
             continue;
         }
-        if (!isTermBankName(raw.name) and !isTermMetaBankName(raw.name)) continue;
+        if (!isTermBankName(raw.name) and !isTermMetaBankName(raw.name) and !isTagBankName(raw.name)) continue;
         try files.append(alloc, try alloc.dupe(u8, raw.name));
     }
 
@@ -1978,6 +2305,7 @@ fn beginBuild(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Builder {
         .db = db,
         .insert_stmt = insert_stmt,
         .insert_meta_stmt = insert_meta_stmt,
+        .insert_tag_stmt = insert_tag_stmt,
         .files = files,
         .title_buf = title_buf,
     };
@@ -2007,6 +2335,8 @@ fn openExisting(alloc: std.mem.Allocator, db: sqlite.Db) !Dict {
     errdefer lookup_stmt.finalize();
     const freq_stmt = try d.prepare(freq_sql);
     errdefer freq_stmt.finalize();
+    const tag_stmt = try d.prepare(tag_sql);
+    errdefer tag_stmt.finalize();
 
     var title_arena: std.heap.ArenaAllocator = .init(alloc);
     errdefer title_arena.deinit();
@@ -2016,6 +2346,7 @@ fn openExisting(alloc: std.mem.Allocator, db: sqlite.Db) !Dict {
         .db = d,
         .lookup_stmt = lookup_stmt,
         .freq_stmt = freq_stmt,
+        .tag_stmt = tag_stmt,
         .title_arena = title_arena,
         .title = title,
     };
@@ -2076,9 +2407,35 @@ pub fn openMemory(
     term_meta_bank_jsons: []const []const u8,
     index_json: ?[]const u8,
 ) !Dict {
-    var db = try sqlite.Db.open(":memory:", sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE);
-    errdefer db.close();
+    return openMemoryWithTags(alloc, term_bank_jsons, term_meta_bank_jsons, &.{}, index_json);
+}
 
+/// `openMemory` with `tag_bank_*.json` contents as well, for the tests
+/// that need headword tags resolved.
+pub fn openMemoryWithTags(
+    alloc: std.mem.Allocator,
+    term_bank_jsons: []const []const u8,
+    term_meta_bank_jsons: []const []const u8,
+    tag_bank_jsons: []const []const u8,
+    index_json: ?[]const u8,
+) !Dict {
+    var db = try sqlite.Db.open(":memory:", sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE);
+    fillMemory(alloc, &db, term_bank_jsons, term_meta_bank_jsons, tag_bank_jsons, index_json) catch |err| {
+        db.close();
+        return err;
+    };
+    // Closes `db` itself if it fails.
+    return openExisting(alloc, db);
+}
+
+fn fillMemory(
+    alloc: std.mem.Allocator,
+    db: *sqlite.Db,
+    term_bank_jsons: []const []const u8,
+    term_meta_bank_jsons: []const []const u8,
+    tag_bank_jsons: []const []const u8,
+    index_json: ?[]const u8,
+) !void {
     try db.exec(schema_sql);
     try db.exec("BEGIN");
     const insert_stmt = try db.prepare(insert_sql);
@@ -2087,6 +2444,9 @@ pub fn openMemory(
     const insert_meta_stmt = try db.prepare(insert_meta_sql);
     for (term_meta_bank_jsons) |j| _ = try insertTermMetaBank(insert_meta_stmt, alloc, j);
     insert_meta_stmt.finalize();
+    const insert_tag_stmt = try db.prepare(insert_tag_sql);
+    for (tag_bank_jsons) |j| _ = try insertTagBank(insert_tag_stmt, alloc, j);
+    insert_tag_stmt.finalize();
     try db.exec("COMMIT");
     try db.exec(index_sql);
 
@@ -2094,18 +2454,5 @@ pub fn openMemory(
     defer title_buf.deinit(alloc);
     if (index_json) |j| try readTitleInto(alloc, &title_buf, alloc, j);
 
-    try writeMeta(&db, title_buf.items);
-
-    const lookup_stmt = try db.prepare(lookup_sql);
-    const freq_stmt = try db.prepare(freq_sql);
-    var title_arena: std.heap.ArenaAllocator = .init(alloc);
-    const title = readTitle(title_arena.allocator(), &db) catch "";
-
-    return .{
-        .db = db,
-        .lookup_stmt = lookup_stmt,
-        .freq_stmt = freq_stmt,
-        .title_arena = title_arena,
-        .title = title,
-    };
+    try writeMeta(db, title_buf.items);
 }
