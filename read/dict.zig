@@ -73,26 +73,20 @@
 //! in-memory (`:memory:`) database without a dictionary directory on
 //! disk.
 //!
-//! **Deinflection chains, up to `max_deinflect_depth` rule
-//! applications.** `lookup` follows every chain from each candidate
-//! substring (0 = a direct dictionary-form hit, 1 = one rule, 2 = two
-//! rules chained, ...); when one entry is reachable several ways the
-//! shortest chain is the one kept, and between entries fewer rules ranks
-//! higher -- the "simplest explanation wins" preference. A rule's
-//! `rules_out` can be empty (`&.{}`), meaning the form it produces is
-//! never itself accepted as a final match -- only a dictionary row's
-//! `rules` column can end a chain, so an empty `rules_out` forces at
-//! least one more rule application (see `DeinflectRule`'s doc comment).
-//! This is how a pre-collapse form like "-nakatta" is represented: it's
-//! not a dictionary headword in its own right (it first collapses to the
-//! plain "-nai" form, which the table's plain negative rules recognize),
-//! so a chain that stops there is rejected the same way a wrong-tagged
-//! direct hit was rejected before. Causative and passive/potential look
-//! like they'd need the same treatment -- they're productive derivations
-//! too -- but they aren't: stripping either always lands directly on the
-//! plain dictionary form (食べさせる -> 食べる), so their `rules_out`
-//! names the real headword's own class (`v1`/`v5`) like any other
-//! terminal rule.
+//! **Deinflection is Yomitan's condition model.** `lookup` follows every
+//! chain from each candidate substring (0 = a direct dictionary-form hit,
+//! 1 = one rule, 2 = two rules chained, ...); when one entry is reachable
+//! several ways the shortest chain is the one kept, and between entries
+//! fewer rules ranks higher -- the "simplest explanation wins" preference.
+//! Every rule names the grammatical conditions it takes in and gives out
+//! (`Condition`, `DeinflectRule`), and those are checked at *every* step:
+//! a rule only applies to a form whose conditions match its
+//! `conditions_in`, and a dictionary row only ends a chain when its own
+//! class matches the form's. A form partway through unwinding -- 食べて,
+//! stripped off 食べている -- is in an intermediate condition (`te`) that
+//! no row carries, so the chain has to keep going. The search is a
+//! breadth-first walk over (form, conditions) pairs with no depth cap;
+//! see `Search.collect`.
 //!
 //! The rule table covers plain negative/past/te-form/negative-past for
 //! godan and ichidan verbs and i-adjectives; causative; passive/potential;
@@ -103,7 +97,10 @@
 //! three irregular classes the index tags but no regular rule can reach --
 //! **vs** (する and the kanji+する headwords), **vk** (来る, in both
 //! spellings) and **vz** (ずる verbs) -- plus 行く, whose te-form and past
-//! are irregular.
+//! are irregular. Beyond those: the copula and na-adjectives, adjective
+//! derivations, te-form compounds, the classical, colloquial and Kansai
+//! negatives, godan potential, and the slang -え sound changes
+//! (言わねえ, すげえ) -- see the blocks in `deinflect_rules`.
 //!
 //! Why the irregular classes matter out of proportion to their share of
 //! the dictionary: every rule that produces only `v1`/`v5`/`adj-i` leaves
@@ -112,20 +109,12 @@
 //! confident wrong answers rather than misses. する and 来る are also
 //! about the most frequent verbs in the language.
 //!
-//! **Still not done:** the copula and na-adjectives (だった/じゃない/
-//! でした), adjective derivations as rules rather than as lexicalized
-//! entries (-さ/-く/-そう/-すぎる), te-form compounds (-ちゃう/-てしまう/
-//! -ておく/-てくる), classical and colloquial negatives (-ぬ/-ず/-ん),
-//! polite negative-past (-masendeshita), a dedicated godan す-row
-//! causative row (causative "させる" is wired to its ichidan and する
-//! targets, so 話す's causative 話させる doesn't resolve -- see the
-//! causative rows below), godan potential -える where the dictionary
-//! hasn't lexicalized it (読める and 話せる are their own `v1` entries,
-//! 書ける is not), keigo, Kansai-ben, and anything needing more than
-//! `max_deinflect_depth` chained rules. The phased plan for the rest,
-//! including the structural fix the remaining forms want underneath them
-//! (condition sets in place of `rules_out`), is in tech-notes:
-//! `plans/glyphwire/2026-09-26-gw-read-yomitan-parity.md`.
+//! **Still not done:** keigo, which needs a *prefix* stripped (お〜になる)
+//! and so is out of reach of a suffix-only engine, and the Yomitan forms
+//! this table has no rows for yet (short causative -さす, -なさい, the
+//! -ゃ contractions, -まい, -たり, ...). Their conditions are already
+//! declared in `Condition`. The phased plan this came out of is in
+//! tech-notes: `plans/glyphwire/2026-09-26-gw-read-yomitan-parity.md`.
 //!
 //! **Frequency data, when there is any, is what makes the ranking
 //! usable.** Without it `rankBefore` puts fewer deinflection rules ahead of
@@ -171,9 +160,8 @@
 //! (`Entry.sense_tags`), which is where the lookup panel draws them.
 //!
 //! Still on the list: pitch accent (`term_meta_bank`'s other row type, which
-//! is read past rather than read), several term dictionaries at once, and
-//! the condition system that would replace `rules_out` -- see
-//! `tech-notes/plans/glyphwire/2026-09-26-gw-read-yomitan-parity.md`.
+//! is read past rather than read) and several term dictionaries at once --
+//! see `tech-notes/plans/glyphwire/2026-09-26-gw-read-yomitan-parity.md`.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
@@ -389,43 +377,177 @@ pub fn hasFrequency(dict: *Dict) bool {
     return stmt.step() catch false;
 }
 
-/// One deinflection step: strip `kana_in` off the end of the clicked
-/// text and append `kana_out` to get a candidate one layer less
-/// conjugated. `rules_out` restricts which of the *candidate*'s own
-/// `rules` tags make the guess acceptable when the candidate is queried
-/// directly against the dictionary -- without it, stripping "ない" off
-/// any text ending that way would "deinflect" plenty of unrelated words
-/// that merely happen to end in it.
+/// A grammatical condition a form can be in -- Yomitan's
+/// `LanguageTransformer` conditions for Japanese, the full set, under ASCII
+/// names (`-ます` is `masu`, `-て` is `te`, and so on). Each value is one
+/// bit; Yomitan's umbrella classes (`v`, `v1`, `v5`, `v5s`) are not members
+/// but unions of these, built in `cond` the way Yomitan builds them from
+/// its `subConditions`.
 ///
-/// An empty `rules_out` (`&.{}`) means the form this rule produces is
-/// never itself a valid final match -- it's an intermediate derivation
-/// (a pre-collapse "-nakatta" negative-past, which first has to become
-/// plain "-nai") that isn't a dictionary headword itself, so the search
-/// must apply at least one more rule before it can succeed.
-/// `hasAnyRule(rules, &.{})` always returns `false`, so this falls out
-/// of the existing filter with no special casing -- see
-/// `Search.collect`. Causative and passive/potential, despite also
-/// being "productive derivations", do *not* use this -- they collapse
-/// straight to the real headword, so they carry that headword's own
-/// `v1`/`v5` tag instead (see the rule table below).
+/// Two kinds, and the difference is what makes the search work:
+///
+/// - **Dictionary forms** (`v1*`, `v5*`, `vk`, `vs`, `vz`, `adj_i`): a
+///   dictionary row's `rules` tags map onto these (`conditionsForRules`),
+///   so a form carrying one can be accepted as a final match.
+/// - **Intermediate forms** (`masu`, `te`, `ta`, ...): what a form is
+///   *partway* through unwinding -- 食べている stripped to 食べて is "a
+///   -て form". No row carries one, so a form in only these conditions is
+///   never itself an answer and the search has to keep going. This is what
+///   the old `rules_out = &.{}` convention stood in for.
+///
+/// Some are unused by `deinflect_rules` today (`v5ss`/`v5sp`, `nasai`,
+/// `ya`): the short causative, -なさい and the -ゃ contractions are Yomitan
+/// forms this table has no rows for yet. They are declared anyway so that
+/// adding those rows is a table edit, not a type change.
+pub const Condition = enum {
+    /// Ichidan verb, dictionary form.
+    v1d,
+    /// Ichidan verb, progressive or perfect form (the いる of 〜ている).
+    v1p,
+    /// Godan verb, dictionary form.
+    v5d,
+    /// Godan short causative ending in さす (cannot take the passive).
+    v5ss,
+    /// Godan short causative not ending in さす (can take the passive).
+    v5sp,
+    vk,
+    vs,
+    vz,
+    adj_i,
+    /// Polite -ます.
+    masu,
+    /// Polite negative -ません.
+    masen,
+    /// -て, the base of the progressive, the te-form compounds and more.
+    te,
+    /// -ば, the provisional.
+    ba,
+    /// -く, an i-adjective's adverbial form.
+    ku,
+    /// -た, the past.
+    ta,
+    /// -ん, the colloquial negative.
+    n,
+    /// -なさい, the polite imperative.
+    nasai,
+    /// -ゃ, the conditional contraction (〜なきゃ).
+    ya,
+};
+
+/// A set of `Condition`s -- what a form *could* be. A rule applies to a
+/// form when the two sets share a condition (`conditionsMatch`).
+pub const Conditions = std.EnumSet(Condition);
+
+/// The named condition sets `deinflect_rules` is written in. `none` is the
+/// empty set, which means a different thing on each side of a rule -- see
+/// `DeinflectRule`.
+pub const cond = struct {
+    pub const none: Conditions = .empty;
+
+    pub const v1d: Conditions = .initOne(.v1d);
+    pub const v1p: Conditions = .initOne(.v1p);
+    pub const v5d: Conditions = .initOne(.v5d);
+    pub const v5ss: Conditions = .initOne(.v5ss);
+    pub const v5sp: Conditions = .initOne(.v5sp);
+    pub const vk: Conditions = .initOne(.vk);
+    pub const vs: Conditions = .initOne(.vs);
+    pub const vz: Conditions = .initOne(.vz);
+    pub const adj_i: Conditions = .initOne(.adj_i);
+    pub const masu: Conditions = .initOne(.masu);
+    pub const masen: Conditions = .initOne(.masen);
+    pub const te: Conditions = .initOne(.te);
+    pub const ba: Conditions = .initOne(.ba);
+    pub const ku: Conditions = .initOne(.ku);
+    pub const ta: Conditions = .initOne(.ta);
+    pub const n: Conditions = .initOne(.n);
+    pub const nasai: Conditions = .initOne(.nasai);
+    pub const ya: Conditions = .initOne(.ya);
+
+    // Yomitan's umbrella classes: each is the union of its subconditions.
+    pub const v1: Conditions = .initMany(&.{ .v1d, .v1p });
+    pub const v5s: Conditions = .initMany(&.{ .v5ss, .v5sp });
+    pub const v5: Conditions = .initMany(&.{ .v5d, .v5ss, .v5sp });
+    pub const v: Conditions = v1.unionWith(v5).unionWith(vk).unionWith(vs).unionWith(vz);
+};
+
+/// Yomitan's `conditionsMatch`: may a rule whose `conditions_in` is `next`
+/// apply to a form currently in `current`? Yes when the two share a
+/// condition -- or when `current` is empty, which is the text as written
+/// (nothing is known about it yet) or the output of a rule that
+/// deliberately says nothing (the copula rows).
+///
+/// The empty case cuts both ways, and that is intended: a rule with an
+/// *empty* `conditions_in` only ever matches an empty `current`, so it
+/// applies to the text as written and nowhere deeper in a chain. That is
+/// how the imperative, volitional and similar rows say "this ending is
+/// always the outermost one".
+pub fn conditionsMatch(current: Conditions, next: Conditions) bool {
+    if (current.count() == 0) return true;
+    return current.intersectWith(next).count() != 0;
+}
+
+/// The conditions a dictionary row's space-separated `rules` tags put it
+/// in. Only Yomitan's dictionary-form classes count. Any other tag, and an
+/// empty `rules` column (every noun and na-adjective), maps to nothing, so
+/// such a row is a final match only for a form whose conditions are empty:
+/// the text as written, or a copula row's output.
+pub fn conditionsForRules(rules: []const u8) Conditions {
+    var out: Conditions = .empty;
+    var it = std.mem.tokenizeScalar(u8, rules, ' ');
+    while (it.next()) |tag| {
+        if (std.mem.eql(u8, tag, "v1")) {
+            out = out.unionWith(cond.v1);
+        } else if (std.mem.eql(u8, tag, "v5")) {
+            out = out.unionWith(cond.v5);
+        } else if (std.mem.eql(u8, tag, "vk")) {
+            out.insert(.vk);
+        } else if (std.mem.eql(u8, tag, "vs")) {
+            out.insert(.vs);
+        } else if (std.mem.eql(u8, tag, "vz")) {
+            out.insert(.vz);
+        } else if (std.mem.eql(u8, tag, "adj-i")) {
+            out.insert(.adj_i);
+        }
+    }
+    return out;
+}
+
+/// One deinflection step: strip `kana_in` off the end of a form and append
+/// `kana_out` to get a candidate one layer less conjugated -- Yomitan's
+/// suffix rule, conditions and all.
+///
+/// The conditions are checked **at every step**, not just the last one,
+/// which is the point of having them. A rule applies only when the form's
+/// current conditions match its `conditions_in` (`conditionsMatch`), and
+/// the form it produces is then in `conditions_out`. A dictionary row is
+/// accepted as the answer when its own class (`conditionsForRules`) matches
+/// that set the same way. So 食べさせなかった unwinds as:
+///
+///   食べさせなかった    as written: anything
+///   -> 食べさせない     past, -た -> adj-i
+///   -> 食べさせる       negative, adj-i -> v1
+///   -> 食べる           causative, v1 -> v1; 食べる's row is v1: accepted
+///
+/// and a rule that cannot apply to what a form is -- the past rule to a -て
+/// form, say -- is never tried at all.
+///
+/// - `conditions_in` is what the *inflected* form must be: the negative
+///   ない attaches to something that conjugates as an i-adjective, so its
+///   `conditions_in` is `adj_i`. **Empty means "only the text as
+///   written"** -- see `conditionsMatch`.
+/// - `conditions_out` is what the *stripped* form is: a dictionary class
+///   (`v1`, `v5`, `adj_i`, ...) when the rule lands on a headword, an
+///   intermediate condition (`te`, `ta`, `masu`, ...) when it lands
+///   partway, which no row carries, so the search must apply another rule.
+///   **Empty means "unknown"**, and accepts any row, including the empty
+///   `rules` of a noun or na-adjective. The copula rows need that (綺麗だった
+///   -> 綺麗 has no class to check), and it is the most permissive setting
+///   in the table.
 pub const DeinflectRule = struct {
     kana_in: []const u8,
     kana_out: []const u8,
-    /// The classes a row must carry for this rule's output to be accepted
-    /// as a final match. Three cases, and the third is the newest:
-    ///
-    /// - `&.{"v1"}`, `&.{ "v1", "v5" }`, ... -- the row's `rules` column
-    ///   must name one of these. The ordinary case.
-    /// - `&.{}` -- never accepted, so the rule is a pure intermediate
-    ///   derivation and the search must apply at least one more rule.
-    /// - `null` -- **accept any row, including one with no `rules` at
-    ///   all.** The copula and na-adjective rows need this: 綺麗だった
-    ///   reduces to 綺麗, and a na-adjective carries an *empty* `rules`
-    ///   column in a Jitendex build, so there is no tag for a filter to
-    ///   bite on. It is the most permissive setting in the table -- な and
-    ///   に in particular will strip a kana off anything -- and it is used
-    ///   only where the target genuinely has no verb class.
-    rules_out: ?[]const []const u8,
+    conditions_in: Conditions,
+    conditions_out: Conditions,
     /// Shown next to a deinflected match so it doesn't read as a typo of
     /// the dictionary form. Joined with other reasons along the same
     /// chain into `Hit.reason` -- see that field's doc comment for the
@@ -435,75 +557,90 @@ pub const DeinflectRule = struct {
 
 /// Deliberately partial -- see the module doc comment. One triple
 /// (negative, past, te-form) per godan sound group, three for ichidan,
-/// three for i-adjectives.
+/// three for i-adjectives; then the form families, each in its own block.
+///
+/// The conditions on each row follow Yomitan's `japanese-transforms.js` for
+/// the same form wherever this table has one: ない is `adj_i` in because
+/// the negative conjugates as an adjective, -て/-た/-ます/-ません/-ば are
+/// intermediate conditions that the te-form, past, polite, polite negative
+/// and provisional rows consume, and the outermost-only endings
+/// (imperative, volitional, conditional, -そう, -ず/-ぬ) have an empty
+/// `conditions_in`. Where this table chains instead of matching a whole
+/// ending (-たら onto the past, 〜ちゃう onto the te-form) the row's
+/// `conditions_out` is the intermediate condition the next row takes in.
+///
+/// The comments below call a row **terminal** when its `conditions_out` is
+/// a dictionary class, so its output can be the answer, and
+/// **non-terminal** when it is an intermediate condition, so another rule
+/// must follow.
 pub const deinflect_rules = [_]DeinflectRule{
-    .{ .kana_in = "わない", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "った", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "って", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "わない", .kana_out = "う", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "った", .kana_out = "う", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "って", .kana_out = "う", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
-    .{ .kana_in = "かない", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "いた", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "いて", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "かない", .kana_out = "く", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "いた", .kana_out = "く", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "いて", .kana_out = "く", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
-    .{ .kana_in = "がない", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "いだ", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "いで", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "がない", .kana_out = "ぐ", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "いだ", .kana_out = "ぐ", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "いで", .kana_out = "ぐ", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
-    .{ .kana_in = "さない", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "した", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "して", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "さない", .kana_out = "す", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "した", .kana_out = "す", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "して", .kana_out = "す", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
-    .{ .kana_in = "たない", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "った", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "って", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "たない", .kana_out = "つ", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "った", .kana_out = "つ", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "って", .kana_out = "つ", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
-    .{ .kana_in = "なない", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "んだ", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "んで", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "なない", .kana_out = "ぬ", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "んだ", .kana_out = "ぬ", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "んで", .kana_out = "ぬ", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
-    .{ .kana_in = "ばない", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "んだ", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "んで", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "ばない", .kana_out = "ぶ", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "んだ", .kana_out = "ぶ", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "んで", .kana_out = "ぶ", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
-    .{ .kana_in = "まない", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "んだ", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "んで", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "まない", .kana_out = "む", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "んだ", .kana_out = "む", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "んで", .kana_out = "む", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
     // Godan verbs ending in -る (e.g. 分かる) -- distinct from ichidan
     // only by which dictionary entry it turns out to match, which is
-    // exactly what `rules_out` disambiguates at lookup time.
-    .{ .kana_in = "らない", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "negative" },
-    .{ .kana_in = "った", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "って", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "te-form" },
+    // exactly what `conditions_out` disambiguates at lookup time.
+    .{ .kana_in = "らない", .kana_out = "る", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "negative" },
+    .{ .kana_in = "った", .kana_out = "る", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "って", .kana_out = "る", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
     // Ichidan (v1): -る drops cleanly, so one variant covers every verb.
-    .{ .kana_in = "ない", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "negative" },
-    .{ .kana_in = "た", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "past" },
-    .{ .kana_in = "て", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "te-form" },
+    .{ .kana_in = "ない", .kana_out = "る", .conditions_in = cond.adj_i, .conditions_out = cond.v1, .reason = "negative" },
+    .{ .kana_in = "た", .kana_out = "る", .conditions_in = cond.ta, .conditions_out = cond.v1, .reason = "past" },
+    .{ .kana_in = "て", .kana_out = "る", .conditions_in = cond.te, .conditions_out = cond.v1, .reason = "te-form" },
 
     // i-adjectives.
-    .{ .kana_in = "くない", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "negative" },
-    .{ .kana_in = "かった", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "past" },
-    .{ .kana_in = "くて", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "te-form" },
+    .{ .kana_in = "くない", .kana_out = "い", .conditions_in = cond.adj_i, .conditions_out = cond.adj_i, .reason = "negative" },
+    .{ .kana_in = "かった", .kana_out = "い", .conditions_in = cond.ta, .conditions_out = cond.adj_i, .reason = "past" },
+    .{ .kana_in = "くて", .kana_out = "い", .conditions_in = cond.te, .conditions_out = cond.adj_i, .reason = "te-form" },
 
     // Negative-past: collapses to the plain negative ("ない") one layer
-    // in, so it's non-terminal -- the chain finishes via whichever plain
-    // negative rule above matches next (godan/ichidan/adjective all end
-    // in exactly "ない" regardless of what precedes it, so one row here
-    // covers every conjugation class).
+    // in, and whichever plain negative rule above matches next finishes
+    // the chain (godan/ichidan/adjective all end in exactly "ない"
+    // regardless of what precedes it, so one row here covers every
+    // conjugation class).
     //
     // **This row never actually decides anything, and the reason is worth
     // understanding.** "ない" is itself an i-adjective, so "なかった" is
     // just its adjective past -- and the "かった" -> "い" row directly
-    // above produces exactly the same string for every input this one
-    // does (X なかった -> X な + い -> X ない). Being earlier in the table,
-    // it always wins the tie in `Search.offer`, so a negative-past chain
-    // reports "negative, past" rather than "negative, negative past".
-    // That decomposition is the more honest one, which is why this is
-    // documented rather than fixed by reordering. The row is kept because
-    // it states the intent, but the live example of a non-terminal rule
-    // is the progressive block further down, not this one.
-    .{ .kana_in = "なかった", .kana_out = "ない", .rules_out = &.{}, .reason = "negative past" },
+    // above produces exactly the same string, in the same `adj_i`
+    // condition, for every input this one does (X なかった -> X な + い ->
+    // X ない). Being earlier in the table it reaches that form first, and
+    // `Search.collect`'s visited set then drops this row's identical
+    // result, so a negative-past chain reports "negative, past" rather
+    // than "negative, negative past". That decomposition is the more
+    // honest one, which is why this is documented rather than fixed by
+    // reordering. The row is kept because it states the intent.
+    .{ .kana_in = "なかった", .kana_out = "ない", .conditions_in = cond.ta, .conditions_out = cond.adj_i, .reason = "negative past" },
 
     // Causative. Terminal, not non-terminal: stripping it always lands
     // directly on the plain dictionary form (食べさせる -> 食べる), the
@@ -514,76 +651,79 @@ pub const deinflect_rules = [_]DeinflectRule{
     // outer layer is peeled by the *plain* negative/past/te-form rules
     // above first, landing on the bare causative form ("食べさせる") as
     // their own intermediate step, which this rule then finishes in the
-    // next round of the search. (An earlier version of this table marked
-    // these `rules_out = &.{}` on the reasoning "causative is never a
-    // headword" -- true, but irrelevant: `rules_out` validates the STEM
-    // *after* stripping the causative suffix, which is always the real
-    // headword. That version could never actually resolve a causative
-    // chain; caught by hand-tracing `食べさせない`/`食べさせた` against it.)
-    .{ .kana_in = "させる", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "causative" },
-    .{ .kana_in = "わせる", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "causative" },
-    .{ .kana_in = "かせる", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "causative" },
-    .{ .kana_in = "がせる", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "causative" },
-    .{ .kana_in = "たせる", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "causative" },
-    .{ .kana_in = "なせる", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "causative" },
-    .{ .kana_in = "ばせる", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "causative" },
-    .{ .kana_in = "ませる", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "causative" },
-    .{ .kana_in = "らせる", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "causative" },
+    // next round of the search. Its `conditions_in` is `v1` because a
+    // causative verb conjugates as ichidan, which is what lets the outer
+    // negative (adj-i -> v1) hand 食べさせる to it at all. (An earlier
+    // version of this table, before conditions, marked these
+    // non-terminal on the reasoning "causative is never a headword" --
+    // true, but irrelevant: what is checked is the STEM *after* stripping
+    // the causative suffix, which is always the real headword. That
+    // version could never actually resolve a causative chain; caught by
+    // hand-tracing `食べさせない`/`食べさせた` against it.)
+    .{ .kana_in = "させる", .kana_out = "る", .conditions_in = cond.v1, .conditions_out = cond.v1, .reason = "causative" },
+    .{ .kana_in = "わせる", .kana_out = "う", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
+    .{ .kana_in = "かせる", .kana_out = "く", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
+    .{ .kana_in = "がせる", .kana_out = "ぐ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
+    .{ .kana_in = "たせる", .kana_out = "つ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
+    .{ .kana_in = "なせる", .kana_out = "ぬ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
+    .{ .kana_in = "ばせる", .kana_out = "ぶ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
+    .{ .kana_in = "ませる", .kana_out = "む", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
+    .{ .kana_in = "らせる", .kana_out = "る", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
 
     // Passive/potential. Terminal, same reasoning as causative above.
     // "られる" is genuinely ambiguous between ichidan and godan-る (both
     // conjugate their passive/potential the same way), so that one row
     // accepts either tag rather than picking one.
-    .{ .kana_in = "られる", .kana_out = "る", .rules_out = &.{ "v1", "v5" }, .reason = "passive/potential" },
-    .{ .kana_in = "われる", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "passive/potential" },
-    .{ .kana_in = "かれる", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "passive/potential" },
-    .{ .kana_in = "がれる", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "passive/potential" },
-    .{ .kana_in = "される", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "passive/potential" },
-    .{ .kana_in = "たれる", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "passive/potential" },
-    .{ .kana_in = "なれる", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "passive/potential" },
-    .{ .kana_in = "ばれる", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "passive/potential" },
-    .{ .kana_in = "まれる", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "passive/potential" },
+    .{ .kana_in = "られる", .kana_out = "る", .conditions_in = cond.v1, .conditions_out = cond.v1.unionWith(cond.v5), .reason = "passive/potential" },
+    .{ .kana_in = "われる", .kana_out = "う", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "passive/potential" },
+    .{ .kana_in = "かれる", .kana_out = "く", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "passive/potential" },
+    .{ .kana_in = "がれる", .kana_out = "ぐ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "passive/potential" },
+    .{ .kana_in = "される", .kana_out = "す", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "passive/potential" },
+    .{ .kana_in = "たれる", .kana_out = "つ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "passive/potential" },
+    .{ .kana_in = "なれる", .kana_out = "ぬ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "passive/potential" },
+    .{ .kana_in = "ばれる", .kana_out = "ぶ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "passive/potential" },
+    .{ .kana_in = "まれる", .kana_out = "む", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "passive/potential" },
 
     // Polite non-past ("-masu"). Terminal -- a plain conjunctive/i-stem
     // form directly corresponds to a real dictionary headword, the same
     // as the plain negative/past/te-form rows above.
-    .{ .kana_in = "ます", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "polite" },
-    .{ .kana_in = "います", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "polite" },
-    .{ .kana_in = "きます", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "polite" },
-    .{ .kana_in = "ぎます", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "polite" },
-    .{ .kana_in = "します", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "polite" },
-    .{ .kana_in = "ちます", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "polite" },
-    .{ .kana_in = "にます", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "polite" },
-    .{ .kana_in = "びます", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "polite" },
-    .{ .kana_in = "みます", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "polite" },
-    .{ .kana_in = "ります", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "polite" },
+    .{ .kana_in = "ます", .kana_out = "る", .conditions_in = cond.masu, .conditions_out = cond.v1, .reason = "polite" },
+    .{ .kana_in = "います", .kana_out = "う", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
+    .{ .kana_in = "きます", .kana_out = "く", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
+    .{ .kana_in = "ぎます", .kana_out = "ぐ", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
+    .{ .kana_in = "します", .kana_out = "す", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
+    .{ .kana_in = "ちます", .kana_out = "つ", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
+    .{ .kana_in = "にます", .kana_out = "ぬ", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
+    .{ .kana_in = "びます", .kana_out = "ぶ", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
+    .{ .kana_in = "みます", .kana_out = "む", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
+    .{ .kana_in = "ります", .kana_out = "る", .conditions_in = cond.masu, .conditions_out = cond.v5, .reason = "polite" },
 
     // Polite past ("-mashita"). Same i-stem endings as -masu above, also
     // terminal.
-    .{ .kana_in = "ました", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "polite past" },
-    .{ .kana_in = "いました", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "polite past" },
-    .{ .kana_in = "きました", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "polite past" },
-    .{ .kana_in = "ぎました", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "polite past" },
-    .{ .kana_in = "しました", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "polite past" },
-    .{ .kana_in = "ちました", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "polite past" },
-    .{ .kana_in = "にました", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "polite past" },
-    .{ .kana_in = "びました", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "polite past" },
-    .{ .kana_in = "みました", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "polite past" },
-    .{ .kana_in = "りました", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "polite past" },
+    .{ .kana_in = "ました", .kana_out = "る", .conditions_in = cond.ta, .conditions_out = cond.v1, .reason = "polite past" },
+    .{ .kana_in = "いました", .kana_out = "う", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
+    .{ .kana_in = "きました", .kana_out = "く", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
+    .{ .kana_in = "ぎました", .kana_out = "ぐ", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
+    .{ .kana_in = "しました", .kana_out = "す", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
+    .{ .kana_in = "ちました", .kana_out = "つ", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
+    .{ .kana_in = "にました", .kana_out = "ぬ", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
+    .{ .kana_in = "びました", .kana_out = "ぶ", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
+    .{ .kana_in = "みました", .kana_out = "む", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
+    .{ .kana_in = "りました", .kana_out = "る", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "polite past" },
 
     // Polite negative ("-masen"). Same i-stem endings again, terminal.
     // "-masendeshita" (polite negative past) is not covered -- see the
     // module doc comment.
-    .{ .kana_in = "ません", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "polite negative" },
-    .{ .kana_in = "いません", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "polite negative" },
-    .{ .kana_in = "きません", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "polite negative" },
-    .{ .kana_in = "ぎません", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "polite negative" },
-    .{ .kana_in = "しません", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "polite negative" },
-    .{ .kana_in = "ちません", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "polite negative" },
-    .{ .kana_in = "にません", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "polite negative" },
-    .{ .kana_in = "びません", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "polite negative" },
-    .{ .kana_in = "みません", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "polite negative" },
-    .{ .kana_in = "りません", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "polite negative" },
+    .{ .kana_in = "ません", .kana_out = "る", .conditions_in = cond.masen, .conditions_out = cond.v1, .reason = "polite negative" },
+    .{ .kana_in = "いません", .kana_out = "う", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
+    .{ .kana_in = "きません", .kana_out = "く", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
+    .{ .kana_in = "ぎません", .kana_out = "ぐ", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
+    .{ .kana_in = "しません", .kana_out = "す", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
+    .{ .kana_in = "ちません", .kana_out = "つ", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
+    .{ .kana_in = "にません", .kana_out = "ぬ", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
+    .{ .kana_in = "びません", .kana_out = "ぶ", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
+    .{ .kana_in = "みません", .kana_out = "む", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
+    .{ .kana_in = "りません", .kana_out = "る", .conditions_in = cond.masen, .conditions_out = cond.v5, .reason = "polite negative" },
 
     // Polite negative past ("-masendeshita"), non-terminal onto the polite
     // negative just above: 食べませんでした -> 食べません -> 食べる.
@@ -594,31 +734,31 @@ pub const deinflect_rules = [_]DeinflectRule{
     // whichever rule comes first in this table. Below the copula block, the
     // chain reads "polite negative, polite copula past" instead of "polite
     // negative, polite negative past".
-    .{ .kana_in = "ませんでした", .kana_out = "ません", .rules_out = &.{}, .reason = "polite negative past" },
+    .{ .kana_in = "ませんでした", .kana_out = "ません", .conditions_in = cond.ta, .conditions_out = cond.masen, .reason = "polite negative past" },
 
     // Progressive ("-teiru"/"-teru" and the "-deiru"/"-deru" variant after
     // a te-form that ends in で, e.g. 死んでいる). These strip back down
     // to the plain te-form, not to a headword directly -- the existing
     // te-form rules above take it the rest of the way (e.g. 食べている ->
     // 食べて -> 食べる, two chained steps), so this is non-terminal.
-    .{ .kana_in = "ている", .kana_out = "て", .rules_out = &.{}, .reason = "progressive" },
-    .{ .kana_in = "てる", .kana_out = "て", .rules_out = &.{}, .reason = "progressive" },
-    .{ .kana_in = "でいる", .kana_out = "で", .rules_out = &.{}, .reason = "progressive" },
-    .{ .kana_in = "でる", .kana_out = "で", .rules_out = &.{}, .reason = "progressive" },
+    .{ .kana_in = "ている", .kana_out = "て", .conditions_in = cond.v1, .conditions_out = cond.te, .reason = "progressive" },
+    .{ .kana_in = "てる", .kana_out = "て", .conditions_in = cond.v1p, .conditions_out = cond.te, .reason = "progressive" },
+    .{ .kana_in = "でいる", .kana_out = "で", .conditions_in = cond.v1, .conditions_out = cond.te, .reason = "progressive" },
+    .{ .kana_in = "でる", .kana_out = "で", .conditions_in = cond.v1p, .conditions_out = cond.te, .reason = "progressive" },
 
     // Volitional ("-you"/"let's"). Terminal, like the plain
     // negative/past rows -- a real conjugated form of the headword
     // itself, not a further derivation.
-    .{ .kana_in = "よう", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "volitional" },
-    .{ .kana_in = "おう", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "volitional" },
-    .{ .kana_in = "こう", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "volitional" },
-    .{ .kana_in = "ごう", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "volitional" },
-    .{ .kana_in = "そう", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "volitional" },
-    .{ .kana_in = "とう", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "volitional" },
-    .{ .kana_in = "のう", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "volitional" },
-    .{ .kana_in = "ぼう", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "volitional" },
-    .{ .kana_in = "もう", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "volitional" },
-    .{ .kana_in = "ろう", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "volitional" },
+    .{ .kana_in = "よう", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v1, .reason = "volitional" },
+    .{ .kana_in = "おう", .kana_out = "う", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
+    .{ .kana_in = "こう", .kana_out = "く", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
+    .{ .kana_in = "ごう", .kana_out = "ぐ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
+    .{ .kana_in = "そう", .kana_out = "す", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
+    .{ .kana_in = "とう", .kana_out = "つ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
+    .{ .kana_in = "のう", .kana_out = "ぬ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
+    .{ .kana_in = "ぼう", .kana_out = "ぶ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
+    .{ .kana_in = "もう", .kana_out = "む", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
+    .{ .kana_in = "ろう", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "volitional" },
 
     // Desiderative ("-tai", "wants to"). Terminal, from the i-stem like
     // the polite rows above. "-tai" is itself an i-adjective, so its own
@@ -626,16 +766,16 @@ pub const deinflect_rules = [_]DeinflectRule{
     // 食べたくない -> 食べたい -> 食べる, two steps. The irregular verbs'
     // desiderative rows (したい, 来たい, ...) live in their own blocks at
     // the end of this table, not here.
-    .{ .kana_in = "たい", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "desiderative" },
-    .{ .kana_in = "いたい", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "desiderative" },
-    .{ .kana_in = "きたい", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "desiderative" },
-    .{ .kana_in = "ぎたい", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "desiderative" },
-    .{ .kana_in = "したい", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "desiderative" },
-    .{ .kana_in = "ちたい", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "desiderative" },
-    .{ .kana_in = "にたい", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "desiderative" },
-    .{ .kana_in = "びたい", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "desiderative" },
-    .{ .kana_in = "みたい", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "desiderative" },
-    .{ .kana_in = "りたい", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "desiderative" },
+    .{ .kana_in = "たい", .kana_out = "る", .conditions_in = cond.adj_i, .conditions_out = cond.v1, .reason = "desiderative" },
+    .{ .kana_in = "いたい", .kana_out = "う", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
+    .{ .kana_in = "きたい", .kana_out = "く", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
+    .{ .kana_in = "ぎたい", .kana_out = "ぐ", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
+    .{ .kana_in = "したい", .kana_out = "す", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
+    .{ .kana_in = "ちたい", .kana_out = "つ", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
+    .{ .kana_in = "にたい", .kana_out = "ぬ", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
+    .{ .kana_in = "びたい", .kana_out = "ぶ", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
+    .{ .kana_in = "みたい", .kana_out = "む", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
+    .{ .kana_in = "りたい", .kana_out = "る", .conditions_in = cond.adj_i, .conditions_out = cond.v5, .reason = "desiderative" },
 
     // Conditional ("-tara"). Two rows, not ten: "-tara" *is* the past
     // form plus ら, so it collapses onto the past and the past rules
@@ -643,8 +783,8 @@ pub const deinflect_rules = [_]DeinflectRule{
     // progressive rows are. 食べたら -> 食べた -> 食べる, 読んだら ->
     // 読んだ -> 読む, 高かったら -> 高かった -> 高い, したら -> した ->
     // する. Modelling it this way isn't a shortcut, it's the morphology.
-    .{ .kana_in = "たら", .kana_out = "た", .rules_out = &.{}, .reason = "conditional" },
-    .{ .kana_in = "だら", .kana_out = "だ", .rules_out = &.{}, .reason = "conditional" },
+    .{ .kana_in = "たら", .kana_out = "た", .conditions_in = cond.none, .conditions_out = cond.ta, .reason = "conditional" },
+    .{ .kana_in = "だら", .kana_out = "だ", .conditions_in = cond.none, .conditions_out = cond.ta, .reason = "conditional" },
 
     // Provisional ("-eba"). Terminal. "れば" is ambiguous between
     // ichidan (食べれば) and godan -る (分かれば) exactly as "られる" is,
@@ -654,16 +794,16 @@ pub const deinflect_rules = [_]DeinflectRule{
     // 食べなければ to 食べない, which the negative rows then reduce to
     // 食べる, and the chain reads "negative, provisional" -- which is
     // what 食べなければ is.
-    .{ .kana_in = "えば", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "provisional" },
-    .{ .kana_in = "けば", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "provisional" },
-    .{ .kana_in = "げば", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "provisional" },
-    .{ .kana_in = "せば", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "provisional" },
-    .{ .kana_in = "てば", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "provisional" },
-    .{ .kana_in = "ねば", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "provisional" },
-    .{ .kana_in = "べば", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "provisional" },
-    .{ .kana_in = "めば", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "provisional" },
-    .{ .kana_in = "れば", .kana_out = "る", .rules_out = &.{ "v1", "v5" }, .reason = "provisional" },
-    .{ .kana_in = "ければ", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "provisional" },
+    .{ .kana_in = "えば", .kana_out = "う", .conditions_in = cond.ba, .conditions_out = cond.v5, .reason = "provisional" },
+    .{ .kana_in = "けば", .kana_out = "く", .conditions_in = cond.ba, .conditions_out = cond.v5, .reason = "provisional" },
+    .{ .kana_in = "げば", .kana_out = "ぐ", .conditions_in = cond.ba, .conditions_out = cond.v5, .reason = "provisional" },
+    .{ .kana_in = "せば", .kana_out = "す", .conditions_in = cond.ba, .conditions_out = cond.v5, .reason = "provisional" },
+    .{ .kana_in = "てば", .kana_out = "つ", .conditions_in = cond.ba, .conditions_out = cond.v5, .reason = "provisional" },
+    .{ .kana_in = "ねば", .kana_out = "ぬ", .conditions_in = cond.ba, .conditions_out = cond.v5, .reason = "provisional" },
+    .{ .kana_in = "べば", .kana_out = "ぶ", .conditions_in = cond.ba, .conditions_out = cond.v5, .reason = "provisional" },
+    .{ .kana_in = "めば", .kana_out = "む", .conditions_in = cond.ba, .conditions_out = cond.v5, .reason = "provisional" },
+    .{ .kana_in = "れば", .kana_out = "る", .conditions_in = cond.ba, .conditions_out = cond.v1.unionWith(cond.v5), .reason = "provisional" },
+    .{ .kana_in = "ければ", .kana_out = "い", .conditions_in = cond.ba, .conditions_out = cond.adj_i, .reason = "provisional" },
 
     // Imperative. The only single-kana `kana_in` rules in the table, and
     // so the most aggressive: every word ending in え/け/せ/て/... now
@@ -676,22 +816,22 @@ pub const deinflect_rules = [_]DeinflectRule{
     //
     // "て" -> "つ" sits beside the existing te-form "て" -> "る": both
     // fire on the same text and each finds only its own class.
-    .{ .kana_in = "ろ", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "imperative" },
-    .{ .kana_in = "よ", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "imperative" },
-    .{ .kana_in = "え", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "imperative" },
-    .{ .kana_in = "け", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "imperative" },
-    .{ .kana_in = "げ", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "imperative" },
-    .{ .kana_in = "せ", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "imperative" },
-    .{ .kana_in = "て", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "imperative" },
-    .{ .kana_in = "ね", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "imperative" },
-    .{ .kana_in = "べ", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "imperative" },
-    .{ .kana_in = "め", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "imperative" },
-    .{ .kana_in = "れ", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "imperative" },
+    .{ .kana_in = "ろ", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v1, .reason = "imperative" },
+    .{ .kana_in = "よ", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v1, .reason = "imperative" },
+    .{ .kana_in = "え", .kana_out = "う", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
+    .{ .kana_in = "け", .kana_out = "く", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
+    .{ .kana_in = "げ", .kana_out = "ぐ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
+    .{ .kana_in = "せ", .kana_out = "す", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
+    .{ .kana_in = "て", .kana_out = "つ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
+    .{ .kana_in = "ね", .kana_out = "ぬ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
+    .{ .kana_in = "べ", .kana_out = "ぶ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
+    .{ .kana_in = "め", .kana_out = "む", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
+    .{ .kana_in = "れ", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "imperative" },
 
     // Polite volitional ("-mashou"). One non-terminal row onto the polite
     // non-past, which the -masu rules above then take to the headword:
     // 食べましょう -> 食べます -> 食べる.
-    .{ .kana_in = "ましょう", .kana_out = "ます", .rules_out = &.{}, .reason = "polite volitional" },
+    .{ .kana_in = "ましょう", .kana_out = "ます", .conditions_in = cond.none, .conditions_out = cond.masu, .reason = "polite volitional" },
 
     // -- Irregular verbs -------------------------------------------------
     //
@@ -712,51 +852,51 @@ pub const deinflect_rules = [_]DeinflectRule{
     // Not listed, because they already chain through the rows above:
     // している / してる (progressive -> して), しなかった (negative past
     // -> しない), したら (conditional -> した).
-    .{ .kana_in = "した", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "past" },
-    .{ .kana_in = "して", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "te-form" },
-    .{ .kana_in = "しない", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "negative" },
-    .{ .kana_in = "します", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "polite" },
-    .{ .kana_in = "しました", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "polite past" },
-    .{ .kana_in = "しません", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "polite negative" },
-    .{ .kana_in = "しよう", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "volitional" },
-    .{ .kana_in = "したい", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "desiderative" },
-    .{ .kana_in = "すれば", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "provisional" },
-    .{ .kana_in = "しろ", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "imperative" },
-    .{ .kana_in = "せよ", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "imperative" },
-    .{ .kana_in = "される", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "passive/potential" },
-    .{ .kana_in = "させる", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "causative" },
+    .{ .kana_in = "した", .kana_out = "する", .conditions_in = cond.ta, .conditions_out = cond.vs, .reason = "past" },
+    .{ .kana_in = "して", .kana_out = "する", .conditions_in = cond.te, .conditions_out = cond.vs, .reason = "te-form" },
+    .{ .kana_in = "しない", .kana_out = "する", .conditions_in = cond.adj_i, .conditions_out = cond.vs, .reason = "negative" },
+    .{ .kana_in = "します", .kana_out = "する", .conditions_in = cond.masu, .conditions_out = cond.vs, .reason = "polite" },
+    .{ .kana_in = "しました", .kana_out = "する", .conditions_in = cond.ta, .conditions_out = cond.vs, .reason = "polite past" },
+    .{ .kana_in = "しません", .kana_out = "する", .conditions_in = cond.masen, .conditions_out = cond.vs, .reason = "polite negative" },
+    .{ .kana_in = "しよう", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "volitional" },
+    .{ .kana_in = "したい", .kana_out = "する", .conditions_in = cond.adj_i, .conditions_out = cond.vs, .reason = "desiderative" },
+    .{ .kana_in = "すれば", .kana_out = "する", .conditions_in = cond.ba, .conditions_out = cond.vs, .reason = "provisional" },
+    .{ .kana_in = "しろ", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "imperative" },
+    .{ .kana_in = "せよ", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "imperative" },
+    .{ .kana_in = "される", .kana_out = "する", .conditions_in = cond.v1, .conditions_out = cond.vs, .reason = "passive/potential" },
+    .{ .kana_in = "させる", .kana_out = "する", .conditions_in = cond.v1, .conditions_out = cond.vs, .reason = "causative" },
 
     // 来る (vk), written with the kanji. The irregularity is in the stem
     // vowel, which the kanji spelling hides -- 来 stays put and only the
     // kana after it change -- so these look like ordinary suffix swaps.
     // Compounds come along by suffix match: 帰って来ない -> 帰って来る.
-    .{ .kana_in = "来た", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "past" },
-    .{ .kana_in = "来て", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "te-form" },
-    .{ .kana_in = "来ない", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "negative" },
-    .{ .kana_in = "来ます", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "polite" },
-    .{ .kana_in = "来ました", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "polite past" },
-    .{ .kana_in = "来ません", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "polite negative" },
-    .{ .kana_in = "来よう", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "volitional" },
-    .{ .kana_in = "来たい", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "desiderative" },
-    .{ .kana_in = "来れば", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "provisional" },
-    .{ .kana_in = "来い", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "imperative" },
-    .{ .kana_in = "来られる", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "passive/potential" },
-    .{ .kana_in = "来させる", .kana_out = "来る", .rules_out = &.{"vk"}, .reason = "causative" },
+    .{ .kana_in = "来た", .kana_out = "来る", .conditions_in = cond.ta, .conditions_out = cond.vk, .reason = "past" },
+    .{ .kana_in = "来て", .kana_out = "来る", .conditions_in = cond.te, .conditions_out = cond.vk, .reason = "te-form" },
+    .{ .kana_in = "来ない", .kana_out = "来る", .conditions_in = cond.adj_i, .conditions_out = cond.vk, .reason = "negative" },
+    .{ .kana_in = "来ます", .kana_out = "来る", .conditions_in = cond.masu, .conditions_out = cond.vk, .reason = "polite" },
+    .{ .kana_in = "来ました", .kana_out = "来る", .conditions_in = cond.ta, .conditions_out = cond.vk, .reason = "polite past" },
+    .{ .kana_in = "来ません", .kana_out = "来る", .conditions_in = cond.masen, .conditions_out = cond.vk, .reason = "polite negative" },
+    .{ .kana_in = "来よう", .kana_out = "来る", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "volitional" },
+    .{ .kana_in = "来たい", .kana_out = "来る", .conditions_in = cond.adj_i, .conditions_out = cond.vk, .reason = "desiderative" },
+    .{ .kana_in = "来れば", .kana_out = "来る", .conditions_in = cond.ba, .conditions_out = cond.vk, .reason = "provisional" },
+    .{ .kana_in = "来い", .kana_out = "来る", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "imperative" },
+    .{ .kana_in = "来られる", .kana_out = "来る", .conditions_in = cond.v1, .conditions_out = cond.vk, .reason = "passive/potential" },
+    .{ .kana_in = "来させる", .kana_out = "来る", .conditions_in = cond.v1, .conditions_out = cond.vk, .reason = "causative" },
 
     // 来る (vk), written in kana, where the stem vowel really does change
     // (き-/こ-/く-) and each form needs its own row.
-    .{ .kana_in = "きた", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "past" },
-    .{ .kana_in = "きて", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "te-form" },
-    .{ .kana_in = "こない", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "negative" },
-    .{ .kana_in = "きます", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "polite" },
-    .{ .kana_in = "きました", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "polite past" },
-    .{ .kana_in = "きません", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "polite negative" },
-    .{ .kana_in = "こよう", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "volitional" },
-    .{ .kana_in = "きたい", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "desiderative" },
-    .{ .kana_in = "くれば", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "provisional" },
-    .{ .kana_in = "こい", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "imperative" },
-    .{ .kana_in = "こられる", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "passive/potential" },
-    .{ .kana_in = "こさせる", .kana_out = "くる", .rules_out = &.{"vk"}, .reason = "causative" },
+    .{ .kana_in = "きた", .kana_out = "くる", .conditions_in = cond.ta, .conditions_out = cond.vk, .reason = "past" },
+    .{ .kana_in = "きて", .kana_out = "くる", .conditions_in = cond.te, .conditions_out = cond.vk, .reason = "te-form" },
+    .{ .kana_in = "こない", .kana_out = "くる", .conditions_in = cond.adj_i, .conditions_out = cond.vk, .reason = "negative" },
+    .{ .kana_in = "きます", .kana_out = "くる", .conditions_in = cond.masu, .conditions_out = cond.vk, .reason = "polite" },
+    .{ .kana_in = "きました", .kana_out = "くる", .conditions_in = cond.ta, .conditions_out = cond.vk, .reason = "polite past" },
+    .{ .kana_in = "きません", .kana_out = "くる", .conditions_in = cond.masen, .conditions_out = cond.vk, .reason = "polite negative" },
+    .{ .kana_in = "こよう", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "volitional" },
+    .{ .kana_in = "きたい", .kana_out = "くる", .conditions_in = cond.adj_i, .conditions_out = cond.vk, .reason = "desiderative" },
+    .{ .kana_in = "くれば", .kana_out = "くる", .conditions_in = cond.ba, .conditions_out = cond.vk, .reason = "provisional" },
+    .{ .kana_in = "こい", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "imperative" },
+    .{ .kana_in = "こられる", .kana_out = "くる", .conditions_in = cond.v1, .conditions_out = cond.vk, .reason = "passive/potential" },
+    .{ .kana_in = "こさせる", .kana_out = "くる", .conditions_in = cond.v1, .conditions_out = cond.vk, .reason = "causative" },
 
     // ずる verbs (vz): 信ずる, 論ずる, 策を講ずる. Largely redundant --
     // most have a modern ichidan twin (信じる, tagged v1) that the rows
@@ -764,17 +904,17 @@ pub const deinflect_rules = [_]DeinflectRule{
     // is what shows up in older or stiffer writing. No imperative row:
     // じろ belongs to the v1 twin, and the vz imperative (ぜよ) is rare
     // enough to leave to phase 3.
-    .{ .kana_in = "じた", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "past" },
-    .{ .kana_in = "じて", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "te-form" },
-    .{ .kana_in = "じない", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "negative" },
-    .{ .kana_in = "じます", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "polite" },
-    .{ .kana_in = "じました", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "polite past" },
-    .{ .kana_in = "じません", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "polite negative" },
-    .{ .kana_in = "じよう", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "volitional" },
-    .{ .kana_in = "じたい", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "desiderative" },
-    .{ .kana_in = "じれば", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "provisional" },
-    .{ .kana_in = "じられる", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "passive/potential" },
-    .{ .kana_in = "じさせる", .kana_out = "ずる", .rules_out = &.{"vz"}, .reason = "causative" },
+    .{ .kana_in = "じた", .kana_out = "ずる", .conditions_in = cond.ta, .conditions_out = cond.vz, .reason = "past" },
+    .{ .kana_in = "じて", .kana_out = "ずる", .conditions_in = cond.te, .conditions_out = cond.vz, .reason = "te-form" },
+    .{ .kana_in = "じない", .kana_out = "ずる", .conditions_in = cond.adj_i, .conditions_out = cond.vz, .reason = "negative" },
+    .{ .kana_in = "じます", .kana_out = "ずる", .conditions_in = cond.masu, .conditions_out = cond.vz, .reason = "polite" },
+    .{ .kana_in = "じました", .kana_out = "ずる", .conditions_in = cond.ta, .conditions_out = cond.vz, .reason = "polite past" },
+    .{ .kana_in = "じません", .kana_out = "ずる", .conditions_in = cond.masen, .conditions_out = cond.vz, .reason = "polite negative" },
+    .{ .kana_in = "じよう", .kana_out = "ずる", .conditions_in = cond.none, .conditions_out = cond.vz, .reason = "volitional" },
+    .{ .kana_in = "じたい", .kana_out = "ずる", .conditions_in = cond.adj_i, .conditions_out = cond.vz, .reason = "desiderative" },
+    .{ .kana_in = "じれば", .kana_out = "ずる", .conditions_in = cond.ba, .conditions_out = cond.vz, .reason = "provisional" },
+    .{ .kana_in = "じられる", .kana_out = "ずる", .conditions_in = cond.v1, .conditions_out = cond.vz, .reason = "passive/potential" },
+    .{ .kana_in = "じさせる", .kana_out = "ずる", .conditions_in = cond.v1, .conditions_out = cond.vz, .reason = "causative" },
 
     // 行く (v5), whose te-form and past are irregular: 行って/行った, not
     // the 書いて/書いた its -く ending would predict.
@@ -794,37 +934,44 @@ pub const deinflect_rules = [_]DeinflectRule{
     // with a `frequency_dictionary` configured it leads. Without one, 行う
     // still does -- which is the argument for configuring one, not for a
     // tiebreaker.
-    .{ .kana_in = "行った", .kana_out = "行く", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "行って", .kana_out = "行く", .rules_out = &.{"v5"}, .reason = "te-form" },
-    .{ .kana_in = "いった", .kana_out = "いく", .rules_out = &.{"v5"}, .reason = "past" },
-    .{ .kana_in = "いって", .kana_out = "いく", .rules_out = &.{"v5"}, .reason = "te-form" },
+    .{ .kana_in = "行った", .kana_out = "行く", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "行って", .kana_out = "行く", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
+    .{ .kana_in = "いった", .kana_out = "いく", .conditions_in = cond.ta, .conditions_out = cond.v5, .reason = "past" },
+    .{ .kana_in = "いって", .kana_out = "いく", .conditions_in = cond.te, .conditions_out = cond.v5, .reason = "te-form" },
 
     // -- The copula and na-adjectives ------------------------------------
     //
-    // The first rows in the table with `rules_out = null`, because their
-    // target has no class tag to check: a na-adjective or a noun carries an
-    // *empty* `rules` column, so 綺麗だった -> 綺麗 can only be validated
-    // by "some row exists". See `DeinflectRule.rules_out`.
+    // The only rows in the table with an empty `conditions_out`, because
+    // their target has no class tag to check: a na-adjective or a noun
+    // carries an *empty* `rules` column, so 綺麗だった -> 綺麗 can only be
+    // validated by "some row exists". See `DeinflectRule.conditions_out`.
+    // Their `conditions_in` still says what the copula form is (だった is a
+    // past, じゃない an adjective), so 綺麗だったら and 静かじゃなかった
+    // reach them through the conditional and the adjective past.
     //
     // No bare "だ" or "では"/"じゃ" row. Those would strip a kana off a
-    // large share of all text for a null filter to wave through, which is
-    // a different risk from the imperative rows' -- those at least still
-    // demand a v5 row at the other end.
-    .{ .kana_in = "だった", .kana_out = "", .rules_out = null, .reason = "copula past" },
-    .{ .kana_in = "です", .kana_out = "", .rules_out = null, .reason = "polite copula" },
-    .{ .kana_in = "でした", .kana_out = "", .rules_out = null, .reason = "polite copula past" },
-    .{ .kana_in = "じゃない", .kana_out = "", .rules_out = null, .reason = "negative copula" },
-    .{ .kana_in = "ではない", .kana_out = "", .rules_out = null, .reason = "negative copula" },
-    .{ .kana_in = "じゃありません", .kana_out = "", .rules_out = null, .reason = "polite negative copula" },
-    .{ .kana_in = "ではありません", .kana_out = "", .rules_out = null, .reason = "polite negative copula" },
+    // large share of all text with nothing at the other end to check,
+    // which is a different risk from the imperative rows' -- those at
+    // least still demand a v5 row.
+    .{ .kana_in = "だった", .kana_out = "", .conditions_in = cond.ta, .conditions_out = cond.none, .reason = "copula past" },
+    .{ .kana_in = "です", .kana_out = "", .conditions_in = cond.none, .conditions_out = cond.none, .reason = "polite copula" },
+    .{ .kana_in = "でした", .kana_out = "", .conditions_in = cond.ta, .conditions_out = cond.none, .reason = "polite copula past" },
+    .{ .kana_in = "じゃない", .kana_out = "", .conditions_in = cond.adj_i, .conditions_out = cond.none, .reason = "negative copula" },
+    .{ .kana_in = "ではない", .kana_out = "", .conditions_in = cond.adj_i, .conditions_out = cond.none, .reason = "negative copula" },
+    .{ .kana_in = "じゃありません", .kana_out = "", .conditions_in = cond.masen, .conditions_out = cond.none, .reason = "polite negative copula" },
+    .{ .kana_in = "ではありません", .kana_out = "", .conditions_in = cond.masen, .conditions_out = cond.none, .reason = "polite negative copula" },
     // 綺麗な人 / 静かに -- the attributive and adverbial forms a
     // na-adjective takes. These two are the most permissive rules in the
     // table: any text ending in な or に gets its last kana stripped and
     // whatever is left accepted if it exists at all. Kept because 〜な and
     // 〜に are everywhere in dialogue, and because a hit still has to be a
     // real headword; ここに -> ここ is the shape that makes it worth it.
-    .{ .kana_in = "な", .kana_out = "", .rules_out = null, .reason = "attributive" },
-    .{ .kana_in = "に", .kana_out = "", .rules_out = null, .reason = "adverbial" },
+    // Their empty `conditions_in` at least keeps them outermost: before
+    // conditions they also stripped な/に off forms *other rules had
+    // produced*, which is where a good share of the nonsense chains came
+    // from.
+    .{ .kana_in = "な", .kana_out = "", .conditions_in = cond.none, .conditions_out = cond.none, .reason = "attributive" },
+    .{ .kana_in = "に", .kana_out = "", .conditions_in = cond.none, .conditions_out = cond.none, .reason = "adverbial" },
     // じゃなかった / ではなかった need no rows: the negative-past row
     // already reduces them to じゃない / ではない.
 
@@ -836,39 +983,39 @@ pub const deinflect_rules = [_]DeinflectRule{
     // work for any adjective. The `adj-i` filter is what keeps "く" -> "い"
     // honest: 行く also matches it, but 行い is a noun, so the guess is
     // rejected rather than shown as an adjective.
-    .{ .kana_in = "さ", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "nominalizer" },
-    .{ .kana_in = "く", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "adverbial" },
-    .{ .kana_in = "かろう", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "presumptive" },
-    .{ .kana_in = "そう", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "appearance" },
-    .{ .kana_in = "すぎる", .kana_out = "い", .rules_out = &.{"adj-i"}, .reason = "excessive" },
+    .{ .kana_in = "さ", .kana_out = "い", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "nominalizer" },
+    .{ .kana_in = "く", .kana_out = "い", .conditions_in = cond.ku, .conditions_out = cond.adj_i, .reason = "adverbial" },
+    .{ .kana_in = "かろう", .kana_out = "い", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "presumptive" },
+    .{ .kana_in = "そう", .kana_out = "い", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "appearance" },
+    .{ .kana_in = "すぎる", .kana_out = "い", .conditions_in = cond.v1, .conditions_out = cond.adj_i, .reason = "excessive" },
 
     // Verbal "-sou" ("looks like it will"), from the i-stem. "そう" -> "す"
     // already exists above as the godan volitional (話そう); both fire and
     // each finds only its own class.
-    .{ .kana_in = "そう", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "appearance" },
-    .{ .kana_in = "いそう", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "きそう", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "ぎそう", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "しそう", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "ちそう", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "にそう", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "びそう", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "みそう", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "りそう", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "appearance" },
-    .{ .kana_in = "しそう", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "appearance" },
+    .{ .kana_in = "そう", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v1, .reason = "appearance" },
+    .{ .kana_in = "いそう", .kana_out = "う", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "きそう", .kana_out = "く", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "ぎそう", .kana_out = "ぐ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "しそう", .kana_out = "す", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "ちそう", .kana_out = "つ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "にそう", .kana_out = "ぬ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "びそう", .kana_out = "ぶ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "みそう", .kana_out = "む", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "りそう", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "appearance" },
+    .{ .kana_in = "しそう", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "appearance" },
 
     // Verbal "-sugiru" ("does too much"), from the same i-stem.
-    .{ .kana_in = "すぎる", .kana_out = "る", .rules_out = &.{"v1"}, .reason = "excessive" },
-    .{ .kana_in = "いすぎる", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "きすぎる", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "ぎすぎる", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "しすぎる", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "ちすぎる", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "にすぎる", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "びすぎる", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "みすぎる", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "りすぎる", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "excessive" },
-    .{ .kana_in = "しすぎる", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "excessive" },
+    .{ .kana_in = "すぎる", .kana_out = "る", .conditions_in = cond.v1, .conditions_out = cond.v1, .reason = "excessive" },
+    .{ .kana_in = "いすぎる", .kana_out = "う", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "きすぎる", .kana_out = "く", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "ぎすぎる", .kana_out = "ぐ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "しすぎる", .kana_out = "す", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "ちすぎる", .kana_out = "つ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "にすぎる", .kana_out = "ぬ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "びすぎる", .kana_out = "ぶ", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "みすぎる", .kana_out = "む", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "りすぎる", .kana_out = "る", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "excessive" },
+    .{ .kana_in = "しすぎる", .kana_out = "する", .conditions_in = cond.v1, .conditions_out = cond.vs, .reason = "excessive" },
 
     // -- te-form compounds ------------------------------------------------
     //
@@ -881,59 +1028,200 @@ pub const deinflect_rules = [_]DeinflectRule{
     // 読んで), not as the formal copula. The copula sense collides with it
     // and simply dead-ends: 学生である -> 学生で, which no te-form rule
     // accepts and no row spells.
-    .{ .kana_in = "ちゃう", .kana_out = "て", .rules_out = &.{}, .reason = "completive" },
-    .{ .kana_in = "じゃう", .kana_out = "で", .rules_out = &.{}, .reason = "completive" },
-    .{ .kana_in = "ちまう", .kana_out = "て", .rules_out = &.{}, .reason = "completive" },
-    .{ .kana_in = "じまう", .kana_out = "で", .rules_out = &.{}, .reason = "completive" },
-    .{ .kana_in = "てしまう", .kana_out = "て", .rules_out = &.{}, .reason = "completive" },
-    .{ .kana_in = "でしまう", .kana_out = "で", .rules_out = &.{}, .reason = "completive" },
-    .{ .kana_in = "ておく", .kana_out = "て", .rules_out = &.{}, .reason = "preparatory" },
-    .{ .kana_in = "でおく", .kana_out = "で", .rules_out = &.{}, .reason = "preparatory" },
-    .{ .kana_in = "とく", .kana_out = "て", .rules_out = &.{}, .reason = "preparatory" },
-    .{ .kana_in = "どく", .kana_out = "で", .rules_out = &.{}, .reason = "preparatory" },
-    .{ .kana_in = "ていく", .kana_out = "て", .rules_out = &.{}, .reason = "continuative" },
-    .{ .kana_in = "でいく", .kana_out = "で", .rules_out = &.{}, .reason = "continuative" },
-    .{ .kana_in = "てくる", .kana_out = "て", .rules_out = &.{}, .reason = "continuative" },
-    .{ .kana_in = "でくる", .kana_out = "で", .rules_out = &.{}, .reason = "continuative" },
-    .{ .kana_in = "てある", .kana_out = "て", .rules_out = &.{}, .reason = "resultative" },
-    .{ .kana_in = "である", .kana_out = "で", .rules_out = &.{}, .reason = "resultative" },
-    .{ .kana_in = "てみる", .kana_out = "て", .rules_out = &.{}, .reason = "attemptive" },
-    .{ .kana_in = "でみる", .kana_out = "で", .rules_out = &.{}, .reason = "attemptive" },
-    .{ .kana_in = "てくれる", .kana_out = "て", .rules_out = &.{}, .reason = "benefactive" },
-    .{ .kana_in = "でくれる", .kana_out = "で", .rules_out = &.{}, .reason = "benefactive" },
-    .{ .kana_in = "てもらう", .kana_out = "て", .rules_out = &.{}, .reason = "benefactive" },
-    .{ .kana_in = "でもらう", .kana_out = "で", .rules_out = &.{}, .reason = "benefactive" },
-    .{ .kana_in = "てあげる", .kana_out = "て", .rules_out = &.{}, .reason = "benefactive" },
-    .{ .kana_in = "であげる", .kana_out = "で", .rules_out = &.{}, .reason = "benefactive" },
+    .{ .kana_in = "ちゃう", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "completive" },
+    .{ .kana_in = "じゃう", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "completive" },
+    .{ .kana_in = "ちまう", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "completive" },
+    .{ .kana_in = "じまう", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "completive" },
+    .{ .kana_in = "てしまう", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "completive" },
+    .{ .kana_in = "でしまう", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "completive" },
+    .{ .kana_in = "ておく", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "preparatory" },
+    .{ .kana_in = "でおく", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "preparatory" },
+    .{ .kana_in = "とく", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "preparatory" },
+    .{ .kana_in = "どく", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "preparatory" },
+    .{ .kana_in = "ていく", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "continuative" },
+    .{ .kana_in = "でいく", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "continuative" },
+    .{ .kana_in = "てくる", .kana_out = "て", .conditions_in = cond.vk, .conditions_out = cond.te, .reason = "continuative" },
+    .{ .kana_in = "でくる", .kana_out = "で", .conditions_in = cond.vk, .conditions_out = cond.te, .reason = "continuative" },
+    .{ .kana_in = "てある", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "resultative" },
+    .{ .kana_in = "である", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "resultative" },
+    .{ .kana_in = "てみる", .kana_out = "て", .conditions_in = cond.v1, .conditions_out = cond.te, .reason = "attemptive" },
+    .{ .kana_in = "でみる", .kana_out = "で", .conditions_in = cond.v1, .conditions_out = cond.te, .reason = "attemptive" },
+    .{ .kana_in = "てくれる", .kana_out = "て", .conditions_in = cond.v1, .conditions_out = cond.te, .reason = "benefactive" },
+    .{ .kana_in = "でくれる", .kana_out = "で", .conditions_in = cond.v1, .conditions_out = cond.te, .reason = "benefactive" },
+    .{ .kana_in = "てもらう", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "benefactive" },
+    .{ .kana_in = "でもらう", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "benefactive" },
+    .{ .kana_in = "てあげる", .kana_out = "て", .conditions_in = cond.v1, .conditions_out = cond.te, .reason = "benefactive" },
+    .{ .kana_in = "であげる", .kana_out = "で", .conditions_in = cond.v1, .conditions_out = cond.te, .reason = "benefactive" },
 
     // -- Classical, colloquial and dialect negatives ----------------------
     //
-    // Four rows instead of the forty their conjugation tables would
-    // suggest, because every one of these attaches to the same negative
-    // stem "ない" does: strip the ending, put "ない" back, and the
-    // negative rows above take it the rest of the way. 知らぬ ->
-    // 知らない -> 知る; 行かず -> 行かない -> 行く; 分からん ->
-    // 分からない -> 分かる. The chain then reads "negative, colloquial
-    // negative", which is accurate -- these *are* negatives.
+    // Every one of these attaches to the same stem ない does, so they were
+    // once four rows -- strip the ending, put ない back, let the negative
+    // rows finish (知らぬ -> 知らない -> 知る). That only worked while a
+    // row could be "non-terminal". Under conditions the honest description
+    // of 知らない is `adj_i`, and the bare adjective ない/無い is `adj_i`
+    // too, so a lone ん or ず resolved to ない "colloquial negative" ahead
+    // of everything else, and 汚い turned up under きたん. So these are
+    // Yomitan's own rows, which go straight to the verb and never pass
+    // through ない: one per conjugation class, as for every other form.
     //
-    // 行かずに comes along too, via the "に" row above: three rules deep.
-    .{ .kana_in = "ぬ", .kana_out = "ない", .rules_out = &.{}, .reason = "classical negative" },
-    .{ .kana_in = "ず", .kana_out = "ない", .rules_out = &.{}, .reason = "classical negative" },
-    .{ .kana_in = "ん", .kana_out = "ない", .rules_out = &.{}, .reason = "colloquial negative" },
-    .{ .kana_in = "へん", .kana_out = "ない", .rules_out = &.{}, .reason = "Kansai negative" },
-    .{ .kana_in = "せん", .kana_out = "する", .rules_out = &.{"vs"}, .reason = "colloquial negative" },
+    // 行かずに still comes along via the "に" row above: に strips to
+    // 行かず with no conditions, which any rule may then take.
+
+    // -ず, classical negative. Outermost only, like Yomitan's.
+    .{ .kana_in = "ず", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v1, .reason = "classical negative" },
+    .{ .kana_in = "かず", .kana_out = "く", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "がず", .kana_out = "ぐ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "さず", .kana_out = "す", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "たず", .kana_out = "つ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "なず", .kana_out = "ぬ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "ばず", .kana_out = "ぶ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "まず", .kana_out = "む", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "らず", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "わず", .kana_out = "う", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "はず", .kana_out = "う", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "ぜず", .kana_out = "ずる", .conditions_in = cond.none, .conditions_out = cond.vz, .reason = "classical negative" },
+    .{ .kana_in = "せず", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "classical negative" },
+    .{ .kana_in = "為ず", .kana_out = "為る", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "classical negative" },
+    .{ .kana_in = "こず", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "classical negative" },
+    .{ .kana_in = "来ず", .kana_out = "来る", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "classical negative" },
+    .{ .kana_in = "來ず", .kana_out = "來る", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "classical negative" },
+
+    // -ぬ, classical negative.
+    .{ .kana_in = "ぬ", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v1, .reason = "classical negative" },
+    .{ .kana_in = "かぬ", .kana_out = "く", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "がぬ", .kana_out = "ぐ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "さぬ", .kana_out = "す", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "たぬ", .kana_out = "つ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "なぬ", .kana_out = "ぬ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "ばぬ", .kana_out = "ぶ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "まぬ", .kana_out = "む", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "らぬ", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "わぬ", .kana_out = "う", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "はぬ", .kana_out = "う", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "classical negative" },
+    .{ .kana_in = "ぜぬ", .kana_out = "ずる", .conditions_in = cond.none, .conditions_out = cond.vz, .reason = "classical negative" },
+    .{ .kana_in = "せぬ", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "classical negative" },
+    .{ .kana_in = "為ぬ", .kana_out = "為る", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "classical negative" },
+    .{ .kana_in = "こぬ", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "classical negative" },
+    .{ .kana_in = "来ぬ", .kana_out = "来る", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "classical negative" },
+    .{ .kana_in = "來ぬ", .kana_out = "來る", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "classical negative" },
+
+    // -ん, colloquial negative (分からん). Yomitan gives these a `-ん`
+    // condition in, which nothing in this table produces, so in practice
+    // they apply to the text as written -- the same as the rows above.
+    .{ .kana_in = "ん", .kana_out = "る", .conditions_in = cond.n, .conditions_out = cond.v1, .reason = "colloquial negative" },
+    .{ .kana_in = "かん", .kana_out = "く", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "がん", .kana_out = "ぐ", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "さん", .kana_out = "す", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "たん", .kana_out = "つ", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "なん", .kana_out = "ぬ", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "ばん", .kana_out = "ぶ", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "まん", .kana_out = "む", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "らん", .kana_out = "る", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "わん", .kana_out = "う", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "はん", .kana_out = "う", .conditions_in = cond.n, .conditions_out = cond.v5, .reason = "colloquial negative" },
+    .{ .kana_in = "ぜん", .kana_out = "ずる", .conditions_in = cond.n, .conditions_out = cond.vz, .reason = "colloquial negative" },
+    .{ .kana_in = "せん", .kana_out = "する", .conditions_in = cond.n, .conditions_out = cond.vs, .reason = "colloquial negative" },
+    .{ .kana_in = "為ん", .kana_out = "為る", .conditions_in = cond.n, .conditions_out = cond.vs, .reason = "colloquial negative" },
+    .{ .kana_in = "こん", .kana_out = "くる", .conditions_in = cond.n, .conditions_out = cond.vk, .reason = "colloquial negative" },
+    .{ .kana_in = "来ん", .kana_out = "来る", .conditions_in = cond.n, .conditions_out = cond.vk, .reason = "colloquial negative" },
+    .{ .kana_in = "來ん", .kana_out = "來る", .conditions_in = cond.n, .conditions_out = cond.vk, .reason = "colloquial negative" },
+
+    // -へん/-ひん, Kansai negative. **Not Yomitan's rows**, deliberately:
+    // Yomitan strips へん to ない as `adj-i`, which is the exact shape that
+    // made ない the top hit above (へんな showed ない ahead of 変). So
+    // these follow the -ず/-ぬ/-ん pattern instead and land on the verb.
+    // The irregular stems are spelled out the way they are actually
+    // written, long-vowel mark included, since nothing normalizes ー.
+    .{ .kana_in = "へん", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v1, .reason = "Kansai negative" },
+    .{ .kana_in = "ひん", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v1, .reason = "Kansai negative" },
+    .{ .kana_in = "かへん", .kana_out = "く", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "がへん", .kana_out = "ぐ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "さへん", .kana_out = "す", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "たへん", .kana_out = "つ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "なへん", .kana_out = "ぬ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "ばへん", .kana_out = "ぶ", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "まへん", .kana_out = "む", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "らへん", .kana_out = "る", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "わへん", .kana_out = "う", .conditions_in = cond.none, .conditions_out = cond.v5, .reason = "Kansai negative" },
+    .{ .kana_in = "せえへん", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "Kansai negative" },
+    .{ .kana_in = "せーへん", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "Kansai negative" },
+    .{ .kana_in = "しいひん", .kana_out = "する", .conditions_in = cond.none, .conditions_out = cond.vs, .reason = "Kansai negative" },
+    .{ .kana_in = "けえへん", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "Kansai negative" },
+    .{ .kana_in = "けーへん", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "Kansai negative" },
+    .{ .kana_in = "こおへん", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "Kansai negative" },
+    .{ .kana_in = "こーへん", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "Kansai negative" },
+    .{ .kana_in = "きいひん", .kana_out = "くる", .conditions_in = cond.none, .conditions_out = cond.vk, .reason = "Kansai negative" },
+    // Its past is Yomitan's row as is: へんかった -> なかった keeps the -た
+    // condition, so the adjective past and the negative rows finish it
+    // (分からへんかった -> 分からなかった -> 分からない -> 分かる).
+    .{ .kana_in = "へんかった", .kana_out = "なかった", .conditions_in = cond.ta, .conditions_out = cond.ta, .reason = "Kansai negative" },
+    .{ .kana_in = "ひんかった", .kana_out = "なかった", .conditions_in = cond.ta, .conditions_out = cond.ta, .reason = "Kansai negative" },
+
+    // -え, slang sound changes of i-adjectives: やばい -> やべえ, すごい ->
+    // すげえ, and the negative 言わない -> 言わねえ, which is most of how
+    // shouted manga dialogue negates. Yomitan's 42 rows, verbatim, minus
+    // its one exact duplicate (れえ -> らい). Several endings map to more
+    // than one adjective (ええ -> いい/わい/よい); the adj-i filter keeps
+    // only the ones that are real.
+    //
+    // ねえ -> ない is the same shape as the Kansai row above that had to
+    // go -- a bare ねえ will offer ない -- but here it is kept, because
+    // ない after a verb stem is the form's whole job and Yomitan gives the
+    // same answer.
+    .{ .kana_in = "ねえ", .kana_out = "ない", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "めえ", .kana_out = "むい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "みい", .kana_out = "むい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ちぇえ", .kana_out = "つい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ちい", .kana_out = "つい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "せえ", .kana_out = "すい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ええ", .kana_out = "いい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ええ", .kana_out = "わい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ええ", .kana_out = "よい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "いぇえ", .kana_out = "よい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "うぇえ", .kana_out = "わい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "けえ", .kana_out = "かい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "げえ", .kana_out = "がい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "げえ", .kana_out = "ごい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "せえ", .kana_out = "さい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "めえ", .kana_out = "まい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ぜえ", .kana_out = "ずい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "っぜえ", .kana_out = "ずい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "れえ", .kana_out = "らい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ちぇえ", .kana_out = "ちゃい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "でえ", .kana_out = "どい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "れえ", .kana_out = "れい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "べえ", .kana_out = "ばい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "てえ", .kana_out = "たい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ねぇ", .kana_out = "ない", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "めぇ", .kana_out = "むい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "みぃ", .kana_out = "むい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ちぃ", .kana_out = "つい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "せぇ", .kana_out = "すい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "けぇ", .kana_out = "かい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "げぇ", .kana_out = "がい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "げぇ", .kana_out = "ごい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "せぇ", .kana_out = "さい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "めぇ", .kana_out = "まい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "ぜぇ", .kana_out = "ずい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "っぜぇ", .kana_out = "ずい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "れぇ", .kana_out = "らい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "でぇ", .kana_out = "どい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "れぇ", .kana_out = "れい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "べぇ", .kana_out = "ばい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
+    .{ .kana_in = "てぇ", .kana_out = "たい", .conditions_in = cond.none, .conditions_out = cond.adj_i, .reason = "slang" },
 
     // Kansai progressive (見とる, 何しとるんや). Strips to the te-form like
     // the standard 〜ている does. Only the kana spelling collides (取る is
     // 取 + る, so it does not end in とる).
-    .{ .kana_in = "とる", .kana_out = "て", .rules_out = &.{}, .reason = "Kansai progressive" },
-    .{ .kana_in = "どる", .kana_out = "で", .rules_out = &.{}, .reason = "Kansai progressive" },
+    .{ .kana_in = "とる", .kana_out = "て", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "Kansai progressive" },
+    .{ .kana_in = "どる", .kana_out = "で", .conditions_in = cond.v5, .conditions_out = cond.te, .reason = "Kansai progressive" },
 
     // -- The gaps the earlier phases left behind --------------------------
 
     // The godan す-row causative the table's own doc comment has been
     // admitting was missing since causative landed: 話させる -> 話す.
-    .{ .kana_in = "させる", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "causative" },
+    .{ .kana_in = "させる", .kana_out = "す", .conditions_in = cond.v1, .conditions_out = cond.v5, .reason = "causative" },
 
     // Godan potential ("can do"), which is a distinct form from the
     // passive/potential -areru above: 書ける, 飲める, 泳げる. Jitendex
@@ -945,33 +1233,31 @@ pub const deinflect_rules = [_]DeinflectRule{
     // its own v1 headword *and* looks like the potential of 入る -- so
     // both are offered, the depth-0 headword first. Same trade as the
     // imperative rows.
-    .{ .kana_in = "える", .kana_out = "う", .rules_out = &.{"v5"}, .reason = "potential" },
-    .{ .kana_in = "ける", .kana_out = "く", .rules_out = &.{"v5"}, .reason = "potential" },
-    .{ .kana_in = "げる", .kana_out = "ぐ", .rules_out = &.{"v5"}, .reason = "potential" },
-    .{ .kana_in = "せる", .kana_out = "す", .rules_out = &.{"v5"}, .reason = "potential" },
-    .{ .kana_in = "てる", .kana_out = "つ", .rules_out = &.{"v5"}, .reason = "potential" },
-    .{ .kana_in = "ねる", .kana_out = "ぬ", .rules_out = &.{"v5"}, .reason = "potential" },
-    .{ .kana_in = "べる", .kana_out = "ぶ", .rules_out = &.{"v5"}, .reason = "potential" },
-    .{ .kana_in = "める", .kana_out = "む", .rules_out = &.{"v5"}, .reason = "potential" },
-    .{ .kana_in = "れる", .kana_out = "る", .rules_out = &.{"v5"}, .reason = "potential" },
+    .{ .kana_in = "える", .kana_out = "う", .conditions_in = cond.v1, .conditions_out = cond.v5d, .reason = "potential" },
+    .{ .kana_in = "ける", .kana_out = "く", .conditions_in = cond.v1, .conditions_out = cond.v5d, .reason = "potential" },
+    .{ .kana_in = "げる", .kana_out = "ぐ", .conditions_in = cond.v1, .conditions_out = cond.v5d, .reason = "potential" },
+    .{ .kana_in = "せる", .kana_out = "す", .conditions_in = cond.v1, .conditions_out = cond.v5d, .reason = "potential" },
+    .{ .kana_in = "てる", .kana_out = "つ", .conditions_in = cond.v1p, .conditions_out = cond.v5d, .reason = "potential" },
+    .{ .kana_in = "ねる", .kana_out = "ぬ", .conditions_in = cond.v1, .conditions_out = cond.v5d, .reason = "potential" },
+    .{ .kana_in = "べる", .kana_out = "ぶ", .conditions_in = cond.v1, .conditions_out = cond.v5d, .reason = "potential" },
+    .{ .kana_in = "める", .kana_out = "む", .conditions_in = cond.v1, .conditions_out = cond.v5d, .reason = "potential" },
+    .{ .kana_in = "れる", .kana_out = "る", .conditions_in = cond.v1, .conditions_out = cond.v5d, .reason = "potential" },
 };
 
-/// Ceiling on how many deinflection rules may be chained for one
-/// candidate substring -- see `Search.collect`. 5 is the deepest real
-/// form the table can reach: 食べさせられたくなかった unwinds through
-/// causative, passive/potential, desiderative, negative and past, one
-/// rule each.
+/// A runaway guard, **not** a grammar limit: the most rules `Search.collect`
+/// will chain before it stops expanding a form.
 ///
-/// Raising it is close to free, which is not obvious from the rule count.
-/// Replaying `collect` against a real 398k-row Jitendex index, a long
-/// kana-only form reaches 40 distinct queried forms at depth 4, 42 at
-/// depth 5 and **42 at depth 6** -- the search saturates rather than
-/// branching, because the rules' `kana_in` suffixes are near-disjoint so
-/// only two or three ever match a given form, and each chain dead-ends
-/// within a step or two. The per-call cache in `Search.query` then makes
-/// repeats free. So the cap is set by what the table can actually
-/// express, not by what the search costs.
-pub const max_deinflect_depth: usize = 5;
+/// There used to be a real cap here (`max_deinflect_depth`, 5), because the
+/// old search checked only the last rule's class and so had nothing else to
+/// stop it. With conditions checked at every step, a chain ends when no
+/// rule's `conditions_in` matches, and the visited set means each (text,
+/// conditions) pair is expanded once -- so the search is finite on its own,
+/// and the deepest real form the table can unwind (食べさせられたくなかった,
+/// five rules) is nowhere near this. What it still guards against is a
+/// future row whose `kana_out` is longer than its `kana_in` and whose output
+/// feeds back into itself, which would grow the text without ever repeating
+/// a visited form.
+pub const max_chain_rules: usize = 12;
 
 /// One entry a lookup found, with how it was found. `dict.lookup` ranks
 /// hits on these fields the way Yomitan's `_sortTermDictionaryEntries`
@@ -1115,7 +1401,7 @@ pub const max_results: usize = 32;
 /// Looks up everything `text` could start with, the way Yomitan does:
 /// every prefix of up to `max_scan_codepoints` codepoints, each tried in
 /// every `kana.variants` spelling, each of those deinflected through
-/// every chain of up to `max_deinflect_depth` rules -- and every
+/// every chain of rules its conditions allow -- and every
 /// resulting form queried against both the `term` and the `reading`
 /// column. All of it is collected, not just the longest length that hit
 /// something, then ranked (`rankBefore`) and capped at `max_results`.
@@ -1162,7 +1448,7 @@ pub fn lookup(
         search.source_len = bounds[li];
         for (try kana.variants(search.scratch, text[0..bounds[li]])) |v| {
             search.variant_steps = v.steps;
-            try search.collect(v.text, null, &.{});
+            try search.collect(v.text);
         }
     }
 
@@ -1302,43 +1588,66 @@ const Search = struct {
         return rows;
     }
 
-    /// Queries `form`, offers every row that passes `filter` (null for
-    /// the undeinflected text, which accepts every row), then tries
-    /// every rule that strips a suffix off `form`, recursing up to
-    /// `max_deinflect_depth` rules deep.
+    /// Deinflects `text` breadth-first, Yomitan's `transform` loop: every
+    /// form reached is queried, every row whose class matches the form's
+    /// conditions is offered, and every rule whose `conditions_in` matches
+    /// is applied to make the next form. Starts from `text` in no
+    /// conditions -- nothing is known about the text as written, so every
+    /// row and every rule matches it.
     ///
-    /// `filter` is the *last* applied rule's `rules_out`: only that rule
-    /// constrains which rows count. An empty `rules_out` (`&.{}`) can
-    /// never pass (`hasAnyRule` against an empty list is always false),
-    /// which is how a non-terminal rule forces at least one more step --
-    /// see `DeinflectRule`.
-    fn collect(self: *Search, form: []const u8, filter: ?[]const []const u8, chain: []const []const u8) !void {
-        for (try self.query(form)) |row| {
-            if (filter) |f| if (!hasAnyRule(row.rules, f)) continue;
-            try self.offer(.{
-                .entry = row,
-                .source_len = self.source_len,
-                .variant_steps = self.variant_steps,
-                .exact = std.mem.eql(u8, row.term, form),
-                .chain = chain,
-            });
-        }
-        if (chain.len == max_deinflect_depth) return;
+    /// **No depth cap.** A form is identified by its text *and* its
+    /// conditions, and each one is expanded once (`visited`): reaching the
+    /// same form in the same conditions again, by another chain, can only
+    /// be the same depth or deeper -- breadth-first order sees to that --
+    /// and leads to exactly the same rows and rules, so it adds nothing.
+    /// That alone makes the search finite; `max_chain_rules` is only a
+    /// guard against a future rule that grows the text forever.
+    ///
+    /// Breadth-first also keeps `offer`'s tie rule meaning what it did
+    /// under the old depth-first search: between two routes to one entry
+    /// at the same depth, the one whose rules come first in
+    /// `deinflect_rules` is offered first and kept.
+    fn collect(self: *Search, text: []const u8) !void {
+        var queue: std.ArrayList(Form) = .empty;
+        var visited: std.HashMapUnmanaged(FormKey, void, FormKey.Context, std.hash_map.default_max_load_percentage) = .empty;
+        try queue.append(self.scratch, .{ .text = text, .conditions = cond.none, .chain = &.{} });
+        try visited.put(self.scratch, .{ .text = text, .conditions = cond.none }, {});
 
-        for (deinflect_rules) |rule| {
-            if (!std.mem.endsWith(u8, form, rule.kana_in)) continue;
-            const stem = form[0 .. form.len - rule.kana_in.len];
-            const next = try std.mem.concat(self.scratch, u8, &.{ stem, rule.kana_out });
-            // The copula rows have an empty `kana_out`, so a form that is
-            // nothing but the ending ("だった" on its own) deinflects to
-            // nothing. Querying "" finds no rows and no rule can match it,
-            // so this only skips work -- but it makes that explicit
-            // rather than leaving it to fall out.
-            if (next.len == 0) continue;
-            const next_chain = try self.scratch.alloc([]const u8, chain.len + 1);
-            @memcpy(next_chain[0..chain.len], chain);
-            next_chain[chain.len] = rule.reason;
-            try self.collect(next, rule.rules_out, next_chain);
+        var qi: usize = 0;
+        while (qi < queue.items.len) : (qi += 1) {
+            // A copy, not a pointer: appending below can move the items.
+            const form = queue.items[qi];
+
+            for (try self.query(form.text)) |row| {
+                if (!conditionsMatch(form.conditions, conditionsForRules(row.rules))) continue;
+                try self.offer(.{
+                    .entry = row,
+                    .source_len = self.source_len,
+                    .variant_steps = self.variant_steps,
+                    .exact = std.mem.eql(u8, row.term, form.text),
+                    .chain = form.chain,
+                });
+            }
+            if (form.chain.len == max_chain_rules) continue;
+
+            for (deinflect_rules) |rule| {
+                if (!conditionsMatch(form.conditions, rule.conditions_in)) continue;
+                if (!std.mem.endsWith(u8, form.text, rule.kana_in)) continue;
+                const stem = form.text[0 .. form.text.len - rule.kana_in.len];
+                const next = try std.mem.concat(self.scratch, u8, &.{ stem, rule.kana_out });
+                // The copula rows have an empty `kana_out`, so a form that
+                // is nothing but the ending ("だった" on its own)
+                // deinflects to nothing. Querying "" finds no rows and no
+                // rule can match it, so this only skips work -- but it
+                // makes that explicit rather than leaving it to fall out.
+                if (next.len == 0) continue;
+                const gop = try visited.getOrPut(self.scratch, .{ .text = next, .conditions = rule.conditions_out });
+                if (gop.found_existing) continue;
+                const next_chain = try self.scratch.alloc([]const u8, form.chain.len + 1);
+                @memcpy(next_chain[0..form.chain.len], form.chain);
+                next_chain[form.chain.len] = rule.reason;
+                try queue.append(self.scratch, .{ .text = next, .conditions = rule.conditions_out, .chain = next_chain });
+            }
         }
     }
 
@@ -1348,6 +1657,35 @@ const Search = struct {
     }
 };
 
+/// One form in `Search.collect`'s queue: the text, what it could
+/// grammatically be, and the rule reasons that produced it, outermost
+/// first.
+const Form = struct {
+    text: []const u8,
+    conditions: Conditions,
+    chain: []const []const u8,
+};
+
+/// What makes two `Form`s the same for `Search.collect`'s visited set --
+/// the chain that got there does not.
+const FormKey = struct {
+    text: []const u8,
+    conditions: Conditions,
+
+    const Context = struct {
+        pub fn hash(_: Context, k: FormKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(k.text);
+            h.update(std.mem.asBytes(&k.conditions.bits.mask));
+            return h.final();
+        }
+
+        pub fn eql(_: Context, a: FormKey, b: FormKey) bool {
+            return a.conditions.eql(b.conditions) and std.mem.eql(u8, a.text, b.text);
+        }
+    };
+};
+
 /// Joins `chain`'s reasons into one display string, innermost reason
 /// first (the reverse of `chain`'s own outermost-first accumulation
 /// order): "食べさせない" strips the outer negative first, landing on the
@@ -1355,7 +1693,7 @@ const Search = struct {
 /// "食べる" -- `chain = .{"negative", "causative"}`, shown as
 /// "causative, negative". Never called with an empty `chain`.
 fn joinChainReasons(alloc: std.mem.Allocator, chain: []const []const u8) ![]const u8 {
-    var reversed: [max_deinflect_depth][]const u8 = undefined;
+    var reversed: [max_chain_rules][]const u8 = undefined;
     for (chain, 0..) |r, idx| reversed[chain.len - 1 - idx] = r;
     return std.mem.join(alloc, ", ", reversed[0..chain.len]);
 }
@@ -1439,16 +1777,6 @@ fn queryTerm(alloc: std.mem.Allocator, dict: *Dict, term: []const u8) !?[]Entry 
         return null;
     }
     return try out.toOwnedSlice(alloc);
-}
-
-fn hasAnyRule(rules: []const u8, valid: []const []const u8) bool {
-    var it = std.mem.tokenizeScalar(u8, rules, ' ');
-    while (it.next()) |tag| {
-        for (valid) |v| {
-            if (std.mem.eql(u8, tag, v)) return true;
-        }
-    }
-    return false;
 }
 
 /// The delimiter joining a row's flattened glossary strings into the
