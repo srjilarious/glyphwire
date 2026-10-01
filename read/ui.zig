@@ -77,6 +77,31 @@ const fg_dialog_border = glyphwire.Color{ .r = 150, .g = 150, .b = 165 };
 /// The lookup panel's term/reading line -- same warm highlight as the
 /// current OCR block's outline, so the two feel like one interaction.
 const fg_lookup_term = glyphwire.Color{ .r = 250, .g = 205, .b = 90 };
+/// A dictionary tag badge's text; `tagBg` gives its background.
+const fg_tag = glyphwire.Color{ .r = 240, .g = 240, .b = 245 };
+
+/// A tag badge's background by its category (`dict.Tag.category`), muted
+/// enough that light text reads on all of them. Part of speech, the most
+/// common badge by far, gets the quietest one.
+fn tagBg(category: []const u8) glyphwire.Color {
+    const Pair = struct { []const u8, glyphwire.Color };
+    const table = [_]Pair{
+        // Structured-content sense tags (Jitendex).
+        .{ "part-of-speech-info", .{ .r = 58, .g = 74, .b = 110 } },
+        .{ "misc-info", .{ .r = 128, .g = 84, .b = 36 } },
+        .{ "field-info", .{ .r = 40, .g = 104, .b = 72 } },
+        .{ "dialect-info", .{ .r = 108, .g = 60, .b = 124 } },
+        .{ "lang-source-wasei", .{ .r = 36, .g = 102, .b = 112 } },
+        // `tag_bank` categories on the headword.
+        .{ "popular", .{ .r = 150, .g = 52, .b = 102 } },
+        .{ "frequent", .{ .r = 118, .g = 64, .b = 140 } },
+        .{ "archaism", .{ .r = 88, .g = 88, .b = 100 } },
+        .{ "expression", .{ .r = 128, .g = 72, .b = 52 } },
+    };
+    for (table) |p| if (std.mem.eql(u8, p[0], category)) return p[1];
+    return .{ .r = 72, .g = 72, .b = 86 };
+}
+
 /// The region hints drawn over the page (`o`). Written with a transparent
 /// background so the artwork still shows around the box glyphs.
 const fg_hint = glyphwire.Color{ .r = 120, .g = 200, .b = 235 };
@@ -1409,7 +1434,50 @@ pub const Ui = struct {
         text: []const u8,
         fg: glyphwire.Color = fg_dialog,
         scale: glyphwire.TextScale = .x1,
+        /// When set, drawn instead of `text` -- the same characters in
+        /// several styles (a ribbon with tag badges). `text` still sizes
+        /// the panel.
+        spans: []const glyphwire.Client.Span = &.{},
     };
+
+    /// One run of a badged ribbon: text, with a background when it is a
+    /// tag badge.
+    const RibbonPiece = struct {
+        text: []const u8,
+        bg: ?glyphwire.Color = null,
+    };
+
+    /// `pieces` run together and wrapped to `cols`, each row carrying the
+    /// spans that colour its badges. Wraps on the plain text, so a badge
+    /// can only break where its label has a space -- and the labels that
+    /// have one (Jitendex's "old kanji form") use no-break spaces.
+    fn ribbonLines(a: std.mem.Allocator, pieces: []const RibbonPiece, cols: usize) ![]const PanelLine {
+        var text: std.ArrayList(u8) = .empty;
+        const Mark = struct { start: usize, end: usize, bg: ?glyphwire.Color };
+        var marks: std.ArrayList(Mark) = .empty;
+        for (pieces) |p| {
+            const start = text.items.len;
+            try text.appendSlice(a, p.text);
+            try marks.append(a, .{ .start = start, .end = text.items.len, .bg = p.bg });
+        }
+
+        var lines: std.ArrayList(PanelLine) = .empty;
+        for (try mokuro.wrap(a, text.items, cols)) |row| {
+            // `wrap` hands back slices of `text`, so a row's offset into it
+            // is where its spans start.
+            const from = @intFromPtr(row.ptr) - @intFromPtr(text.items.ptr);
+            const to = from + row.len;
+            var spans: std.ArrayList(glyphwire.Client.Span) = .empty;
+            for (marks.items) |m| {
+                const s = @max(m.start, from);
+                const e = @min(m.end, to);
+                if (s >= e) continue;
+                try spans.append(a, .{ .text = text.items[s..e], .bg = m.bg, .fg = if (m.bg != null) fg_tag else null });
+            }
+            try lines.append(a, .{ .text = row, .spans = spans.items });
+        }
+        return lines.items;
+    }
 
     /// A run of a side panel's content rows that must stay on screen: the
     /// focused dictionary entry, so `]`/`[` scroll the list to it instead of
@@ -1517,19 +1585,34 @@ pub const Ui = struct {
             for (try mokuro.wrap(a, try subheaderFor(a, lk, g), inner_max)) |r| {
                 try lines.append(a, .{ .text = r });
             }
+            // The headword's own tags (★, old kanji form, ...) on a row of
+            // their own, the way Yomitan puts them beside the term.
+            if (entry.tags.len > 0) {
+                var head: std.ArrayList(RibbonPiece) = .empty;
+                for (entry.tags, 0..) |t, i| {
+                    if (i > 0) try head.append(a, .{ .text = " " });
+                    try head.append(a, .{ .text = t.label, .bg = tagBg(t.category) });
+                }
+                try lines.appendSlice(a, try ribbonLines(a, head.items, inner_max));
+            }
 
             // Body: every sense joined onto one ribbon before wrapping, not
             // one row per sense -- a homograph can carry a dozen, and this
             // panel is meant to answer "what does this word mean", not
-            // replace the dictionary.
-            var body_buf: std.ArrayList(u8) = .empty;
+            // replace the dictionary. A sense's tags (part of speech, `uk`,
+            // field, ...) are badges just before it.
+            var body: std.ArrayList(RibbonPiece) = .empty;
             for (entry.glossary, 0..) |gl, i| {
-                if (i > 0) try body_buf.appendSlice(a, "; ");
-                try body_buf.appendSlice(a, gl);
+                if (i > 0) try body.append(a, .{ .text = "; " });
+                if (i < entry.sense_tags.len) for (entry.sense_tags[i]) |t| {
+                    try body.append(a, .{ .text = t.label, .bg = tagBg(t.category) });
+                    try body.append(a, .{ .text = " " });
+                };
+                try body.append(a, .{ .text = gl });
             }
-            const body_rows = try mokuro.wrap(a, body_buf.items, inner_max);
-            if (body_rows.len > 0) try lines.append(a, .{ .text = "" });
-            for (body_rows) |r| try lines.append(a, .{ .text = r });
+            const body_lines = try ribbonLines(a, body.items, inner_max);
+            if (body_lines.len > 0) try lines.append(a, .{ .text = "" });
+            try lines.appendSlice(a, body_lines);
 
             focus_to = lines.items.len;
         }
@@ -1771,7 +1854,7 @@ pub const Ui = struct {
         var row: usize = 1;
         for (lines) |l| {
             const p = glyphwire.scaledPitch(l.scale);
-            try writePanelRow(&b, layer, row, l.text, inner, l.fg, l.scale);
+            try writePanelRow(&b, layer, row, l, inner);
             // The rows a scaled glyph draws down into carry only their
             // border cells; its own fill paints the rest.
             for (1..p) |k| {
@@ -1867,8 +1950,8 @@ pub const Ui = struct {
         try chromeOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
         try chromeOn(&batch, self.dict_build_layer, box_tr, fg_dialog_border, bg_dialog);
 
-        try writePanelRow(&batch, self.dict_build_layer, 1, line1, inner, fg_dialog, .x1);
-        try writePanelRow(&batch, self.dict_build_layer, 2, line2, inner, fg_dialog, .x1);
+        try writePanelRow(&batch, self.dict_build_layer, 1, .{ .text = line1 }, inner);
+        try writePanelRow(&batch, self.dict_build_layer, 2, .{ .text = line2 }, inner);
 
         try chromeAt(&batch, self.dict_build_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
         try chromeOn(&batch, self.dict_build_layer, h_line, fg_dialog_border, bg_dialog);
@@ -2054,22 +2137,25 @@ pub const Ui = struct {
         b: *glyphwire.Client.Batch,
         layer: glyphwire.LayerHandle,
         row: usize,
-        text: []const u8,
+        line: PanelLine,
         inner: usize,
-        fg: glyphwire.Color,
-        scale: glyphwire.TextScale,
     ) !void {
         try chromeAt(b, layer, row, 0, box_v_pad, fg_dialog_border, bg_dialog);
-        try b.writeTextOpts(text, .{
+        const opts: glyphwire.Client.TextOpts = .{
             .layer = layer,
             .row = row,
             .col = 2,
-            .fg = fg,
+            .fg = line.fg,
             .bg = bg_dialog,
-            .scale = scale,
+            .scale = line.scale,
             .max_cols = inner,
             .pad = true,
-        });
+        };
+        if (line.spans.len > 0) {
+            try b.writeSpans(line.spans, opts);
+        } else {
+            try b.writeTextOpts(line.text, opts);
+        }
         try chromeAt(b, layer, row, inner + 2, pad_box_v, fg_dialog_border, bg_dialog);
     }
 
