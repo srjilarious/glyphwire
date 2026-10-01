@@ -48,6 +48,7 @@ const archive_mod = @import("archive.zig");
 const cache_mod = @import("cache.zig");
 const config_mod = @import("config.zig");
 const mokuro = @import("mokuro.zig");
+const place = @import("place.zig");
 const dict_mod = @import("dict.zig");
 const ai = @import("ai.zig");
 const ai_cache = @import("ai_cache.zig");
@@ -140,6 +141,10 @@ const Ocr = struct {
     /// The dialog's on-screen rect in window cells, from the last render.
     /// A press inside it starts a text selection instead of a page pan.
     rect: struct { row: usize = 0, col: usize = 0, rows: usize = 0, cols: usize = 0 } = .{},
+    /// Whether the last render put the dialog in a margin beside the
+    /// page (`Ui.fitMargin`) rather than over it. A dialog there is
+    /// narrow, so the lookup panel goes beside it, not under it.
+    in_margin: bool = false,
     /// The text the last `renderDialog` drew: the joined-and-rewrapped
     /// source and the rows it wrapped to. `rows` are slices *into*
     /// `joined`. Kept so a stationary click on the panel (`Ui.wordLookupAt`)
@@ -1134,7 +1139,7 @@ pub const Ui = struct {
 
     /// A cell rectangle, signed so it can sit partly (or wholly) off the
     /// left/top of whatever it is being placed in.
-    const CellRect = struct { row: i64, col: i64, rows: i64, cols: i64 };
+    const CellRect = place.Rect;
 
     /// A block's box in **page-layer** cells -- the grid the artwork is
     /// drawn on. Only for placing the dialog, which lives on the cell
@@ -1279,6 +1284,12 @@ pub const Ui = struct {
     /// that config value is the *cap* on the wrap, and a two-word bubble
     /// in a 40-column box would cover artwork for nothing.
     ///
+    /// Placement (`place.zig`): with `ocr_dialog_placement = "margin"`,
+    /// the empty columns beside a fitted page come first -- the dialog
+    /// covers no artwork there -- re-shaped narrower or taller if that's
+    /// what it takes to fit (`fitMargin`); otherwise it sits over the page
+    /// next to its bubble (`place.nearBubble`).
+    ///
     /// Border and fill are drawn the same way `buildHelp` draws the help
     /// popup: a flat background colour and box-drawing characters. (This
     /// predates `create_nine_patch`; the old per-cell `draw_box` "dialog"
@@ -1312,34 +1323,98 @@ pub const Ui = struct {
         // Joined and re-wrapped: mokuro's lines follow the bubble's
         // columns, not the sentence. See `mokuro.joinLines`.
         const joined = try mokuro.joinLines(self.alloc, block.lines);
-        if (self.ocr_layout.isVertical(block)) return self.renderVerticalDialog(o, page, block.box, joined);
         // Until `o.text` takes them over; after that, freeing them here
         // would leave `o.text` pointing at freed memory.
         var handed_over = false;
         errdefer if (!handed_over) self.alloc.free(joined);
-        // Two border columns and a one-column pad inside each of them.
-        // `ocr_dialog_cols` is the wrap width at 1x: a scaled dialog wraps
-        // to the same characters a line and is `pitch` times wider --
-        // unless that would run off the window, when it wraps sooner.
-        const pitch = glyphwire.scaledPitch(self.ocr_scale);
-        const inner_max = @max(@min(self.conf.ocr_dialog_cols -| 4, (self.win.cols -| 4) / pitch), 2);
-        const rows = try mokuro.wrap(self.alloc, joined, inner_max);
-        errdefer if (!handed_over) self.alloc.free(rows);
-        if (rows.len == 0) {
+
+        const vertical = self.ocr_layout.isVertical(block);
+        var shape = try self.shapeDialog(joined, vertical, self.defaultLimit(vertical));
+        errdefer if (!handed_over) self.alloc.free(shape.lines);
+        if (shape.lines.len == 0) {
             self.alloc.free(joined);
-            self.alloc.free(rows);
+            self.alloc.free(shape.lines);
+            handed_over = true;
             try c.setLayerVisible(self.dialog_layer, false);
             return;
         }
+
+        const bubble = self.blockWindowRect(page, block.box);
+        const margin_spot = if (self.conf.ocr_dialog_placement == .margin) try self.fitMargin(joined, bubble, &shape) else null;
+        const at = margin_spot orelse place.nearBubble(self.pageView(), bubble, shape.box_rows, shape.box_cols);
 
         // Replace what a click on the panel resolves against. Freed
         // *after* the new join/wrap succeeds, not before, so a failed
         // render above never leaves `o.text` pointing at freed memory.
         o.freeText(self.alloc);
-        o.text = .{ .joined = joined, .rows = rows };
+        o.text = .{ .joined = joined, .rows = shape.lines, .vertical = shape.vertical, .text_left = shape.text_left };
         handed_over = true;
-        o.pitch = pitch;
+        o.pitch = glyphwire.scaledPitch(self.ocr_scale);
+        o.in_margin = margin_spot != null;
+        o.rect = .{ .row = at.row, .col = at.col, .rows = shape.box_rows, .cols = shape.box_cols };
+        // Right-aligned on the bottom border, one border cell in from the
+        // corner.
+        const tag_cols = mokuro.displayWidth(ai_tag);
+        o.ai_tag = if (self.conf.ai_lookup) .{ .col = shape.box_cols - 2 - tag_cols, .cols = tag_cols } else null;
 
+        if (shape.vertical) try self.drawVerticalDialog(o, shape, at) else try self.drawHorizontalDialog(o, shape, at);
+
+        // The lookup's highlight is in panel cells, which a re-wrap, a
+        // move into a margin or a new text scale (`S`) just changed.
+        if (self.lookup != null) self.highlightLookup();
+    }
+
+    /// A bubble's text laid out for the dialog but not yet placed: the
+    /// rows (horizontal) or columns (vertical, first = rightmost) it
+    /// wrapped to -- slices into the joined text, the slice itself owned
+    /// -- and the box that takes. Separate from drawing so `fitMargin` can
+    /// ask for a narrower or taller one before anything is sent.
+    const DialogShape = struct {
+        lines: []const []const u8,
+        vertical: bool,
+        /// Interior cells between the two pad columns.
+        inner: usize,
+        box_rows: usize,
+        box_cols: usize,
+        /// Vertical only: the cell column the leftmost text column starts
+        /// at -- the columns hug the right edge, where the text starts,
+        /// so a panel widened for the AI tag takes the slack on the left.
+        text_left: usize = 2,
+        /// What it was wrapped to: display columns a row, or characters a
+        /// column.
+        limit: usize,
+    };
+
+    fn shapeDialog(self: *const Ui, joined: []const u8, vertical: bool, limit: usize) !DialogShape {
+        return if (vertical) self.shapeVertical(joined, limit) else self.shapeHorizontal(joined, limit);
+    }
+
+    /// The wrap limit a dialog starts from. Horizontally, `ocr_dialog_cols`
+    /// is the wrap width at 1x: a scaled dialog wraps to the same
+    /// characters a line and is `pitch` times wider -- unless that would
+    /// run off the window, when it wraps sooner. Vertically,
+    /// `ocr_dialog_rows` characters a column, likewise capped by the
+    /// window (`tallestColumn`).
+    fn defaultLimit(self: *const Ui, vertical: bool) usize {
+        if (vertical) return @max(@min(self.conf.ocr_dialog_rows, self.tallestColumn()), 2);
+        const pitch = glyphwire.scaledPitch(self.ocr_scale);
+        return @max(@min(self.conf.ocr_dialog_cols -| 4, (self.win.cols -| 4) / pitch), 2);
+    }
+
+    /// The most characters a vertical column can hold on screen: the
+    /// window less the two border rows, and one slot held back for a
+    /// closing mark hanging off a full column (`mokuro.wrapVertical`).
+    fn tallestColumn(self: *const Ui) usize {
+        const pitch = glyphwire.scaledPitch(self.ocr_scale);
+        return @max(((self.pageView().rows -| 2) / pitch) -| 1, 2);
+    }
+
+    /// `joined` wrapped to `inner_max` display columns a row. Two border
+    /// columns and a one-column pad inside each of them; a scaled row is
+    /// `pitch` cells tall, each display column `pitch` cells wide.
+    fn shapeHorizontal(self: *const Ui, joined: []const u8, inner_max: usize) !DialogShape {
+        const pitch = glyphwire.scaledPitch(self.ocr_scale);
+        const rows = try mokuro.wrap(self.alloc, joined, inner_max);
         // The widest row decides the panel's width, capped at the wrap
         // width it was produced against -- in display columns, then
         // scaled to cells.
@@ -1348,26 +1423,97 @@ pub const Ui = struct {
         text_cols = @min(text_cols, inner_max);
         // Wide enough for the AI tag when there is one: a one-word bubble
         // still needs somewhere to click.
-        const tag_cols = mokuro.displayWidth(ai_tag);
         var inner = text_cols * pitch;
-        if (self.conf.ai_lookup) inner = @max(inner, tag_cols + 2);
-        // One pad column each side of the text, plus the two border cells.
+        if (self.conf.ai_lookup) inner = @max(inner, mokuro.displayWidth(ai_tag) + 2);
+        return .{
+            .lines = rows,
+            .vertical = false,
+            .inner = inner,
+            .box_rows = rows.len * pitch + 2,
+            .box_cols = inner + 4,
+            .limit = inner_max,
+        };
+    }
+
+    /// `joined` in vertical columns of at most `max_chars` characters.
+    /// Each column is two cells a pitch wide -- one wide character -- so
+    /// the grid is regular and a selection can be told its geometry.
+    fn shapeVertical(self: *const Ui, joined: []const u8, max_chars: usize) !DialogShape {
+        const pitch = glyphwire.scaledPitch(self.ocr_scale);
+        const cols = try mokuro.wrapVertical(self.alloc, joined, max_chars);
+        var slots: usize = 1;
+        for (cols) |col| slots = @max(slots, mokuro.charCount(col));
+        const text_cells = cols.len * 2 * pitch;
+        var inner = text_cells;
+        if (self.conf.ai_lookup) inner = @max(inner, mokuro.displayWidth(ai_tag) + 2);
+        return .{
+            .lines = cols,
+            .vertical = true,
+            .inner = inner,
+            .box_rows = slots * pitch + 2,
+            .box_cols = inner + 4,
+            .text_left = 2 + inner - text_cells,
+            .limit = max_chars,
+        };
+    }
+
+    /// Where in the page's side margins the dialog goes, the margin on
+    /// the bubble's side first, or null when neither takes it -- including
+    /// when the page fills the window's width and there are no margins.
+    ///
+    /// A dialog too wide for a margin is re-shaped to fit if it can
+    /// (`marginLimit`), and `shape` is swapped for the one that fit: the
+    /// whole point is that it covers nothing, and a re-wrap is cheap.
+    fn fitMargin(self: *const Ui, joined: []const u8, bubble: place.Rect, shape: *DialogShape) !?place.Spot {
+        const view = self.pageView();
+        const page_col = @as(i64, @intCast(self.layout.col)) - @as(i64, @intCast(self.pan.col));
+        const m = place.margins(view, page_col, self.layout.cols);
+        for (place.marginOrder(page_col, self.layout.cols, bubble)) |side| {
+            if (place.inMargin(m, side, view, bubble.row, shape.box_rows, shape.box_cols)) |spot| return spot;
+            const limit = self.marginLimit(shape.*, m.width(side)) orelse continue;
+            const alt = try self.shapeDialog(joined, shape.vertical, limit);
+            if (place.inMargin(m, side, view, bubble.row, alt.box_rows, alt.box_cols)) |spot| {
+                self.alloc.free(shape.lines);
+                shape.* = alt;
+                return spot;
+            }
+            self.alloc.free(alt.lines);
+        }
+        return null;
+    }
+
+    /// The wrap limit that might make `shape` fit a margin `width` cells
+    /// wide, or null when none would or it is the limit already tried.
+    /// A vertical dialog gets fewer, taller columns -- as tall as the
+    /// window allows. A horizontal one wraps to the margin's width, but
+    /// only into a margin of at least `place.min_margin_cols` and only if
+    /// that still leaves a few characters a line; anything narrower reads
+    /// worse than a panel over the page.
+    fn marginLimit(self: *const Ui, shape: DialogShape, width: usize) ?usize {
+        if (shape.vertical) {
+            const tallest = self.tallestColumn();
+            return if (tallest > shape.limit) tallest else null;
+        }
+        if (width < place.min_margin_cols) return null;
+        const cols = (width - 4) / glyphwire.scaledPitch(self.ocr_scale);
+        if (cols < margin_min_text_cols or cols >= shape.limit) return null;
+        return cols;
+    }
+
+    /// Fewest display columns a horizontal dialog is re-wrapped to for a
+    /// margin: three Japanese characters a line.
+    const margin_min_text_cols: usize = 6;
+
+    /// Draws a horizontal dialog shaped by `shapeHorizontal` at `at`.
+    fn drawHorizontalDialog(self: *Ui, o: *const Ocr, shape: DialogShape, at: place.Spot) !void {
+        const pitch = o.pitch;
+        const inner = shape.inner;
         const interior = inner + 2;
-        const box_cols = interior + 2;
-        // A scaled row is `pitch` cells tall: the glyph draws down into
-        // the rows below its own (see `core.TextScale`).
-        const box_rows = rows.len * pitch + 2;
 
-        const at = self.placeDialog(page, block.box, box_rows, box_cols);
-        o.rect = .{ .row = at.row, .col = at.col, .rows = box_rows, .cols = box_cols };
-        // Right-aligned on the bottom border, one border cell in from the
-        // corner.
-        o.ai_tag = if (self.conf.ai_lookup) .{ .col = box_cols - 2 - tag_cols, .cols = tag_cols } else null;
-
-        var b = c.batch();
+        var b = self.client.batch();
         defer b.deinit();
 
-        try b.setLayerSize(self.dialog_layer, box_cols, box_rows);
+        try b.setLayerSize(self.dialog_layer, shape.box_cols, shape.box_rows);
         try b.setLayerCellPosition(self.dialog_layer, at.row, at.col);
         try b.clearOn(self.dialog_layer, 0, 0, null, null);
         try b.setLayerSelectionFlow(self.dialog_layer, .{});
@@ -1390,7 +1536,7 @@ pub const Ui = struct {
         // (`max_cols` + `pad`, in display columns, so CJK can't overrun
         // the border). A scaled row's extra rows below carry only their
         // border cells: the glyph's own fill already paints the rest.
-        for (rows, 0..) |line, i| {
+        for (shape.lines, 0..) |line, i| {
             const row = 1 + i * pitch;
             try chromeAt(&b, self.dialog_layer, row, 0, box_v_pad, fg_dialog_border, bg_dialog);
             try b.writeTextOpts(line, .{
@@ -1410,103 +1556,47 @@ pub const Ui = struct {
             }
         }
 
-        try chromeAt(&b, self.dialog_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
-        try chromeOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
-        try chromeOn(&b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
-        if (o.ai_tag) |tag| try chromeAt(&b, self.dialog_layer, box_rows - 1, tag.col, ai_tag, fg_lookup_term, bg_dialog);
-
-        // Both in the same batch, so the layer's first visible frame is
-        // already the finished panel -- see `setHelp` for the same trick.
-        try b.setLayerOpacity(self.dialog_layer, if (o.peeking) self.conf.ocr_peek else 1.0);
-        try b.setLayerVisible(self.dialog_layer, true);
-
-        var results = try b.send();
-        results.deinit();
-
-        // The lookup's highlight is in panel cells, which a re-wrap or a
-        // new text scale (`S`) just moved.
-        if (self.lookup != null) self.highlightLookup();
+        try self.finishDialog(&b, o, shape, h_line);
     }
 
-    /// `renderDialog` for a bubble set vertically (`Ui.ocr_layout`): the text
-    /// in columns of at most `ocr_dialog_rows` characters, read top to
-    /// bottom and right to left, one character a slot. Takes ownership
-    /// of `joined`.
+    /// Draws a vertical dialog shaped by `shapeVertical` at `at`: read
+    /// top to bottom and right to left, one character a slot.
     ///
-    /// Each column is two cells a pitch wide -- one wide character -- so
-    /// the grid is regular and a selection can be told its geometry
-    /// (`selection_flow`): the host then tints and copies down the
-    /// columns instead of across the rows. Punctuation and brackets are
-    /// drawn as their vertical forms (`mokuro.verticalForm`), each
-    /// written with the original as its `copy_text`, so Ctrl+Shift+C
-    /// still copies 。 and never ︒. Lookups and Anki never see the forms
-    /// at all: they read `joined`.
-    fn renderVerticalDialog(self: *Ui, o: *Ocr, page: *const mokuro.Page, box: mokuro.Box, joined: []u8) !void {
-        var handed_over = false;
-        errdefer if (!handed_over) self.alloc.free(joined);
-        const c = self.client;
-
-        const pitch = glyphwire.scaledPitch(self.ocr_scale);
+    /// The dialog layer's `selection_flow` is told the column grid, so
+    /// the host tints and copies down the columns instead of across the
+    /// rows. Punctuation and brackets are drawn as their vertical forms
+    /// (`mokuro.verticalForm`), each written with the original as its
+    /// `copy_text`, so Ctrl+Shift+C still copies 。 and never ︒. Lookups
+    /// and Anki never see the forms at all: they read `joined`.
+    fn drawVerticalDialog(self: *Ui, o: *const Ocr, shape: DialogShape, at: place.Spot) !void {
+        const pitch = o.pitch;
         const col_cells = 2 * pitch;
-        // Two border rows, and one slot held back for a closing mark
-        // hanging off a full column (`mokuro.wrapVertical`), so a scaled
-        // dialog wraps sooner rather than running off the window.
-        const max_chars = @max(@min(self.conf.ocr_dialog_rows, ((self.pageView().rows -| 2) / pitch) -| 1), 2);
-        const cols = try mokuro.wrapVertical(self.alloc, joined, max_chars);
-        errdefer if (!handed_over) self.alloc.free(cols);
-        if (cols.len == 0) {
-            self.alloc.free(joined);
-            self.alloc.free(cols);
-            handed_over = true;
-            try c.setLayerVisible(self.dialog_layer, false);
-            return;
-        }
+        const inner = shape.inner;
+        const cols = shape.lines;
 
-        var slots: usize = 1;
-        for (cols) |col| slots = @max(slots, mokuro.charCount(col));
-        const text_cells = cols.len * col_cells;
-        const tag_cols = mokuro.displayWidth(ai_tag);
-        var inner = text_cells;
-        if (self.conf.ai_lookup) inner = @max(inner, tag_cols + 2);
-        // The columns hug the right edge, where the text starts: a panel
-        // widened for the AI tag takes the slack on the left.
-        const text_left = 2 + inner - text_cells;
-
-        o.freeText(self.alloc);
-        o.text = .{ .joined = joined, .rows = cols, .vertical = true, .text_left = text_left };
-        handed_over = true;
-        o.pitch = pitch;
-
-        const interior = inner + 2;
-        const box_cols = interior + 2;
-        const box_rows = slots * pitch + 2;
-        const at = self.placeDialog(page, box, box_rows, box_cols);
-        o.rect = .{ .row = at.row, .col = at.col, .rows = box_rows, .cols = box_cols };
-        o.ai_tag = if (self.conf.ai_lookup) .{ .col = box_cols - 2 - tag_cols, .cols = tag_cols } else null;
-
-        var b = c.batch();
+        var b = self.client.batch();
         defer b.deinit();
 
-        try b.setLayerSize(self.dialog_layer, box_cols, box_rows);
+        try b.setLayerSize(self.dialog_layer, shape.box_cols, shape.box_rows);
         try b.setLayerCellPosition(self.dialog_layer, at.row, at.col);
         // Filled rather than cleared to transparent: a short column
         // leaves slots no glyph paints, which would otherwise be holes.
         try b.clearArea(.{ .layer = self.dialog_layer, .bg = bg_dialog });
-        try b.setLayerSelectionFlow(self.dialog_layer, .{ .mode = .vertical_rl, .column_cols = col_cells, .origin_col = text_left });
+        try b.setLayerSelectionFlow(self.dialog_layer, .{ .mode = .vertical_rl, .column_cols = col_cells, .origin_col = shape.text_left });
 
-        const h_line = try repeatAlloc(self.alloc, box_h, interior);
+        const h_line = try repeatAlloc(self.alloc, box_h, inner + 2);
         defer self.alloc.free(h_line);
         try chromeAt(&b, self.dialog_layer, 0, 0, box_tl, fg_dialog_border, bg_dialog);
         try chromeOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
         try chromeOn(&b, self.dialog_layer, box_tr, fg_dialog_border, bg_dialog);
-        for (1..box_rows - 1) |row| {
+        for (1..shape.box_rows - 1) |row| {
             try chromeAt(&b, self.dialog_layer, row, 0, box_v_pad, fg_dialog_border, bg_dialog);
             try chromeAt(&b, self.dialog_layer, row, inner + 2, pad_box_v, fg_dialog_border, bg_dialog);
         }
 
         // One write per character: each sits on its own row.
         for (cols, 0..) |column, k| {
-            const x = text_left + (cols.len - 1 - k) * col_cells;
+            const x = shape.text_left + (cols.len - 1 - k) * col_cells;
             var i: usize = 0;
             var slot: usize = 0;
             while (i < column.len) : (slot += 1) {
@@ -1530,45 +1620,24 @@ pub const Ui = struct {
             }
         }
 
-        try chromeAt(&b, self.dialog_layer, box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
-        try chromeOn(&b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
-        try chromeOn(&b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
-        if (o.ai_tag) |tag| try chromeAt(&b, self.dialog_layer, box_rows - 1, tag.col, ai_tag, fg_lookup_term, bg_dialog);
+        try self.finishDialog(&b, o, shape, h_line);
+    }
+
+    /// The bottom border (with the AI tag), the fade, and the reveal --
+    /// shared by both layouts, and sent with the rest of the panel so the
+    /// layer's first visible frame is already the finished panel (see
+    /// `setHelp` for the same trick).
+    fn finishDialog(self: *Ui, b: *glyphwire.Client.Batch, o: *const Ocr, shape: DialogShape, h_line: []const u8) !void {
+        try chromeAt(b, self.dialog_layer, shape.box_rows - 1, 0, box_bl, fg_dialog_border, bg_dialog);
+        try chromeOn(b, self.dialog_layer, h_line, fg_dialog_border, bg_dialog);
+        try chromeOn(b, self.dialog_layer, box_br, fg_dialog_border, bg_dialog);
+        if (o.ai_tag) |tag| try chromeAt(b, self.dialog_layer, shape.box_rows - 1, tag.col, ai_tag, fg_lookup_term, bg_dialog);
 
         try b.setLayerOpacity(self.dialog_layer, if (o.peeking) self.conf.ocr_peek else 1.0);
         try b.setLayerVisible(self.dialog_layer, true);
 
         var results = try b.send();
         results.deinit();
-
-        if (self.lookup != null) self.highlightLookup();
-    }
-
-    /// Where the dialog goes: below the bubble it came from when there is
-    /// room, above it when there isn't, left-aligned with it, and always
-    /// wholly on screen.
-    ///
-    /// Below-first because a manga bubble's tail points down more often
-    /// than not, so the panel lands on the artwork you have already
-    /// looked past rather than on the panel you are about to read.
-    fn placeDialog(self: *const Ui, page: *const mokuro.Page, box: mokuro.Box, rows: usize, cols: usize) glyphwire.CellPos {
-        const view = self.pageView();
-        const max_row: i64 = @as(i64, @intCast(view.rows)) - @as(i64, @intCast(rows));
-        const max_col: i64 = @as(i64, @intCast(view.cols)) - @as(i64, @intCast(cols));
-
-        const r = self.blockWindowRect(page, box);
-        var row = r.row + r.rows;
-        if (row > max_row) {
-            const above = r.row - @as(i64, @intCast(rows));
-            // Only move above if that actually fits; otherwise leave it
-            // below and let the clamp below pin it to the bottom edge,
-            // which is still better than half off the top.
-            if (above >= 0) row = above;
-        }
-        return .{
-            .row = @intCast(std.math.clamp(row, 0, @max(max_row, 0))),
-            .col = @intCast(std.math.clamp(r.col, 0, @max(max_col, 0))),
-        };
     }
 
     /// One row of a side panel before it is laid out. A `scale`d row is
@@ -2020,29 +2089,24 @@ pub const Ui = struct {
     }
 
     /// Where a side panel `rows` x `cols` goes, and how many rows of it
-    /// are visible: below the OCR dialog when it fits, above when that
-    /// fits instead, left-aligned with the dialog and always wholly on
-    /// screen. A panel that fits neither side takes whichever side is
-    /// bigger and scrolls; only when neither side has even
-    /// `side_min_rows` does it give up and cover the dialog.
-    fn placeSide(self: *const Ui, rows: usize, cols: usize) struct { row: usize, col: usize, rows: usize } {
+    /// are visible. Beside a tall, narrow dialog (vertical, or in a
+    /// margin) -- right of it, else left -- when either side has the
+    /// width (`place.beside`). Otherwise below the OCR dialog when it
+    /// fits, above when that fits instead, left-aligned with the dialog
+    /// and always wholly on screen; a panel that fits neither side takes
+    /// whichever side is bigger and scrolls, and only when neither side
+    /// has even `side_min_rows` does it give up and cover the dialog
+    /// (`place.stacked`).
+    fn placeSide(self: *const Ui, rows: usize, cols: usize) place.Slot {
         const view = self.pageView();
-        const anchor_row: usize = if (self.ocr) |o| o.rect.row else 0;
-        const anchor_col: usize = if (self.ocr) |o| o.rect.col else 0;
-        const anchor_rows: usize = if (self.ocr) |o| o.rect.rows else 0;
-
-        const col = @min(anchor_col, view.cols -| cols);
-        const below = anchor_row + anchor_rows;
-        const below_space = view.rows -| below;
-        const above_space = @min(anchor_row, view.rows);
-
-        if (rows <= below_space) return .{ .row = below, .col = col, .rows = rows };
-        if (rows <= above_space) return .{ .row = anchor_row - rows, .col = col, .rows = rows };
-        if (below_space >= above_space and below_space >= side_min_rows)
-            return .{ .row = below, .col = col, .rows = below_space };
-        if (above_space >= side_min_rows) return .{ .row = 0, .col = col, .rows = above_space };
-        const fit = @max(@min(rows, view.rows), 1);
-        return .{ .row = view.rows -| fit, .col = col, .rows = fit };
+        const o = self.ocr orelse return place.stacked(view, .{ .row = 0, .col = 0, .rows = 0 }, 0, rows, cols, side_min_rows);
+        const anchor: place.Slot = .{ .row = o.rect.row, .col = o.rect.col, .rows = o.rect.rows };
+        // A vertical dialog, or one squeezed into a margin, is tall and
+        // narrow: under it there's rarely room, beside it usually is.
+        if (o.at != null and (o.text.vertical or o.in_margin)) {
+            if (place.beside(view, anchor, o.rect.cols, rows, cols)) |slot| return slot;
+        }
+        return place.stacked(view, anchor, o.rect.rows, rows, cols, side_min_rows);
     }
 
     /// Draws (or hides) the "building dictionary index" panel for

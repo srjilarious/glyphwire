@@ -13,6 +13,7 @@ const cache = @import("read_support").cache;
 const state = @import("read_support").state;
 const rconfig = @import("read_support").config;
 const mokuro = @import("read_support").mokuro;
+const place = @import("read_support").place;
 const archive = @import("read_support").archive;
 const dict = @import("read_support").dict;
 const kana = @import("read_support").kana;
@@ -333,11 +334,13 @@ pub fn configReadsOcrLayoutKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
         \\config = {
         \\  ocr_layout = "vertical",
         \\  ocr_dialog_rows = 500,
+        \\  ocr_dialog_placement = "bubble",
         \\}
     );
     defer result.deinit(alloc);
     try testz.expectTrue(result.err == null);
     try testz.expectTrue(result.config.ocr_layout == .vertical);
+    try testz.expectTrue(result.config.ocr_dialog_placement == .bubble);
     try testz.expectEqual(result.config.ocr_dialog_rows, rconfig.ocr_dialog_rows_max);
 }
 
@@ -1286,6 +1289,70 @@ pub fn mokuroVerticalFormsTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr("︱", mokuro.verticalForm('ー').?);
     try testz.expectTrue(mokuro.verticalForm('あ') == null);
     try testz.expectTrue(mokuro.verticalForm('a') == null);
+}
+
+// ─── place: where the dialog and side panel go ──────────────────────────
+
+pub fn placeMarginsAroundAFittedPageTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A 100-column window, the page 40 wide starting at column 30.
+    const m = place.margins(.{ .cols = 100, .rows = 30 }, 30, 40);
+    try testz.expectEqual(m.left, 30);
+    try testz.expectEqual(m.right, 30);
+    try testz.expectEqual(m.right_start, 70);
+    // A zoomed page panned past both edges leaves none.
+    const none = place.margins(.{ .cols = 100, .rows = 30 }, -50, 300);
+    try testz.expectEqual(none.left, 0);
+    try testz.expectEqual(none.right, 0);
+}
+
+pub fn placeMarginOrderStartsOnTheBubblesSideTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Page at 30..70; a bubble at 55..65 is right of the page's middle.
+    const right = place.marginOrder(30, 40, .{ .row = 5, .col = 55, .rows = 4, .cols = 10 });
+    try testz.expectTrue(right[0] == .right and right[1] == .left);
+    const left = place.marginOrder(30, 40, .{ .row = 5, .col = 32, .rows = 4, .cols = 10 });
+    try testz.expectTrue(left[0] == .left and left[1] == .right);
+}
+
+pub fn placeInMarginCentresAndLevelsWithTheBubbleTest(_: std.Io, _: std.mem.Allocator) !void {
+    const view: place.View = .{ .cols = 100, .rows = 30 };
+    const m = place.margins(view, 30, 40);
+    // 10 wide in a 30-wide right margin: centred, 10 in from 70.
+    const spot = place.inMargin(m, .right, view, 6, 8, 10).?;
+    try testz.expectEqual(spot.col, 80);
+    try testz.expectEqual(spot.row, 6);
+    // A bubble near the bottom pulls the box up to stay on screen.
+    try testz.expectEqual(place.inMargin(m, .left, view, 28, 8, 10).?.row, 22);
+    // Too wide, or taller than the window: doesn't fit.
+    try testz.expectTrue(place.inMargin(m, .left, view, 0, 8, 31) == null);
+    try testz.expectTrue(place.inMargin(m, .left, view, 0, 31, 10) == null);
+}
+
+pub fn placeNearBubbleGoesBelowThenAboveTest(_: std.Io, _: std.mem.Allocator) !void {
+    const view: place.View = .{ .cols = 80, .rows = 30 };
+    const below = place.nearBubble(view, .{ .row = 2, .col = 10, .rows = 5, .cols = 8 }, 6, 20);
+    try testz.expectEqual(below.row, 7);
+    try testz.expectEqual(below.col, 10);
+    const above = place.nearBubble(view, .{ .row = 20, .col = 70, .rows = 8, .cols = 8 }, 6, 20);
+    try testz.expectEqual(above.row, 14);
+    try testz.expectEqual(above.col, 60);
+}
+
+pub fn placeBesidePrefersTheRightThenTheLeftTest(_: std.Io, _: std.mem.Allocator) !void {
+    const view: place.View = .{ .cols = 100, .rows = 30 };
+    // A 10-wide dialog at column 40: 50 free to its right.
+    const right = place.beside(view, .{ .row = 4, .col = 40, .rows = 20 }, 10, 12, 30).?;
+    try testz.expectEqual(right.col, 50);
+    try testz.expectEqual(right.row, 4);
+    try testz.expectEqual(right.rows, 12);
+    // In the right margin: no room right, so it goes left.
+    const left = place.beside(view, .{ .row = 4, .col = 85, .rows = 20 }, 10, 12, 30).?;
+    try testz.expectEqual(left.col, 55);
+    // Taller than what's left below its top: pulled up, then cut to fit.
+    const tall = place.beside(view, .{ .row = 25, .col = 40, .rows = 4 }, 10, 40, 30).?;
+    try testz.expectEqual(tall.row, 0);
+    try testz.expectEqual(tall.rows, 30);
+    // Neither side has the width.
+    try testz.expectTrue(place.beside(view, .{ .row = 0, .col = 20, .rows = 4 }, 60, 10, 30) == null);
 }
 
 pub fn mokuroLayoutFollowsTheBlockOnlyWhenAutoTest(_: std.Io, _: std.mem.Allocator) !void {
