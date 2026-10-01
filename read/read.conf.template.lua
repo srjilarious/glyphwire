@@ -123,6 +123,15 @@
 --     -- original characters.
 --     ocr_layout = "auto",
 --
+--     -- Where the dialog goes. "margin" puts it in the empty space
+--     -- beside a page that doesn't fill the window's width, when it fits
+--     -- there (re-wrapped narrower, or into taller columns, if that's
+--     -- what it takes), so it covers no artwork; the lookup panel then
+--     -- opens beside it. "bubble" always puts it over the page next to
+--     -- the bubble, which is also where a dialog that won't fit a margin
+--     -- goes either way.
+--     ocr_dialog_placement = "margin",
+--
 --     -- Path to an already-*unzipped* Yomitan-format dictionary
 --     -- directory -- e.g. a Jitendex download
 --     -- (https://jitendex.org/pages/downloads.html) extracted once by

@@ -108,6 +108,13 @@ pub const ReadConfig = struct {
     /// flag from mokuro, `"vertical"` / `"horizontal"` force one way.
     /// `v` cycles it, and the choice is remembered per book.
     ocr_layout: mokuro.Layout = .auto,
+    /// Where the dialog goes. `"margin"` (the default) puts it in the
+    /// empty columns beside a fitted page when it fits there -- re-wrapped
+    /// narrower, or into taller columns, if that's what it takes -- so it
+    /// covers no artwork; `"bubble"` always puts it over the page next
+    /// to its bubble. Either way a dialog that can't go in a margin sits
+    /// by its bubble.
+    ocr_dialog_placement: DialogPlacement = .margin,
 
     /// Path to an already-*unzipped* Yomitan-format dictionary directory
     /// (e.g. a Jitendex download, https://jitendex.org, extracted once
@@ -255,6 +262,9 @@ pub const ReadConfig = struct {
     }
 };
 
+/// `ReadConfig.ocr_dialog_placement`.
+pub const DialogPlacement = enum { margin, bubble };
+
 pub const zoom_max_ceiling: f32 = 16.0;
 /// Bounds on `ocr_dialog_cols`. The floor is "a wrap that isn't one
 /// character per line"; the ceiling is the widest a floating panel can be
@@ -354,6 +364,12 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
         result.config.ocr_dialog_cols = clampUint("ocr_dialog_cols", v, ocr_dialog_cols_min, ocr_dialog_cols_max);
     if (uintField(lua, "ocr_dialog_rows")) |v|
         result.config.ocr_dialog_rows = clampUint("ocr_dialog_rows", v, ocr_dialog_rows_min, ocr_dialog_rows_max);
+    if (stringField(lua, "ocr_dialog_placement")) |v| {
+        if (std.meta.stringToEnum(DialogPlacement, v)) |pl| result.config.ocr_dialog_placement = pl else std.log.warn(
+            "gw-read: {s} `ocr_dialog_placement` = '{s}' is not 'margin'/'bubble'; ignored",
+            .{ conf_name, v },
+        );
+    }
     if (stringField(lua, "ocr_layout")) |v| {
         if (mokuro.Layout.parse(v)) |l| result.config.ocr_layout = l else std.log.warn(
             "gw-read: {s} `ocr_layout` = '{s}' is not 'auto'/'vertical'/'horizontal'; ignored",
