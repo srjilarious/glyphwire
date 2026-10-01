@@ -150,6 +150,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (store) |*s| s.deinit();
 
     var start_page: usize = explicit_page orelse 0;
+    var layout = conf.ocr_layout;
     if (conf.remember_position and explicit_page == null) {
         if (config_dir) |dir| {
             store = read.state.load(alloc, io, dir);
@@ -163,6 +164,7 @@ pub fn main(init: std.process.Init) !void {
                 if (args.optionVal("direction") == null) {
                     if (read.Direction.parse(mark.direction)) |d| direction = d;
                 }
+                if (read.mokuro.Layout.parse(mark.layout)) |l| layout = l;
             }
         }
     }
@@ -192,6 +194,7 @@ pub fn main(init: std.process.Init) !void {
         .page = start_page,
         .mode = mode,
         .direction = direction,
+        .layout = layout,
         .config_dir = config_dir,
         // Read here, where the environment is, rather than threading the
         // whole environ map into the UI. Only ever sent to the endpoint.

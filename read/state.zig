@@ -19,13 +19,16 @@ const std = @import("std");
 
 pub const file_name = "read.state.json";
 
-/// One book's remembered position. `mode` and `direction` are stored as
-/// their enum names rather than as integers so the file survives a
-/// reordering of either enum.
+/// One book's remembered position. `mode`, `direction` and `layout` are
+/// stored as their enum names rather than as integers so the file
+/// survives a reordering of any of them. `layout` is the OCR dialog's
+/// `mokuro.Layout` (`v`); a file written before it existed reads as
+/// `"auto"`.
 pub const Bookmark = struct {
     page: usize = 0,
     mode: []const u8 = "fit_screen",
     direction: []const u8 = "rtl",
+    layout: []const u8 = "auto",
 };
 
 /// The whole file: book path -> bookmark. Backed by an arena because the
@@ -66,6 +69,7 @@ pub const Store = struct {
             .page = mark.page,
             .mode = try alloc.dupe(u8, mark.mode),
             .direction = try alloc.dupe(u8, mark.direction),
+            .layout = try alloc.dupe(u8, mark.layout),
         });
     }
 };
@@ -97,12 +101,14 @@ pub fn parse(alloc: std.mem.Allocator, json: []const u8) Store {
         };
         const mode = stringField(obj, "mode") orelse "fit_screen";
         const direction = stringField(obj, "direction") orelse "rtl";
+        const layout = stringField(obj, "layout") orelse "auto";
 
         const key = a.dupe(u8, kv.key_ptr.*) catch continue;
         store.entries.put(a, key, .{
             .page = page,
             .mode = a.dupe(u8, mode) catch continue,
             .direction = a.dupe(u8, direction) catch continue,
+            .layout = a.dupe(u8, layout) catch continue,
         }) catch continue;
     }
     return store;
@@ -136,6 +142,8 @@ pub fn serialize(alloc: std.mem.Allocator, store: *const Store) ![]u8 {
         try std.json.Stringify.encodeJsonString(mark.mode, .{}, w);
         try w.writeAll(", \"direction\": ");
         try std.json.Stringify.encodeJsonString(mark.direction, .{}, w);
+        try w.writeAll(", \"layout\": ");
+        try std.json.Stringify.encodeJsonString(mark.layout, .{}, w);
         try w.writeAll(" }");
     }
     try w.writeAll("\n}\n");

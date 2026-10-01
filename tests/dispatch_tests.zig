@@ -2387,6 +2387,77 @@ pub fn mouseSelectPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectFalse(ctx.layerPtr(panel).?.mouse_select);
 }
 
+/// `selection_flow` sets and reports a layer's mode and column grid; an
+/// unknown mode is refused and leaves the layer as it was; `{}` with no
+/// mode puts it back to horizontal.
+pub fn selectionFlowPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const panel = try ctx.createLayer(20, 20, 0);
+    try testz.expectEqual(ctx.layerPtr(panel).?.selection_flow.mode, .horizontal);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"selection_flow","mode":"vertical_rl","cols":4,"col":2}}
+    );
+    const flow = ctx.layerPtr(panel).?.selection_flow;
+    try testz.expectEqual(flow.mode, .vertical_rl);
+    try testz.expectEqual(flow.column_cols, 4);
+    try testz.expectEqual(flow.origin_col, 2);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":9,"method":"get_property","params":{"layer":1,"property":"selection_flow"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+    const Response = struct { id: i64, result: struct { mode: []const u8, cols: usize, col: usize } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqualStr("vertical_rl", parsed.value.result.mode);
+    try testz.expectEqual(parsed.value.result.cols, 4);
+    try testz.expectEqual(parsed.value.result.col, 2);
+
+    const bad_msg =
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"selection_flow","mode":"sideways"}}
+    ;
+    const bad_decoded = try roundTripThroughWire(alloc, bad_msg);
+    defer alloc.free(bad_decoded);
+    try testz.expectError(d.handle(alloc, bad_decoded), dispatch.DispatchError.InvalidSelectionFlow);
+    try testz.expectEqual(ctx.layerPtr(panel).?.selection_flow.mode, .vertical_rl);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"selection_flow"}}
+    );
+    try testz.expectEqual(ctx.layerPtr(panel).?.selection_flow.mode, .horizontal);
+}
+
+/// `write_text`'s `copy_text` reaches the cells: a selection over the
+/// glyph copies the stand-in's original text.
+pub fn writeTextCopyTextIsWhatSelectionCopiesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const panel = try ctx.createLayer(20, 4, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"layer":1,"row":0,"col":0,"text":"﹁","copy_text":"「"}}
+    );
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"layer":1,"text":"あ"}}
+    );
+    const layer = ctx.layerPtr(panel).?;
+    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 3 });
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("「あ", text);
+}
+
 pub fn setCaretLayerPointsAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
