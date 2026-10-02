@@ -72,6 +72,15 @@ pub const GapBuffer = struct {
         return self.gap_end - self.gap_start;
     }
 
+    /// The text from logical offset `off` up to the gap, or to the end
+    /// when `off` is past the gap -- the longest run that is contiguous
+    /// in `buf`. Empty at or past the end.
+    pub fn chunkAt(self: *const GapBuffer, off: usize) []const u8 {
+        if (off >= self.len()) return &.{};
+        if (off < self.gap_start) return self.buf[off..self.gap_start];
+        return self.buf[off + self.gapLen() ..];
+    }
+
     /// Backing-store index of logical offset `i`. Only meaningful for
     /// `i < len()`.
     fn physical(self: *const GapBuffer, i: usize) usize {
@@ -391,6 +400,18 @@ pub const Buffer = struct {
     /// The text of one line, without its newline, as a fresh allocation.
     pub fn lineText(self: *const Buffer, alloc: std.mem.Allocator, line: usize) ![]u8 {
         return self.gap.read(alloc, self.lineStart(line), self.lineEnd(line));
+    }
+
+    /// The text as the highlighter reads it: the gap buffer's two runs,
+    /// borrowed, with no copy. Valid until the next mutation, and
+    /// pointing at this `Buffer` -- which must not move while it is held.
+    pub fn textSource(self: *const Buffer) syntax.TextSource {
+        return .{ .reader = .{ .ctx = self, .len = self.len(), .chunk_fn = readChunk } };
+    }
+
+    fn readChunk(ctx: *const anyopaque, off: usize) []const u8 {
+        const self: *const Buffer = @ptrCast(@alignCast(ctx));
+        return self.gap.chunkAt(off);
     }
 
     /// The whole buffer as a fresh allocation -- what `:w` hands the
