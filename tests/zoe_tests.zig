@@ -2566,6 +2566,49 @@ pub fn bufferTextSourceReadsAcrossGapTest(_: std.Io, alloc: std.mem.Allocator) !
     try testz.expectTrue((try src.slice(alloc, 3, 99, &scratch)) == null);
 }
 
+// ─── Selection repaint diff ────────────────────────────────────────────
+
+pub fn selectionDiffCoversOnlyMovedEndsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const diff = zoe.selection_diff;
+    var out: [2]diff.ByteRange = undefined;
+
+    // Nothing selected before or after.
+    try testz.expectEqual(diff.changedRanges(null, null, &out), 0);
+
+    // Appearing and going away: the whole span.
+    const s: diff.SelSpan = .{ .lo = 10, .hi = 40, .linewise = false };
+    try testz.expectEqual(diff.changedRanges(null, s, &out), 1);
+    try testz.expectEqual(out[0].start, 10);
+    try testz.expectEqual(out[0].end, 40);
+    try testz.expectEqual(diff.changedRanges(s, null, &out), 1);
+    try testz.expectEqual(out[0].start, 10);
+
+    // A drag step: only the end moved, so only the bytes between the two
+    // ends -- not the 30 bytes that stayed selected.
+    try testz.expectEqual(diff.changedRanges(s, .{ .lo = 10, .hi = 43, .linewise = false }, &out), 1);
+    try testz.expectEqual(out[0].start, 40);
+    try testz.expectEqual(out[0].end, 43);
+    // Shrinking back is the same range.
+    try testz.expectEqual(diff.changedRanges(.{ .lo = 10, .hi = 43, .linewise = false }, s, &out), 1);
+    try testz.expectEqual(out[0].start, 40);
+    try testz.expectEqual(out[0].end, 43);
+
+    // The cursor crossing the anchor moves both ends.
+    try testz.expectEqual(diff.changedRanges(s, .{ .lo = 5, .hi = 11, .linewise = false }, &out), 2);
+    try testz.expectEqual(out[0].start, 5);
+    try testz.expectEqual(out[0].end, 10);
+    try testz.expectEqual(out[1].start, 11);
+    try testz.expectEqual(out[1].end, 40);
+
+    // Charwise to linewise: the union of both.
+    try testz.expectEqual(diff.changedRanges(s, .{ .lo = 0, .hi = 45, .linewise = true }, &out), 1);
+    try testz.expectEqual(out[0].start, 0);
+    try testz.expectEqual(out[0].end, 45);
+
+    // Unchanged.
+    try testz.expectEqual(diff.changedRanges(s, s, &out), 0);
+}
+
 // ─── Span cache ────────────────────────────────────────────────────────
 
 fn cacheSpan(start: usize) [1]syntax.Span {

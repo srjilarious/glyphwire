@@ -1940,6 +1940,44 @@ pub fn batchRequestFormReturnsResponsesCorrelatedBySubIdTest(io: std.Io, alloc: 
     try testz.expectEqual(responses[2].result.object.get("col").?.integer, 2);
 }
 
+/// `sync` changes nothing and answers `{}` -- standalone, and as the last
+/// sub-request of a batch, where its response comes back after the
+/// sub-messages before it have applied.
+pub fn syncAnswersEmptyAloneAndInBatchTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const alone = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","id":4,"method":"sync","params":{}}
+    );
+    defer alloc.free(alone);
+    const r1 = try d.handle(alloc, alone);
+    const body1 = r1.response.?;
+    defer alloc.free(body1);
+    const p1 = try std.json.parseFromSlice(std.json.Value, alloc, body1, .{});
+    defer p1.deinit();
+    try testz.expectEqual(p1.value.object.get("id").?.integer, 4);
+    try testz.expectEqual(p1.value.object.get("result").?.object.count(), 0);
+
+    const batched = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","id":9,"method":"batch","params":{"messages":[
+        \\  {"method":"write_text","params":{"text":"ok"}},
+        \\  {"method":"sync","params":{},"id":1}
+        \\]}}
+    );
+    defer alloc.free(batched);
+    const r2 = try d.handle(alloc, batched);
+    const body2 = r2.response.?;
+    defer alloc.free(body2);
+    const p2 = try std.json.parseFromSlice(BatchResponseJson, alloc, body2, .{ .ignore_unknown_fields = true });
+    defer p2.deinit();
+    try testz.expectEqual(p2.value.result.responses.len, 1);
+    try testz.expectEqual(p2.value.result.responses[0].id, 1);
+    try testz.expectEqualStr("o", ctx.root.cell(0, 0).grapheme());
+}
+
 /// A sub-message whose handler errors (here: `draw_icon` naming an icon
 /// no catalog entry exists for) is logged and skipped; the sub-messages
 /// around it still apply, and the batch as a whole doesn't error.
