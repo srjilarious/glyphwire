@@ -61,6 +61,7 @@ const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
+const profile = @import("profile.zig");
 const diag = @import("diag.zig");
 const hover_mod = @import("hover.zig");
 const complete = @import("complete.zig");
@@ -898,6 +899,8 @@ pub const Ui = struct {
     hl_dirty_lines: std.ArrayList(usize) = .empty,
     /// Scratch for `Highlighter.reparseIncremental`'s changed-range output.
     hl_changed: std.ArrayList(syntax.ByteRange) = .empty,
+    /// `ZOE_PROFILE=<path>` frame timing; a no-op without it.
+    prof: profile.Profile,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -1040,6 +1043,7 @@ pub const Ui = struct {
             .root_split = root_split,
             .cell_px_h = metrics.h,
             .environ = environ,
+            .prof = .init(io, environ.get("ZOE_PROFILE")),
         };
         errdefer self.tree.deinit();
         errdefer self.layout.deinit();
@@ -1466,6 +1470,7 @@ pub const Ui = struct {
         self.hl_scratch.deinit(self.alloc);
         self.hl_dirty_lines.deinit(self.alloc);
         self.hl_changed.deinit(self.alloc);
+        self.prof.deinit();
         if (self.grammars) |*g| g.deinit();
         for (self.hl_search_dirs) |d| self.alloc.free(d);
         self.alloc.free(self.hl_search_dirs);
@@ -1958,13 +1963,21 @@ pub const Ui = struct {
             const parsing = self.highlightPending();
             const next = if (parsing) self.listener.pollNext() else try self.listener.next(timeout);
             if (next) |first| {
+                const t_input = self.prof.now();
                 try self.handleEvent(first);
+                self.prof.events += 1;
                 while (!self.quit) {
                     const ev = self.listener.pollNext() orelse break;
                     try self.handleEvent(ev);
+                    self.prof.events += 1;
                 }
+                self.prof.add(.input, t_input);
             }
-            if (parsing and !self.quit) self.stepHighlight();
+            if (parsing and !self.quit) {
+                const t_parse = self.prof.now();
+                self.stepHighlight();
+                self.prof.add(.parse, t_parse);
+            }
             // A wake with nothing queued, or the deadline passing: either way
             // this is where the debounced change goes out.
             if (self.lspChangeDue()) self.lspFlushChange();
@@ -4367,6 +4380,8 @@ pub const Ui = struct {
     fn render(self: *Ui) !void {
         var batch = self.client.batch();
         defer batch.deinit();
+        const t_build = self.prof.now();
+        const nested_before = self.prof.nestedNs();
 
         // Before the rows, so the host has scrolled to where the cursor
         // is by the time the frame it belongs to lands.
@@ -4402,8 +4417,15 @@ pub const Ui = struct {
         if (self.completion_dirty or (self.completion != null and focused_buffer_dirty))
             try self.renderCompletion(&batch);
         if (self.tab_tip_dirty) try self.renderTabTip(&batch);
+        self.prof.addNet(.paint, t_build, nested_before);
 
+        if (self.prof.enabled()) {
+            for (batch.msgs.items) |m| self.prof.bytes += m.len;
+        }
+        const t_send = self.prof.now();
         _ = try batch.send();
+        self.prof.add(.send, t_send);
+        self.prof.endFrame();
 
         self.tree_dirty = .none;
         self.status_dirty = false;
@@ -4497,6 +4519,8 @@ pub const Ui = struct {
         var localized = false;
         if (self.buf.hl) |*h| {
             if (h.languageSet() and self.buf.ed.buf.edits != self.buf.hl_edits) {
+                const t_parse = self.prof.now();
+                defer self.prof.add(.parse, t_parse);
                 localized = self.syncHighlight(h) catch blk: {
                     self.buf.full_redraw = true;
                     break :blk false;
@@ -5397,7 +5421,10 @@ pub const Ui = struct {
         const h = &self.buf.hl.?;
         const ls = self.buf.ed.buf.lineStart(line);
         const le = self.buf.ed.buf.lineEnd(line);
+        const t_spans = self.prof.now();
         h.lineSpans(ls, le, &self.hl_scratch) catch return false;
+        self.prof.add(.spans, t_spans);
+        self.prof.span_lines += 1;
         self.rowSpansImpl(batch, r, text, self.hl_scratch.items) catch return false;
         return true;
     }
