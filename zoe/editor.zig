@@ -484,6 +484,17 @@ pub const Editor = struct {
                     try self.backspace();
                 } else if (eq(u8, key, "delete")) {
                     try self.deleteForward();
+                } else if (mods.ctrl and eq(u8, key, "left")) {
+                    // vim's insert-mode <C-Left>/<C-Right>: the `b` / `w`
+                    // motions, crossing lines like they do.
+                    self.moveTo(motion.wordBackward(&self.buf, self.cursor, 1, false), true);
+                } else if (mods.ctrl and eq(u8, key, "right")) {
+                    self.moveTo(motion.wordForward(&self.buf, self.cursor, 1, false), true);
+                } else if (mods.ctrl and eq(u8, key, "home")) {
+                    self.moveTo(0, true);
+                } else if (mods.ctrl and eq(u8, key, "end")) {
+                    // Past the last character, so typing appends to the file.
+                    self.moveTo(self.buf.len(), true);
                 } else if (eq(u8, key, "left")) {
                     self.moveTo(motion.left(&self.buf, self.cursor, 1), true);
                 } else if (eq(u8, key, "right")) {

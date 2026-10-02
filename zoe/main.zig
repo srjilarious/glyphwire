@@ -32,7 +32,9 @@ const interrupt = @import("applib").interrupt;
 //     \\splits the editor into a new group beside or below (:vsplit / :split
 //     \\[file]), each with its own tabs and a draggable divider; q closes a
 //     \\group (:close) and w cycles focus. Ctrl+L/K/J and the Ctrl+arrows
-//     \\move focus that way, Ctrl+Left out to the tree. Ctrl+N toggles
+//     \\move focus that way, Ctrl+Left out to the tree (in insert mode
+//     \\Ctrl+Left/Right jump by word instead, and Ctrl+Home/End go to the
+//     \\start and end of the file). Ctrl+N toggles
 //     \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
 //     \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
 //     \\or hides dotfiles and anything .gitignore excludes, everywhere at once
@@ -68,7 +70,9 @@ pub fn main(init: std.process.Init) !void {
         \\splits the editor into a new group beside or below (:vsplit / :split
         \\[file]), each with its own tabs and a draggable divider; q closes a
         \\group (:close) and w cycles focus. Ctrl+L/K/J and the Ctrl+arrows
-        \\move focus that way, Ctrl+Left out to the tree. Ctrl+N toggles
+        \\move focus that way, Ctrl+Left out to the tree (in insert mode
+        \\Ctrl+Left/Right jump by word instead, and Ctrl+Home/End go to the
+        \\start and end of the file). Ctrl+N toggles
         \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
         \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
         \\or hides dotfiles and anything .gitignore excludes, everywhere at once
