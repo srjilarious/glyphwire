@@ -702,8 +702,8 @@ pub fn dialogEscapeAndFocusTest(_: std.Io, alloc: std.mem.Allocator) !void {
 pub fn navigationKeysTakeTheCheapRepaintTest(_: std.Io, _: std.mem.Allocator) !void {
     // A full pane repaint is a ~54 KB frame; over a remote session that
     // is what made moving the cursor lag. A navigation key moves nothing
-    // but the highlight, so it owes two `set_bg` messages and no text at
-    // all -- the cheapest level there is, and the lag comes straight back
+    // but the highlight, so it owes two rows' `set_bg`/`set_fg` and no
+    // text at all -- the cheapest level there is, and the lag comes back
     // if one of these slips off it.
     const bg_only = [_]sala.ui.Action{
         .cursorUp,   .cursorDown, .pageUp,

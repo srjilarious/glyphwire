@@ -539,6 +539,46 @@ pub const Client = struct {
         bg: protocol.Color,
     };
 
+    /// `set_fg`'s options: `SetBgOpts`' region, with `fg` required.
+    /// Shared by `Client.setFg` and `Batch.setFg`.
+    pub const SetFgOpts = struct {
+        /// null = the root layer.
+        layer: ?core.LayerHandle = null,
+        row: usize = 0,
+        col: usize = 0,
+        /// null = to the layer's edge.
+        rows: ?usize = null,
+        cols: ?usize = null,
+        fg: core.Color,
+    };
+
+    /// `set_fg` -- repaints a region's text colour and nothing else: the
+    /// foreground half of moving a highlight whose text changes colour
+    /// with it. A notification.
+    pub fn setFg(self: *Client, opts: SetFgOpts) !void {
+        try self.notify("set_fg", setFgParams(opts));
+    }
+
+    fn setFgParams(opts: SetFgOpts) SetFgWire {
+        return .{
+            .layer = opts.layer,
+            .row = opts.row,
+            .col = opts.col,
+            .rows = opts.rows,
+            .cols = opts.cols,
+            .fg = colorToJson(opts.fg).?,
+        };
+    }
+
+    const SetFgWire = struct {
+        layer: ?core.LayerHandle,
+        row: usize,
+        col: usize,
+        rows: ?usize,
+        cols: ?usize,
+        fg: protocol.Color,
+    };
+
     /// `set_underline`'s options: `SetBgOpts`' region for the underline
     /// channel. Shared by `Client.setUnderline` and `Batch.setUnderline`.
     pub const SetUnderlineOpts = struct {
@@ -2822,6 +2862,12 @@ pub const Client = struct {
             try self.notify("set_bg", setBgParams(opts));
         }
 
+        /// Batched `set_fg` -- see `Client.SetFgOpts`. Goes out in the
+        /// same frame as the `set_bg`s it recolours text under.
+        pub fn setFg(self: *Batch, opts: SetFgOpts) !void {
+            try self.notify("set_fg", setFgParams(opts));
+        }
+
         /// Batched `set_underline` -- see `Client.SetUnderlineOpts`. Batched
         /// is how an editor uses it: every diagnostic mark on the visible
         /// rows goes out in the same frame as the text it sits under.
@@ -3862,6 +3908,10 @@ pub const Event = union(enum) {
     pane_exit: PaneExitEvent,
     remote_exit: RemoteExitEvent,
     context: ContextEvent,
+    /// The window theme changed, and this connection's context follows
+    /// it. No payload kept: what a client needs from the new theme it
+    /// reads with `Client.getTheme`.
+    theme,
 
     pub fn deinit(self: Event, alloc: std.mem.Allocator) void {
         switch (self) {
@@ -3871,7 +3921,7 @@ pub const Event = union(enum) {
             .terminal_reply => |b| alloc.free(b),
             .layout => |l| l.deinit(alloc),
             .pane_layout => |l| l.deinit(alloc),
-            .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .layer_resize, .pane_exit, .remote_exit, .context => {},
+            .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .layer_resize, .pane_exit, .remote_exit, .context, .theme => {},
         }
     }
 
@@ -4600,6 +4650,8 @@ pub const InputListener = struct {
             try self.enqueue(.{ .context = .{ .context = p.value.context, .cols = p.value.cols, .rows = p.value.rows } });
         } else if (eql(u8, method, "copy_request")) {
             try self.enqueue(.copy_request);
+        } else if (eql(u8, method, "theme")) {
+            try self.enqueue(.theme);
         }
     }
 

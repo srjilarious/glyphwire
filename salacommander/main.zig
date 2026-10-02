@@ -101,6 +101,9 @@ pub fn main(init: std.process.Init) !void {
         "scroll_offset",
         "mouse_button",
         "context",
+        // The window theme changed and this follows it: the F3 popup's
+        // frame is the one thing the host can't recolour itself.
+        "theme",
         // A drag of the shell panel's top edge.
         "layer_resize",
         // Ctrl+Shift+C with no host selection -- answered with the active
