@@ -4593,13 +4593,14 @@ pub const Ui = struct {
         }
 
         // The line-number gutter. Every text path above repainted it for
-        // the rows it drew; two cases leave stale numbers it did not
-        // touch: a `move_content` scroll slides the old numbers along with
-        // the text, and in `.relative` mode moving the caret changes every
-        // row's distance. Repaint the whole gutter then -- it is one short
-        // write per row, no syntax pass.
-        if (self.gutterWidth() > 0 and (scrolled or
-            (self.buf.ed.line_numbers == .relative and cursor.line != self.buf.prev_cursor_line)))
+        // the rows it drew. A `move_content` scroll slides the old numbers
+        // along with their lines, which leaves an `.absolute` gutter right
+        // as it is -- each number still sits beside its own line, and the
+        // caret's highlighted number rode along with it and was repainted
+        // above. Only `.relative` numbers go stale: a scroll or a caret
+        // move changes every row's distance. Repaint the whole gutter then.
+        if (self.gutterWidth() > 0 and self.buf.ed.line_numbers == .relative and
+            (scrolled or cursor.line != self.buf.prev_cursor_line))
         {
             var r: usize = 0;
             while (r < b.rows) : (r += 1) try self.renderGutterCell(batch, r);
@@ -4869,18 +4870,17 @@ pub const Ui = struct {
 
         // The sign first, in its own cell: the worst severity starting on
         // this line, or a blank. Painted even on a clean line, because this
-        // is also what takes yesterday's mark off.
+        // is also what takes yesterday's mark off. Both glyphs are
+        // East Asian "ambiguous" width, which the host draws one cell
+        // wide, so the number's span starts right after it.
         const signs = self.signWidth();
-        if (signs > 0) {
-            var sign: []const u8 = " ";
-            var sign_fg = fg_dim;
-            if (!past_end) {
-                if (self.diagSeverityForLine(line)) |sev| {
-                    sign = if (sev == .err) sign_error else sign_other;
-                    sign_fg = diagColor(sev);
-                }
+        var sign: []const u8 = " ";
+        var sign_fg = fg_dim;
+        if (signs > 0 and !past_end) {
+            if (self.diagSeverityForLine(line)) |sev| {
+                sign = if (sev == .err) sign_error else sign_other;
+                sign_fg = diagColor(sev);
             }
-            try writeAt(batch, self.grp.buffer_layer, r, 0, sign, sign_fg, bg_buffer);
         }
 
         var buf: [32]u8 = undefined;
@@ -4893,7 +4893,21 @@ pub const Ui = struct {
             past_end,
         );
         const fg = if (!past_end and line == cursor_line) fg_text else fg_dim;
-        try writeAt(batch, self.grp.buffer_layer, r, signs, cell, fg, bg_buffer);
+
+        // Sign and number as one write: the gutter is repainted for every
+        // row a frame draws, and a write's fixed fields cost more than the
+        // handful of cells it carries.
+        const spans = [_]glyphwire.client.Client.Span{
+            .{ .text = sign, .fg = sign_fg },
+            .{ .text = cell, .fg = fg },
+        };
+        const first: usize = if (signs > 0) 0 else 1;
+        try batch.writeSpans(spans[first..], .{
+            .layer = self.grp.buffer_layer,
+            .row = r,
+            .col = 0,
+            .bg = bg_buffer,
+        });
     }
 
     /// The worst diagnostic severity starting on buffer `line` of the active
