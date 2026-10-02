@@ -55,6 +55,13 @@ pub fn build(b: *std.Build) void {
     });
     ls_support_mod.addImport("glyphwire", glyphwire_mod);
 
+    // gw-grep's pure halves (the `rg --json` parser and the node builder)
+    // so `tests/grep_tests.zig` can drive them without a subprocess.
+    const grep_support_mod = b.addModule("grep_support", .{
+        .root_source_file = b.path("grep/support.zig"),
+    });
+    grep_support_mod.addImport("glyphwire", glyphwire_mod);
+
     // Windowless pieces of glyphwire-host (pixel/cell geometry, scrollbar
     // math, `host.conf.lua` value clamps, the key-repeat policy) so the
     // test runner can exercise them without standing up a window or a GL
@@ -265,6 +272,7 @@ pub fn build(b: *std.Build) void {
     tests_exe.root_module.addImport("glyphwire", glyphwire_mod);
     tests_exe.root_module.addImport("shell_support", shell_support_mod);
     tests_exe.root_module.addImport("ls_support", ls_support_mod);
+    tests_exe.root_module.addImport("grep_support", grep_support_mod);
     tests_exe.root_module.addImport("host_support", host_support_mod);
     tests_exe.root_module.addImport("zoe_support", zoe_support_mod);
     tests_exe.root_module.addImport("gmux_support", gmux_support_mod);
@@ -594,6 +602,25 @@ pub fn build(b: *std.Build) void {
     const md_step = b.step("gwmd", "Run the glyphwire Markdown reader (gwmd <file.md>)");
     md_step.dependOn(&run_md.step);
 
+    const grep_exe = b.addExecutable(.{
+        .name = "gw-grep",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("grep/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    grep_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    grep_exe.root_module.addImport("zargunaught", zargunaught_mod);
+    b.installArtifact(grep_exe);
+
+    const run_grep = b.addRunArtifact(grep_exe);
+    run_grep.step.dependOn(b.getInstallStep());
+    run_grep.addPassthruArgs();
+
+    const grep_step = b.step("gw-grep", "Run the glyphwire ripgrep browser (gw-grep <pattern> [path...])");
+    grep_step.dependOn(&run_grep.step);
+
     const sala_exe = b.addExecutable(.{
         .name = "salacommander",
         .root_module = b.createModule(.{
@@ -685,7 +712,7 @@ pub fn build(b: *std.Build) void {
     // pulls in. The CI packaging job
     // (.github/workflows/linux-package.yml) drives this step.
     const package_step = b.step("package", "Install the shipped programs and assets into zig-out");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, read_exe, md_exe, ls_exe, hist_exe, zoe_exe, agent_exe, gmux_exe, sala_exe }) |exe| {
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, read_exe, md_exe, ls_exe, hist_exe, zoe_exe, agent_exe, gmux_exe, sala_exe, grep_exe }) |exe| {
         package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     package_step.dependOn(&installed_assets_step.step);
@@ -696,8 +723,8 @@ pub fn build(b: *std.Build) void {
     // runtime, so the packaged tree has to carry them alongside the binary.
     package_step.dependOn(grammars_step);
 
-    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-agent, gw-view, gw-read, gwmd, gw-ls, gw-hist, zoe, gmux, salacommander, grammars, and assets under the selected prefix");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, agent_exe, view_exe, read_exe, md_exe, ls_exe, hist_exe, zoe_exe, gmux_exe, sala_exe }) |exe| {
+    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-agent, gw-view, gw-read, gwmd, gw-ls, gw-hist, gw-grep, zoe, gmux, salacommander, grammars, and assets under the selected prefix");
+    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, agent_exe, view_exe, read_exe, md_exe, ls_exe, hist_exe, zoe_exe, gmux_exe, sala_exe, grep_exe }) |exe| {
         install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
     install_local_step.dependOn(&installed_assets_step.step);

@@ -32,6 +32,7 @@ const all_tests = blk: {
         testz.Group{ .name = "Shell Remote Tests", .tag = "shell-remote", .mod = @import("./shell_remote_tests.zig") },
         testz.Group{ .name = "Prompt Template Tests", .tag = "prompt", .mod = @import("./prompt_template_tests.zig") },
         testz.Group{ .name = "Ls Tests", .tag = "ls", .mod = @import("./ls_tests.zig") },
+        testz.Group{ .name = "Grep Tests", .tag = "grep", .mod = @import("./grep_tests.zig") },
         testz.Group{ .name = "Open Action Tests", .tag = "openaction", .mod = @import("./openaction_tests.zig") },
         testz.Group{ .name = "Host Tests", .tag = "host", .mod = @import("./host_tests.zig") },
         testz.Group{ .name = "Host Engine Tests", .tag = "host-eng", .mod = @import("./host_eng_tests.zig") },
