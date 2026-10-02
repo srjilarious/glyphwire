@@ -471,6 +471,44 @@ pub fn editorCtrlDAndCtrlUPageInNormalModeTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectEqual(ed.operator.?, 'd');
 }
 
+pub fn editorInsertCtrlArrowsJumpByWordTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // vim's `w` / `b`: punctuation is its own word, lines are crossed.
+    var ed = try Editor.initFromText(alloc, "foo.bar baz\nqux", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i");
+    _ = try ed.feedKey("right", .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 3);
+    _ = try ed.feedKey("right", .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 4);
+    _ = try ed.feedKey("right", .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 8);
+    _ = try ed.feedKey("right", .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 12);
+    _ = try ed.feedKey("left", .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 8);
+    _ = try ed.feedKey("left", .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 4);
+    try testz.expectEqual(ed.mode, .insert);
+}
+
+pub fn editorInsertCtrlHomeEndGoToFileEndsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "ji");
+    _ = try ed.feedKey("end", .{ .ctrl = true });
+    // Past the last character, so typing appends to the file.
+    try testz.expectEqual(ed.cursor, 13);
+    _ = try ed.feedText("!");
+    const tail = try ed.buf.read(alloc, 8, 14);
+    defer alloc.free(tail);
+    try testz.expectEqualStr(tail, "three!");
+    _ = try ed.feedKey("home", .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 0);
+    // Plain Home / End stay line-local.
+    _ = try ed.feedKey("end", .{});
+    try testz.expectEqual(ed.cursor, 3);
+}
+
 // ─── Editor: edits ──────────────────────────────────────────────────────
 
 pub fn editorDeleteCharTest(_: std.Io, alloc: std.mem.Allocator) !void {
