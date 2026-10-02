@@ -2236,10 +2236,16 @@ pub const Ui = struct {
                     }
                     // Ctrl + a direction moves focus that way rather than
                     // cycling: to the editor group on that side, or from
-                    // the leftmost one into the file tree.
-                    if (focusDirection(k.key)) |dir| {
-                        self.focusToward(dir);
-                        return;
+                    // the leftmost one into the file tree. Insert mode in
+                    // the buffer keeps Ctrl+Left/Right for itself (word
+                    // jumps); Ctrl+W h/l and Ctrl+L still move focus.
+                    const insert_word_jump = self.focus == .buffer and self.buf.ed.mode == .insert and
+                        (std.mem.eql(u8, k.key, "left") or std.mem.eql(u8, k.key, "right"));
+                    if (!insert_word_jump) {
+                        if (focusDirection(k.key)) |dir| {
+                            self.focusToward(dir);
+                            return;
+                        }
                     }
                     if (std.mem.eql(u8, k.key, "n")) {
                         try self.toggleTree();
