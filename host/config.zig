@@ -169,7 +169,8 @@ pub const ProfileConfig = struct {
 
 /// A host-owned key chord: one key plus the modifiers that must be held
 /// with it, exactly (an extra modifier held is a different chord). What
-/// `host.conf.lua`'s `context_switcher_key` parses into.
+/// `host.conf.lua`'s `context_switcher_key` and `theme_switcher_key`
+/// parse into.
 pub const Chord = struct {
     key: host_eng.input.Key,
     ctrl: bool = false,
@@ -185,6 +186,10 @@ pub const Chord = struct {
 /// Super+F12: a chord no program binds (Ctrl+Z stays free for undo, and
 /// the Super modifier is otherwise unused inside the window).
 pub const context_switcher_default: Chord = .{ .key = .F12, .super = true };
+
+/// Super+F10, the theme switcher's: next to the context switcher's, for
+/// the same reason.
+pub const theme_switcher_default: Chord = .{ .key = .F10, .super = true };
 
 /// Parses a chord written `"super+f12"` / `"ctrl+alt+tab"`: `+`-separated,
 /// case-insensitive, modifiers (`ctrl`/`control`, `alt`, `shift`,
@@ -248,6 +253,10 @@ pub const HostConfig = struct {
     /// or null when `host.conf.lua` turned it off with
     /// `context_switcher_key = false`.
     context_switcher: ?Chord = context_switcher_default,
+    /// The chord that opens the theme switcher
+    /// (`host/theme_switcher.zig`), or null for `theme_switcher_key =
+    /// false`.
+    theme_switcher: ?Chord = theme_switcher_default,
 };
 
 /// Maps `config.cursor_shape`'s string to a `CursorShape`, or null for an

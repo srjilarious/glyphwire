@@ -100,8 +100,10 @@
 --     --   chrome     sidebar_bg status_bg status_fg mode tab_bar_bg tab_bg
 --     --              shell_bg whitespace title_bg title_fg title_inactive_bg
 --     --              title_inactive_fg list_cursor_bg
---     --              list_cursor_inactive_bg keybar_bg keybar_key
+--     --              list_cursor_inactive_bg list_cursor_fg
+--     --              list_cursor_inactive_fg keybar_bg keybar_key
 --     --              keybar_label_bg keybar_label suggestion
+--     --              divider pane_divider (the host's split / pane bands)
 --     --   popups     popup_bg popup_fg popup_code_bg popup_rule popup_border
 --     --              popup_selected_bg popup_label popup_kind popup_detail
 --     --              finder_header_bg finder_header_fg finder_selected_bg

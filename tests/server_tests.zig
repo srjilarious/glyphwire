@@ -1150,3 +1150,76 @@ pub fn copyRequestReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.me
     defer alloc.free(b_second);
     try testz.expectTrue(std.mem.indexOf(u8, b_second, "\"key\":\"x\"") != null);
 }
+
+pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-theme-event-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    // Two panes, so the two clients are in two contexts.
+    const made = try srv.session.createPane(0, 0);
+
+    const t_a = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_a.join();
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var a = try addr.connect(io);
+    defer a.close(io);
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+    var a_buf: [4096]u8 = undefined;
+    var a_w = a.writer(io, &a_buf);
+    try wire.writeFrame(&a_w.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["theme","focus"],"pane":0}}
+    );
+    try a_w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &a, &a_dec));
+
+    // `b` sets its own theme, so a window theme change passes it by. The
+    // `get_theme` round trip makes sure the notification has landed.
+    const t_b = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_b.join();
+    var b = try addr.connect(io);
+    defer b.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+    var b_buf: [4096]u8 = undefined;
+    var b_w = b.writer(io, &b_buf);
+    var subscribe_buf: [160]u8 = undefined;
+    try wire.writeFrame(&b_w.interface, try std.fmt.bufPrint(&subscribe_buf,
+        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["theme","focus"],"pane":{d}}}}}
+    , .{made.pane}));
+    try wire.writeFrame(&b_w.interface,
+        \\{"jsonrpc":"2.0","method":"set_theme","params":{"name":"nord"}}
+    );
+    try wire.writeFrame(&b_w.interface,
+        \\{"jsonrpc":"2.0","id":2,"method":"get_theme","params":{}}
+    );
+    try b_w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &b, &b_dec));
+    const b_theme = try readOneFrame(io, alloc, &b, &b_dec);
+    defer alloc.free(b_theme);
+    try testz.expectTrue(std.mem.indexOf(u8, b_theme, "\"own\":true") != null);
+
+    try srv.setWindowTheme(alloc, glyphwire.theme.resolve("catppuccin-latte", &.{}).?);
+    try testz.expectEqualStr(srv.session.theme.name(), "catppuccin-latte");
+    // A focus change goes to both, so the next thing off each connection
+    // shows what the theme change sent it.
+    try srv.reportFocus(alloc, true);
+
+    const a_first = try readOneFrame(io, alloc, &a, &a_dec);
+    defer alloc.free(a_first);
+    try testz.expectTrue(std.mem.indexOf(u8, a_first, "\"method\":\"theme\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, a_first, "\"name\":\"catppuccin-latte\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, a_first, "\"dark\":false") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, a_first, "\"panel_style\":\"panel_light\"") != null);
+
+    const b_first = try readOneFrame(io, alloc, &b, &b_dec);
+    defer alloc.free(b_first);
+    try testz.expectTrue(std.mem.indexOf(u8, b_first, "\"method\":\"focus\"") != null);
+}

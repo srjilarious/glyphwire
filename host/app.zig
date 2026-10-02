@@ -22,6 +22,7 @@ const pane_proc_mod = @import("pane_proc.zig");
 const redraw_mod = @import("redraw.zig");
 const profiler_mod = @import("profiler.zig");
 const switcher_mod = @import("switcher.zig");
+const theme_switcher_mod = @import("theme_switcher.zig");
 
 const CursorConfig = config.CursorConfig;
 const CursorShape = config.CursorShape;
@@ -66,6 +67,9 @@ const RedrawSig = struct {
     /// The context switcher's change-counter -- opening, closing and
     /// moving the selection repaint an overlay no cell knows about.
     switcher_gen: u64,
+    /// The theme switcher's, the same way. Its previews change the
+    /// window theme too, which this also covers.
+    theme_switcher_gen: u64,
 };
 
 pub const EngOptions: host_eng.EngineOptions = .{
@@ -183,6 +187,9 @@ pub const App = struct {
     /// Super+F12's context switcher. Its chord comes from `host.conf.lua`;
     /// `main` sets it after `init`.
     switcher: switcher_mod.Switcher,
+    /// Super+F10's theme switcher. Chord and theme list set by `main`
+    /// after `init`.
+    theme_switcher: theme_switcher_mod.ThemeSwitcher,
     /// The programs `spawn_in_pane` started, one per pane. Null when
     /// nothing has ever asked for a pane, which is every session without a
     /// window manager -- so the common case pays nothing for this.
@@ -224,6 +231,7 @@ pub const App = struct {
             .outline_toggle = .{ .app = undefined },
             .panes = .{ .app = undefined },
             .switcher = .{ .app = undefined },
+            .theme_switcher = .{ .app = undefined },
             .window_sizing = .{
                 .app = undefined,
                 .font_path = font.path,
@@ -250,6 +258,7 @@ pub const App = struct {
         app.outline_toggle.app = app;
         app.panes.app = app;
         app.switcher.app = app;
+        app.theme_switcher.app = app;
         app.window_sizing.app = app;
         app.renderer.app = app;
 
@@ -292,11 +301,12 @@ pub const App = struct {
         // (the minimum grid no longer fit) is there anything left for the
         // *next* frame's syncWindowSize to reconcile.
         self.window_sizing.handleFontZoom(eng);
-        // The context switcher's chord and, while it is open, every key
-        // press: first, so nothing below -- selection shortcuts included
-        // -- acts on a key meant for the switcher. `reportKeyEvents` and
-        // `reportTextInput` ask it whether to hold presses back.
-        const switcher_took = self.switcher.handleKeys(eng);
+        // The context and theme switchers' chords and, while one is open,
+        // every key press: first, so nothing below -- selection shortcuts
+        // included -- acts on a key meant for a dialog. `reportKeyEvents`
+        // and `reportTextInput` ask `modalConsumed` whether to hold
+        // presses back.
+        const switcher_took = self.handleModalKeys(eng);
         // Ctrl+Shift+C / +V / +Space and, in keyboard selection mode, the
         // arrow/Home/End/Escape/Enter motions. Runs before
         // `reportKeyEvents`, which swallows the same keys so the shell
@@ -446,6 +456,33 @@ pub const App = struct {
         return need;
     }
 
+    /// Runs the host's two modal dialogs for this frame. The open one, if
+    /// any, has every key -- the other's chord included, so they never
+    /// stack. Otherwise each looks for its own chord. Returns whether
+    /// this frame's presses were a dialog's.
+    fn handleModalKeys(self: *App, eng: *Engine) bool {
+        if (self.theme_switcher.open) {
+            self.switcher.consumed = false;
+            return self.theme_switcher.handleKeys(eng);
+        }
+        if (self.switcher.handleKeys(eng)) {
+            self.theme_switcher.consumed = false;
+            return true;
+        }
+        return self.theme_switcher.handleKeys(eng);
+    }
+
+    /// Whether a modal dialog took this frame's key presses (see
+    /// `Switcher.consumed`).
+    pub fn modalConsumed(self: *const App) bool {
+        return self.switcher.consumed or self.theme_switcher.consumed;
+    }
+
+    /// Whether a modal dialog is open.
+    pub fn modalOpen(self: *const App) bool {
+        return self.switcher.open or self.theme_switcher.open;
+    }
+
     /// Mirrors the OS window's keyboard focus onto the caret and puts
     /// each change on the wire as a `focus` notification. Edge-triggered:
     /// clients hear about the change, not about every frame that follows
@@ -509,6 +546,7 @@ pub const App = struct {
             .divider_preview_y = if (self.panes.preview) |p| p.y else 0,
             .divider_preview_on = self.panes.preview != null,
             .switcher_gen = self.switcher.gen,
+            .theme_switcher_gen = self.theme_switcher.gen,
         };
     }
 

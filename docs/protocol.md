@@ -338,7 +338,8 @@ same rule governs layers (`create_layer` / `adopt_layer`).
 not on top keeps running and keeps its screen, putting a full-screen
 program "in the background" is nothing more than changing which context
 is on top of its pane: no signal, no suspend. The host owns a switcher
-for this (Super+F12 by default) that lists the focused pane's stack and
+for this (Super+F12 by default, `context_switcher_key` in
+`host.conf.lua`) that lists the focused pane's stack and
 activates the pick. A context carries an optional `title` for that list
 (`create_context`'s `title`, or `set_context_title`); a client
 **SHOULD** name its context after itself.
@@ -494,14 +495,19 @@ append-only):
 | Status | `success`, `message`, `message_error`, `diag_error`, `diag_warning`, `diag_info`, `diag_hint` |
 | Search | `match`, `match_bg`, `match_current_bg` |
 | Files | `file`, `dir`, `symlink`, `exec`, `special`, `hidden`, `hidden_dir`, `marked` |
-| Chrome | `sidebar_bg`, `status_bg`, `status_fg`, `mode`, `tab_bar_bg`, `tab_bg`, `shell_bg`, `whitespace`, `title_bg`, `title_fg`, `title_inactive_bg`, `title_inactive_fg`, `list_cursor_bg`, `list_cursor_inactive_bg`, `keybar_bg`, `keybar_key`, `keybar_label_bg`, `keybar_label`, `suggestion` |
+| Chrome | `sidebar_bg`, `status_bg`, `status_fg`, `mode`, `tab_bar_bg`, `tab_bg`, `shell_bg`, `whitespace`, `title_bg`, `title_fg`, `title_inactive_bg`, `title_inactive_fg`, `list_cursor_bg`, `list_cursor_inactive_bg`, `list_cursor_fg`, `list_cursor_inactive_fg`, `keybar_bg`, `keybar_key`, `keybar_label_bg`, `keybar_label`, `suggestion`, `divider`, `pane_divider` |
 | Popups and dialogs | `popup_bg`, `popup_fg`, `popup_code_bg`, `popup_rule`, `popup_border`, `popup_selected_bg`, `popup_label`, `popup_kind`, `popup_detail`, `finder_header_bg`, `finder_header_fg`, `finder_selected_bg`, `finder_selected_fg`, `dialog_bg`, `dialog_fg`, `dialog_title_bg`, `dialog_title_fg`, `danger_bg`, `input_bg`, `button_bg`, `button_focus_bg` |
 | Documents | `heading1`–`heading6`, `strong`, `emphasis`, `strike`, `code`, `code_bg`, `code_block`, `code_block_bg`, `quote`, `list_marker`, `rule` |
 | Tables | `table_header`, `table_header_bg`, `table_alt_row_bg`, `outline_marker` |
 | Syntax | the tree-sitter capture groups: `comment`, `keyword`, `string`, `string_escape`, `string_special`, `escape`, `number`, `boolean`, `character`, `constant`, `constant_builtin`, `function`, `function_builtin`, `type`, `type_builtin`, `constructor`, `operator`, `property`, `variable`, `variable_builtin`, `variable_parameter`, `module`, `label`, `attribute`, `tag`, `punctuation`, `punctuation_special`, `text_title`, `text_literal`, `text_uri`, `text_reference` |
 
 A role without a `_bg` suffix is a foreground. A table with no
-`header_fg` draws its header in `table_header`.
+`header_fg` draws its header in `table_header`. `list_cursor_fg` is
+opt-in: a list whose rows carry meaning in their own colours may keep
+them on the cursor row, but a light theme's cursor fill is saturated
+enough that only this reads on it. `divider` and `pane_divider` are the
+host's own: the band between split layers (the context's theme) and
+between panes (the window theme's).
 
 **Whose theme.** The host has a **window theme**, read at startup from
 `theme.lua` in the config directory (`config = { theme = "nord" }`, or a
@@ -513,6 +519,14 @@ program that draws into another program's context (an inline listing in
 a shell's scrollback) therefore takes that context's theme. The frame
 clear under every pane is the window theme's `bg`, and the host caret
 is the context theme's `cursor_bg`.
+
+The host also owns a **theme switcher** (Super+F10 by default,
+`theme_switcher_key` in `host.conf.lua`) listing every built-in and every
+`theme.lua` theme. It changes the window theme for the session —
+previewed as the selection moves, put back on Escape, never written to
+`theme.lua` — and sends a `theme` notification (section 7.2) to every
+connection whose context follows it. It and the context switcher are
+drawn by the host in the window theme's `panel_style` frame.
 
 ## 5. Reading the catalog
 
@@ -723,6 +737,7 @@ default style); any explicit colour, black included, is opaque.
 | `move_content` | notification | `layer?`, `top?`, `bot?`, `count?` = 1, `direction?` | — |
 | `clear` | notification | `layer?`, `row?` = 0, `col?` = 0, `rows?`, `cols?`, `bg?` | — |
 | `set_bg` | notification | `layer?`, `row?` = 0, `col?` = 0, `rows?`, `cols?`, `bg` | — |
+| `set_fg` | notification | `layer?`, `row?` = 0, `col?` = 0, `rows?`, `cols?`, `fg` | — |
 | `get_cells` | request | `layer?`, `view_offset?` = 0 | `{cols, rows, revision, cells}` |
 | `scroll_view` | request | `layer?`, `offset?`, `delta?` | `{offset, max}` |
 
@@ -793,6 +808,12 @@ with a highlighted row can move that highlight with two messages rather
 than redrawing two rows of text — the difference between a few hundred
 bytes and a few kilobytes per keystroke, which matters over a remote
 session.
+
+`set_fg` is the same for the text colour: the region's foreground
+changes and nothing else does. `fg` is required. It is the other half of
+moving a highlight whose text changes colour with it (a cursor row drawn
+in `list_cursor_fg`): one `set_fg` over the row the cursor landed on, and
+one per run of its own colours over the row it left.
 
 `move_content` scrolls a row range: `direction` is `"up"` or `"down"`;
 anything else reports `InvalidMoveDirection`.
@@ -1330,6 +1351,7 @@ flag.
 | clipboard | `copy_request`, `paste` | `clipboard`, `copy_request`, `paste` |
 | terminal | `terminal_reply` | `terminal` |
 | context | `context` | `context` |
+| theme | `theme` | `theme` |
 | panes | `pane_layout`, `pane_exit` | `panes`, `pane_layout`, `pane_exit` |
 | window_keys | `window_key_down`, `window_key_up`, `window_text` | `window_keys`, `window_key`, `window_text` |
 | remote | `remote_exit` | `remote`, `remote_exit` |
@@ -1356,6 +1378,7 @@ the client drains with `get_errors`.
 | `paste` | `{text}` |
 | `terminal_reply` | `{bytes}` |
 | `context` | `{context, cols, rows}` |
+| `theme` | `{name, dark, panel_style}` |
 | `pane_layout` | `{panes: [{pane, row, col, cols, rows}]}` |
 | `pane_exit` | `{pane, status}` |
 | `window_key_down` / `window_key_up` | `{key, mods}` |
@@ -1391,6 +1414,13 @@ offset (from its `scroll` notifications) instead.
 
 **`mouse_move`** fires only when the pointer changes *cell*; per-pixel
 motion is coalesced.
+
+**`theme`** says the window theme changed (the host's theme switcher)
+and goes **only** to connections whose context follows it: one that set
+its own with `set_theme` drew nothing that changed. Every colour reference
+already on screen recolours without the client; the notification is for
+what it resolved itself — `panel_style` (a nine-patch can't be
+recoloured) and blends — which it re-reads with `get_theme`.
 
 **`resize`** carries the receiving connection's own context size: the
 window's for a client that has the window to itself, its pane's for one

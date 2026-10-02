@@ -6,10 +6,10 @@ const glyphwire = @import("glyphwire");
 
 const app_mod = @import("app.zig");
 const config = @import("config.zig");
+const modal_list = @import("modal_list.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
-const Key = app_mod.Key;
 
 /// The context switcher: a small modal list of the programs the focused
 /// pane is holding (its context stack), opened by a host-owned chord
@@ -23,9 +23,9 @@ const Key = app_mod.Key;
 /// front, pops up over the current screen instead of replacing it, and
 /// the keys that drive it never reach a program at all.
 ///
-/// Keys while open: Up/Down (or k/j, Tab/Shift+Tab, or the chord again)
-/// move, Enter switches, 1..9 switch straight to that row, Escape closes.
-/// It opens with the *second* row selected, so the chord then Enter flips
+/// Keys while open are `modal_list.readAction`'s: Up/Down move, Enter
+/// switches, 1..9 switch straight to that row, Escape closes. Drawn by
+/// `Renderer.drawListDialog` from `view`, like the theme switcher. It opens with the *second* row selected, so the chord then Enter flips
 /// between the two most recent programs.
 pub const Switcher = struct {
     app: *App,
@@ -50,6 +50,8 @@ pub const Switcher = struct {
     /// just brought forward. Releases are never withheld (see
     /// `input.KeyInput.reportKeyEvents`).
     consumed: bool = false,
+    /// `view`'s rows, rebuilt each time it is asked for.
+    row_buf: [max_entries]modal_list.Row = undefined,
 
     pub const max_entries = 32;
     pub const max_title = glyphwire.Context.max_title_len;
@@ -87,25 +89,12 @@ pub const Switcher = struct {
         self.refresh();
         if (!self.open) return true;
 
-        if (chord_hit) {
-            self.move(1);
-        } else if (kb.pressed(.escape)) {
-            self.close();
-        } else if (kb.pressed(.enter) or kb.pressed(.kp_enter)) {
-            self.commit(self.selected);
-        } else if (kb.pressed(.up) or kb.pressed(.k) or (kb.pressed(.tab) and kb.shift())) {
-            self.move(-1);
-        } else if (kb.pressed(.down) or kb.pressed(.j) or kb.pressed(.tab)) {
-            self.move(1);
-        } else {
-            const digits = [_]Key{ .one, .two, .three, .four, .five, .six, .seven, .eight, .nine };
-            const kp_digits = [_]Key{ .kp_1, .kp_2, .kp_3, .kp_4, .kp_5, .kp_6, .kp_7, .kp_8, .kp_9 };
-            for (digits, kp_digits, 0..) |d, kp, i| {
-                if (kb.pressed(d) or kb.pressed(kp)) {
-                    if (i < self.len) self.commit(i);
-                    break;
-                }
-            }
+        switch (modal_list.readAction(kb, chord_hit)) {
+            .none => {},
+            .close => self.close(),
+            .commit => self.commit(self.selected),
+            .move => |d| self.move(d),
+            .pick => |i| if (i < self.len) self.commit(i),
         }
         return true;
     }
@@ -184,9 +173,7 @@ pub const Switcher = struct {
 
     fn move(self: *Switcher, delta: isize) void {
         if (self.len == 0) return;
-        const n: isize = @intCast(self.len);
-        const cur: isize = @intCast(self.selected);
-        self.selected = @intCast(@mod(cur + delta, n));
+        self.selected = modal_list.wrapMove(self.selected, self.len, delta);
         self.gen +%= 1;
     }
 
@@ -203,9 +190,20 @@ pub const Switcher = struct {
         self.gen +%= 1;
     }
 
-    /// The rows to draw, top first. Borrowed; valid until the next
-    /// `handleKeys`.
-    pub fn rows(self: *const Switcher) []const Entry {
-        return self.entries[0..self.len];
+    /// What to draw while open: the pane's stack, top first, the top
+    /// one tagged as the program in front. Borrowed; valid until the
+    /// next `handleKeys`.
+    pub fn view(self: *Switcher) ?modal_list.View {
+        if (!self.open or self.len == 0) return null;
+        for (self.entries[0..self.len], 0..) |*e, i| {
+            self.row_buf[i] = .{ .text = e.title(), .tag = if (i == 0) "  (current)" else "" };
+        }
+        return .{
+            .pane = self.pane,
+            .title = "Switch to",
+            .foot = "Enter switch  Esc close",
+            .rows = self.row_buf[0..self.len],
+            .selected = self.selected,
+        };
     }
 };

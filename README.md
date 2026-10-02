@@ -48,7 +48,7 @@ multi-script text:
 | **Panes** | `create_pane`, `spawn_in_pane`, `focus_pane`, `set_window_prefix` | Window-level split tree of panes, each running its own program on a host-managed PTY. What `gmux` is built on. |
 | **Splits** | `create_split`, `set_split_children`, `move_divider` | Layout tree of layers inside a context, with weighted or fixed children and draggable dividers. Re-lays itself on window resize. |
 | **Layers** | `create_layer`, `raise_layer`, `get_property` / `set_property` | Addressable surfaces with position, size, visibility, opacity and background. A viewport over a larger content grid scrolls host-side, with opt-in scrollbars. |
-| **Text** | `write_text`, `insert_cells`, `delete_cells`, `move_content`, `clear`, `set_bg` | Truecolor styled runs or spans, text scale (1.5x, 2x, 3x) from re-rasterized font atlases, in-place cell editing, row shifting without a repaint, and background-only repaints for moving a highlight. |
+| **Text** | `write_text`, `insert_cells`, `delete_cells`, `move_content`, `clear`, `set_bg`, `set_fg` | Truecolor styled runs or spans, text scale (1.5x, 2x, 3x) from re-rasterized font atlases, in-place cell editing, row shifting without a repaint, and background- or foreground-only repaints for moving a highlight. |
 | **Images** | `load_image`, `update_image`, `draw_image` | Real bitmaps (PNG, JPEG, BMP, GIF) placed in the grid, with source cropping. Bytes ride a binary side channel, never base64. |
 | **Icons and panels** | `draw_icon`, `create_nine_patch` | A bundled icon catalog (file types, Devicon logos, distro logos) and nine-patch panels from `.9.png` art, corners at native pixel size. |
 | **Rects** | `create_rect`, `update_rect`, `destroy_rect` | Pixel-space outlines and fills on a layer, independent of the cell grid. Good for marks, crop boxes and focus rings. |
@@ -144,8 +144,8 @@ Every config file is Lua, named `*.conf.lua`, and read from
 
 | File | Configures | Reference |
 |---|---|---|
-| `host.conf.lua` | Font face, fallback and size, cursor, grid size, scrollback, icon theme | `host/host.conf.template.lua` |
-| `theme.lua` | The window's colour theme: a 24-slot ANSI palette (terminal output uses it) and the shared roles every program paints with (`fg`, `heading1`, `table_header_bg`, `keyword`, ...). Nineteen built-ins (Default, xterm, GitHub, Catppuccin, Tokyo Night, Solarized, Darcula, Cobalt2, Dracula, Nord, Gruvbox, Monokai, VS Code Light and more) or your own. zoe, salacommander, gw-read and gw-shell can each override it in their own config | `host/theme.template.lua` |
+| `host.conf.lua` | Font face, fallback and size, cursor, grid size, scrollback, icon theme, the context switcher (Super+F12) and theme switcher (Super+F10) chords | `host/host.conf.template.lua` |
+| `theme.lua` | The window's colour theme: a 24-slot ANSI palette (terminal output uses it) and the shared roles every program paints with (`fg`, `heading1`, `table_header_bg`, `keyword`, ...). Nineteen built-ins (Default, xterm, GitHub, Catppuccin, Tokyo Night, Solarized, Darcula, Cobalt2, Dracula, Nord, Gruvbox, Monokai, VS Code Light and more) or your own. zoe, salacommander, gw-read and gw-shell can each override it in their own config. Super+F10 switches it for the session, with a live preview | `host/theme.template.lua` |
 | `shell.conf.lua` | Aliases, prompt segments, `zj` directory jumping, hooks | `shell/shell.conf.template.lua` |
 | `gmux.conf.lua` | Prefix key, pane shell, scrollback | `gmux/gmux.conf.template.lua` |
 | `zoe.conf.lua` | Languages, grammar path, its own colour theme, editor options, language servers | `zoe/zoe.conf.template.lua` |

@@ -1050,6 +1050,16 @@ const SetBgParams = struct {
     bg: protocol.Color,
 };
 
+/// `set_fg` params: `set_bg`'s, with the foreground required instead.
+const SetFgParams = struct {
+    layer: ?core.LayerHandle = null,
+    row: usize = 0,
+    col: usize = 0,
+    rows: ?usize = null,
+    cols: ?usize = null,
+    fg: protocol.Color,
+};
+
 /// `set_underline` params: the same region as `set_bg`, and `underline` is
 /// required for the same reason `bg` is. `"none"` is how a mark comes off.
 const SetUnderlineParams = struct {
@@ -1159,6 +1169,11 @@ pub const Subscriptions = struct {
     /// auto-restore). A client managing its own context subscribes to
     /// learn it's been backgrounded or brought back.
     context: bool = false,
+    /// `theme` server->client notifications (`{name, dark, panel_style}`),
+    /// sent when the window theme changes, to connections whose context
+    /// follows it. A client that resolved a frame or a blend from the
+    /// theme itself re-reads it.
+    theme: bool = false,
     /// Not a broadcast stream like the rest: subscribing to `"error"` just
     /// tells this connection's `Dispatcher` to start recording its own
     /// failed notifications into a ring (see `Dispatcher.error_ring`),
@@ -1205,6 +1220,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "paste")) return self.clipboard;
         if (std.mem.eql(u8, event, "terminal")) return self.terminal;
         if (std.mem.eql(u8, event, "context")) return self.context;
+        if (std.mem.eql(u8, event, "theme")) return self.theme;
         if (std.mem.eql(u8, event, "error")) return self.error_events;
         if (std.mem.eql(u8, event, "pane_layout")) return self.panes;
         if (std.mem.eql(u8, event, "pane_exit")) return self.panes;
@@ -1236,6 +1252,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "paste")) s.clipboard = true;
             if (std.mem.eql(u8, e, "terminal")) s.terminal = true;
             if (std.mem.eql(u8, e, "context")) s.context = true;
+            if (std.mem.eql(u8, e, "theme")) s.theme = true;
             if (std.mem.eql(u8, e, "error")) s.error_events = true;
             if (std.mem.eql(u8, e, "panes")) s.panes = true;
             // The event names are accepted as subscription names too, so a
@@ -1790,6 +1807,7 @@ pub const Dispatcher = struct {
         .{ "tag_metadata", catVoid(handleTagMetadata) },
         .{ "clear", catVoid(handleClear) },
         .{ "set_bg", catVoid(handleSetBg) },
+        .{ "set_fg", catVoid(handleSetFg) },
         .{ "set_underline", catVoid(handleSetUnderline) },
         .{ "get_cell_metrics", catBytesIdNoParams(handleGetCellMetrics) },
         .{ "create_metadata", catBytesId(handleCreateMetadata) },
@@ -3642,6 +3660,20 @@ pub const Dispatcher = struct {
         const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
         const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
         layer.fillBg(p.row, p.col, rows, cols, try colorFromJson(p.bg));
+    }
+
+    /// `set_fg`: `set_bg` for the text colour -- see `core.Layer.fillFg`.
+    fn handleSetFg(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetFgParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        const layer = try self.resolveLayer(p.layer);
+        const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
+        const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
+        layer.fillFg(p.row, p.col, rows, cols, try colorFromJson(p.fg));
     }
 
     /// `set_underline`: `set_bg` for the underline channel -- a mark applied

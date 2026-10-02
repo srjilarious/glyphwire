@@ -139,6 +139,36 @@ pub fn everyBuiltinResolvesWithOpaqueSlotsTest(_: std.Io, _: std.mem.Allocator) 
     try testz.expectTrue(theme.resolve("no-such-theme", &.{}) == null);
 }
 
+pub fn dividersKeepTheHostsOldGreysOnDefaultTest(_: std.Io, _: std.mem.Allocator) !void {
+    // glyphwire-host drew both bands in fixed colours before they were
+    // roles; `default` keeps them.
+    const t = theme.initDefault();
+    try expectColor(t.roleColor(.divider), 0x3a3a42);
+    try expectColor(t.roleColor(.pane_divider), 0x545460);
+}
+
+pub fn everyBuiltinHasVisibleDividersAndAReadableCursorTest(_: std.Io, _: std.mem.Allocator) !void {
+    for (theme.builtins) |spec| {
+        const t = theme.resolve(spec.name, &.{}).?;
+        const bg = t.roleColor(.bg);
+        // Both bands stand off the background, the pane one further.
+        const div = lumaDistance(t.roleColor(.divider), bg);
+        const pane = lumaDistance(t.roleColor(.pane_divider), bg);
+        try testz.expectTrue(div > 8);
+        try testz.expectTrue(pane > div);
+        // The cursor row's text is far from its fill: the case a light
+        // theme's saturated cursor got wrong with the row's own colours.
+        try testz.expectTrue(lumaDistance(t.roleColor(.list_cursor_fg), t.roleColor(.list_cursor_bg)) > 60);
+    }
+}
+
+/// Rough perceived-brightness difference, 0-255.
+fn lumaDistance(a: Color, b: Color) u32 {
+    const la = (@as(u32, a.r) * 299 + @as(u32, a.g) * 587 + @as(u32, a.b) * 114) / 1000;
+    const lb = (@as(u32, b.r) * 299 + @as(u32, b.g) * 587 + @as(u32, b.b) * 114) / 1000;
+    return if (la > lb) la - lb else lb - la;
+}
+
 pub fn xtermThemeKeepsTheOldAnsiColoursTest(_: std.Io, _: std.mem.Allocator) !void {
     const t = theme.resolve("xterm", &.{}).?;
     try expectColor(t.resolve(Color.ansi(.normal, .red)), 0xcd0000);
