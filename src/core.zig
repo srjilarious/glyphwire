@@ -1345,7 +1345,30 @@ pub const PropertyName = enum {
     /// Which way a selection on this layer reads (`{mode, cols, col}`,
     /// default `horizontal`). See `SelectionFlow`.
     selection_flow,
+    /// Which edge of a floating layer the host lets the user drag to
+    /// resize it (`{edge: "top" | "none"}`, default `none`). See
+    /// `ResizeEdge`.
+    resize_edge,
 };
+
+/// A floating layer's draggable edge (`PropertyName.resize_edge`).
+///
+/// Split dividers already resize the layers *in* a split tree, but a
+/// layer that floats over one -- the Ctrl+` shell panel along the bottom
+/// of zoe and salacommander -- has no divider: nothing sits on its other
+/// side. This gives it one. The host draws a thin band along that edge,
+/// hit-tests it ahead of the layer's own cells, and drags it with the
+/// same ghost preview a split divider gets.
+///
+/// The host does **not** resize the layer itself. When the drag ends it
+/// sends a `layer_resize` notification with the size the user asked for,
+/// and the client applies (and clamps, and remembers) it: a floating
+/// layer's placement is the client's arithmetic, redone on every window
+/// resize, and only the client knows what has to stay visible around it.
+///
+/// Only `top` exists because only a bottom-anchored panel has asked for
+/// one; the other edges are the obvious extension.
+pub const ResizeEdge = enum { none, top };
 
 /// How a selection reads the cells of a layer (`PropertyName.selection_flow`).
 ///
@@ -1445,6 +1468,7 @@ pub const PropertyValue = union(PropertyName) {
     mouse_select: bool,
     shadow: ?Shadow,
     selection_flow: SelectionFlow,
+    resize_edge: ResizeEdge,
 };
 
 /// See `PropertyName.scroll_mode`.
@@ -1704,6 +1728,8 @@ pub const Layer = struct {
     mouse_select: bool = false,
     /// Which way a selection on this layer reads. See `SelectionFlow`.
     selection_flow: SelectionFlow = .{},
+    /// The edge the host lets the user drag. See `ResizeEdge`.
+    resize_edge: ResizeEdge = .none,
     /// --- B1 screen model (see `execCsi` / decisions.md's VT fallback) ---
     /// Alternate-screen buffer (xterm `?1049` / `?47` / `?1047`): a
     /// lazily-allocated `width * height` cell array, row-major, with **no
@@ -3898,6 +3924,7 @@ pub const Layer = struct {
             .mouse_select => .{ .mouse_select = self.mouse_select },
             .shadow => .{ .shadow = self.shadow },
             .selection_flow => .{ .selection_flow = self.selection_flow },
+            .resize_edge => .{ .resize_edge = self.resize_edge },
         };
     }
 
@@ -3947,6 +3974,7 @@ pub const Layer = struct {
             .mouse_select => |v| self.mouse_select = v,
             .shadow => |v| self.shadow = if (v) |sh| sh.clamped() else null,
             .selection_flow => |v| self.selection_flow = .{ .mode = v.mode, .column_cols = @max(v.column_cols, 1), .origin_col = v.origin_col },
+            .resize_edge => |v| self.resize_edge = v,
         }
         // `.position` moves where the layer composites; `.cursor` can scroll
         // the ring buffer via `resolveRow` (bumped in `scrollOne`) and the
@@ -6988,7 +7016,7 @@ pub const Context = struct {
                 if (layer.scroll_mode != .client) return PropertyError.WrongScrollMode;
                 layer.setProperty(value);
             },
-            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select, .shadow, .selection_flow => layer.setProperty(value),
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select, .shadow, .selection_flow, .resize_edge => layer.setProperty(value),
         }
     }
 

@@ -15,6 +15,23 @@ const system_font = hs.system_font;
 const key_repeat = hs.key_repeat;
 const redraw = hs.redraw;
 
+// ─── geometry.resizeEdge* ─────────────────────────────────────────────
+
+pub fn resizeEdgeBandSitsOnTheLayersTopTest(_: std.Io, _: std.mem.Allocator) !void {
+    const rect: geometry.RectPx = .{ .x = 0, .y = 200, .w = 640, .h = 160 };
+    const band = geometry.resizeEdgeBand(rect);
+    // Over the layer's own first row, full width, a few pixels thick.
+    try testz.expectEqual(band.y, 200.0);
+    try testz.expectEqual(band.w, 640.0);
+    try testz.expectEqual(band.h, geometry.resize_edge_px);
+    // The grab target reaches past it both ways.
+    const grab = geometry.resizeEdgeHit(rect);
+    try testz.expectTrue(grab.contains(10, 200 - geometry.resize_edge_slop_px));
+    try testz.expectTrue(grab.contains(10, 200 + geometry.resize_edge_px + geometry.resize_edge_slop_px - 1));
+    try testz.expectFalse(grab.contains(10, 200 - geometry.resize_edge_slop_px - 1));
+    try testz.expectFalse(grab.contains(10, 220));
+}
+
 // ─── geometry.scrollbarGeom ───────────────────────────────────────────
 
 pub fn scrollbarGeomNoHistoryFillsTrackTest(_: std.Io, _: std.mem.Allocator) !void {

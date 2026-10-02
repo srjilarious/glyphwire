@@ -821,6 +821,39 @@ pub fn commandLineBufferStepReturnsADirectionTest(_: std.Io, alloc: std.mem.Allo
     }
 }
 
+pub fn commandLineSplitAndCloseNameTheGroupCommandsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+
+    // Bare: move the current buffer into the new group.
+    switch (try keys.feed(&ed, ":vsp<cr>")) {
+        .split => |sp| {
+            try testz.expectTrue(sp.vertical);
+            try testz.expectTrue(sp.path == null);
+        },
+        else => try testz.fail(),
+    }
+    // With a path, and the long spelling.
+    switch (try keys.feed(&ed, ":split other.zig<cr>")) {
+        .split => |sp| {
+            try testz.expectFalse(sp.vertical);
+            try testz.expectEqualStr(sp.path.?, "other.zig");
+        },
+        else => try testz.fail(),
+    }
+    switch (try keys.feed(&ed, ":clo<cr>")) {
+        .close_group => {},
+        else => try testz.fail(),
+    }
+    // A dirty buffer splits and closes freely: its tab moves along, so
+    // nothing is abandoned.
+    _ = try keys.feed(&ed, "iy<esc>");
+    switch (try keys.feed(&ed, ":close<cr>")) {
+        .close_group => {},
+        else => try testz.fail(),
+    }
+}
+
 pub fn commandLineBufferDeleteRefusesADirtyBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
@@ -3664,4 +3697,99 @@ pub fn completeAcceptIsOneUndoWithTheTypingTest(_: std.Io, alloc: std.mem.Alloca
     // And one `u` takes back the whole insert session, completion included.
     _ = try keys.feed(&ed, "<Esc>u");
     try expectText(alloc, &ed.buf, "x = \n");
+}
+
+// ─── Editor groups: layout tree ──────────────────────────────────────────
+
+const groups = zoe.groups;
+
+fn groupOrder(alloc: std.mem.Allocator, layout: *const groups.Layout) ![]groups.GroupId {
+    var out: std.ArrayList(groups.GroupId) = .empty;
+    try layout.groupsInOrder(alloc, &out);
+    return out.toOwnedSlice(alloc);
+}
+
+pub fn groupsSplitTurnsTheLeafIntoASplitTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var layout = try groups.Layout.init(alloc, 1);
+    defer layout.deinit();
+    const root_before = layout.root;
+
+    const s = try layout.split(1, 2, .vertical, 100);
+    // In place: the root node is still the root, now a split, so its
+    // parent's pointer (here, the root slot) never changes.
+    try testz.expectTrue(s == root_before);
+    try testz.expectEqual(s.kind.split.handle, 100);
+    try testz.expectEqual(s.kind.split.orientation.axis(), .row);
+    try testz.expectEqual(layout.count(), 2);
+
+    // Splitting the second half again nests under it.
+    const inner = try layout.split(2, 3, .horizontal, 101);
+    try testz.expectTrue(inner.parent.? == s);
+    const order = try groupOrder(alloc, &layout);
+    defer alloc.free(order);
+    try testz.expectEqual(order.len, 3);
+    try testz.expectEqual(order[0], 1);
+    try testz.expectEqual(order[1], 2);
+    try testz.expectEqual(order[2], 3);
+}
+
+pub fn groupsRemoveCollapsesIntoTheSiblingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var layout = try groups.Layout.init(alloc, 1);
+    defer layout.deinit();
+    // The only group can't be removed.
+    try testz.expectTrue(layout.remove(1) == null);
+
+    _ = try layout.split(1, 2, .vertical, 100);
+    _ = try layout.split(2, 3, .horizontal, 101);
+
+    // Closing 1: the {2 over 3} subtree takes the whole root, focus goes
+    // to its first group, and the root's split is the one destroyed.
+    const r = layout.remove(1).?;
+    try testz.expectEqual(r.destroyed, 100);
+    try testz.expectEqual(r.focus, 2);
+    try testz.expectTrue(r.replacement == layout.root);
+    try testz.expectTrue(layout.root.parent == null);
+    try testz.expectEqual(layout.root.kind.split.handle, 101);
+    // The moved-up split's children point at their new parent.
+    try testz.expectTrue(layout.root.kind.split.first.parent.? == layout.root);
+    try testz.expectTrue(layout.root.kind.split.second.parent.? == layout.root);
+
+    const r2 = layout.remove(3).?;
+    try testz.expectEqual(r2.destroyed, 101);
+    try testz.expectEqual(r2.focus, 2);
+    try testz.expectEqual(layout.count(), 1);
+    try testz.expectEqual(layout.root.kind.group, 2);
+}
+
+pub fn groupsRemoveKeepsTheGrandparentLinkTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var layout = try groups.Layout.init(alloc, 1);
+    defer layout.deinit();
+    _ = try layout.split(1, 2, .vertical, 100);
+    _ = try layout.split(2, 3, .horizontal, 101);
+
+    // Closing 3 puts 2 where the inner split was; the root still holds it.
+    const r = layout.remove(3).?;
+    try testz.expectEqual(r.destroyed, 101);
+    try testz.expectTrue(r.replacement.parent.? == layout.root);
+    try testz.expectTrue(layout.root.kind.split.second == r.replacement);
+    try testz.expectEqual(r.replacement.kind.group, 2);
+}
+
+pub fn groupsNeighborPicksTheFacingPaneTest(_: std.Io, _: std.mem.Allocator) !void {
+    // [0 | 1]
+    // [0 | 2]   -- 0 is full height on the left, 1 over 2 on the right.
+    const rects = [_]groups.Rect{
+        .{ .row = 0, .col = 0, .cols = 40, .rows = 30 },
+        .{ .row = 0, .col = 41, .cols = 40, .rows = 15 },
+        .{ .row = 16, .col = 41, .cols = 40, .rows = 14 },
+    };
+    try testz.expectEqual(groups.neighbor(&rects, 1, .left), 0);
+    try testz.expectEqual(groups.neighbor(&rects, 2, .left), 0);
+    try testz.expectEqual(groups.neighbor(&rects, 1, .down), 2);
+    try testz.expectEqual(groups.neighbor(&rects, 2, .up), 1);
+    // Nothing above 1, and nothing right of either.
+    try testz.expectTrue(groups.neighbor(&rects, 1, .up) == null);
+    try testz.expectTrue(groups.neighbor(&rects, 1, .right) == null);
+    // From the tall pane, the one sharing more of its rows wins.
+    try testz.expectEqual(groups.neighbor(&rects, 0, .right), 1);
 }

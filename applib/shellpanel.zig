@@ -27,6 +27,13 @@
 //! wants it (`close` hides it; an editor then re-sends its own). Both
 //! sides doing it raced.
 //!
+//! **Its height is the user's.** The layer's top edge is a host
+//! `resize_edge`: dragging it comes back as a `layer_resize` event, which
+//! the host program hands to `handleLayerResize`. The height asked for
+//! sticks for the rest of the run -- across Ctrl+` and window resizes,
+//! clamped to whatever window it is laid out in -- but isn't saved:
+//! the next run opens at the default share again.
+//!
 //! **Closing keeps the shell.** Ctrl+` hides the layer and blurs it; the
 //! shell keeps running with its history, its environment and whatever it
 //! was in the middle of. Only the host exiting ends it, and it ends
@@ -58,6 +65,9 @@ const share_num = 1;
 const share_den = 3;
 const min_rows = 6;
 const max_rows = 24;
+/// The least a drag may shrink the panel to: a prompt and a line of
+/// output.
+const min_dragged_rows = 2;
 
 /// Rows left below the panel: salacommander's function-key bar and zoe's
 /// statusline (the mode word lives there), which stay readable
@@ -93,6 +103,11 @@ pub const Panel = struct {
     /// The directory last sent, so following the panes doesn't re-send
     /// the same `cd` on every cursor move. Owned.
     sent_cwd: ?[]u8 = null,
+    /// The height the user dragged the panel to, if they have; `place`
+    /// uses it instead of the default share. Kept as asked, not as
+    /// clamped, so shrinking the window and growing it back returns the
+    /// panel to the height the user picked.
+    wanted_rows: ?usize = null,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -161,6 +176,27 @@ pub const Panel = struct {
         return @min(@max(share, min_rows), room);
     }
 
+    /// `rowsFor`, or the height the user dragged the panel to. A dragged
+    /// height isn't held to the default's `min_rows`/`max_rows` -- the
+    /// user chose it -- only to the room the window has: the key bar and
+    /// a couple of rows above the panel stay, so the edge can always be
+    /// grabbed again from the content side.
+    pub fn rowsForWanted(win_rows: usize, wanted: ?usize) usize {
+        const w = wanted orelse return rowsFor(win_rows);
+        const room = @max(win_rows -| (bar_rows + 2), 1);
+        return std.math.clamp(w, @min(min_dragged_rows, room), room);
+    }
+
+    /// A `layer_resize` from the host: the user dragged the panel's top
+    /// edge. Returns false for anyone else's layer, so the caller can
+    /// pass every one through here.
+    pub fn handleLayerResize(self: *Panel, ev: glyphwire.LayerResizeEvent, win: WinSize) bool {
+        if (ev.context != self.context or ev.layer != self.layer) return false;
+        self.wanted_rows = ev.rows;
+        if (self.visible) self.place(win) catch {};
+        return true;
+    }
+
     /// Opens the panel, starting the shell the first time. `cwd` is the
     /// directory it should be in.
     pub fn open(self: *Panel, cwd: []const u8, win: WinSize) !void {
@@ -187,7 +223,7 @@ pub const Panel = struct {
     /// Puts the layer across the bottom of a `win`-sized window and tells
     /// the shell to re-read its size. A no-op before the shell exists.
     pub fn place(self: *Panel, win: WinSize) !void {
-        const rows = rowsFor(win.rows);
+        const rows = rowsForWanted(win.rows, self.wanted_rows);
         try self.client.setLayerSize(self.layer, win.cols, rows);
         // Above the key bar, not over it.
         try self.client.setLayerCellPosition(self.layer, win.rows -| (rows + bar_rows), 0);
@@ -231,6 +267,7 @@ pub const Panel = struct {
     fn start(self: *Panel, cwd: []const u8, win: WinSize) !void {
         try self.place(win);
         try self.client.setLayerVisible(self.layer, false);
+        try self.client.setLayerResizeEdge(self.layer, .top);
 
         var fds: [2]i32 = undefined;
         if (c.pipe2(&fds, o_nonblock) != 0) return error.PipeFailed;

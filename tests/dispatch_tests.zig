@@ -2436,6 +2436,67 @@ pub fn selectionFlowPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqual(ctx.layerPtr(panel).?.selection_flow.mode, .horizontal);
 }
 
+/// `resize_edge` sets and reports a layer's draggable edge; an unknown
+/// edge is refused and leaves the layer as it was; omitting `edge` takes
+/// it back off.
+pub fn resizeEdgePropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const panel = try ctx.createLayer(20, 20, 0);
+    try testz.expectEqual(ctx.layerPtr(panel).?.resize_edge, .none);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"resize_edge","edge":"top"}}
+    );
+    try testz.expectEqual(ctx.layerPtr(panel).?.resize_edge, .top);
+
+    const get_msg =
+        \\{"jsonrpc":"2.0","id":9,"method":"get_property","params":{"layer":1,"property":"resize_edge"}}
+    ;
+    const get_decoded = try roundTripThroughWire(alloc, get_msg);
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+    const Response = struct { id: i64, result: struct { edge: []const u8 } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try testz.expectEqualStr("top", parsed.value.result.edge);
+
+    const bad_msg =
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"resize_edge","edge":"diagonal"}}
+    ;
+    const bad_decoded = try roundTripThroughWire(alloc, bad_msg);
+    defer alloc.free(bad_decoded);
+    try testz.expectError(d.handle(alloc, bad_decoded), dispatch.DispatchError.InvalidResizeEdge);
+    try testz.expectEqual(ctx.layerPtr(panel).?.resize_edge, .top);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"resize_edge"}}
+    );
+    try testz.expectEqual(ctx.layerPtr(panel).?.resize_edge, .none);
+}
+
+/// `layer_resize` rides the `layout` stream, and can be asked for by its
+/// own name.
+pub fn layerResizeSubscribesThroughLayoutTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["layer_resize"]}}
+    );
+    if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(d.subscriptions.layout);
+    try testz.expectTrue(d.subscriptions.has("layer_resize"));
+    try testz.expectTrue(d.subscriptions.has("layout"));
+}
+
 /// `write_text`'s `copy_text` reaches the cells: a selection over the
 /// glyph copies the stand-in's original text.
 pub fn writeTextCopyTextIsWhatSelectionCopiesTest(io: std.Io, alloc: std.mem.Allocator) !void {

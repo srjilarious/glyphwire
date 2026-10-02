@@ -1529,6 +1529,15 @@ pub const Client = struct {
         try self.notify("set_property", .{ .layer = layer, .property = "shadow", .shadow = shadowToJson(shadow) });
     }
 
+    /// `set_property(layer, "resize_edge", {edge})` -- a notification.
+    /// Gives a floating layer an edge the host lets the user drag; the
+    /// drag comes back as a `layer_resize` event (subscribe to
+    /// `"layout"`), which the client applies itself. See
+    /// `core.ResizeEdge`.
+    pub fn setLayerResizeEdge(self: *Client, layer: core.LayerHandle, edge: core.ResizeEdge) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "resize_edge", .edge = @tagName(edge) });
+    }
+
     /// `core.Shadow` in its wire shape. Shared with `Batch.setLayerShadow`.
     fn shadowToJson(shadow: ?core.Shadow) ?ShadowWire {
         const sh = shadow orelse return null;
@@ -2908,6 +2917,11 @@ pub const Client = struct {
             try self.notify("set_property", .{ .layer = layer, .property = "shadow", .shadow = Client.shadowToJson(shadow) });
         }
 
+        /// Batched `Client.setLayerResizeEdge`.
+        pub fn setLayerResizeEdge(self: *Batch, layer: core.LayerHandle, edge: core.ResizeEdge) !void {
+            try self.notify("set_property", .{ .layer = layer, .property = "resize_edge", .edge = @tagName(edge) });
+        }
+
         /// Batched `Client.raiseLayer`.
         pub fn raiseLayer(self: *Batch, layer: core.LayerHandle, above: ?core.LayerHandle) !void {
             try self.notify("raise_layer", .{ .layer = layer, .above = above });
@@ -3628,6 +3642,16 @@ pub const ScrollOffsetEvent = struct {
     max_col: usize,
 };
 
+/// A `layer_resize` notification: the user dragged `layer`'s
+/// `resize_edge` and wants it `rows` tall. Nothing has been resized yet
+/// -- the owning client applies it. Check `context` as well as `layer`:
+/// handles are per-context and every `"layout"` subscriber hears it.
+pub const LayerResizeEvent = struct {
+    context: core.ContextHandle,
+    layer: core.LayerHandle,
+    rows: usize,
+};
+
 /// One pane's bounds from a `layout` notification.
 pub const LayoutBounds = struct {
     layer: core.LayerHandle,
@@ -3746,6 +3770,7 @@ pub const Event = union(enum) {
     scroll: ScrollEvent,
     scroll_offset: ScrollOffsetEvent,
     layout: LayoutEvent,
+    layer_resize: LayerResizeEvent,
     pane_layout: PaneLayoutEvent,
     pane_exit: PaneExitEvent,
     remote_exit: RemoteExitEvent,
@@ -3759,7 +3784,7 @@ pub const Event = union(enum) {
             .terminal_reply => |b| alloc.free(b),
             .layout => |l| l.deinit(alloc),
             .pane_layout => |l| l.deinit(alloc),
-            .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .pane_exit, .remote_exit, .context => {},
+            .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .layer_resize, .pane_exit, .remote_exit, .context => {},
         }
     }
 
@@ -4445,6 +4470,10 @@ pub const InputListener = struct {
                 owned[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
             }
             try self.enqueue(.{ .layout = .{ .layers = owned } });
+        } else if (eql(u8, method, "layer_resize")) {
+            const p = try self.parseParams(protocol.LayerResizeParams, params);
+            defer p.deinit();
+            try self.enqueue(.{ .layer_resize = .{ .context = p.value.context, .layer = p.value.layer, .rows = p.value.rows } });
         } else if (eql(u8, method, "pane_layout")) {
             const p = try self.parseParams(protocol.PaneLayoutParams, params);
             defer p.deinit();

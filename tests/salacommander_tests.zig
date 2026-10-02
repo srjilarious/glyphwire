@@ -885,6 +885,21 @@ pub fn shellPanelTakesAThirdOfTheWindowTest(_: std.Io, _: std.mem.Allocator) !vo
     try testz.expectEqual(rowsFor(1), 1);
 }
 
+pub fn shellPanelKeepsADraggedHeightTest(_: std.Io, _: std.mem.Allocator) !void {
+    const rowsForWanted = @import("applib").shellpanel.Panel.rowsForWanted;
+    // Nothing dragged: the default share.
+    try testz.expectEqual(rowsForWanted(45, null), 15);
+    // A dragged height is the user's, past the default's 24-row ceiling
+    // and under its 6-row floor alike.
+    try testz.expectEqual(rowsForWanted(60, 40), 40);
+    try testz.expectEqual(rowsForWanted(45, 3), 3);
+    // But never so short there's no prompt and output line ...
+    try testz.expectEqual(rowsForWanted(45, 1), 2);
+    // ... and never past the key bar and the two rows kept above it.
+    try testz.expectEqual(rowsForWanted(30, 40), 27);
+    try testz.expectEqual(rowsForWanted(3, 40), 1);
+}
+
 // ─── Open actions ───────────────────────────────────────────────────────
 
 pub fn openActionResolvesByExtensionTest(_: std.Io, _: std.mem.Allocator) !void {

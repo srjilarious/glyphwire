@@ -28,8 +28,11 @@ const interrupt = @import("applib").interrupt;
 //     \\the file tree with an empty buffer; anything else is a file to open.
 //     \\
 //     \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
-//     \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
-//     \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
+//     \\glyphwire display server. Ctrl+W is vim's window prefix: then v or s
+//     \\splits the editor into a new group beside or below (:vsplit / :split
+//     \\[file]), each with its own tabs and a draggable divider; q closes a
+//     \\group (:close) and w cycles focus. Ctrl+L/K/J and the Ctrl+arrows
+//     \\move focus that way, Ctrl+Left out to the tree. Ctrl+N toggles
 //     \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
 //     \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
 //     \\or hides dotfiles and anything .gitignore excludes, everywhere at once
@@ -61,8 +64,11 @@ pub fn main(init: std.process.Init) !void {
         \\--line N (before the file) starts the cursor on line N.
         \\
         \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
-        \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
-        \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
+        \\glyphwire display server. Ctrl+W is vim's window prefix: then v or s
+        \\splits the editor into a new group beside or below (:vsplit / :split
+        \\[file]), each with its own tabs and a draggable divider; q closes a
+        \\group (:close) and w cycles focus. Ctrl+L/K/J and the Ctrl+arrows
+        \\move focus that way, Ctrl+Left out to the tree. Ctrl+N toggles
         \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
         \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
         \\or hides dotfiles and anything .gitignore excludes, everywhere at once
@@ -177,10 +183,11 @@ pub fn main(init: std.process.Init) !void {
 
     if (script) |s| {
         switch (try zoe.keys.feed(&ed, s)) {
-            // `:bn` / `:bp` / `:bd` need the UI's buffer list, `:cd` /
-            // `:pwd` a live client and a real cwd, the clipboard ones a
-            // live host, and every LSP one a running language server.
-            // The headless driver just reports what parsed.
+            // `:bn` / `:bp` / `:bd` need the UI's buffer list, `:vsplit`
+            // / `:close` its editor groups, `:cd` / `:pwd` a live client
+            // and a real cwd, the clipboard ones a live host, and every
+            // LSP one a running language server. The headless driver
+            // just reports what parsed.
             .none,
             .quit,
             .chdir,
@@ -189,6 +196,8 @@ pub fn main(init: std.process.Init) !void {
             .paste,
             .buffer_step,
             .buffer_close,
+            .split,
+            .close_group,
             .lsp_hover,
             .lsp_definition,
             .diag_step,

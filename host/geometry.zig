@@ -262,6 +262,34 @@ pub fn layerRect(pos: glyphwire.PxPos, view_cols: usize, view_rows: usize) RectP
     return layerRectIn(.{}, pos, view_cols, view_rows);
 }
 
+/// How thick the band drawn along a layer's `resize_edge` is. A split
+/// divider has a whole cell of reserved gap to sit in; a floating layer
+/// has nothing either side of its edge, so the band is drawn over the
+/// top pixels of its own first row -- thin enough to leave the text
+/// there readable.
+pub const resize_edge_px: f32 = 3;
+
+/// How far past the drawn band a press still grabs the edge, each way.
+/// A 3px target is too fine to hit on purpose.
+pub const resize_edge_slop_px: f32 = 4;
+
+/// The band drawn along the top edge of a layer at `rect`.
+pub fn resizeEdgeBand(rect: RectPx) RectPx {
+    return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = @min(resize_edge_px, rect.h) };
+}
+
+/// Where a press grabs that edge: the band, widened by the slop above
+/// (over whatever the layer floats on) and below (into its first row).
+pub fn resizeEdgeHit(rect: RectPx) RectPx {
+    const band = resizeEdgeBand(rect);
+    return .{
+        .x = band.x,
+        .y = band.y - resize_edge_slop_px,
+        .w = band.w,
+        .h = band.h + 2 * resize_edge_slop_px,
+    };
+}
+
 /// A context-relative cell rectangle (a layer divider band, a pane inside
 /// a context) in window pixels.
 pub fn cellRectPxIn(origin: Origin, rect: glyphwire.CellRect) RectPx {

@@ -1161,6 +1161,16 @@ pub const Server = struct {
         self.broadcast(null, "layout", body);
     }
 
+    /// Broadcasts a `layer_resize` notification -- glyphwire-host's drag
+    /// of a layer's `resize_edge` ended and the user wants it `rows`
+    /// tall. Touches no context state: the client that owns the layer is
+    /// the one that resizes it (see `core.ResizeEdge`).
+    pub fn reportLayerResize(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle, layer: core.LayerHandle, rows: usize) !void {
+        const body = try rpc.layerResizeNotification(alloc, context, layer, rows);
+        defer alloc.free(body);
+        self.broadcast(null, "layer_resize", body);
+    }
+
     /// In-process equivalent of `set_property(layer, "scroll_offset")` --
     /// glyphwire-host's mouse wheel and scrollbar drags over a pane. Pass
     /// `offset` for an absolute move or `delta` for a relative one (the

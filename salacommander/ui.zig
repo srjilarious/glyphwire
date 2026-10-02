@@ -421,6 +421,9 @@ pub const Ui = struct {
         if (self.shell.reapIfExited()) self.markAllDirty();
         switch (ev) {
             .resize => |r| try self.handleResize(r),
+            // The shell panel's top edge was dragged. It floats over the
+            // panes rather than squeezing them, so nothing else moves.
+            .layer_resize => |lr| _ = self.shell.handleLayerResize(lr, .{ .cols = self.win.cols, .rows = self.win.rows }),
             .scroll_offset => |so| {
                 // A wheel or thumb drag over the popup's list.
                 if (self.finder.scrolled(so)) return;

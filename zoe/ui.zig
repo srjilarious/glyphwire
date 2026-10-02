@@ -59,6 +59,7 @@ const homepath = @import("applib").homepath;
 const syntax = @import("applib").syntax;
 const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
+const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
 const diag = @import("diag.zig");
 const hover_mod = @import("hover.zig");
@@ -74,6 +75,10 @@ const Color = glyphwire.Color;
 
 /// Cells the tree pane occupies until a divider drag says otherwise.
 const default_tree_cols: usize = 28;
+
+/// The most editor groups the directional search looks at. Far more
+/// than fit on a screen; past it, Ctrl+hjkl just can't reach the extras.
+const max_groups: usize = 32;
 
 /// Blank rows the tree's content grid keeps below the last entry.
 ///
@@ -410,17 +415,25 @@ pub const Target = union(enum) {
 };
 
 /// Which way a Ctrl+direction chord moves the focus.
-pub const Direction = enum { left, right, up, down };
+pub const Direction = groups.Direction;
+
+/// A key that only modifies others. The host reports each one as a key
+/// of its own, under its `left_*` / `right_*` name.
+fn isModifierKey(key: []const u8) bool {
+    const names = [_][]const u8{ "control", "alt", "shift", "super" };
+    for (names) |n| {
+        if (std.mem.endsWith(u8, key, n) and
+            (std.mem.startsWith(u8, key, "left_") or std.mem.startsWith(u8, key, "right_"))) return true;
+    }
+    return false;
+}
 
 /// The direction a key names under Ctrl, for the focus chords: vim's
 /// `hjkl` and the arrow keys both, since the panes are navigated with
 /// either. Null for every other key, which is what lets `handleInput`
 /// use this as the test for "is this a focus chord at all".
 ///
-/// Claiming the vertical pair now costs nothing and keeps the mapping
-/// whole: zoe will grow buffer panes stacked over each other, and having
-/// Ctrl+j mean something else in the meantime would be a worse surprise
-/// than it meaning nothing.
+/// The vertical pair moves between editor groups stacked by `:split`.
 pub fn focusDirection(key: []const u8) ?Direction {
     const eq = std.mem.eql;
     // `h` is deliberately absent: Ctrl+H toggles hidden files, the
@@ -574,48 +587,37 @@ const Slot = struct {
     }
 };
 
-pub const Ui = struct {
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    client: *glyphwire.Client,
-    listener: *glyphwire.InputListener,
-    tree: Tree,
-
-    /// Every open buffer, in tab order, and the one being edited. Heap
-    /// slots rather than values in the list: `buf` points into it, and a
-    /// list resize would move values out from under that pointer.
-    ///
-    /// Never empty -- closing the last buffer leaves a fresh scratch one
-    /// (`closeBuffer`), so `buf` is always valid and the strip always has
-    /// something to draw.
-    buffers: std.ArrayList(*Slot) = .empty,
-    /// The active buffer, always `buffers.items[active]`. Kept as a
-    /// pointer because nearly every line of the render and dispatch paths
-    /// reaches through it; `setActive` is the only writer of the pair.
-    buf: *Slot,
-    active: usize = 0,
-
-    /// zoe's own context -- an alt-screen-style full-window surface, not
-    /// a set of layers stacked over the shell's scrollback. Everything
-    /// below (layers, splits) lives in it, and `destroyContext` on exit
-    /// tears the whole thing down and drops visibility back to the shell.
-    context: glyphwire.ContextHandle,
-    tree_layer: glyphwire.LayerHandle,
+/// One editor group: a tab strip over a buffer pane, with its own list
+/// of open buffers. `:vsplit` / `:split` make more; each sits in the
+/// layout tree (`zoe/groups.zig`) as one leaf, and in the host's split
+/// tree as `col_split`.
+///
+/// A file is open in at most one group: opening one that is already
+/// open elsewhere focuses its tab there (`openFile`). That is what lets
+/// a `Slot` -- editor, undo, parse tree, language-server document --
+/// stay the one owner of its buffer.
+const Group = struct {
+    id: groups.GroupId,
     tabs_layer: glyphwire.LayerHandle,
     buffer_layer: glyphwire.LayerHandle,
-    status_layer: glyphwire.LayerHandle,
-    pane_split: glyphwire.SplitHandle,
     /// The tab strip stacked over the buffer pane. A column split of its
     /// own so the strip starts where the buffer does -- the file tree
     /// keeps its full height, and hiding the tree widens the strip with
-    /// the pane it belongs to.
-    buffer_col_split: glyphwire.SplitHandle,
-    root_split: glyphwire.SplitHandle,
+    /// the pane it belongs to. Not resizable: the strip is one row.
+    col_split: glyphwire.SplitHandle,
 
-    tree_bounds: Bounds = .{},
+    /// This group's open buffers, in tab order, and the one shown. Heap
+    /// slots rather than values in the list: `Ui.buf` points into it,
+    /// and a list resize would move values out from under that pointer.
+    ///
+    /// Never empty -- closing the last buffer either closes the group or
+    /// leaves a fresh scratch one (`closeBuffer`), so the strip always
+    /// has something to draw.
+    buffers: std.ArrayList(*Slot) = .empty,
+    active: usize = 0,
+
     tabs_bounds: Bounds = .{},
     buffer_bounds: Bounds = .{},
-    status_bounds: Bounds = .{},
 
     /// The tab strip's horizontal scroll, in strip columns, and the tab
     /// spans the last layout produced (also strip coordinates -- subtract
@@ -629,6 +631,78 @@ pub const Ui = struct {
     /// The `(width, scroll)` last pushed to the tabs layer as its content
     /// extent and offset, so a still strip is silent on the wire.
     pushed_tab_bar: [2]usize = .{ std.math.maxInt(usize), 0 },
+
+    buffer_dirty: bool = true,
+    tabs_dirty: bool = true,
+
+    fn slot(self: *const Group) *Slot {
+        return self.buffers.items[self.active];
+    }
+
+    /// The group's whole area, strip and pane together, for Ctrl+hjkl.
+    fn rect(self: *const Group) groups.Rect {
+        const t = self.tabs_bounds;
+        const b = self.buffer_bounds;
+        return .{ .row = t.row, .col = b.col, .cols = b.cols, .rows = t.rows + b.rows };
+    }
+
+    fn contains(self: *const Group, cell: glyphwire.CellPos) bool {
+        const r = self.rect();
+        return r.cols > 0 and cell.row >= r.row and cell.row < r.row + r.rows and
+            cell.col >= r.col and cell.col < r.col + r.cols;
+    }
+
+    fn markRedraw(self: *Group) void {
+        if (self.buffers.items.len > 0) self.slot().full_redraw = true;
+        self.buffer_dirty = true;
+        self.tabs_dirty = true;
+    }
+};
+
+pub const Ui = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    client: *glyphwire.Client,
+    listener: *glyphwire.InputListener,
+    tree: Tree,
+
+    /// Every editor group, in no particular order (`layout` has the
+    /// on-screen arrangement), and the one with the keyboard. Never
+    /// empty: closing the last group is refused, and closing its last
+    /// tab leaves a scratch buffer instead.
+    ///
+    /// Everything that acts on "the" buffer pane -- the editing keys, the
+    /// render helpers -- reaches it through `grp`. `render` points `grp`
+    /// at each dirty group in turn to draw it (`renderGroup`), so the
+    /// same helpers paint every group; outside that, `grp` is always the
+    /// focused one.
+    group_list: std.ArrayList(*Group) = .empty,
+    grp: *Group,
+    /// The groups' arrangement, mirrored one-for-one in host splits. See
+    /// `zoe/groups.zig`.
+    layout: groups.Layout,
+    next_group_id: groups.GroupId = 1,
+    /// False while `renderGroup` is drawing a group that doesn't have the
+    /// keyboard, which then gets no caret.
+    render_focused: bool = true,
+    /// The active buffer of `grp`, always `grp.buffers.items[grp.active]`.
+    /// Kept as a pointer because nearly every line of the render and
+    /// dispatch paths reaches through it; `setActive`, `focusGroup` and
+    /// `renderGroup` are its only writers.
+    buf: *Slot,
+
+    /// zoe's own context -- an alt-screen-style full-window surface, not
+    /// a set of layers stacked over the shell's scrollback. Everything
+    /// below (layers, splits) lives in it, and `destroyContext` on exit
+    /// tears the whole thing down and drops visibility back to the shell.
+    context: glyphwire.ContextHandle,
+    tree_layer: glyphwire.LayerHandle,
+    status_layer: glyphwire.LayerHandle,
+    pane_split: glyphwire.SplitHandle,
+    root_split: glyphwire.SplitHandle,
+
+    tree_bounds: Bounds = .{},
+    status_bounds: Bounds = .{},
 
     /// Session cell height in px, for natural-sizing tree icons to the
     /// row height. Re-read on every `resize`, which a font-size step
@@ -704,8 +778,8 @@ pub const Ui = struct {
     hover_hl: ?syntax.Highlighter = null,
 
     /// The tab tooltip. `tab_tip_index` is the tab the pointer is resting
-    /// on (only tabs with a file behind them count), whether or not its
-    /// tooltip is up yet; `tab_tip_due` is when it goes up, armed on the
+    /// on (only tabs with a file behind them count) in group
+    /// `tab_tip_group`, whether or not its tooltip is up yet; `tab_tip_due` is when it goes up, armed on the
     /// move onto the tab. A keystroke or click takes it down and disarms
     /// it without forgetting the tab, so it stays down until the pointer
     /// moves onto another one.
@@ -714,6 +788,7 @@ pub const Ui = struct {
     /// null draws it flat in `bg_hover`.
     tab_tip_patch: ?glyphwire.NinePatchHandle,
     tab_tip_index: ?usize = null,
+    tab_tip_group: ?*Group = null,
     tab_tip_due: ?std.Io.Clock.Timestamp = null,
     tab_tip_shown: bool = false,
     tab_tip_dirty: bool = false,
@@ -741,6 +816,9 @@ pub const Ui = struct {
     /// key before the text in the same frame, and some layouts also commit
     /// a " " for the chord, which this drops.
     swallow_space_text: bool = false,
+    /// A window command (`windowCommand`) just took a printable key; the
+    /// `text` the host sends for the same key is dropped.
+    swallow_window_text: bool = false,
     jumps: JumpList = .{},
     /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom, above
     /// the statusline, for running builds and tests without leaving the
@@ -776,15 +854,19 @@ pub const Ui = struct {
     /// the buffer (a fresh syntax pass per visible row) and the whole
     /// file tree (a `draw_icon` per entry) on every such keystroke is
     /// what made the command line feel laggy.
-    buffer_dirty: bool = true,
+    /// The buffer pane's and tab strip's flags are per group
+    /// (`Group.buffer_dirty`, `Group.tabs_dirty`).
+    ///
     /// The tree's own flag has three levels rather than two: moving the
     /// cursor changes exactly two rows' background, and repainting the
     /// whole listing (a `write_text` *and* a `draw_icon` per entry) for
     /// that is what made holding `j` down heavy. See `TreeDirty`.
     tree_dirty: TreeDirty = .full,
-    tabs_dirty: bool = true,
     status_dirty: bool = true,
     quit: bool = false,
+    /// Ctrl+W was pressed and the next key is a window command (`v`,
+    /// `s`, `q`, `w`, a direction) -- vim's prefix.
+    window_prefix: bool = false,
 
     /// The process environment, kept for `:cd` (`$HOME`) and passed on
     /// to the highlighter setup.
@@ -857,34 +939,18 @@ pub const Ui = struct {
         // Content sizes are provisional: every `layout` notification
         // resizes them to match the panes they landed in.
         const tree_layer = try client.createLayer(default_tree_cols, size.rows, 0);
-        const tabs_layer = try client.createLayer(size.cols, 1, 0);
-        const buffer_layer = try client.createLayer(size.cols, size.rows, 0);
+        // The first editor group; `:vsplit` / `:split` add more.
+        const first_group = try makeGroup(alloc, client, 1, size);
+        errdefer alloc.destroy(first_group);
         const status_layer = try client.createLayer(size.cols, 1, 0);
 
-        // The tree is host-scrolled (both bars). The buffer is in
-        // `client` scroll mode: it redraws its own visible rows, and a
-        // `content_extent` (pushed each frame from the line count -- see
-        // `syncBufferScrollbar`) lets the host draw a proportional
-        // vertical bar and turn a wheel or thumb drag over the pane into
-        // a `scroll_offset` zoe then follows.
-        try client.setLayerScrollMode(buffer_layer, .client);
-        try client.setLayerScrollMode(tabs_layer, .client);
+        // The tree is host-scrolled (both bars).
         try client.setLayerScrollbars(tree_layer, true, true);
-        try client.setLayerScrollbars(buffer_layer, true, false);
         // Each pane's resting colour, so a cell nothing has written yet
-        // (a frame racing a resize, the columns past a short tab strip)
-        // is the pane's colour rather than whatever is behind zoe.
+        // (a frame racing a resize) is the pane's colour rather than
+        // whatever is behind zoe.
         try client.setLayerBackground(tree_layer, bg_tree);
-        try client.setLayerBackground(tabs_layer, bg_tab_bar);
-        try client.setLayerBackground(buffer_layer, bg_buffer);
         try client.setLayerBackground(status_layer, bg_status);
-        // The tab strip scrolls sideways but draws no bar of its own: it
-        // is one row tall, and a horizontal bar under it would double its
-        // height for a scrollbar nothing needs to see. It still reports a
-        // `content_extent` (`syncTabScrollbar`), which is what makes the
-        // host treat it as scrollable and route a shift+wheel over it
-        // back as a `scroll_offset`.
-        try client.setLayerScrollbars(tabs_layer, false, false);
 
         // The Ctrl+` shell panel. `gw-shell --embed` draws its prompt and
         // its commands' output here, so it carries scrollback of its own
@@ -937,12 +1003,12 @@ pub const Ui = struct {
         };
         if (tab_tip_patch == null) try client.setLayerBackground(tab_tip_layer, bg_hover);
 
-        // The tree|buffer split stays user-resizable. The two column
-        // splits are not: what they stack above and below is a single
-        // fixed row each -- the tab strip and the command line -- so a
-        // drag handle on either is a wasted row.
+        // The tree|editor split stays user-resizable, as do the splits
+        // between editor groups. The column splits are not: what they
+        // stack above and below is a single fixed row each -- a group's
+        // tab strip and the command line -- so a drag handle on either is
+        // a wasted row.
         const pane_split = try client.createSplit(.row, true);
-        const buffer_col_split = try client.createSplit(.column, false);
         const root_split = try client.createSplit(.column, false);
 
         self.* = .{
@@ -958,8 +1024,6 @@ pub const Ui = struct {
             .buf = undefined,
             .context = context,
             .tree_layer = tree_layer,
-            .tabs_layer = tabs_layer,
-            .buffer_layer = buffer_layer,
             .status_layer = status_layer,
             .finder = finder,
             .hover_layer = hover_layer,
@@ -970,12 +1034,16 @@ pub const Ui = struct {
             .diags = diag.Store.init(alloc),
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
             .pane_split = pane_split,
-            .buffer_col_split = buffer_col_split,
+            .grp = first_group,
+            .layout = try groups.Layout.init(alloc, first_group.id),
+            .next_group_id = first_group.id + 1,
             .root_split = root_split,
             .cell_px_h = metrics.h,
             .environ = environ,
         };
         errdefer self.tree.deinit();
+        errdefer self.layout.deinit();
+        try self.group_list.append(alloc, first_group);
 
         // Best-effort: highlighting off is a valid state, never a reason
         // to fail bringing the editor up. Done before the first buffer,
@@ -1008,9 +1076,9 @@ pub const Ui = struct {
             .file => |f| if (f.line) |line| first.ed.gotoStartLine(line),
             .none, .directory => {},
         };
-        try self.buffers.append(alloc, first);
+        try self.grp.buffers.append(alloc, first);
         self.buf = first;
-        self.active = 0;
+        self.grp.active = 0;
 
         // `zoe <dir>` names a place to work, not a file to open: the tree
         // is already rooted there (`root_dir` is the directory `main`
@@ -1019,12 +1087,6 @@ pub const Ui = struct {
         // buffer has nothing to look at.
         if (target == .directory) self.focus = .tree;
 
-        try client.setSplitChildren(buffer_col_split, &.{
-            // One row, whatever the window does -- same reasoning as the
-            // statusline below.
-            glyphwire.SplitChildInput.layerFixed(tabs_layer, 1),
-            glyphwire.SplitChildInput.layerWeighted(buffer_layer, 1),
-        });
         try self.applySplitChildren();
         try client.setSplitChildren(root_split, &.{
             glyphwire.SplitChildInput.splitWeighted(pane_split, 1),
@@ -1039,6 +1101,47 @@ pub const Ui = struct {
         // a startup frame drawn against guesses.
         try self.readBounds();
         return self;
+    }
+
+    /// Creates an editor group's two layers -- its tab strip and its
+    /// buffer pane -- and the column split that stacks them. Its buffer
+    /// list starts empty; the caller gives it its first tab before
+    /// anything can draw it.
+    fn makeGroup(alloc: std.mem.Allocator, client: *glyphwire.Client, id: groups.GroupId, size: anytype) !*Group {
+        // Content sizes are provisional, like every pane's: the `layout`
+        // that places the group resizes them.
+        const tabs_layer = try client.createLayer(size.cols, 1, 0);
+        const buffer_layer = try client.createLayer(size.cols, size.rows, 0);
+
+        // The buffer is in `client` scroll mode: it redraws its own
+        // visible rows, and a `content_extent` (pushed each frame from
+        // the line count -- see `syncBufferScrollbar`) lets the host draw
+        // a proportional vertical bar and turn a wheel or thumb drag over
+        // the pane into a `scroll_offset` zoe then follows.
+        try client.setLayerScrollMode(buffer_layer, .client);
+        try client.setLayerScrollMode(tabs_layer, .client);
+        try client.setLayerScrollbars(buffer_layer, true, false);
+        // The tab strip scrolls sideways but draws no bar of its own: it
+        // is one row tall, and a horizontal bar under it would double its
+        // height for a scrollbar nothing needs to see. It still reports a
+        // `content_extent` (`syncTabScrollbar`), which is what makes the
+        // host treat it as scrollable and route a shift+wheel over it
+        // back as a `scroll_offset`.
+        try client.setLayerScrollbars(tabs_layer, false, false);
+        try client.setLayerBackground(tabs_layer, bg_tab_bar);
+        try client.setLayerBackground(buffer_layer, bg_buffer);
+
+        const col_split = try client.createSplit(.column, false);
+        try client.setSplitChildren(col_split, &.{
+            // One row, whatever the window does -- same reasoning as the
+            // statusline.
+            glyphwire.SplitChildInput.layerFixed(tabs_layer, 1),
+            glyphwire.SplitChildInput.layerWeighted(buffer_layer, 1),
+        });
+
+        const g = try alloc.create(Group);
+        g.* = .{ .id = id, .tabs_layer = tabs_layer, .buffer_layer = buffer_layer, .col_split = col_split };
+        return g;
     }
 
     /// Loads `zoe.conf.lua` and resolves the grammar search path into a
@@ -1215,7 +1318,7 @@ pub const Ui = struct {
     /// that shape; null takes it back for `renderBuffer` to draw.
     fn sendCaret(self: *Ui, shape: ?glyphwire.CaretShape) !void {
         if (shape) |s| {
-            try self.client.setCaretLayer(self.buffer_layer);
+            try self.client.setCaretLayer(self.grp.buffer_layer);
             try self.client.setCaretShape(s);
             try self.client.setCaretVisible(true);
         } else {
@@ -1295,7 +1398,7 @@ pub const Ui = struct {
 
         // A `:set lineno=…` typed this session beats the config default,
         // so a buffer opened afterwards matches the ones already open.
-        if (self.buffers.items.len > 0) {
+        if (self.grp.buffers.items.len > 0) {
             slot.ed.line_numbers = self.buf.ed.line_numbers;
             slot.ed.page_lines = self.buf.ed.page_lines;
             slot.ed.tab_width = self.buf.ed.tab_width;
@@ -1351,9 +1454,14 @@ pub const Ui = struct {
 
         // Every open buffer's text and parse tree, not just the visible
         // one -- that is the bargain multiple buffers made.
-        for (self.buffers.items) |slot| slot.deinit(self.alloc);
-        self.buffers.deinit(self.alloc);
-        self.tab_spans.deinit(self.alloc);
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| slot.deinit(self.alloc);
+            g.buffers.deinit(self.alloc);
+            g.tab_spans.deinit(self.alloc);
+            self.alloc.destroy(g);
+        }
+        self.group_list.deinit(self.alloc);
+        self.layout.deinit();
 
         self.hl_scratch.deinit(self.alloc);
         self.hl_dirty_lines.deinit(self.alloc);
@@ -1371,16 +1479,339 @@ pub const Ui = struct {
     /// layer, so the buffer actually reclaims the columns instead of
     /// leaving a gap where the tree was.
     fn applySplitChildren(self: *Ui) !void {
+        const editors = self.layoutChild(self.layout.root);
         if (self.tree_visible) {
             try self.client.setSplitChildren(self.pane_split, &.{
                 glyphwire.SplitChildInput.layerFixed(self.tree_layer, default_tree_cols),
-                glyphwire.SplitChildInput.splitWeighted(self.buffer_col_split, 1),
+                editors,
             });
         } else {
-            try self.client.setSplitChildren(self.pane_split, &.{
-                glyphwire.SplitChildInput.splitWeighted(self.buffer_col_split, 1),
-            });
+            try self.client.setSplitChildren(self.pane_split, &.{editors});
         }
+    }
+
+    // ── Editor groups ───────────────────────────────────────────────────
+    //
+    // The arrangement is `layout` (zoe/groups.zig), and each of its nodes
+    // is one host split: a group is its `col_split`, a split node its
+    // own resizable split of two. Every change below re-sends only the
+    // child lists whose shape changed, because `set_split_children`
+    // replaces a list wholesale and so resets the proportions the user
+    // dragged it to.
+
+    fn groupById(self: *const Ui, id: groups.GroupId) *Group {
+        for (self.group_list.items) |g| {
+            if (g.id == id) return g;
+        }
+        unreachable; // every id in `layout` has a group
+    }
+
+    /// The host split child a layout node stands for.
+    fn layoutChild(self: *const Ui, node: *const groups.Node) glyphwire.SplitChildInput {
+        return switch (node.kind) {
+            .group => |id| glyphwire.SplitChildInput.splitWeighted(self.groupById(id).col_split, 1),
+            .split => |s| glyphwire.SplitChildInput.splitWeighted(s.handle, 1),
+        };
+    }
+
+    fn sendSplit(self: *Ui, node: *const groups.Node) !void {
+        const s = node.kind.split;
+        try self.client.setSplitChildren(s.handle, &.{ self.layoutChild(s.first), self.layoutChild(s.second) });
+    }
+
+    /// Re-sends the one list that holds `node`: its parent split's, or
+    /// the tree|editor split's when it is the layout's root.
+    fn sendListHolding(self: *Ui, node: *const groups.Node) !void {
+        if (node.parent) |p| try self.sendSplit(p) else try self.applySplitChildren();
+    }
+
+    const SlotAt = struct { group: *Group, index: usize };
+
+    /// The group holding `slot`, and the slot's tab index there.
+    fn findSlot(self: *const Ui, slot: *const Slot) ?SlotAt {
+        for (self.group_list.items) |g| {
+            for (g.buffers.items, 0..) |s, i| {
+                if (s == slot) return .{ .group = g, .index = i };
+            }
+        }
+        return null;
+    }
+
+    /// Gives `g` the keyboard. The group that had it is repainted too,
+    /// to take its caret off.
+    fn focusGroup(self: *Ui, g: *Group) void {
+        if (g != self.grp) {
+            self.grp.markRedraw();
+            self.grp = g;
+            self.buf = g.slot();
+            g.markRedraw();
+            // The host's caret, when it is drawing one, sits on a group's
+            // buffer layer: point it at the new one.
+            self.caret_host = null;
+            self.closeCompletion();
+            _ = self.closeHover();
+        }
+        self.setFocus(.buffer);
+        self.status_dirty = true;
+    }
+
+    /// `:vsplit` / `:split` and Ctrl+W v / s: a new group beside (or
+    /// under) the focused one, which gets the keyboard.
+    ///
+    /// A file is only ever open in one group, so the new group can't show
+    /// a second view of the current buffer the way vim's would. It takes
+    /// the current tab instead -- "put this file over there" -- and the
+    /// group it left keeps the rest of its tabs, or a scratch buffer if
+    /// that was its only one. `:vsplit <path>` opens that file in the
+    /// new group instead (moving its tab there if it is open already).
+    fn splitGroup(self: *Ui, orientation: groups.Orientation, path: ?[]const u8) !void {
+        if (self.focus == .tree) self.setFocus(.buffer);
+        const from = self.grp;
+
+        // Resolve what the new group will show before creating anything,
+        // so a refused file leaves the layout untouched.
+        var fresh: ?*Slot = null;
+        var moved: ?*Slot = null;
+        if (path) |p| {
+            if (self.findPath(p)) |hit| {
+                moved = hit.group.buffers.items[hit.index];
+            } else {
+                fresh = self.newSlot(p) catch |err| switch (err) {
+                    error.NotTextFile => {
+                        self.buf.ed.setStatus("E484: \"{s}\" is not a text file", .{p});
+                        self.status_dirty = true;
+                        return;
+                    },
+                    else => return err,
+                };
+            }
+        } else {
+            moved = self.buf;
+        }
+        errdefer if (fresh) |f| f.deinit(self.alloc);
+
+        const size = try self.client.getSize();
+        const g = try makeGroup(self.alloc, self.client, self.next_group_id, size);
+        self.next_group_id += 1;
+        // Created after the popups and the shell panel, so the new layers
+        // would composite over them; split panes never overlap one
+        // another, so the bottom of the stack is a safe place for them.
+        self.client.lowerLayer(g.buffer_layer, null) catch {};
+        self.client.lowerLayer(g.tabs_layer, null) catch {};
+        try self.group_list.append(self.alloc, g);
+
+        const handle = try self.client.createSplit(orientation.axis(), true);
+        const node = try self.layout.split(from.id, g.id, orientation, handle);
+        // Should filling it fail, the group must not stay on screen with
+        // no tab: every other path assumes a group has one.
+        errdefer if (g.buffers.items.len == 0) {
+            if (self.layout.remove(g.id)) |removed| self.dropGroup(g, removed) catch {};
+        };
+        try self.sendSplit(node);
+        try self.sendListHolding(node);
+
+        if (fresh) |f| {
+            try g.buffers.append(self.alloc, f);
+            fresh = null;
+        } else if (moved) |m| {
+            try self.moveSlot(m, g);
+        }
+        self.focusGroup(g);
+        // Every group's pane just changed size; the `layout` that follows
+        // repaints them, but the new one has never drawn at all.
+        for (self.group_list.items) |each| each.markRedraw();
+    }
+
+    /// Moves `slot` from whichever group holds it to the end of `to`'s
+    /// tabs, as `to`'s shown tab. A group the move leaves empty gets a
+    /// scratch buffer rather than closing: only `closeGroup` takes a
+    /// group away.
+    fn moveSlot(self: *Ui, slot: *Slot, to: *Group) !void {
+        const at = self.findSlot(slot) orelse return;
+        const from = at.group;
+        if (from == to) return;
+        try to.buffers.append(self.alloc, slot);
+        _ = from.buffers.orderedRemove(at.index);
+        if (from.buffers.items.len == 0) {
+            const scratch = try self.newSlot(null);
+            from.buffers.append(self.alloc, scratch) catch |err| {
+                scratch.deinit(self.alloc);
+                return err;
+            };
+        }
+        // The same index rule closing a tab uses: a tab left of the shown
+        // one going shifts it down, and the shown one going leaves
+        // whatever slid into its place.
+        if (from.active > at.index) from.active -= 1;
+        from.active = @min(from.active, from.buffers.items.len - 1);
+        from.markRedraw();
+
+        to.active = to.buffers.items.len - 1;
+        // The layer it lands on has never shown this buffer.
+        slot.full_redraw = true;
+        slot.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
+        to.markRedraw();
+        if (from == self.grp) self.buf = from.slot();
+        if (to == self.grp) self.buf = to.slot();
+    }
+
+    /// `:close` and Ctrl+W q / c: closes the focused group, its tabs
+    /// moving to the group that grows into its space -- nothing is
+    /// abandoned, so nothing needs a `!`. The last group can't be
+    /// closed (`:q` is how zoe goes away).
+    fn closeGroup(self: *Ui) !void {
+        if (self.group_list.items.len < 2) {
+            self.buf.ed.setStatus("E444: Cannot close last window", .{});
+            self.status_dirty = true;
+            return;
+        }
+        const g = self.grp;
+        const shown = self.buf;
+        const removed = self.layout.remove(g.id) orelse return;
+        const to = self.groupById(removed.focus);
+
+        // Its tabs go along to `to` -- except a lone, untouched scratch
+        // buffer: carrying an empty `[No Name]` over is just clutter.
+        const lone = g.buffers.items.len == 1;
+        for (g.buffers.items) |slot| {
+            if (lone and slot.ed.path == null and !slot.ed.buf.dirty and slot.ed.buf.len() == 0) {
+                slot.deinit(self.alloc);
+                continue;
+            }
+            slot.full_redraw = true;
+            slot.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
+            try to.buffers.append(self.alloc, slot);
+        }
+        // `to` shows what `g` was showing, if that came along.
+        for (to.buffers.items, 0..) |slot, i| {
+            if (slot == shown) to.active = i;
+        }
+        g.buffers.clearRetainingCapacity();
+        // Before the group goes: `grp` must not be left pointing at it.
+        self.focusGroup(to);
+        try self.dropGroup(g, removed);
+    }
+
+    /// The other way a group goes: its last tab was closed. Nothing to
+    /// carry over, and focus goes where `closeGroup`'s would.
+    fn closeEmptyGroup(self: *Ui, g: *Group) !void {
+        const removed = self.layout.remove(g.id) orelse return;
+        // Before the group goes: `grp` must not be left pointing at it.
+        // (`buf` already doesn't point anywhere -- its slot was the one
+        // just closed -- and `focusGroup` replaces it without reading it.)
+        self.focusGroup(self.groupById(removed.focus));
+        try self.dropGroup(g, removed);
+    }
+
+    /// Takes an emptied group off the screen and frees it: its sibling
+    /// takes the parent split's place in the host tree, and the group's
+    /// own layers and split go. `g` must already be out of `layout`, its
+    /// buffers gone, and `grp` pointing at another group.
+    fn dropGroup(self: *Ui, g: *Group, removed: groups.Layout.Removed) !void {
+        try self.sendListHolding(removed.replacement);
+        self.client.destroySplit(removed.destroyed) catch {};
+        self.client.destroySplit(g.col_split) catch {};
+        self.client.destroyLayer(g.tabs_layer) catch {};
+        self.client.destroyLayer(g.buffer_layer) catch {};
+        if (self.tab_tip_group == g) {
+            self.tab_tip_group = null;
+            self.tab_tip_index = null;
+            self.dismissTabTip();
+        }
+        for (self.group_list.items, 0..) |each, i| {
+            if (each == g) {
+                _ = self.group_list.orderedRemove(i);
+                break;
+            }
+        }
+        g.buffers.deinit(self.alloc);
+        g.tab_spans.deinit(self.alloc);
+        self.alloc.destroy(g);
+        for (self.group_list.items) |each| each.markRedraw();
+    }
+
+    /// Ctrl+hjkl and Ctrl+W hjkl: the group (or the file tree) that way.
+    fn focusToward(self: *Ui, dir: groups.Direction) void {
+        if (self.focus == .tree) {
+            // Out of the sidebar: whichever group faces it.
+            if (dir != .right) return;
+            const t = self.tree_bounds;
+            const from: groups.Rect = .{ .row = t.row, .col = t.col, .cols = t.cols, .rows = t.rows };
+            self.focusGroup(self.groupFacing(from, null, dir) orelse self.grp);
+            return;
+        }
+        if (self.groupFacing(self.grp.rect(), self.grp, dir)) |g| {
+            self.focusGroup(g);
+        } else if (dir == .left and self.tree_visible) {
+            self.setFocus(.tree);
+        }
+    }
+
+    /// The group lying `dir` of the rect `from` -- a group's own (`self`
+    /// is that group, left out of the search) or the file tree's.
+    fn groupFacing(self: *Ui, from: groups.Rect, self_group: ?*Group, dir: groups.Direction) ?*Group {
+        var rects: [max_groups + 1]groups.Rect = undefined;
+        var owners: [max_groups + 1]?*Group = undefined;
+        rects[0] = from;
+        owners[0] = null;
+        var n: usize = 1;
+        for (self.group_list.items) |g| {
+            if (n == rects.len) break;
+            if (g == self_group) continue;
+            rects[n] = g.rect();
+            owners[n] = g;
+            n += 1;
+        }
+        const hit = groups.neighbor(rects[0..n], 0, dir) orelse return null;
+        return owners[hit];
+    }
+
+    /// Ctrl+W w / Ctrl+W Ctrl+W: the next group in reading order, with
+    /// the file tree as the stop after the last one when it is showing --
+    /// the same tree/buffer toggle the bare Ctrl+W was when there was
+    /// only one group.
+    fn cycleFocus(self: *Ui) !void {
+        var order: std.ArrayList(groups.GroupId) = .empty;
+        defer order.deinit(self.alloc);
+        try self.layout.groupsInOrder(self.alloc, &order);
+        if (self.focus == .tree) {
+            self.focusGroup(self.groupById(order.items[0]));
+            return;
+        }
+        const here = std.mem.indexOfScalar(groups.GroupId, order.items, self.grp.id) orelse 0;
+        if (here + 1 < order.items.len) {
+            self.focusGroup(self.groupById(order.items[here + 1]));
+        } else if (self.tree_visible) {
+            self.setFocus(.tree);
+        } else {
+            self.focusGroup(self.groupById(order.items[0]));
+        }
+    }
+
+    /// The key after Ctrl+W. Returns false for one that isn't a window
+    /// command, which is then handled as itself -- vim would drop it, but
+    /// a key that does something is less surprising than one that
+    /// silently vanishes.
+    fn windowCommand(self: *Ui, key: []const u8) !bool {
+        const eq = std.mem.eql;
+        if (eq(u8, key, "v")) {
+            try self.splitGroup(.vertical, null);
+        } else if (eq(u8, key, "s")) {
+            try self.splitGroup(.horizontal, null);
+        } else if (eq(u8, key, "q") or eq(u8, key, "c")) {
+            try self.closeGroup();
+        } else if (eq(u8, key, "w")) {
+            try self.cycleFocus();
+        } else if (eq(u8, key, "h")) {
+            // Plain `h` here, not Ctrl+H (hidden files), so the whole of
+            // vim's hjkl is available behind the prefix.
+            self.focusToward(.left);
+        } else if (focusDirection(key)) |dir| {
+            self.focusToward(dir);
+        } else {
+            return false;
+        }
+        return true;
     }
 
     /// Reads each pane's bounds straight from the server -- used once at
@@ -1396,8 +1827,10 @@ pub const Ui = struct {
     /// every layer at the full window size, so nothing is clamped yet.
     fn readBounds(self: *Ui) !void {
         self.tree_bounds = try self.boundsOf(self.tree_layer);
-        self.tabs_bounds = try self.boundsOf(self.tabs_layer);
-        self.buffer_bounds = try self.boundsOf(self.buffer_layer);
+        for (self.group_list.items) |g| {
+            g.tabs_bounds = try self.boundsOf(g.tabs_layer);
+            g.buffer_bounds = try self.boundsOf(g.buffer_layer);
+        }
         self.status_bounds = try self.boundsOf(self.status_layer);
         try self.syncContentSizes();
     }
@@ -1417,18 +1850,20 @@ pub const Ui = struct {
     /// but never smaller, or the pane would be transparent below the last
     /// entry and the shell's scrollback would show through.
     fn syncContentSizes(self: *Ui) !void {
-        if (self.buffer_bounds.cols > 0) {
-            try self.client.setLayerSize(self.buffer_layer, self.buffer_bounds.cols, self.buffer_bounds.rows);
+        for (self.group_list.items) |g| {
+            if (g.buffer_bounds.cols > 0) {
+                try self.client.setLayerSize(g.buffer_layer, g.buffer_bounds.cols, g.buffer_bounds.rows);
+            }
+            // The tab strip is client-scrolled the same way the buffer
+            // is: its grid is exactly the pane, and a strip wider than
+            // that is reported as a `content_extent` rather than drawn
+            // into cells nothing shows.
+            if (g.tabs_bounds.cols > 0) {
+                try self.client.setLayerSize(g.tabs_layer, g.tabs_bounds.cols, 1);
+            }
         }
         if (self.status_bounds.cols > 0) {
             try self.client.setLayerSize(self.status_layer, self.status_bounds.cols, 1);
-        }
-        // The tab strip is client-scrolled the same way the buffer is:
-        // its grid is exactly the pane, and a strip wider than that is
-        // reported as a `content_extent` rather than drawn into cells
-        // nothing shows.
-        if (self.tabs_bounds.cols > 0) {
-            try self.client.setLayerSize(self.tabs_layer, self.tabs_bounds.cols, 1);
         }
         if (self.tree_visible and self.tree_bounds.cols > 0) {
             try self.client.setLayerSize(
@@ -1482,7 +1917,7 @@ pub const Ui = struct {
             // since the last turn, so an arriving diagnostic is drawn in the
             // frame it arrived for rather than the one after.
             self.drainLsp();
-            if (self.buffer_dirty or self.tree_dirty != .none or self.tabs_dirty or
+            if (self.anyGroupDirty() or self.tree_dirty != .none or
                 self.status_dirty or self.finder.dirty or self.hover_dirty or self.completion_dirty or
                 self.tab_tip_dirty or self.tree_scroll_pending != null)
                 try self.render();
@@ -1554,17 +1989,17 @@ pub const Ui = struct {
         switch (ev) {
             .layout => |l| {
                 if (l.boundsFor(self.tree_layer)) |b| self.tree_bounds = toBounds(b);
-                if (l.boundsFor(self.tabs_layer)) |b| self.tabs_bounds = toBounds(b);
-                if (l.boundsFor(self.buffer_layer)) |b| self.buffer_bounds = toBounds(b);
+                for (self.group_list.items) |g| {
+                    if (l.boundsFor(g.tabs_layer)) |b| g.tabs_bounds = toBounds(b);
+                    if (l.boundsFor(g.buffer_layer)) |b| g.buffer_bounds = toBounds(b);
+                }
                 if (l.boundsFor(self.status_layer)) |b| self.status_bounds = toBounds(b);
                 try self.syncContentSizes();
-                // The buffer layer's grid was resized: the rows it holds no
-                // longer line up with the panes, so the next frame can't
-                // shift them -- it has to repaint. Every pane moved.
-                self.buf.full_redraw = true;
-                self.buffer_dirty = true;
+                // The buffer layers' grids were resized: the rows they
+                // hold no longer line up with the panes, so the next frame
+                // can't shift them -- it has to repaint. Every pane moved.
+                for (self.group_list.items) |g| g.markRedraw();
                 self.markTreeDirty(.full);
-                self.tabs_dirty = true;
                 self.status_dirty = true;
                 // The popup is outside the split tree, so this
                 // notification never mentions it -- but it is placed
@@ -1572,6 +2007,9 @@ pub const Ui = struct {
                 if (self.finder.isOpen()) self.finder.dirty = true;
                 self.replaceShell();
             },
+            // The shell panel's top edge was dragged. It floats over the
+            // panes rather than squeezing them, so nothing else moves.
+            .layer_resize => |lr| _ = self.shell.handleLayerResize(lr, self.winSize()),
             // The window (or this pane) changed size. Repaint, but take
             // no geometry from it: the `layout` that comes with it
             // carries the new pane rects, and is the only thing that
@@ -1594,9 +2032,9 @@ pub const Ui = struct {
                     self.cell_px_h = m.h;
                 } else |_| {}
                 self.buf.full_redraw = true;
-                self.buffer_dirty = true;
+                self.grp.buffer_dirty = true;
                 self.markTreeDirty(.full);
-                self.tabs_dirty = true;
+                self.grp.tabs_dirty = true;
                 self.status_dirty = true;
                 if (self.finder.isOpen()) self.finder.dirty = true;
                 self.replaceShell();
@@ -1615,15 +2053,20 @@ pub const Ui = struct {
                 // The hover stays up through a scroll, deliberately: reading
                 // the code around a definition with its docs still open is
                 // what the wheel is for here. Only a button press closes it.
-                if (so.layer == self.buffer_layer) self.scrollBufferTo(so.row, so.col);
-                // A shift+wheel or thumb drag over the tab strip. Only the
-                // column matters -- the strip is one row tall -- and the
-                // offset is recorded as already pushed so `syncTabScrollbar`
-                // doesn't echo it straight back.
-                if (so.layer == self.tabs_layer and so.col != self.tab_scroll) {
-                    self.tab_scroll = so.col;
-                    self.pushed_tab_bar[1] = so.col;
-                    self.tabs_dirty = true;
+                //
+                // Any group's pane, not just the focused one: the wheel
+                // scrolls whatever is under the pointer.
+                for (self.group_list.items) |g| {
+                    if (so.layer == g.buffer_layer) self.scrollGroupTo(g, so.row, so.col);
+                    // A shift+wheel or thumb drag over a tab strip. Only
+                    // the column matters -- the strip is one row tall --
+                    // and the offset is recorded as already pushed so
+                    // `syncTabScrollbar` doesn't echo it straight back.
+                    if (so.layer == g.tabs_layer and so.col != g.tab_scroll) {
+                        g.tab_scroll = so.col;
+                        g.pushed_tab_bar[1] = so.col;
+                        g.tabs_dirty = true;
+                    }
                 }
             },
             // The pointer belongs to the shell panel too while it is up:
@@ -1637,7 +2080,7 @@ pub const Ui = struct {
                 if (f.focused == self.window_focused) return;
                 self.window_focused = f.focused;
                 self.buf.full_redraw = true;
-                self.buffer_dirty = true;
+                self.grp.buffer_dirty = true;
             },
             .mouse_move => |m| {
                 if (!self.shell.isOpen()) try self.handleMouseDrag(m);
@@ -1689,6 +2132,23 @@ pub const Ui = struct {
                     return;
                 }
 
+                // The key after Ctrl+W. A modifier pressed on the way to
+                // it (letting go of Ctrl, reaching for Shift) is not it.
+                if (self.window_prefix and !isModifierKey(k.key)) {
+                    self.window_prefix = false;
+                    self.status_dirty = true;
+                    if (std.mem.eql(u8, k.key, "escape")) return;
+                    // With or without Ctrl still held: Ctrl+W Ctrl+W is
+                    // vim's cycle, the same as Ctrl+W w.
+                    if (try self.windowCommand(k.key)) {
+                        // A printable key also arrives as `text` straight
+                        // after this, which would otherwise reach the
+                        // editor (`v` entering visual mode).
+                        if (!k.ctrl() and k.key.len == 1) self.swallow_window_text = true;
+                        return;
+                    }
+                }
+
                 // A leftover status/error message (`:q` on a dirty
                 // buffer, an unknown command, ...) would otherwise sit in
                 // the statusline forever -- nothing else ever clears it,
@@ -1731,8 +2191,12 @@ pub const Ui = struct {
                         self.requestCompletion(null, true);
                         return;
                     }
+                    // Ctrl+W is vim's window prefix: the next key splits
+                    // (`v`, `s`), closes (`q`, `c`) or moves (`w`, a
+                    // direction). See `windowCommand`.
                     if (std.mem.eql(u8, k.key, "w")) {
-                        self.setFocus(if (self.focus == .buffer) .tree else .buffer);
+                        self.window_prefix = true;
+                        self.status_dirty = true;
                         return;
                     }
                     // Ctrl+O / Ctrl+I walk the jumplist -- vim's chords, and
@@ -1746,16 +2210,10 @@ pub const Ui = struct {
                         return;
                     }
                     // Ctrl + a direction moves focus that way rather than
-                    // cycling, so it keeps meaning the same thing once
-                    // there is more than one buffer pane to move between.
-                    // The vertical pair is claimed now and does nothing
-                    // yet -- there is nothing above or below either pane.
+                    // cycling: to the editor group on that side, or from
+                    // the leftmost one into the file tree.
                     if (focusDirection(k.key)) |dir| {
-                        switch (dir) {
-                            .left => if (self.tree_visible) self.setFocus(.tree),
-                            .right => self.setFocus(.buffer),
-                            .up, .down => {},
-                        }
+                        self.focusToward(dir);
                         return;
                     }
                     if (std.mem.eql(u8, k.key, "n")) {
@@ -1803,7 +2261,7 @@ pub const Ui = struct {
                         if (std.mem.eql(u8, k.key, "x")) {
                             try self.applyOutcome(try self.buf.ed.clipboardCut());
                             self.buf.full_redraw = true;
-                            self.buffer_dirty = true;
+                            self.grp.buffer_dirty = true;
                             self.status_dirty = true;
                             return;
                         }
@@ -1835,6 +2293,10 @@ pub const Ui = struct {
                 if (self.swallow_space_text) {
                     self.swallow_space_text = false;
                     if (std.mem.eql(u8, t.text, " ")) return;
+                }
+                if (self.swallow_window_text) {
+                    self.swallow_window_text = false;
+                    return;
                 }
                 self.buf.ed.status.clearRetainingCapacity();
                 if (self.focus == .tree) {
@@ -1874,7 +2336,7 @@ pub const Ui = struct {
                         try self.buf.ed.dropSelection();
                         try self.buf.ed.putText(t.text, true);
                         self.buf.full_redraw = true;
-                        self.buffer_dirty = true;
+                        self.grp.buffer_dirty = true;
                     }
                 }
             },
@@ -1888,7 +2350,7 @@ pub const Ui = struct {
             // (it copies its own selection), not the buffer's.
             .copy_request => if (self.isVisible() and !self.shell.isOpen()) {
                 try self.applyOutcome(try self.buf.ed.clipboardCopy());
-                self.buffer_dirty = true;
+                self.grp.buffer_dirty = true;
                 self.status_dirty = true;
             },
             // The host closing already ends zoe's run loop when the shell
@@ -1906,10 +2368,10 @@ pub const Ui = struct {
         // when the editor state it shows actually moved.
         self.status_dirty = true;
         const after = EdSnapshot.of(&self.buf.ed);
-        if (!after.eql(before)) self.buffer_dirty = true;
+        if (!after.eql(before)) self.grp.buffer_dirty = true;
         // The tab's `+` marker is the only thing the strip draws that a
         // keystroke can change.
-        if (after.dirty != before.dirty) self.tabs_dirty = true;
+        if (after.dirty != before.dirty) self.grp.tabs_dirty = true;
         // A `:set` moves the text origin or the width of a glyph, which a
         // row shift can't express -- the whole pane has to be
         // re-laid-out. These settings live on the `Editor`, and there is
@@ -1921,12 +2383,16 @@ pub const Ui = struct {
             after.show_whitespace != before.show_whitespace)
         {
             self.buf.full_redraw = true;
-            for (self.buffers.items) |slot| {
-                slot.ed.line_numbers = after.line_numbers;
-                slot.ed.tab_width = after.tab_width;
-                slot.ed.expand_tab = after.expand_tab;
-                slot.ed.show_whitespace = after.show_whitespace;
-                slot.full_redraw = true;
+            for (self.group_list.items) |g| {
+                for (g.buffers.items) |slot| {
+                    slot.ed.line_numbers = after.line_numbers;
+                    slot.ed.tab_width = after.tab_width;
+                    slot.ed.expand_tab = after.expand_tab;
+                    slot.ed.show_whitespace = after.show_whitespace;
+                    slot.full_redraw = true;
+                }
+                // The groups not being typed in show it too.
+                g.buffer_dirty = true;
             }
         }
         // A visual selection touches whole rows, not just the caret's:
@@ -1986,9 +2452,9 @@ pub const Ui = struct {
         // The buffer pane -- and the strip above it -- is about to be
         // re-laid-out wider or narrower.
         self.buf.full_redraw = true;
-        self.buffer_dirty = true;
+        self.grp.buffer_dirty = true;
         self.markTreeDirty(.full);
-        self.tabs_dirty = true;
+        self.grp.tabs_dirty = true;
         self.status_dirty = true;
     }
 
@@ -2372,7 +2838,12 @@ pub const Ui = struct {
         }
 
         if (ev.pressed) {
-            if (self.tabAt(ev.cell)) |h| {
+            // A press anywhere in a group -- its strip or its pane -- gives
+            // it the keyboard first, so what follows acts on that group.
+            if (self.groupAt(ev.cell)) |g| {
+                if (g != self.grp) self.focusGroup(g);
+            }
+            if (tabAt(self.grp, ev.cell)) |h| {
                 if (h.close) {
                     try self.closeBuffer(h.index, false);
                 } else {
@@ -2386,7 +2857,7 @@ pub const Ui = struct {
                 self.buf.ed.moveCursorTo(byte);
                 self.focus = .buffer;
                 self.buf.full_redraw = true;
-                self.buffer_dirty = true;
+                self.grp.buffer_dirty = true;
                 self.status_dirty = true;
             } else {
                 try self.handleTreeClick(ev);
@@ -2402,7 +2873,7 @@ pub const Ui = struct {
                 self.buf.ed.exitVisual();
             }
             self.buf.full_redraw = true;
-            self.buffer_dirty = true;
+            self.grp.buffer_dirty = true;
             self.status_dirty = true;
         }
     }
@@ -2419,7 +2890,7 @@ pub const Ui = struct {
             }
             self.buf.ed.setVisualSelection(d.anchor, byte);
             self.buf.full_redraw = true;
-            self.buffer_dirty = true;
+            self.grp.buffer_dirty = true;
             self.status_dirty = true;
         }
     }
@@ -2427,12 +2898,20 @@ pub const Ui = struct {
     /// The tab under a root-grid cell, or null when the cell isn't in
     /// the strip. Screen columns are strip columns less the scroll, so
     /// the spans `renderTabs` recorded answer this directly.
-    fn tabAt(self: *Ui, cell: glyphwire.CellPos) ?tabs.Hit {
-        const b = self.tabs_bounds;
+    fn tabAt(g: *const Group, cell: glyphwire.CellPos) ?tabs.Hit {
+        const b = g.tabs_bounds;
         if (b.cols == 0 or b.rows == 0) return null;
         if (cell.row < b.row or cell.row >= b.row + b.rows) return null;
         if (cell.col < b.col or cell.col >= b.col + b.cols) return null;
-        return tabs.hit(self.tab_spans.items, cell.col - b.col + self.tab_scroll);
+        return tabs.hit(g.tab_spans.items, cell.col - b.col + g.tab_scroll);
+    }
+
+    /// The group whose strip or pane is under `cell`, if any.
+    fn groupAt(self: *const Ui, cell: glyphwire.CellPos) ?*Group {
+        for (self.group_list.items) |g| {
+            if (g.contains(cell)) return g;
+        }
+        return null;
     }
 
     /// Follows the pointer for the tab tooltip. Moving onto a tab arms its
@@ -2445,18 +2924,22 @@ pub const Ui = struct {
     /// leaves the window from the strip leaves the tooltip up until the
     /// next move, key or click.
     fn trackTabHover(self: *Ui, cell: glyphwire.CellPos) void {
+        var over_group: ?*Group = null;
         const over: ?usize = blk: {
             // A drag and the finder both own the pointer while they last.
             if (self.drag != null or self.finder.isOpen()) break :blk null;
-            const h = self.tabAt(cell) orelse break :blk null;
-            if (h.index >= self.buffers.items.len) break :blk null;
+            const g = self.groupAt(cell) orelse break :blk null;
+            const h = tabAt(g, cell) orelse break :blk null;
+            if (h.index >= g.buffers.items.len) break :blk null;
             // `[No Name]` has no path to show.
-            if (self.buffers.items[h.index].ed.path == null) break :blk null;
+            if (g.buffers.items[h.index].ed.path == null) break :blk null;
+            over_group = g;
             break :blk h.index;
         };
-        if (over == self.tab_tip_index) return;
+        if (over == self.tab_tip_index and over_group == self.tab_tip_group) return;
         const was_shown = self.tab_tip_shown;
         self.tab_tip_index = over;
+        self.tab_tip_group = over_group;
         self.tab_tip_due = null;
         if (was_shown) {
             self.tab_tip_shown = false;
@@ -2505,7 +2988,7 @@ pub const Ui = struct {
     /// cell isn't inside the buffer pane -- the test a press uses to
     /// decide between a buffer drag and a tree click.
     fn cellInBuffer(self: *Ui, cell: glyphwire.CellPos) ?usize {
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         if (b.cols == 0 or b.rows == 0) return null;
         if (cell.row < b.row or cell.row >= b.row + b.rows) return null;
         if (cell.col < b.col or cell.col >= b.col + b.cols) return null;
@@ -2516,7 +2999,7 @@ pub const Ui = struct {
     /// into the buffer pane first so a drag that wanders out of the pane
     /// still tracks its nearest edge.
     fn cellToBufferByte(self: *Ui, cell: glyphwire.CellPos) usize {
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         const rows = @max(b.rows, 1);
         const screen_row = std.math.clamp(cell.row, b.row, b.row + rows - 1) - b.row;
         const line = @min(self.buf.top_line + screen_row, self.buf.ed.buf.lineCount() - 1);
@@ -2580,7 +3063,9 @@ pub const Ui = struct {
                 if (target) |t| try self.openFile(t) else try self.reloadCurrent();
             },
             .buffer_step => |b| self.stepBuffer(b.forward),
-            .buffer_close => |b| try self.closeBuffer(self.active, b.force),
+            .buffer_close => |b| try self.closeBuffer(self.grp.active, b.force),
+            .split => |sp| try self.splitGroup(if (sp.vertical) .vertical else .horizontal, sp.path),
+            .close_group => try self.closeGroup(),
             .chdir => |target| self.changeDir(target),
             .pwd => {
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2618,7 +3103,7 @@ pub const Ui = struct {
         try self.buf.ed.putText(text, after);
         // A paste can add lines and move the text origin; repaint the pane.
         self.buf.full_redraw = true;
-        self.buffer_dirty = true;
+        self.grp.buffer_dirty = true;
         self.status_dirty = true;
     }
 
@@ -2726,8 +3211,17 @@ pub const Ui = struct {
     /// buffer being left keeps its text, its cursor and its parse tree,
     /// so coming back to it is a switch rather than a reload.
     fn openFile(self: *Ui, path: []const u8) !void {
-        if (self.indexOfPath(path)) |i| {
-            self.setActive(i);
+        // Open in another group already: that group and tab get the
+        // focus, since a file is never open in two.
+        if (self.findPath(path)) |at| {
+            if (at.group != self.grp) {
+                const keep_tree = self.focus == .tree;
+                self.focusGroup(at.group);
+                // Picking a file in the tree leaves the keyboard there, as
+                // it does when the file opens in the focused group.
+                if (keep_tree) self.setFocus(.tree);
+            }
+            self.setActive(at.index);
             self.buf.ed.setStatus("\"{s}\"", .{path});
             return;
         }
@@ -2744,8 +3238,8 @@ pub const Ui = struct {
         // Inserted next to the current tab rather than at the far end:
         // the file you just opened belongs beside the one you opened it
         // from, and `:bp` goes back to it.
-        try self.buffers.insert(self.alloc, self.active + 1, slot);
-        self.setActive(self.active + 1);
+        try self.grp.buffers.insert(self.alloc, self.grp.active + 1, slot);
+        self.setActive(self.grp.active + 1);
     }
 
     /// A bare `:e` -- re-reads the current buffer from disk, in place.
@@ -2780,8 +3274,8 @@ pub const Ui = struct {
         // Fresh contents -- nothing on screen carries over.
         self.buf.full_redraw = true;
         self.buf.ed.setStatus("\"{s}\" {d}L", .{ self.buf.ed.path.?, self.buf.ed.buf.lineCount() });
-        self.buffer_dirty = true;
-        self.tabs_dirty = true;
+        self.grp.buffer_dirty = true;
+        self.grp.tabs_dirty = true;
         self.status_dirty = true;
     }
 
@@ -2791,27 +3285,31 @@ pub const Ui = struct {
     /// whole editor down with every buffer in it, so this guard can only
     /// live here. `:q!` skips it, the way `!` always does.
     fn refuseQuitForDirtyBuffer(self: *Ui) bool {
-        for (self.buffers.items) |slot| {
-            if (!slot.ed.buf.dirty) continue;
-            self.buf.ed.setStatus(
-                "E162: No write since last change for buffer \"{s}\"",
-                .{slot.ed.path orelse "[No Name]"},
-            );
-            self.status_dirty = true;
-            return true;
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                if (!slot.ed.buf.dirty) continue;
+                self.buf.ed.setStatus(
+                    "E162: No write since last change for buffer \"{s}\"",
+                    .{slot.ed.path orelse "[No Name]"},
+                );
+                self.status_dirty = true;
+                return true;
+            }
         }
         return false;
     }
 
-    /// The tab holding `path`, if one is open. Paths are compared as
-    /// they were given, so `:e ./x.zig` and `:e x.zig` are two tabs --
-    /// resolving them would mean touching the filesystem for what is a
-    /// convenience. The tree is self-consistent, so clicking the same
-    /// entry twice always finds the tab it opened.
-    fn indexOfPath(self: *Ui, path: []const u8) ?usize {
-        for (self.buffers.items, 0..) |slot, i| {
-            const p = slot.ed.path orelse continue;
-            if (std.mem.eql(u8, p, path)) return i;
+    /// The group and tab holding `path`, if one is open anywhere. Paths
+    /// are compared as they were given, so `:e ./x.zig` and `:e x.zig`
+    /// are two tabs -- resolving them would mean touching the filesystem
+    /// for what is a convenience. The tree is self-consistent, so
+    /// clicking the same entry twice always finds the tab it opened.
+    fn findPath(self: *const Ui, path: []const u8) ?SlotAt {
+        for (self.group_list.items) |g| {
+            for (g.buffers.items, 0..) |slot, i| {
+                const p = slot.ed.path orelse continue;
+                if (std.mem.eql(u8, p, path)) return .{ .group = g, .index = i };
+            }
         }
         return null;
     }
@@ -2820,33 +3318,34 @@ pub const Ui = struct {
     /// `active` / `buf` pair. Focus is left alone: opening a file from
     /// the tree shouldn't yank the keyboard out of the tree.
     fn setActive(self: *Ui, index: usize) void {
-        self.active = @min(index, self.buffers.items.len - 1);
-        self.buf = self.buffers.items[self.active];
+        self.grp.active = @min(index, self.grp.buffers.items.len - 1);
+        self.buf = self.grp.buffers.items[self.grp.active];
         // The buffer layer's cells belong to whichever buffer drew last,
         // and its scrollbar to that buffer's line count. Neither carries
         // over, so the incoming buffer repaints and re-pushes its extent.
         self.buf.full_redraw = true;
         self.buf.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
-        self.buffer_dirty = true;
-        self.tabs_dirty = true;
+        self.grp.buffer_dirty = true;
+        self.grp.tabs_dirty = true;
         self.status_dirty = true;
     }
 
     /// `:bn` / `:bp`, and Ctrl+Tab / Ctrl+Shift+Tab. Wraps at both ends,
     /// so two buffers can be flipped between with one chord.
     fn stepBuffer(self: *Ui, forward: bool) void {
-        const n = self.buffers.items.len;
+        const n = self.grp.buffers.items.len;
         if (n < 2) return;
-        self.setActive(if (forward) (self.active + 1) % n else (self.active + n - 1) % n);
+        self.setActive(if (forward) (self.grp.active + 1) % n else (self.grp.active + n - 1) % n);
     }
 
-    /// Closes tab `index`. A modified buffer refuses unless `force`, the
-    /// same E37 guard `:q` uses and what the tab's `×` reports when it
-    /// can't close. Closing the last buffer leaves an empty scratch one:
-    /// `buf` always points somewhere, and the strip always has a tab.
+    /// Closes tab `index` of the focused group. A modified buffer refuses
+    /// unless `force`, the same E37 guard `:q` uses and what the tab's `×`
+    /// reports when it can't close. Closing a group's last buffer closes
+    /// the group, unless it is the only one: that is left an empty
+    /// scratch buffer, so `buf` always points somewhere.
     fn closeBuffer(self: *Ui, index: usize, force: bool) !void {
-        if (index >= self.buffers.items.len) return;
-        const slot = self.buffers.items[index];
+        if (index >= self.grp.buffers.items.len) return;
+        const slot = self.grp.buffers.items[index];
         if (slot.ed.buf.dirty and !force) {
             self.buf.ed.setStatus("E37: No write since last change (add ! to override)", .{});
             self.status_dirty = true;
@@ -2857,25 +3356,29 @@ pub const Ui = struct {
         // stored diagnostics go with it.
         self.lspDidClose(slot);
 
-        const closed_active = index == self.active;
-        _ = self.buffers.orderedRemove(index);
+        const closed_active = index == self.grp.active;
+        _ = self.grp.buffers.orderedRemove(index);
         slot.deinit(self.alloc);
 
-        if (self.buffers.items.len == 0) {
+        if (self.grp.buffers.items.len == 0) {
+            // A group that has run out of tabs closes, like a VS Code
+            // editor group; only the last one is left with a scratch
+            // buffer, because there has to be somewhere to type.
+            if (self.group_list.items.len > 1) return self.closeEmptyGroup(self.grp);
             const fresh = try self.newSlot(null);
             errdefer fresh.deinit(self.alloc);
-            try self.buffers.append(self.alloc, fresh);
+            try self.grp.buffers.append(self.alloc, fresh);
         }
 
         // Closing the active tab focuses whatever slid into its place
         // (or the new last tab); closing one to its left just shifts its
         // index down.
         const target = if (closed_active)
-            @min(index, self.buffers.items.len - 1)
-        else if (self.active > index)
-            self.active - 1
+            @min(index, self.grp.buffers.items.len - 1)
+        else if (self.grp.active > index)
+            self.grp.active - 1
         else
-            self.active;
+            self.grp.active;
         self.setActive(target);
     }
 
@@ -2902,7 +3405,7 @@ pub const Ui = struct {
         self.buf.ed.markSaved();
         self.lspDidSave();
         // The tab loses its `+`, and a `:w <name>` also renamed it.
-        self.tabs_dirty = true;
+        self.grp.tabs_dirty = true;
         self.buf.ed.setStatus("\"{s}\" {d}L written", .{ dest, self.buf.ed.buf.lineCount() });
     }
 
@@ -3150,7 +3653,7 @@ pub const Ui = struct {
                 self.buf.ed.setStatus("LSP: {s} exited (:lsp restart)", .{d.server});
                 self.status_dirty = true;
                 self.buf.full_redraw = true;
-                self.buffer_dirty = true;
+                self.grp.buffer_dirty = true;
             },
         }
     }
@@ -3419,9 +3922,9 @@ pub const Ui = struct {
         self.completion_empty_at = null;
         self.closeCompletion();
         self.buf.full_redraw = true;
-        self.buffer_dirty = true;
+        self.grp.buffer_dirty = true;
         self.status_dirty = true;
-        self.tabs_dirty = true;
+        self.grp.tabs_dirty = true;
     }
 
     /// A key while the popup is up. Returns true when the popup took it.
@@ -3491,11 +3994,13 @@ pub const Ui = struct {
 
         // Every visible row may have gained or lost a mark, and the marks
         // live on cells the row painter owns.
-        if (slot != null and slot.? == self.buf) {
-            self.buf.full_redraw = true;
-            self.buffer_dirty = true;
+        //
+        // Whichever group shows it, focused or not.
+        if (slot) |sl| if (self.findSlot(sl)) |at| if (at.group.slot() == sl) {
+            sl.full_redraw = true;
+            at.group.buffer_dirty = true;
             self.status_dirty = true;
-        }
+        };
     }
 
     /// The byte column in `slot`'s line for an LSP position under `enc`.
@@ -3507,9 +4012,11 @@ pub const Ui = struct {
     }
 
     fn slotForPath(self: *Ui, abs: []const u8) ?*Slot {
-        for (self.buffers.items) |slot| {
-            const slot_abs = self.slotAbs(slot) orelse continue;
-            if (std.mem.eql(u8, slot_abs, abs)) return slot;
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                const slot_abs = self.slotAbs(slot) orelse continue;
+                if (std.mem.eql(u8, slot_abs, abs)) return slot;
+            }
         }
         return null;
     }
@@ -3701,7 +4208,7 @@ pub const Ui = struct {
         const end = self.buf.ed.buf.lineEnd(target_line);
         self.buf.ed.setCursor(@min(start + column, end));
         self.buf.full_redraw = true;
-        self.buffer_dirty = true;
+        self.grp.buffer_dirty = true;
         self.status_dirty = true;
     }
 
@@ -3768,15 +4275,19 @@ pub const Ui = struct {
         self.lsp_pool = null;
         self.diags.deinit();
         self.diags = diag.Store.init(self.alloc);
-        for (self.buffers.items) |slot| slot.lsp_opened = false;
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| slot.lsp_opened = false;
+        }
 
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         const n = std.process.currentPath(self.io, &root_buf) catch 0;
         self.startLsp(if (n > 0) root_buf[0..n] else ".", self.environ);
-        for (self.buffers.items) |slot| self.lspDidOpen(slot);
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| self.lspDidOpen(slot);
+            // The sign column's marks went with the old store.
+            g.markRedraw();
+        }
 
-        self.buf.full_redraw = true;
-        self.buffer_dirty = true;
         self.buf.ed.setStatus("LSP: restarted", .{});
     }
 
@@ -3831,7 +4342,7 @@ pub const Ui = struct {
         };
         self.buf.ed.setCursor(entry.offset);
         self.buf.full_redraw = true;
-        self.buffer_dirty = true;
+        self.grp.buffer_dirty = true;
         self.status_dirty = true;
     }
 
@@ -3864,42 +4375,78 @@ pub const Ui = struct {
             try batch.setLayerScrollOffset(self.tree_layer, p.row, p.col);
         }
 
-        if (self.buffer_dirty) try self.renderBuffer(&batch);
+        // Read before the groups are drawn, which clears their flags: the
+        // completion popup is placed against the focused buffer and has
+        // to follow it when it repaints.
+        const focused_buffer_dirty = self.grp.buffer_dirty;
+        for (self.group_list.items) |g| {
+            if (!g.buffer_dirty and !g.tabs_dirty) continue;
+            try self.renderGroup(&batch, g);
+        }
         if (self.tree_visible) switch (self.tree_dirty) {
             .none => {},
             .selection => try self.renderTreeSelection(&batch),
             .full => try self.renderTree(&batch),
         };
-        if (self.tabs_dirty) {
-            try self.renderTabs(&batch);
-            // The strip was laid out or scrolled again, and the tooltip
-            // hangs from its tab.
-            if (self.tab_tip_shown) self.tab_tip_dirty = true;
-        }
         if (self.status_dirty) try self.renderStatus(&batch);
         // Last in the frame, as they are last in the compositing order. The
         // hover popup after the finder: both float, and a hover raised while
         // the finder is open is the newer of the two.
         if (self.finder.dirty) {
-            const b = self.buffer_bounds;
+            const b = self.grp.buffer_bounds;
             try self.finder.render(&batch, .{ .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows });
         }
         if (self.hover_dirty) try self.renderHover(&batch);
         // Placed against the word being typed, so it follows a buffer
         // repaint (a scroll, a wrap) as well as its own changes.
-        if (self.completion_dirty or (self.completion != null and self.buffer_dirty))
+        if (self.completion_dirty or (self.completion != null and focused_buffer_dirty))
             try self.renderCompletion(&batch);
         if (self.tab_tip_dirty) try self.renderTabTip(&batch);
 
         _ = try batch.send();
 
-        self.buffer_dirty = false;
         self.tree_dirty = .none;
-        self.tabs_dirty = false;
         self.status_dirty = false;
         self.hover_dirty = false;
         self.completion_dirty = false;
         self.tab_tip_dirty = false;
+    }
+
+    fn anyGroupDirty(self: *const Ui) bool {
+        for (self.group_list.items) |g| {
+            if (g.buffer_dirty or g.tabs_dirty) return true;
+        }
+        return false;
+    }
+
+    /// Draws one group's dirty panes into `batch`.
+    ///
+    /// The render helpers all draw "the" group -- `grp`, and its shown
+    /// buffer `buf` -- because that is the one the keyboard edits and
+    /// nearly every change is to. A group without the keyboard is drawn
+    /// by pointing the pair at it for the duration, so the same code
+    /// paints every group; `render_focused` keeps the caret off it.
+    fn renderGroup(self: *Ui, batch: *glyphwire.client.Client.Batch, g: *Group) !void {
+        const focused_grp = self.grp;
+        const focused_buf = self.buf;
+        self.grp = g;
+        self.buf = g.slot();
+        self.render_focused = g == focused_grp;
+        defer {
+            self.grp = focused_grp;
+            self.buf = focused_buf;
+            self.render_focused = true;
+        }
+
+        if (g.buffer_dirty) try self.renderBuffer(batch);
+        if (g.tabs_dirty) {
+            try self.renderTabs(batch);
+            // The strip was laid out or scrolled again, and the tooltip
+            // hangs from its tab.
+            if (self.tab_tip_shown and self.tab_tip_group == g) self.tab_tip_dirty = true;
+        }
+        g.buffer_dirty = false;
+        g.tabs_dirty = false;
     }
 
     /// Raises the tree pane's pending repaint to at least `level`. Never
@@ -3938,7 +4485,7 @@ pub const Ui = struct {
     /// highlighting effect an incremental reparse could bound repaints
     /// only the rows it touched (`renderChangedRows`).
     fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         if (b.cols == 0 or b.rows == 0) return;
         self.scrollBufferToCursor();
         try self.syncBufferScrollbar(batch);
@@ -3993,7 +4540,7 @@ pub const Ui = struct {
             .shift => |s| {
                 // The scrolled-past rows are still valid where they land;
                 // only the newly-uncovered band at one edge needs drawing.
-                try batch.moveContent(self.buffer_layer, null, null, s.count, s.dir);
+                try batch.moveContent(self.grp.buffer_layer, null, null, s.count, s.dir);
                 try self.renderBufferRows(batch, s.exposed_lo, s.exposed_hi);
 
                 // The caret is drawn as an inverted cell over its row;
@@ -4029,17 +4576,19 @@ pub const Ui = struct {
         // Unless the host is drawing it (`caretShape`: insert mode's bar,
         // or the hollow box of an unfocused window), in which case all
         // that is left to do here is say which cell it belongs on.
-        if (cursor.line >= self.buf.top_line and cursor.line < self.buf.top_line + b.rows) {
+        //
+        // Only the group with the keyboard has a caret at all.
+        if (self.render_focused and cursor.line >= self.buf.top_line and cursor.line < self.buf.top_line + b.rows) {
             const display_col = try self.cursorDisplayCol();
             if (display_col >= self.buf.left_col and display_col - self.buf.left_col < self.textCols()) {
                 const row = cursor.line - self.buf.top_line;
                 const col = self.gutterWidth() + display_col - self.buf.left_col;
                 if (self.caretShape() != null) {
-                    try batch.setCursorOn(self.buffer_layer, row, col);
+                    try batch.setCursorOn(self.grp.buffer_layer, row, col);
                 } else {
                     const under = try self.cursorGrapheme();
                     defer self.alloc.free(under);
-                    try writeAt(batch, self.buffer_layer, row, col, under, fg_cursor, bg_cursor);
+                    try writeAt(batch, self.grp.buffer_layer, row, col, under, fg_cursor, bg_cursor);
                 }
             }
         }
@@ -4057,7 +4606,7 @@ pub const Ui = struct {
     /// is already correct; `renderBuffer`'s caret pass draws the block
     /// cursor on top afterwards.
     fn repaintCaretRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor_line: usize) !void {
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         const top = self.buf.top_line;
         try self.repaintRowIfOnScreen(batch, self.buf.prev_cursor_line, top, b.rows);
         if (cursor_line != self.buf.prev_cursor_line)
@@ -4132,13 +4681,13 @@ pub const Ui = struct {
         for (self.hl_changed.items) |cr| {
             const lo = buf.lineAt(cr.start);
             const hi = buf.lineAt(if (cr.end > cr.start) cr.end - 1 else cr.start);
-            if (hi -| lo > self.buffer_bounds.rows) {
+            if (hi -| lo > self.grp.buffer_bounds.rows) {
                 self.buf.full_redraw = true;
                 return false;
             }
             var line = lo;
             while (line <= hi) : (line += 1) try self.addDirtyLine(line);
-            if (self.hl_dirty_lines.items.len > self.buffer_bounds.rows) {
+            if (self.hl_dirty_lines.items.len > self.grp.buffer_bounds.rows) {
                 self.buf.full_redraw = true;
                 return false;
             }
@@ -4152,7 +4701,7 @@ pub const Ui = struct {
     /// block comment) mis-colours rows nobody is looking at.
     fn parsePrefixEnd(self: *const Ui) usize {
         const buf = &self.buf.ed.buf;
-        const last = self.buf.top_line + 2 * @as(usize, self.buffer_bounds.rows);
+        const last = self.buf.top_line + 2 * @as(usize, self.grp.buffer_bounds.rows);
         return buf.lineEnd(@min(last, buf.lineCount() -| 1));
     }
 
@@ -4162,25 +4711,29 @@ pub const Ui = struct {
 
     /// Any buffer, shown or not, with a staged parse still running.
     fn highlightPending(self: *const Ui) bool {
-        for (self.buffers.items) |slot| {
-            if (slot.hl) |*h| if (h.parsing()) return true;
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                if (slot.hl) |*h| if (h.parsing()) return true;
+            }
         }
         return false;
     }
 
     /// Gives every buffer's parked parse one more slice. One that
-    /// finishes on the active buffer repaints the pane: rows past the
-    /// prefix were drawn plain, and rows near the cut may change colour.
-    /// A background buffer that finishes just has its full tree ready for
-    /// when it is next shown (`setActive` repaints then anyway).
+    /// finishes on a group's shown buffer repaints that pane: rows past
+    /// the prefix were drawn plain, and rows near the cut may change
+    /// colour. A background buffer that finishes just has its full tree
+    /// ready for when it is next shown (`setActive` repaints then anyway).
     fn stepHighlight(self: *Ui) void {
-        for (self.buffers.items) |slot| {
-            const h = if (slot.hl) |*x| x else continue;
-            if (!h.parsing()) continue;
-            const progress = h.continueParse(self.parseBudget(parse_slice_ms)) catch .done;
-            if (progress == .done and slot == self.buf) {
-                slot.full_redraw = true;
-                self.buffer_dirty = true;
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                const h = if (slot.hl) |*x| x else continue;
+                if (!h.parsing()) continue;
+                const progress = h.continueParse(self.parseBudget(parse_slice_ms)) catch .done;
+                if (progress == .done and slot == g.slot()) {
+                    slot.full_redraw = true;
+                    g.buffer_dirty = true;
+                }
             }
         }
     }
@@ -4198,7 +4751,7 @@ pub const Ui = struct {
     /// dirty, plus the caret's old and new rows, leaving every other row
     /// as it was. `renderBuffer`'s caret pass runs afterwards.
     fn renderChangedRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor_line: usize) !void {
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         const top = self.buf.top_line;
 
         for (self.hl_dirty_lines.items) |line| {
@@ -4250,7 +4803,7 @@ pub const Ui = struct {
     /// Buffer-text width: the pane less the gutter. Saturates to zero if
     /// the pane is narrower than the gutter (a degenerate split).
     fn textCols(self: *const Ui) usize {
-        return self.buffer_bounds.cols -| self.gutterWidth();
+        return self.grp.buffer_bounds.cols -| self.gutterWidth();
     }
 
     /// Paints just the line-number cell for buffer screen row `r`, in
@@ -4278,7 +4831,7 @@ pub const Ui = struct {
                     sign_fg = diagColor(sev);
                 }
             }
-            try writeAt(batch, self.buffer_layer, r, 0, sign, sign_fg, bg_buffer);
+            try writeAt(batch, self.grp.buffer_layer, r, 0, sign, sign_fg, bg_buffer);
         }
 
         var buf: [32]u8 = undefined;
@@ -4291,7 +4844,7 @@ pub const Ui = struct {
             past_end,
         );
         const fg = if (!past_end and line == cursor_line) fg_text else fg_dim;
-        try writeAt(batch, self.buffer_layer, r, signs, cell, fg, bg_buffer);
+        try writeAt(batch, self.grp.buffer_layer, r, signs, cell, fg, bg_buffer);
     }
 
     /// The worst diagnostic severity starting on buffer `line` of the active
@@ -4315,7 +4868,7 @@ pub const Ui = struct {
             // vim's marker for "past the end of the buffer", the rest of
             // the row padded by the host.
             try batch.writeTextOpts("~", .{
-                .layer = self.buffer_layer,
+                .layer = self.grp.buffer_layer,
                 .row = r,
                 .col = gutter,
                 .fg = fg_dim,
@@ -4403,7 +4956,7 @@ pub const Ui = struct {
             if (vis_hi <= vis_lo) continue;
 
             try batch.setUnderline(.{
-                .layer = self.buffer_layer,
+                .layer = self.grp.buffer_layer,
                 .row = r,
                 .col = self.gutterWidth() + (vis_lo - self.buf.left_col),
                 .rows = 1,
@@ -4419,7 +4972,7 @@ pub const Ui = struct {
     /// is describing. Clamped inside the buffer pane like `finderRect`.
     /// `want_rows` counts the frame's two rows.
     fn hoverRect(self: *const Ui, want_rows: usize) Bounds {
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         const cols = @min(hover_max_cols, b.cols);
         const rows = @min(@min(want_rows, hover_max_rows + 2), b.rows);
 
@@ -4467,7 +5020,7 @@ pub const Ui = struct {
         // Wrapped to the popup's width first, so the height is the height of
         // what will actually be drawn rather than of the source text. Four
         // columns go to the frame and a one-cell margin inside it each side.
-        const wrap_cols = @min(hover_max_cols, self.buffer_bounds.cols) -| 4;
+        const wrap_cols = @min(hover_max_cols, self.grp.buffer_bounds.cols) -| 4;
         if (wrap_cols == 0) return self.hideHover(batch);
         var rows: std.ArrayList(HoverRow) = .empty;
         defer rows.deinit(self.alloc);
@@ -4550,11 +5103,12 @@ pub const Ui = struct {
     fn renderTabTip(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         const hide = !self.tab_tip_shown or self.tab_tip_index == null;
         const index = self.tab_tip_index orelse 0;
+        const g = self.tab_tip_group orelse return batch.setLayerVisible(self.tab_tip_layer, false);
         // The buffer list or the strip may have changed under a tooltip
         // that is still up.
-        if (hide or index >= self.buffers.items.len or index >= self.tab_spans.items.len)
+        if (hide or index >= g.buffers.items.len or index >= g.tab_spans.items.len)
             return batch.setLayerVisible(self.tab_tip_layer, false);
-        const slot = self.buffers.items[index];
+        const slot = g.buffers.items[index];
         const abs = self.slotAbs(slot) orelse return batch.setLayerVisible(self.tab_tip_layer, false);
 
         var home_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -4562,13 +5116,13 @@ pub const Ui = struct {
 
         // The window's full width: the statusline spans it.
         const area: tabs.TipArea = .{
-            .strip_row = self.tabs_bounds.row,
-            .strip_col = self.tabs_bounds.col,
-            .scroll = self.tab_scroll,
+            .strip_row = g.tabs_bounds.row,
+            .strip_col = g.tabs_bounds.col,
+            .scroll = g.tab_scroll,
             .area_col = self.status_bounds.col,
             .area_cols = self.status_bounds.cols,
         };
-        const r = tabs.tipRect(self.tab_spans.items[index], glyphwire.stringWidth(path), area) orelse
+        const r = tabs.tipRect(g.tab_spans.items[index], glyphwire.stringWidth(path), area) orelse
             return batch.setLayerVisible(self.tab_tip_layer, false);
         const clipped = tabs.clipHead(path, r.cols - tabs.tip_chrome_cols);
 
@@ -4605,7 +5159,7 @@ pub const Ui = struct {
             try batch.setLayerVisible(self.completion_layer, false);
             return;
         };
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         const rows = @min(@min(m.count(), complete_max_rows), b.rows);
         if (rows == 0 or b.cols < complete_kind_cols + 8) {
             try batch.setLayerVisible(self.completion_layer, false);
@@ -4766,7 +5320,7 @@ pub const Ui = struct {
 
         try writeAt(
             batch,
-            self.buffer_layer,
+            self.grp.buffer_layer,
             r,
             self.gutterWidth() + vis_lo - self.buf.left_col,
             overlay.items,
@@ -4826,7 +5380,7 @@ pub const Ui = struct {
         defer overlay.deinit(self.alloc);
         try display.appendCols(self.alloc, &overlay, text, vis_lo, vis_hi - vis_lo, opts);
 
-        try writeAt(batch, self.buffer_layer, r, gutter + vis_lo - self.buf.left_col, overlay.items, fg_text, bg_selected);
+        try writeAt(batch, self.grp.buffer_layer, r, gutter + vis_lo - self.buf.left_col, overlay.items, fg_text, bg_selected);
     }
 
     /// Paints buffer row `r` (buffer line `line`, whole text `text`) as
@@ -4971,7 +5525,7 @@ pub const Ui = struct {
             sp.* = .{ .text = bytes[rg.start..stop], .fg = rg.color orelse fg_text };
         }
         try batch.writeSpans(row_spans, .{
-            .layer = self.buffer_layer,
+            .layer = self.grp.buffer_layer,
             .row = r,
             .col = self.gutterWidth() + start_dc - left,
             .bg = bg_buffer,
@@ -4984,12 +5538,12 @@ pub const Ui = struct {
     /// not a run of spaces.
     fn writeSpaces(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize, col: usize, n: usize) !void {
         if (n == 0) return;
-        try batch.clearArea(.{ .layer = self.buffer_layer, .row = r, .col = col, .rows = 1, .cols = n, .bg = bg_buffer });
+        try batch.clearArea(.{ .layer = self.grp.buffer_layer, .row = r, .col = col, .rows = 1, .cols = n, .bg = bg_buffer });
     }
 
     /// Keeps the caret inside the buffer pane, both axes.
     fn scrollBufferToCursor(self: *Ui) void {
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         if (b.rows == 0 or b.cols == 0) return;
         const pos = self.buf.ed.pos();
 
@@ -5002,26 +5556,29 @@ pub const Ui = struct {
         if (cols > 0 and col >= self.buf.left_col + cols) self.buf.left_col = col - cols + 1;
     }
 
-    /// Applies a host-driven scroll of the buffer pane (wheel or thumb
-    /// drag): moves the view and drags the cursor back onto it, keeping
-    /// its column. Records the new position as already pushed so the next
-    /// `syncBufferScrollbar` doesn't bounce it back to the host.
-    fn scrollBufferTo(self: *Ui, row: usize, col: usize) void {
-        const b = self.buffer_bounds;
+    /// Applies a host-driven scroll of group `g`'s buffer pane (wheel or
+    /// thumb drag): moves the view and drags the cursor back onto it,
+    /// keeping its column. Records the new position as already pushed so
+    /// the next `syncBufferScrollbar` doesn't bounce it back to the host.
+    /// Any group, not only the focused one -- the wheel follows the
+    /// pointer, not the keyboard.
+    fn scrollGroupTo(self: *Ui, g: *Group, row: usize, col: usize) void {
+        const b = g.buffer_bounds;
         if (b.rows == 0) return;
-        self.buf.top_line = row;
-        self.buf.left_col = col;
+        const slot = g.slot();
+        slot.top_line = row;
+        slot.left_col = col;
 
-        const cur = self.buf.ed.pos();
-        const last = self.buf.ed.buf.lineCount() -| 1;
+        const cur = slot.ed.pos();
+        const last = slot.ed.buf.lineCount() -| 1;
         const clamped_line = std.math.clamp(cur.line, row, @min(row + b.rows - 1, last));
         if (clamped_line != cur.line) {
-            self.buf.ed.cursor = self.buf.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
+            slot.ed.cursor = slot.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
         }
-        self.buf.pushed_bar = .{ self.buf.ed.buf.lineCount(), b.cols, self.buf.top_line, self.buf.left_col };
+        slot.pushed_bar = .{ slot.ed.buf.lineCount(), b.cols, slot.top_line, slot.left_col };
         // The view moved and the cursor may have been dragged with it;
         // the status row shows both.
-        self.buffer_dirty = true;
+        g.buffer_dirty = true;
         self.status_dirty = true;
     }
 
@@ -5034,14 +5591,14 @@ pub const Ui = struct {
     /// `handleEvent`). Batched with the frame, so the bar never moves
     /// ahead of the rows it describes.
     fn syncBufferScrollbar(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
-        const b = self.buffer_bounds;
+        const b = self.grp.buffer_bounds;
         const now: [4]usize = .{ self.buf.ed.buf.lineCount(), b.cols, self.buf.top_line, self.buf.left_col };
         if (std.mem.eql(usize, &now, &self.buf.pushed_bar)) return;
 
         if (now[0] != self.buf.pushed_bar[0] or now[1] != self.buf.pushed_bar[1]) {
-            try batch.setLayerContentExtent(self.buffer_layer, now[1], now[0]);
+            try batch.setLayerContentExtent(self.grp.buffer_layer, now[1], now[0]);
         }
-        try batch.setLayerScrollOffset(self.buffer_layer, self.buf.top_line, self.buf.left_col);
+        try batch.setLayerScrollOffset(self.grp.buffer_layer, self.buf.top_line, self.buf.left_col);
         self.buf.pushed_bar = now;
     }
 
@@ -5188,25 +5745,25 @@ pub const Ui = struct {
     /// it. The row is painted with the bar's background first, so a tab
     /// that just closed leaves no cells of its own behind.
     fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
-        const b = self.tabs_bounds;
+        const b = self.grp.tabs_bounds;
         if (b.cols == 0 or b.rows == 0) return;
 
         var labels: std.ArrayList(tabs.Tab) = .empty;
         defer labels.deinit(self.alloc);
-        for (self.buffers.items) |slot| {
+        for (self.grp.buffers.items) |slot| {
             try labels.append(self.alloc, .{
                 .label = tabs.labelFor(slot.ed.path),
                 .dirty = slot.ed.buf.dirty,
             });
         }
 
-        self.tab_total = try tabs.layout(self.alloc, labels.items, &self.tab_spans);
-        if (self.active < self.tab_spans.items.len) {
-            self.tab_scroll = tabs.scrollToShow(
-                self.tab_spans.items[self.active],
+        self.grp.tab_total = try tabs.layout(self.alloc, labels.items, &self.grp.tab_spans);
+        if (self.grp.active < self.grp.tab_spans.items.len) {
+            self.grp.tab_scroll = tabs.scrollToShow(
+                self.grp.tab_spans.items[self.grp.active],
                 b.cols,
-                self.tab_scroll,
-                self.tab_total,
+                self.grp.tab_scroll,
+                self.grp.tab_total,
             );
         }
         try self.syncTabScrollbar(batch);
@@ -5214,10 +5771,10 @@ pub const Ui = struct {
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(self.alloc);
 
-        try batch.clearArea(.{ .layer = self.tabs_layer, .row = 0, .rows = 1, .bg = bg_tab_bar });
+        try batch.clearArea(.{ .layer = self.grp.tabs_layer, .row = 0, .rows = 1, .bg = bg_tab_bar });
 
-        for (self.tab_spans.items, labels.items, 0..) |span, tab, i| {
-            const active = i == self.active;
+        for (self.grp.tab_spans.items, labels.items, 0..) |span, tab, i| {
+            const active = i == self.grp.active;
             text.clearRetainingCapacity();
             try text.append(self.alloc, ' ');
             try text.appendSlice(self.alloc, tab.label);
@@ -5229,14 +5786,17 @@ pub const Ui = struct {
             try text.appendSlice(self.alloc, tabs.close_glyph);
             try text.append(self.alloc, ' ');
 
+            // A group's shown tab joins its pane (`bg_buffer`); only the
+            // focused group's is lit, so with several groups up the strip
+            // says which one the keyboard is in.
             try self.writeStripRun(
                 batch,
                 span.start,
                 text.items,
-                if (active) fg_text else fg_dim,
+                if (active and self.render_focused) fg_text else fg_dim,
                 if (active) bg_buffer else bg_tab,
             );
-            if (i + 1 < self.tab_spans.items.len) {
+            if (i + 1 < self.grp.tab_spans.items.len) {
                 try self.writeStripRun(batch, span.end, tabs.separator, fg_dim, bg_tab_bar);
             }
         }
@@ -5255,8 +5815,8 @@ pub const Ui = struct {
         bg: Color,
     ) !void {
         const width = glyphwire.stringWidth(text);
-        const view_lo = self.tab_scroll;
-        const view_hi = self.tab_scroll + self.tabs_bounds.cols;
+        const view_lo = self.grp.tab_scroll;
+        const view_hi = self.grp.tab_scroll + self.grp.tabs_bounds.cols;
         const lo = @max(start, view_lo);
         const hi = @min(start + width, view_hi);
         if (lo >= hi) return;
@@ -5265,7 +5825,7 @@ pub const Ui = struct {
         // default `Opts` is the plain codepoint-width walk this wants.
         const from = display.byteAtCol(text, lo - start, .{});
         const to = display.byteAtCol(text, hi - start, .{});
-        try writeAt(batch, self.tabs_layer, 0, lo - view_lo, text[from..to], fg, bg);
+        try writeAt(batch, self.grp.tabs_layer, 0, lo - view_lo, text[from..to], fg, bg);
     }
 
     /// Keeps the tabs layer's virtual extent and offset in step with the
@@ -5274,18 +5834,18 @@ pub const Ui = struct {
     /// lets the host turn a shift+wheel or a drag over it into the
     /// `scroll_offset` `handleEvent` follows. Silent when nothing moved.
     fn syncTabScrollbar(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
-        const now: [2]usize = .{ self.tab_total, self.tab_scroll };
-        if (std.mem.eql(usize, &now, &self.pushed_tab_bar)) return;
+        const now: [2]usize = .{ self.grp.tab_total, self.grp.tab_scroll };
+        if (std.mem.eql(usize, &now, &self.grp.pushed_tab_bar)) return;
 
-        if (now[0] != self.pushed_tab_bar[0]) {
+        if (now[0] != self.grp.pushed_tab_bar[0]) {
             try batch.setLayerContentExtent(
-                self.tabs_layer,
-                @max(self.tab_total, self.tabs_bounds.cols),
+                self.grp.tabs_layer,
+                @max(self.grp.tab_total, self.grp.tabs_bounds.cols),
                 1,
             );
         }
-        try batch.setLayerScrollOffset(self.tabs_layer, 0, self.tab_scroll);
-        self.pushed_tab_bar = now;
+        try batch.setLayerScrollOffset(self.grp.tabs_layer, 0, self.grp.tab_scroll);
+        self.grp.pushed_tab_bar = now;
     }
 
     /// The diagnostic the statusline should show, if any: whatever covers the
@@ -5344,8 +5904,8 @@ pub const Ui = struct {
             });
             // Which tab this is, once there is more than one. The strip
             // above shows the names; this is the count.
-            if (self.buffers.items.len > 1) {
-                try line.print(self.alloc, "  [{d}/{d}]", .{ self.active + 1, self.buffers.items.len });
+            if (self.grp.buffers.items.len > 1) {
+                try line.print(self.alloc, "  [{d}/{d}]", .{ self.grp.active + 1, self.grp.buffers.items.len });
             }
             // The diagnostic under the cursor, with the tool that reported
             // it -- which matters, because two servers publish for the same

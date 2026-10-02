@@ -128,6 +128,15 @@ pub const Outcome = union(enum) {
     /// plain `:bd` on a modified buffer never gets this far (E37, the
     /// same guard `:q` uses).
     buffer_close: struct { force: bool },
+    /// `:vsplit [path]` / `:split [path]` -- a new editor group beside
+    /// (`vertical`) or under this one. `path` borrows `Editor.cmd_arg`
+    /// like `edit` does; null moves the current buffer into the new
+    /// group. Groups are a `zoe/ui.zig` thing, the same way the buffer
+    /// list is.
+    split: struct { vertical: bool, path: ?[]const u8 },
+    /// `:close` -- close this editor group, its tabs moving to the
+    /// neighbour that takes its space.
+    close_group,
     /// `K` -- ask a language server what is under the cursor. The editor
     /// has no idea; `zoe/ui.zig` owns the servers and puts the answer in a
     /// popup when it arrives. Named for what was asked, not for what will
@@ -1902,6 +1911,11 @@ pub const Editor = struct {
             }
             return .{ .buffer_close = .{ .force = false } };
         }
+        if (eq(u8, name, "vs") or eq(u8, name, "vsp") or eq(u8, name, "vsplit"))
+            return .{ .split = .{ .vertical = true, .path = arg_opt } };
+        if (eq(u8, name, "sp") or eq(u8, name, "split"))
+            return .{ .split = .{ .vertical = false, .path = arg_opt } };
+        if (eq(u8, name, "clo") or eq(u8, name, "close")) return .close_group;
         // `:lsp` reports which language servers are attached; `:lsp restart`
         // brings back one that crashed. The editor core knows about neither,
         // so both are just relayed (see `Outcome.lsp_status`).

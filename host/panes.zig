@@ -14,6 +14,11 @@
 //!   context's own split tree (`core.Context`). Dragging one resizes two
 //!   panes *within* one program (zoe's sidebar against its buffer).
 //!
+//! A third kind of band rides along: a floating layer's `resize_edge`
+//! (the Ctrl+` shell panel's top). It belongs to no tree, so it isn't in
+//! the band cache -- it is found live by `edgeAt` -- and finishing its
+//! drag resizes nothing here, it only tells the layer's client.
+//!
 //! `core` owns both trees and both layout walks; this is the part that
 //! needs a mouse and a framebuffer. Both `render.zig` (drawing the bands)
 //! and `scroll.zig` (routing a wheel tick) read through here, which is why
@@ -98,6 +103,17 @@ pub const Band = struct {
         pane,
         /// One context's own layer split tree.
         layer: glyphwire.ContextHandle,
+        /// A floating layer's `resize_edge`. Never in `bands` -- see
+        /// `Panes.edgeAt` -- but a drag of one rides the same `Drag`.
+        edge: Edge,
+    };
+
+    pub const Edge = struct {
+        context: glyphwire.ContextHandle,
+        layer: glyphwire.LayerHandle,
+        /// The layer's height when the drag started; the drag's travel
+        /// is applied to this.
+        rows: usize,
     };
 };
 
@@ -243,6 +259,48 @@ pub const Panes = struct {
                 // context's own area, so nothing can be over them.
                 .pane => return d,
                 .layer => |h| if (!self.layerCovers(h, px, py)) return d,
+                .edge => unreachable, // never cached; see `edgeAt`
+            }
+        }
+        return null;
+    }
+
+    /// A floating layer's `resize_edge` under `(px, py)`, with the
+    /// layer's window rect. Takes `ctx_mutex` itself, so the caller must
+    /// not hold it.
+    ///
+    /// Found live rather than cached with the split bands: what moves an
+    /// edge is the layer being resized, moved or shown, none of which
+    /// bumps a context's `layout_gen`, and there is at most one of these
+    /// on screen, so walking the layers on a press is cheap.
+    ///
+    /// Walked top layer first, and a layer that covers the point without
+    /// an edge there ends the search in that context: an edge something
+    /// is drawn over (a completion popup over the panel's top row) is not
+    /// one the user can mean to grab.
+    pub fn edgeAt(self: *const Panes, px: f32, py: f32) ?struct { edge: Band.Edge, rect: geometry.RectPx } {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+
+        var it = server.session.panes.valueIterator();
+        while (it.next()) |pane| {
+            if (!pane.mapped) continue;
+            const ctx_handle = pane.top();
+            const ctx = server.session.contextPtr(ctx_handle) orelse continue;
+            const origin = geometry.contextOrigin(ctx);
+            var i = ctx.layer_order.items.len;
+            while (i > 0) {
+                i -= 1;
+                const handle = ctx.layer_order.items[i];
+                const layer = ctx.layers.getPtr(handle) orelse continue;
+                if (!layer.visible) continue;
+                const rect = geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows());
+                if (layer.resize_edge == .top and geometry.resizeEdgeHit(rect).contains(px, py)) return .{
+                    .edge = .{ .context = ctx_handle, .layer = handle, .rows = layer.viewportRows() },
+                    .rect = rect,
+                };
+                if (rect.contains(px, py)) break;
             }
         }
         return null;
@@ -275,10 +333,26 @@ pub const Panes = struct {
             defer server.ctx_mutex.unlock(server.io);
             self.syncLocked();
         }
-        if (self.bands.items.len == 0 and self.drag == null) return false;
+        const pressed = eng.inputs.mouse.pressed(.left);
+        if (!pressed and self.drag == null) return false;
 
-        if (eng.inputs.mouse.pressed(.left)) {
-            const band = self.dividerAt(pos.x, pos.y) orelse return false;
+        if (pressed) {
+            const band = self.dividerAt(pos.x, pos.y) orelse {
+                const e = self.edgeAt(pos.x, pos.y) orelse return false;
+                const base = geometry.resizeEdgeBand(e.rect);
+                self.drag = .{
+                    .level = .{ .edge = e.edge },
+                    .split = 0,
+                    .index = 0,
+                    // A top edge moves up and down, like the band of a
+                    // column split.
+                    .axis = .column,
+                    .grab_px = pos.y,
+                    .base = base,
+                };
+                self.preview = base;
+                return true;
+            };
             self.drag = .{
                 .level = band.level,
                 .split = band.split,
@@ -346,6 +420,16 @@ pub const Panes = struct {
                 }
                 server.reportLayout(self.app.alloc) catch |err| {
                     std.log.err("glyphwire-host: reportLayout(divider) failed: {t}", .{err});
+                };
+            },
+            .edge => |e| {
+                // Dragging a top edge up (negative travel) makes the layer
+                // taller. Floored at one row so the edge stays grabbable;
+                // every other bound is the client's call.
+                const rows: usize = @intCast(@max(@as(i64, @intCast(e.rows)) - travelled, 1));
+                if (rows == e.rows) return;
+                server.reportLayerResize(self.app.alloc, e.context, e.layer, rows) catch |err| {
+                    std.log.err("glyphwire-host: reportLayerResize failed: {t}", .{err});
                 };
             },
         }

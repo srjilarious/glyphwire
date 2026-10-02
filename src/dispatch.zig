@@ -34,6 +34,9 @@ pub const DispatchError = error{
     /// `set_property "selection_flow"` with a `mode` other than
     /// `"horizontal"` / `"vertical_rl"`.
     InvalidSelectionFlow,
+    /// `set_property "resize_edge"` with an `edge` other than `"top"` /
+    /// `"none"`.
+    InvalidResizeEdge,
     /// `write_text` carried both `text` and `spans`, or neither.
     InvalidSpans,
     NotARequest,
@@ -246,6 +249,8 @@ const PropertyParams = struct {
     color: ?protocol.Color = null,
     /// `"shadow"`'s shape; omitted removes the shadow.
     shadow: ?ShadowJson = null,
+    /// `"resize_edge"`'s `"top"` / `"none"`; omitted is `"none"`.
+    edge: ?[]const u8 = null,
 };
 
 /// `core.Shadow` on the wire. Every field is optional with the core's
@@ -294,6 +299,7 @@ const ScrollModeResult = struct { mode: []const u8 };
 const SelectionFlowResult = struct { mode: []const u8, cols: usize, col: usize };
 const BackgroundResult = struct { color: ?protocol.Color };
 const ShadowResult = struct { shadow: ?ShadowJson };
+const ResizeEdgeResult = struct { edge: []const u8 };
 const ScrollOffsetResult = struct { row: usize, col: usize, max_row: usize, max_col: usize };
 const ScrollbarsResult = struct {
     vertical: bool,
@@ -1138,6 +1144,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "scroll")) return self.scroll;
         if (std.mem.eql(u8, event, "scroll_offset")) return self.scroll;
         if (std.mem.eql(u8, event, "layout")) return self.layout;
+        if (std.mem.eql(u8, event, "layer_resize")) return self.layout;
         if (std.mem.eql(u8, event, "selection")) return self.selection;
         if (std.mem.eql(u8, event, "clipboard")) return self.clipboard;
         // Broadcast under their own names, not the stream's: `copy_request`
@@ -1171,6 +1178,7 @@ pub const Subscriptions = struct {
             if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
             if (std.mem.eql(u8, e, "scroll_offset")) s.scroll = true;
             if (std.mem.eql(u8, e, "layout")) s.layout = true;
+            if (std.mem.eql(u8, e, "layer_resize")) s.layout = true;
             if (std.mem.eql(u8, e, "selection")) s.selection = true;
             if (std.mem.eql(u8, e, "clipboard")) s.clipboard = true;
             if (std.mem.eql(u8, e, "copy_request")) s.clipboard = true;
@@ -2127,6 +2135,9 @@ pub const Dispatcher = struct {
                 .column_cols = if (p.cols == 0) 2 else p.cols,
                 .origin_col = p.col,
             } }
+        else if (std.mem.eql(u8, p.property, "resize_edge"))
+            .{ .resize_edge = std.meta.stringToEnum(core.ResizeEdge, p.edge orelse "none") orelse
+                return DispatchError.InvalidResizeEdge }
         else
             return DispatchError.UnknownProperty;
 
@@ -2253,6 +2264,9 @@ pub const Dispatcher = struct {
         } else if (std.mem.eql(u8, p.property, "selection_flow")) {
             const f = layer.getProperty(.selection_flow).selection_flow;
             return try rpc.response(alloc, id, SelectionFlowResult{ .mode = @tagName(f.mode), .cols = f.column_cols, .col = f.origin_col });
+        } else if (std.mem.eql(u8, p.property, "resize_edge")) {
+            const e = layer.getProperty(.resize_edge).resize_edge;
+            return try rpc.response(alloc, id, ResizeEdgeResult{ .edge = @tagName(e) });
         }
         return DispatchError.UnknownProperty;
     }
