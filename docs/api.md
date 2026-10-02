@@ -810,6 +810,7 @@ band at a time. See decisions.md's Batch section for the reasoning.
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
 | `batch` | notification *or* request | `messages: [{method, params, id?}, ...]` | request form only: `{responses: [<response object>, ...]}` | ✅ |
+| `sync` | request | *(none)* | `{}` | ✅ changes nothing; see below |
 
 - **Notification form** (no outer `id`): every sub-message is applied in
   order; no response. A sub-message carrying an `id` still runs, but its
@@ -845,6 +846,19 @@ band at a time. See decisions.md's Batch section for the reasoning.
   an ssh channel. `Client.bytes_sent` / `frames_sent` count both, so a
   client can tell which it is spending; `move_content` (Text & Styling)
   is the primitive for redrawing a scrolled pane without resending it.
+- **`sync` paces a client to the server.** Messages on a connection are
+  applied in order, so `sync`'s reply means everything sent before it has
+  been applied. A client that ends each frame's batch with one (request
+  form; `Client.Batch.sendSynced`) has at most one frame in flight: input
+  that arrives while the server is still applying a frame queues on the
+  client and folds into its next one, instead of every input event
+  becoming a frame the server applies late. Without it a client that
+  draws faster than the server applies -- zoe repainting on every cell of
+  a mouse drag -- builds a backlog in the socket, and the screen trails
+  the input by however long that backlog takes to drain. The cost is one
+  round trip per frame: microseconds on a local socket, the channel's
+  latency over `--ssh`, where pacing to it is what keeps frames from
+  queueing up in the channel anyway.
 
 ## Error reporting
 
