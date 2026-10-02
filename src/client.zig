@@ -3074,6 +3074,18 @@ pub const Client = struct {
             return self.request("create_metadata", .{ .json = json });
         }
 
+        /// `send`, with a `sync` request appended so it returns only once
+        /// the server has applied the whole batch. A client that sends
+        /// every frame this way never has more than one frame in flight:
+        /// input arriving meanwhile waits in its own queue and folds into
+        /// the next frame, rather than each event becoming a frame the
+        /// server falls behind on. See `sync` in docs/api.md. Caller frees
+        /// the result with `BatchResults.deinit`, as with `send`.
+        pub fn sendSynced(self: *Batch) !BatchResults {
+            _ = try self.request("sync", .{});
+            return self.send();
+        }
+
         /// Sends the batch. With no request adders used, sends
         /// notification-form (no `id`, no reply) and returns an empty
         /// `BatchResults`. Otherwise sends request-form using the

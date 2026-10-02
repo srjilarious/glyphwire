@@ -646,6 +646,34 @@ pub fn clientBatchRequestFormReturnsSlottedResultsTest(io: std.Io, alloc: std.me
     try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
 }
 
+/// `Batch.sendSynced` returns only after the server has applied the batch:
+/// by the time it is back, the frame's writes are on the grid.
+pub fn clientBatchSendSyncedReturnsAfterApplyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    var b = client.batch();
+    defer b.deinit();
+    try b.writeTextOpts("synced", .{ .row = 1, .col = 2 });
+    var results = try b.sendSynced();
+    results.deinit();
+
+    try testz.expectEqualStr("s", ctx.root.cell(1, 2).grapheme());
+    try testz.expectEqualStr("d", ctx.root.cell(1, 7).grapheme());
+}
+
 /// Batched `create_rect`/`update_rect`/`destroy_rect`: several rects in
 /// one round trip, each handle resolved from its slot, and the updates
 /// and destroys applied by the next batch.

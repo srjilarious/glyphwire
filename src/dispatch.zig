@@ -1775,6 +1775,7 @@ pub const Dispatcher = struct {
         .{ "set_clipboard", catVoid(handleSetClipboard) },
         .{ "get_clipboard", catBytesIdNoParams(handleGetClipboard) },
         .{ "get_errors", catBytesIdNoParams(handleGetErrors) },
+        .{ "sync", catBytesIdNoParams(handleSync) },
         .{ "batch", &catBatch },
     });
 
@@ -4372,6 +4373,17 @@ pub const Dispatcher = struct {
     /// `dropped: 0` for a connection that never subscribed to `"error"`,
     /// since nothing gets recorded in that case. See
     /// `Dispatcher.recordError` and decisions.md's Error reporting section.
+    /// `sync`: changes nothing and answers `{}`. Messages on a connection
+    /// are applied in order, so the reply means everything the client sent
+    /// before it has been applied. A client ending each frame's batch with
+    /// one (`Client.Batch.sendSynced`) keeps at most one frame in flight:
+    /// it can't send the next until the server has caught up with this
+    /// one, so input that arrives meanwhile queues on the client and folds
+    /// into one frame instead of the server falling behind frame by frame.
+    fn handleSync(_: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        return rpc.response(alloc, id, struct {}{});
+    }
+
     fn handleGetErrors(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
         var entries: std.ArrayList(protocol.DispatchErrorEntry) = .empty;
         defer entries.deinit(alloc);

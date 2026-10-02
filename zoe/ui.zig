@@ -49,6 +49,7 @@ const glyphwire = @import("glyphwire");
 const ls_icons = @import("applib").icons;
 
 const editor = @import("editor.zig");
+const motion = @import("motion.zig");
 const display = @import("display.zig");
 const search = @import("search.zig");
 const tree_mod = @import("tree.zig");
@@ -63,6 +64,7 @@ const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
 const profile = @import("profile.zig");
 const SpanCache = @import("spancache.zig").SpanCache;
+const selection_diff = @import("selection_diff.zig");
 const diag = @import("diag.zig");
 const hover_mod = @import("hover.zig");
 const complete = @import("complete.zig");
@@ -538,10 +540,10 @@ const Slot = struct {
     prev_left_col: usize = 0,
     prev_cursor_line: usize = 0,
     prev_edits: u64 = 0,
-    /// Whether the buffer pane's cells currently carry a selection
-    /// highlight, so `renderBuffer` repaints once more to clear it when
-    /// the selection goes away.
-    prev_sel_active: bool = false,
+    /// The selection the buffer pane's cells currently show, so
+    /// `renderBuffer` can repaint just the rows a changed selection
+    /// covers differently -- including clearing it when it goes away.
+    prev_sel: ?editor.Editor.SelSpan = null,
     /// Forces a full buffer repaint next frame -- set whenever the pane's
     /// bounds change or its content is replaced wholesale, cases a row
     /// shift can't express. True on a fresh slot, and on every switch
@@ -2418,15 +2420,11 @@ pub const Ui = struct {
                 g.buffer_dirty = true;
             }
         }
-        // A visual selection touches whole rows, not just the caret's:
-        // any change to the anchor or the mode (entering/leaving visual,
-        // or a motion that grew the selection over rows the caret didn't
-        // land on) needs the pane repainted so the highlight follows.
-        if (after.mode != before.mode or after.anchor != before.anchor or
-            (after.mode == .visual or after.mode == .visual_line))
-        {
-            self.buf.full_redraw = true;
-        }
+        // A visual selection touches whole rows, not just the caret's,
+        // but `renderBuffer` diffs it against what the pane shows
+        // (`Slot.prev_sel`) and repaints just the rows whose highlight
+        // changed, so nothing beyond `buffer_dirty` (set above whenever
+        // the mode, anchor or cursor moved) is needed here.
         // The search highlight is the same story: a new pattern, or `n`
         // moving which match is the current one, changes rows all over
         // the pane.
@@ -2895,7 +2893,8 @@ pub const Ui = struct {
             if (!d.moved and (self.buf.ed.mode == .visual or self.buf.ed.mode == .visual_line)) {
                 self.buf.ed.exitVisual();
             }
-            self.buf.full_redraw = true;
+            // A selection dropped here is repainted by `renderBuffer`'s
+            // selection diff, like any other change to it.
             self.grp.buffer_dirty = true;
             self.status_dirty = true;
         }
@@ -2910,9 +2909,15 @@ pub const Ui = struct {
             if (!d.moved) {
                 if (byte == d.anchor) return;
                 d.moved = true;
+            } else if (motion.clampNormal(&self.buf.ed.buf, byte) == self.buf.ed.cursor) {
+                // A new cell, but the same selection end -- past the end
+                // of a line, or across the columns of one tab. Nothing to
+                // redraw.
+                return;
             }
             self.buf.ed.setVisualSelection(d.anchor, byte);
-            self.buf.full_redraw = true;
+            // Just dirty: `renderBuffer` repaints the rows whose highlight
+            // the step changed, not the whole pane.
             self.grp.buffer_dirty = true;
             self.status_dirty = true;
         }
@@ -4433,7 +4438,13 @@ pub const Ui = struct {
             for (batch.msgs.items) |m| self.prof.bytes += m.len;
         }
         const t_send = self.prof.now();
-        _ = try batch.send();
+        // Synced: returns once the server has applied the frame, so zoe
+        // never has a second one in flight. Input that arrives meanwhile
+        // queues on the listener and the run loop folds all of it into
+        // the next frame -- which is what keeps a fast mouse drag from
+        // turning into a backlog of frames the screen trails behind.
+        var results = try batch.sendSynced();
+        results.deinit();
         self.prof.add(.send, t_send);
         self.prof.endFrame();
 
@@ -4543,17 +4554,20 @@ pub const Ui = struct {
         // fill in the visible lines it is missing first, a run at a time.
         self.fillSpanCache();
 
-        // A visual selection spans whole rows the incremental paths don't
-        // know to touch. While one is active -- and once more the frame it
-        // clears -- repaint the whole pane so the highlight is always
-        // current. `handleInput` already forces this for a keyboard
-        // selection; this covers the mouse-drag and paste paths too.
-        const sel_active = self.buf.ed.selectionSpan() != null;
-        if (sel_active or self.buf.prev_sel_active) self.buf.full_redraw = true;
-
         const cursor = self.buf.ed.pos();
         const scrolled = self.buf.top_line != self.buf.prev_top_line or self.buf.left_col != self.buf.prev_left_col;
         const edited = self.buf.ed.buf.edits != self.buf.prev_edits;
+
+        // A visual selection covers rows the caret never touches. When it
+        // changed, the rows to repaint are the ones whose highlight
+        // differs between the old span and the new -- one or two for a
+        // drag step or a motion. That diff is in byte offsets, which an
+        // edit moves, so an edit with a selection on either side of it
+        // still repaints in full.
+        const sel = self.buf.ed.selectionSpan();
+        const sel_changed = !selEql(sel, self.buf.prev_sel);
+        if (edited and (sel != null or self.buf.prev_sel != null)) self.buf.full_redraw = true;
+        var repainted_full = false;
         if (!self.buf.full_redraw and !scrolled and !edited and !localized) {
             // Nothing but the caret moved (a bare `h`/`j`/`k`/`l`, a
             // word motion, an on-screen `:23k`): the pane is already
@@ -4563,7 +4577,7 @@ pub const Ui = struct {
             try self.repaintCaretRows(batch, cursor.line);
         } else if (localized and !self.buf.full_redraw and !scrolled) {
             try self.renderChangedRows(batch, cursor.line);
-        } else switch (planBufferRender(.{
+        } else plan: switch (planBufferRender(.{
             .prev_top = self.buf.prev_top_line,
             .top = self.buf.top_line,
             .prev_left = self.buf.prev_left_col,
@@ -4573,7 +4587,11 @@ pub const Ui = struct {
             .rows = b.rows,
             .force_full = self.buf.full_redraw,
         })) {
-            .full => try self.renderBufferRows(batch, 0, b.rows),
+            .full => {
+                try self.renderBufferRows(batch, 0, b.rows);
+                repainted_full = true;
+                break :plan;
+            },
             .shift => |s| {
                 // The scrolled-past rows are still valid where they land;
                 // only the newly-uncovered band at one edge needs drawing.
@@ -4591,6 +4609,11 @@ pub const Ui = struct {
                 }
             },
         }
+
+        // The rows the selection change covers, wherever the paths above
+        // left them (a shift moved them along; the caret rows are
+        // already fresh, which a second paint of costs nothing but bytes).
+        if (sel_changed and !repainted_full) try self.repaintSelectionChange(batch, self.buf.prev_sel, sel, cursor.line);
 
         // The line-number gutter. Every text path above repainted it for
         // the rows it drew. A `move_content` scroll slides the old numbers
@@ -4635,8 +4658,40 @@ pub const Ui = struct {
         self.buf.prev_left_col = self.buf.left_col;
         self.buf.prev_cursor_line = cursor.line;
         self.buf.prev_edits = self.buf.ed.buf.edits;
-        self.buf.prev_sel_active = sel_active;
+        self.buf.prev_sel = sel;
         self.buf.full_redraw = false;
+    }
+
+    /// Repaints the on-screen rows whose selection highlight differs
+    /// between `old` and `new`, skipping the caret's row (repainted
+    /// already). Two spans of the same kind differ only where their ends
+    /// moved, so only the lines around those two byte ranges change; a
+    /// selection appearing, disappearing or switching between charwise and
+    /// linewise changes every line either one covers.
+    fn repaintSelectionChange(
+        self: *Ui,
+        batch: *glyphwire.client.Client.Batch,
+        old: ?editor.Editor.SelSpan,
+        new: ?editor.Editor.SelSpan,
+        cursor_line: usize,
+    ) !void {
+        var ranges: [2]selection_diff.ByteRange = undefined;
+        const n = selection_diff.changedRanges(old, new, &ranges);
+        const buf = &self.buf.ed.buf;
+        const top = self.buf.top_line;
+        const rows = self.grp.buffer_bounds.rows;
+        for (ranges[0..n]) |r| {
+            // A byte either side: whether a line's highlight runs to the
+            // pane edge depends on the span reaching its newline, which
+            // is the byte just before the next line's start.
+            const first = @max(buf.lineAt(r.start -| 1), top);
+            const last = @min(buf.lineAt(r.end), top + rows -| 1);
+            var line = first;
+            while (line <= last) : (line += 1) {
+                if (line == cursor_line or line == self.buf.prev_cursor_line) continue;
+                try self.renderBufferRow(batch, line - top);
+            }
+        }
     }
 
     /// Repaints the buffer rows the caret just left and just landed on.
@@ -6213,6 +6268,12 @@ pub fn gutterCellText(
 /// The colour of the span covering line-relative byte `off`, or null for
 /// "no span here" (the default text colour). Spans are sorted and
 /// non-overlapping, so the first hit is the answer.
+fn selEql(a: ?editor.Editor.SelSpan, b: ?editor.Editor.SelSpan) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return a.?.lo == b.?.lo and a.?.hi == b.?.hi and a.?.linewise == b.?.linewise;
+}
+
 fn spanColorAt(spans: []const syntax.Span, off: usize) ?Color {
     for (spans) |s| {
         if (off < s.start) return null;
