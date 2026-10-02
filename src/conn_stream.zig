@@ -13,18 +13,19 @@
 
 const std = @import("std");
 const mux = @import("mux.zig");
+const net_read = @import("net_read.zig");
 
 pub const ConnStream = union(enum) {
     net: std.Io.net.Stream,
     channel: *mux.Channel,
 
     /// Reads up to `dst.len` bytes. Returns 0 only at end of stream, the
-    /// same convention as `std.Io.net.Stream.read`.
+    /// same convention as `net_read.readSome`.
     pub fn read(self: *ConnStream, io: std.Io, dst: []u8) !usize {
         switch (self.*) {
             .net => |s| {
                 var data: [1][]u8 = .{dst};
-                return s.read(io, &data);
+                return net_read.readSome(s, io, &data);
             },
             .channel => |ch| return ch.read(dst),
         }

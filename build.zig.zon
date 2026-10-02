@@ -5,7 +5,7 @@
     .name = .glyphwire,
     .version = "0.6.0",
     .fingerprint = 0x13e00fabb58419a6,
-    .minimum_zig_version = "0.17.0-dev.1857+3c46da14d",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .testz = .{
             .url = "https://github.com/srjilarious/testz/archive/refs/tags/v1.7.0.tar.gz",

@@ -2,7 +2,7 @@
 # glyphwire
 
 ![Version Badge](https://img.shields.io/badge/Version-0.6.0-brightgreen)
-![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0--dev.1857%2B3c46da14d-%23f7a41d?logo=zig)
+![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
 
 A 2D-grid terminal replacement. Programs talk to the display over a local
@@ -108,7 +108,7 @@ A word highlighted in a speech bubble, with its dictionary entry up:
 
 ## Build and run
 
-Requires Zig 0.17.0-dev.1857+3c46da14d. Dependencies are fetched or
+Requires Zig 0.17.0. Dependencies are fetched or
 vendored; SDL3 builds from source, so no system dev packages are needed.
 
 | Command | Effect |

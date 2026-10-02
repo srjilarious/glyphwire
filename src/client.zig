@@ -4,6 +4,7 @@
 const std = @import("std");
 const core = @import("core.zig");
 const wire = @import("wire.zig");
+const net_read = @import("net_read.zig");
 const protocol = @import("protocol.zig");
 
 /// Serialization for `notifyCompact`: null optional fields are omitted.
@@ -3179,10 +3180,10 @@ pub const Client = struct {
 
             var read_buf: [4096]u8 = undefined;
             var data: [1][]u8 = .{&read_buf};
-            const n = try (try self.io.operateTimeout(.{ .net_read = .{
+            const n = (try (try self.io.operateTimeout(.{ .net_read = .{
                 .socket_handle = self.stream.socket.handle,
                 .data = &data,
-            } }, self.read_timeout)).net_read;
+            } }, self.read_timeout)).net_read).data_len;
             if (n == 0) return error.ConnectionClosed;
             try self.decoder.feed(self.alloc, read_buf[0..n]);
         }
@@ -4407,7 +4408,7 @@ pub const InputListener = struct {
         var read_buf: [4096]u8 = undefined;
         while (true) {
             var data: [1][]u8 = .{&read_buf};
-            const n = try self.stream.read(self.io, &data);
+            const n = try net_read.readSome(self.stream, self.io, &data);
             if (n == 0) return error.ConnectionClosed;
             try decoder.feed(self.alloc, read_buf[0..n]);
             if (try decoder.next(self.alloc)) |ack| {
@@ -4430,7 +4431,7 @@ pub const InputListener = struct {
         var read_buf: [4096]u8 = undefined;
         while (true) {
             var data: [1][]u8 = .{&read_buf};
-            const n = try self.stream.read(self.io, &data);
+            const n = try net_read.readSome(self.stream, self.io, &data);
             if (n == 0) return;
             try decoder.feed(self.alloc, read_buf[0..n]);
 

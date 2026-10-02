@@ -55,7 +55,7 @@ fn readOneFrame(io: std.Io, alloc: std.mem.Allocator, stream: *std.Io.net.Stream
     var read_buf: [4096]u8 = undefined;
     while (true) {
         var data: [1][]u8 = .{&read_buf};
-        const n = try stream.read(io, &data);
+        const n = try glyphwire.readSome(stream.*, io, &data);
         if (n == 0) return error.ConnectionClosedBeforeResponse;
 
         try decoder.feed(alloc, read_buf[0..n]);

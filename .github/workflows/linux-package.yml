@@ -44,15 +44,12 @@ jobs:
       # in-tree, and the SDL3 dependency vendors its own X11 and Wayland
       # headers and dlopens libX11 / libwayland-client at runtime.
 
-      # Matches build.zig.zon's minimum_zig_version. Nightlies get pruned
-      # from ziglang.org and the community mirrors, so this exact dev build
-      # is served from our own zig-toolchains releases (setup-zig still
-      # verifies the upstream minisign signature).
+      # Matches build.zig.zon's minimum_zig_version. A tagged release, so
+      # setup-zig fetches it from ziglang.org and its mirrors as usual.
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0-dev.1857+3c46da14d
-          mirror: https://github.com/srjilarious/zig-toolchains/releases/download/0.17.0-dev.1857+3c46da14d
+          version: 0.17.0
 
       # `zig build package` (defined in build.zig) installs only the shipped
       # programs, assets, grammars and desktop files, skipping the test

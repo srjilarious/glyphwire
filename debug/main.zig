@@ -177,7 +177,7 @@ fn readOneFrame(client: *glyphwire.Client) ![]u8 {
         if (try client.decoder.next(client.alloc)) |body| return body;
         var read_buf: [4096]u8 = undefined;
         var data: [1][]u8 = .{&read_buf};
-        const n = try client.stream.read(client.io, &data);
+        const n = try glyphwire.readSome(client.stream, client.io, &data);
         if (n == 0) return error.ConnectionClosed;
         try client.decoder.feed(client.alloc, read_buf[0..n]);
     }

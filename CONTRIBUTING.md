@@ -22,11 +22,11 @@ glyphwire pins an exact Zig version, matching `build.zig.zon`'s
 `minimum_zig_version` and CI:
 
 ```
-0.17.0-dev.1857+3c46da14d
+0.17.0
 ```
 
-Newer or older Zig will not build this tree. The dev build is pruned from
-`ziglang.org`; the community mirrors still carry it, and
+Newer or older Zig will not build this tree. Get it from
+[ziglang.org/download](https://ziglang.org/download/);
 [`scripts/bootstrap-linux.sh`](scripts/bootstrap-linux.sh) verifies the
 version and primes the cache for you:
 
