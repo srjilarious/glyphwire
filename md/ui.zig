@@ -30,33 +30,34 @@ const Layout = layout_mod.Layout;
 const Tone = layout_mod.Tone;
 const Color = glyphwire.Color;
 
-fn rgb(r: u8, g: u8, b: u8) Color {
-    return .{ .r = r, .g = g, .b = b };
-}
+// Every colour is a theme role the host resolves against the window's
+// theme (`glyphwire.theme`): the document roles (`heading1`, `code_bg`,
+// `quote`, ...) are shared with every other program that draws prose.
+const role = Color.role;
 
-const bg_page = rgb(24, 26, 31);
-const bg_code = rgb(34, 38, 46);
-const bg_inline_code = rgb(44, 49, 58);
-const bg_status = rgb(40, 44, 52);
-const bg_table_alt = rgb(30, 33, 39);
-const fg_body = rgb(205, 209, 216);
-const fg_bold = rgb(240, 241, 245);
-const fg_italic = rgb(190, 205, 230);
-const fg_strike = rgb(120, 124, 134);
-const fg_link = rgb(88, 166, 255);
-const fg_code = rgb(229, 192, 123);
-const fg_code_block = rgb(171, 178, 191);
-const fg_quote = rgb(140, 150, 162);
-const fg_marker = rgb(229, 192, 123);
-const fg_rule = rgb(70, 76, 88);
-const fg_muted = rgb(110, 118, 129);
-const fg_status = rgb(171, 178, 191);
-const fg_h1 = rgb(97, 175, 239);
-const fg_h2 = rgb(198, 120, 221);
-const fg_h3 = rgb(86, 182, 194);
-const fg_h4 = rgb(229, 192, 123);
-const fg_h5 = rgb(152, 195, 121);
-const fg_h6 = rgb(150, 156, 168);
+const bg_page = role(.bg);
+const bg_code = role(.code_block_bg);
+const bg_inline_code = role(.code_bg);
+const bg_status = role(.status_bg);
+const bg_table_alt = role(.table_alt_row_bg);
+const fg_body = role(.fg);
+const fg_bold = role(.strong);
+const fg_italic = role(.emphasis);
+const fg_strike = role(.strike);
+const fg_link = role(.link);
+const fg_code = role(.code);
+const fg_code_block = role(.code_block);
+const fg_quote = role(.quote);
+const fg_marker = role(.list_marker);
+const fg_rule = role(.rule);
+const fg_muted = role(.fg_dim);
+const fg_status = role(.status_fg);
+const fg_h1 = role(.heading1);
+const fg_h2 = role(.heading2);
+const fg_h3 = role(.heading3);
+const fg_h4 = role(.heading4);
+const fg_h5 = role(.heading5);
+const fg_h6 = role(.heading6);
 
 fn toneColor(t: Tone) Color {
     return switch (t) {
@@ -543,7 +544,8 @@ pub const Ui = struct {
 
         const handle = try c.createTable(self.page_layer, t.row, t.col, cols, .{
             .alt_row_bg = bg_table_alt,
-            .header_fg = fg_h4,
+            .header_fg = role(.table_header),
+            .header_bg = role(.table_header_bg),
         });
         try self.tables.append(self.alloc, handle);
 

@@ -322,4 +322,10 @@
 --     anki_image_max_width = 800,
 --     anki_image_max_height = 800,
 --     anki_image_quality = 85,
+--
+--     -- gw-read's own theme, overriding the window's (theme.lua) for this
+--     -- program alone; absent, it follows the window's. A name or a
+--     -- table, in the shapes theme.lua takes (see host/theme.template.lua),
+--     -- and it may name a theme theme.lua defines.
+--     theme = nil,
 -- }

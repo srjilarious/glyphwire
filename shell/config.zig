@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const ziglua = @import("ziglua");
+const themeconf = @import("themeconf");
 const Lua = ziglua.Lua;
 const openaction = @import("openaction.zig");
 
@@ -218,6 +219,10 @@ pub const ShellConfig = struct {
     /// a bad-config path is unreachable -- the arena frees the partial work
     /// wholesale in `deinit` instead. Merging calls just accumulates here.
     prompt_arena: std.heap.ArenaAllocator,
+    /// `theme(...)`: this shell's own theme, overriding the window's for
+    /// its context. Empty (`name == null`) follows the window. Strings
+    /// live in `prompt_arena`.
+    themes: themeconf.Parsed = .{ .source = "shell.conf.lua" },
 
     pub fn deinit(self: *ShellConfig) void {
         self.freeAliases();
@@ -248,6 +253,7 @@ pub const ShellConfig = struct {
         // be dropped wholesale rather than cleared -- the reset below is
         // what frees it.
         self.open_actions = .empty;
+        self.themes = .{ .source = "shell.conf.lua" };
         _ = self.prompt_arena.reset(.free_all);
     }
 
@@ -299,6 +305,25 @@ pub fn installBindings(lua: *Lua) void {
 
     lua.pushFunction(ziglua.wrap(luaOn));
     lua.setGlobal("on");
+
+    lua.pushFunction(ziglua.wrap(luaTheme));
+    lua.setGlobal("theme");
+}
+
+/// `theme("nord")` / `theme{ base = "nord", keyword = "bright_magenta" }`
+/// -- this shell's own theme, the same name-or-table every program config
+/// takes (see `applib/themeconf.zig`), and it may name a theme
+/// `theme.lua` defined. Without it the shell follows the window's.
+fn luaTheme(lua: *Lua) !i32 {
+    const cfg = g_active orelse return 0;
+    // `{ theme = <arg> }`, so themeconf reads it the way it reads any
+    // config's `config` table.
+    lua.createTable(0, 1);
+    lua.pushValue(1);
+    lua.setField(-2, "theme");
+    cfg.themes = themeconf.read(lua, cfg.prompt_arena.allocator(), "shell.conf.lua");
+    lua.pop(1);
+    return 0;
 }
 
 /// Makes `cfg` the `ShellConfig` every `alias`/`prompt` call appends

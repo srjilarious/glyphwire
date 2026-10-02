@@ -1,0 +1,136 @@
+-- theme.lua -- the glyphwire window's colour theme.
+--
+-- Copy to ~/.config/glyphwire/theme.lua (or $XDG_CONFIG_HOME/glyphwire/).
+-- glyphwire-host reads it at startup: its theme is what every program's
+-- colours resolve to unless that program's own config names a `theme`
+-- (zoe.conf.lua, salacommander.conf.lua, read.conf.lua, and
+-- shell.conf.lua's `theme(...)` call). Those configs can name the
+-- `themes` defined here too.
+--
+-- Every key is listed at its built-in default, commented out, so copying
+-- this file verbatim changes nothing. A plain Lua script; assign a single
+-- global table named `config`. Bad names and colours are logged and
+-- skipped, never fatal.
+--
+-- How colours work: programs don't paint RGB, they paint a *slot* or a
+-- *role*, and the host looks it up in the theme every time it draws --
+-- so changing the theme recolours what is already on screen.
+--
+--   slots  24 colours: the eight ANSI hues (black red green yellow blue
+--          magenta cyan white) at three levels, named `red` (normal),
+--          `dim_red` and `bright_red`. Terminal output uses them:
+--          `ESC[31m` is `red`, bold or `ESC[91m` is `bright_red`, and
+--          `ESC[2;31m` is `dim_red`.
+--   roles  what a colour is for, shared by every program: `fg`, `bg`,
+--          `dir`, `heading1`, `code_bg`, `table_header_bg`,
+--          `popup_border`, `keyword`, ... (full list below). Each one is
+--          a slot, a #rrggbb colour, or another role.
+
+-- config = {
+--     -- A name picks a built-in or one of `themes` below:
+--     --
+--     --   default              zoe's own dark palette (One Dark syntax)
+--     --   xterm                default, with xterm's ANSI colours in the
+--     --                        slots (terminal output as it always was)
+--     --   one-dark             Atom One Dark
+--     --   vscode-light         VS Code Light+
+--     --   github-dark          GitHub Dark Default
+--     --   github-light         GitHub Light Default
+--     --   catppuccin-mocha     catppuccin-macchiato   catppuccin-frappe
+--     --   catppuccin-latte     (light)
+--     --   tokyo-night
+--     --   solarized-dark       solarized-light
+--     --   darcula              JetBrains Darcula
+--     --   cobalt2              Wes Bos's Cobalt2
+--     --   dracula   nord   gruvbox-dark   monokai
+--     --
+--     -- An unknown name is logged and `default` is used.
+--     theme = "default",
+--
+--     -- Or a table, a theme of its own:
+--     --
+--     --   theme = {
+--     --       base = "github-dark",     -- start from this theme
+--     --                                 -- (default: "default")
+--     --       dark = true,              -- light or dark; picks the popup
+--     --                                 -- frame, flips derived blends
+--     --       panel_style = "panel",    -- popup nine-patch: "panel",
+--     --                                 -- "panel_light", or your own
+--     --                                 -- ~/.config/glyphwire/ninepatch/
+--     --                                 -- <name>.9.png
+--     --
+--     --       -- The 15 colours every slot and role is derived from.
+--     --       -- Changing one re-derives everything blended from it,
+--     --       -- except what the base theme sets by hand.
+--     --       palette = {
+--     --           bg = "#0d1117", bg_dark = "#010409", bg_hi = "#21262d",
+--     --           fg = "#e6edf3", fg_dim = "#6e7681", comment = "#8b949e",
+--     --           selection = "#1f3b5a", cursor = "#2f81f7",
+--     --           red = "#f85149", orange = "#ffa657", yellow = "#d29922",
+--     --           green = "#3fb950", cyan = "#39c5cf", blue = "#58a6ff",
+--     --           purple = "#bc8cff",
+--     --       },
+--     --
+--     --       -- Slots by name, after derivation. Every role that names a
+--     --       -- slot follows it.
+--     --       slots = {
+--     --           red = "#ff5555", bright_red = "#ff7777", dim_red = "#882222",
+--     --       },
+--     --
+--     --       -- Roles, applied last. A value is a slot name, another
+--     --       -- role's name, "#rrggbb", or a slot number 0-23. Any role
+--     --       -- may also be written at the top level of the table
+--     --       -- (`keyword = "bright_magenta"`), and zoe's old `ui = {}`
+--     --       -- names (bg_buffer, fg_text, ...) still work.
+--     --       roles = {
+--     --           heading1 = "bright_blue",
+--     --           table_header_bg = "#202830",
+--     --           variable = "fg",
+--     --       },
+--     --   }
+--     --
+--     -- The roles:
+--     --
+--     --   base       fg fg_dim fg_strong bg bg_dark bg_raised border accent
+--     --              link selection_bg cursor_bg cursor_fg
+--     --   status     success message message_error diag_error diag_warning
+--     --              diag_info diag_hint
+--     --   search     match match_bg match_current_bg
+--     --   files      file dir symlink exec special hidden hidden_dir marked
+--     --   chrome     sidebar_bg status_bg status_fg mode tab_bar_bg tab_bg
+--     --              shell_bg whitespace title_bg title_fg title_inactive_bg
+--     --              title_inactive_fg list_cursor_bg
+--     --              list_cursor_inactive_bg keybar_bg keybar_key
+--     --              keybar_label_bg keybar_label suggestion
+--     --   popups     popup_bg popup_fg popup_code_bg popup_rule popup_border
+--     --              popup_selected_bg popup_label popup_kind popup_detail
+--     --              finder_header_bg finder_header_fg finder_selected_bg
+--     --              finder_selected_fg dialog_bg dialog_fg dialog_title_bg
+--     --              dialog_title_fg danger_bg input_bg button_bg
+--     --              button_focus_bg
+--     --   documents  heading1..heading6 strong emphasis strike code code_bg
+--     --              code_block code_block_bg quote list_marker rule
+--     --   tables     table_header table_header_bg table_alt_row_bg
+--     --              outline_marker
+--     --   syntax     comment keyword string string_escape string_special
+--     --              escape number boolean character constant
+--     --              constant_builtin function function_builtin type
+--     --              type_builtin constructor operator property variable
+--     --              variable_builtin variable_parameter module label
+--     --              attribute tag punctuation punctuation_special
+--     --              text_title text_literal text_uri text_reference
+--     --
+--     -- Syntax roles are tree-sitter capture groups; a dotted capture
+--     -- falls back to its prefix ("string.special.key" -> string_special
+--     -- -> string), and a dotted name is accepted here too
+--     -- (`["string.escape"] = ...`). `variable` and `punctuation` stay
+--     -- uncoloured unless a theme gives them a colour of their own.
+--
+--     -- Named themes of your own, in the table shape above, for `theme`
+--     -- (here or in any program's config) and zoe's `:theme` to pick. One
+--     -- named like a built-in replaces it; `base` naming itself starts
+--     -- from the built-in of that name.
+--     themes = {
+--         -- mine = { base = "nord", palette = { bg = "#262a33" } },
+--     },
+-- }

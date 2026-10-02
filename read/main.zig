@@ -21,6 +21,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const read = @import("read_support");
+const themeconf = @import("themeconf");
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -190,6 +191,12 @@ pub fn main(init: std.process.Init) !void {
     }) catch return list(alloc, io, book, conf.ocr);
     defer listener.deinit();
 
+    // `read.conf.lua`'s own `theme`, if it names one; otherwise the
+    // window's. Borrows from `theme_arena`.
+    var theme_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer theme_arena.deinit();
+    const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, read.config.conf_name);
+
     const ui = try read.Ui.init(alloc, &client, listener, book, conf, .{
         .page = start_page,
         .mode = mode,
@@ -199,6 +206,7 @@ pub fn main(init: std.process.Init) !void {
         // Read here, where the environment is, rather than threading the
         // whole environ map into the UI. Only ever sent to the endpoint.
         .ai_api_key = if (conf.ai_lookup and conf.aiApiKeyEnv().len > 0) init.environ_map.get(conf.aiApiKeyEnv()) else null,
+        .theme = own_theme,
     });
     defer ui.deinit();
 

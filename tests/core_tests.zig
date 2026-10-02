@@ -1685,12 +1685,12 @@ pub fn writeTextInterpretsSgrColourSequenceTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectEqual(layer.cursor.col, 4);
     try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
 
-    // ANSI 31 == palette index 1 == {205, 0, 0}.
-    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 205);
-    try testz.expectEqual(layer.cell(0, 0).style.fg.g, 0);
-    try testz.expectEqual(layer.cell(0, 2).style.fg.r, 205);
+    // ANSI 31 is the theme's normal red slot -- a reference, not RGB.
+    const red = glyphwire.Color.ansi(.normal, .red);
+    try testz.expectTrue(layer.cell(0, 0).style.fg.eql(red));
+    try testz.expectTrue(layer.cell(0, 2).style.fg.eql(red));
     // "!" is drawn after `ESC [ 0 m` reset it to the call's fg argument.
-    try testz.expectEqual(layer.cell(0, 3).style.fg.r, glyphwire.default_style.fg.r);
+    try testz.expectTrue(layer.cell(0, 3).style.fg.eql(glyphwire.default_style.fg));
 }
 
 pub fn writeTextStripsOscSequenceTerminatedByBelTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1791,12 +1791,13 @@ pub fn writeTextSgrBackgroundAndInverseTest(io: std.Io, alloc: std.mem.Allocator
     // Green background (42), then inverse (7) swaps it onto the foreground.
     try layer.writeText("\x1b[42mA\x1b[7mB", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
-    // "A": default fg on green bg. ANSI 32 (green) == {0, 205, 0}.
-    try testz.expectEqual(layer.cell(0, 0).style.fg.r, glyphwire.default_style.fg.r);
-    try testz.expectEqual(layer.cell(0, 0).style.bg.color.g, 205);
+    // "A": default fg on green bg. ANSI 42 is the normal green slot.
+    const green = glyphwire.Color.ansi(.normal, .green);
+    try testz.expectTrue(layer.cell(0, 0).style.fg.eql(glyphwire.default_style.fg));
+    try testz.expectTrue(layer.cell(0, 0).style.bg.color.eql(green));
     // "B": inverse -> fg is the former bg (green), bg is the former fg.
-    try testz.expectEqual(layer.cell(0, 1).style.fg.g, 205);
-    try testz.expectEqual(layer.cell(0, 1).style.bg.color.r, glyphwire.default_style.fg.r);
+    try testz.expectTrue(layer.cell(0, 1).style.fg.eql(green));
+    try testz.expectTrue(layer.cell(0, 1).style.bg.color.eql(glyphwire.default_style.fg));
 }
 
 pub fn writeTextSgrBoldPromotesBasicForegroundToBrightTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1804,12 +1805,11 @@ pub fn writeTextSgrBoldPromotesBasicForegroundToBrightTest(io: std.Io, alloc: st
     var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
     defer layer.deinit();
 
-    // `ESC [ 1 ; 31 m` -- bold + red. Bold promotes basic red (index 1,
-    // {205,0,0}) to bright red (index 9, {255,0,0}), a common terminal
-    // behaviour and the whole of Phase A's "bold" support.
+    // `ESC [ 1 ; 31 m` -- bold + red. Bold promotes basic red to the
+    // bright red slot, a common terminal behaviour and the whole of
+    // Phase A's "bold" support.
     try layer.writeText("\x1b[1;31mERR", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 255);
-    try testz.expectEqual(layer.cell(0, 0).style.fg.g, 0);
+    try testz.expectTrue(layer.cell(0, 0).style.fg.eql(glyphwire.Color.ansi(.bright, .red)));
 
     // Bold with a non-basic (truecolor) fg is left as-is.
     layer.cursor = .{ .row = 1, .col = 0 };
@@ -1823,9 +1823,19 @@ pub fn writeTextSgrDimDarkensForegroundTest(io: std.Io, alloc: std.mem.Allocator
     var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
     defer layer.deinit();
 
-    // Dim (2) scales the resolved fg to 55%. White default fg (255) -> 140.
+    // Dim (2) on the default fg is the theme's `fg_dim`...
     try layer.writeText("\x1b[2md", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 140);
+    try testz.expectTrue(layer.cell(0, 0).style.fg.eql(glyphwire.Color.role(.fg_dim)));
+
+    // ...on a basic colour its dim slot...
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("\x1b[2;34mb", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.cell(1, 0).style.fg.eql(glyphwire.Color.ansi(.dim, .blue)));
+
+    // ...and a literal colour is scaled to 55%: 200 -> 110.
+    layer.cursor = .{ .row = 2, .col = 0 };
+    try layer.writeText("\x1b[2;38;2;200;200;200mt", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cell(2, 0).style.fg.r, 110);
 }
 
 pub fn writeTextSgrColourDoesNotCarryAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1839,13 +1849,11 @@ pub fn writeTextSgrColourDoesNotCarryAcrossCallsTest(io: std.Io, alloc: std.mem.
     // shell prompt / `ls` listing after such a command renders in that
     // colour. The pen is call-local.
     try layer.writeText("\x1b[31mred", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cell(0, 0).style.fg.r, 205); // "red" is red
+    try testz.expectTrue(layer.cell(0, 0).style.fg.eql(glyphwire.Color.ansi(.normal, .red))); // "red" is red
 
     layer.cursor = .{ .row = 1, .col = 0 };
     try layer.writeText("plain", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cell(1, 0).style.fg.r, glyphwire.default_style.fg.r);
-    try testz.expectEqual(layer.cell(1, 0).style.fg.g, glyphwire.default_style.fg.g);
-    try testz.expectEqual(layer.cell(1, 0).style.fg.b, glyphwire.default_style.fg.b);
+    try testz.expectTrue(layer.cell(1, 0).style.fg.eql(glyphwire.default_style.fg));
 }
 
 pub fn layerPtyModeCarriesPartialCsiAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1880,14 +1888,14 @@ pub fn layerPtyModeKeepsSgrColourAcrossCallsTest(io: std.Io, alloc: std.mem.Allo
     try layer.writeText("\x1b[31m", glyphwire.default_style.fg, glyphwire.default_style.bg);
     layer.cursor = .{ .row = 1, .col = 0 };
     try layer.writeText("still-red", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cell(1, 0).style.fg.r, 205);
+    try testz.expectTrue(layer.cell(1, 0).style.fg.eql(glyphwire.Color.ansi(.normal, .red)));
 
     // Re-setting the property is the "program exited" re-arm: it drops
     // the lingering pen, so the following write is back to the default.
     layer.setProperty(.{ .pty_mode = true });
     layer.cursor = .{ .row = 2, .col = 0 };
     try layer.writeText("plain", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cell(2, 0).style.fg.r, glyphwire.default_style.fg.r);
+    try testz.expectTrue(layer.cell(2, 0).style.fg.eql(glyphwire.default_style.fg));
 }
 
 // --- CSI cursor / erase interpretation --------------------------------------

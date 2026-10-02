@@ -27,6 +27,7 @@ const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const sala = @import("salacommander_support");
 const interrupt = @import("applib").interrupt;
+const themeconf = @import("themeconf");
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -80,6 +81,12 @@ pub fn main(init: std.process.Init) !void {
     if (args.hasOption("small")) cfg.view = .small;
     if (args.hasOption("hidden")) cfg.show_hidden = true;
 
+    // `salacommander.conf.lua`'s own `theme`, if it names one; otherwise
+    // the window's. Borrows from `theme_arena`.
+    var theme_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer theme_arena.deinit();
+    const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, sala.config.conf_name);
+
     var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
         cfg.deinit(alloc);
         return fail(io, "salacommander: needs a glyphwire session (no GLYPHWIRE_SOCK)\n");
@@ -111,6 +118,7 @@ pub fn main(init: std.process.Init) !void {
         .home = init.environ_map.get("HOME"),
         .profile = init.environ_map.get("GLYPHWIRE_SALA_PROFILE") != null,
         .cfg = cfg,
+        .theme = own_theme,
     }) catch |err| {
         var buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "salacommander: can't open {s}: {t}\n", .{ left, err }) catch "salacommander: can't start\n";

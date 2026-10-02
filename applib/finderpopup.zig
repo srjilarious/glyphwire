@@ -57,21 +57,22 @@ pub const Rect = struct {
     }
 };
 
-/// Colours and size limits. The defaults are zoe's.
+/// Colours and size limits. The colours default to the theme's finder
+/// and popup roles, which the host resolves.
 pub const Style = struct {
     /// The nine-patch style name for the frame.
     frame_style: []const u8 = "panel",
     /// The flat background when the host has no `frame_style`, and the
     /// ink of the character under the drawn query caret.
-    bg: Color = rgb(38, 38, 46),
-    header_bg: Color = rgb(40, 90, 170),
-    header_fg: Color = rgb(235, 240, 250),
-    selected_bg: Color = rgb(70, 120, 200),
-    selected_fg: Color = rgb(245, 250, 255),
+    bg: Color = .role(.popup_bg),
+    header_bg: Color = .role(.finder_header_bg),
+    header_fg: Color = .role(.finder_header_fg),
+    selected_bg: Color = .role(.finder_selected_bg),
+    selected_fg: Color = .role(.finder_selected_fg),
     /// A result's name, and the query text.
-    text_fg: Color = rgb(205, 205, 215),
+    text_fg: Color = .role(.fg),
     /// A result's directory part, the `> ` prompt and the empty-list note.
-    dim_fg: Color = rgb(110, 110, 125),
+    dim_fg: Color = .role(.fg_dim),
     /// A directory result's name (one ending in `/`, which only a finder
     /// with `include_dirs` lists). Null draws it like a file.
     dir_fg: ?Color = null,
@@ -83,9 +84,6 @@ pub const Style = struct {
     min_rows: usize = 4,
 };
 
-fn rgb(r: u8, g: u8, b: u8) Color {
-    return .{ .r = r, .g = g, .b = b, .a = 255 };
-}
 
 /// Where the popup goes inside `area`: centred, at its preferred size or
 /// as much of it as fits, and never below the minimum unless the area

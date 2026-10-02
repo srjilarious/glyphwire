@@ -90,14 +90,12 @@ pub const Config = struct {
     langs: []const syntax.LangDef,
     /// Extra grammar directories from `config.grammar_dirs`, `~` expanded.
     grammar_dirs: []const []const u8,
-    /// The theme to start in: `config.theme` resolved against the
-    /// built-ins and `config.themes` (see `applib/theme.zig`), or
-    /// `default`. Its syntax half is what every highlighter colours with.
-    theme: themes.Theme,
-    /// `config.themes` (and the table form of `config.theme`, as
-    /// `themeconf.table_theme_name`), kept so `:theme <name>` can switch
-    /// to one later.
-    custom_themes: []const themes.Custom = &.{},
+    /// `config.theme` / `config.themes`: zoe's own theme, overriding the
+    /// window's (`ownTheme`), and the themes `:theme <name>` can reach.
+    themes: themeconf.Parsed = .{ .source = conf_name },
+    /// The shared `theme.lua`'s `themes`, which `config.theme` and
+    /// `:theme` may name too.
+    shared_themes: themeconf.Parsed = .{},
     /// `config.injections` -- whether to run `injections.scm` and
     /// highlight embedded languages (code fences, Markdown inline).
     /// Default true; set `false` as an escape hatch.
@@ -167,6 +165,19 @@ pub const Config = struct {
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
     }
+
+    /// The theme `config.theme` names, resolved against zoe's `themes`
+    /// and `theme.lua`'s, or null when zoe should follow the window's.
+    /// Borrows from the arena.
+    pub fn ownTheme(self: *Config) ?themes.Theme {
+        return self.themes.resolve(self.arena.allocator(), self.shared_themes);
+    }
+
+    /// `:theme <name>`: a built-in, or one of either config's `themes`.
+    pub fn findTheme(self: *Config, name: []const u8) ?themes.Theme {
+        const all = std.mem.concat(self.arena.allocator(), themes.Custom, &.{ self.shared_themes.customs, self.themes.customs }) catch self.themes.customs;
+        return themes.resolve(name, all);
+    }
 };
 
 /// A `Config` holding nothing but the defaults, with a fresh arena. What
@@ -176,7 +187,6 @@ pub fn defaults(gpa: std.mem.Allocator) Config {
         .arena = std.heap.ArenaAllocator.init(gpa),
         .langs = &syntax.default_langs,
         .grammar_dirs = &.{},
-        .theme = themes.initDefault(),
         .injections = true,
         .line_numbers = .absolute,
     };
@@ -192,6 +202,7 @@ pub fn load(
     environ: *const std.process.Environ.Map,
 ) Config {
     var cfg = defaults(gpa);
+    cfg.shared_themes = themeconf.loadShared(cfg.arena.allocator(), gpa, io, environ);
     const src = readConf(&cfg.arena, io, environ) orelse return cfg;
     return parseSource(gpa, src, environ, cfg);
 }
@@ -233,9 +244,7 @@ pub fn parseSource(
         return cfg;
     }
 
-    const parsed = themeconf.read(lua, a);
-    cfg.custom_themes = parsed.customs;
-    cfg.theme = parsed.resolveOrDefault();
+    cfg.themes = themeconf.read(lua, a, conf_name);
     cfg.grammar_dirs = readGrammarDirs(lua, a, environ);
     cfg.langs = readLangs(lua, a);
     cfg.injections = readInjections(lua);

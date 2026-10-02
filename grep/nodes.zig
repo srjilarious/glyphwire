@@ -38,6 +38,7 @@ const glyphwire = @import("glyphwire");
 
 const syntax = @import("applib").syntax;
 const themes = @import("applib").theme;
+const role = glyphwire.Color.role;
 
 const rg = @import("rg.zig");
 
@@ -62,28 +63,36 @@ pub const Colors = struct {
     /// all the way. Aimed at a dark terminal background.
     dim_toward: glyphwire.Color = .{ .r = 28, .g = 28, .b = 32 },
     dim_amount: f32 = 0.35,
+    /// What a role or slot reference above resolves to, for `dim`, which
+    /// has to blend real colours. Null when every colour is a literal.
+    resolver: ?*const themes.Theme = null,
 
-    /// The colours from zoe's theme, so a grep reads like the editor:
-    /// paths are the file tree's directories, the counts and numbers its
-    /// dim text, and context rows dim towards the editor's background.
+    /// Theme roles, so a grep reads like the rest of the window: paths
+    /// are directories, the counts and numbers dim text, and context rows
+    /// dim towards the background. `t` is the theme the host resolves
+    /// them against (`get_theme`), kept for `dim`; it must outlive this.
     pub fn fromTheme(t: *const themes.Theme) Colors {
         return .{
-            .path = t.ui.fg_dir,
-            .count = t.ui.fg_dim,
-            .line_number = t.ui.fg_dim,
-            .text = t.ui.fg_text,
-            .match = t.ui.fg_match,
-            .match_bg = t.ui.bg_match,
-            .dim_toward = t.ui.bg_buffer,
+            .path = role(.dir),
+            .count = role(.fg_dim),
+            .line_number = role(.fg_dim),
+            .text = role(.fg),
+            .match = role(.match),
+            .match_bg = role(.match_bg),
+            .dim_toward = role(.bg),
+            .resolver = t,
         };
     }
 
-    /// `c` as a context row draws it.
-    pub fn dim(self: Colors, c: glyphwire.Color) glyphwire.Color {
+    /// `c` as a context row draws it: a blend, so a literal colour --
+    /// these rows don't follow a later theme switch the way the rest do.
+    pub fn dim(self: Colors, c_in: glyphwire.Color) glyphwire.Color {
+        const c = if (self.resolver) |t| t.resolve(c_in) else c_in;
+        const to = if (self.resolver) |t| t.resolve(self.dim_toward) else self.dim_toward;
         return .{
-            .r = blend(c.r, self.dim_toward.r, self.dim_amount),
-            .g = blend(c.g, self.dim_toward.g, self.dim_amount),
-            .b = blend(c.b, self.dim_toward.b, self.dim_amount),
+            .r = blend(c.r, to.r, self.dim_amount),
+            .g = blend(c.g, to.g, self.dim_amount),
+            .b = blend(c.b, to.b, self.dim_amount),
             .a = c.a,
         };
     }
@@ -288,8 +297,7 @@ const Styler = struct {
         matched: bool,
 
         fn eql(a: Style, b: Style) bool {
-            return a.matched == b.matched and
-                a.fg.r == b.fg.r and a.fg.g == b.fg.g and a.fg.b == b.fg.b and a.fg.a == b.fg.a;
+            return a.matched == b.matched and a.fg.eql(b.fg);
         }
     };
 

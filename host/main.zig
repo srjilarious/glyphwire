@@ -9,6 +9,7 @@ const app_mod = @import("app.zig");
 const pane_proc_mod = @import("pane_proc.zig");
 const config = @import("config.zig");
 const config_load = @import("config_load.zig");
+const themeconf = @import("themeconf");
 const geometry = @import("geometry.zig");
 const icons = @import("icons.zig");
 const system_font = @import("system_font.zig");
@@ -295,6 +296,11 @@ pub fn main(init: std.process.Init) !void {
     // `font_path` above) rather than silently relying on the default
     // matching -- see Context's doc comment on cell_px_w/cell_px_h.
     ctx.setCellMetrics(@intCast(geometry.cell_w), @intCast(geometry.cell_h));
+    // `theme.lua`: the window's theme -- the colours every program's
+    // slot and role references resolve to unless it sets its own. Set on
+    // the root context before the server wraps it, so the session starts
+    // from it.
+    ctx.theme.set(themeconf.loadShared(arena, alloc, io, init.environ_map).resolveOrDefault(arena, .{}));
     const icons_dir = try std.fs.path.join(arena, &.{ asset_dir, "icons" });
     icons.loadIconsFromDir(io, alloc, &ctx, icons_dir, "", true);
     // The file-type icon set (`file/*`, aliased `oxygen/*`) comes from

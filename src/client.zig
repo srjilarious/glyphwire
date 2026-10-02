@@ -1126,6 +1126,45 @@ pub const Client = struct {
         try self.notify("set_context_title", .{ .title = title });
     }
 
+    /// `set_theme` -- a notification. Gives this connection's active
+    /// context its own theme: every slot and role of `t`, which the host
+    /// resolves this context's colours against from now on, whatever the
+    /// window's theme becomes. Null goes back to following the window's.
+    pub fn setTheme(self: *Client, t: ?*const core.theme.Theme) !void {
+        const th = t orelse return self.notify("set_theme", .{});
+        var slots: [core.theme.slot_count]protocol.Color = undefined;
+        for (th.slots, 0..) |c, i| slots[i] = protocol.colorToWire(c);
+        var roles: std.json.ArrayHashMap(protocol.Color) = .{};
+        defer roles.deinit(self.alloc);
+        for (std.enums.values(core.theme.Role)) |r| {
+            try roles.map.put(self.alloc, @tagName(r), protocol.roleValueToWire(th.roles.get(r)));
+        }
+        try self.notify("set_theme", .{ .theme = protocol.ThemeWire{
+            .name = th.name,
+            .dark = th.dark,
+            .panel_style = th.panel_style,
+            .slots = &slots,
+            .roles = roles,
+        } });
+    }
+
+    /// `set_theme` by built-in name -- a notification.
+    pub fn setThemeByName(self: *Client, name: []const u8) !void {
+        try self.notify("set_theme", .{ .name = name });
+    }
+
+    /// `get_theme` -- a request. This connection's active context's
+    /// theme as the host resolves it: the window's, or the one this
+    /// context set. Roles and slots the reply leaves out (an older host)
+    /// keep `default`'s.
+    pub fn getTheme(self: *Client) !core.theme.Stored {
+        const parsed = try self.request(protocol.ThemeWire, "get_theme", .{});
+        defer parsed.deinit();
+        var t = core.theme.initDefault();
+        try parsed.value.result.applyTo(&t);
+        return .init(t);
+    }
+
     /// `list_contexts` -- a request. This connection's pane stack, top
     /// (on screen) first, and which of them is this connection's own
     /// active context. Caller `deinit`s the result.
@@ -1554,7 +1593,7 @@ pub const Client = struct {
             .blur = sh.blur,
             .radius = sh.radius,
             .spread = sh.spread,
-            .color = .{ .r = sh.color.r, .g = sh.color.g, .b = sh.color.b, .a = sh.color.a },
+            .color = colorToWire(sh.color),
         };
     }
 
@@ -2196,7 +2235,7 @@ pub const Client = struct {
             .y = rect.y,
             .w = rect.w,
             .h = rect.h,
-            .color = protocol.Color{ .r = rect.color.r, .g = rect.color.g, .b = rect.color.b, .a = rect.color.a },
+            .color = Client.colorToWire(rect.color),
             .line_width = rect.line_width,
             .filled = rect.filled,
         };
@@ -2551,8 +2590,12 @@ pub const Client = struct {
     /// adder has to build the same `fg`/`bg` field itself.
     pub fn colorToJson(c: ?core.Color) ?protocol.Color {
         const v = c orelse return null;
-        return .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a };
+        return colorToWire(v);
     }
+
+    /// `colorToJson` for a colour that is always there. A palette slot
+    /// or theme role goes out as the reference, for the host to resolve.
+    pub const colorToWire = protocol.colorToWire;
 
     fn notify(self: *Client, method: []const u8, params: anytype) !void {
         const Msg = struct {

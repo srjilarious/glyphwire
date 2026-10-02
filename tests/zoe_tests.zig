@@ -1800,10 +1800,10 @@ pub fn themeColorForWalksDottedPrefixesTest(_: std.Io, _: std.mem.Allocator) !vo
     try testz.expectTrue(theme.colorFor("keyword") != null);
     // A dotted name with no mapping of its own falls back to the nearest
     // prefix that has one: `keyword.function` -> `keyword`.
-    try testz.expectEqual(theme.colorFor("keyword.function.macro").?.r, theme.colorFor("keyword").?.r);
+    try testz.expectTrue(theme.colorFor("keyword.function.macro").?.eql(theme.colorFor("keyword").?));
     // The walk stops at the *first* known prefix, so a name whose prefix
     // is itself mapped resolves to that, not further up.
-    try testz.expectEqual(theme.colorFor("string.special.key").?.r, theme.colorFor("string.special").?.r);
+    try testz.expectTrue(theme.colorFor("string.special.key").?.eql(theme.colorFor("string.special").?));
     // `@none` and unknown groups get nothing.
     try testz.expectTrue(theme.colorFor("none") == null);
     try testz.expectTrue(theme.colorFor("nonsense.group") == null);
@@ -2057,7 +2057,7 @@ pub fn syntaxIncrementalReparseMatchesFullTest(io: std.Io, alloc: std.mem.Alloca
         for (a.items, b.items) |x, y| {
             try testz.expectEqual(x.start, y.start);
             try testz.expectEqual(x.end, y.end);
-            try testz.expectEqual(x.color.r, y.color.r);
+            try testz.expectTrue(x.color.eql(y.color));
             try testz.expectEqual(x.color.g, y.color.g);
             try testz.expectEqual(x.color.b, y.color.b);
         }
@@ -2094,7 +2094,7 @@ fn expectSameSpans(alloc: std.mem.Allocator, buf: *const Buffer, a: *syntax.High
         for (sa.items, sb.items) |x, y| {
             try testz.expectEqual(x.start, y.start);
             try testz.expectEqual(x.end, y.end);
-            try testz.expectEqual(x.color.r, y.color.r);
+            try testz.expectTrue(x.color.eql(y.color));
         }
     }
 }
@@ -2256,9 +2256,7 @@ pub fn syntaxInjectionHighlightsFencedCodeTest(io: std.Io, alloc: std.mem.Alloca
     try reparseBuf(&on, &buf);
     try on.lineSpans(ls, le, &spans);
     const on_span = spanAt(spans.items, 7) orelse return error.NoSpanOverNumber;
-    try testz.expectEqual(on_span.color.r, number.r);
-    try testz.expectEqual(on_span.color.g, number.g);
-    try testz.expectEqual(on_span.color.b, number.b);
+    try testz.expectTrue(on_span.color.eql(number));
 
     var off = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
     defer off.deinit();
@@ -2267,7 +2265,7 @@ pub fn syntaxInjectionHighlightsFencedCodeTest(io: std.Io, alloc: std.mem.Alloca
     try reparseBuf(&off, &buf);
     try off.lineSpans(ls, le, &spans);
     if (spanAt(spans.items, 7)) |s| {
-        try testz.expectFalse(s.color.r == number.r and s.color.g == number.g and s.color.b == number.b);
+        try testz.expectFalse(s.color.eql(number));
     }
 }
 
@@ -2496,7 +2494,7 @@ pub fn syntaxIncrementalInjectionsRandomEditsTest(io: std.Io, alloc: std.mem.All
             for (cached, fresh.items) |x, y| {
                 try testz.expectEqual(x.start, y.start);
                 try testz.expectEqual(x.end, y.end);
-                try testz.expectEqual(x.color.r, y.color.r);
+                try testz.expectTrue(x.color.eql(y.color));
                 try testz.expectEqual(x.color.g, y.color.g);
                 try testz.expectEqual(x.color.b, y.color.b);
             }
@@ -2542,7 +2540,7 @@ pub fn syntaxLinesSpansMatchesPerLineTest(io: std.Io, alloc: std.mem.Allocator) 
         for (got, one.items) |x, y| {
             try testz.expectEqual(x.start, y.start);
             try testz.expectEqual(x.end, y.end);
-            try testz.expectEqual(x.color.r, y.color.r);
+            try testz.expectTrue(x.color.eql(y.color));
             try testz.expectEqual(x.color.g, y.color.g);
             try testz.expectEqual(x.color.b, y.color.b);
         }
@@ -4219,106 +4217,37 @@ pub fn groupsNeighborPicksTheFacingPaneTest(_: std.Io, _: std.mem.Allocator) !vo
 }
 
 // ─── Themes ──────────────────────────────────────────────────────────────
+//
+// The theme model itself is covered in theme_tests.zig; these are zoe's
+// half: its config's `theme`, `:theme`, and the highlighter's captures.
 
 const themes = @import("applib").theme;
 const themeconf = @import("themeconf");
-
-fn expectColor(got: @import("glyphwire").Color, hex: u24) !void {
-    const want = themes.rgb(hex);
-    try testz.expectEqual(got.r, want.r);
-    try testz.expectEqual(got.g, want.g);
-    try testz.expectEqual(got.b, want.b);
-}
-
-pub fn themeDefaultMatchesOriginalSyntaxPaletteTest(_: std.Io, _: std.mem.Allocator) !void {
-    // `default` is derived from a palette rather than written out, so pin
-    // it to the hand-written one `syntax.Theme.initDefault` still holds:
-    // choosing no theme must not change a single capture colour.
-    const t = themes.initDefault();
-    const orig = syntax.Theme.initDefault();
-    for (std.meta.tags(syntax.Theme.Group)) |g| {
-        const a = t.syntax.colors.get(g);
-        const b = orig.colors.get(g);
-        try testz.expectEqual(a == null, b == null);
-        if (a) |c| {
-            try testz.expectEqual(c.r, b.?.r);
-            try testz.expectEqual(c.g, b.?.g);
-            try testz.expectEqual(c.b, b.?.b);
-        }
-    }
-    // ...and a few of the UI slots that used to be constants in ui.zig.
-    try expectColor(t.ui.bg_buffer, 0x18181d);
-    try expectColor(t.ui.bg_status, 0x2e2e38);
-    try expectColor(t.ui.bg_tab_bar, 0x101014);
-    try expectColor(t.ui.bg_selected, 0x303e54);
-    try expectColor(t.ui.fg_cursor, 0x18181d);
-    try testz.expectEqualStr(t.panel_style, "panel");
-}
-
-pub fn themeEveryBuiltinResolvesTest(_: std.Io, _: std.mem.Allocator) !void {
-    for (themes.builtins, 0..) |spec, i| {
-        const t = themes.resolve(spec.name, &.{}) orelse return error.BuiltinDidNotResolve;
-        try testz.expectEqualStr(t.name, spec.name);
-        // Light themes get the light frame unless they name one.
-        try testz.expectEqualStr(t.panel_style, if (spec.dark) "panel" else "panel_light");
-        // Names are unique, or `:theme` could never reach the second.
-        for (themes.builtins[i + 1 ..]) |other| {
-            try testz.expectFalse(std.mem.eql(u8, spec.name, other.name));
-        }
-    }
-    try testz.expectTrue(themes.resolve("no-such-theme", &.{}) == null);
-}
-
-pub fn themeCustomLayersOverBaseTest(_: std.Io, _: std.mem.Allocator) !void {
-    const customs = [_]themes.Custom{
-        .{
-            .name = "mine",
-            .base = "nord",
-            .palette = &.{.{ .name = "bg", .color = themes.rgb(0x101010) }},
-            .syntax = &.{.{ .name = "keyword", .color = themes.rgb(0x123456) }},
-            .ui = &.{.{ .name = "bg_status", .color = themes.rgb(0x654321) }},
-        },
-        // Tweaking a built-in under its own name: the base is the
-        // built-in, not this entry again.
-        .{ .name = "dracula", .base = "dracula", .syntax = &.{.{ .name = "string", .color = themes.rgb(0x010203) }} },
-        .{ .name = "a", .base = "b" },
-        .{ .name = "b", .base = "a" },
-    };
-
-    const mine = themes.resolve("mine", &customs).?;
-    try testz.expectEqualStr(mine.name, "mine");
-    // The palette swap re-derives what is blended from it...
-    try expectColor(mine.ui.bg_buffer, 0x101010);
-    try expectColor(mine.ui.fg_cursor, 0x101010);
-    // ...the base's own capture mapping survives...
-    try expectColor(mine.syntax.colors.get(.function).?, 0x88c0d0);
-    // ...and the custom's explicit overrides land last.
-    try expectColor(mine.syntax.colors.get(.keyword).?, 0x123456);
-    try expectColor(mine.ui.bg_status, 0x654321);
-
-    const dracula = themes.resolve("dracula", &customs).?;
-    try expectColor(dracula.syntax.colors.get(.string).?, 0x010203);
-    try expectColor(dracula.syntax.colors.get(.keyword).?, 0xff79c6);
-
-    // A loop never resolves.
-    try testz.expectTrue(themes.resolve("a", &customs) == null);
-}
+const RoleColor = @import("glyphwire").Color;
 
 pub fn themeConfigNameAndTablesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     {
+        // No `theme`: zoe follows the window's.
+        var cfg = try parseConf(alloc, "config = { page_lines = 3 }");
+        defer cfg.deinit();
+        try testz.expectTrue(cfg.ownTheme() == null);
+    }
+    {
         var cfg = try parseConf(alloc, "config = { theme = \"tokyo-night\" }");
         defer cfg.deinit();
-        try testz.expectEqualStr(cfg.theme.name, "tokyo-night");
-        try expectColor(cfg.theme.ui.bg_buffer, 0x1a1b26);
+        const t = cfg.ownTheme().?;
+        try testz.expectEqualStr(t.name, "tokyo-night");
+        try testz.expectTrue(t.roleColor(.bg).eql(themes.rgb(0x1a1b26)));
     }
     {
         // The old form -- a bare table of capture colours -- still works,
         // as overrides on `default`.
         var cfg = try parseConf(alloc, "config = { theme = { keyword = \"#010203\" } }");
         defer cfg.deinit();
-        try testz.expectEqualStr(cfg.theme.name, themeconf.table_theme_name);
-        try expectColor(cfg.theme.syntax.colors.get(.keyword).?, 0x010203);
-        try expectColor(cfg.theme.syntax.colors.get(.string).?, 0x98c379);
+        const t = cfg.ownTheme().?;
+        try testz.expectEqualStr(t.name, themeconf.table_theme_name);
+        try testz.expectTrue(t.roleColor(.keyword).eql(themes.rgb(0x010203)));
+        try testz.expectTrue(t.roleColor(.string).eql(themes.rgb(0x98c379)));
     }
     {
         var cfg = try parseConf(alloc,
@@ -4330,28 +4259,23 @@ pub fn themeConfigNameAndTablesTest(_: std.Io, alloc: std.mem.Allocator) !void {
             \\}
         );
         defer cfg.deinit();
-        try testz.expectEqualStr(cfg.theme.name, "paper");
-        try testz.expectFalse(cfg.theme.dark);
-        try testz.expectEqualStr(cfg.theme.panel_style, "panel_light");
-        try expectColor(cfg.theme.ui.bg_buffer, 0xfafafa);
+        const t = cfg.ownTheme().?;
+        try testz.expectEqualStr(t.name, "paper");
+        try testz.expectFalse(t.dark);
+        try testz.expectEqualStr(t.panel_style, "panel_light");
+        // zoe's old `ui` names still land on their roles.
+        try testz.expectTrue(t.roleColor(.bg).eql(themes.rgb(0xfafafa)));
         // Kept for `:theme`.
-        try testz.expectEqual(cfg.custom_themes.len, 1);
+        try testz.expectTrue(cfg.findTheme("paper") != null);
+        try testz.expectTrue(cfg.findTheme("nord") != null);
+        try testz.expectTrue(cfg.findTheme("nope") == null);
     }
     {
         // An unknown name falls back to `default` rather than failing.
         var cfg = try parseConf(alloc, "config = { theme = \"nope\" }");
         defer cfg.deinit();
-        try testz.expectEqualStr(cfg.theme.name, "default");
+        try testz.expectEqualStr(cfg.ownTheme().?.name, "default");
     }
-}
-
-pub fn themeGrepReadsZoeConfTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var arena: std.heap.ArenaAllocator = .init(alloc);
-    defer arena.deinit();
-    const t = themeconf.fromSource(arena.allocator(), alloc, "config = { theme = \"gruvbox-dark\", page_lines = 3 }");
-    try testz.expectEqualStr(t.name, "gruvbox-dark");
-    const broken = themeconf.fromSource(arena.allocator(), alloc, "config = {");
-    try testz.expectEqualStr(broken.name, "default");
 }
 
 pub fn commandLineThemeReturnsOutcomeTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -4371,14 +4295,29 @@ pub fn commandLineThemeReturnsOutcomeTest(_: std.Io, alloc: std.mem.Allocator) !
     }
 }
 
-pub fn syntaxSetThemeRecoloursKeptTreeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn syntaxThemeIsRoleReferencesTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Every coloured capture is its role, for the host to resolve.
+    const st = syntax.Theme.initDefault();
+    try testz.expectTrue(st.colorFor("keyword.function").?.eql(RoleColor.role(.keyword)));
+    try testz.expectTrue(st.colorFor("string.special.key").?.eql(RoleColor.role(.string_special)));
+    // `variable` and `punctuation` stay plain by default...
+    try testz.expectTrue(st.colorFor("variable") == null);
+    try testz.expectTrue(st.colorFor("punctuation.bracket") == null);
+    // ...until a theme colours them.
+    var t = themes.initDefault();
+    t.roles.set(.variable, .{ .slot = themes.slot(.normal, .red) });
+    const coloured = syntax.Theme.fromTheme(&t);
+    try testz.expectTrue(coloured.colorFor("variable").?.eql(RoleColor.role(.variable)));
+}
+
+pub fn syntaxSetThemeKeepsTreeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     if (!grammarsInstalled(io)) return;
 
     var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
     defer reg.deinit();
     const json = reg.get("json") orelse return error.GrammarMissing;
 
-    var hl = try syntax.Highlighter.init(alloc, themes.initDefault().syntax);
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
     defer hl.deinit();
     try hl.setLanguage("json", json);
     try hl.reparse("{ \"x\": 42 }");
@@ -4386,12 +4325,13 @@ pub fn syntaxSetThemeRecoloursKeptTreeTest(io: std.Io, alloc: std.mem.Allocator)
     var spans: std.ArrayList(syntax.Span) = .empty;
     defer spans.deinit(alloc);
     try hl.lineSpans(0, 11, &spans);
-    try expectColor((spanAt(spans.items, 7) orelse return error.NoSpanOverNumber).color, 0xd19a66);
+    try testz.expectTrue((spanAt(spans.items, 7) orelse return error.NoSpanOverNumber).color.eql(RoleColor.role(.number)));
 
     const gen = hl.generation;
-    hl.setTheme(themes.resolve("dracula", &.{}).?.syntax);
+    const dracula = themes.resolve("dracula", &.{}).?;
+    hl.setTheme(syntax.Theme.fromTheme(&dracula));
     // A span cache keyed on `generation` must notice.
     try testz.expectFalse(hl.generation == gen);
     try hl.lineSpans(0, 11, &spans);
-    try expectColor((spanAt(spans.items, 7) orelse return error.NoSpanOverNumber).color, 0xbd93f9);
+    try testz.expectTrue((spanAt(spans.items, 7) orelse return error.NoSpanOverNumber).color.eql(RoleColor.role(.number)));
 }
