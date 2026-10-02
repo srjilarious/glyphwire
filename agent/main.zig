@@ -246,7 +246,7 @@ fn sockReader(agent: *Agent, ch: *Channel) void {
     var buf: [mux.max_payload]u8 = undefined;
     while (true) {
         var data: [1][]u8 = .{&buf};
-        const n = ch.sock.read(io, &data) catch break;
+        const n = glyphwire.readSome(ch.sock, io, &data) catch break;
         if (n == 0) break;
         agent.trunk.sendData(ch.id, buf[0..n]) catch break;
     }
@@ -302,7 +302,7 @@ fn runAskpass(init: std.process.Init, prompt: []const u8) !void {
     var total: usize = 0;
     while (total < reply_buf.len) {
         var data: [1][]u8 = .{reply_buf[total..]};
-        const n = sock.read(io, &data) catch break;
+        const n = glyphwire.readSome(sock, io, &data) catch break;
         if (n == 0) break;
         total += n;
     }

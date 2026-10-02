@@ -2,9 +2,9 @@
 #
 # Repeatable Linux build of glyphwire with the pinned Zig toolchain.
 #
-# This does NOT install Zig. glyphwire's dev branch tracks an unreleased
-# Zig (see REQUIRED_ZIG below); install exactly that version yourself, put
-# it on PATH, then run this script. It verifies the toolchain, checks the
+# This does NOT install Zig. glyphwire pins an exact Zig release (see
+# REQUIRED_ZIG below); install exactly that version yourself, put it on
+# PATH, then run this script. It verifies the toolchain, checks the
 # few system prerequisites, primes the package cache and builds the
 # shipped programs.
 #
@@ -14,11 +14,10 @@
 set -euo pipefail
 
 # Keep this in step with build.zig.zon's `minimum_zig_version`.
-REQUIRED_ZIG="0.17.0-dev.1857+3c46da14d"
+REQUIRED_ZIG="0.17.0"
 
-# Where to get it: this exact dev build is pruned from ziglang.org, but the
-# mach project keeps it (nomination 2026.7.30-mach) on a permanent mirror.
-ZIG_TARBALL_URL="https://pkg.hexops.org/zig/zig-x86_64-linux-${REQUIRED_ZIG}.tar.xz"
+# Where to get it: tagged releases stay on ziglang.org.
+ZIG_TARBALL_URL="https://ziglang.org/download/${REQUIRED_ZIG}/zig-x86_64-linux-${REQUIRED_ZIG}.tar.xz"
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -38,7 +37,7 @@ if [ "$have_zig" != "$REQUIRED_ZIG" ] && [ "${BOOTSTRAP_SKIP_ZIG_CHECK:-}" != "1
   die "wrong Zig version.
   need:  ${REQUIRED_ZIG}
   found: ${have_zig}  ($(command -v zig))
-  Download the pinned build:
+  Download the pinned release:
     curl -fL '${ZIG_TARBALL_URL}' | tar -xJ
   and put its directory ahead of the current zig on PATH.
   (Set BOOTSTRAP_SKIP_ZIG_CHECK=1 to bypass this at your own risk.)"
