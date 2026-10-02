@@ -58,6 +58,7 @@ const finderpopup = @import("applib").finderpopup;
 const filetype = @import("applib").filetype;
 const homepath = @import("applib").homepath;
 const syntax = @import("applib").syntax;
+const themes = @import("applib").theme;
 const langconf = @import("langconf.zig");
 const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
@@ -119,70 +120,28 @@ const first_parse_budget_ms: i64 = 8;
 /// that a key typed meanwhile waits no longer than this.
 const parse_slice_ms: i64 = 10;
 
-// The palette. Flat and dark; the panes have to paint their own
-// background because a cell whose background is pure black draws nothing
-// (see `host/render.zig`), which would leave the shell's scrollback
-// showing through.
-const bg_buffer = Color{ .r = 24, .g = 24, .b = 29, .a = 255 };
-const bg_tree = Color{ .r = 20, .g = 20, .b = 25, .a = 255 };
-const bg_status = Color{ .r = 46, .g = 46, .b = 56, .a = 255 };
-const bg_cursor = Color{ .r = 220, .g = 220, .b = 230, .a = 255 };
-const bg_selected = Color{ .r = 48, .g = 62, .b = 84, .a = 255 };
-// Search matches. Amber rather than another blue so a `/` highlight is
-// never mistaken for a selection, and two weights of it: every match gets
-// the dim one, the match the cursor is on gets the bright one, which is
-// how you tell where `n` just landed in a screen full of hits.
-const bg_match = Color{ .r = 84, .g = 68, .b = 34, .a = 255 };
-const bg_match_current = Color{ .r = 150, .g = 116, .b = 42, .a = 255 };
-const fg_text = Color{ .r = 210, .g = 210, .b = 218, .a = 255 };
-const fg_dim = Color{ .r = 92, .g = 92, .b = 104, .a = 255 };
-const fg_dir = Color{ .r = 132, .g = 176, .b = 232, .a = 255 };
-/// A tree row that is only on screen because Ctrl+H is on -- a dotfile or
-/// something `.gitignore` excludes. Dimmed rather than marked, so the
-/// listing still reads as one list, and kept distinct for files and
-/// directories so the shape of the tree survives the dimming. Roughly
-/// halfway from the normal colour to the pane background, which is enough
-/// to be obvious next to a real entry and still readable on its own.
-const fg_hidden = Color{ .r = 112, .g = 112, .b = 120, .a = 255 };
-const fg_hidden_dir = Color{ .r = 84, .g = 108, .b = 142, .a = 255 };
-const fg_status = Color{ .r = 226, .g = 226, .b = 236, .a = 255 };
-const fg_mode = Color{ .r = 150, .g = 220, .b = 160, .a = 255 };
-const fg_error = Color{ .r = 240, .g = 140, .b = 140, .a = 255 };
-const fg_cursor = Color{ .r = 24, .g = 24, .b = 29, .a = 255 };
-// The space dots and tab arrows `:set whitespace=on` paints. Faint on
-// purpose: bright enough to read the indentation off, dim enough to
-// disappear when you stop looking for it. Not a theme group -- the theme
-// maps tree-sitter captures, and whitespace has none.
-const fg_whitespace = Color{ .r = 62, .g = 62, .b = 72, .a = 255 };
-// The tab strip. The active tab takes the buffer's own background so it
-// reads as the front of the pane below it, the way a tabbed window does;
-// the rest sit on a bar darker than either.
-const bg_tab_bar = Color{ .r = 16, .g = 16, .b = 20, .a = 255 };
-const bg_tab = Color{ .r = 34, .g = 34, .b = 41, .a = 255 };
+// The colours come from the theme (`Ui.th`, `applib/theme.zig`): every
+// pane paints its own background from it, because a cell whose
+// background is pure black draws nothing (see `host/render.zig`), which
+// would leave the shell's scrollback showing through.
 
-// The Ctrl+` shell panel: darker than the buffer, so it reads as a
-// terminal laid over the editor and not as more of it. Opaque for the
-// same reason -- the shell only writes the cells it uses.
-const bg_shell = Color{ .r = 14, .g = 15, .b = 18, .a = 255 };
-
-// The Ctrl+P finder popup (`applib/finderpopup.zig`, shared with
-// salacommander's F3): the `panel` nine-patch and a drop shadow, with
-// zoe's text colours.
-const finder_style: finderpopup.Style = .{
-    .text_fg = fg_text,
-    .dim_fg = fg_dim,
-    .max_cols = 84,
-    .max_rows = 20,
-};
-
-/// Diagnostic colours: the squiggle under the text, and the mark in the
-/// sign column. Red/amber/blue/grey by severity, which is the convention
-/// every editor and every compiler shares -- worth following exactly
-/// because it is read at a glance and never looked up.
-const fg_diag_error = Color{ .r = 232, .g = 92, .b = 92, .a = 255 };
-const fg_diag_warning = Color{ .r = 226, .g = 176, .b = 74, .a = 255 };
-const fg_diag_info = Color{ .r = 108, .g = 164, .b = 232, .a = 255 };
-const fg_diag_hint = Color{ .r = 132, .g = 132, .b = 148, .a = 255 };
+/// The Ctrl+P finder popup's look (`applib/finderpopup.zig`, shared with
+/// salacommander's F3): the theme's panel nine-patch and a drop shadow,
+/// with the theme's text colours.
+fn finderStyle(th: *const themes.Theme) finderpopup.Style {
+    return .{
+        .frame_style = th.panel_style,
+        .bg = th.ui.bg_popup,
+        .header_bg = th.ui.bg_finder_header,
+        .header_fg = th.ui.fg_finder_header,
+        .selected_bg = th.ui.bg_finder_selected,
+        .selected_fg = th.ui.fg_finder_selected,
+        .text_fg = th.ui.fg_text,
+        .dim_fg = th.ui.fg_dim,
+        .max_cols = 84,
+        .max_rows = 20,
+    };
+}
 
 /// The sign-column glyph. Solid for an error, hollow for everything else,
 /// so severity still reads on a display where the colours are hard to tell
@@ -194,18 +153,10 @@ const sign_other = "\u{25cb}"; // ○
 /// The hover popup's size limits, clamped to the pane like the finder's.
 const hover_max_cols: usize = 76;
 const hover_max_rows: usize = 14;
-const bg_hover = Color{ .r = 34, .g = 34, .b = 42, .a = 255 };
-const fg_hover = Color{ .r = 214, .g = 214, .b = 222, .a = 255 };
-/// A fenced code block in the popup sits on a slightly darker band, so a
-/// signature reads as a unit apart from the prose under it.
-const bg_hover_code = Color{ .r = 26, .g = 26, .b = 32, .a = 255 };
-const fg_hover_rule = Color{ .r = 80, .g = 80, .b = 96, .a = 255 };
-/// The colour of a `---` rule across the popup: the same shade as the
-/// `panel` nine-patch's border, which it joins on both sides.
-const fg_hover_border = Color{ .r = 104, .g = 112, .b = 140, .a = 255 };
-/// The popup's background and border: the nine-patch the finder's frame
-/// uses. `bg_hover` is the flat fallback for a host without it.
-const hover_panel_style = "panel";
+// The popup's background and border are the theme's `panel_style`
+// nine-patch, the one the finder's frame uses; `bg_popup` is the flat
+// fallback for a host without it.
+
 /// The rows the popup's drop shadow (`glyphwire.Shadow.dialog`, drawn by
 /// the host) reaches below it: `hoverRect` keeps that row clear of the line
 /// being described when the popup goes above the cursor.
@@ -223,11 +174,6 @@ const complete_max_cols: usize = 60;
 const complete_max_rows: usize = 10;
 /// The kind column (`fn`, `var`, `struct`), padded to this width.
 const complete_kind_cols: usize = 6;
-const bg_complete = Color{ .r = 34, .g = 34, .b = 42, .a = 255 };
-const bg_complete_selected = Color{ .r = 60, .g = 90, .b = 150, .a = 255 };
-const fg_complete_label = Color{ .r = 226, .g = 226, .b = 234, .a = 255 };
-const fg_complete_kind = Color{ .r = 140, .g = 170, .b = 220, .a = 255 };
-const fg_complete_detail = Color{ .r = 130, .g = 130, .b = 146, .a = 255 };
 
 /// How long typing has to pause before an identifier being typed asks for
 /// completions. A trigger character (`.`) doesn't wait. Short enough that
@@ -769,7 +715,7 @@ pub const Ui = struct {
     /// The hover layer's `hover_panel_style` nine-patch, covering the whole
     /// layer; its border lands in the popup's one-cell frame, which is left
     /// transparent. Null when the host has no such style: the layer then
-    /// paints `bg_hover` and the popup has no border.
+    /// paints `bg_popup` and the popup has no border.
     hover_panel_patch: ?glyphwire.NinePatchHandle,
     hover_rect: Bounds = .{},
     hover_dirty: bool = false,
@@ -793,7 +739,7 @@ pub const Ui = struct {
     /// moves onto another one.
     tab_tip_layer: glyphwire.LayerHandle,
     /// The layer's `hover_panel_style` nine-patch, as for the hover popup;
-    /// null draws it flat in `bg_hover`.
+    /// null draws it flat in `bg_popup`.
     tab_tip_patch: ?glyphwire.NinePatchHandle,
     tab_tip_index: ?usize = null,
     tab_tip_group: ?*Group = null,
@@ -882,12 +828,18 @@ pub const Ui = struct {
     /// The working directory before the last `:cd`, for `:cd -`. Owned.
     prev_cwd: ?[]u8 = null,
 
+    /// The colour theme everything is painted with: `zoe.conf.lua`'s
+    /// `theme` at startup, then whatever `:theme` switched to. Its strings
+    /// borrow from `hl_config`'s arena (or are static, for a built-in).
+    th: themes.Theme,
+
     /// tree-sitter syntax highlighting: the config, the grammar registry
     /// every buffer's highlighter resolves through, and the search path
-    /// it was built from. All null / empty when highlighting is off -- no
-    /// grammar directory resolved, or the config failed to load -- and
-    /// every buffer then renders in plain `fg_text`. `hl_config`'s arena
-    /// backs `grammars`' language table, so it outlives the registry.
+    /// it was built from. `grammars` is null when highlighting is off --
+    /// no grammar directory resolved -- and every buffer then renders in
+    /// plain `fg_text`; `hl_config` is the parsed config either way, and
+    /// its arena backs `grammars`' language table, so it outlives the
+    /// registry.
     /// Each buffer's own parse tree lives in its `Slot`. See applib/syntax.zig.
     hl_config: ?langconf.Config = null,
     grammars: ?syntax.Registry = null,
@@ -924,6 +876,12 @@ pub const Ui = struct {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
 
+        // The config comes first: its theme colours every layer created
+        // below. Owned here until `loadConfig` hands it to `self`.
+        var cfg_owned: ?langconf.Config = langconf.load(alloc, io, environ);
+        errdefer if (cfg_owned) |*c| c.deinit();
+        const th = cfg_owned.?.theme;
+
         // A dedicated context for the editor, shown immediately. From
         // here on every layer/split call on `client` targets it, not the
         // shell's context. The paired listener joins it too so its input
@@ -953,7 +911,7 @@ pub const Ui = struct {
         // resizes them to match the panes they landed in.
         const tree_layer = try client.createLayer(default_tree_cols, size.rows, 0);
         // The first editor group; `:vsplit` / `:split` add more.
-        const first_group = try makeGroup(alloc, client, 1, size);
+        const first_group = try makeGroup(alloc, client, &th, 1, size);
         errdefer alloc.destroy(first_group);
         const status_layer = try client.createLayer(size.cols, 1, 0);
 
@@ -962,8 +920,8 @@ pub const Ui = struct {
         // Each pane's resting colour, so a cell nothing has written yet
         // (a frame racing a resize) is the pane's colour rather than
         // whatever is behind zoe.
-        try client.setLayerBackground(tree_layer, bg_tree);
-        try client.setLayerBackground(status_layer, bg_status);
+        try client.setLayerBackground(tree_layer, th.ui.bg_tree);
+        try client.setLayerBackground(status_layer, th.ui.bg_status);
 
         // The Ctrl+` shell panel. `gw-shell --embed` draws its prompt and
         // its commands' output here, so it carries scrollback of its own
@@ -971,7 +929,7 @@ pub const Ui = struct {
         // the popup still composites over it, and outside the split tree:
         // `Panel.place` puts it across the bottom when it opens.
         const shell_layer = try client.createLayer(size.cols, 1, shellpanel.scrollback_rows);
-        try client.setLayerBackground(shell_layer, bg_shell);
+        try client.setLayerBackground(shell_layer, th.ui.bg_shell);
         try client.setLayerScrollbars(shell_layer, true, false);
         // Output the user may want to copy: the host's drag-to-select,
         // which zoe's own drag handling would otherwise never allow here.
@@ -986,23 +944,23 @@ pub const Ui = struct {
         // pane (creation order is the initial stacking -- see
         // `raise_layer` in docs/api.md) but under the hover and completion
         // popups below. It stays invisible until Ctrl+P.
-        var finder = try finderpopup.Popup.init(alloc, client, finder_style);
+        var finder = try finderpopup.Popup.init(alloc, client, finderStyle(&th));
         errdefer finder.deinit();
         // The hover popup, floating like the finder's layers and placed
         // against the cursor rather than the pane -- `hoverRect`.
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
         try client.setLayerVisible(hover_layer, false);
         try client.setLayerShadow(hover_layer, glyphwire.Shadow.dialog);
-        const hover_panel_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(hover_layer, 0, 0, 1, hover_max_cols, hover_panel_style) catch |err| blk: {
-            std.log.warn("zoe: no '{s}' nine-patch for the hover popup ({t}); drawing it flat", .{ hover_panel_style, err });
+        const hover_panel_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(hover_layer, 0, 0, 1, hover_max_cols, th.panel_style) catch |err| blk: {
+            std.log.warn("zoe: no '{s}' nine-patch for the hover popup ({t}); drawing it flat", .{ th.panel_style, err });
             break :blk null;
         };
-        if (hover_panel_patch == null) try client.setLayerBackground(hover_layer, bg_hover);
+        if (hover_panel_patch == null) try client.setLayerBackground(hover_layer, th.ui.bg_popup);
         // The completion popup: one more float, placed under the word being
         // completed (`completionRect`).
         const completion_layer = try client.createLayer(complete_max_cols, 1, 0);
         try client.setLayerVisible(completion_layer, false);
-        try client.setLayerBackground(completion_layer, bg_complete);
+        try client.setLayerBackground(completion_layer, th.ui.bg_popup);
         try client.setLayerShadow(completion_layer, glyphwire.Shadow.dialog);
         // The tab tooltip, last so it sits over everything: it hangs from
         // the tab strip over the top of the buffer and, for a long path,
@@ -1010,11 +968,11 @@ pub const Ui = struct {
         const tab_tip_layer = try client.createLayer(tab_tip_initial_cols, tabs.tip_rows, 0);
         try client.setLayerVisible(tab_tip_layer, false);
         try client.setLayerShadow(tab_tip_layer, glyphwire.Shadow.dialog);
-        const tab_tip_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(tab_tip_layer, 0, 0, tabs.tip_rows, tab_tip_initial_cols, hover_panel_style) catch |err| blk: {
-            std.log.warn("zoe: no '{s}' nine-patch for the tab tooltip ({t}); drawing it flat", .{ hover_panel_style, err });
+        const tab_tip_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(tab_tip_layer, 0, 0, tabs.tip_rows, tab_tip_initial_cols, th.panel_style) catch |err| blk: {
+            std.log.warn("zoe: no '{s}' nine-patch for the tab tooltip ({t}); drawing it flat", .{ th.panel_style, err });
             break :blk null;
         };
-        if (tab_tip_patch == null) try client.setLayerBackground(tab_tip_layer, bg_hover);
+        if (tab_tip_patch == null) try client.setLayerBackground(tab_tip_layer, th.ui.bg_popup);
 
         // The tree|editor split stays user-resizable, as do the splits
         // between editor groups. The column splits are not: what they
@@ -1054,6 +1012,7 @@ pub const Ui = struct {
             .cell_px_h = metrics.h,
             .environ = environ,
             .prof = .init(io, environ.get("ZOE_PROFILE")),
+            .th = th,
         };
         errdefer self.tree.deinit();
         errdefer self.layout.deinit();
@@ -1062,7 +1021,8 @@ pub const Ui = struct {
         // Best-effort: highlighting off is a valid state, never a reason
         // to fail bringing the editor up. Done before the first buffer,
         // which builds its own highlighter against what this leaves.
-        self.loadConfig(environ);
+        self.loadConfig(cfg_owned.?, environ);
+        cfg_owned = null;
 
         // After the config (which carries the server list) and before the
         // first buffer (which announces itself to whatever started).
@@ -1121,7 +1081,7 @@ pub const Ui = struct {
     /// buffer pane -- and the column split that stacks them. Its buffer
     /// list starts empty; the caller gives it its first tab before
     /// anything can draw it.
-    fn makeGroup(alloc: std.mem.Allocator, client: *glyphwire.Client, id: groups.GroupId, size: anytype) !*Group {
+    fn makeGroup(alloc: std.mem.Allocator, client: *glyphwire.Client, th: *const themes.Theme, id: groups.GroupId, size: anytype) !*Group {
         // Content sizes are provisional, like every pane's: the `layout`
         // that places the group resizes them.
         const tabs_layer = try client.createLayer(size.cols, 1, 0);
@@ -1142,8 +1102,8 @@ pub const Ui = struct {
         // host treat it as scrollable and route a shift+wheel over it
         // back as a `scroll_offset`.
         try client.setLayerScrollbars(tabs_layer, false, false);
-        try client.setLayerBackground(tabs_layer, bg_tab_bar);
-        try client.setLayerBackground(buffer_layer, bg_buffer);
+        try client.setLayerBackground(tabs_layer, th.ui.bg_tab_bar);
+        try client.setLayerBackground(buffer_layer, th.ui.bg_buffer);
 
         const col_split = try client.createSplit(.column, false);
         try client.setSplitChildren(col_split, &.{
@@ -1158,21 +1118,18 @@ pub const Ui = struct {
         return g;
     }
 
-    /// Loads `zoe.conf.lua` and resolves the grammar search path into a
-    /// registry. Any failure leaves all of it null, and every buffer then
-    /// renders unhighlighted -- each buffer's own `Highlighter` is built
-    /// against this in `newSlot`.
-    fn loadConfig(self: *Ui, environ: *const std.process.Environ.Map) void {
-        var cfg = langconf.load(self.alloc, self.io, environ);
-
-        const dirs = syntax.searchDirs(self.alloc, self.io, environ, cfg.grammar_dirs) catch {
-            cfg.deinit();
-            return;
-        };
+    /// Takes ownership of the loaded `zoe.conf.lua` and resolves the
+    /// grammar search path into a registry. A failure there leaves
+    /// `grammars` null, and every buffer then renders unhighlighted --
+    /// each buffer's own `Highlighter` is built against this in `newSlot`.
+    fn loadConfig(self: *Ui, cfg: langconf.Config, environ: *const std.process.Environ.Map) void {
+        // Kept even without grammars: the theme and the editor settings
+        // in it still apply, and `th` borrows from its arena.
+        self.hl_config = cfg;
+        const dirs = syntax.searchDirs(self.alloc, self.io, environ, cfg.grammar_dirs) catch return;
 
         self.hl_search_dirs = dirs;
         self.grammars = syntax.Registry.init(self.alloc, self.io, dirs, cfg.langs);
-        self.hl_config = cfg;
     }
 
     /// Tells glyphwire-host, once per mode change, what cadence to repeat
@@ -1391,7 +1348,7 @@ pub const Ui = struct {
             slot.ed.expand_tab = cfg.expand_tab;
             slot.ed.show_whitespace = cfg.show_whitespace;
 
-            if (syntax.Highlighter.init(self.alloc, cfg.theme)) |h| {
+            if (syntax.Highlighter.init(self.alloc, self.th.syntax)) |h| {
                 slot.hl = h;
                 // The highlighter resolves injected grammars through the
                 // shared registry; `injections` is the `zoe.conf.lua` switch.
@@ -1608,7 +1565,7 @@ pub const Ui = struct {
         errdefer if (fresh) |f| f.deinit(self.alloc);
 
         const size = try self.client.getSize();
-        const g = try makeGroup(self.alloc, self.client, self.next_group_id, size);
+        const g = try makeGroup(self.alloc, self.client, &self.th, self.next_group_id, size);
         self.next_group_id += 1;
         // Created after the popups and the shell panel, so the new layers
         // would composite over them; split panes never overlap one
@@ -3123,6 +3080,7 @@ pub const Ui = struct {
             .diag_step => |d| self.stepDiagnostic(d.forward),
             .lsp_status => |arg| self.lspStatus(arg),
             .diag_list => self.diagList(),
+            .theme => |arg| self.themeCommand(arg),
         }
     }
 
@@ -4163,11 +4121,10 @@ pub const Ui = struct {
         @memset(out, &.{});
         if (doc.blocks.len == 0) return out;
 
-        const cfg = self.hl_config orelse return out;
         const reg = if (self.grammars) |*g| g else return out;
         const fallback: ?[]const u8 = if (self.buf.hl) |*bh| bh.lang_name else null;
         if (self.hover_hl == null) {
-            self.hover_hl = syntax.Highlighter.init(self.alloc, cfg.theme) catch return out;
+            self.hover_hl = syntax.Highlighter.init(self.alloc, self.th.syntax) catch return out;
             // No injections: a hover's code block is a signature, and a
             // grammar nested in one is not worth the second parse.
             self.hover_hl.?.configureInjections(reg, false);
@@ -4264,6 +4221,84 @@ pub const Ui = struct {
             };
         self.gotoLineColumn(found.range.start.line, found.range.start.character);
         self.buf.ed.setStatus("{s}: {s}", .{ found.source, found.message });
+    }
+
+    /// `:theme` reports the current theme; `:theme <name>` switches to a
+    /// built-in or one of `zoe.conf.lua`'s `themes`.
+    fn themeCommand(self: *Ui, arg: ?[]const u8) void {
+        self.status_dirty = true;
+        const name = arg orelse {
+            self.buf.ed.setStatus("theme: {s}", .{self.th.name});
+            return;
+        };
+        const customs: []const themes.Custom = if (self.hl_config) |cfg| cfg.custom_themes else &.{};
+        const t = themes.resolve(name, customs) orelse {
+            self.buf.ed.setStatus("E185: Cannot find color scheme '{s}'", .{name});
+            return;
+        };
+        self.applyTheme(t) catch |err| {
+            self.buf.ed.setStatus("E: theme switch failed ({t})", .{err});
+            return;
+        };
+        self.buf.ed.setStatus("theme: {s}", .{self.th.name});
+    }
+
+    /// Repaints everything in `t`: the layers' resting backgrounds, the
+    /// popups' frames, and every highlighter's capture colours (their
+    /// parse trees are kept). The popups are closed rather than redrawn
+    /// in place; they come back in the new colours when next asked for.
+    fn applyTheme(self: *Ui, t: themes.Theme) !void {
+        const frame_changed = !std.mem.eql(u8, t.panel_style, self.th.panel_style);
+        self.th = t;
+        const c = self.client;
+
+        try c.setLayerBackground(self.tree_layer, t.ui.bg_tree);
+        try c.setLayerBackground(self.status_layer, t.ui.bg_status);
+        try c.setLayerBackground(self.shell.layer, t.ui.bg_shell);
+        try c.setLayerBackground(self.completion_layer, t.ui.bg_popup);
+        for (self.group_list.items) |g| {
+            try c.setLayerBackground(g.tabs_layer, t.ui.bg_tab_bar);
+            try c.setLayerBackground(g.buffer_layer, t.ui.bg_buffer);
+            g.buffer_dirty = true;
+            g.tabs_dirty = true;
+            for (g.buffers.items) |slot| {
+                if (slot.hl) |*h| h.setTheme(t.syntax);
+                slot.full_redraw = true;
+            }
+        }
+        if (self.hover_hl) |*h| h.setTheme(t.syntax);
+
+        _ = self.closeHover();
+        self.closeCompletion();
+        self.dismissTabTip();
+        if (frame_changed) {
+            self.hover_panel_patch = try self.swapPanelPatch(self.hover_layer, self.hover_panel_patch, 1, hover_max_cols);
+            self.tab_tip_patch = try self.swapPanelPatch(self.tab_tip_layer, self.tab_tip_patch, tabs.tip_rows, tab_tip_initial_cols);
+        }
+        try c.setLayerBackground(self.hover_layer, if (self.hover_panel_patch == null) t.ui.bg_popup else null);
+        try c.setLayerBackground(self.tab_tip_layer, if (self.tab_tip_patch == null) t.ui.bg_popup else null);
+        try self.finder.setStyle(finderStyle(&self.th));
+
+        self.tree_dirty = .full;
+        self.status_dirty = true;
+    }
+
+    /// Replaces a popup layer's panel nine-patch with the current theme's
+    /// `panel_style`, sized like `init` sizes it (the popup's own render
+    /// resizes it to fit). Null when the host has no such style, which
+    /// draws the popup flat.
+    fn swapPanelPatch(
+        self: *Ui,
+        layer: glyphwire.LayerHandle,
+        old: ?glyphwire.NinePatchHandle,
+        rows: usize,
+        cols: usize,
+    ) !?glyphwire.NinePatchHandle {
+        if (old) |p| try self.client.destroyNinePatch(layer, p);
+        return self.client.createNinePatch(layer, 0, 0, rows, cols, self.th.panel_style) catch |err| blk: {
+            std.log.warn("zoe: no '{s}' nine-patch for a popup ({t}); drawing it flat", .{ self.th.panel_style, err });
+            break :blk null;
+        };
     }
 
     /// `:lsp` / `:lsp restart`.
@@ -4381,12 +4416,12 @@ pub const Ui = struct {
     }
 
     /// The severity's colour, for the squiggle and the sign alike.
-    fn diagColor(severity: lsp.Severity) Color {
+    fn diagColor(self: *const Ui, severity: lsp.Severity) Color {
         return switch (severity) {
-            .err => fg_diag_error,
-            .warning => fg_diag_warning,
-            .information => fg_diag_info,
-            .hint => fg_diag_hint,
+            .err => self.th.ui.fg_diag_error,
+            .warning => self.th.ui.fg_diag_warning,
+            .information => self.th.ui.fg_diag_info,
+            .hint => self.th.ui.fg_diag_hint,
         };
     }
 
@@ -4655,7 +4690,7 @@ pub const Ui = struct {
                 } else {
                     const under = try self.cursorGrapheme();
                     defer self.alloc.free(under);
-                    try writeAt(batch, self.grp.buffer_layer, row, col, under, fg_cursor, bg_cursor);
+                    try writeAt(batch, self.grp.buffer_layer, row, col, under, self.th.ui.fg_cursor, self.th.ui.bg_cursor);
                 }
             }
         }
@@ -4936,11 +4971,11 @@ pub const Ui = struct {
         // wide, so the number's span starts right after it.
         const signs = self.signWidth();
         var sign: []const u8 = " ";
-        var sign_fg = fg_dim;
+        var sign_fg = self.th.ui.fg_dim;
         if (signs > 0 and !past_end) {
             if (self.diagSeverityForLine(line)) |sev| {
                 sign = if (sev == .err) sign_error else sign_other;
-                sign_fg = diagColor(sev);
+                sign_fg = self.diagColor(sev);
             }
         }
 
@@ -4953,7 +4988,7 @@ pub const Ui = struct {
             cursor_line,
             past_end,
         );
-        const fg = if (!past_end and line == cursor_line) fg_text else fg_dim;
+        const fg = if (!past_end and line == cursor_line) self.th.ui.fg_text else self.th.ui.fg_dim;
 
         // Sign and number as one write: the gutter is repainted for every
         // row a frame draws, and a write's fixed fields cost more than the
@@ -4967,7 +5002,7 @@ pub const Ui = struct {
             .layer = self.grp.buffer_layer,
             .row = r,
             .col = 0,
-            .bg = bg_buffer,
+            .bg = self.th.ui.bg_buffer,
         });
     }
 
@@ -4995,8 +5030,8 @@ pub const Ui = struct {
                 .layer = self.grp.buffer_layer,
                 .row = r,
                 .col = gutter,
-                .fg = fg_dim,
-                .bg = bg_buffer,
+                .fg = self.th.ui.fg_dim,
+                .bg = self.th.ui.bg_buffer,
                 .max_cols = cols,
                 .pad = true,
             });
@@ -5086,7 +5121,7 @@ pub const Ui = struct {
                 .rows = 1,
                 .cols = vis_hi - vis_lo,
                 .underline = .curly,
-                .underline_color = diagColor(e.severity),
+                .underline_color = self.diagColor(e.severity),
             });
         }
     }
@@ -5182,7 +5217,7 @@ pub const Ui = struct {
                     .layer = self.hover_layer,
                     .row = row,
                     .col = 0,
-                    .fg = fg_hover_border,
+                    .fg = self.th.ui.fg_popup_border,
                     .max_cols = r.cols,
                     .selectable = false,
                 });
@@ -5190,7 +5225,7 @@ pub const Ui = struct {
             }
 
             // Prose is transparent, so the panel is its background.
-            const bg: ?Color = if (kind == .code) bg_hover_code else null;
+            const bg: ?Color = if (kind == .code) self.th.ui.bg_popup_code else null;
             runs.clearRetainingCapacity();
             // The inner margin, in the row's own background so a code band
             // runs from frame to frame.
@@ -5198,7 +5233,7 @@ pub const Ui = struct {
             if (hr) |x| {
                 const line = h.doc.lines[x.line];
                 if (x.indent > 0) try runs.append(self.alloc, .{ .text = spaces[0..@min(x.indent, spaces.len)] });
-                try colorRuns(self.alloc, line.text, h.spans[x.line], x.start, x.end, fg_hover, &runs);
+                try colorRuns(self.alloc, line.text, h.spans[x.line], x.start, x.end, self.th.ui.fg_popup, &runs);
             }
             // One padded write inside the frame: `pad` fills the rest,
             // right margin included, so a code band runs edge to edge
@@ -5207,7 +5242,7 @@ pub const Ui = struct {
                 .layer = self.hover_layer,
                 .row = row,
                 .col = 1,
-                .fg = fg_hover,
+                .fg = self.th.ui.fg_popup,
                 .bg = bg,
                 .max_cols = r.cols - 2,
                 .pad = true,
@@ -5267,7 +5302,7 @@ pub const Ui = struct {
             .layer = self.tab_tip_layer,
             .row = 0,
             .col = 1,
-            .fg = fg_hover,
+            .fg = self.th.ui.fg_popup,
             .max_cols = r.cols - tabs.tip_chrome_cols,
             .pad = true,
         });
@@ -5327,7 +5362,7 @@ pub const Ui = struct {
         for (0..rows) |r| {
             const it = m.visible(r) orelse break;
             const selected = m.top + r == m.selected;
-            const bg = if (selected) bg_complete_selected else bg_complete;
+            const bg = if (selected) self.th.ui.bg_popup_selected else self.th.ui.bg_popup;
 
             const kind = complete.kindLabel(it.kind);
             const kn = @min(kind.len, complete_kind_cols);
@@ -5338,21 +5373,21 @@ pub const Ui = struct {
             var n: usize = 0;
             runs[n] = .{ .text = " " };
             n += 1;
-            runs[n] = .{ .text = &kind_buf, .fg = fg_complete_kind };
+            runs[n] = .{ .text = &kind_buf, .fg = self.th.ui.fg_popup_kind };
             n += 1;
-            runs[n] = .{ .text = it.label, .fg = fg_complete_label };
+            runs[n] = .{ .text = it.label, .fg = self.th.ui.fg_popup_label };
             n += 1;
             if (it.detail) |d| {
                 runs[n] = .{ .text = "  " };
                 n += 1;
-                runs[n] = .{ .text = d, .fg = fg_complete_detail };
+                runs[n] = .{ .text = d, .fg = self.th.ui.fg_popup_detail };
                 n += 1;
             }
             try batch.writeSpans(runs[0..n], .{
                 .layer = self.completion_layer,
                 .row = r,
                 .col = 0,
-                .fg = fg_complete_label,
+                .fg = self.th.ui.fg_popup_label,
                 .bg = bg,
                 .max_cols = cols,
                 .pad = true,
@@ -5407,7 +5442,7 @@ pub const Ui = struct {
                 text,
                 hit - ls,
                 hi - ls,
-                if (current) bg_match_current else bg_match,
+                if (current) self.th.ui.bg_match_current else self.th.ui.bg_match,
             );
         }
     }
@@ -5448,7 +5483,7 @@ pub const Ui = struct {
             r,
             self.gutterWidth() + vis_lo - self.buf.left_col,
             overlay.items,
-            fg_text,
+            self.th.ui.fg_text,
             bg,
         );
     }
@@ -5504,7 +5539,7 @@ pub const Ui = struct {
         defer overlay.deinit(self.alloc);
         try display.appendCols(self.alloc, &overlay, text, vis_lo, vis_hi - vis_lo, opts);
 
-        try writeAt(batch, self.grp.buffer_layer, r, gutter + vis_lo - self.buf.left_col, overlay.items, fg_text, bg_selected);
+        try writeAt(batch, self.grp.buffer_layer, r, gutter + vis_lo - self.buf.left_col, overlay.items, self.th.ui.fg_text, self.th.ui.bg_selected);
     }
 
     /// Paints buffer row `r` (buffer line `line`, whole text `text`) as
@@ -5638,7 +5673,7 @@ pub const Ui = struct {
             const color: ?Color = if (blanks)
                 null
             else if (cell.marker)
-                fg_whitespace
+                self.th.ui.fg_whitespace
             else
                 spanColorAt(spans, cell.src);
 
@@ -5700,13 +5735,13 @@ pub const Ui = struct {
         defer self.alloc.free(row_spans);
         for (ranges, row_spans, 0..) |rg, *sp, i| {
             const stop = if (i + 1 < ranges.len) ranges[i + 1].start else bytes.len;
-            sp.* = .{ .text = bytes[rg.start..stop], .fg = rg.color orelse fg_text };
+            sp.* = .{ .text = bytes[rg.start..stop], .fg = rg.color orelse self.th.ui.fg_text };
         }
         try batch.writeSpans(row_spans, .{
             .layer = self.grp.buffer_layer,
             .row = r,
             .col = self.gutterWidth() + start_dc - left,
-            .bg = bg_buffer,
+            .bg = self.th.ui.bg_buffer,
             .max_cols = if (pad_row) left + self.textCols() - start_dc else null,
             .pad = pad_row,
         });
@@ -5716,7 +5751,7 @@ pub const Ui = struct {
     /// not a run of spaces.
     fn writeSpaces(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize, col: usize, n: usize) !void {
         if (n == 0) return;
-        try batch.clearArea(.{ .layer = self.grp.buffer_layer, .row = r, .col = col, .rows = 1, .cols = n, .bg = bg_buffer });
+        try batch.clearArea(.{ .layer = self.grp.buffer_layer, .row = r, .col = col, .rows = 1, .cols = n, .bg = self.th.ui.bg_buffer });
     }
 
     /// Keeps the caret inside the buffer pane, both axes.
@@ -5832,7 +5867,7 @@ pub const Ui = struct {
         while (r < content_rows) : (r += 1) {
             const entry = self.tree.at(r);
             const selected = self.focus == .tree and r == self.tree.cursor;
-            const bg = if (selected) bg_selected else bg_tree;
+            const bg = if (selected) self.th.ui.bg_selected else self.th.ui.bg_tree;
 
             line.clearRetainingCapacity();
             if (entry) |e| {
@@ -5848,9 +5883,9 @@ pub const Ui = struct {
                     // extra, lesser entries rather than as a listing that
                     // mysteriously doubled in length.
                     .fg = if (e.hidden)
-                        (if (e.is_dir) fg_hidden_dir else fg_hidden)
+                        (if (e.is_dir) self.th.ui.fg_hidden_dir else self.th.ui.fg_hidden)
                     else
-                        (if (e.is_dir) fg_dir else fg_text),
+                        (if (e.is_dir) self.th.ui.fg_dir else self.th.ui.fg_text),
                     .bg = bg,
                     .max_cols = content_cols,
                     .pad = true,
@@ -5874,7 +5909,7 @@ pub const Ui = struct {
                     .foreground = true,
                 });
             } else {
-                try batch.clearArea(.{ .layer = self.tree_layer, .row = r, .rows = 1, .cols = content_cols, .bg = bg_tree });
+                try batch.clearArea(.{ .layer = self.tree_layer, .row = r, .rows = 1, .cols = content_cols, .bg = self.th.ui.bg_tree });
             }
         }
 
@@ -5899,10 +5934,10 @@ pub const Ui = struct {
         if (was.focused == focused and was.row == self.tree.cursor) return;
 
         if (was.focused) {
-            try batch.setBg(.{ .layer = self.tree_layer, .row = was.row, .rows = 1, .cols = cols, .bg = bg_tree });
+            try batch.setBg(.{ .layer = self.tree_layer, .row = was.row, .rows = 1, .cols = cols, .bg = self.th.ui.bg_tree });
         }
         if (focused) {
-            try batch.setBg(.{ .layer = self.tree_layer, .row = self.tree.cursor, .rows = 1, .cols = cols, .bg = bg_selected });
+            try batch.setBg(.{ .layer = self.tree_layer, .row = self.tree.cursor, .rows = 1, .cols = cols, .bg = self.th.ui.bg_selected });
         }
         self.tree_painted = .{ .row = self.tree.cursor, .focused = focused };
     }
@@ -5949,7 +5984,7 @@ pub const Ui = struct {
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(self.alloc);
 
-        try batch.clearArea(.{ .layer = self.grp.tabs_layer, .row = 0, .rows = 1, .bg = bg_tab_bar });
+        try batch.clearArea(.{ .layer = self.grp.tabs_layer, .row = 0, .rows = 1, .bg = self.th.ui.bg_tab_bar });
 
         for (self.grp.tab_spans.items, labels.items, 0..) |span, tab, i| {
             const active = i == self.grp.active;
@@ -5971,11 +6006,11 @@ pub const Ui = struct {
                 batch,
                 span.start,
                 text.items,
-                if (active and self.render_focused) fg_text else fg_dim,
-                if (active) bg_buffer else bg_tab,
+                if (active and self.render_focused) self.th.ui.fg_text else self.th.ui.fg_dim,
+                if (active) self.th.ui.bg_buffer else self.th.ui.bg_tab,
             );
             if (i + 1 < self.grp.tab_spans.items.len) {
-                try self.writeStripRun(batch, span.end, tabs.separator, fg_dim, bg_tab_bar);
+                try self.writeStripRun(batch, span.end, tabs.separator, self.th.ui.fg_dim, self.th.ui.bg_tab_bar);
             }
         }
     }
@@ -6042,7 +6077,7 @@ pub const Ui = struct {
 
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(self.alloc);
-        var fg = fg_status;
+        var fg = self.th.ui.fg_status;
 
         // A tree search takes the row ahead of everything else: it is the
         // only thing on screen that says what was typed, since the prefix
@@ -6053,7 +6088,7 @@ pub const Ui = struct {
             const prompt: []const u8 = if (f.scope == .deep) "/" else "find: ";
             const n = f.hits.items.len;
             if (n == 0) {
-                if (f.query.items.len > 0) fg = fg_error;
+                if (f.query.items.len > 0) fg = self.th.ui.fg_error;
                 try line.print(self.alloc, " {s}{s}  (no match)", .{ prompt, f.query.items });
             } else {
                 try line.print(self.alloc, " {s}{s}  [{d}/{d}]", .{ prompt, f.query.items, f.pick + 1, n });
@@ -6067,11 +6102,11 @@ pub const Ui = struct {
         } else if (self.buf.ed.mode == .search) {
             // `/foo` or `?foo`, in the error colour once the pattern
             // stops matching -- the same signal the tree's `/` gives.
-            if (self.buf.ed.search_failed) fg = fg_error;
+            if (self.buf.ed.search_failed) fg = self.th.ui.fg_error;
             try line.append(self.alloc, self.buf.ed.searchPrompt());
             try line.appendSlice(self.alloc, self.buf.ed.cmdline.text());
         } else if (self.buf.ed.status.items.len > 0) {
-            if (std.mem.startsWith(u8, self.buf.ed.status.items, "E")) fg = fg_error;
+            if (std.mem.startsWith(u8, self.buf.ed.status.items, "E")) fg = self.th.ui.fg_error;
             try line.appendSlice(self.alloc, self.buf.ed.status.items);
         } else {
             const pos = self.buf.ed.pos();
@@ -6112,7 +6147,7 @@ pub const Ui = struct {
             .row = 0,
             .col = 0,
             .fg = fg,
-            .bg = bg_status,
+            .bg = self.th.ui.bg_status,
             .max_cols = b.cols,
             .pad = true,
         };
@@ -6120,7 +6155,7 @@ pub const Ui = struct {
             const mode_end = 1 + mode_word.len;
             try batch.writeSpans(&.{
                 .{ .text = line.items[0..1] },
-                .{ .text = line.items[1..mode_end], .fg = fg_mode },
+                .{ .text = line.items[1..mode_end], .fg = self.th.ui.fg_mode },
                 .{ .text = line.items[mode_end..] },
             }, opts);
         } else {
@@ -6143,7 +6178,7 @@ pub const Ui = struct {
                     .layer = self.status_layer,
                     .row = 0,
                     .col = col,
-                    .fg = bg_status,
+                    .fg = self.th.ui.bg_status,
                     .bg = fg,
                 });
             }

@@ -10,7 +10,7 @@
 -- Every key is listed below at its built-in default, with every line
 -- commented out -- so copying this file verbatim changes nothing.
 -- Uncomment and edit only the keys you want to override. With no file at
--- all zoe highlights the bundled languages with its built-in dark theme,
+-- all zoe highlights the bundled languages with its `default` dark theme,
 -- embedded languages included.
 --
 -- Syntax: a plain Lua script (standard libraries open). Assign a single
@@ -18,9 +18,9 @@
 -- wrong type is logged and the default stands. Any parse error is logged
 -- and whatever parsed before it is kept.
 --
--- zoe.conf.lua carries syntax-highlighting and the editor's display
--- settings only. Buffer colours beyond the capture-group theme,
--- keybindings, and the pane layout are not configurable yet.
+-- zoe.conf.lua carries syntax-highlighting, the colour theme and the
+-- editor's display settings. Keybindings and the pane layout are not
+-- configurable yet. gw-grep reads this file too, for the theme alone.
 
 -- config = {
 --
@@ -190,31 +190,92 @@
 --
 --     ---- Theme --------------------------------------------------------
 --
---     -- Capture-group colours, "#rrggbb". Unset groups keep zoe's
---     -- built-in value; `variable` and `punctuation` are intentionally
---     -- left uncoloured (colouring every identifier and bracket is
---     -- noise). Names are tree-sitter highlight captures; a dotted name
---     -- falls back to its prefix when unset ("string.special.key" ->
---     -- "string.special" -> "string").
+--     -- The colour theme: the syntax colours *and* everything else zoe
+--     -- paints (panes, bars, tabs, cursor, selection, search matches,
+--     -- diagnostics, popups). `:theme <name>` switches at runtime and
+--     -- `:theme` alone names the current one. gw-grep reads this key
+--     -- (and `themes`) from this file so its results match the editor.
 --     --
---     -- The keys below are shown at their built-in defaults:
---     theme = {
---         comment      = "#5c6370",
---         keyword      = "#c678dd",
---         ["string"]   = "#98c379",
---         number       = "#d19a66",
---         boolean      = "#d19a66",
---         constant     = "#d19a66",
---         ["function"] = "#61afef",
---         type         = "#e5c07b",
---         constructor  = "#e5c07b",
---         operator     = "#56b6c2",
---         property     = "#e06c75",
---         module       = "#e5c07b",
---         label        = "#61afef",
---         attribute    = "#d19a66",
---         tag          = "#e06c75",
---         -- string.escape / string.special / escape:
---         ["string.escape"] = "#56b6c2",
+--     -- A name picks a built-in or one of `themes` below:
+--     --
+--     --   default              zoe's own dark palette (One Dark syntax)
+--     --   one-dark             Atom One Dark
+--     --   vscode-light         VS Code Light+
+--     --   github-dark          GitHub Dark Default
+--     --   github-light         GitHub Light Default
+--     --   catppuccin-mocha     catppuccin-macchiato   catppuccin-frappe
+--     --   catppuccin-latte     (light)
+--     --   tokyo-night
+--     --   solarized-dark       solarized-light
+--     --   darcula              JetBrains Darcula
+--     --   cobalt2              Wes Bos's Cobalt2
+--     --   dracula   nord   gruvbox-dark   monokai
+--     --
+--     -- An unknown name is logged and `default` is used.
+--     theme = "default",
+--
+--     -- Or a table, a theme of its own (`:theme config` gets back to it):
+--     --
+--     --   theme = {
+--     --       base = "github-dark",     -- start from this theme
+--     --                                 -- (default: "default")
+--     --       dark = true,              -- light or dark; picks the popup
+--     --                                 -- frame, flips derived blends
+--     --       panel_style = "panel",    -- popup nine-patch: "panel",
+--     --                                 -- "panel_light", or your own
+--     --                                 -- ~/.config/glyphwire/ninepatch/
+--     --                                 -- <name>.9.png
+--     --
+--     --       -- The 15 colours every other one is derived from. Changing
+--     --       -- one re-derives what is blended from it (bg -> tree,
+--     --       -- tab bar, match highlight...), except slots the base
+--     --       -- theme sets by hand.
+--     --       palette = {
+--     --           bg = "#0d1117", bg_dark = "#010409", bg_hi = "#21262d",
+--     --           fg = "#e6edf3", fg_dim = "#6e7681", comment = "#8b949e",
+--     --           selection = "#1f3b5a", cursor = "#2f81f7",
+--     --           red = "#f85149", orange = "#ffa657", yellow = "#d29922",
+--     --           green = "#3fb950", cyan = "#39c5cf", blue = "#58a6ff",
+--     --           purple = "#bc8cff",
+--     --       },
+--     --
+--     --       -- Any single UI colour, applied last:
+--     --       ui = {
+--     --           bg_buffer = "#...", bg_tree, bg_status, bg_tab_bar,
+--     --           bg_tab, bg_shell, fg_text, fg_dim, fg_dir, fg_hidden,
+--     --           fg_hidden_dir, fg_status, fg_mode, fg_error,
+--     --           fg_whitespace, bg_cursor, fg_cursor, bg_selected,
+--     --           bg_match, bg_match_current, fg_match (gw-grep),
+--     --           fg_diag_error, fg_diag_warning, fg_diag_info,
+--     --           fg_diag_hint, bg_popup, fg_popup, bg_popup_code,
+--     --           fg_popup_rule, fg_popup_border, bg_popup_selected,
+--     --           fg_popup_label, fg_popup_kind, fg_popup_detail,
+--     --           bg_finder_header, fg_finder_header,
+--     --           bg_finder_selected, fg_finder_selected,
+--     --       },
+--     --
+--     --       -- Every other key is a capture-group colour, applied last.
+--     --       -- Names are tree-sitter highlight captures; a dotted
+--     --       -- name falls back to its prefix when unset
+--     --       -- ("string.special.key" -> "string.special" -> "string").
+--     --       -- `variable` and `punctuation` are left uncoloured by
+--     --       -- every built-in (colouring every identifier and bracket
+--     --       -- is noise), but can be set here.
+--     --       keyword = "#ff7b72",
+--     --       ["string.escape"] = "#79c0ff",
+--     --       -- comment, keyword, string, string.escape, string.special,
+--     --       -- escape, number, boolean, character, constant,
+--     --       -- constant.builtin, function, function.builtin, type,
+--     --       -- type.builtin, constructor, operator, property, variable,
+--     --       -- variable.builtin, variable.parameter, module, label,
+--     --       -- attribute, tag, punctuation, punctuation.special,
+--     --       -- text.title, text.literal, text.uri, text.reference
+--     --   }
+--
+--     -- Named themes of your own, in the table shape above, for `theme`
+--     -- and `:theme` to pick. One named like a built-in replaces it;
+--     -- `base` naming itself starts from the built-in of that name.
+--     themes = {
+--         -- mine = { base = "nord", palette = { bg = "#262a33" } },
 --     },
 -- }

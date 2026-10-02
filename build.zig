@@ -70,6 +70,17 @@ pub fn build(b: *std.Build) void {
     grep_support_mod.addImport("glyphwire", glyphwire_mod);
     grep_support_mod.addImport("applib", applib_mod);
 
+    // Reading `config.theme` / `config.themes` from a Lua config (zoe,
+    // and gw-grep matching zoe's colours). Kept out of `applib` because
+    // it needs ziglua, which would otherwise drag the Lua C library into
+    // every program that uses `applib`. Its ziglua import is added below,
+    // next to the other Lua consumers.
+    const themeconf_mod = b.addModule("themeconf", .{
+        .root_source_file = b.path("applib/themeconf.zig"),
+    });
+    themeconf_mod.addImport("glyphwire", glyphwire_mod);
+    themeconf_mod.addImport("applib", applib_mod);
+
     // Windowless pieces of glyphwire-host (pixel/cell geometry, scrollbar
     // math, `host.conf.lua` value clamps, the key-repeat policy) so the
     // test runner can exercise them without standing up a window or a GL
@@ -97,6 +108,7 @@ pub fn build(b: *std.Build) void {
     // The Ctrl+P finder, `.gitignore` rule, text sniff, `:` line field,
     // keymap and shell panel it shares with salacommander.
     zoe_support_mod.addImport("applib", applib_mod);
+    zoe_support_mod.addImport("themeconf", themeconf_mod);
 
     // gmux's split-tree structure (pure) and its tiny Lua config, shared
     // by the `gmux` binary and its test runner -- same cross-directory-
@@ -244,6 +256,9 @@ pub fn build(b: *std.Build) void {
     read_support_mod.addImport("ziglua", ziglua_mod);
     // salacommander/config.zig (salacommander.conf.lua parser) is the sixth.
     salacommander_support_mod.addImport("ziglua", ziglua_mod);
+    // applib/themeconf.zig (the theme half of zoe.conf.lua, for zoe and
+    // gw-grep) is the seventh.
+    themeconf_mod.addImport("ziglua", ziglua_mod);
 
     // ── syntax highlighting (zoe, gw-grep) ──
     //
@@ -273,6 +288,7 @@ pub fn build(b: *std.Build) void {
     tests_exe.root_module.addImport("shell_support", shell_support_mod);
     tests_exe.root_module.addImport("ls_support", ls_support_mod);
     tests_exe.root_module.addImport("grep_support", grep_support_mod);
+    tests_exe.root_module.addImport("themeconf", themeconf_mod);
     tests_exe.root_module.addImport("host_support", host_support_mod);
     tests_exe.root_module.addImport("zoe_support", zoe_support_mod);
     tests_exe.root_module.addImport("gmux_support", gmux_support_mod);
@@ -621,6 +637,10 @@ pub fn build(b: *std.Build) void {
     grep_exe.root_module.addImport("glyphwire", glyphwire_mod);
     grep_exe.root_module.addImport("zargunaught", zargunaught_mod);
     grep_exe.root_module.addImport("applib", applib_mod);
+    // The theme from zoe.conf.lua, so results are coloured like the
+    // editor: themeconf -> ziglua, so the Lua C library goes on too.
+    grep_exe.root_module.addImport("themeconf", themeconf_mod);
+    grep_exe.root_module.linkLibrary(lua_lib);
     // applib/syntax.zig -> tree_sitter (the vendored C runtime) and the
     // `dlopen` of each grammar both need libc.
     grep_exe.root_module.link_libc = true;

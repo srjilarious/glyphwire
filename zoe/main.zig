@@ -210,6 +210,7 @@ pub fn main(init: std.process.Init) !void {
             .diag_step,
             .lsp_status,
             .diag_list,
+            .theme,
             => {},
             .write, .write_quit, .edit => |dest| try headlessSave(io, &ed, dest),
         }

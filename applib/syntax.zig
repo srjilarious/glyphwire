@@ -948,6 +948,28 @@ pub const Highlighter = struct {
         self.injections_enabled = enabled;
     }
 
+    /// Recolour with `theme`: re-resolves the capture colours of the
+    /// primary grammar and every compiled injected one, keeping the parse
+    /// trees, and bumps `generation` so a caller's span cache drops the
+    /// spans coloured with the old theme. On allocation failure the old
+    /// colours stay for that grammar.
+    pub fn setTheme(self: *Highlighter, theme: Theme) void {
+        self.theme = theme;
+        self.generation +%= 1;
+        if (self.query) |q| {
+            if (resolveCaptureColors(self.alloc, &self.theme, q)) |colors| {
+                self.alloc.free(self.capture_colors);
+                self.capture_colors = colors;
+            } else |_| {}
+        }
+        var it = self.compiled.valueIterator();
+        while (it.next()) |cl| {
+            const colors = resolveCaptureColors(self.alloc, &self.theme, cl.*.query) catch continue;
+            self.alloc.free(cl.*.capture_colors);
+            cl.*.capture_colors = colors;
+        }
+    }
+
     /// A language has been chosen (its query compiled).
     pub fn languageSet(self: *const Highlighter) bool {
         return self.query != null;

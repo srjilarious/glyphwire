@@ -86,6 +86,13 @@ def panel():
     return vertical_panel(24, 40, 8, 6, (44, 44, 54), (30, 30, 38), (104, 112, 140, 255))
 
 
+def panel_light():
+    # `panel` for light themes (applib/theme.zig picks it for any theme
+    # with `dark = false`): near-white falling off to a faint grey, under
+    # a soft grey border -- the colour `Ui.fg_popup_border` derives to.
+    return vertical_panel(24, 40, 8, 6, (252, 252, 253), (241, 242, 245), (184, 188, 200, 255))
+
+
 def box():
     # A thin rounded outline over a transparent middle, for framing
     # content on a layer that already has its own background.
@@ -97,7 +104,7 @@ def box():
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    for name, make in (("dialog", dialog), ("panel", panel), ("box", box)):
+    for name, make in (("dialog", dialog), ("panel", panel), ("panel_light", panel_light), ("box", box)):
         path = OUT / f"{name}.9.png"
         make().save(path)
         print(f"wrote {path}")

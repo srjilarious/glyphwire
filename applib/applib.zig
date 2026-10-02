@@ -42,6 +42,9 @@
 //!                (zoe, gw-hist, salacommander, gmux)
 //!   `syntax`     tree-sitter highlighting: grammar registry, theme,
 //!                per-line colour spans (zoe, gw-grep)
+//!   `theme`      the built-in colour themes and resolving a config's
+//!                own (zoe, gw-grep); the Lua half is the separate
+//!                `themeconf` module, see applib/themeconf.zig
 
 pub const lineedit = @import("lineedit.zig");
 pub const interrupt = @import("interrupt.zig");
@@ -60,5 +63,6 @@ pub const gridlayout = @import("gridlayout.zig");
 pub const icons = @import("icons.zig");
 pub const homepath = @import("homepath.zig");
 pub const syntax = @import("syntax.zig");
+pub const theme = @import("theme.zig");
 
 pub const LineEdit = lineedit.LineEdit;

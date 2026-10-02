@@ -5,7 +5,7 @@
 -- startup; assign a single global table named `config` and every key is
 -- optional -- with no config at all zoe highlights the nine bundled
 -- languages (zig, json, c, python, toml, lua, bash, markdown,
--- markdown_inline) with its built-in dark theme, embedded languages
+-- markdown_inline) with its `default` dark theme, embedded languages
 -- included. See zoe/zoe.conf.template.lua for the full annotated
 -- reference.
 
@@ -47,13 +47,21 @@ config = {
     -- How long the pointer rests on a tab before its full path pops up.
     tab_tooltip_delay_ms = 400,
 
-    -- A few capture-group colors; unset groups keep the built-in value.
+    -- A built-in theme by name: default, one-dark, vscode-light,
+    -- github-dark, github-light, catppuccin-mocha, catppuccin-macchiato,
+    -- catppuccin-frappe, catppuccin-latte, tokyo-night, solarized-dark,
+    -- solarized-light, darcula, cobalt2, dracula, nord, gruvbox-dark,
+    -- monokai. `:theme <name>` switches live; gw-grep follows this too.
+    --
+    -- Or a table: a built-in to start from plus the colors to change.
     theme = {
+        base = "tokyo-night",
         comment = "#6a7a86",
-        keyword = "#c678dd",
-        ["string"] = "#98c379",
-        number = "#d19a66",
-        type = "#e5c07b",
-        ["function"] = "#61afef",
+        ui = { bg_status = "#24283b" },
+    },
+
+    -- Your own named themes, for `theme = "..."` or `:theme ...`.
+    themes = {
+        dim = { base = "nord", palette = { bg = "#262a33" } },
     },
 }

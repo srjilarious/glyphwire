@@ -6,6 +6,7 @@ const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 
 const syntax = @import("applib").syntax;
+const themeconf = @import("themeconf");
 
 const rg = @import("rg.zig");
 const nodes_mod = @import("nodes.zig");
@@ -185,8 +186,15 @@ pub fn main(init: std.process.Init) !void {
         var client = connected;
         defer client.deinit();
 
+        // zoe's theme, from zoe.conf.lua, so results are coloured like
+        // the editor. The theme borrows its names from this arena.
+        var theme_arena: std.heap.ArenaAllocator = .init(alloc);
+        defer theme_arena.deinit();
+        const th = themeconf.loadZoeTheme(theme_arena.allocator(), alloc, io, init.environ_map);
+
         var opts: nodes_mod.Options = .{
             .ctx = .{ .before = before, .after = after },
+            .colors = .fromTheme(&th),
             .hits_collapsed = !args.hasOption("expand"),
             .files_collapsed = args.hasOption("collapse"),
         };
@@ -205,7 +213,7 @@ pub fn main(init: std.process.Init) !void {
         }
         var registry = syntax.Registry.init(alloc, io, dirs, &syntax.default_langs);
         defer registry.deinit();
-        var colours = try highlight.compute(alloc, io, &registry, syntax.Theme.initDefault(), files);
+        var colours = try highlight.compute(alloc, io, &registry, th.syntax, files);
         defer colours.deinit();
 
         opts.spans = colours.files;
