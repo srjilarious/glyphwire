@@ -145,4 +145,10 @@
 --         -- ["ctrl+up"] = "upToParentDir",
 --         -- ["delete"] = false,
 --     },
+--
+--     -- salacommander's own theme, overriding the window's (theme.lua) for this
+--     -- program alone; absent, it follows the window's. A name or a
+--     -- table, in the shapes theme.lua takes (see host/theme.template.lua),
+--     -- and it may name a theme theme.lua defines.
+--     theme = nil,
 -- }

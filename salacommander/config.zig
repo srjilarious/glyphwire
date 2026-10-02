@@ -20,7 +20,7 @@ const pane_mod = @import("pane.zig");
 const actions = @import("actions.zig");
 const openaction = @import("openaction.zig");
 
-const conf_name = "salacommander.conf.lua";
+pub const conf_name = "salacommander.conf.lua";
 
 pub const KeyOverride = struct {
     /// Owned.

@@ -64,54 +64,57 @@ const Direction = config_mod.Direction;
 const status_rows: usize = 1;
 
 /// Colors. Deliberately few: a reader is a picture on a background, and
-/// anything else competing for attention is noise.
-const bg_page = glyphwire.Color{ .r = 12, .g = 12, .b = 14 };
-const bg_status = glyphwire.Color{ .r = 28, .g = 28, .b = 34 };
-const fg_status = glyphwire.Color{ .r = 190, .g = 190, .b = 200 };
-const fg_dim = glyphwire.Color{ .r = 120, .g = 120, .b = 132 };
-const fg_warn = glyphwire.Color{ .r = 230, .g = 170, .b = 90 };
-/// The OCR dialog: a near-black panel so Japanese at cell size stays
-/// legible over whatever artwork it lands on, and a warm border that
-/// reads as "this is not part of the page".
-const bg_dialog = glyphwire.Color{ .r = 20, .g = 20, .b = 26 };
-const fg_dialog = glyphwire.Color{ .r = 232, .g = 232, .b = 238 };
+/// anything else competing for attention is noise. Theme roles and
+/// palette slots, resolved by the host against this context's theme --
+/// the window's, or `read.conf.lua`'s `theme`.
+const role = glyphwire.Color.role;
+const ansi = glyphwire.Color.ansi;
+const bg_page = role(.bg_dark);
+const bg_status = role(.status_bg);
+const fg_status = role(.status_fg);
+const fg_dim = role(.fg_dim);
+const fg_warn = role(.diag_warning);
+/// The OCR dialog: a solid panel so Japanese at cell size stays legible
+/// over whatever artwork it lands on.
+const bg_dialog = role(.dialog_bg);
+const fg_dialog = role(.dialog_fg);
 /// The panel's drawn border. Dimmer than its text so the frame reads as
 /// chrome rather than competing with the Japanese inside it.
-const fg_dialog_border = glyphwire.Color{ .r = 150, .g = 150, .b = 165 };
-/// The lookup panel's term/reading line -- same warm highlight as the
+const fg_dialog_border = role(.popup_border);
+/// The lookup panel's term/reading line -- the same highlight as the
 /// current OCR block's outline, so the two feel like one interaction.
-const fg_lookup_term = glyphwire.Color{ .r = 250, .g = 205, .b = 90 };
+const fg_lookup_term = role(.match);
 /// A dictionary tag badge's text; `tagBg` gives its background.
-const fg_tag = glyphwire.Color{ .r = 240, .g = 240, .b = 245 };
+const fg_tag = role(.fg_strong);
 
-/// A tag badge's background by its category (`dict.Tag.category`), muted
-/// enough that light text reads on all of them. Part of speech, the most
-/// common badge by far, gets the quietest one.
+/// A tag badge's background by its category (`dict.Tag.category`): the
+/// dim palette row, muted enough that light text reads on all of them.
+/// Part of speech, the most common badge by far, gets blue.
 fn tagBg(category: []const u8) glyphwire.Color {
     const Pair = struct { []const u8, glyphwire.Color };
     const table = [_]Pair{
         // Structured-content sense tags (Jitendex).
-        .{ "part-of-speech-info", .{ .r = 58, .g = 74, .b = 110 } },
-        .{ "misc-info", .{ .r = 128, .g = 84, .b = 36 } },
-        .{ "field-info", .{ .r = 40, .g = 104, .b = 72 } },
-        .{ "dialect-info", .{ .r = 108, .g = 60, .b = 124 } },
-        .{ "lang-source-wasei", .{ .r = 36, .g = 102, .b = 112 } },
+        .{ "part-of-speech-info", ansi(.dim, .blue) },
+        .{ "misc-info", ansi(.dim, .yellow) },
+        .{ "field-info", ansi(.dim, .green) },
+        .{ "dialect-info", ansi(.dim, .magenta) },
+        .{ "lang-source-wasei", ansi(.dim, .cyan) },
         // `tag_bank` categories on the headword.
-        .{ "popular", .{ .r = 150, .g = 52, .b = 102 } },
-        .{ "frequent", .{ .r = 118, .g = 64, .b = 140 } },
-        .{ "archaism", .{ .r = 88, .g = 88, .b = 100 } },
-        .{ "expression", .{ .r = 128, .g = 72, .b = 52 } },
+        .{ "popular", ansi(.dim, .red) },
+        .{ "frequent", ansi(.dim, .magenta) },
+        .{ "archaism", ansi(.dim, .white) },
+        .{ "expression", ansi(.dim, .yellow) },
     };
     for (table) |p| if (std.mem.eql(u8, p[0], category)) return p[1];
-    return .{ .r = 72, .g = 72, .b = 86 };
+    return ansi(.normal, .black);
 }
 
 /// The region hints drawn over the page (`o`). Written with a transparent
 /// background so the artwork still shows around the box glyphs.
-const fg_hint = glyphwire.Color{ .r = 120, .g = 200, .b = 235 };
+const fg_hint = ansi(.bright, .cyan);
 /// The block currently in the dialog, outlined whether hints are on or
 /// not -- it is the answer to "which bubble am I reading".
-const fg_hint_current = glyphwire.Color{ .r = 250, .g = 205, .b = 90 };
+const fg_hint_current = role(.match);
 /// The Anki crop overlay: everything outside the box is shaded with a
 /// translucent black, so the part that goes on the card is the part
 /// still at full brightness.
@@ -474,6 +477,9 @@ pub const Ui = struct {
             layout: mokuro.Layout = .auto,
             config_dir: ?[]const u8 = null,
             ai_api_key: ?[]const u8 = null,
+            /// `read.conf.lua`'s own `theme`, or null to follow the
+            /// window's (`themeconf.programTheme`).
+            theme: ?glyphwire.theme.Theme = null,
         },
     ) !*Ui {
         const self = try alloc.create(Ui);
@@ -487,6 +493,7 @@ pub const Ui = struct {
         errdefer client.destroyContext(context) catch {};
         try listener.attachContext(context);
         try client.setContextTitle("gw-read");
+        if (start.theme) |t| try client.setTheme(&t);
         // Nothing here takes typed text, so there's nowhere for a caret
         // to point.
         try client.setCaretVisible(false);

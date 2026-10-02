@@ -20,9 +20,144 @@ const core = @import("core.zig");
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
 
-/// An RGBA color on the wire. `a` defaults to fully opaque so a client
-/// can send `{r,g,b}` and omit it.
-pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
+/// A color on the wire: RGBA, or a reference to a theme palette slot
+/// (`{"slot": 9}`, 0-23) or role (`{"role": "keyword"}`) that the host
+/// resolves against the context's theme -- see `core.theme`. `a`
+/// defaults to fully opaque so a client can omit it, and applies to a
+/// reference too.
+///
+/// Serialized compactly by hand (`jsonStringify`): a reference goes out
+/// as just `slot`/`role` (plus `a` when it isn't 255), unless `resolved`
+/// is set -- which only `get_cells` does, to report the RGBA the
+/// reference resolved to alongside the reference itself.
+pub const Color = struct {
+    r: u8 = 0,
+    g: u8 = 0,
+    b: u8 = 0,
+    a: u8 = 255,
+    slot: ?u8 = null,
+    role: ?[]const u8 = null,
+    /// `r`/`g`/`b`/`a` hold what a reference resolved to; send them too.
+    /// Never read off the wire.
+    resolved: bool = false,
+
+    pub fn jsonStringify(self: Color, jw: anytype) !void {
+        try jw.beginObject();
+        const is_ref = self.slot != null or self.role != null;
+        if (!is_ref or self.resolved) {
+            try jw.objectField("r");
+            try jw.write(self.r);
+            try jw.objectField("g");
+            try jw.write(self.g);
+            try jw.objectField("b");
+            try jw.write(self.b);
+            try jw.objectField("a");
+            try jw.write(self.a);
+        } else if (self.a != 255) {
+            try jw.objectField("a");
+            try jw.write(self.a);
+        }
+        if (self.slot) |s| {
+            try jw.objectField("slot");
+            try jw.write(s);
+        }
+        if (self.role) |r| {
+            try jw.objectField("role");
+            try jw.write(r);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ColorError = error{
+    /// A colour's `slot` was outside 0-23, or a theme slot was given as a
+    /// reference rather than a colour.
+    InvalidColor,
+    /// A colour's `role` isn't a `core.theme.Role` name.
+    UnknownColorRole,
+};
+
+/// A wire colour as a `core.Color`: RGB, or a slot / role reference.
+pub fn colorFromWire(c: Color) ColorError!core.Color {
+    if (c.slot) |s| {
+        if (s >= core.theme.slot_count) return ColorError.InvalidColor;
+        return core.Color.slot(@intCast(s)).withAlpha(c.a);
+    }
+    if (c.role) |name| {
+        const r = core.theme.roleByName(name) orelse return ColorError.UnknownColorRole;
+        return core.Color.role(r).withAlpha(c.a);
+    }
+    return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
+}
+
+/// A `core.Color` for the wire, a reference kept a reference.
+pub fn colorToWire(c: core.Color) Color {
+    return switch (c.ref) {
+        .none => .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a },
+        .slot => |s| .{ .a = c.a, .slot = s },
+        .role => |r| .{ .a = c.a, .role = @tagName(r) },
+    };
+}
+
+/// A theme role's value in `Color`'s shape: `{"slot": n}`, `{"role":
+/// "name"}`, or RGB.
+pub fn roleValueToWire(v: core.theme.RoleValue) Color {
+    return switch (v) {
+        .slot => |s| .{ .slot = s },
+        .role => |r| .{ .role = @tagName(r) },
+        .rgb => |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a },
+    };
+}
+
+pub fn roleValueFromWire(c: Color) ColorError!core.theme.RoleValue {
+    const col = try colorFromWire(c);
+    return switch (col.ref) {
+        .slot => |s| .{ .slot = s },
+        .role => |r| .{ .role = r },
+        .none => .{ .rgb = col },
+    };
+}
+
+/// A theme on the wire: `set_theme`'s `theme`, and (with `own`)
+/// `get_theme`'s result. `set_theme` starts from `default` and lays
+/// `slots` and `roles` over it, so a partial one is fine; `get_theme`
+/// always fills every slot and role. Roles are keyed by
+/// `core.theme.Role` name, each value read by `roleValueFromWire`.
+pub const ThemeWire = struct {
+    name: []const u8 = "",
+    dark: bool = true,
+    panel_style: ?[]const u8 = null,
+    slots: ?[]const Color = null,
+    roles: ?std.json.ArrayHashMap(Color) = null,
+    /// `get_theme` only: whether the context set this theme itself
+    /// rather than following the window's.
+    own: bool = false,
+
+    /// Applies this over `t` (`set_theme`'s reading). `t` borrows the
+    /// name strings.
+    pub fn applyTo(self: ThemeWire, t: *core.theme.Theme) ColorError!void {
+        t.name = self.name;
+        t.dark = self.dark;
+        t.panel_style = self.panel_style orelse
+            (if (self.dark) core.theme.panel_dark else core.theme.panel_light);
+        if (self.slots) |slots| {
+            for (slots, 0..) |c, i| {
+                if (i >= core.theme.slot_count) break;
+                const col = try colorFromWire(c);
+                // A slot is a colour, never a reference to one.
+                if (col.ref != .none) return ColorError.InvalidColor;
+                t.slots[i] = col;
+            }
+        }
+        if (self.roles) |roles| {
+            var it = roles.map.iterator();
+            while (it.next()) |e| {
+                const r = core.theme.roleByName(e.key_ptr.*) orelse return ColorError.UnknownColorRole;
+                t.roles.set(r, try roleValueFromWire(e.value_ptr.*));
+            }
+        }
+    }
+};
 
 /// An image background reference in a `get_cells` cell -- the handle, the
 /// sub-image pixel offset the cell samples from, and the uniform scale the

@@ -70,16 +70,16 @@ pub fn build(b: *std.Build) void {
     grep_support_mod.addImport("glyphwire", glyphwire_mod);
     grep_support_mod.addImport("applib", applib_mod);
 
-    // Reading `config.theme` / `config.themes` from a Lua config (zoe,
-    // and gw-grep matching zoe's colours). Kept out of `applib` because
-    // it needs ziglua, which would otherwise drag the Lua C library into
-    // every program that uses `applib`. Its ziglua import is added below,
-    // next to the other Lua consumers.
+    // Reading `config.theme` / `config.themes` from a Lua config: the
+    // shared `theme.lua` (the host, and every program for its `themes`)
+    // and a program's own override. Kept out of `applib` because it needs
+    // ziglua, which would otherwise drag the Lua C library into every
+    // program that uses `applib`. Its ziglua import is added below, next
+    // to the other Lua consumers.
     const themeconf_mod = b.addModule("themeconf", .{
         .root_source_file = b.path("applib/themeconf.zig"),
     });
     themeconf_mod.addImport("glyphwire", glyphwire_mod);
-    themeconf_mod.addImport("applib", applib_mod);
 
     // Windowless pieces of glyphwire-host (pixel/cell geometry, scrollbar
     // math, `host.conf.lua` value clamps, the key-repeat policy) so the
@@ -256,9 +256,13 @@ pub fn build(b: *std.Build) void {
     read_support_mod.addImport("ziglua", ziglua_mod);
     // salacommander/config.zig (salacommander.conf.lua parser) is the sixth.
     salacommander_support_mod.addImport("ziglua", ziglua_mod);
-    // applib/themeconf.zig (the theme half of zoe.conf.lua, for zoe and
-    // gw-grep) is the seventh.
+    // applib/themeconf.zig (`theme.lua`, and the `theme` key of each
+    // program's own config) is the seventh.
     themeconf_mod.addImport("ziglua", ziglua_mod);
+    // The programs whose own config can override the window's theme.
+    shell_support_mod.addImport("themeconf", themeconf_mod);
+    read_support_mod.addImport("themeconf", themeconf_mod);
+    salacommander_support_mod.addImport("themeconf", themeconf_mod);
 
     // ── syntax highlighting (zoe, gw-grep) ──
     //
@@ -369,6 +373,7 @@ pub fn build(b: *std.Build) void {
     shell_exe.root_module.addImport("shell_support", shell_support_mod);
     shell_exe.root_module.addImport("applib", applib_mod);
     shell_exe.root_module.addImport("ziglua", ziglua_mod);
+    shell_exe.root_module.addImport("themeconf", themeconf_mod);
     shell_exe.root_module.linkLibrary(lua_lib);
     shell_exe.root_module.link_libc = true;
     b.installArtifact(shell_exe);
@@ -465,6 +470,8 @@ pub fn build(b: *std.Build) void {
     });
     host_exe.root_module.addImport("glyphwire", glyphwire_mod);
     host_exe.root_module.addImport("host_eng", host_eng_mod);
+    // `theme.lua`: the window's theme.
+    host_exe.root_module.addImport("themeconf", themeconf_mod);
     b.installArtifact(host_exe);
 
     const run_host = b.addRunArtifact(host_exe);
@@ -590,6 +597,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     read_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    read_exe.root_module.addImport("themeconf", themeconf_mod);
     read_exe.root_module.addImport("zargunaught", zargunaught_mod);
     read_exe.root_module.addImport("read_support", read_support_mod);
     // read_support -> config.zig -> ziglua (read.conf.lua), so the final
@@ -637,10 +645,6 @@ pub fn build(b: *std.Build) void {
     grep_exe.root_module.addImport("glyphwire", glyphwire_mod);
     grep_exe.root_module.addImport("zargunaught", zargunaught_mod);
     grep_exe.root_module.addImport("applib", applib_mod);
-    // The theme from zoe.conf.lua, so results are coloured like the
-    // editor: themeconf -> ziglua, so the Lua C library goes on too.
-    grep_exe.root_module.addImport("themeconf", themeconf_mod);
-    grep_exe.root_module.linkLibrary(lua_lib);
     // applib/syntax.zig -> tree_sitter (the vendored C runtime) and the
     // `dlopen` of each grammar both need libc.
     grep_exe.root_module.link_libc = true;
@@ -667,6 +671,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     sala_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    sala_exe.root_module.addImport("themeconf", themeconf_mod);
     sala_exe.root_module.addImport("applib", applib_mod);
     sala_exe.root_module.addImport("zargunaught", zargunaught_mod);
     sala_exe.root_module.addImport("salacommander_support", salacommander_support_mod);

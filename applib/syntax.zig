@@ -207,7 +207,10 @@ const max_highlight_line: usize = 1 << 15;
 
 // ── Theme ───────────────────────────────────────────────────────────────
 
-/// Maps a tree-sitter highlight capture name to a foreground colour.
+/// Maps a tree-sitter highlight capture name to a foreground colour: a
+/// reference to the theme role of the same name (`keyword`, `string`,
+/// ...), which the host resolves -- so a theme switch recolours code
+/// without a re-highlight.
 ///
 /// Capture names are dotted and hierarchical (`string.special.key`); a
 /// name with no colour of its own falls back to its prefix
@@ -293,50 +296,28 @@ pub const Theme = struct {
         .{ "text.reference", .text_reference },
     });
 
-    fn rgb(hex: u24) Color {
-        return .{
-            .r = @intCast((hex >> 16) & 0xff),
-            .g = @intCast((hex >> 8) & 0xff),
-            .b = @intCast(hex & 0xff),
-        };
+    /// Every group as its role, except the two a theme leaves as plain
+    /// text by default -- `variable` and `punctuation` -- which stay
+    /// uncoloured (no span at all) unless `t` gives them a colour of
+    /// their own: colouring every identifier and bracket is noise, and a
+    /// span per identifier is a lot of spans.
+    pub fn fromTheme(t: *const glyphwire.theme.Theme) Theme {
+        var out = Theme{ .colors = std.EnumArray(Group, ?Color).initFill(null) };
+        inline for (comptime std.enums.values(Group)) |g| {
+            const r = @field(glyphwire.theme.Role, @tagName(g));
+            const plain = switch (t.roles.get(r)) {
+                .role => |to| to == .fg,
+                else => false,
+            };
+            out.colors.set(g, if (plain) null else Color.role(r));
+        }
+        return out;
     }
 
-    /// A flat, dark palette in the spirit of the one in `ui.zig` --
-    /// enough contrast between groups to read structure, nothing
-    /// fluorescent. `variable` and `punctuation` are left uncoloured on
-    /// purpose: colouring every identifier and bracket is noise.
+    /// `fromTheme` over the `default` theme.
     pub fn initDefault() Theme {
-        var t = Theme{ .colors = std.EnumArray(Group, ?Color).initFill(null) };
-        t.colors.set(.comment, rgb(0x5c6370));
-        t.colors.set(.keyword, rgb(0xc678dd));
-        t.colors.set(.string, rgb(0x98c379));
-        t.colors.set(.string_escape, rgb(0x56b6c2));
-        t.colors.set(.string_special, rgb(0x56b6c2));
-        t.colors.set(.escape, rgb(0x56b6c2));
-        t.colors.set(.number, rgb(0xd19a66));
-        t.colors.set(.boolean, rgb(0xd19a66));
-        t.colors.set(.character, rgb(0x98c379));
-        t.colors.set(.constant, rgb(0xd19a66));
-        t.colors.set(.constant_builtin, rgb(0xd19a66));
-        t.colors.set(.function, rgb(0x61afef));
-        t.colors.set(.function_builtin, rgb(0x61afef));
-        t.colors.set(.type, rgb(0xe5c07b));
-        t.colors.set(.type_builtin, rgb(0xe5c07b));
-        t.colors.set(.constructor, rgb(0xe5c07b));
-        t.colors.set(.operator, rgb(0x56b6c2));
-        t.colors.set(.property, rgb(0xe06c75));
-        t.colors.set(.variable_builtin, rgb(0xe06c75));
-        t.colors.set(.variable_parameter, rgb(0xd19a66));
-        t.colors.set(.module, rgb(0xe5c07b));
-        t.colors.set(.label, rgb(0x61afef));
-        t.colors.set(.attribute, rgb(0xd19a66));
-        t.colors.set(.tag, rgb(0xe06c75));
-        t.colors.set(.punctuation_special, rgb(0xc678dd));
-        t.colors.set(.text_title, rgb(0x61afef));
-        t.colors.set(.text_literal, rgb(0x98c379));
-        t.colors.set(.text_uri, rgb(0x56b6c2));
-        t.colors.set(.text_reference, rgb(0xe06c75));
-        return t;
+        const t = glyphwire.theme.initDefault();
+        return fromTheme(&t);
     }
 
     /// Override one group by its (undotted) name, e.g. `set("keyword",
@@ -2060,5 +2041,5 @@ fn colorEql(a: ?Color, b: ?Color) bool {
     if (a == null or b == null) return false;
     const x = a.?;
     const y = b.?;
-    return x.r == y.r and x.g == y.g and x.b == y.b and x.a == y.a;
+    return x.eql(y);
 }

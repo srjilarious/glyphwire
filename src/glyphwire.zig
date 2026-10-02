@@ -62,6 +62,8 @@ pub const noteSurface = client.noteSurface;
 pub const noteSurfaceFromEnviron = client.noteSurfaceFromEnviron;
 
 pub const Color = core.Color;
+pub const ColorRef = core.ColorRef;
+pub const theme = core.theme;
 pub const ImageHandle = core.ImageHandle;
 pub const MetadataHandle = core.MetadataHandle;
 pub const Metadata = core.Metadata;

@@ -506,13 +506,13 @@ pub fn grepHighlightParsesTheWholeFileTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqual(in_comment.len, 1);
     try testz.expectEqual(in_comment[0].start, 0);
     try testz.expectEqual(in_comment[0].end, 17);
-    try testz.expectEqual(in_comment[0].color.r, comment.r);
+    try testz.expectTrue(in_comment[0].color.eql(comment));
 
     // Real code: `int` gets the type colour, not the comment one.
     const code = got.files[0][1];
     try testz.expectTrue(code.len > 0);
     try testz.expectEqual(code[0].start, 0);
-    try testz.expectEqual(code[0].color.r, theme.colorFor("type").?.r);
+    try testz.expectTrue(code[0].color.eql(theme.colorFor("type").?));
 
     try testz.expectEqual(got.files[0][2].len, 0);
 }

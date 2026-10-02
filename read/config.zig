@@ -21,7 +21,7 @@ const ai = @import("ai.zig");
 const anki = @import("anki.zig");
 const mokuro = @import("mokuro.zig");
 
-const conf_name = "read.conf.lua";
+pub const conf_name = "read.conf.lua";
 
 /// Which way a page turn goes. Manga reads right-to-left, which is the
 /// default because that's what this reader was built for; western comics

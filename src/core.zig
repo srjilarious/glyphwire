@@ -7,14 +7,51 @@ const std = @import("std");
 /// a key that also produces committed text. Pure, same module.
 const key_encode = @import("key_encode.zig");
 
-/// Truecolor RGBA. The "use theme default" sentinel from decisions.md's
-/// color model isn't needed until a real theme system exists; add it when
-/// that lands.
+pub const theme = @import("theme.zig");
+
+/// Truecolor RGBA, or a reference to a theme palette slot or role (`ref`).
+/// A reference's `r`/`g`/`b` mean nothing: the host resolves it against
+/// the drawing context's theme (`theme.Theme.resolve`) when it renders,
+/// which is how a theme switch recolours what is already on screen. Its
+/// `a` still applies, multiplied into the theme colour's.
 pub const Color = struct {
     r: u8,
     g: u8,
     b: u8,
     a: u8 = 255,
+    ref: ColorRef = .none,
+
+    /// Palette slot `s` (0-23: dim, normal, bright ANSI hues).
+    pub fn slot(s: theme.Slot) Color {
+        return .{ .r = 0, .g = 0, .b = 0, .ref = .{ .slot = s } };
+    }
+
+    /// ANSI hue `hue` at `level`, as a slot reference.
+    pub fn ansi(level: theme.Level, hue: theme.Hue) Color {
+        return slot(theme.slot(level, hue));
+    }
+
+    /// Theme role `r` (`fg`, `keyword`, `table_header_bg`, ...).
+    pub fn role(r: theme.Role) Color {
+        return .{ .r = 0, .g = 0, .b = 0, .ref = .{ .role = r } };
+    }
+
+    pub fn withAlpha(self: Color, a: u8) Color {
+        var c = self;
+        c.a = a;
+        return c;
+    }
+
+    pub fn eql(a: Color, b: Color) bool {
+        return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a and std.meta.eql(a.ref, b.ref);
+    }
+};
+
+/// What a `Color` stands for besides its own RGB. See `Color`.
+pub const ColorRef = union(enum) {
+    none,
+    slot: theme.Slot,
+    role: theme.Role,
 };
 
 /// Server-generated reference to a loaded image, per the Object Model's
@@ -434,7 +471,7 @@ pub const UnderlineStyle = struct {
         if (a.color == null and b.color == null) return true;
         const ac = a.color orelse return false;
         const bc = b.color orelse return false;
-        return ac.r == bc.r and ac.g == bc.g and ac.b == bc.b and ac.a == bc.a;
+        return ac.eql(bc);
     }
 };
 
@@ -452,9 +489,10 @@ pub const Style = struct {
 /// other one, black included. An explicit `{r: 0, g: 0, b: 0}` from a
 /// client (whose wire `a` defaults to 255) is therefore an opaque black
 /// fill, not "the default" -- which is what makes `clear`'s `bg` and the
-/// layer `background` property usable with a black theme.
+/// layer `background` property usable with a black theme. `fg` is the
+/// theme's `fg` role, so unstyled text follows the theme.
 pub const default_style: Style = .{
-    .fg = .{ .r = 255, .g = 255, .b = 255 },
+    .fg = Color.role(.fg),
     .bg = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } },
 };
 
@@ -482,8 +520,10 @@ const SgrColorTarget = enum { fg, bg, ul };
 /// emits (compiler diagnostics in colour, `pip`/`npm` progress bars),
 /// rather than the full VT model a real terminal library would bring.
 ///
-/// **Colour, plus underline.** `bold` maps a basic (30-37) foreground to
-/// its bright (90-97) variant; `dim` darkens the resolved foreground;
+/// **Colour, plus underline.** The basic and bright colours (and 0-15 of
+/// `38;5;N`) are references to the theme's palette slots, not RGB --
+/// see `theme`. `bold` maps a basic (30-37) foreground to its bright
+/// (90-97) slot; `dim` moves a slot to its dim level (`SgrPen.dimmed`);
 /// `inverse` swaps foreground and background. All three are folded into the
 /// concrete `Cell.style` at write time -- no attribute bitflags on `Style`.
 /// Underline (`4`, `4:1`..`4:5`, `21`, `24`) and its colour (`58`, `59`)
@@ -512,23 +552,18 @@ pub const SgrPen = struct {
     /// colours -- it passes straight through to `Style.underline`.
     underline: UnderlineStyle = .{},
 
-    /// The 16 base ANSI colours (xterm's default palette). Index 0-7 are
-    /// the normal set, 8-15 the bright set.
-    pub const ansi16 = [16]Color{
-        .{ .r = 0, .g = 0, .b = 0 },       .{ .r = 205, .g = 0, .b = 0 },
-        .{ .r = 0, .g = 205, .b = 0 },     .{ .r = 205, .g = 205, .b = 0 },
-        .{ .r = 0, .g = 0, .b = 238 },     .{ .r = 205, .g = 0, .b = 205 },
-        .{ .r = 0, .g = 205, .b = 205 },   .{ .r = 229, .g = 229, .b = 229 },
-        .{ .r = 127, .g = 127, .b = 127 }, .{ .r = 255, .g = 0, .b = 0 },
-        .{ .r = 0, .g = 255, .b = 0 },     .{ .r = 255, .g = 255, .b = 0 },
-        .{ .r = 92, .g = 92, .b = 255 },   .{ .r = 255, .g = 0, .b = 255 },
-        .{ .r = 0, .g = 255, .b = 255 },   .{ .r = 255, .g = 255, .b = 255 },
-    };
+    /// ANSI colour `n` (0-7 normal, 8-15 bright) -- a reference to the
+    /// theme's palette slot for it, not a fixed RGB, so terminal output
+    /// takes the theme's colours.
+    pub fn ansi16(n: u4) Color {
+        return Color.slot(theme.ansiSlot(n));
+    }
 
-    /// Maps an xterm 256-colour index to RGB: 0-15 the base palette,
-    /// 16-231 the 6x6x6 cube, 232-255 the 24-step grey ramp.
+    /// Maps an xterm 256-colour index to a colour: 0-15 the theme's
+    /// palette slots (`ansi16`), 16-231 the 6x6x6 cube, 232-255 the
+    /// 24-step grey ramp.
     pub fn xterm256(idx: u8) Color {
-        if (idx < 16) return ansi16[idx];
+        if (idx < 16) return ansi16(@intCast(idx));
         if (idx < 232) {
             const levels = [6]u8{ 0, 95, 135, 175, 215, 255 };
             const c = idx - 16;
@@ -633,19 +668,19 @@ pub const SgrPen = struct {
                 3, 5, 9, 23, 25, 29 => {},
                 30...37 => {
                     self.fg_basic = @intCast(code - 30);
-                    self.fg = ansi16[code - 30];
+                    self.fg = ansi16(@intCast(code - 30));
                 },
                 39 => {
                     self.fg = null;
                     self.fg_basic = null;
                 },
-                40...47 => self.bg = ansi16[code - 40],
+                40...47 => self.bg = ansi16(@intCast(code - 40)),
                 49 => self.bg = null,
                 90...97 => {
                     self.fg_basic = null;
-                    self.fg = ansi16[8 + (code - 90)];
+                    self.fg = ansi16(@intCast(8 + (code - 90)));
                 },
-                100...107 => self.bg = ansi16[8 + (code - 100)],
+                100...107 => self.bg = ansi16(@intCast(8 + (code - 100))),
                 38, 48, 58 => {
                     // `38;5;N` (256) / `38;2;R;G;B` (truecolor), with the
                     // colon variants `38:5:N` and `38:2[:cs]:R:G:B`. Skip
@@ -722,16 +757,9 @@ pub const SgrPen = struct {
     ) struct { fg: Color, bg: ?Background, underline: UnderlineStyle } {
         var fg: Color = self.fg orelse arg_fg;
         if (self.bold) {
-            if (self.fg_basic) |idx| fg = ansi16[8 + @as(usize, idx)];
+            if (self.fg_basic) |idx| fg = Color.slot(theme.ansiSlot(@as(u4, idx) + 8));
         }
-        if (self.dim) {
-            fg = .{
-                .r = @intCast(@as(u16, fg.r) * 55 / 100),
-                .g = @intCast(@as(u16, fg.g) * 55 / 100),
-                .b = @intCast(@as(u16, fg.b) * 55 / 100),
-                .a = fg.a,
-            };
-        }
+        if (self.dim) fg = SgrPen.dimmed(fg);
 
         var bg: ?Background = if (self.bg) |c| .{ .color = c } else arg_bg;
 
@@ -744,8 +772,9 @@ pub const SgrPen = struct {
             };
             const new_bg = fg;
             // The default background is transparent (alpha 0); swapped
-            // into the foreground it has to become visible ink.
-            fg = .{ .r = bg_color.r, .g = bg_color.g, .b = bg_color.b };
+            // into the foreground it has to become visible ink -- the
+            // theme's background colour, which is what it showed.
+            fg = if (bg_color.a == 0 and bg_color.ref == .none) Color.role(.bg) else bg_color.withAlpha(255);
             bg = .{ .color = new_bg };
         }
 
@@ -759,6 +788,24 @@ pub const SgrPen = struct {
         if (self.underline.color) |c| ul.color = c;
 
         return .{ .fg = fg, .bg = bg, .underline = ul };
+    }
+
+    /// SGR `2`'s faint foreground. A slot steps down to its hue's dim
+    /// level, which is what the dim row of the palette is for, and the
+    /// default text colour becomes `fg_dim`. Any other role is left as it
+    /// is -- darkening it needs the theme, which the pen doesn't have --
+    /// and a literal is darkened directly.
+    fn dimmed(c: Color) Color {
+        return switch (c.ref) {
+            .slot => |s| Color.slot(theme.atLevel(s, .dim)).withAlpha(c.a),
+            .role => |r| if (r == .fg) Color.role(.fg_dim).withAlpha(c.a) else c,
+            .none => .{
+                .r = @intCast(@as(u16, c.r) * 55 / 100),
+                .g = @intCast(@as(u16, c.g) * 55 / 100),
+                .b = @intCast(@as(u16, c.b) * 55 / 100),
+                .a = c.a,
+            },
+        };
     }
 };
 
@@ -5286,7 +5333,7 @@ pub const Table = struct {
     }
 
     fn writeHeaderRow(self: *const Table, layer: *Layer, row: i64, content_start_col: usize) void {
-        const fg = self.style.header_fg orelse default_style.fg;
+        const fg = self.style.header_fg orelse Color.role(.table_header);
         var col = content_start_col;
         for (self.columns, 0..) |column, i| {
             if (i > 0) {
@@ -6704,12 +6751,22 @@ pub const Context = struct {
     /// `list_contexts` hands it to a shell's `jobs`. Capped at
     /// `max_title_len` bytes, cut on a UTF-8 boundary.
     title: std.ArrayList(u8) = .empty,
+    /// The theme every `Color` reference this context's cells hold is
+    /// resolved against (see `theme`). A copy of the session's theme until
+    /// the program sets its own with `set_theme` (`theme_own`); a session
+    /// theme change then passes this context by.
+    theme: theme.Stored,
+    theme_own: bool = false,
+    /// Bumped on every change to `theme`, so glyphwire-host rebuilds the
+    /// layer batches it resolved against the old one.
+    theme_gen: u64 = 0,
 
     pub const max_title_len = 128;
 
     pub fn init(alloc: std.mem.Allocator, width: usize, height: usize, scrollback_rows: usize) !Context {
         return .{
             .alloc = alloc,
+            .theme = .init(theme.initDefault()),
             .root = try Layer.init(alloc, width, height, scrollback_rows),
             .layers = std.AutoHashMap(LayerHandle, Layer).init(alloc),
             .splits = std.AutoHashMap(SplitHandle, Split).init(alloc),
@@ -6745,6 +6802,21 @@ pub const Context = struct {
         self.metadata.deinit();
         self.clipboard.deinit(self.alloc);
         self.title.deinit(self.alloc);
+    }
+
+    /// `set_theme`: this context's own theme from now on, whatever the
+    /// session's becomes.
+    pub fn setOwnTheme(self: *Context, t: theme.Theme) void {
+        self.theme.set(t);
+        self.theme_own = true;
+        self.theme_gen +%= 1;
+    }
+
+    /// `set_theme` with no theme: back to following the session's.
+    pub fn followTheme(self: *Context, session_theme: *const theme.Stored) void {
+        self.theme = session_theme.*;
+        self.theme_own = false;
+        self.theme_gen +%= 1;
     }
 
     /// `set_context_title`: replaces the title (see `title`), truncated to
@@ -8202,6 +8274,12 @@ pub const Session = struct {
     /// or acts on any field. See `src/profiler.zig`.
     profile: ProfileSnapshot = .{},
 
+    /// The window's theme: what every context that hasn't set its own
+    /// (`Context.theme_own`) resolves colours against. glyphwire-host
+    /// sets it from `theme.lua` (`setTheme`); a context created later
+    /// starts with a copy.
+    theme: theme.Stored,
+
     /// Wraps an already-created root context as the root pane's base. The
     /// caller keeps ownership of `root`'s memory and stays responsible for
     /// `root.deinit()`; this session frees only the contexts it creates
@@ -8229,6 +8307,7 @@ pub const Session = struct {
             .panes = panes,
             .pane_splits = std.AutoHashMap(PaneSplitHandle, PaneSplit).init(alloc),
             .input = InputState.init(alloc),
+            .theme = root.theme,
             .window_cols = root.root.width,
             .window_rows = root.root.height,
         };
@@ -8249,6 +8328,16 @@ pub const Session = struct {
         while (sit.next()) |sp| sp.deinit(self.alloc);
         self.pane_splits.deinit();
         self.input.deinit();
+    }
+
+    /// Replaces the window's theme, and with it the theme of every
+    /// context that hasn't set its own.
+    pub fn setTheme(self: *Session, t: theme.Theme) void {
+        self.theme.set(t);
+        var it = self.contexts.valueIterator();
+        while (it.next()) |ctx| {
+            if (!ctx.*.theme_own) ctx.*.followTheme(&self.theme);
+        }
     }
 
     /// The root context -- the asset source every other context falls
@@ -8608,6 +8697,7 @@ pub const Session = struct {
         const root = self.rootContext();
         ctx.* = try Context.init(self.alloc, self.window_cols, self.window_rows, scrollback_rows);
         errdefer ctx.deinit();
+        ctx.theme = self.theme;
         ctx.cell_px_w = root.cell_px_w;
         ctx.cell_px_h = root.cell_px_h;
         ctx.asset_fallback = root;
@@ -8987,6 +9077,7 @@ pub const Session = struct {
             scrollback_rows,
         );
         errdefer ctx.deinit();
+        ctx.theme = self.theme;
         ctx.cell_px_w = root.cell_px_w;
         ctx.cell_px_h = root.cell_px_h;
         ctx.asset_fallback = root;

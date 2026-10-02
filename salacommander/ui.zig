@@ -72,48 +72,49 @@ const lsfmt = @import("applib").format;
 const lsentries = @import("applib").entries;
 const gridlayout = @import("applib").gridlayout;
 
-fn rgb(r: u8, g: u8, b: u8) Color {
-    return .{ .r = r, .g = g, .b = b };
-}
+// Every colour is a theme role the host resolves against this context's
+// theme -- the window's, or `salacommander.conf.lua`'s `theme` -- so the
+// names below just say which role each part of the screen is.
+const role = Color.role;
 
-const bg_pane = rgb(24, 26, 31);
+const bg_pane = role(.bg);
 /// Every other listing row, a shade up from `bg_pane` so a wide pane's
 /// name and size columns stay on one line for the eye. Kept below the
 /// header/footer shade: a stripe shouldn't read as chrome.
-const bg_row_alt = rgb(28, 30, 36);
-const bg_header = rgb(30, 33, 39);
-const bg_footer = rgb(30, 33, 39);
-const bg_title_active = rgb(52, 101, 164);
-const bg_title_inactive = rgb(40, 44, 52);
-const bg_cursor = rgb(52, 101, 164);
-const bg_cursor_inactive = rgb(50, 54, 62);
-const bg_bar = rgb(24, 26, 31);
+const bg_row_alt = role(.table_alt_row_bg);
+const bg_header = role(.table_header_bg);
+const bg_footer = role(.status_bg);
+const bg_title_active = role(.title_bg);
+const bg_title_inactive = role(.title_inactive_bg);
+const bg_cursor = role(.list_cursor_bg);
+const bg_cursor_inactive = role(.list_cursor_inactive_bg);
+const bg_bar = role(.keybar_bg);
 /// The Ctrl+` shell panel: darker than a pane, so it reads as a terminal
 /// dropped over the file manager rather than as part of it.
-const bg_shell = rgb(14, 15, 18);
-const bg_bar_label = rgb(56, 132, 140);
-const bg_dialog = rgb(44, 48, 58);
-const bg_dialog_title = rgb(52, 101, 164);
-const bg_dialog_danger = rgb(150, 60, 60);
-const bg_input = rgb(24, 26, 31);
-const bg_button_focus = rgb(52, 101, 164);
-const bg_button = rgb(60, 65, 77);
+const bg_shell = role(.shell_bg);
+const bg_bar_label = role(.keybar_label_bg);
+const bg_dialog = role(.dialog_bg);
+const bg_dialog_title = role(.dialog_title_bg);
+const bg_dialog_danger = role(.danger_bg);
+const bg_input = role(.input_bg);
+const bg_button_focus = role(.button_focus_bg);
+const bg_button = role(.button_bg);
 
-const fg_title_active = rgb(240, 241, 245);
-const fg_title_inactive = rgb(150, 156, 168);
-const fg_header = rgb(229, 192, 123);
-const fg_file = rgb(205, 209, 216);
-const fg_dir = rgb(130, 170, 255);
-const fg_link = rgb(86, 182, 194);
-const fg_exec = rgb(152, 195, 121);
-const fg_other = rgb(198, 120, 221);
-const fg_marked = rgb(255, 204, 64);
-const fg_detail = rgb(120, 126, 138);
-const fg_footer = rgb(171, 178, 191);
-const fg_bar_key = rgb(220, 220, 220);
-const fg_bar_label = rgb(16, 18, 22);
-const fg_message = rgb(229, 192, 123);
-const fg_dialog = rgb(220, 223, 228);
+const fg_title_active = role(.title_fg);
+const fg_title_inactive = role(.title_inactive_fg);
+const fg_header = role(.table_header);
+const fg_file = role(.file);
+const fg_dir = role(.dir);
+const fg_link = role(.symlink);
+const fg_exec = role(.exec);
+const fg_other = role(.special);
+const fg_marked = role(.marked);
+const fg_detail = role(.fg_dim);
+const fg_footer = role(.status_fg);
+const fg_bar_key = role(.keybar_key);
+const fg_bar_label = role(.keybar_label);
+const fg_message = role(.message);
+const fg_dialog = role(.dialog_fg);
 
 // The F3 finder popup (`applib/finderpopup.zig`, zoe's Ctrl+P): the
 // panes' text colours, directories in their blue, and wider than zoe's --
@@ -239,6 +240,9 @@ pub const Ui = struct {
     /// all go to it -- and walked afresh on every open, as zoe's Ctrl+P is
     /// (see applib/finder.zig).
     finder: finderpopup.Popup,
+    /// The theme this context resolves against, for the F3 popup's frame
+    /// (`finder.style.frame_style` borrows its name).
+    th: glyphwire.theme.Stored,
     /// Type-to-find: what's been typed so far, moving the cursor to the
     /// first entry that starts with it. Cleared by anything that moves
     /// the cursor or changes the listing -- see `clearFind`.
@@ -280,6 +284,9 @@ pub const Ui = struct {
         profile: bool = false,
         /// Taken over by the `Ui`.
         cfg: config_mod.Config,
+        /// `salacommander.conf.lua`'s own `theme`, or null to follow the
+        /// window's (`themeconf.programTheme`).
+        theme: ?glyphwire.theme.Theme = null,
     };
 
     pub fn init(
@@ -312,6 +319,15 @@ pub const Ui = struct {
         // Nothing here takes text at a host caret; the dialog's field
         // draws its own.
         try client.setCaretVisible(false);
+        // Kept for the one thing the host can't recolour: the F3 popup's
+        // nine-patch frame, picked by name.
+        const th: glyphwire.theme.Stored = if (opts.theme) |t| blk: {
+            try client.setTheme(&t);
+            break :blk .init(t);
+        } else try client.getTheme();
+        self.th = th;
+        var popup_style = finder_style;
+        popup_style.frame_style = self.th.panelStyle();
 
         const size = try client.getSize();
         const metrics = try client.getCellMetrics();
@@ -326,7 +342,7 @@ pub const Ui = struct {
         // F3's popup, over the panes and the panel (it can't be opened
         // while the panel has the keyboard, but the panel stays drawn
         // underneath). Placed per frame by `Popup.render`.
-        var finder = try finderpopup.Popup.init(alloc, client, finder_style);
+        var finder = try finderpopup.Popup.init(alloc, client, popup_style);
         errdefer finder.deinit();
         // Created last so it composites over everything else, the panel
         // included: a modal question belongs on top of a shell.
@@ -361,6 +377,7 @@ pub const Ui = struct {
         try client.setLayerVisible(dialog_layer, false);
 
         self.* = .{
+            .th = th,
             .alloc = alloc,
             .io = io,
             .client = client,
