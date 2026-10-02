@@ -6,11 +6,12 @@
 //! `host.conf.lua` and `ls.conf.lua` use. It carries the settings zoe
 //! reads at startup:
 //! extra languages / extension remaps, extra grammar directories,
-//! capture-group colour overrides, an `injections` on/off switch, and
+//! the colour theme (`theme`/`themes`, read by `applib/themeconf.zig`),
+//! an `injections` on/off switch, and
 //! the editor's display options (`page_lines`, `line_numbers`,
 //! `tab_width`, `expand_tab`, `show_whitespace`, `tab_tooltip_delay_ms`).
 //! With no file present
-//! zoe runs on the built-in languages, the dark theme, injection
+//! zoe runs on the built-in languages, the `default` theme, injection
 //! enabled, and a 4-cell expanding Tab.
 //!
 //! Split out here (rather than in `ui.zig`) so `tests/zoe_tests.zig` can
@@ -21,11 +22,12 @@ const std = @import("std");
 const ziglua = @import("ziglua");
 const glyphwire = @import("glyphwire");
 const syntax = @import("applib").syntax;
+const themes = @import("applib").theme;
+const themeconf = @import("themeconf");
 const editor = @import("editor.zig");
 const lsp = @import("lsp.zig");
 
 const Lua = ziglua.Lua;
-const Color = glyphwire.Color;
 
 const conf_name = "zoe.conf.lua";
 
@@ -88,8 +90,14 @@ pub const Config = struct {
     langs: []const syntax.LangDef,
     /// Extra grammar directories from `config.grammar_dirs`, `~` expanded.
     grammar_dirs: []const []const u8,
-    /// The built-in theme with any `config.theme` overrides applied.
-    theme: syntax.Theme,
+    /// The theme to start in: `config.theme` resolved against the
+    /// built-ins and `config.themes` (see `applib/theme.zig`), or
+    /// `default`. Its syntax half is what every highlighter colours with.
+    theme: themes.Theme,
+    /// `config.themes` (and the table form of `config.theme`, as
+    /// `themeconf.table_theme_name`), kept so `:theme <name>` can switch
+    /// to one later.
+    custom_themes: []const themes.Custom = &.{},
     /// `config.injections` -- whether to run `injections.scm` and
     /// highlight embedded languages (code fences, Markdown inline).
     /// Default true; set `false` as an escape hatch.
@@ -168,7 +176,7 @@ pub fn defaults(gpa: std.mem.Allocator) Config {
         .arena = std.heap.ArenaAllocator.init(gpa),
         .langs = &syntax.default_langs,
         .grammar_dirs = &.{},
-        .theme = syntax.Theme.initDefault(),
+        .theme = themes.initDefault(),
         .injections = true,
         .line_numbers = .absolute,
     };
@@ -225,7 +233,9 @@ pub fn parseSource(
         return cfg;
     }
 
-    applyTheme(lua, &cfg.theme);
+    const parsed = themeconf.read(lua, a);
+    cfg.custom_themes = parsed.customs;
+    cfg.theme = parsed.resolveOrDefault();
     cfg.grammar_dirs = readGrammarDirs(lua, a, environ);
     cfg.langs = readLangs(lua, a);
     cfg.injections = readInjections(lua);
@@ -319,32 +329,6 @@ fn readInjections(lua: *Lua) bool {
     defer lua.pop(1);
     if (t != .boolean) return true;
     return lua.toBoolean(-1);
-}
-
-/// `config.theme = { keyword = "#c678dd", ... }` -> overrides on the
-/// built-in theme. Unknown group names and unparseable colours are
-/// skipped with a warning.
-fn applyTheme(lua: *Lua, theme: *syntax.Theme) void {
-    if (lua.getField(-1, "theme") != .table) {
-        lua.pop(1);
-        return;
-    }
-    defer lua.pop(1);
-
-    lua.pushNil();
-    while (lua.next(-2)) {
-        // key at -2, value at -1
-        defer lua.pop(1);
-        if (!lua.isString(-2) or !lua.isString(-1)) continue;
-        const key = lua.toString(-2) catch continue;
-        const val = lua.toString(-1) catch continue;
-        const color = parseHexColor(val) orelse {
-            std.log.warn("zoe: {s} theme.{s} = \"{s}\" is not a #rrggbb colour; ignored", .{ conf_name, key, val });
-            continue;
-        };
-        if (!theme.setByName(key, color))
-            std.log.warn("zoe: {s} theme.{s} is not a known highlight group; ignored", .{ conf_name, key });
-    }
 }
 
 /// `config.grammar_dirs = { "~/x", ... }`, `~` expanded against $HOME.
@@ -650,20 +634,4 @@ fn expandTilde(
     if (!std.mem.startsWith(u8, path, "~/")) return a.dupe(u8, path);
     const home = environ.get("HOME") orelse return a.dupe(u8, path);
     return std.fs.path.join(a, &.{ home, path[2..] });
-}
-
-/// `#rrggbb` or `rrggbb`.
-fn parseHexColor(s: []const u8) ?Color {
-    const hex = if (s.len > 0 and s[0] == '#') s[1..] else s;
-    if (hex.len != 6) return null;
-    const v = std.fmt.parseInt(u24, hex, 16) catch return null;
-    return .{
-        .r = @intCast((v >> 16) & 0xff),
-        .g = @intCast((v >> 8) & 0xff),
-        .b = @intCast(v & 0xff),
-    };
-}
-
-test {
-    _ = parseHexColor;
 }

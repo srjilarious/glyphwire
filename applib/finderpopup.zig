@@ -233,6 +233,35 @@ pub const Popup = struct {
         };
     }
 
+    /// Restyles the popup in place (zoe's `:theme`). A different
+    /// `frame_style` swaps the nine-patch: destroyed and re-created rather
+    /// than `update_nine_patch`ed, because an unknown style is only
+    /// reported to a request, and the popup then falls back to drawing
+    /// flat exactly as `init` does. Repaints on the next `render`.
+    pub fn setStyle(self: *Popup, style: Style) !void {
+        const frame_changed = !std.mem.eql(u8, style.frame_style, self.style.frame_style);
+        self.style = style;
+        self.dirty = true;
+        if (frame_changed) {
+            if (self.frame_patch) |p| try self.client.destroyNinePatch(self.frame_layer, p);
+            self.frame_patch = self.client.createNinePatch(
+                self.frame_layer,
+                0,
+                0,
+                style.min_rows + 2,
+                style.min_cols + 2,
+                style.frame_style,
+            ) catch |err| blk: {
+                std.log.warn("finder popup: no '{s}' nine-patch ({t}); drawing it flat", .{ style.frame_style, err });
+                break :blk null;
+            };
+            try self.client.setLayerShadow(self.frame_layer, if (self.frame_patch != null) glyphwire.Shadow.dialog else null);
+        }
+        const flat_bg: ?Color = if (self.frame_patch == null) style.bg else null;
+        try self.client.setLayerBackground(self.header_layer, flat_bg);
+        try self.client.setLayerBackground(self.list_layer, flat_bg);
+    }
+
     pub fn deinit(self: *Popup) void {
         if (self.finder) |*f| f.deinit();
         self.finder = null;

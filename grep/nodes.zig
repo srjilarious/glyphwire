@@ -37,6 +37,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 
 const syntax = @import("applib").syntax;
+const themes = @import("applib").theme;
 
 const rg = @import("rg.zig");
 
@@ -61,6 +62,21 @@ pub const Colors = struct {
     /// all the way. Aimed at a dark terminal background.
     dim_toward: glyphwire.Color = .{ .r = 28, .g = 28, .b = 32 },
     dim_amount: f32 = 0.35,
+
+    /// The colours from zoe's theme, so a grep reads like the editor:
+    /// paths are the file tree's directories, the counts and numbers its
+    /// dim text, and context rows dim towards the editor's background.
+    pub fn fromTheme(t: *const themes.Theme) Colors {
+        return .{
+            .path = t.ui.fg_dir,
+            .count = t.ui.fg_dim,
+            .line_number = t.ui.fg_dim,
+            .text = t.ui.fg_text,
+            .match = t.ui.fg_match,
+            .match_bg = t.ui.bg_match,
+            .dim_toward = t.ui.bg_buffer,
+        };
+    }
 
     /// `c` as a context row draws it.
     pub fn dim(self: Colors, c: glyphwire.Color) glyphwire.Color {
