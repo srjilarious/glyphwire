@@ -63,6 +63,6 @@ pub const gridlayout = @import("gridlayout.zig");
 pub const icons = @import("icons.zig");
 pub const homepath = @import("homepath.zig");
 pub const syntax = @import("syntax.zig");
-pub const theme = @import("theme.zig");
+pub const theme = @import("glyphwire").theme;
 
 pub const LineEdit = lineedit.LineEdit;

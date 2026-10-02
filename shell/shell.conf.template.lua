@@ -108,6 +108,19 @@
 -- }
 
 
+---- Theme -----------------------------------------------------------
+--
+-- theme(name_or_table) -- this shell's own colour theme, overriding the
+-- window's (theme.lua) for its pane: its prompt, its errors, and every
+-- program that draws inline in it (gw-ls, gw-grep, ANSI-coloured
+-- output). A name or a table, in the shapes theme.lua takes -- see
+-- host/theme.template.lua -- and it may name a theme theme.lua defines.
+-- Leave it out to follow the window's; `reload` picks up a change.
+--
+-- theme("nord")
+-- theme{ base = "nord", slots = { red = "#ff5555" } }
+
+
 ---- Directory-change hook (on) -------------------------------------
 --
 -- on{ chdir = { ... } } -- run a command after the shell's working
@@ -285,6 +298,11 @@
 -- >= dur_min_ms), or a `{var}` expression (shown only when it renders
 -- truthy against the command vars -- e.g. when = "{is_repo}", or
 -- "!{is_repo}").
+--
+-- fg / bg take "#rgb" / "#rrggbb", or a name the window's theme
+-- (theme.lua) resolves and keeps current across a theme switch: a
+-- palette slot ("blue", "dim_blue", "bright_blue", any ANSI hue) or a
+-- theme role ("status_bg", "accent", "title_bg", ...).
 --
 -- A `when` expression sees the command vars and {env:NAME} -- NOT the
 -- prompt fields.  {cwd}, {host}, {remote} and friends all render empty

@@ -6,7 +6,6 @@ const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 
 const syntax = @import("applib").syntax;
-const themeconf = @import("themeconf");
 
 const rg = @import("rg.zig");
 const nodes_mod = @import("nodes.zig");
@@ -186,15 +185,14 @@ pub fn main(init: std.process.Init) !void {
         var client = connected;
         defer client.deinit();
 
-        // zoe's theme, from zoe.conf.lua, so results are coloured like
-        // the editor. The theme borrows its names from this arena.
-        var theme_arena: std.heap.ArenaAllocator = .init(alloc);
-        defer theme_arena.deinit();
-        const th = themeconf.loadZoeTheme(theme_arena.allocator(), alloc, io, init.environ_map);
+        // Results draw in theme roles the host resolves; the theme itself
+        // is only needed to blend the dimmed context rows. gw-grep draws
+        // into the shell's context, so it is that context's theme.
+        const th = client.getTheme() catch glyphwire.theme.Stored.init(glyphwire.theme.initDefault());
 
         var opts: nodes_mod.Options = .{
             .ctx = .{ .before = before, .after = after },
-            .colors = .fromTheme(&th),
+            .colors = .fromTheme(&th.theme),
             .hits_collapsed = !args.hasOption("expand"),
             .files_collapsed = args.hasOption("collapse"),
         };
@@ -213,7 +211,7 @@ pub fn main(init: std.process.Init) !void {
         }
         var registry = syntax.Registry.init(alloc, io, dirs, &syntax.default_langs);
         defer registry.deinit();
-        var colours = try highlight.compute(alloc, io, &registry, th.syntax, files);
+        var colours = try highlight.compute(alloc, io, &registry, syntax.Theme.fromTheme(&th.theme), files);
         defer colours.deinit();
 
         opts.spans = colours.files;
@@ -358,7 +356,7 @@ fn draw(
 
     if (cap) |max| {
         var buf: [128]u8 = undefined;
-        try client.writeText(capNote(&buf, max), .{ .r = 230, .g = 180, .b = 80 }, null);
+        try client.writeText(capNote(&buf, max), glyphwire.Color.role(.message), null);
     }
 }
 

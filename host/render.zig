@@ -153,6 +153,9 @@ pub const LayerBatches = struct {
     /// modulated at draw time instead, which is why the factor is kept
     /// here rather than only consumed during the build.
     built_opacity: f32 = 1.0,
+    /// The context's `theme_gen` this was built under: every colour in
+    /// the batch was resolved against that theme.
+    built_theme_gen: u64 = 0,
 
     /// The layer's drop shadow (`core.Shadow`), bound to its cached
     /// texture (`Renderer.shadowTexture`). At most one entry; a list only
@@ -863,7 +866,7 @@ pub const Renderer = struct {
     ) void {
         const origin = geometry.contextOrigin(ctx);
         const root_view: usize = if (scroll.rootOwned(&ctx.root)) 0 else ctx.root.view_scroll;
-        self.syncOneLayer(eng, fa, .{ .context = ctx_handle, .layer = glyphwire.root_layer_handle }, &ctx.root, origin, root_view);
+        self.syncOneLayer(eng, fa, .{ .context = ctx_handle, .layer = glyphwire.root_layer_handle }, &ctx.root, origin, root_view, ctx);
 
         for (ctx.layer_order.items) |handle| {
             const layer = ctx.layers.getPtr(handle) orelse continue;
@@ -880,7 +883,7 @@ pub const Renderer = struct {
             // the live tail regardless is a bar that moves over content
             // that doesn't. The root layer two lines up has always been
             // drawn this way; this is the same thing per layer.
-            self.syncOneLayer(eng, fa, .{ .context = ctx_handle, .layer = handle }, layer, layer_origin, layer.view_scroll);
+            self.syncOneLayer(eng, fa, .{ .context = ctx_handle, .layer = handle }, layer, layer_origin, layer.view_scroll, ctx);
         }
     }
 
@@ -922,6 +925,8 @@ pub const Renderer = struct {
         layer: *const glyphwire.Layer,
         origin: geometry.Origin,
         view_offset: usize,
+        /// The layer's context, for the theme its colours resolve against.
+        ctx: *const glyphwire.Context,
     ) void {
         const alloc = self.app.alloc;
         const gop = self.layer_batches.getOrPut(alloc, key) catch return;
@@ -949,11 +954,12 @@ pub const Renderer = struct {
             lb.built_text_epoch != self.text_epoch or
             lb.built_origin.x != origin.x or
             lb.built_origin.y != origin.y or
-            lb.built_opacity != layer.opacity;
+            lb.built_opacity != layer.opacity or
+            lb.built_theme_gen != ctx.theme_gen;
         if (!need) return;
 
         self.app.profiler.add(.layers_rebuilt, 1);
-        self.rebuildLayer(eng, fa, lb, layer, origin.x, origin.y, view_offset, layer.opacity);
+        self.rebuildLayer(eng, fa, lb, layer, &ctx.theme, origin.x, origin.y, view_offset, layer.opacity);
         lb.built = true;
         lb.built_gen = gen;
         lb.built_view_offset = view_offset;
@@ -962,6 +968,7 @@ pub const Renderer = struct {
         lb.built_text_epoch = self.text_epoch;
         lb.built_origin = origin;
         lb.built_opacity = layer.opacity;
+        lb.built_theme_gen = ctx.theme_gen;
     }
 
     fn rebuildLayer(
@@ -970,6 +977,8 @@ pub const Renderer = struct {
         fa: ?*host_eng.renderer.FontAtlas,
         lb: *LayerBatches,
         layer: *const glyphwire.Layer,
+        /// What every `Color` reference in the layer resolves against.
+        th: *const glyphwire.theme.Stored,
         origin_x: i32,
         origin_y: i32,
         view_offset: usize,
@@ -1061,13 +1070,18 @@ pub const Renderer = struct {
 
         // `shadow` (see `core.Shadow`): drawn around the viewport's
         // pixel rect, before -- so under -- everything else here.
-        if (layer.shadow) |sh| self.emitShadow(eng, lb, sh, origin_x, origin_y, @as(i32, @intCast(vp_cols)) * geometry.cell_w, @as(i32, @intCast(vp_rows)) * geometry.cell_h);
+        if (layer.shadow) |sh_ref| {
+            var sh = sh_ref;
+            sh.color = th.resolve(sh.color);
+            self.emitShadow(eng, lb, sh, origin_x, origin_y, @as(i32, @intCast(vp_cols)) * geometry.cell_w, @as(i32, @intCast(vp_rows)) * geometry.cell_h);
+        }
 
         // `background` (see `core.PropertyName.background`): one rect
         // under the whole viewport, in its own `base` batch so the
         // nine-patches and every cell's own background and glyph
         // composite over it.
-        if (layer.background) |bg| {
+        if (layer.background) |bg_ref| {
+            const bg = th.resolve(bg_ref);
             if (bg.a != 0) {
                 addRect(
                     &lb.base,
@@ -1092,7 +1106,8 @@ pub const Renderer = struct {
                 const py = origin_y + @as(i32, @intCast(row)) * geometry.cell_h;
 
                 switch (c.style.bg) {
-                    .color => |bg| {
+                    .color => |bg_ref| {
+                        const bg = th.resolve(bg_ref);
                         // Alpha alone decides transparency: the default
                         // background is alpha 0, and an explicit black
                         // paints (see `core.default_style`).
@@ -1131,7 +1146,7 @@ pub const Renderer = struct {
                 // glyph's fill columns) still draws its part of the line.
                 if (c.style.underline.style != .none) {
                     const ul = c.style.underline;
-                    const src = ul.color orelse c.style.fg;
+                    const src = th.resolve(ul.color orelse c.style.fg);
                     emitUnderline(
                         &lb.underline,
                         ul.style,
@@ -1144,7 +1159,8 @@ pub const Renderer = struct {
                 if (fa) |f| {
                     const g = c.grapheme();
                     if (g.len > 0) {
-                        const color = fade(host_eng.Color.from(c.style.fg.r, c.style.fg.g, c.style.fg.b, c.style.fg.a), alpha);
+                        const fg = th.resolve(c.style.fg);
+                        const color = fade(host_eng.Color.from(fg.r, fg.g, fg.b, fg.a), alpha);
                         if (c.text_scale == .x1) {
                             emitGlyphs(&lb.text, f, g, px, py, color);
                         } else {
@@ -1235,7 +1251,8 @@ pub const Renderer = struct {
                 const ry = origin_y + @as(i32, @intCast(r.y)) - scroll_px_y;
                 const rw: i32 = @intCast(r.w);
                 const rh: i32 = @intCast(r.h);
-                const col = fade(host_eng.Color.from(r.color.r, r.color.g, r.color.b, r.color.a), alpha);
+                const rc = th.resolve(r.color);
+                const col = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), alpha);
                 if (r.filled) {
                     addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry, rw, rh), col);
                 } else {
@@ -1672,7 +1689,20 @@ pub const Renderer = struct {
     /// `create_layer` layer in `ctx.layer_order` (creation order -- later
     /// draws on top). The scrollbar is a final pass over everything.
     pub fn render(self: *Renderer, eng: *Engine) void {
-        eng.renderer.clear(0.0, 0.0, 0.0, 1.0);
+        // The window theme's background, under every pane: a program
+        // that paints no background of its own (a shell) shows it.
+        const bg = blk: {
+            const server = self.app.server;
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            break :blk server.session.theme.theme.roleColor(.bg);
+        };
+        eng.renderer.clear(
+            @as(f32, @floatFromInt(bg.r)) / 255.0,
+            @as(f32, @floatFromInt(bg.g)) / 255.0,
+            @as(f32, @floatFromInt(bg.b)) / 255.0,
+            1.0,
+        );
 
         {
             const server = self.app.server;
@@ -1760,7 +1790,7 @@ pub const Renderer = struct {
         };
         const shape = self.app.caret.shapeFor(ctx.caret_shape);
         if (focused and ctx.caret_visible and focus_caret == null)
-            self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, shape);
+            self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, shape, caretColor(&ctx.theme));
         // IME composition, over both: it covers the cells the caret is
         // about to write into, so it has to sit above the caret too.
         if (focused) self.drawPreedit(eng, &ctx.root, origin.x, origin.y, root_view);
@@ -1774,7 +1804,7 @@ pub const Renderer = struct {
             // floats over, the same as it covers that layer's cells.
             drawLayerScrollbars(eng, layer, origin);
             drawResizeEdge(eng, layer, origin);
-            if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape);
+            if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape, caretColor(&ctx.theme));
         }
     }
 
@@ -1968,12 +1998,12 @@ pub const Renderer = struct {
     /// Normally at the live grid cursor; a mouse-driven scroll pins it
     /// (`caret.Caret.pin`) to the buffer cell it was on when the scroll
     /// began, clipping off-screen once that cell leaves the viewport.
-    fn drawRootCaret(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize, shape: CursorShape) void {
+    fn drawRootCaret(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize, shape: CursorShape, color: host_eng.Color) void {
         if (!self.app.caret.visible()) return;
         const cell = self.app.caret.screenCell(root, view_offset) orelse return;
 
         eng.renderer.begin(eng.projMat);
-        drawCaret(eng, root, origin_x, origin_y, cell.row, cell.col, view_offset, shape);
+        drawCaret(eng, root, origin_x, origin_y, cell.row, cell.col, view_offset, shape, color);
         eng.renderer.end();
     }
 
@@ -1986,7 +2016,7 @@ pub const Renderer = struct {
     /// it is scrolled back into its own history (`view_scroll != 0`), or
     /// while the cursor sits outside the visible viewport. Shares the
     /// blink clock with the root caret.
-    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, shape: CursorShape) void {
+    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, shape: CursorShape, color: host_eng.Color) void {
         if (!layer.cursor_visible) return;
         if (!self.app.caret.blinkOn()) return;
         if (layer.view_scroll != 0) return;
@@ -2001,7 +2031,7 @@ pub const Renderer = struct {
         const oy = @as(i32, @intFromFloat(@round(layer.pos.y))) + origin.y;
 
         eng.renderer.begin(eng.projMat);
-        drawCaret(eng, layer, ox, oy, crow, ccol, 0, shape);
+        drawCaret(eng, layer, ox, oy, crow, ccol, 0, shape, color);
         eng.renderer.end();
     }
 
@@ -2095,8 +2125,14 @@ pub const Renderer = struct {
     /// cell -- two cells on the lead of a wide (CJK) character -- while
     /// `line` stays a thin bar at the left edge. Assumes an open renderer
     /// pass.
-    fn drawCaret(eng: *Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, crow: usize, ccol: usize, view_offset: usize, shape: CursorShape) void {
-        const white = host_eng.Color.from(255, 255, 255, 255);
+    /// The caret is the theme's `cursor_bg`: a fixed white would vanish
+    /// on a light theme.
+    fn caretColor(th: *const glyphwire.theme.Stored) host_eng.Color {
+        const c = th.theme.roleColor(.cursor_bg);
+        return host_eng.Color.from(c.r, c.g, c.b, 255);
+    }
+
+    fn drawCaret(eng: *Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, crow: usize, ccol: usize, view_offset: usize, shape: CursorShape, color: host_eng.Color) void {
         const cx = origin_x + @as(i32, @intCast(ccol)) * geometry.cell_w;
         const cy = origin_y + @as(i32, @intCast(crow)) * geometry.cell_h;
 
@@ -2106,20 +2142,20 @@ pub const Renderer = struct {
         switch (shape) {
             .line => eng.renderer.drawFilledRect(
                 host_eng.RectF.fromPosSize(cx, cy, cursor_width, geometry.cell_h),
-                white,
+                color,
             ),
             .block => eng.renderer.drawFilledRect(
                 host_eng.RectF.fromPosSize(cx, cy, cell_span, geometry.cell_h),
-                white,
+                color,
             ),
             .box => eng.renderer.drawRect(
                 host_eng.RectF.fromPosSize(cx, cy, cell_span, geometry.cell_h),
-                white,
+                color,
                 cursor_box_line_px,
             ),
             .underline => eng.renderer.drawFilledRect(
                 host_eng.RectF.fromPosSize(cx, cy + geometry.cell_h - cursor_underline_px, cell_span, cursor_underline_px),
-                white,
+                color,
             ),
         }
     }

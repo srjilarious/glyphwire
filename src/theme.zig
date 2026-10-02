@@ -1,45 +1,449 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: MPL-2.0
 
-//! Colour themes for zoe and gw-grep: the built-in set, and resolving a
-//! theme name (built-in or one a config defined) to concrete colours.
+//! Colour themes: the 24-slot palette, the well-known roles, the built-in
+//! set, and resolving a theme name (built-in or one a config defined) to
+//! concrete colours.
 //!
-//! A theme is three things:
+//! A theme is two tables:
 //!
-//!   `syntax`  the tree-sitter capture-group colours (`syntax.Theme`)
-//!   `ui`      every colour the programs paint themselves: pane and bar
-//!             backgrounds, cursor, selection, search matches,
-//!             diagnostics, popups (`Ui`)
-//!   `panel_style`  the nine-patch the popups are framed with, since a
-//!             nine-patch is art and can't be recoloured
+//!   `slots`  24 colours: the eight ANSI hues (black red green yellow blue
+//!            magenta cyan white) at three levels -- 0-7 dim, 8-15
+//!            normal, 16-23 bright. ANSI escape output draws from these
+//!            (`30`-`37` is 8-15, `90`-`97` and bold are 16-23, `2` dim
+//!            is 0-7), so a program's `ls --color` and a glyphwire-native
+//!            program agree on what "red" is.
+//!   `roles`  what a colour is *for*: `fg`, `bg`, `keyword`, `heading1`,
+//!            `table_header_bg`, `popup_border`, ... (`Role`). Each names
+//!            a slot, a literal colour, or another role.
 //!
-//! Nobody writes all of that out by hand. A theme is *specified* as a
+//! A program sends a `Color` that *refers* to a slot or a role
+//! (`Color.slot`, `Color.role`) instead of RGB, and the host resolves it
+//! against the theme of the context that drew it -- at render time, so
+//! switching theme recolours everything already on screen.
+//!
+//! Nobody writes all of that out by hand. A built-in is *specified* as a
 //! fifteen-colour `Palette` -- a few backgrounds, the text colours, and
-//! seven accents -- and both halves are derived from it (`derive`), the
-//! syntax half with the One Dark capture mapping and the UI half with
+//! seven accents -- and both tables are derived from it (`derive`), the
+//! syntax roles with the One Dark capture mapping and the chrome with
 //! blends between the backgrounds and accents. Then a spec's own explicit
-//! `syntax`/`ui` pairs are laid over the result: that is how a built-in
-//! keeps the capture mapping of the editor theme it copies (GitHub's
-//! keywords are red, not purple) and how `default` stays pixel-identical
-//! to the hand-tuned palette zoe shipped before themes existed.
+//! pairs are laid over the result: that is how a built-in keeps the
+//! capture mapping of the editor theme it copies (GitHub's keywords are
+//! red, not purple) and how `default` stays pixel-identical to the
+//! hand-tuned palette zoe shipped before themes existed.
 //!
 //! A config's theme (`Custom`) is the same idea one level up: a `base`
 //! theme, palette colours that replace the base's *before* derivation,
-//! then syntax/ui overrides after it. Changing `palette.bg` therefore
-//! moves every colour blended from it, but a slot the base set by hand
-//! keeps its hand-set value until the custom theme names that slot too.
+//! then slot and role overrides after it. Changing `palette.bg` therefore
+//! moves every colour blended from it; changing a slot moves every role
+//! that names that slot, but not a blend that was computed from it.
 //!
-//! Pure data and arithmetic -- no Lua, no wire. zoe's `langconf.zig`
-//! parses the Lua tables into `Custom`s and gw-grep reuses that parse.
+//! Pure data and arithmetic -- no Lua, no wire. `applib/themeconf.zig`
+//! parses the Lua tables into `Custom`s.
 
 const std = @import("std");
-const glyphwire = @import("glyphwire");
-const syntax = @import("syntax.zig");
+const core = @import("core.zig");
 
-const Color = glyphwire.Color;
-const Group = syntax.Theme.Group;
+const Color = core.Color;
 
-/// The colours a theme is specified in. `u24` (`0xrrggbb`) so the
+// ── Slots ───────────────────────────────────────────────────────────────
+
+pub const slot_count = 24;
+
+/// A palette index, 0-23.
+pub const Slot = u5;
+
+/// The eight ANSI hues, in ANSI order.
+pub const Hue = enum(u3) { black, red, green, yellow, blue, magenta, cyan, white };
+
+pub const Level = enum(u2) { dim, normal, bright };
+
+pub fn slot(level: Level, hue: Hue) Slot {
+    return @as(Slot, @intFromEnum(level)) * 8 + @intFromEnum(hue);
+}
+
+pub fn slotHue(s: Slot) Hue {
+    return @enumFromInt(s % 8);
+}
+
+pub fn slotLevel(s: Slot) Level {
+    return @enumFromInt(s / 8);
+}
+
+/// ANSI colour `n` (0-7 normal, 8-15 bright) as a slot.
+pub fn ansiSlot(n: u4) Slot {
+    return @as(Slot, n) + 8;
+}
+
+/// The same hue at `level`.
+pub fn atLevel(s: Slot, level: Level) Slot {
+    return slot(level, slotHue(s));
+}
+
+/// The slot names a config and the wire use: the hue for the normal
+/// level, `dim_`/`bright_` prefixed for the other two.
+pub const slot_names = blk: {
+    var names: [slot_count][]const u8 = undefined;
+    for (0..slot_count) |i| {
+        const hue = @tagName(@as(Hue, @enumFromInt(i % 8)));
+        names[i] = switch (i / 8) {
+            0 => "dim_" ++ hue,
+            1 => hue,
+            else => "bright_" ++ hue,
+        };
+    }
+    break :blk names;
+};
+
+pub fn slotByName(name: []const u8) ?Slot {
+    for (slot_names, 0..) |n, i| {
+        if (std.mem.eql(u8, n, name)) return @intCast(i);
+    }
+    return null;
+}
+
+// ── Roles ───────────────────────────────────────────────────────────────
+
+/// What a colour is for. The names are the wire and config form; the
+/// numeric order is append-only, so an index a program stored stays
+/// meaningful. A role without a background suffix is a foreground.
+pub const Role = enum(u8) {
+    // Base text and surfaces.
+    /// The default text colour: every cell nobody gave an `fg`.
+    fg,
+    /// Secondary text: line numbers, detail columns, hints.
+    fg_dim,
+    /// Emphasised text: bold-ish titles, the active pane's title.
+    fg_strong,
+    /// The main surface: an editor pane, a terminal's background.
+    bg,
+    /// The darkest chrome (a tab bar, a key bar).
+    bg_dark,
+    /// Raised chrome (a status bar, a button).
+    bg_raised,
+    border,
+    accent,
+    link,
+    selection_bg,
+    cursor_bg,
+    cursor_fg,
+
+    // Status.
+    success,
+    message,
+    message_error,
+    diag_error,
+    diag_warning,
+    diag_info,
+    diag_hint,
+
+    // Search.
+    match,
+    match_bg,
+    match_current_bg,
+
+    // Files: a tree, `gw-ls`, salacommander's panes.
+    file,
+    dir,
+    symlink,
+    exec,
+    /// A device, socket or fifo.
+    special,
+    /// A dotfile or an ignored file shown anyway.
+    hidden,
+    hidden_dir,
+    /// A multi-selected entry.
+    marked,
+
+    // Editor and app chrome.
+    sidebar_bg,
+    status_bg,
+    status_fg,
+    /// zoe's mode indicator.
+    mode,
+    tab_bar_bg,
+    tab_bg,
+    /// A terminal embedded in an app (zoe's and sala's Ctrl+` panel).
+    shell_bg,
+    whitespace,
+    /// The focused pane's title bar, and the inactive ones'.
+    title_bg,
+    title_fg,
+    title_inactive_bg,
+    title_inactive_fg,
+    /// The cursor row of a list that has focus, and of one that hasn't.
+    list_cursor_bg,
+    list_cursor_inactive_bg,
+    /// A function-key bar: the key, and the label beside it.
+    keybar_bg,
+    keybar_key,
+    keybar_label_bg,
+    keybar_label,
+    /// Grey completion text after the caret.
+    suggestion,
+
+    // Popups, dialogs, the finder.
+    popup_bg,
+    popup_fg,
+    popup_code_bg,
+    popup_rule,
+    /// Keep this the colour of the popup nine-patch's border, which a
+    /// `popup_rule` running into it has to meet.
+    popup_border,
+    popup_selected_bg,
+    popup_label,
+    popup_kind,
+    popup_detail,
+    finder_header_bg,
+    finder_header_fg,
+    finder_selected_bg,
+    finder_selected_fg,
+    dialog_bg,
+    dialog_fg,
+    dialog_title_bg,
+    dialog_title_fg,
+    /// A dialog asking about something destructive.
+    danger_bg,
+    input_bg,
+    button_bg,
+    button_focus_bg,
+
+    // Documents (gwmd, hover text).
+    heading1,
+    heading2,
+    heading3,
+    heading4,
+    heading5,
+    heading6,
+    strong,
+    emphasis,
+    strike,
+    /// Inline code.
+    code,
+    code_bg,
+    code_block,
+    code_block_bg,
+    quote,
+    list_marker,
+    rule,
+
+    // Tables and outlines.
+    table_header,
+    table_header_bg,
+    table_alt_row_bg,
+    outline_marker,
+
+    // Syntax: the tree-sitter capture groups (`applib/syntax.zig` maps a
+    // dotted capture name down to one of these).
+    comment,
+    keyword,
+    string,
+    string_escape,
+    string_special,
+    escape,
+    number,
+    boolean,
+    character,
+    constant,
+    constant_builtin,
+    function,
+    function_builtin,
+    type,
+    type_builtin,
+    constructor,
+    operator,
+    property,
+    variable,
+    variable_builtin,
+    variable_parameter,
+    module,
+    label,
+    attribute,
+    tag,
+    punctuation,
+    punctuation_special,
+    text_title,
+    text_literal,
+    text_uri,
+    text_reference,
+};
+
+pub const role_count = std.enums.values(Role).len;
+
+/// The names zoe's `ui = { ... }` table used before roles existed, so an
+/// old config keeps working.
+const legacy_role_names = std.StaticStringMap(Role).initComptime(.{
+    .{ "bg_buffer", .bg },
+    .{ "bg_tree", .sidebar_bg },
+    .{ "bg_status", .status_bg },
+    .{ "bg_tab_bar", .tab_bar_bg },
+    .{ "bg_tab", .tab_bg },
+    .{ "bg_shell", .shell_bg },
+    .{ "fg_text", .fg },
+    .{ "fg_dir", .dir },
+    .{ "fg_hidden", .hidden },
+    .{ "fg_hidden_dir", .hidden_dir },
+    .{ "fg_status", .status_fg },
+    .{ "fg_mode", .mode },
+    .{ "fg_error", .message_error },
+    .{ "fg_whitespace", .whitespace },
+    .{ "bg_cursor", .cursor_bg },
+    .{ "fg_cursor", .cursor_fg },
+    .{ "bg_selected", .selection_bg },
+    .{ "bg_match", .match_bg },
+    .{ "bg_match_current", .match_current_bg },
+    .{ "fg_match", .match },
+    .{ "fg_diag_error", .diag_error },
+    .{ "fg_diag_warning", .diag_warning },
+    .{ "fg_diag_info", .diag_info },
+    .{ "fg_diag_hint", .diag_hint },
+    .{ "bg_popup", .popup_bg },
+    .{ "fg_popup", .popup_fg },
+    .{ "bg_popup_code", .popup_code_bg },
+    .{ "fg_popup_rule", .popup_rule },
+    .{ "fg_popup_border", .popup_border },
+    .{ "bg_popup_selected", .popup_selected_bg },
+    .{ "fg_popup_label", .popup_label },
+    .{ "fg_popup_kind", .popup_kind },
+    .{ "fg_popup_detail", .popup_detail },
+    .{ "bg_finder_header", .finder_header_bg },
+    .{ "fg_finder_header", .finder_header_fg },
+    .{ "bg_finder_selected", .finder_selected_bg },
+    .{ "fg_finder_selected", .finder_selected_fg },
+});
+
+/// A role by its name, a legacy `ui` name, or a dotted capture group
+/// (`string.escape`).
+pub fn roleByName(name: []const u8) ?Role {
+    if (std.meta.stringToEnum(Role, name)) |r| return r;
+    if (legacy_role_names.get(name)) |r| return r;
+    if (std.mem.indexOfScalar(u8, name, '.') != null) {
+        var buf: [64]u8 = undefined;
+        if (name.len > buf.len) return null;
+        for (name, 0..) |ch, i| buf[i] = if (ch == '.') '_' else ch;
+        return std.meta.stringToEnum(Role, buf[0..name.len]);
+    }
+    return null;
+}
+
+/// What a role resolves through.
+pub const RoleValue = union(enum) {
+    slot: Slot,
+    rgb: Color,
+    /// Another role's colour (`variable` is `fg` unless a theme says
+    /// otherwise).
+    role: Role,
+};
+
+/// How many `role` hops `Theme.roleColor` follows before it gives up on
+/// a cycle and answers `fg`'s slot.
+const max_role_hops = 8;
+
+/// A resolved theme: what the host resolves `Color` references against.
+pub const Theme = struct {
+    /// Borrowed: a built-in's static name, or the owner's copy.
+    name: []const u8,
+    dark: bool,
+    slots: [slot_count]Color,
+    roles: std.EnumArray(Role, RoleValue),
+    /// The nine-patch style popups are framed with -- a nine-patch is
+    /// art and can't be recoloured, so a theme picks one.
+    panel_style: []const u8,
+
+    pub fn slotColor(self: *const Theme, s: Slot) Color {
+        return self.slots[s];
+    }
+
+    /// The concrete colour of role `r`.
+    pub fn roleColor(self: *const Theme, r: Role) Color {
+        var cur = r;
+        var hops: usize = 0;
+        while (hops < max_role_hops) : (hops += 1) {
+            switch (self.roles.get(cur)) {
+                .slot => |s| return self.slots[s],
+                .rgb => |c| return c,
+                .role => |next| cur = next,
+            }
+        }
+        return self.slots[slot(.normal, .white)];
+    }
+
+    /// `c` with any reference followed: its RGB from the slot or role,
+    /// its alpha the reference's alpha times the theme colour's. A
+    /// literal colour is returned as it is.
+    pub fn resolve(self: *const Theme, c: Color) Color {
+        const base = switch (c.ref) {
+            .none => return c,
+            .slot => |s| self.slots[s],
+            .role => |r| self.roleColor(r),
+        };
+        return .{
+            .r = base.r,
+            .g = base.g,
+            .b = base.b,
+            .a = @intCast(@as(u16, base.a) * c.a / 255),
+        };
+    }
+
+    /// The value a pair from a spec or config gets: the slot whose
+    /// colour it is exactly, if there is one, so a later slot override
+    /// carries it along; otherwise the literal.
+    fn snap(self: *const Theme, c: Color) RoleValue {
+        for (self.slots, 0..) |s, i| {
+            if (s.r == c.r and s.g == c.g and s.b == c.b and s.a == c.a) return .{ .slot = @intCast(i) };
+        }
+        return .{ .rgb = c };
+    }
+};
+
+/// A theme held by something that outlives what it was resolved from (a
+/// `Context`, the `Session`): the two strings copied into inline buffers.
+/// Plain data, so the holder can be moved; `theme.name` and
+/// `theme.panel_style` are left empty and read through `name()` /
+/// `panelStyle()` instead.
+pub const Stored = struct {
+    theme: Theme,
+    name_buf: [max_name_len]u8 = undefined,
+    name_len: u8 = 0,
+    panel_buf: [max_name_len]u8 = undefined,
+    panel_len: u8 = 0,
+
+    pub const max_name_len = 64;
+
+    pub fn init(t: Theme) Stored {
+        var s: Stored = .{ .theme = t };
+        s.set(t);
+        return s;
+    }
+
+    /// Replaces the stored theme. Strings longer than `max_name_len`
+    /// are cut.
+    pub fn set(self: *Stored, t: Theme) void {
+        self.theme = t;
+        self.theme.name = "";
+        self.theme.panel_style = "";
+        self.name_len = @intCast(@min(t.name.len, max_name_len));
+        @memcpy(self.name_buf[0..self.name_len], t.name[0..self.name_len]);
+        self.panel_len = @intCast(@min(t.panel_style.len, max_name_len));
+        @memcpy(self.panel_buf[0..self.panel_len], t.panel_style[0..self.panel_len]);
+    }
+
+    pub fn name(self: *const Stored) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+
+    pub fn panelStyle(self: *const Stored) []const u8 {
+        return self.panel_buf[0..self.panel_len];
+    }
+
+    pub fn resolve(self: *const Stored, c: Color) Color {
+        return self.theme.resolve(c);
+    }
+};
+
+// ── Specs ───────────────────────────────────────────────────────────────
+
+/// The colours a built-in is specified in. `u24` (`0xrrggbb`) so the
 /// built-in table below reads like the hex the upstream themes publish.
 pub const Palette = struct {
     /// The editing pane.
@@ -83,113 +487,8 @@ pub const Palette = struct {
     }
 };
 
-/// Every colour zoe (and gw-grep) paints outside the syntax colours.
-/// The field names are what a config's `ui = { ... }` table uses.
-pub const Ui = struct {
-    bg_buffer: Color,
-    bg_tree: Color,
-    bg_status: Color,
-    /// The tab strip. The active tab takes `bg_buffer` so it reads as the
-    /// front of the pane below it, the way a tabbed window does; the rest
-    /// are `bg_tab` on a bar darker than either.
-    bg_tab_bar: Color,
-    bg_tab: Color,
-    /// The Ctrl+` shell panel: darker than the buffer, so it reads as a
-    /// terminal laid over the editor and not as more of it. Dark on every
-    /// built-in, light themes included: what runs in it is a terminal
-    /// program that assumes light text on a dark background, and
-    /// gw-shell's prompt does too.
-    bg_shell: Color,
-    fg_text: Color,
-    fg_dim: Color,
-    fg_dir: Color,
-    /// A tree row only on screen because Ctrl+H is on -- a dotfile or
-    /// something `.gitignore` excludes. Dimmed rather than marked, so the
-    /// listing still reads as one list, and kept distinct for files and
-    /// directories so the shape of the tree survives the dimming: roughly
-    /// halfway from the normal colour to the background.
-    fg_hidden: Color,
-    fg_hidden_dir: Color,
-    fg_status: Color,
-    fg_mode: Color,
-    fg_error: Color,
-    /// The dots and arrows `:set whitespace=on` paints. Bright enough to
-    /// read the indentation off, dim enough to disappear when you stop
-    /// looking for it.
-    fg_whitespace: Color,
-    bg_cursor: Color,
-    fg_cursor: Color,
-    bg_selected: Color,
-    /// Search matches, in two weights: every match gets the dim one, the
-    /// one the cursor is on the bright one, which is how you tell where
-    /// `n` just landed in a screen full of hits.
-    bg_match: Color,
-    bg_match_current: Color,
-    /// gw-grep's "this is the hit" line-number colour.
-    fg_match: Color,
-    fg_diag_error: Color,
-    fg_diag_warning: Color,
-    fg_diag_info: Color,
-    fg_diag_hint: Color,
-    /// The hover and completion popups' flat background, used where the
-    /// host has no `panel_style` nine-patch.
-    bg_popup: Color,
-    fg_popup: Color,
-    /// A fenced code block in the hover popup sits on its own band, so a
-    /// signature reads as a unit apart from the prose under it.
-    bg_popup_code: Color,
-    fg_popup_rule: Color,
-    /// A `---` rule across the hover popup, which joins the nine-patch's
-    /// own border on both sides -- so keep it the border's colour.
-    fg_popup_border: Color,
-    bg_popup_selected: Color,
-    fg_popup_label: Color,
-    fg_popup_kind: Color,
-    fg_popup_detail: Color,
-    bg_finder_header: Color,
-    fg_finder_header: Color,
-    bg_finder_selected: Color,
-    fg_finder_selected: Color,
-
-    pub const Slot = std.meta.FieldEnum(Ui);
-
-    pub fn setByName(self: *Ui, name: []const u8, c: Color) bool {
-        inline for (comptime std.meta.fieldNames(Ui)) |f| {
-            if (std.mem.eql(u8, name, f)) {
-                @field(self, f) = c;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    pub fn has(name: []const u8) bool {
-        inline for (comptime std.meta.fieldNames(Ui)) |f| {
-            if (std.mem.eql(u8, name, f)) return true;
-        }
-        return false;
-    }
-
-    fn setSlot(self: *Ui, slot: Slot, c: Color) void {
-        inline for (comptime std.meta.fieldNames(Ui)) |f| {
-            if (slot == @field(Slot, f)) @field(self, f) = c;
-        }
-    }
-};
-
-/// A resolved theme: what the programs read colours from.
-pub const Theme = struct {
-    /// Borrowed: a built-in's static name, or the config arena's copy.
-    name: []const u8,
-    dark: bool,
-    syntax: syntax.Theme,
-    ui: Ui,
-    /// The nine-patch style the popups are framed with.
-    panel_style: []const u8,
-};
-
-const SyntaxPair = struct { Group, u24 };
-const UiPair = struct { Ui.Slot, u24 };
+const RolePair = struct { Role, u24 };
+const SlotPair = struct { Slot, u24 };
 
 /// A built-in theme.
 pub const Spec = struct {
@@ -198,14 +497,28 @@ pub const Spec = struct {
     /// Null picks by `dark`: `panel` or `panel_light`.
     panel_style: ?[]const u8 = null,
     palette: Palette,
-    syntax: []const SyntaxPair = &.{},
-    ui: []const UiPair = &.{},
+    /// Slots set by hand over the derived ones.
+    slots: []const SlotPair = &.{},
+    /// Capture-group roles, then chrome roles, set by hand. Two lists
+    /// only so a spec reads in the two halves people think of.
+    syntax: []const RolePair = &.{},
+    ui: []const RolePair = &.{},
 };
 
 /// One `name = "#rrggbb"` from a config table.
 pub const NamedColor = struct {
     name: []const u8,
     color: Color,
+};
+
+pub const NamedSlot = struct {
+    slot: Slot,
+    color: Color,
+};
+
+pub const NamedRole = struct {
+    role: Role,
+    value: RoleValue,
 };
 
 /// A theme a config defined (`config.themes.<name>`, or the table form
@@ -219,11 +532,10 @@ pub const Custom = struct {
     panel_style: ?[]const u8 = null,
     /// Replaces the base's palette colours before derivation.
     palette: []const NamedColor = &.{},
-    /// Capture-group colours, by `syntax.Theme` name (`keyword`,
-    /// `string.escape`), laid over the derived ones.
-    syntax: []const NamedColor = &.{},
-    /// `Ui` slots by field name, laid over the derived ones.
-    ui: []const NamedColor = &.{},
+    /// Slot colours, laid over the derived ones.
+    slots: []const NamedSlot = &.{},
+    /// Role values, laid over everything else.
+    roles: []const NamedRole = &.{},
 };
 
 /// The bundled light popup frame (`assets/ninepatch/panel_light.9.png`).
@@ -284,14 +596,15 @@ pub fn resolve(name: []const u8, customs: []const Custom) ?Theme {
     // resolve a name it is only borrowing (`:theme`'s argument).
     t.name = if (depth > 0) chain[0].name else root.name;
     t.panel_style = panel orelse (if (dark) panel_dark else panel_light);
-    for (root.syntax) |p| t.syntax.colors.set(p[0], rgb(p[1]));
-    for (root.ui) |p| t.ui.setSlot(p[0], rgb(p[1]));
+    for (root.slots) |p| t.slots[p[0]] = rgb(p[1]);
+    for (root.syntax) |p| t.roles.set(p[0], t.snap(rgb(p[1])));
+    for (root.ui) |p| t.roles.set(p[0], t.snap(rgb(p[1])));
     i = depth;
     while (i > 0) {
         i -= 1;
         const c = chain[i];
-        for (c.syntax) |p| _ = t.syntax.setByName(p.name, p.color);
-        for (c.ui) |p| _ = t.ui.setByName(p.name, p.color);
+        for (c.slots) |p| t.slots[p.slot] = p.color;
+        for (c.roles) |p| t.roles.set(p.role, p.value);
     }
     return t;
 }
@@ -319,102 +632,237 @@ fn findCustom(customs: []const Custom, name: []const u8) ?*const Custom {
     return null;
 }
 
-/// The whole theme from a palette alone: One Dark's capture mapping for
-/// the syntax half, blends for the UI half. A spec's explicit pairs go
-/// on top of this.
+/// The slots from a palette alone. Each accent is its hue's normal
+/// level; dim is that accent taken most of the way to the background,
+/// bright a step further from it. Black and white are the theme's own
+/// greys: on a dark theme black is the chrome and white the text, on a
+/// light one the other way round, which is what a light terminal theme
+/// does too (`30` stays the text-on-light colour).
+pub fn deriveSlots(p: Palette, dark: bool) [slot_count]Color {
+    var s: [slot_count]Color = undefined;
+    const bg = rgb(p.bg);
+    const white = rgb(0xffffff);
+    const black = rgb(0x000000);
+    const accents = [_]struct { Hue, u24 }{
+        .{ .red, p.red },
+        .{ .green, p.green },
+        .{ .yellow, p.yellow },
+        .{ .blue, p.blue },
+        .{ .magenta, p.purple },
+        .{ .cyan, p.cyan },
+    };
+    for (accents) |a| {
+        const c = rgb(a[1]);
+        s[slot(.dim, a[0])] = mix(c, bg, 0.45);
+        s[slot(.normal, a[0])] = c;
+        s[slot(.bright, a[0])] = if (dark) mix(c, white, 0.3) else mix(c, black, 0.25);
+    }
+    if (dark) {
+        s[slot(.dim, .black)] = rgb(p.bg_dark);
+        s[slot(.normal, .black)] = rgb(p.bg_hi);
+        s[slot(.bright, .black)] = rgb(p.comment);
+        s[slot(.dim, .white)] = rgb(p.fg_dim);
+        s[slot(.normal, .white)] = rgb(p.fg);
+        s[slot(.bright, .white)] = mix(rgb(p.fg), white, 0.5);
+    } else {
+        s[slot(.dim, .black)] = rgb(p.fg_dim);
+        s[slot(.normal, .black)] = rgb(p.fg);
+        s[slot(.bright, .black)] = rgb(p.comment);
+        s[slot(.dim, .white)] = rgb(p.bg_hi);
+        s[slot(.normal, .white)] = rgb(p.bg_dark);
+        s[slot(.bright, .white)] = rgb(p.bg);
+    }
+    return s;
+}
+
+/// The whole theme from a palette alone: the derived slots, One Dark's
+/// capture mapping for the syntax roles, blends for the chrome. A spec's
+/// explicit pairs go on top of this.
 pub fn derive(p: Palette, dark: bool) Theme {
-    var s = syntax.Theme{ .colors = std.EnumArray(Group, ?Color).initFill(null) };
+    var t: Theme = .{
+        .name = "",
+        .dark = dark,
+        .slots = deriveSlots(p, dark),
+        .roles = .initFill(.{ .role = .fg }),
+        .panel_style = "",
+    };
+    const R = struct {
+        fn s(level: Level, hue: Hue) RoleValue {
+            return .{ .slot = slot(level, hue) };
+        }
+        fn n(hue: Hue) RoleValue {
+            return .{ .slot = slot(.normal, hue) };
+        }
+        fn c(col: Color) RoleValue {
+            return .{ .rgb = col };
+        }
+        fn h(hex: u24) RoleValue {
+            return .{ .rgb = rgb(hex) };
+        }
+        fn r(role: Role) RoleValue {
+            return .{ .role = role };
+        }
+    };
     const set = struct {
-        fn f(st: *syntax.Theme, g: Group, hex: u24) void {
-            st.colors.set(g, rgb(hex));
+        fn f(th: *Theme, role: Role, v: RoleValue) void {
+            th.roles.set(role, v);
         }
     }.f;
-    set(&s, .comment, p.comment);
-    set(&s, .keyword, p.purple);
-    set(&s, .string, p.green);
-    set(&s, .string_escape, p.cyan);
-    set(&s, .string_special, p.cyan);
-    set(&s, .escape, p.cyan);
-    set(&s, .number, p.orange);
-    set(&s, .boolean, p.orange);
-    set(&s, .character, p.green);
-    set(&s, .constant, p.orange);
-    set(&s, .constant_builtin, p.orange);
-    set(&s, .function, p.blue);
-    set(&s, .function_builtin, p.blue);
-    set(&s, .type, p.yellow);
-    set(&s, .type_builtin, p.yellow);
-    set(&s, .constructor, p.yellow);
-    set(&s, .operator, p.cyan);
-    set(&s, .property, p.red);
-    set(&s, .variable_builtin, p.red);
-    set(&s, .variable_parameter, p.orange);
-    set(&s, .module, p.yellow);
-    set(&s, .label, p.blue);
-    set(&s, .attribute, p.orange);
-    set(&s, .tag, p.red);
-    set(&s, .punctuation_special, p.purple);
-    set(&s, .text_title, p.blue);
-    set(&s, .text_literal, p.green);
-    set(&s, .text_uri, p.cyan);
-    set(&s, .text_reference, p.red);
 
     const bg = rgb(p.bg);
     const fg = rgb(p.fg);
     const blue = rgb(p.blue);
+    const white = rgb(0xffffff);
+    const black = rgb(0x000000);
     const popup = if (dark) mix(bg, rgb(p.bg_hi), 0.5) else mix(bg, rgb(p.bg_dark), 0.6);
     const popup_selected = mix(popup, blue, if (dark) 0.45 else 0.25);
-    const black = rgb(0x000000);
+    const header = if (dark) mix(bg, blue, 0.55) else blue;
 
-    const ui: Ui = .{
-        .bg_buffer = bg,
-        .bg_tree = mix(bg, rgb(p.bg_dark), 0.5),
-        .bg_status = rgb(p.bg_hi),
-        .bg_tab_bar = rgb(p.bg_dark),
-        .bg_tab = mix(bg, rgb(p.bg_hi), 0.5),
-        // See `Ui.bg_shell`: a light theme's terminal is its text colour
-        // taken most of the way to black.
-        .bg_shell = if (dark) mix(bg, black, 0.4) else mix(fg, black, 0.6),
-        .fg_text = fg,
-        .fg_dim = rgb(p.fg_dim),
-        .fg_dir = blue,
-        .fg_hidden = mix(fg, bg, 0.45),
-        .fg_hidden_dir = mix(blue, bg, 0.45),
-        .fg_status = fg,
-        .fg_mode = rgb(p.green),
-        .fg_error = rgb(p.red),
-        .fg_whitespace = mix(rgb(p.fg_dim), bg, 0.5),
-        .bg_cursor = rgb(p.cursor),
-        .fg_cursor = bg,
-        .bg_selected = rgb(p.selection),
-        // Amber either way, so a search hit never reads as a selection.
-        // A light theme's yellow is dark enough that the stronger
-        // current-match tint goes to orange to keep text on it legible.
-        .bg_match = mix(bg, rgb(p.yellow), if (dark) 0.28 else 0.22),
-        .bg_match_current = if (dark) mix(bg, rgb(p.yellow), 0.55) else mix(bg, rgb(p.orange), 0.4),
-        .fg_match = rgb(p.yellow),
-        // Red/amber/blue/grey by severity: the convention every editor
-        // and compiler shares, read at a glance and never looked up.
-        .fg_diag_error = rgb(p.red),
-        .fg_diag_warning = rgb(p.yellow),
-        .fg_diag_info = blue,
-        .fg_diag_hint = rgb(p.fg_dim),
-        .bg_popup = popup,
-        .fg_popup = fg,
-        .bg_popup_code = if (dark) mix(popup, rgb(p.bg_dark), 0.5) else mix(popup, rgb(p.bg_hi), 0.5),
-        .fg_popup_rule = mix(rgb(p.fg_dim), popup, 0.3),
-        // The bundled frames' border colours (scripts/gen-ninepatches.py).
-        .fg_popup_border = if (dark) rgb(0x68708c) else rgb(0xb8bcc8),
-        .bg_popup_selected = popup_selected,
-        .fg_popup_label = fg,
-        .fg_popup_kind = blue,
-        .fg_popup_detail = rgb(p.fg_dim),
-        .bg_finder_header = if (dark) mix(bg, blue, 0.55) else blue,
-        .fg_finder_header = if (dark) fg else bg,
-        .bg_finder_selected = popup_selected,
-        .fg_finder_selected = fg,
-    };
-    return .{ .name = "", .dark = dark, .syntax = s, .ui = ui, .panel_style = "" };
+    // Base.
+    set(&t, .fg, R.c(fg));
+    set(&t, .fg_dim, R.h(p.fg_dim));
+    set(&t, .fg_strong, R.c(mix(fg, if (dark) white else black, 0.5)));
+    set(&t, .bg, R.c(bg));
+    set(&t, .bg_dark, R.h(p.bg_dark));
+    set(&t, .bg_raised, R.h(p.bg_hi));
+    set(&t, .border, R.c(mix(rgb(p.fg_dim), bg, 0.3)));
+    set(&t, .accent, R.n(.blue));
+    set(&t, .link, R.n(.blue));
+    set(&t, .selection_bg, R.h(p.selection));
+    set(&t, .cursor_bg, R.h(p.cursor));
+    set(&t, .cursor_fg, R.r(.bg));
+
+    // Red/amber/blue/grey by severity: the convention every editor and
+    // compiler shares, read at a glance and never looked up.
+    set(&t, .success, R.n(.green));
+    set(&t, .message, R.n(.yellow));
+    set(&t, .message_error, R.n(.red));
+    set(&t, .diag_error, R.n(.red));
+    set(&t, .diag_warning, R.n(.yellow));
+    set(&t, .diag_info, R.n(.blue));
+    set(&t, .diag_hint, R.r(.fg_dim));
+
+    // Amber either way, so a search hit never reads as a selection. A
+    // light theme's yellow is dark enough that the stronger current-match
+    // tint goes to orange to keep text on it legible.
+    set(&t, .match, R.n(.yellow));
+    set(&t, .match_bg, R.c(mix(bg, rgb(p.yellow), if (dark) 0.28 else 0.22)));
+    set(&t, .match_current_bg, R.c(if (dark) mix(bg, rgb(p.yellow), 0.55) else mix(bg, rgb(p.orange), 0.4)));
+
+    set(&t, .file, R.r(.fg));
+    set(&t, .dir, R.n(.blue));
+    set(&t, .symlink, R.n(.cyan));
+    set(&t, .exec, R.n(.green));
+    set(&t, .special, R.n(.magenta));
+    // Dimmed rather than marked, so the listing still reads as one list:
+    // roughly halfway from the normal colour to the background.
+    set(&t, .hidden, R.c(mix(fg, bg, 0.45)));
+    set(&t, .hidden_dir, R.c(mix(blue, bg, 0.45)));
+    set(&t, .marked, R.s(.bright, .yellow));
+
+    set(&t, .sidebar_bg, R.c(mix(bg, rgb(p.bg_dark), 0.5)));
+    set(&t, .status_bg, R.r(.bg_raised));
+    set(&t, .status_fg, R.r(.fg));
+    set(&t, .mode, R.n(.green));
+    set(&t, .tab_bar_bg, R.r(.bg_dark));
+    set(&t, .tab_bg, R.c(mix(bg, rgb(p.bg_hi), 0.5)));
+    // An embedded terminal sits a shade off the pane so it reads as laid
+    // over it -- darker on a dark theme, the faint grey chrome on a light
+    // one. Light, not dark: what runs in it draws in this theme's `fg`
+    // and slots, which are chosen for this theme's background.
+    set(&t, .shell_bg, R.c(if (dark) mix(bg, black, 0.4) else rgb(p.bg_dark)));
+    // Bright enough to read the indentation off, dim enough to disappear
+    // when you stop looking for it.
+    set(&t, .whitespace, R.c(mix(rgb(p.fg_dim), bg, 0.5)));
+    set(&t, .title_bg, R.c(header));
+    set(&t, .title_fg, R.r(.fg_strong));
+    set(&t, .title_inactive_bg, R.r(.bg_raised));
+    set(&t, .title_inactive_fg, R.r(.fg_dim));
+    set(&t, .list_cursor_bg, R.c(header));
+    set(&t, .list_cursor_inactive_bg, R.c(mix(bg, rgb(p.bg_hi), 0.7)));
+    set(&t, .keybar_bg, R.r(.bg_dark));
+    set(&t, .keybar_key, R.r(.fg));
+    set(&t, .keybar_label_bg, R.c(mix(rgb(p.cyan), bg, 0.3)));
+    set(&t, .keybar_label, R.r(.bg_dark));
+    set(&t, .suggestion, R.r(.fg_dim));
+
+    set(&t, .popup_bg, R.c(popup));
+    set(&t, .popup_fg, R.r(.fg));
+    set(&t, .popup_code_bg, R.c(if (dark) mix(popup, rgb(p.bg_dark), 0.5) else mix(popup, rgb(p.bg_hi), 0.5)));
+    set(&t, .popup_rule, R.c(mix(rgb(p.fg_dim), popup, 0.3)));
+    // The bundled frames' border colours (scripts/gen-ninepatches.py).
+    set(&t, .popup_border, R.h(if (dark) 0x68708c else 0xb8bcc8));
+    set(&t, .popup_selected_bg, R.c(popup_selected));
+    set(&t, .popup_label, R.r(.fg));
+    set(&t, .popup_kind, R.n(.blue));
+    set(&t, .popup_detail, R.r(.fg_dim));
+    set(&t, .finder_header_bg, R.c(header));
+    set(&t, .finder_header_fg, if (dark) R.r(.fg) else R.r(.bg));
+    set(&t, .finder_selected_bg, R.c(popup_selected));
+    set(&t, .finder_selected_fg, R.r(.fg));
+    set(&t, .dialog_bg, R.r(.popup_bg));
+    set(&t, .dialog_fg, R.r(.popup_fg));
+    set(&t, .dialog_title_bg, R.r(.title_bg));
+    set(&t, .dialog_title_fg, R.r(.title_fg));
+    set(&t, .danger_bg, R.c(mix(rgb(p.red), bg, 0.4)));
+    set(&t, .input_bg, R.r(.bg));
+    set(&t, .button_bg, R.r(.bg_raised));
+    set(&t, .button_focus_bg, R.r(.title_bg));
+
+    set(&t, .heading1, R.n(.blue));
+    set(&t, .heading2, R.n(.magenta));
+    set(&t, .heading3, R.n(.cyan));
+    set(&t, .heading4, R.n(.yellow));
+    set(&t, .heading5, R.n(.green));
+    set(&t, .heading6, R.r(.fg_dim));
+    set(&t, .strong, R.r(.fg_strong));
+    set(&t, .emphasis, R.c(mix(fg, blue, 0.25)));
+    set(&t, .strike, R.r(.comment));
+    set(&t, .code, R.n(.yellow));
+    set(&t, .code_bg, R.c(mix(bg, rgb(p.bg_hi), 0.8)));
+    set(&t, .code_block, R.r(.fg));
+    set(&t, .code_block_bg, R.c(mix(bg, rgb(p.bg_hi), 0.5)));
+    set(&t, .quote, R.r(.comment));
+    set(&t, .list_marker, R.n(.yellow));
+    set(&t, .rule, R.r(.border));
+
+    set(&t, .table_header, R.n(.yellow));
+    set(&t, .table_header_bg, R.r(.bg_raised));
+    set(&t, .table_alt_row_bg, R.c(mix(bg, rgb(p.bg_hi), 0.3)));
+    set(&t, .outline_marker, R.r(.fg_dim));
+
+    set(&t, .comment, R.h(p.comment));
+    set(&t, .keyword, R.n(.magenta));
+    set(&t, .string, R.n(.green));
+    set(&t, .string_escape, R.n(.cyan));
+    set(&t, .string_special, R.n(.cyan));
+    set(&t, .escape, R.n(.cyan));
+    set(&t, .number, R.h(p.orange));
+    set(&t, .boolean, R.h(p.orange));
+    set(&t, .character, R.n(.green));
+    set(&t, .constant, R.h(p.orange));
+    set(&t, .constant_builtin, R.h(p.orange));
+    set(&t, .function, R.n(.blue));
+    set(&t, .function_builtin, R.n(.blue));
+    set(&t, .type, R.n(.yellow));
+    set(&t, .type_builtin, R.n(.yellow));
+    set(&t, .constructor, R.n(.yellow));
+    set(&t, .operator, R.n(.cyan));
+    set(&t, .property, R.n(.red));
+    set(&t, .variable, R.r(.fg));
+    set(&t, .variable_builtin, R.n(.red));
+    set(&t, .variable_parameter, R.h(p.orange));
+    set(&t, .module, R.n(.yellow));
+    set(&t, .label, R.n(.blue));
+    set(&t, .attribute, R.h(p.orange));
+    set(&t, .tag, R.n(.red));
+    set(&t, .punctuation, R.r(.fg));
+    set(&t, .punctuation_special, R.n(.magenta));
+    set(&t, .text_title, R.n(.blue));
+    set(&t, .text_literal, R.n(.green));
+    set(&t, .text_uri, R.n(.cyan));
+    set(&t, .text_reference, R.n(.red));
+    return t;
 }
 
 pub fn rgb(hex: u24) Color {
@@ -447,6 +895,15 @@ pub fn parseHex(s: []const u8) ?Color {
     if (hex.len != 6) return null;
     const v = std.fmt.parseInt(u24, hex, 16) catch return null;
     return rgb(v);
+}
+
+/// A role value as a config or the wire spells it: a slot name
+/// (`"bright_red"`), another role's name (`"keyword"`), or `#rrggbb`.
+pub fn parseRoleValue(s: []const u8) ?RoleValue {
+    if (slotByName(s)) |sl| return .{ .slot = sl };
+    if (roleByName(s)) |r| return .{ .role = r };
+    if (parseHex(s)) |c| return .{ .rgb = c };
+    return null;
 }
 
 // ── The built-ins ───────────────────────────────────────────────────────
@@ -523,9 +980,9 @@ fn catppuccin(comptime f: Catppuccin) Spec {
             .{ .text_reference, f.lavender },
         },
         .ui = &.{
-            .{ .bg_tree, f.mantle },
-            .{ .bg_tab_bar, f.crust },
-            .{ .bg_tab, f.mantle },
+            .{ .sidebar_bg, f.mantle },
+            .{ .tab_bar_bg, f.crust },
+            .{ .tab_bg, f.mantle },
         },
     };
 }
@@ -591,10 +1048,70 @@ fn solarized(comptime dark: bool) Spec {
             .{ .text_uri, 0x6c71c4 },
             .{ .text_reference, 0x268bd2 },
         },
-        // The light variant's terminal is the dark variant's background.
-        .ui = if (dark) &.{} else &.{.{ .bg_shell, base03 }},
     };
 }
+
+/// zoe's original hand-tuned palette.
+const default_palette: Palette = .{
+    .bg = 0x18181d,
+    .bg_dark = 0x101014,
+    .bg_hi = 0x2e2e38,
+    .fg = 0xd2d2da,
+    .fg_dim = 0x5c5c68,
+    .comment = 0x5c6370,
+    .selection = 0x303e54,
+    .cursor = 0xdcdce6,
+    .red = 0xe06c75,
+    .orange = 0xd19a66,
+    .yellow = 0xe5c07b,
+    .green = 0x98c379,
+    .cyan = 0x56b6c2,
+    .blue = 0x61afef,
+    .purple = 0xc678dd,
+};
+
+/// xterm's 16 ANSI colours, which every SGR colour was before slots
+/// existed: the normal row then the bright one.
+const xterm_slots = [_]SlotPair{
+    .{ 8, 0x000000 },  .{ 9, 0xcd0000 },  .{ 10, 0x00cd00 }, .{ 11, 0xcdcd00 },
+    .{ 12, 0x0000ee }, .{ 13, 0xcd00cd }, .{ 14, 0x00cdcd }, .{ 15, 0xe5e5e5 },
+    .{ 16, 0x7f7f7f }, .{ 17, 0xff0000 }, .{ 18, 0x00ff00 }, .{ 19, 0xffff00 },
+    .{ 20, 0x5c5cff }, .{ 21, 0xff00ff }, .{ 22, 0x00ffff }, .{ 23, 0xffffff },
+};
+
+/// `default`'s chrome, pinned to the constants `zoe/ui.zig` had.
+const default_ui: []const RolePair = &.{
+    .{ .sidebar_bg, 0x141419 },
+    .{ .tab_bg, 0x222229 },
+    .{ .shell_bg, 0x0e0f12 },
+    .{ .dir, 0x84b0e8 },
+    .{ .hidden, 0x707078 },
+    .{ .hidden_dir, 0x546c8e },
+    .{ .status_fg, 0xe2e2ec },
+    .{ .mode, 0x96dca0 },
+    .{ .message_error, 0xf08c8c },
+    .{ .whitespace, 0x3e3e48 },
+    .{ .match_bg, 0x544422 },
+    .{ .match_current_bg, 0x96742a },
+    .{ .match, 0xffbe3c },
+    .{ .diag_error, 0xe85c5c },
+    .{ .diag_warning, 0xe2b04a },
+    .{ .diag_info, 0x6ca4e8 },
+    .{ .diag_hint, 0x848494 },
+    .{ .popup_bg, 0x22222a },
+    .{ .popup_fg, 0xd6d6de },
+    .{ .popup_code_bg, 0x1a1a20 },
+    .{ .popup_rule, 0x505060 },
+    .{ .popup_border, 0x68708c },
+    .{ .popup_selected_bg, 0x3c5a96 },
+    .{ .popup_label, 0xe2e2ea },
+    .{ .popup_kind, 0x8caadc },
+    .{ .popup_detail, 0x828292 },
+    .{ .finder_header_bg, 0x285aaa },
+    .{ .finder_header_fg, 0xebf0fa },
+    .{ .finder_selected_bg, 0x4678c8 },
+    .{ .finder_selected_fg, 0xf5faff },
+};
 
 pub const builtins = [_]Spec{
     // zoe's original hand-tuned palette, every UI slot pinned to the
@@ -602,55 +1119,18 @@ pub const builtins = [_]Spec{
     // changes nothing on screen. One Dark's syntax colours.
     .{
         .name = default_name,
-        .palette = .{
-            .bg = 0x18181d,
-            .bg_dark = 0x101014,
-            .bg_hi = 0x2e2e38,
-            .fg = 0xd2d2da,
-            .fg_dim = 0x5c5c68,
-            .comment = 0x5c6370,
-            .selection = 0x303e54,
-            .cursor = 0xdcdce6,
-            .red = 0xe06c75,
-            .orange = 0xd19a66,
-            .yellow = 0xe5c07b,
-            .green = 0x98c379,
-            .cyan = 0x56b6c2,
-            .blue = 0x61afef,
-            .purple = 0xc678dd,
-        },
-        .ui = &.{
-            .{ .bg_tree, 0x141419 },
-            .{ .bg_tab, 0x222229 },
-            .{ .bg_shell, 0x0e0f12 },
-            .{ .fg_dir, 0x84b0e8 },
-            .{ .fg_hidden, 0x707078 },
-            .{ .fg_hidden_dir, 0x546c8e },
-            .{ .fg_status, 0xe2e2ec },
-            .{ .fg_mode, 0x96dca0 },
-            .{ .fg_error, 0xf08c8c },
-            .{ .fg_whitespace, 0x3e3e48 },
-            .{ .bg_match, 0x544422 },
-            .{ .bg_match_current, 0x96742a },
-            .{ .fg_match, 0xffbe3c },
-            .{ .fg_diag_error, 0xe85c5c },
-            .{ .fg_diag_warning, 0xe2b04a },
-            .{ .fg_diag_info, 0x6ca4e8 },
-            .{ .fg_diag_hint, 0x848494 },
-            .{ .bg_popup, 0x22222a },
-            .{ .fg_popup, 0xd6d6de },
-            .{ .bg_popup_code, 0x1a1a20 },
-            .{ .fg_popup_rule, 0x505060 },
-            .{ .fg_popup_border, 0x68708c },
-            .{ .bg_popup_selected, 0x3c5a96 },
-            .{ .fg_popup_label, 0xe2e2ea },
-            .{ .fg_popup_kind, 0x8caadc },
-            .{ .fg_popup_detail, 0x828292 },
-            .{ .bg_finder_header, 0x285aaa },
-            .{ .fg_finder_header, 0xebf0fa },
-            .{ .bg_finder_selected, 0x4678c8 },
-            .{ .fg_finder_selected, 0xf5faff },
-        },
+        .palette = default_palette,
+        .ui = default_ui,
+    },
+    // `default` with xterm's own ANSI colours in the slots, as terminal
+    // output had before the palette existed: for whoever wants `ls
+    // --color` unchanged. The syntax roles name slots, so code takes
+    // xterm's hues too; the chrome is `default`'s.
+    .{
+        .name = "xterm",
+        .palette = default_palette,
+        .slots = &xterm_slots,
+        .ui = default_ui,
     },
     .{
         .name = "one-dark",
@@ -724,11 +1204,11 @@ pub const builtins = [_]Spec{
         },
         // VS Code's blue status bar, white on it.
         .ui = &.{
-            .{ .bg_status, 0x007acc },
-            .{ .fg_status, 0xffffff },
-            .{ .fg_mode, 0xffffff },
-            .{ .fg_error, 0xffd6d6 },
-            .{ .bg_tab, 0xececec },
+            .{ .status_bg, 0x007acc },
+            .{ .status_fg, 0xffffff },
+            .{ .mode, 0xffffff },
+            .{ .message_error, 0xffd6d6 },
+            .{ .tab_bg, 0xececec },
         },
     },
     .{
@@ -1041,7 +1521,7 @@ pub const builtins = [_]Spec{
         },
         // The comment blue is the theme's brightest accent; the tree's
         // directories take the property cyan instead.
-        .ui = &.{.{ .fg_dir, 0x9effff }},
+        .ui = &.{.{ .dir, 0x9effff }},
     },
     .{
         .name = "dracula",
@@ -1239,7 +1719,7 @@ pub const builtins = [_]Spec{
     },
 };
 
-const github_dark_syntax = [_]SyntaxPair{
+const github_dark_syntax = [_]RolePair{
     .{ .keyword, 0xff7b72 },
     .{ .string, 0xa5d6ff },
     .{ .character, 0xa5d6ff },

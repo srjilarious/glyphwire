@@ -46,14 +46,16 @@ const interrupt = @import("applib").interrupt;
 /// Rows the header block occupies: title, search field, hint line.
 const header_rows: usize = 3;
 
-const bg_header = glyphwire.Color{ .r = 40, .g = 90, .b = 170 };
-const fg_header = glyphwire.Color{ .r = 235, .g = 240, .b = 250 };
-const bg_list = glyphwire.Color{ .r = 16, .g = 16, .b = 20 };
-const fg_list = glyphwire.Color{ .r = 210, .g = 210, .b = 216 };
-// Selection uses the same blue as the header, tying the "you are here"
-// highlight to the chrome around it rather than inventing a third color.
-const bg_selected = glyphwire.Color{ .r = 70, .g = 120, .b = 200 };
-const fg_selected = glyphwire.Color{ .r = 245, .g = 250, .b = 255 };
+// A picker like the finder popups (zoe's Ctrl+P, salacommander's F3), so
+// it draws in the same theme roles: the finder's header and selection
+// over a popup's body.
+const role = glyphwire.Color.role;
+const bg_header = role(.finder_header_bg);
+const fg_header = role(.finder_header_fg);
+const bg_list = role(.popup_bg);
+const fg_list = role(.popup_fg);
+const bg_selected = role(.finder_selected_bg);
+const fg_selected = role(.finder_selected_fg);
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;

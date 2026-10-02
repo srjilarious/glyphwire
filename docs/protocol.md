@@ -237,6 +237,8 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `InvalidScrollMode` | `scroll_mode`'s `mode` is not `"host"` or `"client"` |
 | `InvalidSpans` | `write_text` has both `text` and `spans`, or neither |
 | `InvalidTextScale` | `write_text`'s `scale` is not one of the enumerated values |
+| `InvalidColor`, `UnknownColorRole` | a colour's `slot` is outside 0–23, or its `role` is not a role name; `set_theme` slot given as a reference |
+| `UnknownTheme` | `set_theme`'s `name` is not a built-in theme |
 | `UnknownLayer` | any `layer` handle that does not exist, **and** the root handle where a non-root one is required |
 | `LayerPermissionDenied` | `destroy_layer` from a non-owner |
 | `UnknownContext`, `RootContextImmutable`, `ContextPermissionDenied`, `NoContextSession` | context messages |
@@ -385,9 +387,21 @@ ordinary 1-cell character has no `wide` member. The host computes width
 from Unicode East Asian Width, treating `W` and `F` as wide and `A` as
 narrow.
 
-**Colours** are `{"r":0-255,"g":0-255,"b":0-255,"a":0-255}`. `a` defaults
-to 255, so `{"r":255,"g":0,"b":0}` is valid. The default style is white on
-black.
+**Colours** take one of three forms:
+
+- `{"r":0-255,"g":0-255,"b":0-255,"a":0-255}` — a fixed colour. `a`
+  defaults to 255, so `{"r":255,"g":0,"b":0}` is valid.
+- `{"slot":0-23}` — a palette slot of the context's theme (section 4.10).
+- `{"role":"<name>"}` — a theme role (section 4.10), e.g.
+  `{"role":"keyword"}`.
+
+A slot or role is a **reference**: the cell stores it, and the host
+resolves it against the theme of the context the cell belongs to every
+time it draws, so a theme change recolours what is already on screen. `a`
+applies to a reference too, multiplied into the theme colour's own alpha.
+An out-of-range slot is `InvalidColor`; an unknown role is
+`UnknownColorRole`. The default style's foreground is `{"role":"fg"}` and
+its background is transparent (alpha 0).
 
 **Positions.** Pixel positions are `{"x":<f32>,"y":<f32>}`; cell positions
 are `{"row":<int>,"col":<int>}`, both 0-based, origin top-left.
@@ -454,6 +468,52 @@ pane's size, not the window's, and no message it can send reveals pane
 geometry. Only `pane_layout`, which only a window manager subscribes to,
 exposes where panes sit.
 
+### 4.10 Theme
+
+A **theme** is two tables the host resolves colour references against.
+
+**Slots** are 24 colours: the eight ANSI hues — `black red green yellow
+blue magenta cyan white`, in ANSI order — at three levels. Slots 0–7 are
+the dim level, 8–15 normal, 16–23 bright, so slot `level * 8 + hue`.
+Their names are the hue for the normal level and `dim_` / `bright_`
+prefixed for the other two (`red`, `dim_red`, `bright_red`). ANSI escape
+output draws from them: SGR `30`–`37` / `40`–`47` are slots 8–15, `90`–`97`
+/ `100`–`107` are 16–23, bold promotes a basic foreground to its bright
+slot, SGR `2` (dim) moves a slot to its dim one, and `38;5;N` / `48;5;N`
+for `N` 0–15 are the same slots as the basic and bright codes. Only
+256-colour indices 16–255 and truecolor stay fixed.
+
+**Roles** say what a colour is *for*. Each names a slot, a fixed colour,
+or another role. The set is fixed and shared by every program (the names
+below are the wire form; the numeric order in `core.theme.Role` is
+append-only):
+
+| Group | Roles |
+|---|---|
+| Base | `fg` (the default text), `fg_dim`, `fg_strong`, `bg`, `bg_dark`, `bg_raised`, `border`, `accent`, `link`, `selection_bg`, `cursor_bg`, `cursor_fg` |
+| Status | `success`, `message`, `message_error`, `diag_error`, `diag_warning`, `diag_info`, `diag_hint` |
+| Search | `match`, `match_bg`, `match_current_bg` |
+| Files | `file`, `dir`, `symlink`, `exec`, `special`, `hidden`, `hidden_dir`, `marked` |
+| Chrome | `sidebar_bg`, `status_bg`, `status_fg`, `mode`, `tab_bar_bg`, `tab_bg`, `shell_bg`, `whitespace`, `title_bg`, `title_fg`, `title_inactive_bg`, `title_inactive_fg`, `list_cursor_bg`, `list_cursor_inactive_bg`, `keybar_bg`, `keybar_key`, `keybar_label_bg`, `keybar_label`, `suggestion` |
+| Popups and dialogs | `popup_bg`, `popup_fg`, `popup_code_bg`, `popup_rule`, `popup_border`, `popup_selected_bg`, `popup_label`, `popup_kind`, `popup_detail`, `finder_header_bg`, `finder_header_fg`, `finder_selected_bg`, `finder_selected_fg`, `dialog_bg`, `dialog_fg`, `dialog_title_bg`, `dialog_title_fg`, `danger_bg`, `input_bg`, `button_bg`, `button_focus_bg` |
+| Documents | `heading1`–`heading6`, `strong`, `emphasis`, `strike`, `code`, `code_bg`, `code_block`, `code_block_bg`, `quote`, `list_marker`, `rule` |
+| Tables | `table_header`, `table_header_bg`, `table_alt_row_bg`, `outline_marker` |
+| Syntax | the tree-sitter capture groups: `comment`, `keyword`, `string`, `string_escape`, `string_special`, `escape`, `number`, `boolean`, `character`, `constant`, `constant_builtin`, `function`, `function_builtin`, `type`, `type_builtin`, `constructor`, `operator`, `property`, `variable`, `variable_builtin`, `variable_parameter`, `module`, `label`, `attribute`, `tag`, `punctuation`, `punctuation_special`, `text_title`, `text_literal`, `text_uri`, `text_reference` |
+
+A role without a `_bg` suffix is a foreground. A table with no
+`header_fg` draws its header in `table_header`.
+
+**Whose theme.** The host has a **window theme**, read at startup from
+`theme.lua` in the config directory (`config = { theme = "nord" }`, or a
+theme table; see `applib/themeconf.zig`). Every context starts with a
+copy of it. A context may set its **own** theme with `set_theme`
+(section 6.1), and from then on a window-theme change passes it by; a
+cell is always resolved against the theme of the context it is in. A
+program that draws into another program's context (an inline listing in
+a shell's scrollback) therefore takes that context's theme. The frame
+clear under every pane is the window theme's `bg`, and the host caret
+is the context theme's `cursor_bg`.
+
 ## 5. Reading the catalog
 
 Each entry gives the method, its kind, its params and its result.
@@ -477,6 +537,8 @@ Each entry gives the method, its kind, its params and its result.
 | `attach_layer` | notification | `layer?` | — |
 | `adopt_context` | notification | `context` | — |
 | `set_context_title` | notification | `title` | — |
+| `set_theme` | notification | `name?`, `theme?` | — |
+| `get_theme` | request | — | `{name, dark, panel_style, own, slots, roles}` |
 | `list_contexts` | request | — | `{current, contexts: [{context, title, visible}]}` |
 | `set_window_scrollbar` | notification | `visible` | — |
 | `set_caret_layer` | notification | `layer?` | — |
@@ -505,6 +567,24 @@ context `0` and restores itself by activating its own handle.
 host's context switcher lists it and a shell's `jobs` prints it. No
 ownership needed, so a shell can name the context it inherited. Capped at
 128 bytes, cut on a UTF-8 boundary.
+
+`set_theme` gives the issuing connection's current context its own theme
+(section 4.10). `name` picks a built-in. `theme` is a whole theme —
+`{name?, dark?, panel_style?, slots?, roles?}` — laid over `default`:
+`slots` is an array of up to 24 fixed colours (a reference is
+`InvalidColor`), `roles` an object of role name to a colour in any of the
+three forms of section 4.4, read as the role's value. With neither, the
+context goes back to following the window theme. No ownership needed: a
+program colours what it draws. An unknown `name` is `UnknownTheme`. A
+client that wants a theme defined in `theme.lua` or its own config
+resolves it itself and sends the result as `theme`.
+
+`get_theme` returns the current context's theme as the host resolves it:
+every slot as a fixed colour and every role as a `{slot}`, `{role}` or
+fixed colour, plus `own` (whether the context set it) and `panel_style`
+(the nine-patch style a popup should be framed with, since a nine-patch
+can't be recoloured). A program needs it only for what it can't express
+as a reference: the frame name, or a colour it blends itself.
 
 `list_contexts` returns the issuing connection's **own pane's** stack, top
 (on screen) first, each with its `title` (empty if never set) and

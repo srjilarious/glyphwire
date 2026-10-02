@@ -55,6 +55,13 @@ pub const DispatchError = error{
     InvalidTextScale,
     /// `write_text`'s `underline` wasn't one of `core.Underline`'s names.
     InvalidUnderline,
+    /// A colour's `slot` was outside 0-23.
+    InvalidColor,
+    /// A colour's `role` isn't a `core.theme.Role` name.
+    UnknownColorRole,
+    /// `set_theme`'s `name` isn't a built-in theme. (A `theme.lua`
+    /// theme is resolved by the client and sent whole.)
+    UnknownTheme,
     /// `move_content`'s `direction` wasn't `"up"` or `"down"`.
     InvalidMoveDirection,
     /// `find_metadata`'s `direction` wasn't `"next"` or `"prev"`.
@@ -263,14 +270,14 @@ const ShadowJson = struct {
     spread: i32 = 0,
     color: protocol.Color = .{ .r = 0, .g = 0, .b = 0, .a = 128 },
 
-    fn toCore(self: ShadowJson) core.Shadow {
+    fn toCore(self: ShadowJson) DispatchError!core.Shadow {
         return .{
             .x = self.x,
             .y = self.y,
             .blur = self.blur,
             .radius = self.radius,
             .spread = self.spread,
-            .color = colorFromJson(self.color),
+            .color = try colorFromJson(self.color),
         };
     }
 
@@ -281,7 +288,7 @@ const ShadowJson = struct {
             .blur = sh.blur,
             .radius = sh.radius,
             .spread = sh.spread,
-            .color = .{ .r = sh.color.r, .g = sh.color.g, .b = sh.color.b, .a = sh.color.a },
+            .color = colorToJson(sh.color),
         };
     }
 };
@@ -357,6 +364,37 @@ const CreateContextResult = struct { context: core.ContextHandle };
 
 /// `set_context_title`: names the issuing connection's active context.
 const SetContextTitleParams = struct { title: []const u8 };
+
+/// `set_theme`: one of `name` (a built-in) or `theme` (a whole theme the
+/// client resolved itself), or neither to go back to the window's theme.
+const SetThemeParams = struct {
+    name: ?[]const u8 = null,
+    theme: ?protocol.ThemeWire = null,
+};
+
+/// `get_theme`'s result, in `protocol.ThemeWire`'s shape. `roles` is
+/// written by hand (`RolesJson`) because its keys are the enum's tags.
+const GetThemeResult = struct {
+    name: []const u8,
+    dark: bool,
+    panel_style: []const u8,
+    own: bool,
+    slots: []const protocol.Color,
+    roles: RolesJson,
+};
+
+const RolesJson = struct {
+    theme: *const core.theme.Theme,
+
+    pub fn jsonStringify(self: RolesJson, jw: anytype) !void {
+        try jw.beginObject();
+        inline for (comptime std.enums.values(core.theme.Role)) |r| {
+            try jw.objectField(@tagName(r));
+            try jw.write(protocol.roleValueToWire(self.theme.roles.get(r)));
+        }
+        try jw.endObject();
+    }
+};
 
 /// `destroy_context` / `activate_context` / `adopt_context` -- all just
 /// name one context handle.
@@ -744,17 +782,17 @@ fn parseIconOption(comptime E: type, value: ?[]const u8, default: E) !E {
 /// own error so a bad value is reported as `InvalidTextScale` rather than
 /// `InvalidIconOption`.
 /// `write_text`'s `fg`, defaulting to the default style's.
-fn resolveFg(c: ?protocol.Color) core.Color {
+fn resolveFg(c: ?protocol.Color) DispatchError!core.Color {
     const v = c orelse return core.default_style.fg;
-    return .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a };
+    return colorFromJson(v);
 }
 
 /// `write_text`'s background: null (leave each cell's own) under
 /// `transparent_bg`, else `bg`, else the default style's (transparent).
-fn resolveBg(c: ?protocol.Color, transparent_bg: bool) ?core.Background {
+fn resolveBg(c: ?protocol.Color, transparent_bg: bool) DispatchError!?core.Background {
     if (transparent_bg) return null;
     const v = c orelse return core.default_style.bg;
-    return .{ .color = .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a } };
+    return .{ .color = try colorFromJson(v) };
 }
 
 fn parseTextScale(value: ?[]const u8) !core.TextScale {
@@ -772,8 +810,7 @@ fn parseUnderline(style: ?[]const u8, color: ?protocol.Color) !core.UnderlineSty
         std.meta.stringToEnum(core.Underline, name) orelse return DispatchError.InvalidUnderline
     else
         .none;
-    const c: ?core.Color = if (color) |v| .{ .r = v.r, .g = v.g, .b = v.b, .a = v.a } else null;
-    return .{ .style = s, .color = c };
+    return .{ .style = s, .color = try optColorFromJson(color) };
 }
 
 // ─── Table ───────────────────────────────────────────────────────────────
@@ -786,12 +823,26 @@ fn parseUnderline(style: ?[]const u8, color: ?protocol.Color) !core.UnderlineSty
 // (unlike a layer handle, which is globally meaningful), since it's
 // stored in that layer's own `tables` map.
 
-fn colorFromJson(c: protocol.Color) core.Color {
-    return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
+const colorFromJson = protocol.colorFromWire;
+
+fn optColorFromJson(c: ?protocol.Color) DispatchError!?core.Color {
+    return if (c) |v| try colorFromJson(v) else null;
 }
 
-fn colorToJson(c: core.Color) protocol.Color {
-    return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
+const colorToJson = protocol.colorToWire;
+
+/// `get_cells`' colour: the reference, if any, and the RGB it resolves
+/// to under `th` -- so a test or a client inspecting the grid sees both
+/// what was asked for and what is on screen.
+fn colorToJsonResolved(c: core.Color, th: *const core.theme.Stored) protocol.Color {
+    const rgb = th.resolve(c);
+    var out = colorToJson(c);
+    out.r = rgb.r;
+    out.g = rgb.g;
+    out.b = rgb.b;
+    out.a = rgb.a;
+    out.resolved = true;
+    return out;
 }
 
 /// Parses a table-related wire string against enum `E` -- same shape
@@ -1696,6 +1747,8 @@ pub const Dispatcher = struct {
         .{ "attach_layer", catVoid(handleAttachLayer) },
         .{ "adopt_context", catVoid(handleAdoptContext) },
         .{ "set_context_title", catVoid(handleSetContextTitle) },
+        .{ "set_theme", catVoid(handleSetTheme) },
+        .{ "get_theme", catBytesIdNoParams(handleGetTheme) },
         .{ "list_contexts", catBytesIdNoParams(handleListContexts) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
@@ -1978,8 +2031,8 @@ pub const Dispatcher = struct {
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
 
-        const fg = resolveFg(p.fg);
-        const bg = resolveBg(p.bg, p.transparent_bg);
+        const fg = try resolveFg(p.fg);
+        const bg = try resolveBg(p.bg, p.transparent_bg);
         const metadata_id = try self.resolveMetadata(p.metadata_id);
         const scale = try parseTextScale(p.scale);
         const underline = try parseUnderline(p.underline, p.underline_color);
@@ -1997,9 +2050,9 @@ pub const Dispatcher = struct {
             for (spans, out) |s, *r| {
                 r.* = .{
                     .text = s.text,
-                    .fg = if (s.fg != null) resolveFg(s.fg) else fg,
+                    .fg = if (s.fg != null) try resolveFg(s.fg) else fg,
                     .bg = if (s.bg != null or s.transparent_bg != null)
-                        resolveBg(s.bg orelse p.bg, s.transparent_bg orelse p.transparent_bg)
+                        try resolveBg(s.bg orelse p.bg, s.transparent_bg orelse p.transparent_bg)
                     else
                         bg,
                     .metadata_id = if (s.metadata_id != null) try self.resolveMetadata(s.metadata_id) else metadata_id,
@@ -2120,13 +2173,13 @@ pub const Dispatcher = struct {
             .{ .scroll_mode = std.meta.stringToEnum(core.ScrollMode, p.mode orelse "") orelse
                 return DispatchError.InvalidScrollMode }
         else if (std.mem.eql(u8, p.property, "background"))
-            .{ .background = if (p.color) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else null }
+            .{ .background = try optColorFromJson(p.color) }
         else if (std.mem.eql(u8, p.property, "pty_mode"))
             .{ .pty_mode = p.enabled }
         else if (std.mem.eql(u8, p.property, "mouse_select"))
             .{ .mouse_select = p.enabled }
         else if (std.mem.eql(u8, p.property, "shadow"))
-            .{ .shadow = if (p.shadow) |sh| sh.toCore() else null }
+            .{ .shadow = if (p.shadow) |sh| try sh.toCore() else null }
         else if (std.mem.eql(u8, p.property, "selection_flow"))
             // `mode` omitted means horizontal, so `{}` resets it; `cols`
             // omitted (0) is one wide character's two cells.
@@ -2246,7 +2299,7 @@ pub const Dispatcher = struct {
             return try rpc.response(alloc, id, ScrollModeResult{ .mode = @tagName(mode) });
         } else if (std.mem.eql(u8, p.property, "background")) {
             const bg: ?protocol.Color = if (layer.getProperty(.background).background) |c|
-                .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a }
+                colorToJson(c)
             else
                 null;
             return try rpc.response(alloc, id, BackgroundResult{ .color = bg });
@@ -2506,6 +2559,45 @@ pub const Dispatcher = struct {
         });
         defer parsed.deinit();
         try self.ctx.setTitle(parsed.value.title);
+    }
+
+    /// `set_theme`: gives this connection's active context its own theme
+    /// (see `core.Context.theme`), or with neither `name` nor `theme`
+    /// puts it back on the window's. Needs no ownership, like a title: a
+    /// program colours what it draws.
+    fn handleSetTheme(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+        const parsed = try std.json.parseFromValue(SetThemeParams, alloc, params_value, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const p = parsed.value;
+
+        if (p.theme) |tj| {
+            var t = core.theme.initDefault();
+            try tj.applyTo(&t);
+            self.ctx.setOwnTheme(t);
+        } else if (p.name) |name| {
+            const t = core.theme.resolve(name, &.{}) orelse return DispatchError.UnknownTheme;
+            self.ctx.setOwnTheme(t);
+        } else {
+            const session = self.session orelse return DispatchError.NoContextSession;
+            self.ctx.followTheme(&session.theme);
+        }
+    }
+
+    /// `get_theme`: the active context's theme, every slot and role.
+    fn handleGetTheme(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        const st = &self.ctx.theme;
+        var slots: [core.theme.slot_count]protocol.Color = undefined;
+        for (st.theme.slots, 0..) |c, i| slots[i] = colorToJson(c);
+        return try rpc.response(alloc, id, GetThemeResult{
+            .name = st.name(),
+            .dark = st.theme.dark,
+            .panel_style = st.panelStyle(),
+            .own = self.ctx.theme_own,
+            .slots = &slots,
+            .roles = .{ .theme = &st.theme },
+        });
     }
 
     /// `list_contexts`: this connection's pane stack, top first, with
@@ -3162,7 +3254,7 @@ pub const Dispatcher = struct {
             while (col < layer.width) : (col += 1) {
                 const cell: *const core.Cell = if (view_row) |vr| &vr[col] else layer.cell(row, col);
                 const bg: ?protocol.Color = switch (cell.style.bg) {
-                    .color => |bgc| .{ .r = bgc.r, .g = bgc.g, .b = bgc.b, .a = bgc.a },
+                    .color => |bgc| colorToJsonResolved(bgc, &self.ctx.theme),
                     .image, .icon => null,
                 };
                 const bg_image: ?protocol.ImageBg = switch (cell.style.bg) {
@@ -3197,7 +3289,7 @@ pub const Dispatcher = struct {
                 } else null;
                 cells[row * layer.width + col] = .{
                     .g = cell.grapheme(),
-                    .fg = .{ .r = cell.style.fg.r, .g = cell.style.fg.g, .b = cell.style.fg.b, .a = cell.style.fg.a },
+                    .fg = colorToJsonResolved(cell.style.fg, &self.ctx.theme),
                     .bg = bg,
                     .bg_image = bg_image,
                     .bg_icon = bg_icon,
@@ -3214,7 +3306,7 @@ pub const Dispatcher = struct {
                     else
                         @tagName(cell.style.underline.style),
                     .underline_color = if (cell.style.underline.color) |c|
-                        .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a }
+                        colorToJsonResolved(c, &self.ctx.theme)
                     else
                         null,
                 };
@@ -3532,7 +3624,7 @@ pub const Dispatcher = struct {
         const layer = try self.resolveLayer(p.layer);
         const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
         const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
-        const bg: ?core.Color = if (p.bg) |c| .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a } else null;
+        const bg = try optColorFromJson(p.bg);
         layer.clearFill(p.row, p.col, rows, cols, bg);
     }
 
@@ -3549,7 +3641,7 @@ pub const Dispatcher = struct {
         const layer = try self.resolveLayer(p.layer);
         const rows = p.rows orelse (if (p.row < layer.height) layer.height - p.row else 0);
         const cols = p.cols orelse (if (p.col < layer.width) layer.width - p.col else 0);
-        layer.fillBg(p.row, p.col, rows, cols, colorFromJson(p.bg));
+        layer.fillBg(p.row, p.col, rows, cols, try colorFromJson(p.bg));
     }
 
     /// `set_underline`: `set_bg` for the underline channel -- a mark applied
@@ -3594,9 +3686,9 @@ pub const Dispatcher = struct {
             .borders = s.borders,
             .header_separator = s.header_separator,
             .box_style = box_style,
-            .alt_row_bg = if (s.alt_row_bg) |c| colorFromJson(c) else null,
-            .header_fg = if (s.header_fg) |c| colorFromJson(c) else null,
-            .header_bg = if (s.header_bg) |c| colorFromJson(c) else null,
+            .alt_row_bg = if (s.alt_row_bg) |c| try colorFromJson(c) else null,
+            .header_fg = if (s.header_fg) |c| try colorFromJson(c) else null,
+            .header_bg = if (s.header_bg) |c| try colorFromJson(c) else null,
             .row_height = @max(s.row_height, 1),
             .max_icon_px = s.max_icon_px,
         };
@@ -3670,8 +3762,8 @@ pub const Dispatcher = struct {
             .indent = js.indent,
             .marker_collapsed = collapsed,
             .marker_expanded = expanded,
-            .marker_fg = if (js.marker_fg) |c| colorFromJson(c) else null,
-            .alt_row_bg = if (js.alt_row_bg) |c| colorFromJson(c) else null,
+            .marker_fg = if (js.marker_fg) |c| try colorFromJson(c) else null,
+            .alt_row_bg = if (js.alt_row_bg) |c| try colorFromJson(c) else null,
         };
     }
 
@@ -3722,8 +3814,8 @@ pub const Dispatcher = struct {
             for (nj.runs, 0..) |rj, ri| {
                 runs[ri] = .{
                     .text = try talloc.dupe(u8, rj.text),
-                    .fg = if (rj.fg) |c| colorFromJson(c) else core.default_style.fg,
-                    .bg = if (rj.bg) |c| core.Background{ .color = colorFromJson(c) } else null,
+                    .fg = if (rj.fg) |c| try colorFromJson(c) else core.default_style.fg,
+                    .bg = if (rj.bg) |c| core.Background{ .color = try colorFromJson(c) } else null,
                     .metadata_id = rj.metadata_id,
                 };
             }
@@ -3889,7 +3981,7 @@ pub const Dispatcher = struct {
             .y = p.y,
             .w = p.w,
             .h = p.h,
-            .color = colorFromJson(p.color),
+            .color = try colorFromJson(p.color),
             .line_width = p.line_width,
             .filled = p.filled,
         }) catch |err| switch (err) {
@@ -3910,7 +4002,7 @@ pub const Dispatcher = struct {
             .y = p.y,
             .w = p.w,
             .h = p.h,
-            .color = if (p.color) |c| colorFromJson(c) else null,
+            .color = if (p.color) |c| try colorFromJson(c) else null,
             .line_width = p.line_width,
             .filled = p.filled,
         }) catch |err| switch (err) {
@@ -4015,7 +4107,7 @@ pub const Dispatcher = struct {
             .display = display,
             .sort_key = sort_key,
             .icon = icon_handle,
-            .fg = if (cj.fg) |c| colorFromJson(c) else null,
+            .fg = if (cj.fg) |c| try colorFromJson(c) else null,
             .metadata_id = metadata_id,
         };
     }

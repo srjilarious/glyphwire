@@ -313,20 +313,23 @@ fn freeListings(alloc: std.mem.Allocator, listings: []Listing) void {
 }
 
 // ── Styling ────────────────────────────────────────────────────────────────
+//
+// Every colour is a theme role or palette slot the host resolves (see
+// `glyphwire.theme`), so a listing already in the scrollback follows a
+// theme switch along with everything else in the window.
 
-fn rgb(r: u8, g: u8, b: u8) glyphwire.Color {
-    return .{ .r = r, .g = g, .b = b, .a = 255 };
-}
+const role = glyphwire.Color.role;
+const ansi = glyphwire.Color.ansi;
 
-const dir_color = rgb(98, 114, 164);
-const symlink_color = rgb(139, 233, 253);
-const file_color = rgb(220, 220, 220);
-const detail_color = rgb(120, 120, 120);
+const dir_color = role(.dir);
+const symlink_color = role(.symlink);
+const file_color = role(.file);
+const detail_color = role(.fg_dim);
 /// The `<operand>:` header printed above each block in a multi-operand
 /// listing, and the `total ...` summary line (`-l`).
-const header_color = rgb(200, 200, 200);
+const header_color = role(.fg_strong);
 
-// ── `-l` table cell colors (VSCode Dark+ palette, lsd-inspired) ─────────
+// ── `-l` table cell colors (lsd-inspired) ────────────────────────────────
 //
 // The server-side table gives each cell one foreground color for its
 // whole text -- no per-character styling, no bold -- so lsd's per-bit
@@ -335,23 +338,23 @@ const header_color = rgb(200, 200, 200);
 // each triad as a unit by how open it is. Owner and group get their own
 // name columns so the "brighter for owner, dimmer for group" pair lsd
 // uses (it leans on bold there, which a cell can't do) still reads.
+// These are palette slots rather than roles: "how open" is a traffic
+// light, and the slots are exactly that set of hues at three weights.
 
 /// rwx triad cell, colored as a unit by access level -- `permTriadColor`.
-const perm_none = rgb(92, 99, 112); //   `---`  dim slate  (#5C6370)
-const perm_read = rgb(106, 153, 85); //  `r--`  comment green (#6A9955)
-const perm_rwx = rgb(129, 184, 105); //  `rwx`  brighter green
-const perm_write = rgb(215, 186, 125); // `rw-`  gold (#D7BA7D)
-const perm_exec = rgb(211, 105, 105); //  `--x`/`r-x`  soft red
+const perm_none = ansi(.bright, .black); // `---`  grey
+const perm_read = ansi(.dim, .green); //    `r--`
+const perm_rwx = ansi(.bright, .green); //  `rwx`
+const perm_write = ansi(.normal, .yellow); // `rw-`
+const perm_exec = ansi(.normal, .red); //  `--x`/`r-x`
 
-/// Owner-name column: the pale yellow VSCode uses for function names
-/// (#DCDCAA), standing in for lsd's bold user color.
-const owner_color = rgb(220, 220, 170);
-/// Group-name column: a dimmer wash of the same yellow -- lsd's
+/// Owner-name column: yellow, standing in for lsd's bold user color.
+const owner_color = ansi(.normal, .yellow);
+/// Group-name column: the dim weight of the same yellow -- lsd's
 /// non-bold group tone.
-const group_color = rgb(178, 174, 128);
-/// Time column: a muted steel blue, deliberately not the bright keyword
-/// blue (#569CD6) the rest of the palette uses for identifiers.
-const time_color = rgb(96, 139, 168);
+const group_color = ansi(.dim, .yellow);
+/// Time column: a muted blue, deliberately not the one directories use.
+const time_color = ansi(.dim, .cyan);
 
 /// Foreground for one `formatPermTriad` cell, by how much access it
 /// grants -- see the color block above on why this is per-triad and not
@@ -374,7 +377,7 @@ fn permTypeColor(kind: EntryKind) glyphwire.Color {
     return switch (kind) {
         .directory => dir_color,
         .sym_link => symlink_color,
-        .other => rgb(197, 134, 192), // magenta -- device/socket/fifo
+        .other => role(.special), // device/socket/fifo
         .file => perm_none,
     };
 }
@@ -388,9 +391,9 @@ fn permTypeColor(kind: EntryKind) glyphwire.Color {
 /// color its flags individually.
 fn sizeColor(size: u64) glyphwire.Color {
     if (size < lsfmt.KBytes) return detail_color;
-    if (size < lsfmt.MBytes) return rgb(120, 190, 120);
-    if (size < lsfmt.GBytes) return rgb(220, 180, 100);
-    return rgb(225, 120, 110);
+    if (size < lsfmt.MBytes) return ansi(.normal, .green);
+    if (size < lsfmt.GBytes) return ansi(.normal, .yellow);
+    return ansi(.normal, .red);
 }
 
 
@@ -886,7 +889,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         .{ .name = "Name", .width = name_width, .sortable = true, .case_insensitive = true, .focus = true },
     }, .{
         .borders = false,
-        .alt_row_bg = rgb(20, 20, 20),
+        .alt_row_bg = role(.table_alt_row_bg),
         .row_height = row_height,
         .max_icon_px = icon_px,
     });

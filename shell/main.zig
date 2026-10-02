@@ -13,6 +13,7 @@ const glob = @import("shell_support").glob;
 const hs = @import("shell_support").handshake;
 const config = @import("shell_support").config;
 const script_engine = @import("shell_support").script_engine;
+const themeconf = @import("themeconf");
 const history = @import("applib").history;
 const homepath = @import("applib").homepath;
 const zjump = @import("shell_support").zjump;
@@ -35,11 +36,13 @@ const ModeTracker = glyphwire.ModeTracker;
 /// produces -- an absolute cwd, then `" > "`.
 const default_prompt_left = "{cwd_full} > ";
 
-/// The red glyphwire-shell uses for every error line it prints onto the
-/// grid itself (a bad `cd`, a spawn failure, a pipeline syntax error).
-const err_color = glyphwire.Color{ .r = 255, .g = 85, .b = 85 };
+/// The colour glyphwire-shell uses for every error line it prints onto
+/// the grid itself (a bad `cd`, a spawn failure, a pipeline syntax
+/// error). A theme role, like every colour the shell draws, so the host
+/// resolves it against the window's theme.
+const err_color = glyphwire.Color.role(.message_error);
 /// `[1] zoe main.zig  (background)` and the other job notices.
-const job_color = glyphwire.Color{ .r = 135, .g = 175, .b = 215 };
+const job_color = glyphwire.Color.role(.accent);
 /// How long `hangUpJobs` waits after SIGHUP before SIGKILL, when the shell
 /// exits with jobs still in the background.
 const job_hangup_grace_ms = 500;
@@ -82,7 +85,7 @@ const prompt_idle_ms: i64 = 500;
 /// Fish-style inline completion hint delay. The prompt loop already uses
 /// a 500ms idle heartbeat, so this stays aligned with that cadence.
 const autocomplete_idle_ms: i64 = 500;
-const autocomplete_hint_color = glyphwire.Color{ .r = 120, .g = 120, .b = 120 };
+const autocomplete_hint_color = glyphwire.Color.role(.suggestion);
 
 /// Env var naming the write end of the "result pipe" `runCommand` opens
 /// before spawning every foreground command (see `Prompt.spawnResultPipe`):
@@ -151,10 +154,14 @@ const timelib = struct {
     extern "c" fn strftime(s: [*]u8, max: usize, format: [*:0]const u8, tm: *const Tm) usize;
 };
 
-/// Parses a `#rgb` / `#rrggbb` (the `#` optional) colour for a powerline
-/// segment; `null` for an unset field or a malformed value.
+/// A powerline segment's colour: a palette slot (`"bright_blue"`), a
+/// theme role (`"status_bg"`) -- both follow the window's theme -- or a
+/// fixed `#rgb` / `#rrggbb` (the `#` optional). `null` for an unset field
+/// or a malformed value.
 fn plColor(s: ?[]const u8) ?glyphwire.Color {
     const spec = s orelse return null;
+    if (glyphwire.theme.slotByName(spec)) |sl| return glyphwire.Color.slot(sl);
+    if (glyphwire.theme.roleByName(spec)) |r| return glyphwire.Color.role(r);
     const p = prompt_template.parseColor(spec) orelse return null;
     return .{ .r = p.r, .g = p.g, .b = p.b };
 }
@@ -1318,6 +1325,9 @@ const Prompt = struct {
     /// `shell.conf.lua` again long after `runPrompt` resolved the path.
     /// Owned; freed in `deinit`.
     config_dir: ?[]const u8 = null,
+    /// Whether `shell.conf.lua`'s `theme(...)` gave this context its own
+    /// theme, so a `reload` without one can hand it back to the window's.
+    own_theme: bool = false,
     /// Absolute path to `~/.config/glyphwire/history`, set by
     /// `loadHistory` once it knows the config directory exists. `null`
     /// when there's no `$HOME`/`$XDG_CONFIG_HOME` to derive it from, or
@@ -3212,7 +3222,7 @@ const Prompt = struct {
             error.NeedsSingle => {
                 try self.drawText(
                     "glyphwire-shell: that action opens one file at a time\n",
-                    .{ .r = 255, .g = 85, .b = 85 },
+                    err_color,
                     null,
                 );
                 return null;
@@ -4240,7 +4250,7 @@ const Prompt = struct {
         for (argv) |arg| {
             const exp = if (opts.expand_tilde)
                 self.expandTilde(arg) catch {
-                    try self.drawText("~: HOME not set", .{ .r = 255, .g = 85, .b = 85 }, null);
+                    try self.drawText("~: HOME not set", err_color, null);
                     return;
                 }
             else
@@ -4306,7 +4316,7 @@ const Prompt = struct {
                 error.CommandNotFound => std.fmt.bufPrint(&buf, "{s}: command not found", .{argv[0]}) catch "command not found",
                 else => std.fmt.bufPrint(&buf, "{s}: {t}", .{ argv[0], err }) catch "failed to start command",
             };
-            try self.drawText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+            try self.drawText(msg, err_color, null);
             // Couldn't start it: record a status so `{exit}` reflects the
             // failure, but no duration (it never ran).
             self.last_status = if (err == error.CommandNotFound) 127 else 1;
@@ -5421,7 +5431,7 @@ const Prompt = struct {
     fn reportCdError(self: *Prompt, target: []const u8, err: anyerror) !void {
         var buf: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "cd: {s}: {t}", .{ target, err }) catch "cd: failed";
-        try self.drawText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+        try self.drawText(msg, err_color, null);
     }
 
     /// `alias` builtin. Given a `NAME=VALUE` argument
@@ -5469,7 +5479,7 @@ const Prompt = struct {
             if (!self.aliases.remove(alloc, name)) {
                 var buf: [160]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "unalias: {s}: not found", .{name}) catch "unalias: not found";
-                try self.drawText(msg, .{ .r = 255, .g = 85, .b = 85 }, null);
+                try self.drawText(msg, err_color, null);
             }
         }
     }
@@ -5754,6 +5764,19 @@ const Prompt = struct {
         // `writePromptPrefix` reads `.prompt` off it live on every redraw
         // (so `{time}` and cwd stay current).
         self.prompt_config = &eng.cfg;
+
+        // `theme(...)`: this context's own theme, resolved against
+        // `theme.lua`'s too. Without one, follow the window's -- which,
+        // after a `reload` that removed the line, means saying so.
+        const arena = eng.cfg.prompt_arena.allocator();
+        const shared = themeconf.loadShared(arena, alloc, self.client.io, self.environ_map);
+        if (eng.cfg.themes.resolve(arena, shared)) |t| {
+            try self.client.setTheme(&t);
+            self.own_theme = true;
+        } else if (self.own_theme) {
+            try self.client.setTheme(null);
+            self.own_theme = false;
+        }
 
         // `zj{}` settings. Copy the excludes into our own storage with a
         // leading `~` expanded, so the pure matcher can compare them
