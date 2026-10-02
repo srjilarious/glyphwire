@@ -333,14 +333,11 @@ pub const Buffer = struct {
         self.dirty = false;
     }
 
-    /// Rebuilds `line_starts` from scratch.
-    ///
-    /// A full rescan per edit is O(text) where an incremental fixup would
-    /// be O(edited line) -- deliberate for now: it is the version that is
-    /// obviously correct, and a whole-buffer scan is a few hundred
-    /// microseconds on the file sizes zoe opens today. The incremental
-    /// version is a contained change behind this one function when a
-    /// profile asks for it.
+    /// Rebuilds `line_starts` from scratch -- once, when the text is
+    /// loaded. Edits keep it up to date incrementally (`reindexInsert`,
+    /// `reindexDelete`): a rescan per edit was O(text), a byte at a time
+    /// through the gap, and showed up as most of a keystroke's input
+    /// handling in a 6k-line file.
     fn reindex(self: *Buffer) !void {
         self.line_starts.clearRetainingCapacity();
         try self.line_starts.append(self.alloc, 0);
@@ -430,9 +427,14 @@ pub const Buffer = struct {
         if (bytes.len == 0) return;
         const at = @min(offset, self.len());
         const start_point = if (self.track_edits) self.posOf(at) else Pos{};
+        // Before the text changes: `lineAt` clamps to the current length.
+        const line = self.lineAt(at);
 
+        // Grow the index first, so a failed allocation leaves both it and
+        // the text as they were.
+        try self.reindexInsert(line, at, bytes);
+        errdefer self.reindex() catch {};
         try self.gap.insert(at, bytes);
-        try self.reindex();
         self.dirty = true;
         self.edits += 1;
 
@@ -458,8 +460,9 @@ pub const Buffer = struct {
         const removed = try self.gap.read(self.alloc, offset, offset + del);
         errdefer self.alloc.free(removed);
 
+        // Before the text changes: `lineAt` clamps to the current length.
+        self.reindexDelete(self.lineAt(offset), self.lineAt(offset + del), del);
         self.gap.delete(offset, del);
-        try self.reindex();
         self.dirty = true;
         self.edits += 1;
 
@@ -472,6 +475,39 @@ pub const Buffer = struct {
             .new_end_point = start_point,
         });
         self.recordUndo(offset, removed, 0);
+    }
+
+    /// `line_starts` after inserting `bytes` at `at`, which lies on `line`:
+    /// every later line moves down by the insert's length, and each
+    /// newline in `bytes` starts a new line right after it. O(lines after
+    /// the insert) for the shift -- a pass of additions -- with no scan of
+    /// the text.
+    fn reindexInsert(self: *Buffer, line: usize, at: usize, bytes: []const u8) !void {
+        const newlines = std.mem.count(u8, bytes, "\n");
+        try self.line_starts.ensureUnusedCapacity(self.alloc, newlines);
+        for (self.line_starts.items[line + 1 ..]) |*start| start.* += bytes.len;
+        if (newlines == 0) return;
+
+        var new_starts = try self.alloc.alloc(usize, newlines);
+        defer self.alloc.free(new_starts);
+        var n: usize = 0;
+        for (bytes, 0..) |c, i| {
+            if (c != '\n') continue;
+            new_starts[n] = at + i + 1;
+            n += 1;
+        }
+        self.line_starts.insertSliceAssumeCapacity(line + 1, new_starts);
+    }
+
+    /// `line_starts` after deleting `del` bytes starting on line
+    /// `first_line`, the deleted range ending on `last_line`: the lines
+    /// whose newline was cut (starts in `first_line + 1 ..= last_line`)
+    /// are gone, and every later line moves up by `del`. Can't fail --
+    /// the list only shrinks.
+    fn reindexDelete(self: *Buffer, first_line: usize, last_line: usize, del: usize) void {
+        const removed = last_line - first_line;
+        self.line_starts.replaceRangeAssumeCapacity(first_line + 1, removed, &.{});
+        for (self.line_starts.items[first_line + 1 ..]) |*start| start.* -= del;
     }
 
     /// Append one edit to the pending log, or trip `edits_overflowed` and
