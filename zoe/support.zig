@@ -25,6 +25,7 @@ pub const gitignore = @import("applib").gitignore;
 pub const filetype = @import("applib").filetype;
 pub const ui = @import("ui.zig");
 pub const tabs = @import("tabs.zig");
+pub const spancache = @import("spancache.zig");
 pub const groups = @import("groups.zig");
 pub const langconf = @import("langconf.zig");
 pub const lsp = @import("lsp.zig");

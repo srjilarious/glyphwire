@@ -78,6 +78,9 @@ pub fn main(init: std.process.Init) !void {
         \\Space opens. f jumps to the next name starting with what you type; /
         \\does the same over the whole tree, opening whatever folders that
         \\takes; Tab cycles the matches.
+        \\
+        \\ZOE_PROFILE=<file> writes one timing line per drawn frame (input,
+        \\parse, highlight queries, paint, send) to <file>.
         ,
         .opts = &.{
             .{

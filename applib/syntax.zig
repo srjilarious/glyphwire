@@ -38,7 +38,21 @@
 //! `lineSpans` paints them over the top of the primary layer so a deeper
 //! layer's colour wins the bytes it covers. Injection recurses up to
 //! `max_injection_depth` (Markdown block -> markdown_inline -> html).
-//! Child trees are rebuilt from scratch each reparse -- they are small.
+//! Child trees survive an incremental reparse: the edit is applied to
+//! them too, the injection query re-runs only over what changed, and only
+//! a region an edit landed in is reparsed (against its own old tree). A
+//! big Markdown file has a child tree per paragraph; rebuilding them all
+//! per keystroke was most of what typing in one cost.
+//!
+//! **The text is read, not copied.** Parses and predicate checks read
+//! through a `TextSource`, so zoe hands over its gap buffer as-is.
+//! Only a whole-buffer parse takes a snapshot, because a staged one
+//! reads it across many UI turns.
+//!
+//! **Spans come a run of lines at a time.** `linesSpans` runs one query
+//! per layer over a whole run of lines; a query descends from the root
+//! to reach its range, and in a big file that descent is most of what
+//! a one-line query costs.
 //!
 //! Deliberate limitations:
 //!   - No `locals.scm` (so no scope-aware local/parameter distinction).
@@ -157,8 +171,8 @@ const ParseSlice = struct {
     /// Parses `src` with `parser` under this slice's budget, resuming
     /// whatever parse `parser` has parked. Null when stopped (see
     /// `fired`) or failed.
-    fn parse(self: *ParseSlice, parser: *ts.Parser, src: []const u8) ?*ts.Tree {
-        const input: ts.Input = .{ .payload = @ptrCast(@constCast(&src)), .read = readSlice };
+    fn parse(self: *ParseSlice, parser: *ts.Parser, src: *const TextSource) ?*ts.Tree {
+        const input = src.input();
         const opts: TsParseOptions = .{ .payload = self, .progress_callback = budgetExpired };
         return ts_parser_parse_with_options(parser, null, input, opts);
     }
@@ -168,18 +182,6 @@ fn budgetExpired(state: *ts.Parser.State) callconv(.c) bool {
     const slice: *ParseSlice = @ptrCast(@alignCast(state.payload.?));
     if (slice.expired()) slice.fired = true;
     return slice.fired;
-}
-
-/// `ts.Input.read` over one contiguous slice: hands the parser everything
-/// from `byte_index` on in a single chunk, and nothing past the end.
-fn readSlice(payload: ?*anyopaque, byte_index: u32, _: ts.Point, bytes_read: *u32) callconv(.c) [*c]const u8 {
-    const src: *const []const u8 = @ptrCast(@alignCast(payload.?));
-    if (byte_index >= src.len) {
-        bytes_read.* = 0;
-        return "";
-    }
-    bytes_read.* = @intCast(src.len - byte_index);
-    return src.ptr + byte_index;
 }
 
 /// The oldest grammar ABI libtree-sitter here can parse. A `parser.so`
@@ -696,19 +698,132 @@ const CompiledLang = struct {
 };
 
 /// One resolved embedded region: a child grammar's parse tree over a set
-/// of byte ranges of the same `Highlighter.source`. Trees are rebuilt
-/// from scratch each reparse (they are small); `compiled` outlives them.
+/// of byte ranges of the same text as the primary tree. Kept across
+/// incremental reparses: `applyEdit` edits the tree and shifts `ranges`
+/// along with the primary tree, and `refreshInjections` reparses it
+/// (incrementally) only when an edit landed inside it. `compiled`
+/// outlives it.
 const Injection = struct {
-    /// Borrowed from the `compiled` map key.
-    lang_name: []const u8,
-    /// Owned.
-    tree: *ts.Tree,
     /// Borrowed from the `compiled` map.
     compiled: *CompiledLang,
+    /// Owned.
+    tree: *ts.Tree,
     /// Owned. The included ranges this tree was parsed over, in buffer
-    /// coordinates -- `lineSpans` uses them to skip layers off the line.
+    /// coordinates -- `linesSpans` uses them to skip layers off the
+    /// lines being painted, and `refreshInjections` matches them against
+    /// the regions a reparse finds.
     ranges: []ts.Range,
+    /// 1 for a region the primary grammar injected, 2 for one injected
+    /// by such a region, and so on. Painting goes shallowest first.
+    depth: u8,
+    /// Unique among `Highlighter.injections`; `parent` names the
+    /// injection whose tree this region was found in, 0 for the primary
+    /// tree. How a reparsed region's descendants are found and dropped.
+    id: u32,
+    parent: u32,
+    /// An edit since the last reparse changed bytes inside `ranges`, so
+    /// the tree needs reparsing before it is trusted again.
+    touched: bool = false,
+    /// An edit straddled one of `ranges`' boundaries: the shifted ranges
+    /// no longer describe anything, so the region can't be matched.
+    broken: bool = false,
+
+    fn destroy(self: *Injection, alloc: std.mem.Allocator) void {
+        self.tree.destroy();
+        alloc.free(self.ranges);
+    }
 };
+
+/// One embedded region found by an injection query, before it is parsed:
+/// its language resolved, and its ranges (owned).
+const InjPair = struct { compiled: *CompiledLang, ranges: []ts.Range };
+
+/// The text a parse tree indexes, wherever it lives.
+///
+/// tree-sitter reads its input in chunks through a callback, so the text
+/// doesn't have to be one slice: zoe hands over its gap buffer as two
+/// runs and nothing is copied per keystroke. gw-grep, the hover popup and
+/// the tests pass plain bytes.
+pub const TextSource = union(enum) {
+    /// One contiguous slice.
+    bytes: []const u8,
+    /// A store that hands out the text a contiguous run at a time.
+    reader: Reader,
+
+    pub const Reader = struct {
+        ctx: *const anyopaque,
+        len: usize,
+        /// The bytes from `off` up to the store's next seam or its end.
+        /// Called only for `off < len`, and must then return at least one
+        /// byte.
+        chunk_fn: *const fn (ctx: *const anyopaque, off: usize) []const u8,
+    };
+
+    pub fn len(self: TextSource) usize {
+        return switch (self) {
+            .bytes => |b| b.len,
+            .reader => |r| r.len,
+        };
+    }
+
+    /// The contiguous bytes from `off` on, as many as the store has in
+    /// one piece; empty at or past the end.
+    pub fn chunk(self: TextSource, off: usize) []const u8 {
+        if (off >= self.len()) return &.{};
+        return switch (self) {
+            .bytes => |b| b[off..],
+            .reader => |r| r.chunk_fn(r.ctx, off),
+        };
+    }
+
+    /// Bytes `[start, end)` as one slice: borrowed from the store when
+    /// they sit in one chunk, otherwise copied into `scratch` (cleared
+    /// first). Null when the range is out of bounds.
+    pub fn slice(
+        self: TextSource,
+        alloc: std.mem.Allocator,
+        start: usize,
+        end: usize,
+        scratch: *std.ArrayList(u8),
+    ) !?[]const u8 {
+        if (start > end or end > self.len()) return null;
+        const first = self.chunk(start);
+        if (end - start <= first.len) return first[0 .. end - start];
+        scratch.clearRetainingCapacity();
+        var off = start;
+        while (off < end) {
+            const c = self.chunk(off);
+            if (c.len == 0) return null;
+            const n = @min(c.len, end - off);
+            try scratch.appendSlice(alloc, c[0..n]);
+            off += n;
+        }
+        return scratch.items;
+    }
+
+    /// A `ts.Input` reading through `self`, which must stay put for as
+    /// long as the parse it is handed to runs.
+    fn input(self: *const TextSource) ts.Input {
+        return .{ .payload = @constCast(self), .read = readSource };
+    }
+};
+
+/// `ts.Input.read` over a `TextSource`: one chunk per call, nothing past
+/// the end.
+fn readSource(payload: ?*anyopaque, byte_index: u32, _: ts.Point, bytes_read: *u32) callconv(.c) [*c]const u8 {
+    const src: *const TextSource = @ptrCast(@alignCast(payload.?));
+    const c = src.chunk(byte_index);
+    if (c.len == 0) {
+        bytes_read.* = 0;
+        return "";
+    }
+    bytes_read.* = @intCast(@min(c.len, std.math.maxInt(u32)));
+    return c.ptr;
+}
+
+/// One buffer line for `Highlighter.linesSpans`: byte offsets of its
+/// first byte and of its newline (or the text's end).
+pub const LineRange = struct { start: usize, end: usize };
 
 pub const Highlighter = struct {
     alloc: std.mem.Allocator,
@@ -723,16 +838,27 @@ pub const Highlighter = struct {
     lang_name: ?[]const u8 = null,
     query: ?*ts.Query = null,
     tree: ?*ts.Tree = null,
-    /// The exact bytes `tree` was parsed from -- kept so `#eq?` /
-    /// `#any-of?` can read a captured node's text. Owned. While a staged
-    /// parse is pending this is the whole-buffer snapshot the full parse
-    /// is reading, and the provisional prefix `tree` indexes into it too.
+    /// The text `tree` (and every injection tree) indexes -- what `#eq?` /
+    /// `#any-of?` read a captured node's text from. After a whole-buffer
+    /// parse of bytes this is `.bytes = source`; after
+    /// `reparseIncremental` it is whatever the caller passed, borrowed.
+    text: TextSource = .{ .bytes = &.{} },
+    /// An owned snapshot of the text, kept only for the parses that need
+    /// one: the bytes API (`reparse`, `beginParse`) and a staged parse,
+    /// whose slices read it across many UI turns while the caller's own
+    /// text may change. Empty once `reparseIncremental` has moved `text`
+    /// onto the caller's store.
     source: []u8 = &.{},
     /// A whole-buffer parse of `source` was cut short by its budget and
     /// `parser` holds its state; `continueParse` resumes it. Anything else
     /// that parses with `parser` must `cancelParse` first, or tree-sitter
     /// would resume the old parse against the new input.
     parse_pending: bool = false,
+    /// Bumped whenever the trees change in a way `reparseIncremental`'s
+    /// changed ranges don't describe: a whole-buffer parse (or the end of
+    /// a staged one), a language switch. A caller caching spans compares
+    /// it to know when to throw the whole cache away.
+    generation: u64 = 0,
 
     /// capture id -> resolved colour (or null = don't colour). Rebuilt
     /// by `setLanguage`. Owned.
@@ -750,20 +876,34 @@ pub const Highlighter = struct {
     /// The primary language's `injections.scm` compiled, or null (no
     /// grammar file, injection disabled, or a bad query). Owned.
     inj_query: ?*ts.Query = null,
-    /// Resolved embedded regions, shallowest first. Rebuilt every
-    /// reparse. Owned.
+    /// Resolved embedded regions, sorted by `depth` so painting them in
+    /// order lets a deeper layer win. Owned.
     injections: std.ArrayList(Injection) = .empty,
+    /// The next `Injection.id` to hand out. 0 is the primary tree.
+    next_inj_id: u32 = 1,
     /// canonical language name -> its compiled artifacts, shared across
     /// injections and reparses. Keys owned; values boxed and owned.
     compiled: std.StringHashMapUnmanaged(*CompiledLang) = .empty,
     /// Injected languages we tried and couldn't compile, so a miss is
     /// silent after the first. Keys owned.
     compiled_failed: std.StringHashMapUnmanaged(void) = .empty,
+    /// Where the edits applied since the last reparse put new text, in
+    /// current coordinates. The injection pass re-queries these as well
+    /// as tree-sitter's changed ranges: an edit inside an injected region
+    /// changes the region's bytes without necessarily changing the
+    /// primary tree's structure.
+    edit_ranges: std.ArrayList(ByteRange) = .empty,
 
-    /// Per-line scratch: one entry per byte of the line, holding the
-    /// winning colour so far. Reused across calls.
+    /// Paint scratch: one entry per byte of the run being painted,
+    /// holding the winning colour so far. Reused across calls.
     paint: std.ArrayList(?Color) = .empty,
     raw: std.ArrayList(RawSpan) = .empty,
+    /// `lineSpans`' one-line bounds, and the two capture-text buffers a
+    /// predicate comparing two captures needs when both straddle a seam
+    /// in `text`.
+    line_bounds: std.ArrayList(usize) = .empty,
+    pred_a: std.ArrayList(u8) = .empty,
+    pred_b: std.ArrayList(u8) = .empty,
 
     const RawSpan = struct { start: usize, end: usize, specificity: u32, color: Color };
 
@@ -790,8 +930,12 @@ pub const Highlighter = struct {
         self.injections.deinit(self.alloc);
         self.compiled.deinit(self.alloc);
         self.compiled_failed.deinit(self.alloc);
+        self.edit_ranges.deinit(self.alloc);
         self.paint.deinit(self.alloc);
         self.raw.deinit(self.alloc);
+        self.line_bounds.deinit(self.alloc);
+        self.pred_a.deinit(self.alloc);
+        self.pred_b.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -818,6 +962,8 @@ pub const Highlighter = struct {
     pub fn clearLanguage(self: *Highlighter) void {
         self.cancelParse();
         self.clearInjections();
+        self.edit_ranges.clearRetainingCapacity();
+        self.generation +%= 1;
 
         var cit = self.compiled.iterator();
         while (cit.next()) |e| {
@@ -844,8 +990,7 @@ pub const Highlighter = struct {
             self.query = null;
         }
         self.parser.setLanguage(null) catch {};
-        self.alloc.free(self.source);
-        self.source = &.{};
+        self.setOwnedSource(&.{});
         self.alloc.free(self.capture_colors);
         self.capture_colors = &.{};
         freePreds(self.alloc, self.pattern_preds);
@@ -856,11 +1001,16 @@ pub const Highlighter = struct {
     /// Drop every resolved injection tree. The compiled-language cache
     /// (`compiled`) is kept -- only the trees and their range slices go.
     fn clearInjections(self: *Highlighter) void {
-        for (self.injections.items) |*inj| {
-            inj.tree.destroy();
-            self.alloc.free(inj.ranges);
-        }
+        for (self.injections.items) |*inj| inj.destroy(self.alloc);
         self.injections.clearRetainingCapacity();
+    }
+
+    /// Replaces the owned snapshot with `src` (owned, may be empty) and
+    /// points `text` at it.
+    fn setOwnedSource(self: *Highlighter, src: []u8) void {
+        self.alloc.free(self.source);
+        self.source = src;
+        self.text = .{ .bytes = src };
     }
 
     /// Switch to `grammar` (which outlives the Highlighter -- the
@@ -918,17 +1068,25 @@ pub const Highlighter = struct {
     pub fn reparse(self: *Highlighter, text: []const u8) !void {
         if (self.query == null) return;
         self.cancelParse();
+        self.setOwnedSource(try self.alloc.dupe(u8, text));
+        try self.parseWhole();
+    }
 
-        const src = try self.alloc.dupe(u8, text);
-        errdefer self.alloc.free(src);
-
-        const new_tree = self.parser.parseString(src, null) orelse return error.ParseFailed;
-
+    /// Whole-buffer parse of `self.text` with no tree reuse, then every
+    /// injection found fresh.
+    fn parseWhole(self: *Highlighter) !void {
+        const new_tree = self.parser.parse(self.text.input(), null) orelse return error.ParseFailed;
         if (self.tree) |t| t.destroy();
         self.tree = new_tree;
-        self.alloc.free(self.source);
-        self.source = src;
+        self.wholeTreeReplaced();
+    }
 
+    /// The bookkeeping after `tree` was replaced by a parse that didn't
+    /// reuse the old one: injections found again from scratch, and
+    /// `generation` bumped so span caches know nothing old carries over.
+    fn wholeTreeReplaced(self: *Highlighter) void {
+        self.generation +%= 1;
+        self.edit_ranges.clearRetainingCapacity();
         self.clearInjections();
         self.resolveInjections() catch {};
     }
@@ -953,12 +1111,14 @@ pub const Highlighter = struct {
         if (self.query == null) return .done;
         self.cancelParse();
 
-        const src = try self.alloc.dupe(u8, text);
+        // The parked parse reads this snapshot across many UI turns, so
+        // it is the one parse that must not read the caller's live text.
+        self.setOwnedSource(try self.alloc.dupe(u8, text));
         if (self.tree) |t| t.destroy();
         self.tree = null;
         self.clearInjections();
-        self.alloc.free(self.source);
-        self.source = src;
+        self.edit_ranges.clearRetainingCapacity();
+        self.generation +%= 1;
         self.parse_pending = true;
 
         if (try self.stepFullParse(budget) == .done) return .done;
@@ -973,7 +1133,8 @@ pub const Highlighter = struct {
         defer prefix.destroy();
         prefix.setLanguage(self.parser.getLanguage()) catch return .pending;
         var slice = ParseSlice.start(budget);
-        self.tree = slice.parse(prefix, self.source[0..cut]);
+        const prefix_src: TextSource = .{ .bytes = self.source[0..cut] };
+        self.tree = slice.parse(prefix, &prefix_src);
         if (self.tree != null) self.resolveInjections() catch {};
         return .pending;
     }
@@ -1001,7 +1162,8 @@ pub const Highlighter = struct {
 
     fn stepFullParse(self: *Highlighter, budget: ParseBudget) !ParseProgress {
         var slice = ParseSlice.start(budget);
-        const new_tree = slice.parse(self.parser, self.source) orelse {
+        const src: TextSource = .{ .bytes = self.source };
+        const new_tree = slice.parse(self.parser, &src) orelse {
             // Stopped by the budget: `parser` keeps its place for the
             // next slice. Anything else (an external scanner error) would
             // fail the same way every slice, so give up on it and keep
@@ -1014,55 +1176,85 @@ pub const Highlighter = struct {
         self.parse_pending = false;
         if (self.tree) |t| t.destroy();
         self.tree = new_tree;
-        self.clearInjections();
-        self.resolveInjections() catch {};
+        self.text = .{ .bytes = self.source };
+        self.wholeTreeReplaced();
         return .done;
     }
 
-    /// Replay one buffer mutation onto the retained tree so the next
-    /// `reparseIncremental` can reuse it. No-op until there is a tree.
+    /// Replay one buffer mutation onto the retained trees -- the primary
+    /// one and every injection's -- so the next `reparseIncremental` can
+    /// reuse them. No-op until there is a tree.
     pub fn applyEdit(self: *Highlighter, e: Edit) void {
         const t = self.tree orelse return;
-        t.edit(.{
+        const input_edit: ts.InputEdit = .{
             .start_byte = @intCast(e.start_byte),
             .old_end_byte = @intCast(e.old_end_byte),
             .new_end_byte = @intCast(e.new_end_byte),
             .start_point = pointOf(e.start_point),
             .old_end_point = pointOf(e.old_end_point),
             .new_end_point = pointOf(e.new_end_point),
-        });
+        };
+        t.edit(input_edit);
+
+        // An injection tree is in buffer coordinates too, so the same
+        // edit applies to it; its ranges move with the text. One wholly
+        // before the edit is left alone -- nothing in it moved.
+        for (self.injections.items) |*inj| {
+            const last = inj.ranges[inj.ranges.len - 1];
+            if (last.end_byte < e.start_byte) continue;
+            inj.tree.edit(input_edit);
+            switch (shiftRanges(inj.ranges, e)) {
+                .untouched => {},
+                .touched => inj.touched = true,
+                .broken => inj.broken = true,
+            }
+        }
+
+        // Earlier edits' new text moves with this one; then this edit's.
+        for (self.edit_ranges.items) |*r| r.* = shiftByteRange(r.*, e);
+        self.edit_ranges.append(self.alloc, .{ .start = e.start_byte, .end = e.new_end_byte }) catch {};
     }
 
-    /// Reparse against the retained tree (already brought in sync by
-    /// `applyEdit`). Appends to `changed` the buffer byte ranges whose
-    /// syntax structure moved between the old tree and the new one.
+    /// Reparse against the retained trees (already brought in sync by
+    /// `applyEdit`), reading the text through `src`. From here on `src`
+    /// is the text the trees index -- borrowed: the caller keeps it alive
+    /// and unchanged until its next `applyEdit`. Appends to `changed` the
+    /// byte ranges whose highlighting may have moved: where the primary
+    /// tree's structure changed, where an injected region was reparsed,
+    /// appeared or went away.
     ///
-    /// Returns false when the caller should still repaint the whole
-    /// visible pane -- no tree was retained to diff against, or the set
-    /// of injected regions changed (a code fence added or its language
-    /// edited); true when `changed`, unioned with the caller's own
-    /// edited-line set, is a complete account of what must be redrawn.
+    /// Returns false when the caller should repaint everything instead --
+    /// there was no tree to reuse, or a staged parse was still running,
+    /// and the whole buffer was parsed again (`generation` moved); true
+    /// when `changed`, unioned with the caller's own edited lines, is a
+    /// complete account of what must be redrawn.
     pub fn reparseIncremental(
         self: *Highlighter,
-        text: []const u8,
+        src: TextSource,
         changed: *std.ArrayList(ByteRange),
     ) !bool {
         if (self.query == null) return false;
         // The retained tree is a provisional prefix, not a tree of the
         // pre-edit buffer: nothing incremental can be built on it.
-        if (self.parse_pending) {
-            try self.reparse(text);
+        if (self.parse_pending or self.tree == null) {
+            self.cancelParse();
+            self.setOwnedSource(&.{});
+            self.text = src;
+            try self.parseWhole();
             return false;
         }
-        const old = self.tree orelse {
-            try self.reparse(text);
-            return false;
-        };
+        const old = self.tree.?;
 
-        const src = try self.alloc.dupe(u8, text);
-        errdefer self.alloc.free(src);
-
-        const new_tree = self.parser.parseString(src, old) orelse return error.ParseFailed;
+        const new_tree = self.parser.parse(src.input(), old) orelse return error.ParseFailed;
+        // A copy, not `src`: `text` is what injection parses read through
+        // from now on, and it must outlive this call.
+        self.text = src;
+        // The snapshot from the last whole-buffer parse is no longer what
+        // anything indexes.
+        if (self.source.len > 0) {
+            self.alloc.free(self.source);
+            self.source = &.{};
+        }
 
         const ranges: []const ts.Range = old.getChangedRanges(self.alloc, new_tree) catch &.{};
         defer if (ranges.len > 0) self.alloc.free(ranges);
@@ -1070,60 +1262,70 @@ pub const Highlighter = struct {
 
         old.destroy();
         self.tree = new_tree;
-        self.alloc.free(self.source);
-        self.source = src;
 
-        const before = self.injectionSignature();
-        self.clearInjections();
-        self.resolveInjections() catch {};
-        return before == self.injectionSignature();
+        // Where injected regions could have changed: everywhere the
+        // primary tree's structure did, plus every edit's new text.
+        var regions: std.ArrayList(ByteRange) = .empty;
+        defer regions.deinit(self.alloc);
+        try regions.appendSlice(self.alloc, changed.items);
+        try regions.appendSlice(self.alloc, self.edit_ranges.items);
+        self.edit_ranges.clearRetainingCapacity();
+        self.refreshInjections(&regions, changed) catch {
+            // Half-refreshed injections can't be trusted; find them all
+            // again and have the caller repaint.
+            self.generation +%= 1;
+            self.clearInjections();
+            self.resolveInjections() catch {};
+            return false;
+        };
+        return true;
     }
 
     // ── Injection resolution ───────────────────────────────────────────
 
-    /// (Re)build `injections` from the primary tree's `injections.scm`.
+    /// (Re)build `injections` from the primary tree's `injections.scm`,
+    /// from scratch. `injections` must be empty.
     fn resolveInjections(self: *Highlighter) !void {
         if (!self.injections_enabled) return;
         if (self.registry == null) return;
         const iq = self.inj_query orelse return;
         const tree = self.tree orelse return;
-        try self.collectInjections(iq, tree, 1);
+        try self.collectInjections(iq, tree, 1, 0, null);
+        self.sortInjections();
     }
 
-    const InjPair = struct { lang: []const u8, ranges: []ts.Range };
-
-    /// Runs `iq` over `tree`, and for every `@injection.content` region
-    /// with a resolvable language, parses a child tree and appends it to
-    /// `injections`; then recurses into that child's own injections.
-    fn collectInjections(self: *Highlighter, iq: *ts.Query, tree: *ts.Tree, depth: u8) !void {
-        if (depth > max_injection_depth) return;
-
+    /// Runs `iq` over `tree` (just `range` of it, when given) and puts
+    /// every embedded region whose language resolves into `pairs`.
+    /// A region captured twice (two overlapping query ranges) is kept once.
+    fn queryRegions(
+        self: *Highlighter,
+        iq: *ts.Query,
+        tree: *ts.Tree,
+        range: ?ByteRange,
+        pairs: *std.ArrayList(InjPair),
+    ) !void {
         const content_cap = queryCaptureId(iq, "injection.content") orelse return;
         const lang_cap = queryCaptureId(iq, "injection.language");
 
-        // Phase 1: drain the cursor into a list, so the recursion in
-        // phase 2 can re-`exec` the same cursor freely.
-        var pairs: std.ArrayList(InjPair) = .empty;
-        defer {
-            for (pairs.items) |p| self.alloc.free(p.ranges);
-            pairs.deinit(self.alloc);
+        if (range) |r| {
+            self.inj_cursor.setByteRange(@intCast(r.start), @intCast(r.end)) catch {};
+        } else {
+            self.inj_cursor.setByteRange(0, std.math.maxInt(u32)) catch {};
         }
-
-        self.inj_cursor.setByteRange(0, std.math.maxInt(u32)) catch {};
         self.inj_cursor.exec(iq, tree.rootNode());
         while (self.inj_cursor.nextMatch()) |m| {
-            var lang: ?[]const u8 = staticInjectionLang(iq, m.pattern_index);
+            var compiled: ?*CompiledLang = null;
+            if (staticInjectionLang(iq, m.pattern_index)) |name| compiled = self.getCompiled(name) catch null;
             if (lang_cap) |lc| {
                 for (m.captures) |cap| {
                     if (cap.index != lc) continue;
-                    const s: usize = cap.node.startByte();
-                    const e: usize = cap.node.endByte();
-                    if (e <= self.source.len and s <= e)
-                        lang = std.mem.trim(u8, self.source[s..e], " \t\r\n");
+                    const raw = (self.text.slice(self.alloc, cap.node.startByte(), cap.node.endByte(), &self.pred_a) catch null) orelse continue;
+                    const name = std.mem.trim(u8, raw, " \t\r\n");
+                    if (name.len == 0) continue;
+                    compiled = self.getCompiled(name) catch null;
                 }
             }
-            const lname = lang orelse continue;
-            if (lname.len == 0) continue;
+            const lang = compiled orelse continue;
 
             var ranges: std.ArrayList(ts.Range) = .empty;
             defer ranges.deinit(self.alloc);
@@ -1134,37 +1336,225 @@ pub const Highlighter = struct {
             }
             if (ranges.items.len == 0) continue;
 
-            const slice = try ranges.toOwnedSlice(self.alloc);
-            errdefer self.alloc.free(slice);
-            try pairs.append(self.alloc, .{ .lang = lname, .ranges = slice });
+            var dup = false;
+            for (pairs.items) |p| {
+                if (p.compiled == lang and rangesEqual(p.ranges, ranges.items)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+
+            const owned = try ranges.toOwnedSlice(self.alloc);
+            errdefer self.alloc.free(owned);
+            try pairs.append(self.alloc, .{ .compiled = lang, .ranges = owned });
+        }
+    }
+
+    /// Finds every embedded region in `tree` (all of it, or the `range`
+    /// slice) and parses each from scratch with its own grammar, at
+    /// `depth` under injection `parent`; then recurses into each new
+    /// region's own injections.
+    fn collectInjections(
+        self: *Highlighter,
+        iq: *ts.Query,
+        tree: *ts.Tree,
+        depth: u8,
+        parent: u32,
+        range: ?ByteRange,
+    ) !void {
+        if (depth > max_injection_depth) return;
+
+        // Drain the cursor into a list first, so the recursion below can
+        // re-`exec` the same cursor freely.
+        var pairs: std.ArrayList(InjPair) = .empty;
+        defer {
+            for (pairs.items) |p| self.alloc.free(p.ranges);
+            pairs.deinit(self.alloc);
+        }
+        try self.queryRegions(iq, tree, range, &pairs);
+
+        for (pairs.items) |*p| {
+            const id = (try self.addInjection(p, depth, parent, null)) orelse continue;
+            const added = self.injections.items[self.injections.items.len - 1];
+            if (p.compiled.inj_query) |ciq| try self.collectInjections(ciq, added.tree, depth + 1, id, null);
+        }
+    }
+
+    /// Parses the region `p` describes -- incrementally against `old`
+    /// when given (an edited tree of the same region, still the caller's)
+    /// -- and appends it to `injections`, taking ownership of `p.ranges`
+    /// (left empty). Its id, or null when the parse failed.
+    fn addInjection(self: *Highlighter, p: *InjPair, depth: u8, parent: u32, old: ?*ts.Tree) !?u32 {
+        const child = p.compiled;
+        child.parser.setIncludedRanges(p.ranges) catch return null;
+        const parsed = child.parser.parse(self.text.input(), old);
+        child.parser.setIncludedRanges(null) catch {};
+        const ct = parsed orelse return null;
+        errdefer ct.destroy();
+
+        const id = self.next_inj_id;
+        self.next_inj_id +%= 1;
+        if (self.next_inj_id == 0) self.next_inj_id = 1;
+        try self.injections.append(self.alloc, .{
+            .compiled = child,
+            .tree = ct,
+            .ranges = p.ranges,
+            .depth = depth,
+            .id = id,
+            .parent = parent,
+        });
+        p.ranges = &.{};
+        return id;
+    }
+
+    /// Brings `injections` up to date after an incremental reparse,
+    /// touching only what `regions` (the primary tree's changed ranges
+    /// plus the edits' new text) can have affected.
+    ///
+    /// An injection that doesn't meet any region and no edit touched is
+    /// kept as it is, tree and descendants -- for a big Markdown file that
+    /// is every paragraph but the one being typed in. The primary
+    /// injection query then runs over just the regions; each region it
+    /// finds is matched against the old injections there (same language,
+    /// same ranges): a match no edit touched is kept, a touched one is
+    /// reparsed against its own edited tree, and anything unmatched is
+    /// parsed fresh. Old injections there that matched nothing are gone.
+    /// Every region that was reparsed, added or dropped lands in
+    /// `changed`.
+    fn refreshInjections(
+        self: *Highlighter,
+        regions: *std.ArrayList(ByteRange),
+        changed: *std.ArrayList(ByteRange),
+    ) !void {
+        if (!self.injections_enabled or self.registry == null) return;
+        const iq = self.inj_query orelse return;
+        const tree = self.tree orelse return;
+        normalizeRanges(regions, self.text.len());
+
+        var old = self.injections;
+        self.injections = .empty;
+        // Whatever of `old` this doesn't hand back to `injections` is
+        // destroyed: a dropped region, or one an error abandoned.
+        const taken = try self.alloc.alloc(bool, old.items.len);
+        defer self.alloc.free(taken);
+        @memset(taken, false);
+        defer {
+            for (old.items, taken) |*inj, t| {
+                if (!t) inj.destroy(self.alloc);
+            }
+            old.deinit(self.alloc);
         }
 
-        // Phase 2: parse each region's child grammar and recurse.
-        for (pairs.items) |p| {
-            const child = (self.getCompiled(p.lang) catch continue) orelse continue;
-
-            child.parser.setIncludedRanges(p.ranges) catch continue;
-            const child_tree = child.parser.parseString(self.source, null);
-            child.parser.setIncludedRanges(null) catch {};
-            const ct = child_tree orelse continue;
-
-            const owned = self.alloc.dupe(ts.Range, p.ranges) catch {
-                ct.destroy();
-                continue;
-            };
-            self.injections.append(self.alloc, .{
-                .lang_name = child.name,
-                .tree = ct,
-                .compiled = child,
-                .ranges = owned,
-            }) catch {
-                ct.destroy();
-                self.alloc.free(owned);
-                continue;
-            };
-
-            if (child.inj_query) |ciq| try self.collectInjections(ciq, ct, depth + 1);
+        // The depth-1 regions that may have changed: touched by an edit,
+        // or meeting a changed region. Each one's own extent joins the
+        // regions to query, so a region that still exists is found again
+        // even where it no longer meets an edit (a paragraph split in
+        // two shrinks the first half away from the new blank line). That
+        // can make a neighbour meet the regions too, so repeat until no
+        // more join.
+        const suspect = try self.alloc.alloc(bool, old.items.len);
+        defer self.alloc.free(suspect);
+        @memset(suspect, false);
+        var grew = true;
+        while (grew) {
+            grew = false;
+            for (old.items, 0..) |inj, i| {
+                if (inj.parent != 0 or suspect[i]) continue;
+                if (inj.touched or inj.broken or rangesMeet(inj.ranges, regions.items)) {
+                    suspect[i] = true;
+                    try regions.append(self.alloc, rangesSpan(inj.ranges));
+                    grew = true;
+                }
+            }
+            normalizeRanges(regions, self.text.len());
         }
+
+        // The rest meet nothing the query will look at: they keep their
+        // trees and whole subtrees.
+        var suspects: std.ArrayList(usize) = .empty;
+        defer suspects.deinit(self.alloc);
+        for (old.items, 0..) |inj, i| {
+            if (inj.parent != 0) continue;
+            if (suspect[i]) {
+                try suspects.append(self.alloc, i);
+            } else {
+                try self.keepSubtree(&old, taken, i);
+            }
+        }
+
+        var pairs: std.ArrayList(InjPair) = .empty;
+        defer {
+            for (pairs.items) |p| self.alloc.free(p.ranges);
+            pairs.deinit(self.alloc);
+        }
+        for (regions.items) |r| try self.queryRegions(iq, tree, r, &pairs);
+
+        for (pairs.items) |*p| {
+            const match: ?usize = for (suspects.items) |i| {
+                const o = &old.items[i];
+                if (taken[i] or o.broken) continue;
+                if (o.compiled == p.compiled and rangesEqual(o.ranges, p.ranges)) break i;
+            } else null;
+
+            if (match) |i| {
+                if (!old.items[i].touched) {
+                    // Found again, unchanged: as it was.
+                    try self.keepSubtree(&old, taken, i);
+                    continue;
+                }
+                // Same region, edited inside: reparse against its own
+                // tree, and find its own injections again from scratch.
+                taken[i] = true;
+                const before = old.items[i].tree;
+                defer before.destroy();
+                self.alloc.free(old.items[i].ranges);
+                const id = (try self.addInjection(p, 1, 0, before)) orelse continue;
+                const added = self.injections.items[self.injections.items.len - 1];
+                const moved = before.getChangedRanges(self.alloc, added.tree) catch &.{};
+                defer if (moved.len > 0) self.alloc.free(moved);
+                for (moved) |m| try changed.append(self.alloc, .{ .start = m.start_byte, .end = m.end_byte });
+                // Typed text inside the region can recolour it without
+                // changing its structure; the caller covers the edited
+                // lines themselves.
+                if (added.compiled.inj_query) |ciq| try self.collectInjections(ciq, added.tree, 2, id, null);
+                continue;
+            }
+
+            // A region that wasn't there before.
+            try changed.append(self.alloc, rangesSpan(p.ranges));
+            const id = (try self.addInjection(p, 1, 0, null)) orelse continue;
+            const added = self.injections.items[self.injections.items.len - 1];
+            if (added.compiled.inj_query) |ciq| try self.collectInjections(ciq, added.tree, 2, id, null);
+        }
+
+        // Suspects nothing matched are gone; their colours with them.
+        for (suspects.items) |i| {
+            if (!taken[i]) try changed.append(self.alloc, rangesSpan(old.items[i].ranges));
+        }
+        self.sortInjections();
+    }
+
+    /// Moves `old.items[i]` and every injection descended from it into
+    /// `injections`, marking each taken.
+    fn keepSubtree(self: *Highlighter, old: *std.ArrayList(Injection), taken: []bool, i: usize) !void {
+        const inj = &old.items[i];
+        inj.touched = false;
+        try self.injections.append(self.alloc, inj.*);
+        taken[i] = true;
+        for (old.items, 0..) |o, j| {
+            if (!taken[j] and o.parent == inj.id) try self.keepSubtree(old, taken, j);
+        }
+    }
+
+    /// Shallowest first, so painting in list order lets a deeper layer's
+    /// colour win the bytes it covers.
+    fn sortInjections(self: *Highlighter) void {
+        std.sort.block(Injection, self.injections.items, {}, struct {
+            fn lt(_: void, a: Injection, b: Injection) bool {
+                return a.depth < b.depth;
+            }
+        }.lt);
     }
 
     /// The compiled artifacts for an injected language, compiling and
@@ -1237,86 +1627,117 @@ pub const Highlighter = struct {
         self.compiled_failed.put(self.alloc, key, {}) catch self.alloc.free(key);
     }
 
-    /// A cheap fingerprint of the current injection layout (languages and
-    /// range bounds) so an incremental reparse can tell whether the
-    /// embedded regions moved.
-    fn injectionSignature(self: *const Highlighter) u64 {
-        var h = std.hash.Wyhash.init(0);
-        for (self.injections.items) |inj| {
-            h.update(inj.lang_name);
-            for (inj.ranges) |r| {
-                h.update(std.mem.asBytes(&r.start_byte));
-                h.update(std.mem.asBytes(&r.end_byte));
-            }
-            h.update(&[_]u8{0xff});
-        }
-        return h.final();
-    }
-
-    // ── Per-line painting ──────────────────────────────────────────────
+    // ── Painting ───────────────────────────────────────────────────────
 
     /// Fill `out` (cleared first) with the colour spans covering buffer
     /// byte range `[line_start, line_end)`, as offsets relative to
-    /// `line_start`. The primary layer is painted first, then each
-    /// injection that touches the line, so a deeper layer's colour wins.
+    /// `line_start`. One line's worth of `linesSpans`.
     pub fn lineSpans(self: *Highlighter, line_start: usize, line_end: usize, out: *std.ArrayList(Span)) !void {
-        out.clearRetainingCapacity();
-        const q = self.query orelse return;
-        const tree = self.tree orelse return;
-        const line_len = line_end -| line_start;
-        if (line_len == 0 or line_len > max_highlight_line) return;
+        const one = [_]LineRange{.{ .start = line_start, .end = line_end }};
+        try self.linesSpans(&one, out, &self.line_bounds);
+    }
 
-        try self.paint.resize(self.alloc, line_len);
-        @memset(self.paint.items, null);
-
-        try self.paintLayer(q, tree, self.capture_colors, self.pattern_preds, line_start, line_end);
-        for (self.injections.items) |*inj| {
-            if (!rangesTouchLine(inj.ranges, line_start, line_end)) continue;
-            try self.paintLayer(
-                inj.compiled.query,
-                inj.tree,
-                inj.compiled.capture_colors,
-                inj.compiled.pattern_preds,
-                line_start,
-                line_end,
-            );
-        }
+    /// The colour spans of each of `lines` -- consecutive buffer lines, in
+    /// order -- with one query per layer for the whole run rather than one
+    /// per line: a query walks down from the root to reach its range, and
+    /// in a big file that descent, not the matching, is most of what a
+    /// one-line query costs.
+    ///
+    /// `spans` gets every line's spans back to back, each relative to its
+    /// own line's start; `bounds` gets `lines.len + 1` indexes into it, so
+    /// line `i`'s spans are `spans[bounds[i]..bounds[i + 1]]`. Both are
+    /// cleared first. A line longer than `max_highlight_line` gets none
+    /// and splits the run around it.
+    pub fn linesSpans(
+        self: *Highlighter,
+        lines: []const LineRange,
+        spans: *std.ArrayList(Span),
+        bounds: *std.ArrayList(usize),
+    ) !void {
+        spans.clearRetainingCapacity();
+        bounds.clearRetainingCapacity();
+        try bounds.append(self.alloc, 0);
 
         var i: usize = 0;
-        while (i < line_len) {
-            const c = self.paint.items[i];
+        while (i < lines.len) {
+            if (lines[i].end -| lines[i].start > max_highlight_line or !self.ready()) {
+                try bounds.append(self.alloc, spans.items.len);
+                i += 1;
+                continue;
+            }
             var j = i + 1;
-            while (j < line_len and colorEql(self.paint.items[j], c)) j += 1;
-            if (c) |col| try out.append(self.alloc, .{ .start = i, .end = j, .color = col });
+            while (j < lines.len and lines[j].end -| lines[j].start <= max_highlight_line) j += 1;
+            try self.paintRun(lines[i..j], spans, bounds);
             i = j;
         }
     }
 
-    /// Runs one layer's query clipped to `[line_start, line_end)` and
-    /// blends its captures into `self.paint` (already sized to the line).
+    /// `linesSpans` for one run of lines no longer than
+    /// `max_highlight_line`: paint every layer over the run's bytes, then
+    /// cut the result into per-line spans.
+    fn paintRun(self: *Highlighter, run: []const LineRange, spans: *std.ArrayList(Span), bounds: *std.ArrayList(usize)) !void {
+        const run_start = run[0].start;
+        const run_end = @max(run[run.len - 1].end, run_start);
+        try self.paint.resize(self.alloc, run_end - run_start);
+        @memset(self.paint.items, null);
+
+        if (run_end > run_start) {
+            try self.paintLayer(self.query.?, self.tree.?, self.capture_colors, self.pattern_preds, run_start, run_end);
+            for (self.injections.items) |*inj| {
+                if (!rangesTouchLine(inj.ranges, run_start, run_end)) continue;
+                try self.paintLayer(
+                    inj.compiled.query,
+                    inj.tree,
+                    inj.compiled.capture_colors,
+                    inj.compiled.pattern_preds,
+                    run_start,
+                    run_end,
+                );
+            }
+        }
+
+        for (run) |line| {
+            const lo = line.start - run_start;
+            const hi = @max(line.end, line.start) - run_start;
+            const painted = self.paint.items[lo..hi];
+            var k: usize = 0;
+            while (k < painted.len) {
+                const c = painted[k];
+                var m = k + 1;
+                while (m < painted.len and colorEql(painted[m], c)) m += 1;
+                if (c) |col| try spans.append(self.alloc, .{ .start = k, .end = m, .color = col });
+                k = m;
+            }
+            try bounds.append(self.alloc, spans.items.len);
+        }
+    }
+
+    /// Runs one layer's query clipped to `[range_start, range_end)` and
+    /// blends its captures into `self.paint` (already sized to the range,
+    /// index 0 = `range_start`).
     fn paintLayer(
         self: *Highlighter,
         q: *ts.Query,
         tree: *ts.Tree,
         colors: []const ?Color,
         preds: []const []const Predicate,
-        line_start: usize,
-        line_end: usize,
+        range_start: usize,
+        range_end: usize,
     ) !void {
         self.raw.clearRetainingCapacity();
-        self.cursor.setByteRange(@intCast(line_start), @intCast(line_end)) catch {};
+        self.cursor.setByteRange(@intCast(range_start), @intCast(range_end)) catch {};
         self.cursor.exec(q, tree.rootNode());
 
         while (self.cursor.nextMatch()) |m| {
-            if (!predicatesOk(self.source, preds, m)) continue;
+            if (!self.predicatesOk(preds, m)) continue;
             for (m.captures) |cap| {
                 if (cap.index >= colors.len) continue;
                 const color = colors[cap.index] orelse continue;
                 const s: usize = cap.node.startByte();
                 const e: usize = cap.node.endByte();
-                if (e <= line_start or s >= line_end) continue;
-                const cs = if (s > line_start) s - line_start else 0;
-                const ce = (if (e < line_end) e else line_end) - line_start;
+                if (e <= range_start or s >= range_end) continue;
+                const cs = if (s > range_start) s - range_start else 0;
+                const ce = (if (e < range_end) e else range_end) - range_start;
                 if (ce <= cs) continue;
                 try self.raw.append(self.alloc, .{
                     .start = cs,
@@ -1329,15 +1750,151 @@ pub const Highlighter = struct {
         if (self.raw.items.len == 0) return;
 
         // Paint less-specific (wider) captures first so a nested, more-
-        // specific capture wins the bytes it covers. Stable sort keeps
+        // specific capture wins the bytes it covers. A stable sort keeps
         // "a later match wins on a tie", matching tree-sitter's own
-        // last-wins convention.
-        std.sort.insertion(RawSpan, self.raw.items, {}, lessSpecificFirst);
+        // last-wins convention. Block sort rather than insertion: a run of
+        // a whole screen collects hundreds of captures.
+        std.sort.block(RawSpan, self.raw.items, {}, lessSpecificFirst);
         for (self.raw.items) |r| {
             @memset(self.paint.items[r.start..r.end], r.color);
         }
     }
+
+    /// Whether match `m` passes its pattern's `#eq?` family predicates,
+    /// reading captured text from `text`.
+    fn predicatesOk(self: *Highlighter, preds: []const []const Predicate, m: ts.Query.Match) bool {
+        if (m.pattern_index >= preds.len) return true;
+        for (preds[m.pattern_index]) |pr| {
+            const lhs = self.captureText(m, pr.capture, &self.pred_a) orelse return false;
+            switch (pr.kind) {
+                .eq, .not_eq => {
+                    if (pr.args.len == 0) continue;
+                    const rhs = switch (pr.args[0]) {
+                        .capture => |c| self.captureText(m, c, &self.pred_b) orelse return false,
+                        .text => |t| t,
+                    };
+                    const equal = std.mem.eql(u8, lhs, rhs);
+                    if ((pr.kind == .eq) != equal) return false;
+                },
+                .any_of, .not_any_of => {
+                    var found = false;
+                    for (pr.args) |a| {
+                        const s = switch (a) {
+                            .capture => |c| self.captureText(m, c, &self.pred_b) orelse continue,
+                            .text => |t| t,
+                        };
+                        if (std.mem.eql(u8, lhs, s)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if ((pr.kind == .any_of) != found) return false;
+                },
+            }
+        }
+        return true;
+    }
+
+    /// The text of `capture_id` in `m`, borrowed from `text` or copied
+    /// into `scratch` when it straddles a seam there.
+    fn captureText(self: *Highlighter, m: ts.Query.Match, capture_id: u32, scratch: *std.ArrayList(u8)) ?[]const u8 {
+        for (m.captures) |cap| {
+            if (cap.index != capture_id) continue;
+            return self.text.slice(self.alloc, cap.node.startByte(), cap.node.endByte(), scratch) catch null;
+        }
+        return null;
+    }
 };
+
+/// What an edit did to an injected region's ranges (`shiftRanges`).
+const RangeShift = enum { untouched, touched, broken };
+
+/// Moves `ranges` (in place) to where `e` put their text. An edit wholly
+/// before a range shifts it; one wholly inside (boundaries included, so
+/// typing at either end of a region extends it) grows or shrinks its end
+/// and marks the region touched; one straddling a boundary breaks it.
+/// Only the byte offsets move -- a refreshed region takes fresh ranges,
+/// points and all, from the query that finds it again.
+fn shiftRanges(ranges: []ts.Range, e: Edit) RangeShift {
+    var result: RangeShift = .untouched;
+    for (ranges) |*r| {
+        const s: usize = r.start_byte;
+        const end: usize = r.end_byte;
+        if (e.old_end_byte < s or (e.old_end_byte == s and e.start_byte < s)) {
+            r.start_byte = @intCast(s - e.old_end_byte + e.new_end_byte);
+            r.end_byte = @intCast(end - e.old_end_byte + e.new_end_byte);
+        } else if (e.start_byte > end) {
+            // Wholly after: nothing moves.
+        } else if (e.start_byte >= s and e.old_end_byte <= end) {
+            r.end_byte = @intCast(end - e.old_end_byte + e.new_end_byte);
+            if (result == .untouched) result = .touched;
+        } else {
+            result = .broken;
+        }
+    }
+    return result;
+}
+
+/// `r` after edit `e`: shifted when wholly after the edit, widened to
+/// cover the edit's new text when they overlap.
+fn shiftByteRange(r: ByteRange, e: Edit) ByteRange {
+    if (r.start >= e.old_end_byte) {
+        return .{ .start = r.start - e.old_end_byte + e.new_end_byte, .end = r.end - e.old_end_byte + e.new_end_byte };
+    }
+    if (r.end <= e.start_byte) return r;
+    const end = if (r.end >= e.old_end_byte) r.end - e.old_end_byte + e.new_end_byte else e.new_end_byte;
+    return .{ .start = @min(r.start, e.start_byte), .end = @max(end, e.new_end_byte) };
+}
+
+/// Sorts `ranges` and merges the ones that overlap or touch, after
+/// widening each empty one (a deletion) to the bytes either side of it
+/// so a query over it still finds the region it sat in. Clamped to
+/// `len`.
+fn normalizeRanges(ranges: *std.ArrayList(ByteRange), len: usize) void {
+    for (ranges.items) |*r| {
+        if (r.end <= r.start) r.* = .{ .start = r.start -| 1, .end = r.start + 1 };
+        r.end = @min(r.end, len);
+        r.start = @min(r.start, r.end);
+    }
+    std.sort.block(ByteRange, ranges.items, {}, struct {
+        fn lt(_: void, a: ByteRange, b: ByteRange) bool {
+            return a.start < b.start;
+        }
+    }.lt);
+    var out: usize = 0;
+    for (ranges.items) |r| {
+        if (out > 0 and r.start <= ranges.items[out - 1].end) {
+            ranges.items[out - 1].end = @max(ranges.items[out - 1].end, r.end);
+        } else {
+            ranges.items[out] = r;
+            out += 1;
+        }
+    }
+    ranges.shrinkRetainingCapacity(out);
+}
+
+/// Whether any of `a` meets any of `regions`, boundaries included.
+fn rangesMeet(a: []const ts.Range, regions: []const ByteRange) bool {
+    for (a) |r| {
+        for (regions) |g| {
+            if (r.start_byte <= g.end and g.start <= r.end_byte) return true;
+        }
+    }
+    return false;
+}
+
+fn rangesEqual(a: []const ts.Range, b: []const ts.Range) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x.start_byte != y.start_byte or x.end_byte != y.end_byte) return false;
+    }
+    return true;
+}
+
+/// From the first range's start to the last one's end.
+fn rangesSpan(ranges: []const ts.Range) ByteRange {
+    return .{ .start = ranges[0].start_byte, .end = ranges[ranges.len - 1].end_byte };
+}
 
 /// capture id -> theme colour (or null = don't colour), as a fresh
 /// owned slice.
@@ -1432,50 +1989,6 @@ fn freePreds(alloc: std.mem.Allocator, preds: []const []const Predicate) void {
         alloc.free(per_pattern);
     }
     alloc.free(preds);
-}
-
-fn predicatesOk(source: []const u8, preds: []const []const Predicate, m: ts.Query.Match) bool {
-    if (m.pattern_index >= preds.len) return true;
-    for (preds[m.pattern_index]) |pr| {
-        const lhs = captureText(source, m, pr.capture) orelse return false;
-        switch (pr.kind) {
-            .eq, .not_eq => {
-                if (pr.args.len == 0) continue;
-                const rhs = switch (pr.args[0]) {
-                    .capture => |c| captureText(source, m, c) orelse return false,
-                    .text => |t| t,
-                };
-                const equal = std.mem.eql(u8, lhs, rhs);
-                if ((pr.kind == .eq) != equal) return false;
-            },
-            .any_of, .not_any_of => {
-                var found = false;
-                for (pr.args) |a| {
-                    const s = switch (a) {
-                        .capture => |c| captureText(source, m, c) orelse continue,
-                        .text => |t| t,
-                    };
-                    if (std.mem.eql(u8, lhs, s)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if ((pr.kind == .any_of) != found) return false;
-            },
-        }
-    }
-    return true;
-}
-
-fn captureText(source: []const u8, m: ts.Query.Match, capture_id: u32) ?[]const u8 {
-    for (m.captures) |cap| {
-        if (cap.index != capture_id) continue;
-        const s: usize = cap.node.startByte();
-        const e: usize = cap.node.endByte();
-        if (e > source.len or s > e) return null;
-        return source[s..e];
-    }
-    return null;
 }
 
 /// The static `#set! injection.language "x"` value for a pattern, if it

@@ -21,6 +21,7 @@ const motion = zoe.motion;
 const search = zoe.search;
 const keys = zoe.keys;
 const tabs = zoe.tabs;
+const SpanCache = zoe.spancache.SpanCache;
 const lsp = zoe.lsp;
 const diag = zoe.diag;
 const langconf = zoe.langconf;
@@ -1789,10 +1790,10 @@ fn beginParseBuf(hl: *syntax.Highlighter, buf: *const Buffer, prefix_end: usize,
     return hl.beginParse(text, prefix_end, budget);
 }
 
+/// Reads the gap buffer in place, the way zoe does; `buf` must outlive
+/// `hl`'s use of the tree.
 fn reparseIncrementalBuf(hl: *syntax.Highlighter, buf: *const Buffer, changed: *std.ArrayList(syntax.ByteRange)) !bool {
-    const text = try buf.text(hl.alloc);
-    defer hl.alloc.free(text);
-    return hl.reparseIncremental(text, changed);
+    return hl.reparseIncremental(buf.textSource(), changed);
 }
 
 /// The grammar `.so`s only exist after `zig build` has run the install
@@ -2268,6 +2269,316 @@ pub fn syntaxInjectionSurvivesIncrementalEditTest(io: std.Io, alloc: std.mem.All
 
     try hl.lineSpans(buf.lineStart(1), buf.lineEnd(1), &spans);
     try testz.expectTrue(spans.items.len >= 1);
+}
+
+const injection_doc =
+    \\# Title
+    \\
+    \\First paragraph with `code` and *emphasis*.
+    \\Still the first paragraph.
+    \\
+    \\Second paragraph, **bold** here.
+    \\
+    \\```json
+    \\{ "x": 1 }
+    \\```
+    \\
+    \\Third paragraph.
+    \\
+;
+
+/// Replays `buf`'s journal onto `hl`, reparses incrementally, and checks
+/// every line against a fresh whole-buffer parse of the same text.
+fn reparseAndCompare(
+    alloc: std.mem.Allocator,
+    reg: *syntax.Registry,
+    g: *const syntax.LoadedGrammar,
+    buf: *Buffer,
+    hl: *syntax.Highlighter,
+    changed: *std.ArrayList(syntax.ByteRange),
+) !bool {
+    for (buf.pending_edits.items) |e| hl.applyEdit(e.toSyntax());
+    changed.clearRetainingCapacity();
+    const localized = try reparseIncrementalBuf(hl, buf, changed);
+    buf.clearEdits();
+
+    var full = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer full.deinit();
+    full.configureInjections(reg, true);
+    try full.setLanguage("markdown", g);
+    try reparseBuf(&full, buf);
+    try expectSameSpans(alloc, buf, hl, &full);
+    return localized;
+}
+
+pub fn syntaxIncrementalInjectionsMatchFullParseTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io) or !markdownStackInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const md = reg.get("markdown") orelse return error.GrammarMissing;
+
+    var buf = try Buffer.initFromText(alloc, injection_doc);
+    defer buf.deinit();
+    buf.track_edits = true;
+
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer hl.deinit();
+    hl.configureInjections(&reg, true);
+    try hl.setLanguage("markdown", md);
+    try reparseBuf(&hl, &buf);
+    const injected = hl.injections.items.len;
+    try testz.expectTrue(injected >= 4);
+
+    var changed: std.ArrayList(syntax.ByteRange) = .empty;
+    defer changed.deinit(alloc);
+
+    // Typing inside the second paragraph: localized, and every changed
+    // range stays inside that paragraph -- the others' injections are
+    // kept, not rebuilt.
+    const p2 = std.mem.indexOf(u8, injection_doc, "Second").?;
+    const p2_end = p2 + std.mem.indexOfScalar(u8, injection_doc[p2..], '\n').?;
+    try buf.insert(p2 + 7, "abc ");
+    try testz.expectTrue(try reparseAndCompare(alloc, &reg, md, &buf, &hl, &changed));
+    for (changed.items) |r| {
+        try testz.expectTrue(r.start >= p2 and r.end <= p2_end + 4 + 1);
+    }
+    try testz.expectEqual(hl.injections.items.len, injected);
+
+    // Typing emphasis open at the end of the third paragraph.
+    const text0 = try buf.text(alloc);
+    defer alloc.free(text0);
+    const p3 = std.mem.indexOf(u8, text0, "Third").?;
+    try buf.insert(p3 + 5, " *open");
+    _ = try reparseAndCompare(alloc, &reg, md, &buf, &hl, &changed);
+
+    // Splitting the first paragraph with a blank line.
+    const text1 = try buf.text(alloc);
+    defer alloc.free(text1);
+    const still = std.mem.indexOf(u8, text1, "Still").?;
+    try buf.insert(still, "\n");
+    _ = try reparseAndCompare(alloc, &reg, md, &buf, &hl, &changed);
+
+    // Editing inside the fenced JSON.
+    const text2 = try buf.text(alloc);
+    defer alloc.free(text2);
+    const one = std.mem.indexOf(u8, text2, "1 }").?;
+    try buf.insert(one + 1, ", \"y\": [2, 3]");
+    _ = try reparseAndCompare(alloc, &reg, md, &buf, &hl, &changed);
+
+    // Deleting the closing fence: the code block now runs to the end.
+    const text3 = try buf.text(alloc);
+    defer alloc.free(text3);
+    const close = std.mem.lastIndexOf(u8, text3, "```\n").?;
+    try buf.delete(close, 4);
+    _ = try reparseAndCompare(alloc, &reg, md, &buf, &hl, &changed);
+
+    // A new fenced block at the top, several edits in one batch.
+    try buf.insert(0, "```json\n[1]\n```\n\n");
+    try buf.insert(0, "Lead paragraph.\n\n");
+    _ = try reparseAndCompare(alloc, &reg, md, &buf, &hl, &changed);
+
+    // Deleting a whole paragraph.
+    const text4 = try buf.text(alloc);
+    defer alloc.free(text4);
+    const p2b = std.mem.indexOf(u8, text4, "Second").?;
+    const p2b_end = p2b + std.mem.indexOfScalar(u8, text4[p2b..], '\n').? + 1;
+    try buf.delete(p2b, p2b_end - p2b);
+    _ = try reparseAndCompare(alloc, &reg, md, &buf, &hl, &changed);
+}
+
+pub fn syntaxIncrementalInjectionsRandomEditsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io) or !markdownStackInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const md = reg.get("markdown") orelse return error.GrammarMissing;
+
+    var buf = try Buffer.initFromText(alloc, injection_doc ++ injection_doc);
+    defer buf.deinit();
+    buf.track_edits = true;
+
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer hl.deinit();
+    hl.configureInjections(&reg, true);
+    try hl.setLanguage("markdown", md);
+    try reparseBuf(&hl, &buf);
+
+    var changed: std.ArrayList(syntax.ByteRange) = .empty;
+    defer changed.deinit(alloc);
+
+    // A span cache kept the way zoe's `syncHighlight` keeps it: every
+    // edit applied, the changed ranges' lines dropped, refilled lazily.
+    // It must never hand back a line whose colours have moved.
+    var cache: SpanCache = .{};
+    defer cache.deinit(alloc);
+    var spans: std.ArrayList(syntax.Span) = .empty;
+    defer spans.deinit(alloc);
+    var fresh: std.ArrayList(syntax.Span) = .empty;
+    defer fresh.deinit(alloc);
+
+    // Fixed seed: a failure reproduces. Snippets chosen to open and close
+    // the constructs that move injected regions around.
+    const snippets = [_][]const u8{ "\n", "\n\n", "```json\n", "```\n", "*", "`", "**", "abc ", "{ \"k\": [1, 2] }", "# ", "<b>", "- item\n" };
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rand = prng.random();
+    for (0..60) |_| {
+        try cache.sync(alloc, hl.generation, buf.lineCount());
+        for (0..buf.lineCount()) |l| {
+            if (cache.get(l) != null) continue;
+            try hl.lineSpans(buf.lineStart(l), buf.lineEnd(l), &spans);
+            try cache.put(alloc, l, spans.items);
+        }
+
+        // One to three edits per reparse, as a fast typist's frame has.
+        const n = rand.intRangeAtMost(usize, 1, 3);
+        for (0..n) |_| {
+            const at = rand.uintAtMost(usize, buf.len());
+            if (rand.boolean() and buf.len() > 0) {
+                const del = @min(rand.intRangeAtMost(usize, 1, 6), buf.len() - @min(at, buf.len() - 1));
+                try buf.delete(@min(at, buf.len() - 1), del);
+            } else {
+                try buf.insert(at, snippets[rand.uintLessThan(usize, snippets.len)]);
+            }
+        }
+        for (buf.pending_edits.items) |e| {
+            try cache.applyEdit(alloc, e.start_point.line, e.old_end_point.line, e.new_end_point.line);
+        }
+        _ = try reparseAndCompare(alloc, &reg, md, &buf, &hl, &changed);
+        for (changed.items) |cr| {
+            cache.invalidate(alloc, buf.lineAt(cr.start), buf.lineAt(if (cr.end > cr.start) cr.end - 1 else cr.start));
+        }
+
+        // Every line still cached must match what a query gives now.
+        try cache.sync(alloc, hl.generation, buf.lineCount());
+        for (0..buf.lineCount()) |l| {
+            const cached = cache.get(l) orelse continue;
+            try hl.lineSpans(buf.lineStart(l), buf.lineEnd(l), &fresh);
+            try testz.expectEqual(cached.len, fresh.items.len);
+            for (cached, fresh.items) |x, y| {
+                try testz.expectEqual(x.start, y.start);
+                try testz.expectEqual(x.end, y.end);
+                try testz.expectEqual(x.color.r, y.color.r);
+                try testz.expectEqual(x.color.g, y.color.g);
+                try testz.expectEqual(x.color.b, y.color.b);
+            }
+        }
+    }
+}
+
+pub fn syntaxLinesSpansMatchesPerLineTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (!grammarsInstalled(io) or !markdownStackInstalled(io)) return;
+
+    var reg = syntax.Registry.init(alloc, io, &.{grammar_test_dir}, &syntax.default_langs);
+    defer reg.deinit();
+    const md = reg.get("markdown") orelse return error.GrammarMissing;
+
+    var buf = try Buffer.initFromText(alloc, injection_doc);
+    defer buf.deinit();
+
+    var hl = try syntax.Highlighter.init(alloc, syntax.Theme.initDefault());
+    defer hl.deinit();
+    hl.configureInjections(&reg, true);
+    try hl.setLanguage("markdown", md);
+    try reparseBuf(&hl, &buf);
+
+    // Every line in one run, injections included, must colour exactly as
+    // each line queried on its own.
+    var lines: std.ArrayList(syntax.LineRange) = .empty;
+    defer lines.deinit(alloc);
+    for (0..buf.lineCount()) |l| try lines.append(alloc, .{ .start = buf.lineStart(l), .end = buf.lineEnd(l) });
+    var run: std.ArrayList(syntax.Span) = .empty;
+    defer run.deinit(alloc);
+    var bounds: std.ArrayList(usize) = .empty;
+    defer bounds.deinit(alloc);
+    try hl.linesSpans(lines.items, &run, &bounds);
+    try testz.expectEqual(bounds.items.len, buf.lineCount() + 1);
+
+    var one: std.ArrayList(syntax.Span) = .empty;
+    defer one.deinit(alloc);
+    var colored: usize = 0;
+    for (0..buf.lineCount()) |l| {
+        try hl.lineSpans(buf.lineStart(l), buf.lineEnd(l), &one);
+        const got = run.items[bounds.items[l]..bounds.items[l + 1]];
+        try testz.expectEqual(got.len, one.items.len);
+        for (got, one.items) |x, y| {
+            try testz.expectEqual(x.start, y.start);
+            try testz.expectEqual(x.end, y.end);
+            try testz.expectEqual(x.color.r, y.color.r);
+            try testz.expectEqual(x.color.g, y.color.g);
+            try testz.expectEqual(x.color.b, y.color.b);
+        }
+        colored += got.len;
+    }
+    try testz.expectTrue(colored > 0);
+}
+
+pub fn bufferTextSourceReadsAcrossGapTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "hello world");
+    defer buf.deinit();
+    // An insert in the middle leaves the gap there: the text is now two
+    // runs in the backing store.
+    try buf.insert(5, " big");
+    const src = buf.textSource();
+    try testz.expectEqual(src.len(), "hello big world".len);
+    try testz.expectTrue(src.chunk(0).len < src.len());
+
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(alloc);
+    const all = (try src.slice(alloc, 0, src.len(), &scratch)).?;
+    try testz.expectEqualStr(all, "hello big world");
+    // A range inside one run is borrowed, not copied.
+    const tail = (try src.slice(alloc, 10, 15, &scratch)).?;
+    try testz.expectEqualStr(tail, "world");
+    try testz.expectTrue(src.chunk(src.len()).len == 0);
+    try testz.expectTrue((try src.slice(alloc, 3, 99, &scratch)) == null);
+}
+
+// ─── Span cache ────────────────────────────────────────────────────────
+
+fn cacheSpan(start: usize) [1]syntax.Span {
+    return .{.{ .start = start, .end = start + 1, .color = .{ .r = 1, .g = 2, .b = 3 } }};
+}
+
+pub fn spanCacheFollowsEditsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cache: SpanCache = .{};
+    defer cache.deinit(alloc);
+    try cache.sync(alloc, 1, 5);
+    for (0..5) |l| try cache.put(alloc, l, &cacheSpan(l));
+
+    // A one-line edit on line 2 drops just that line.
+    try cache.applyEdit(alloc, 2, 2, 2);
+    try testz.expectTrue(cache.get(2) == null);
+    try testz.expectEqual(cache.get(3).?[0].start, 3);
+
+    // Two new lines after line 1 (1..=1 becomes 1..=3): line 1 and the
+    // two new ones are uncomputed, old line 3 is now line 5.
+    try cache.applyEdit(alloc, 1, 1, 3);
+    try testz.expectEqual(cache.lines.items.len, 7);
+    try testz.expectEqual(cache.get(0).?[0].start, 0);
+    try testz.expectTrue(cache.get(1) == null and cache.get(2) == null and cache.get(3) == null);
+    try testz.expectEqual(cache.get(5).?[0].start, 3);
+    try testz.expectEqual(cache.get(6).?[0].start, 4);
+
+    // Joining lines 5..=6 into one: old line 4 (now 6) moves up.
+    try cache.applyEdit(alloc, 4, 5, 4);
+    try testz.expectEqual(cache.lines.items.len, 6);
+    try testz.expectEqual(cache.get(5).?[0].start, 4);
+
+    // Invalidation by range, clamped to the end.
+    cache.invalidate(alloc, 5, 100);
+    try testz.expectTrue(cache.get(5) == null);
+    try testz.expectEqual(cache.get(0).?[0].start, 0);
+
+    // A new generation empties it; so does a line-count mismatch.
+    try cache.sync(alloc, 1, 6);
+    try testz.expectEqual(cache.get(0).?[0].start, 0);
+    try cache.sync(alloc, 2, 6);
+    try testz.expectTrue(cache.get(0) == null);
+    try cache.put(alloc, 0, &cacheSpan(0));
+    try cache.sync(alloc, 2, 9);
+    try testz.expectEqual(cache.lines.items.len, 9);
+    try testz.expectTrue(cache.get(0) == null);
 }
 
 // ─── Buffer tabs ───────────────────────────────────────────────────────

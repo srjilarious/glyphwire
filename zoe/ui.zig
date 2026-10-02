@@ -62,6 +62,7 @@ const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
 const profile = @import("profile.zig");
+const SpanCache = @import("spancache.zig").SpanCache;
 const diag = @import("diag.zig");
 const hover_mod = @import("hover.zig");
 const complete = @import("complete.zig");
@@ -559,6 +560,9 @@ const Slot = struct {
     /// The `Buffer.edits` value `hl`'s tree reflects; a mismatch in
     /// `renderBuffer` triggers a reparse.
     hl_edits: u64 = 0,
+    /// `hl`'s spans for the lines painted so far, kept in step with the
+    /// buffer by `syncHighlight` and filled per frame by `fillSpanCache`.
+    spans: SpanCache = .{},
 
     /// The `Buffer.edits` value the language servers have been told about.
     /// A mismatch arms the `didChange` debounce -- deliberately a separate
@@ -582,6 +586,7 @@ const Slot = struct {
 
     fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
         if (self.hl) |*h| h.deinit();
+        self.spans.deinit(alloc);
         if (self.abs_path) |p| alloc.free(p);
         self.ed.deinit();
         alloc.destroy(self);
@@ -891,8 +896,11 @@ pub const Ui = struct {
     /// held key repeating across the change -- which matters even when
     /// both modes are configured to the same numbers.
     key_repeat_mode_sent: ?editor.Mode = null,
-    /// Reused span buffer for `renderRowSpans`.
+    /// Reused span buffer for `renderRowSpans` and `fillSpanRun`.
     hl_scratch: std.ArrayList(syntax.Span) = .empty,
+    /// `fillSpanRun`'s line list and per-line bounds into `hl_scratch`.
+    hl_lines: std.ArrayList(syntax.LineRange) = .empty,
+    hl_bounds: std.ArrayList(usize) = .empty,
     /// Buffer lines an incremental reparse says need repainting for a
     /// highlighting reason (edited lines plus tree-sitter's changed
     /// ranges). Filled by `syncHighlight`, consumed by `renderChangedRows`.
@@ -1468,6 +1476,8 @@ pub const Ui = struct {
         self.layout.deinit();
 
         self.hl_scratch.deinit(self.alloc);
+        self.hl_lines.deinit(self.alloc);
+        self.hl_bounds.deinit(self.alloc);
         self.hl_dirty_lines.deinit(self.alloc);
         self.hl_changed.deinit(self.alloc);
         self.prof.deinit();
@@ -4529,6 +4539,9 @@ pub const Ui = struct {
             }
             self.buf.ed.buf.clearEdits();
         }
+        // Every row this frame paints reads its colours from the cache;
+        // fill in the visible lines it is missing first, a run at a time.
+        self.fillSpanCache();
 
         // A visual selection spans whole rows the incremental paths don't
         // know to touch. While one is active -- and once more the frame it
@@ -4681,17 +4694,29 @@ pub const Ui = struct {
         var line_count_stable = true;
         for (buf.pending_edits.items) |e| {
             h.applyEdit(e.toSyntax());
+            // The cached lines follow the edit the same way the tree does.
+            self.buf.spans.applyEdit(self.alloc, e.start_point.line, e.old_end_point.line, e.new_end_point.line) catch
+                self.buf.spans.reset(self.alloc);
             if (e.start_point.line != e.old_end_point.line or
                 e.start_point.line != e.new_end_point.line) line_count_stable = false;
         }
 
+        // Read straight out of the gap buffer: no copy per keystroke. The
+        // highlighter keeps reading it (predicates, injection parses)
+        // until the next edit is replayed onto it, here.
         self.hl_changed.clearRetainingCapacity();
-        const text = try buf.text(self.alloc);
-        defer self.alloc.free(text);
-        const localized = h.reparseIncremental(text, &self.hl_changed) catch {
+        const localized = h.reparseIncremental(buf.textSource(), &self.hl_changed) catch {
             self.buf.full_redraw = true;
             return false;
         };
+        // Lines whose colours may have moved without their text changing
+        // lose their cached spans, on screen or not -- a scroll down to
+        // them later must not paint the old colours.
+        for (self.hl_changed.items) |cr| {
+            const lo = buf.lineAt(cr.start);
+            const hi = buf.lineAt(if (cr.end > cr.start) cr.end - 1 else cr.start);
+            self.buf.spans.invalidate(self.alloc, lo, hi);
+        }
         if (!localized or !line_count_stable) {
             self.buf.full_redraw = true;
             return false;
@@ -5418,15 +5443,66 @@ pub const Ui = struct {
         line: usize,
         text: []const u8,
     ) bool {
-        const h = &self.buf.hl.?;
-        const ls = self.buf.ed.buf.lineStart(line);
-        const le = self.buf.ed.buf.lineEnd(line);
-        const t_spans = self.prof.now();
-        h.lineSpans(ls, le, &self.hl_scratch) catch return false;
-        self.prof.add(.spans, t_spans);
-        self.prof.span_lines += 1;
-        self.rowSpansImpl(batch, r, text, self.hl_scratch.items) catch return false;
+        const spans = self.buf.spans.get(line) orelse blk: {
+            // `fillSpanCache` covers every visible line, so this is only
+            // a row it couldn't fill (an allocation failure): query it on
+            // its own rather than paint it plain.
+            const h = &self.buf.hl.?;
+            const t_spans = self.prof.now();
+            h.lineSpans(self.buf.ed.buf.lineStart(line), self.buf.ed.buf.lineEnd(line), &self.hl_scratch) catch return false;
+            self.prof.add(.spans, t_spans);
+            self.prof.span_lines += 1;
+            break :blk self.hl_scratch.items;
+        };
+        self.rowSpansImpl(batch, r, text, spans) catch return false;
         return true;
+    }
+
+    /// How many already-cached lines `fillSpanCache` will re-query to keep
+    /// two missing lines in one run. Re-querying a few lines costs less
+    /// than a second query's descent from the root.
+    const span_run_gap: usize = 8;
+
+    /// Computes the spans of every visible line the cache is missing, one
+    /// `linesSpans` query per run of nearby missing lines, so the rows
+    /// this frame paints all read from the cache. A scroll by a line
+    /// misses one line; a scroll back over rows seen before, a caret move
+    /// or a selection repaint misses none.
+    fn fillSpanCache(self: *Ui) void {
+        const h = if (self.buf.hl) |*x| x else return;
+        if (!h.ready()) return;
+        const buf = &self.buf.ed.buf;
+        self.buf.spans.sync(self.alloc, h.generation, buf.lineCount()) catch return;
+
+        const end = @min(self.buf.top_line + self.grp.buffer_bounds.rows, buf.lineCount());
+        var line = self.buf.top_line;
+        while (line < end) {
+            if (self.buf.spans.get(line) != null) {
+                line += 1;
+                continue;
+            }
+            var last_missing = line;
+            var next = line + 1;
+            while (next < end and next - last_missing <= span_run_gap) : (next += 1) {
+                if (self.buf.spans.get(next) == null) last_missing = next;
+            }
+            self.fillSpanRun(h, line, last_missing + 1) catch return;
+            line = last_missing + 1;
+        }
+    }
+
+    /// Queries buffer lines `[lo, hi)` in one `linesSpans` call and caches
+    /// each line's spans.
+    fn fillSpanRun(self: *Ui, h: *syntax.Highlighter, lo: usize, hi: usize) !void {
+        const t_spans = self.prof.now();
+        defer self.prof.add(.spans, t_spans);
+        const buf = &self.buf.ed.buf;
+        self.hl_lines.clearRetainingCapacity();
+        for (lo..hi) |l| try self.hl_lines.append(self.alloc, .{ .start = buf.lineStart(l), .end = buf.lineEnd(l) });
+        try h.linesSpans(self.hl_lines.items, &self.hl_scratch, &self.hl_bounds);
+        const bounds = self.hl_bounds.items;
+        for (lo..hi, 0..) |l, i| try self.buf.spans.put(self.alloc, l, self.hl_scratch.items[bounds[i]..bounds[i + 1]]);
+        self.prof.span_lines += @intCast(hi - lo);
     }
 
     /// Paints one buffer row as colour runs, walking the line's *display*
