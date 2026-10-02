@@ -1773,8 +1773,24 @@ pub const Renderer = struct {
             // a popup created later has to cover the bars of whatever it
             // floats over, the same as it covers that layer's cells.
             drawLayerScrollbars(eng, layer, origin);
+            drawResizeEdge(eng, layer, origin);
             if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape);
         }
+    }
+
+    /// A floating layer's `resize_edge` band, over the top pixels of its
+    /// own first row (`geometry.resizeEdgeBand`). Drawn with the layer,
+    /// like its scrollbars, so a popup over the layer covers it too --
+    /// matching `Panes.edgeAt`, which won't grab an edge it can't see.
+    fn drawResizeEdge(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin) void {
+        if (layer.resize_edge != .top) return;
+        const r = geometry.resizeEdgeBand(geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows()));
+        eng.renderer.begin(eng.projMat);
+        defer eng.renderer.end();
+        eng.renderer.drawFilledRect(
+            host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
+            pane_divider_color,
+        );
     }
 
     /// One context's layer-split bands. Drawn per context inside
@@ -1797,7 +1813,7 @@ pub const Renderer = struct {
         defer if (drawing) eng.renderer.end();
         for (self.app.panes.bands.items) |d| {
             switch (d.level) {
-                .pane => continue,
+                .pane, .edge => continue,
                 .layer => |h| if (h != ctx_handle) continue,
             }
             if (!drawing) {

@@ -91,6 +91,15 @@ pub fn resizeNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     , body);
 }
 
+pub fn layerResizeNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const body = try rpc.layerResizeNotification(alloc, 2, 5, 14);
+    defer alloc.free(body);
+    try testz.expectEqualStr(
+        \\{"jsonrpc":"2.0","method":"layer_resize","params":{"context":2,"layer":5,"rows":14}}
+    , body);
+}
+
 pub fn selectionNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     const active = try rpc.selectionNotification(alloc, .{

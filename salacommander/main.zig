@@ -94,6 +94,8 @@ pub fn main(init: std.process.Init) !void {
         "scroll_offset",
         "mouse_button",
         "context",
+        // A drag of the shell panel's top edge.
+        "layer_resize",
         // Ctrl+Shift+C with no host selection -- answered with the active
         // pane's paths. See `Ui.copySelectionPaths`.
         "copy_request",
