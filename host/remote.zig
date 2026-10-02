@@ -666,7 +666,7 @@ fn askpassResponder(self: *Remote, listener_in: std.Io.net.Server) void {
         var prompt_len: usize = 0;
         while (prompt_len < prompt_buf.len) {
             var data: [1][]u8 = .{prompt_buf[prompt_len..]};
-            const n = conn.read(io, &data) catch break;
+            const n = glyphwire.readSome(conn, io, &data) catch break;
             if (n == 0) break;
             prompt_len += n;
         }
