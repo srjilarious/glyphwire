@@ -6,6 +6,9 @@ const core = @import("core.zig");
 const wire = @import("wire.zig");
 const protocol = @import("protocol.zig");
 
+/// Serialization for `notifyCompact`: null optional fields are omitted.
+const compact_json: std.json.Stringify.Options = .{ .emit_null_optional_fields = false };
+
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
 
@@ -349,7 +352,7 @@ pub const Client = struct {
 
     /// `write_text` with every option (see `TextOpts`) -- a notification.
     pub fn writeTextOpts(self: *Client, text: []const u8, opts: TextOpts) !void {
-        try self.notify("write_text", textParams(text, null, opts));
+        try self.notifyCompact("write_text", textParams(text, null, opts));
     }
 
     /// One styled piece of a `writeSpans` write. Every null field inherits
@@ -375,7 +378,7 @@ pub const Client = struct {
     pub fn writeSpans(self: *Client, spans: []const Span, opts: TextOpts) !void {
         const wire_spans = try spansToWire(self.alloc, spans);
         defer self.alloc.free(wire_spans);
-        try self.notify("write_text", textParams(null, wire_spans, opts));
+        try self.notifyCompact("write_text", textParams(null, wire_spans, opts));
     }
 
     fn spansToWire(alloc: std.mem.Allocator, spans: []const Span) ![]SpanWire {
@@ -405,7 +408,11 @@ pub const Client = struct {
     };
 
     /// The wire params for a `TextOpts` write: either `text` or `spans`.
-    /// Shared with `Batch`.
+    /// Shared with `Batch`. Sent with `notifyCompact`, so every field left
+    /// null here is absent on the wire -- which is why the server-side
+    /// defaults (`pad` false, `selectable` true, `transparent_bg` false,
+    /// `scale` x1) are written as null rather than spelled out: a syntax-
+    /// coloured row is mostly spans, and every byte per span counts.
     fn textParams(text: ?[]const u8, spans: ?[]const SpanWire, opts: TextOpts) WriteTextWire {
         return .{
             .layer = opts.layer,
@@ -415,12 +422,12 @@ pub const Client = struct {
             .spans = spans,
             .fg = colorToJson(opts.fg),
             .bg = colorToJson(opts.bg),
-            .transparent_bg = opts.transparent_bg,
+            .transparent_bg = if (opts.transparent_bg) true else null,
             .metadata_id = opts.metadata_id,
-            .scale = @tagName(opts.scale),
+            .scale = if (opts.scale == .x1) null else @tagName(opts.scale),
             .max_cols = opts.max_cols,
-            .pad = opts.pad,
-            .selectable = opts.selectable,
+            .pad = if (opts.pad) true else null,
+            .selectable = if (opts.selectable) null else false,
             .copy_text = opts.copy_text,
             // Omitted entirely for the overwhelmingly common no-underline
             // write, so nothing grows on the wire for every existing
@@ -438,12 +445,12 @@ pub const Client = struct {
         spans: ?[]const SpanWire,
         fg: ?protocol.Color,
         bg: ?protocol.Color,
-        transparent_bg: bool,
+        transparent_bg: ?bool,
         metadata_id: ?core.MetadataHandle,
-        scale: []const u8,
+        scale: ?[]const u8,
         max_cols: ?usize,
-        pad: bool,
-        selectable: bool,
+        pad: ?bool,
+        selectable: ?bool,
         copy_text: ?[]const u8,
         underline: ?[]const u8,
         underline_color: ?protocol.Color,
@@ -2556,6 +2563,22 @@ pub const Client = struct {
         try self.send(Msg{ .method = method, .params = params });
     }
 
+    /// `notify` with every null field left out of the JSON rather than
+    /// sent as `null`. Only for methods whose server-side params give each
+    /// optional field a null default, so absent and null mean the same
+    /// thing -- today `write_text`, the hot path, where the nulls were over
+    /// half the bytes of a syntax-coloured frame.
+    fn notifyCompact(self: *Client, method: []const u8, params: anytype) !void {
+        const Msg = struct {
+            jsonrpc: []const u8 = "2.0",
+            method: []const u8,
+            params: @TypeOf(params),
+        };
+        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .method = method, .params = params }, compact_json);
+        defer self.alloc.free(body);
+        try self.frameAndFlush(body);
+    }
+
     fn request(self: *Client, comptime ResultT: type, method: []const u8, params: anytype) !std.json.Parsed(ResponseOf(ResultT)) {
         const id = self.next_id;
         self.next_id += 1;
@@ -2653,6 +2676,14 @@ pub const Client = struct {
             try self.msgs.append(a, s);
         }
 
+        /// A notification sub-message with null fields left out -- see
+        /// `Client.notifyCompact` for which methods may use it.
+        fn notifyCompact(self: *Batch, method: []const u8, params: anytype) !void {
+            const a = self.arena.allocator();
+            const s = try std.json.Stringify.valueAlloc(a, .{ .method = method, .params = params }, compact_json);
+            try self.msgs.append(a, s);
+        }
+
         /// Appends a notification sub-message (no result). `method`/
         /// `params` are the same pair `Client`'s own notification methods
         /// build -- this is the generic escape hatch for anything without
@@ -2681,13 +2712,13 @@ pub const Client = struct {
 
         /// Batched `write_text` with every option -- see `Client.TextOpts`.
         pub fn writeTextOpts(self: *Batch, text: []const u8, opts: TextOpts) !void {
-            try self.notify("write_text", textParams(text, null, opts));
+            try self.notifyCompact("write_text", textParams(text, null, opts));
         }
 
         /// Batched `write_text` with `spans` -- see `Client.writeSpans`.
         pub fn writeSpans(self: *Batch, spans: []const Span, opts: TextOpts) !void {
             const wire_spans = try spansToWire(self.arena.allocator(), spans);
-            try self.notify("write_text", textParams(null, wire_spans, opts));
+            try self.notifyCompact("write_text", textParams(null, wire_spans, opts));
         }
 
         /// Batched `write_text` -- see `Client.writeText`.

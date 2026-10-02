@@ -2513,6 +2513,38 @@ pub fn syntaxLinesSpansMatchesPerLineTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectTrue(colored > 0);
 }
 
+pub fn bufferLineIndexFollowsRandomEditsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "one\ntwo\n\nthree\nfour");
+    defer buf.deinit();
+
+    // Fixed seed. Inserts and deletes at random offsets -- line starts,
+    // line ends, the very end, across several newlines -- each checked
+    // against the line starts a rescan of the text gives.
+    const pieces = [_][]const u8{ "\n", "x", "ab\ncd", "\n\n", "line\n", "z\nz\nz" };
+    var prng = std.Random.DefaultPrng.init(0x11e5);
+    const rand = prng.random();
+    var expected: std.ArrayList(usize) = .empty;
+    defer expected.deinit(alloc);
+    for (0..500) |_| {
+        const at = rand.uintAtMost(usize, buf.len());
+        if (rand.uintLessThan(u8, 3) == 0 and buf.len() > 0) {
+            try buf.delete(@min(at, buf.len() - 1), rand.intRangeAtMost(usize, 1, 8));
+        } else {
+            try buf.insert(at, pieces[rand.uintLessThan(usize, pieces.len)]);
+        }
+
+        const text = try buf.text(alloc);
+        defer alloc.free(text);
+        expected.clearRetainingCapacity();
+        try expected.append(alloc, 0);
+        for (text, 0..) |c, i| {
+            if (c == '\n') try expected.append(alloc, i + 1);
+        }
+        try testz.expectEqual(buf.line_starts.items.len, expected.items.len);
+        for (buf.line_starts.items, expected.items) |got, want| try testz.expectEqual(got, want);
+    }
+}
+
 pub fn bufferTextSourceReadsAcrossGapTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var buf = try Buffer.initFromText(alloc, "hello world");
     defer buf.deinit();
