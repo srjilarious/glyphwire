@@ -34,6 +34,11 @@ const CursorShape = config.CursorShape;
 /// with `std.meta.eql`.
 const RedrawSig = struct {
     ctx: redraw_mod.ContextSig,
+    /// Every mapped pane's on-screen context and the pane layout
+    /// (`redraw.panesSig`). `ctx` is only the focused one, and a change in
+    /// any other pane -- a wheel scroll there, a program redrawing on its
+    /// own -- has to repaint too.
+    panes: u64,
     /// The session's visibility change-counter
     /// (`Server.visibleContextGen`). A context switch re-points
     /// `server.ctx`, and two contexts could in principle share a
@@ -524,6 +529,7 @@ pub const App = struct {
         const fb = eng.window_state.framebuffer_size;
 
         var ctx_sig: redraw_mod.ContextSig = .{};
+        var panes_sig: u64 = 0;
         var caret_shown = false;
         var caret_row: usize = 0;
         var caret_col: usize = 0;
@@ -536,6 +542,7 @@ pub const App = struct {
             // reads them under. Inert when profiling is off.
             if (self.profiler.active()) server.session.profile = self.profiler.snapshot();
             ctx_sig = redraw_mod.contextSig(server.ctx);
+            panes_sig = redraw_mod.panesSig(&server.session);
             // The shape actually drawn, not the configured one: a client
             // `set_caret_shape`, or the window losing focus, changes the
             // caret without touching a cell.
@@ -553,6 +560,7 @@ pub const App = struct {
 
         return .{
             .ctx = ctx_sig,
+            .panes = panes_sig,
             .visible_gen = server.visibleContextGen(),
             .fb_w = fb.x,
             .fb_h = fb.y,
