@@ -1712,6 +1712,23 @@ pub const Client = struct {
         };
     }
 
+    /// `set_property(layer, "mouse_report", {enabled})` -- a notification.
+    /// Says the program whose output `layer` shows has turned xterm mouse
+    /// reporting on or off, so glyphwire-host hands it the raw button,
+    /// drag and wheel events instead of selecting text. glyphwire-shell
+    /// sends it as its pty child flips `?1000`/`?1002`/`?1003`. See
+    /// `core.Layer.mouse_report`.
+    pub fn setLayerMouseReport(self: *Client, layer: core.LayerHandle, enabled: bool) !void {
+        try self.notify("set_property", .{ .layer = layer, .property = "mouse_report", .enabled = enabled });
+    }
+
+    /// `get_property(layer?, "mouse_report")`.
+    pub fn getLayerMouseReport(self: *Client, layer: ?core.LayerHandle) !bool {
+        var parsed = try self.request(struct { enabled: bool }, "get_property", .{ .layer = layer, .property = "mouse_report" });
+        defer parsed.deinit();
+        return parsed.value.result.enabled;
+    }
+
     /// `get_property(layer?, "mouse_select")`.
     pub fn getLayerMouseSelect(self: *Client, layer: ?core.LayerHandle) !bool {
         var parsed = try self.request(struct { enabled: bool }, "get_property", .{ .layer = layer, .property = "mouse_select" });

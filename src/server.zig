@@ -541,6 +541,17 @@ pub const Server = struct {
         return l.mouse_select;
     }
 
+    /// Whether the program drawing on `layer` (null = root) of the
+    /// visible context has asked for mouse events -- glyphwire-host then
+    /// forwards a press there raw instead of starting a selection. See
+    /// `core.Layer.mouse_report`.
+    pub fn mouseReportOn(self: *Server, layer: ?core.LayerHandle) bool {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        const l = self.ctx.layerPtr(layer) orelse return false;
+        return l.mouse_report;
+    }
+
     /// Fans a `context` notification (`{context, cols, rows}` -- the
     /// now-visible context's handle and size) out to every `"context"`
     /// subscriber. Sent by `create_context` / `activate_context` /
