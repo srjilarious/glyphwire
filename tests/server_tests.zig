@@ -1368,6 +1368,46 @@ pub fn aKeyTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
 }
 
+/// The wheel over a mouse-reporting program in an unfocused pane reaches
+/// that program as a wheel button, in its own pane's coordinates, and not
+/// the focused pane's program.
+pub fn aWheelTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-wheel-tap-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const other = try splitIntoTwoPanes(&srv);
+
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+    var a = try connectToPane(io, alloc, &srv, socket_path, glyphwire.root_pane_handle, "[\"mouse_button\"]", &a_dec);
+    defer a.thread.join();
+    defer a.stream.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+    var b = try connectToPane(io, alloc, &srv, socket_path, other, "[\"mouse_button\"]", &b_dec);
+    defer b.thread.join();
+    defer b.stream.close(io);
+
+    try srv.reportWheelTapIn(alloc, srv.session.panePtr(other).?.top(), "wheel_up", .{ .x = 0, .y = 0 }, .{ .row = 2, .col = 3 });
+    const b_got = try readOneFrame(io, alloc, &b.stream, &b_dec);
+    defer alloc.free(b_got);
+    try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"button\":\"wheel_up\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"col\":3") != null);
+
+    // The focused client's first read is a real click, never the wheel.
+    try srv.reportMouseButton(alloc, "left", true, .{ .x = 0, .y = 0 }, .{ .row = 0, .col = 0 }, 0, 1);
+    const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
+    defer alloc.free(a_got);
+    try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"button\":\"left\"") != null);
+}
+
 /// The host's click-to-focus moves focus without the manager asking, so
 /// the manager has to be told -- otherwise gmux's `z` zooms whichever pane
 /// it last focused itself, not the one the user clicked into.
