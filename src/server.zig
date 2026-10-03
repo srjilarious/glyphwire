@@ -958,14 +958,47 @@ pub const Server = struct {
         defer alloc.free(down);
         const up = try rpc.keyNotification(alloc, key, false, .{});
         defer alloc.free(up);
+        self.sendTapToContext(context, "key", down, up);
+    }
 
+    /// A wheel notch (`wheel_up` / `wheel_down`) as a `mouse_button`
+    /// press-and-release delivered to `context`'s clients only -- the
+    /// wheel over a mouse-reporting program (htop, vim `mouse=a`) in any
+    /// pane, focused or not. Pointing at a pane and scrolling it shouldn't
+    /// first require clicking it. `cell` is in that context's own frame.
+    /// Bypasses `Session.input` like `reportKeyTapIn`: a wheel notch has no
+    /// held state to record.
+    pub fn reportWheelTapIn(
+        self: *Server,
+        alloc: std.mem.Allocator,
+        context: core.ContextHandle,
+        button: []const u8,
+        px: core.PxPos,
+        cell: core.CellPos,
+    ) !void {
+        const mods = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            break :blk self.session.mods;
+        };
+        const down = try rpc.mouseButtonNotification(alloc, button, true, px, cell, 0, mods, 1);
+        defer alloc.free(down);
+        const up = try rpc.mouseButtonNotification(alloc, button, false, px, cell, 0, mods, 1);
+        defer alloc.free(up);
+        self.sendTapToContext(context, "mouse_button", down, up);
+    }
+
+    /// Sends a press/release pair to every `event` subscriber whose
+    /// context is `context`, skipping the focus gate -- the addressed
+    /// delivery behind `reportKeyTapIn` / `reportWheelTapIn`.
+    fn sendTapToContext(self: *Server, context: core.ContextHandle, event: []const u8, down: []const u8, up: []const u8) void {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
             if (conn.active_ctx != context) continue;
-            if (!conn.subscriptions.has("key")) continue;
+            if (!conn.subscriptions.has(event)) continue;
             conn.send(self.io, down) catch |err| {
-                std.log.err("glyphwire: key tap to a connection failed: {t}", .{err});
+                std.log.err("glyphwire: {s} tap to a connection failed: {t}", .{ event, err });
                 continue;
             };
             conn.send(self.io, up) catch {};

@@ -1443,8 +1443,10 @@ is a run of non-blank characters stopping at quotes, brackets and
 
 **`mouse_button`'s `button`** can also be `wheel_up` / `wheel_down`: over
 a `mouse_report` layer the host turns each wheel notch into a press and
-release of one of these instead of scrolling. A terminal client encodes
-the press as an xterm wheel report and drops the release.
+release of one of these instead of scrolling. Unlike a click, a wheel
+notch is addressed to the pane **under the pointer**, focused or not, in
+that pane's own cell coordinates. A terminal client encodes the press as
+an xterm wheel report and drops the release.
 
 **`mouse_move`** fires only when the pointer changes *cell*; per-pixel
 motion is coalesced.
