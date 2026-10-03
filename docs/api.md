@@ -78,8 +78,10 @@ the one on screen rather than to every `"clipboard"` subscriber (whose
 `set_clipboard` replies would otherwise overwrite each other at random).
 `paste` is gated too: it is typed input in all but name, and fanned out a
 path pasted into a shell pane also landed in the zoe buffer beside it.
-`layout`, `scroll` and `scroll_offset` are delivered only to connections
-whose current context is the one the layer belongs to (visible or not):
+`layout`, `scroll`, `scroll_offset` and `terminal_reply` are delivered
+only to connections whose current context is the one the layer belongs to
+(visible or not; for `terminal_reply`, the context whose text carried the
+query, so htop's `CSI 6n` answer isn't typed into another pane's program):
 layer handles are per-context, so two zoes in two panes both own layer 1,
 and a pooled `layout` used to make each apply the other's bounds
 (`Server.broadcastIn`). Every other server→client event (`resize`,

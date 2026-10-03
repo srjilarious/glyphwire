@@ -516,13 +516,16 @@ pub const Server = struct {
             std.mem.eql(u8, event, "window_text");
     }
 
-    /// Whether `event` names a layer by its per-context handle, and so
-    /// means something only to clients of the context it came from (see
-    /// `broadcastIn`).
+    /// Whether `event` means something only to clients of the context it
+    /// came from (see `broadcastIn`): one naming a layer by its
+    /// per-context handle, or a terminal's answer to a query. Fanned out,
+    /// htop's `CSI 6n` in one pane would have its cursor-position reply
+    /// written into every other pane's pty child as stray input.
     fn isContextScopedEvent(event: []const u8) bool {
         return std.mem.eql(u8, event, "scroll") or
             std.mem.eql(u8, event, "scroll_offset") or
-            std.mem.eql(u8, event, "layout");
+            std.mem.eql(u8, event, "layout") or
+            std.mem.eql(u8, event, "terminal_reply");
     }
 
     fn isFocusGatedEvent(event: []const u8) bool {
