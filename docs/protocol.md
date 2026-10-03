@@ -62,7 +62,7 @@ connects.
 |---|---|---|
 | `GLYPHWIRE_SOCK` | host | Absolute path of the listening socket. **Its presence is the whole discovery protocol.** |
 | `GLYPHWIRE_CTX` | host / shell | Opaque session id. Reserved; no current message consumes it. |
-| `GLYPHWIRE_PANE` | host / multiplexer | The pane handle this process was seated in. A client **SHOULD** pass it as `subscribe`'s `pane` (section 6.16). |
+| `GLYPHWIRE_PANE` | host / multiplexer | The pane handle this process was seated in. A client **SHOULD** pass it as `subscribe`'s `pane` (section 6.18). |
 | `GLYPHWIRE_LAYER` | an embedded shell | The layer this process should draw on: the surface an omitted `layer` resolves to. A client **SHOULD** send it as `attach_layer` immediately after connecting. Unset means the context's root layer. |
 | `GLYPHWIRE_REMOTE` | `gw-agent` | Set inside a remote session. |
 | `GLYPHWIRE_CONFIG_DIR` | user | Overrides the config directory. Not part of the wire protocol. |
@@ -123,7 +123,7 @@ Rules:
   parsing. Bytes past that count belong to the next frame.
 - A client **MUST NOT** interleave any other message between the header
   frame and the payload on the same connection.
-- `load_image` **MUST NOT** appear inside a `batch` (section 6.17).
+- `load_image` **MUST NOT** appear inside a `batch` (section 6.19).
 
 This is the only place raw bytes cross the wire. Image pixels are never
 base64'd into JSON.
@@ -212,7 +212,7 @@ containing an `error` member. Instead:
 |---|---|
 | A **request** whose handler fails | The host **MUST** close the connection. There is no reply. |
 | A **notification** whose handler fails | The host **MUST** apply nothing, keep the connection open, and log. The client is not told. |
-| A notification failing on a connection subscribed to `"error"` | As above, plus the failure is recorded in a per-connection ring the client drains with `get_errors` (section 6.16). |
+| A notification failing on a connection subscribed to `"error"` | As above, plus the failure is recorded in a per-connection ring the client drains with `get_errors` (section 6.18). |
 | An unparseable frame body | Treated as a failed message of unknown kind. |
 
 Severing on a failed request is a deliberate least-bad choice: a client
@@ -236,15 +236,18 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `WrongScrollMode` | `content_extent` set on a layer whose `scroll_mode` is `host` |
 | `InvalidScrollMode` | `scroll_mode`'s `mode` is not `"host"` or `"client"` |
 | `InvalidSpans` | `write_text` has both `text` and `spans`, or neither |
+| `InvalidTextScale` | `write_text`'s `scale` is not one of the enumerated values |
 | `UnknownLayer` | any `layer` handle that does not exist, **and** the root handle where a non-root one is required |
 | `LayerPermissionDenied` | `destroy_layer` from a non-owner |
 | `UnknownContext`, `RootContextImmutable`, `ContextPermissionDenied`, `NoContextSession` | context messages |
 | `UnknownPane`, `RootPaneImmutable`, `UnknownPaneSplit`, `InvalidPaneSplitChild` | pane messages |
 | `NotWindowManager`, `UnknownRole` | role messages |
 | `UnknownSplit`, `InvalidSplitAxis`, `InvalidSplitChild` | layer-split messages |
-| `UnknownImage`, `UnknownIcon`, `InvalidIconOption`, `UnsupportedImageFormat` | image / icon messages |
+| `UnknownImage`, `UnknownIcon`, `ImageIsIcon`, `InvalidIconOption`, `UnsupportedImageFormat` | image / icon messages |
 | `UnknownMetadata`, `InvalidMetadataDirection` | metadata messages |
 | `UnknownTable`, `InvalidTableOption`, `TableRowShapeMismatch` | table messages |
+| `UnknownRect` | rect messages |
+| `UnknownOutline`, `OutlineNodeOutOfRange` | outline messages |
 | `InvalidMoveDirection` | `move_content` |
 | `SpawnUnsupported`, `SpawnFailed` | `spawn_in_pane` |
 | `RemoteUnsupported`, `RemoteStartFailed` | `start_remote` |
@@ -279,14 +282,18 @@ All handles are unsigned 32-bit integers unless noted.
 | `ContextHandle` | `0` = the root context |
 | `PaneHandle` | `0` = the root pane |
 | `SplitHandle`, `PaneSplitHandle` | no root |
-| `ImageHandle`, `MetadataHandle`, `TableHandle` | no root |
+| `ImageHandle`, `MetadataHandle`, `TableHandle`, `RectHandle`, `OutlineHandle` | no root |
 | remote session id | 64-bit |
 
 Handle `0` is the root for layers, contexts and panes and is **never**
 valid where a created object is required: `destroy_layer(0)`,
 `raise_layer(0)` and friends report `UnknownLayer`, not a permission
-error. Handles are per-context for layers, tables, splits and metadata;
-per-session for contexts and panes.
+error. Handles are per-context for layers, tables, rects, outlines,
+splits and metadata; per-session for contexts and panes.
+
+Tables, rects and outlines are allocated from a per-context counter but
+**stored on a layer**, which is why every message naming one carries both
+the optional `layer` and the object's own handle.
 
 ### 4.2 Context
 
@@ -343,7 +350,7 @@ A cell holds:
   reference.
 - `fg_icon` — an optional icon composited *over* the background,
   independent of which background case is set.
-- `metadata_id` — an optional metadata handle (section 4.6).
+- `metadata_id` — an optional metadata handle (section 4.8).
 - `wide` — East Asian Width role.
 
 **Wide characters.** A 2-cell East Asian wide character occupies a `lead`
@@ -369,7 +376,30 @@ optional icon and an optional metadata id. The host owns layout, sorting,
 borders and striping — a client sets rows and reads back where the table
 painted. Sorting a 10,000-row listing costs one message, not a redraw.
 
-### 4.6 Metadata
+### 4.6 Rect
+
+A plain coloured box, filled or outlined, and the one layer component
+that is **not part of the cell grid**: its `x`/`y`/`w`/`h` are pixels in
+the layer's own content coordinate frame. So a rect pans with the layer's
+`scroll_offset` for free, the way image cells and text do, and a client
+drawing a highlight over a picture does not have to round it to cells.
+
+Rects composite last within their layer, after text — unlike the
+selection and highlight tints, which draw under it so text stays
+readable over them.
+
+### 4.7 Outline
+
+A collapsible tree of text rows: a flat node list where each node carries
+a `depth`, and a collapsed node hides the contiguous run of deeper nodes
+after it. Like a table it compiles into ordinary cells and outlives the
+client that drew it, so a host can expand a node with nothing running.
+
+Unlike every other component, an outline's height changes when a node
+toggles, so it **reflows the layer around itself**: rows at and above it
+shift up into scrollback, rows below it do not move. See section 6.11.
+
+### 4.8 Metadata
 
 An opaque JSON blob registered with `create_metadata`, tagged onto cells,
 and resolved back from a cell position with `get_metadata`. This is how a
@@ -377,12 +407,12 @@ client attaches meaning to a region of the grid — a filename behind a
 listing entry, a diagnostic behind a span — without the host understanding
 any of it. The host stores and returns the string verbatim.
 
-### 4.7 Pane
+### 4.9 Pane
 
 Panes are the window manager's tiling of the window, one level above
 contexts: each pane holds a *stack* of contexts, and the top of that stack
 is what the pane shows. Pane messages are restricted to the connection
-holding the `window_manager` role (section 6.13).
+holding the `window_manager` role (section 6.15).
 
 A program inside a pane cannot tell it is in one. Its `resize` carries its
 pane's size, not the window's, and no message it can send reveals pane
@@ -627,8 +657,10 @@ broadcasts `scroll` to other subscribers.
 | Method | Kind | Params | Result |
 |---|---|---|---|
 | `load_image` | request | `format`, `bytes` **+ raw payload** | `{handle}` |
+| `update_image` | request | `handle`, `format`, `bytes` **+ raw payload** | `{handle}` |
 | `get_image_info` | request | `handle` | `{width, height}` |
 | `draw_image` | notification | `layer?`, `handle`, `row?`, `col?`, `row_span`, `col_span`, `scale?` = 1.0 | — |
+| `destroy_image` | notification | `handle` | — |
 
 `format` is `"png"`, `"jpeg"` (`"jpg"` accepted), `"bmp"` or `"gif"`;
 anything else reports `UnsupportedImageFormat`. `bytes` is the payload
@@ -637,6 +669,21 @@ length, delivered per section 2.3.
 `draw_image` sets each cell in the `row_span` × `col_span` rectangle to
 sample its own region of the image, so the picture spans the rectangle
 rather than repeating per cell.
+
+`update_image` replaces an existing handle's pixels in place, so cells
+already drawing that handle pick up the new content without being
+rewritten. Like `load_image` it carries a side-channel payload, and so
+**MUST NOT** appear inside a `batch`.
+
+`destroy_image` frees an image's bytes and drops its handle. Cells still
+backed by it are deliberately left alone and render nothing from then on
+— the same "report the dangling reference rather than chase it"
+treatment `get_metadata` gives a destroyed `metadata_id`. A client
+**SHOULD NOT** need it: an image loaded over a connection is reclaimed
+once that connection is gone and the image has scrolled out of
+scrollback. It reports `UnknownImage` for an unknown handle and
+`ImageIsIcon` for one registered in the icon catalog, which is
+session-wide infrastructure no client owns.
 
 ### 6.6 Icons
 
@@ -749,7 +796,85 @@ client placing something below a table **SHOULD** read `painted` rather
 than recomputing the layout, which would drift the moment the host's
 layout changes.
 
-### 6.10 Selection and clipboard
+### 6.10 Rects
+
+| Method | Kind | Params | Result |
+|---|---|---|---|
+| `create_rect` | request | `layer?`, `x`, `y`, `w`, `h`, `color`, `line_width?` = 1, `filled?` = false | `{handle}` |
+| `update_rect` | notification | `layer?`, `rect`, `x?`, `y?`, `w?`, `h?`, `color?`, `line_width?`, `filled?` | — |
+| `destroy_rect` | notification | `layer?`, `rect` | — |
+
+`x`/`y`/`w`/`h` are **pixels in the layer's own content coordinate
+frame**, not cells (section 4.6), so a rect pans with `scroll_offset`.
+
+`line_width` applies only when `filled` is false; the outline is drawn as
+four non-overlapping strips, so a translucent `color` does not double up
+at the corners.
+
+`update_rect` **merges** only the fields actually sent — an omitted field
+keeps its current value. This is unlike every other `*_set_*` message in
+this specification, which replace wholesale; moving a rect needs only
+`x`/`y`.
+
+An unresolvable `layer` reports `UnknownLayer`, an unknown `rect`
+reports `UnknownRect`. All three are batchable. There is no read-back
+message, and no ownership check — a rect is layer-scoped passive
+presentation data, the same treatment tables get.
+
+### 6.11 Outlines
+
+| Method | Kind | Params | Result |
+|---|---|---|---|
+| `create_outline` | request | `layer?`, `row?`, `col?`, `width?`, `style?` | `{handle}` |
+| `destroy_outline` | notification | `layer?`, `outline` | — |
+| `outline_set_nodes` | notification | `layer?`, `outline`, `nodes` | — |
+| `outline_set_collapsed` | notification | `layer?`, `outline`, `node`, `collapsed?` | — |
+| `outline_set_all_collapsed` | notification | `layer?`, `outline`, `collapsed`, `depth?` | — |
+| `outline_set_style` | notification | `layer?`, `outline`, `style` | — |
+| `outline_get_state` | request | `layer?`, `outline` | see below |
+
+`row`/`col` default to the layer's cursor; `width` defaults to the rest
+of the layer's width from `col`.
+
+**Node** — `{depth?=0, runs, icon?, metadata_id?, collapsible?=false, collapsed?=false}`.
+The list is flat: a node marked `collapsible` and `collapsed` hides the
+contiguous run of following nodes whose `depth` is greater than its own.
+`icon` resolves against the same catalog `draw_icon` uses.
+
+**Run** — `{text, fg?, bg?, metadata_id?}`, the same shape `write_text`'s
+`spans` takes. A node's `runs` are written back to back as its row. An
+omitted `fg` takes the layer default, an omitted `bg` the row's own
+background, an omitted `metadata_id` the node's.
+
+**Style** — `{indent?=2, marker_collapsed?, marker_expanded?, marker_fg?, alt_row_bg?}`.
+Every node reserves **two cells** for its marker at its own indent
+column, whether or not it is collapsible, so sibling text lines up. A
+row wider than `width` is clipped; outlines never wrap.
+
+`outline_set_collapsed` with `collapsed` omitted **toggles**. A `node`
+index past the end reports `OutlineNodeOutOfRange`; a non-collapsible
+node is a silent no-op. `outline_set_all_collapsed` applies to every
+collapsible node, or only those at `depth`, in one reflow.
+
+A toggle that changes the outline's height **reflows the layer**: rows at
+and above the outline shift up by the difference, the topmost passing
+into scrollback, and rows below it do not move. Rows pushed past
+`scrollback_rows` are evicted and a later collapse cannot recover them; a
+collapse with less than the needed history takes the shortfall off the
+bottom instead. On the alternate screen, which has no scrollback, the
+reflow is a no-op. A reflow **clears the layer's selection**, the same as
+a resize.
+
+`outline_get_state` returns
+`{nodes, node_count, visible_rows, style, painted, revision}`, where each
+`nodes[]` entry is `{depth, collapsible, collapsed, visible}` and
+`visible` is whether that node is on screen as the list currently stands.
+`painted` is `{row, col, rows, cols}`, and a client placing content below
+an outline **SHOULD** read it rather than recomputing the layout.
+
+Every outline message is batchable.
+
+### 6.12 Selection and clipboard
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
@@ -781,7 +906,7 @@ The three mutating messages return nothing. A client that wants to see the
 result subscribes to `selection` (section 7) and reads the notification
 they broadcast, or reads back with `get_selection`.
 
-### 6.11 Highlights
+### 6.13 Highlights
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
@@ -800,7 +925,7 @@ cells — which is what makes multi-select survive a re-sort or a redraw.
 along so a client needn't round-trip per id. `json` null means the id was
 destroyed but is still in the set.
 
-### 6.12 Layer splits
+### 6.14 Layer splits
 
 A layout tree over layers within one context.
 
@@ -824,7 +949,7 @@ remainder.
 window resize or a divider drag — subscribers to `layout` receive the new
 bounds for every pane that moved.
 
-### 6.13 Panes and the window-manager role
+### 6.15 Panes and the window-manager role
 
 Pane messages require the `window_manager` role. A connection without it
 gets `NotWindowManager`.
@@ -852,7 +977,7 @@ two sockets that must count as one manager. An unknown role reports
 `UnknownRole`.
 
 `create_pane` returns both the pane and the context created inside it.
-Pane split messages mirror section 6.12 with `pane` in place of `layer`;
+Pane split messages mirror section 6.14 with `pane` in place of `layer`;
 their child shape is `{pane?, split?, weight?, fixed?}` and reports
 `InvalidPaneSplitChild`.
 
@@ -872,7 +997,7 @@ belongs to the session. The key after the prefix arrives as
 `window_key_down` / `window_key_up` / `window_text` (section 7), addressed
 to the manager alone and never broadcast. Passing `key: null` unregisters.
 
-### 6.14 Remote sessions
+### 6.16 Remote sessions
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
@@ -890,7 +1015,7 @@ stream — note it goes to the *listener* connection, not the requester,
 because a program's drawing client and its input listener are separate
 connections and it is the listener that waits.
 
-### 6.15 Input reporting
+### 6.17 Input reporting
 
 These let a client inject input as though the user produced it — used by
 the host's own in-process path and by test harnesses.
@@ -902,11 +1027,29 @@ the host's own in-process path and by test harnesses.
 | `report_mouse_button` | notification | `button`, `pressed`, `px`, `cell`, `view_offset?` = 0 | — |
 | `report_mouse_move` | notification | `px`, `cell` | — |
 | `get_input_state` | request | — | `{keys_down, mouse_buttons_down, cursor_px, cursor_cell}` |
+| `set_key_repeat` | notification | `delay_ms?`, `interval_ms?` | — |
 
 Each `report_*` fans the corresponding notification out to subscribers per
 section 7.
 
-### 6.16 Subscriptions and introspection
+`set_key_repeat` sets the typematic cadence the host runs at while the
+issuing connection's active context is focused: `delay_ms` before the
+first repeat, `interval_ms` between repeats after it. It governs both
+the `key_down` repeats of named keys and the `text` repeats of held
+printable keys, so one held key cannot run at two rates.
+
+**Every arrival also cancels the repeat in flight**, so whatever is held
+stops repeating until pressed again; a focus change does the same. A
+client whose keys mean different things in different modes **SHOULD**
+send this on every mode change, not only when the numbers differ — the
+key still held across the change was pressed under the old meaning.
+
+Both fields absent clears the override; one alone keeps the other from
+the current override, or from the defaults (500 / 40 ms). The host
+clamps `delay_ms` to 0..5000 and `interval_ms` to 10..2000, and applies
+the change from the next press, never mid-hold.
+
+### 6.18 Subscriptions and introspection
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
@@ -926,7 +1069,7 @@ the connect, and staying in the focused pane beats refusing to subscribe.
 monotonic counter; `dropped` counts entries lost to a full ring since the
 last call.
 
-### 6.17 `batch`
+### 6.19 `batch`
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
@@ -1146,7 +1289,7 @@ A client that also wants input adds:
 
 Note that a drawing client and an input listener are commonly **two
 connections** to the same socket, because a blocking read for input would
-otherwise stall drawing. Section 6.13's `join_role` and section 6.1's
+otherwise stall drawing. Section 6.15's `join_role` and section 6.1's
 `attach_context` exist to let two connections act as one program.
 
 ## 10. Versioning and compatibility

@@ -393,6 +393,125 @@ See decisions.md's Table section.
 Other table interactivity (a checkbox toggling `alt_row_bg`, say) still
 isn't wired — `table_set_style` exists for a future client to call.
 
+## Outline
+
+A collapsible tree of text rows, and the second layer component after
+Table. Real server-side state (`core.Outline`) that compiles into ordinary
+cells, addressed by the `outline` handle `create_outline` returns
+alongside the usual optional `layer` — the same pairing a table needs,
+since an outline lives in that layer's own `outlines` map rather than
+being globally addressable.
+
+Where a table is a fixed block whose height only its row *set* can change,
+an **outline's height changes whenever a node toggles**, so it is the one
+component that reflows the layer around itself (`core.Layer.reflowAt`).
+See "How expanding moves the grid" below — it is the part worth
+understanding before using this.
+
+The node list is **flat, with a `depth` per node** — a tree view's display
+list, not a recursive structure. A collapsed node hides the contiguous run
+of nodes after it with a greater depth. That gives arbitrary nesting for
+one wire shape, and makes a detail row (a grep hit's context line) simply
+a non-collapsible node one level deeper rather than a second concept.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `create_outline` | request | `layer?, row?, col?, width?, style?` | outline handle | ✅ `row`/`col` default to the layer's cursor, same convention `create_table`/`draw_box` use; `width` defaults to the rest of the layer's width from `col`. No nodes yet — nothing paints until `outline_set_nodes`, exactly as a fresh table paints nothing until `table_set_rows` |
+| `destroy_outline` | notification | `layer?, outline` | — | ✅ blanks whatever the outline last painted, frees it, and drops it from its layer's `outline_order`. The rows it occupied are left **blank rather than closed up**: collapsing them would move content the caller didn't ask to move, and a client that wants the space back collapses the outline first. Errors `UnknownLayer`/`UnknownOutline` |
+| `outline_set_nodes` | notification | `layer?, outline, nodes: [{depth, runs, icon?, metadata_id?, collapsible?, collapsed?}]` | — | ✅ replaces every node wholesale and draws fresh at the anchor, scrolling the layer terminal-style — the same `render` path `table_set_rows` takes. Collapse state travels **with** the new nodes rather than carrying over from the old ones: a client replacing the list knows what it wants shown, and matching old state onto new nodes would need an identity a flat list doesn't have. `icon` is an icon-registry name resolved like `draw_icon`'s (`UnknownIcon` on an unknown one) |
+| `outline_set_collapsed` | notification | `layer?, outline, node, collapsed?` | — | ✅ the height-changing mutation. An omitted `collapsed` **toggles**, which is what both the host's own marker click and a client keybinding want far more often than a set. Reflows the layer and redraws the outline. A `node` past the end reports `OutlineNodeOutOfRange`; a non-collapsible node is a silent no-op. Toggling a node currently hidden under a collapsed ancestor changes its stored state without moving anything on screen, so it is already open when its parent expands |
+| `outline_set_all_collapsed` | notification | `layer?, outline, collapsed, depth?` | — | ✅ every collapsible node, or every one at `depth`, in **one** reflow and one repaint instead of the N a client would pay sending one `outline_set_collapsed` per node. `depth: 1` closes a `gw-grep` run's hits while leaving its files open; an omitted `depth` closes everything |
+| `outline_set_style` | notification | `layer?, outline, style` | — | ✅ replaces the whole style (`indent`, `marker_collapsed`, `marker_expanded`, `marker_fg`, `alt_row_bg`) and repaints |
+| `outline_get_state` | request | `layer?, outline` | `{nodes, node_count, visible_rows, style, painted, revision}` | ✅ structured config, not rendered cells — those are already readable through the layer's `get_cells`, same as for a table. Each `nodes[]` entry reports `depth, collapsible, collapsed, visible`, where **`visible`** is whether the node is on screen right now (no collapsed node above it in the list is shallower) — derived state a client would otherwise re-walk the list for. `painted` is the on-screen footprint, the same shape and purpose `table_get_state`'s has: `painted.row + painted.rows` is the first row below the outline, for a caller placing its own next content there (`gw-grep` parks the next shell prompt with it) |
+
+**Node runs.** A node's `runs` is `write_text`'s `spans` shape —
+`[{text, fg?, bg?, metadata_id?}]` — written back to back as the row. That
+is what lets a grep hit colour its line number, its matched bytes and its
+tail differently in one row without the server knowing what a match is. A
+run's omitted `fg` takes the layer default; its omitted `bg` takes the
+row's own background (an `alt_row_bg` stripe, or transparent); its
+omitted `metadata_id` takes the node's, so a whole row resolves to one
+span unless a run says otherwise.
+
+**Rows are clipped, never wrapped.** A row wider than the outline's
+`width` is cut. One row stands for one source line, and a minified
+2000-column line wrapping to thirty rows would bury the rest of the
+results. A client that wants wrapped body text can pre-split it into
+several nodes at the same depth (`glyphwire.wrapLineCount` measures the
+same way the server would).
+
+**The marker gutter.** Every node reserves two cells for its ▸/▾ marker at
+its own indent column (`core.outline_marker_cols`) — a non-collapsible
+node pads them with blanks, so its text still lines up under its
+siblings'. Total indent for depth *d* is `d * style.indent + 2`.
+
+### How expanding moves the grid
+
+Expanding a node by *n* rows means the layer's content grows by *n*, and
+the viewport's height is fixed, so *n* rows have to leave it. The only
+exit that **preserves** them is the top. So:
+
+> Rows at and above the outline shift **up** by *n*, the topmost passing
+> into scrollback. Rows **below** the outline do not move at all.
+
+On screen the outline's header rises while the shell prompt under it, a
+later command's output and the live prompt all stay put — the same thing
+that happens when ordinary output arrives, which is why it reads as
+natural rather than as the grid lurching. Growing *downward* would push
+the bottom rows off the viewport, where there is no ring to catch them,
+and they would simply be lost.
+
+Collapsing is the mirror: the content above comes back down out of
+history, the content below stays put. Expanding at a row and collapsing
+the same node restores the original grid, which is what makes a toggle
+round-trip.
+
+Three limits, all documented rather than worked around:
+
+- Rows pushed past `scrollback_rows` are **evicted**, exactly as they are
+  for ordinary output, and a later collapse cannot bring them back. A
+  layer created with no scrollback at all loses its top rows outright.
+- A collapse needs *n* rows of history to pull down. With less — the
+  outline sits near the oldest retained row — the shortfall is taken off
+  the bottom instead: the content below moves *up* by the remainder and
+  blank rows appear at the bottom. The gap always closes by the full *n*
+  either way.
+- On the **alternate screen** there is no scrollback ring, so the reflow
+  is a no-op.
+
+The layer's **selection is dropped** by a reflow, the same call `resize`
+makes for the same reason: the rows it referred to moved by two different
+amounts depending on which side of the split they sat on, and a selection
+spanning the split has no correct answer at all.
+
+### Outline interactivity
+
+**Marker clicks are live, driven by glyphwire-host directly**, the same
+way table header sorting is and for the same reason: an outline is real
+server-side state, so a toggle is `Outline.setNodeCollapsed` plus a
+repaint with **no client running**. That is the whole point of the
+component — `gw-grep` paints its results into the shell's scrollback and
+exits, and the hits stay expandable afterwards.
+
+Only the **two marker cells** take the click. A press anywhere else on the
+row is left unconsumed, so it still reaches glyphwire-shell as a grid
+click where the node's `metadata_id` resolves it: the marker expands the
+hit, the text opens the file. This is the same split table header clicks
+already have, and it is why the marker gutter is a fixed two cells rather
+than a style knob.
+
+The click resolves through the outline's pinned `top_live` (which
+`Layer.scrollOne` / `unscrollOne` / `resize` / `reflowAt` all keep
+accurate as output and window changes move it) plus the layer's scrollback
+offset, so it works wherever the row is actually on screen — after output
+has scrolled the outline, after a window resize, or after the user has
+scrolled the view back to reach it. Like table header clicks it works on
+**any layer of the visible context**, resolved against the top-most
+visible layer whose bounds contain the pointer (`host/hit.zig`).
+
+There is no keyboard path in the host: a client that wants one binds a key
+and sends `outline_set_collapsed` itself.
+
 ## Rect
 
 A first-class overlay primitive: a plain coloured box (filled or
