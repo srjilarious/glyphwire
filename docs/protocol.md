@@ -578,7 +578,9 @@ context `0` and restores itself by activating its own handle.
 
 `set_context_title` names the issuing connection's current context
 (`create_context`'s `title` does the same at creation). Display only: the
-host's context switcher lists it and a shell's `jobs` prints it. No
+host's context switcher lists it, a shell's `jobs` prints it, and the host
+**SHOULD** show the title of the context on screen in the focused pane in
+its window title. A program **MAY** resend it as what it shows changes. No
 ownership needed, so a shell can name the context it inherited. Capped at
 128 bytes, cut on a UTF-8 boundary.
 

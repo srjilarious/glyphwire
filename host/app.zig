@@ -23,6 +23,7 @@ const redraw_mod = @import("redraw.zig");
 const profiler_mod = @import("profiler.zig");
 const switcher_mod = @import("switcher.zig");
 const theme_switcher_mod = @import("theme_switcher.zig");
+const window_title_mod = @import("window_title.zig");
 
 const CursorConfig = config.CursorConfig;
 const CursorShape = config.CursorShape;
@@ -196,6 +197,8 @@ pub const App = struct {
     pane_procs: ?*pane_proc_mod.PaneProcs = null,
     window_sizing: window_sizing_mod.WindowSizing,
     renderer: render_mod.Renderer,
+    /// The OS window title, following the focused pane's program.
+    window_title: window_title_mod.WindowTitle = .{},
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -295,6 +298,7 @@ pub const App = struct {
         if (self.pane_procs) |pp| pp.pump(self.alloc);
 
         self.syncWindowFocus(eng);
+        self.syncWindowTitle(eng);
         self.window_sizing.syncWindowSize(eng, deltaTimeMs);
         // After syncWindowSize: a font change commits its own grid for the
         // current framebuffer, and only when it had to grow the window
@@ -499,6 +503,20 @@ pub const App = struct {
         self.server.reportFocus(self.alloc, focused) catch |err| {
             std.log.err("glyphwire-host: reportFocus failed: {t}", .{err});
         };
+    }
+
+    /// Retitles the window when the focused pane's on-screen context has
+    /// a different title from last frame's -- focus moved, a program
+    /// started or exited, or one renamed its context (zoe switching
+    /// buffers, the shell changing directory). See `window_title.zig`.
+    fn syncWindowTitle(self: *App, eng: *Engine) void {
+        const server = self.server;
+        const next = blk: {
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            break :blk self.window_title.update(server.session.focusedContext().title.items);
+        };
+        if (next) |title| eng.window.setTitle(title);
     }
 
     fn redrawSig(self: *App, eng: *Engine) RedrawSig {
