@@ -46,6 +46,11 @@ pub const Connection = struct {
     /// `reportResize` uses to send each connection *its own pane's* size
     /// rather than the window's.
     active_pane: core.PaneHandle = core.root_pane_handle,
+    /// The last `focus` value sent to this connection (see
+    /// `syncConnectionFocus`). Starts true: a client assumes it has focus
+    /// until told otherwise, so a fresh one that does is sent nothing.
+    /// Guarded by `registry_mutex`.
+    focus_sent: bool = true,
 
     fn send(self: *Connection, io: std.Io, body: []const u8) !void {
         self.write_mutex.lockUncancelable(io);
@@ -108,6 +113,10 @@ pub const Server = struct {
     /// The focused pane as of the last `pane_focus` notification (see
     /// `reportPaneFocusIfChanged`). Guarded by `ctx_mutex`.
     reported_focus_pane: core.PaneHandle = core.root_pane_handle,
+    /// Whether the host's window has the keyboard, as last reported by
+    /// `reportFocus`. Half of what a connection's `focus` means -- see
+    /// `syncConnectionFocus`. Guarded by `ctx_mutex`.
+    window_focused: bool = true,
     listener: std.Io.net.Server,
     /// Guards every `Dispatcher.handle` call: concurrent connections all
     /// dispatch against the same `Context`.
@@ -346,6 +355,9 @@ pub const Server = struct {
                 self.reportPaneFocusIfChanged(alloc) catch |err| {
                     std.log.err("glyphwire: pane_focus failed: {t}", .{err});
                 };
+                self.syncConnectionFocus(alloc) catch |err| {
+                    std.log.err("glyphwire: focus failed: {t}", .{err});
+                };
                 self.wake();
             }
         }
@@ -432,6 +444,11 @@ pub const Server = struct {
         if (context_switched) {
             self.reportContext(alloc) catch |err| {
                 std.log.err("glyphwire: context notification after cull failed: {t}", .{err});
+            };
+            // The program underneath (the shell zoe was started from) is
+            // the one being typed into again.
+            self.syncConnectionFocus(alloc) catch |err| {
+                std.log.err("glyphwire: focus after context cull failed: {t}", .{err});
             };
             // The restored context may have missed a window resize while
             // it was backgrounded -- re-lay-out its tree against the
@@ -737,6 +754,39 @@ pub const Server = struct {
         if (!changed) return;
         try self.reportContext(alloc);
         try self.reportPaneFocusIfChanged(alloc);
+        try self.syncConnectionFocus(alloc);
+    }
+
+    /// Sends each `"focus"` subscriber whose focus changed a `focus`
+    /// notification. A connection has focus when the window does *and*
+    /// its context is the one on screen in the focused pane: it is the
+    /// program being typed into. Window focus alone left a zoe in a pane
+    /// you'd moved away from drawing the solid, active cursor. Sent only
+    /// on a change per connection, so calling this after every possible
+    /// change point is cheap.
+    pub fn syncConnectionFocus(self: *Server, alloc: std.mem.Allocator) !void {
+        const focused_ctx, const window = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            break :blk .{ self.session.focusedContextHandle(), self.window_focused };
+        };
+        const on = try rpc.focusNotification(alloc, true);
+        defer alloc.free(on);
+        const off = try rpc.focusNotification(alloc, false);
+        defer alloc.free(off);
+
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        for (self.connections.items) |conn| {
+            if (!conn.subscriptions.has("focus")) continue;
+            const has = window and conn.active_ctx == focused_ctx;
+            if (has == conn.focus_sent) continue;
+            conn.send(self.io, if (has) on else off) catch |err| {
+                std.log.err("glyphwire: focus to a connection failed: {t}", .{err});
+                continue;
+            };
+            conn.focus_sent = has;
+        }
     }
 
     /// Broadcasts `pane_focus` when the focused pane differs from the one
@@ -777,6 +827,7 @@ pub const Server = struct {
         if (changed) {
             try self.reportContext(alloc);
             try self.reportPaneFocusIfChanged(alloc);
+            try self.syncConnectionFocus(alloc);
         }
         return changed;
     }
@@ -1280,18 +1331,17 @@ pub const Server = struct {
         try self.applyPaneLayout(alloc);
     }
 
-    /// Broadcasts a `focus` notification (`{focused}`) to every
-    /// connection subscribed to `"focus"` -- the host's window gained or
-    /// lost the keyboard. Sent by glyphwire-host on the edge only.
-    ///
-    /// Deliberately not focus-gated: this is a fact about the window, the
-    /// same for every client on it, and a backgrounded one still wants to
-    /// come back up drawn correctly. Touches no context state, so it
-    /// needs no lock.
+    /// The host's window gained or lost the keyboard (glyphwire-host
+    /// calls this on the edge only). Every connection's `focus` follows
+    /// it, combined with which pane has focus -- see
+    /// `syncConnectionFocus`.
     pub fn reportFocus(self: *Server, alloc: std.mem.Allocator, focused: bool) !void {
-        const body = try rpc.focusNotification(alloc, focused);
-        defer alloc.free(body);
-        self.broadcast(null, "focus", body);
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            self.window_focused = focused;
+        }
+        try self.syncConnectionFocus(alloc);
     }
 
     /// Broadcasts a `shutdown` notification (`{grace_ms}`) to every
