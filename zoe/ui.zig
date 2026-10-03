@@ -2276,6 +2276,14 @@ pub const Ui = struct {
                         try self.toggleHidden();
                         return;
                     }
+                    // Ctrl+S is `:w`, in every mode and from the tree too:
+                    // it saves the active buffer and leaves the mode (and
+                    // any selection) alone, the way other editors do.
+                    if (std.mem.eql(u8, k.key, "s") and !k.shift()) {
+                        self.save(null);
+                        self.status_dirty = true;
+                        return;
+                    }
                     // Ctrl+P opens the file finder, in every mode -- the
                     // chord every editor with one uses. Insert mode
                     // included: vim's meaning of Ctrl+P (previous
