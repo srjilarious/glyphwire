@@ -3598,6 +3598,54 @@ pub fn altMoveInInsertModeIsItsOwnUndoStepTest(_: std.Io, alloc: std.mem.Allocat
     try expectEdit(alloc, "a\nb", "Ax<a-down><esc>u", "ax\nb");
 }
 
+// ─── Shift+Alt+Up / Shift+Alt+Down ───────────────────────────────────────
+
+pub fn shiftAltCopiesTheCursorLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb", "<s-a-down>", "a\na\nb");
+    try expectEdit(alloc, "a\nb", "j<s-a-up>", "a\nb\nb");
+    // The unterminated last line still gets a line of its own.
+    try expectEdit(alloc, "a\nb", "j<s-a-down>", "a\nb\nb");
+    try expectEdit(alloc, "a\nb\n", "j<s-a-down>", "a\nb\nb\n");
+    // A count is copies.
+    try expectEdit(alloc, "a", "3<s-a-down>", "a\na\na\na");
+}
+
+pub fn shiftAltCopyLeavesTheCursorOnTheCopyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Down: the cursor follows the copy below, same column.
+    var ed = try Editor.initFromText(alloc, "abc\nxy", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "l<s-a-down>");
+    try expectText(alloc, &ed.buf, "abc\nabc\nxy");
+    try testz.expectEqual(ed.buf.lineAt(ed.cursor), 1);
+    try testz.expectEqual(ed.cursor - ed.buf.lineStart(1), 1);
+    // Up: the copy takes the original's place, so the cursor stays put
+    // and a second press copies again above it.
+    _ = try keys.feed(&ed, "<s-a-up><s-a-up>");
+    try expectText(alloc, &ed.buf, "abc\nabc\nabc\nabc\nxy");
+    try testz.expectEqual(ed.buf.lineAt(ed.cursor), 1);
+}
+
+pub fn shiftAltCopiesTheSelectedBlockTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", "Vj<s-a-down>", "a\nb\na\nb\nc");
+    try expectEdit(alloc, "a\nb\nc", "jVj<s-a-up>", "a\nb\nc\nb\nc");
+
+    // The selection moves onto the copy below and stays selected.
+    var ed = try Editor.initFromText(alloc, "a\nb\nc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "Vj<s-a-down>");
+    try testz.expectEqual(ed.mode, .visual_line);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(ed.buf.lineAt(span.lo), 2);
+    try testz.expectEqual(ed.buf.lineAt(span.hi - 1), 3);
+}
+
+pub fn shiftAltCopyIsOneUndoStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", "Vj<s-a-down><esc>u", "a\nb\nc");
+    // In insert mode it is its own step, separate from the typing.
+    try expectEdit(alloc, "a\nb", "Ax<s-a-down>y<esc>", "ax\naxy\nb");
+    try expectEdit(alloc, "a\nb", "Ax<s-a-down><esc>u", "ax\nb");
+}
+
 // ─── LSP: position encoding ──────────────────────────────────────────────
 //
 // The trap this whole group exists for: LSP counts UTF-16 code units by
