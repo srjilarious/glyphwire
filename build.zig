@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 const std = @import("std");
+const testz = @import("testz");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -279,44 +280,49 @@ pub fn build(b: *std.Build) void {
     const grammars_install_dir = "share/glyphwire/grammars";
     const grammars_step = installGrammars(b, target, optimize, grammars_install_dir);
 
-    const tests_exe = b.addExecutable(.{
-        .name = "tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const tests_mod = b.createModule(.{
+        .root_source_file = b.path("tests/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
-    tests_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    tests_exe.root_module.addImport("applib", applib_mod);
-    tests_exe.root_module.addImport("shell_support", shell_support_mod);
-    tests_exe.root_module.addImport("ls_support", ls_support_mod);
-    tests_exe.root_module.addImport("grep_support", grep_support_mod);
-    tests_exe.root_module.addImport("themeconf", themeconf_mod);
-    tests_exe.root_module.addImport("host_support", host_support_mod);
-    tests_exe.root_module.addImport("zoe_support", zoe_support_mod);
-    tests_exe.root_module.addImport("gmux_support", gmux_support_mod);
-    tests_exe.root_module.addImport("read_support", read_support_mod);
-    tests_exe.root_module.addImport("md_support", md_support_mod);
-    tests_exe.root_module.addImport("salacommander_support", salacommander_support_mod);
+    tests_mod.addImport("glyphwire", glyphwire_mod);
+    tests_mod.addImport("applib", applib_mod);
+    tests_mod.addImport("shell_support", shell_support_mod);
+    tests_mod.addImport("ls_support", ls_support_mod);
+    tests_mod.addImport("grep_support", grep_support_mod);
+    tests_mod.addImport("themeconf", themeconf_mod);
+    tests_mod.addImport("host_support", host_support_mod);
+    tests_mod.addImport("zoe_support", zoe_support_mod);
+    tests_mod.addImport("gmux_support", gmux_support_mod);
+    tests_mod.addImport("read_support", read_support_mod);
+    tests_mod.addImport("md_support", md_support_mod);
+    tests_mod.addImport("salacommander_support", salacommander_support_mod);
     // `host_eng_tests` exercises the SDL3 backend's Keyboard/Mouse state
     // machines and its two wire-visible enums. They need no window and no
     // GL context -- but the module does drag libSDL3.a into the test
     // binary, which is the price of catching a renamed key before it
     // reaches the protocol.
-    tests_exe.root_module.addImport("host_eng", host_eng_mod);
+    tests_mod.addImport("host_eng", host_eng_mod);
     // shell_support -> shell/config.zig -> ziglua: the Lua C library and
     // libc have to be linked into the final test binary.
-    tests_exe.root_module.linkLibrary(lua_lib);
-    tests_exe.root_module.link_libc = true;
+    tests_mod.linkLibrary(lua_lib);
+    tests_mod.link_libc = true;
 
     // testz pulls in its own `tree_sitter` dependency (for highlighting
     // failure output). Passing it the same target/optimize makes that
     // resolve to the very module `applib` already imports; with testz's
     // defaults (Debug) a release build would see `tree_sitter/root.zig`
     // in two modules and refuse to compile.
-    const testz_dep = b.dependency("testz", .{ .target = target, .optimize = optimize });
-    tests_exe.root_module.addImport("testz", testz_dep.module("testz"));
+    // `addTestExe` also adds the `testz` import to `tests_mod`, and wraps it
+    // in a generated root module that installs testz's panic handler, so a
+    // panic inside a captured test still prints its message.
+    const tests_exe = testz.addTestExe(b, .{
+        .target = target,
+        .optimize = optimize,
+        .testz_dep = b.dependency("testz", .{ .target = target, .optimize = optimize }),
+        .name = "tests",
+        .root_module = tests_mod,
+    });
 
     // The `e2e` group spawns the real `gw-shell` / `gw-ls` binaries and
     // drives them over real sockets and pty pairs, and it is flaky on the
@@ -332,7 +338,7 @@ pub fn build(b: *std.Build) void {
     ) orelse false;
     const tests_options = b.addOptions();
     tests_options.addOption(bool, "skip_e2e", skip_e2e);
-    tests_exe.root_module.addImport("build_options", tests_options.createModule());
+    tests_mod.addImport("build_options", tests_options.createModule());
 
     b.installArtifact(tests_exe);
 
