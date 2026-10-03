@@ -476,11 +476,16 @@ pub const Editor = struct {
                     return .none;
                 }
                 // Alt+Up / Alt+Down: move the cursor line, or every line
-                // the selection touches, past its neighbour.
+                // the selection touches, past its neighbour. With Shift,
+                // copy them above / below instead (a count is copies).
                 if (mods.alt and (eq(u8, key, "up") or eq(u8, key, "down"))) {
                     const n = self.takeCount();
                     self.resetPending();
-                    try self.moveLines(eq(u8, key, "down"), n);
+                    if (mods.shift) {
+                        try self.copyLines(eq(u8, key, "down"), n);
+                    } else {
+                        try self.moveLines(eq(u8, key, "down"), n);
+                    }
                     return .none;
                 }
                 if (eq(u8, key, "left")) {
@@ -511,7 +516,11 @@ pub const Editor = struct {
                     // Its own undo step, not part of the insert session's:
                     // `u` after typing then moving a line puts the line
                     // back and keeps the typing. `moveLines` opens it.
-                    try self.moveLines(eq(u8, key, "down"), 1);
+                    if (mods.shift) {
+                        try self.copyLines(eq(u8, key, "down"), 1);
+                    } else {
+                        try self.moveLines(eq(u8, key, "down"), 1);
+                    }
                     self.buf.closeUndoGroup();
                 } else if (eq(u8, key, "backspace")) {
                     try self.backspace();
@@ -1343,6 +1352,52 @@ pub const Editor = struct {
             self.select_anchor = if (down) a + shift else a - shift;
         }
         self.moveTo(if (down) self.cursor + shift else self.cursor - shift, false);
+    }
+
+    /// Shift+Alt+Up / Shift+Alt+Down: copy the cursor line, or every line
+    /// a visual selection touches, `n` times above or below itself, as one
+    /// undo step -- VSCode's Copy Line Up/Down. The cursor and selection
+    /// end up on the copy furthest in that direction: going up that is the
+    /// top copy, which now sits where the original was, so nothing moves;
+    /// going down they slide past the copies. Doesn't touch the clipboard.
+    fn copyLines(self: *Editor, down: bool, n: usize) !void {
+        var first = self.buf.lineAt(self.cursor);
+        var last = first;
+        if (self.mode == .visual or self.mode == .visual_line) {
+            if (self.selectionSpan()) |span| {
+                first = self.buf.lineAt(span.lo);
+                last = self.buf.lineAt(if (span.hi > span.lo) span.hi - 1 else span.hi);
+            }
+        }
+        const block = try self.buf.read(self.alloc, self.buf.lineStart(first), self.buf.lineEnd(last));
+        defer self.alloc.free(block);
+
+        // Each copy is the block plus one "\n": in front of it going down
+        // (so a block on the unterminated last line still gets a line of
+        // its own), after it going up.
+        const stride = block.len + 1;
+        const paste = try self.alloc.alloc(u8, stride * n);
+        defer self.alloc.free(paste);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const at = i * stride;
+            if (down) {
+                paste[at] = '\n';
+                @memcpy(paste[at + 1 .. at + stride], block);
+            } else {
+                @memcpy(paste[at .. at + block.len], block);
+                paste[at + block.len] = '\n';
+            }
+        }
+
+        self.buf.undoCheckpoint(self.cursor);
+        if (down) {
+            try self.buf.insert(self.buf.lineEnd(last), paste);
+            if (self.select_anchor) |a| self.select_anchor = a + paste.len;
+            self.moveTo(self.cursor + paste.len, false);
+        } else {
+            try self.buf.insert(self.buf.lineStart(first), paste);
+        }
     }
 
     /// One end of a visual selection, remembered across an edit that
