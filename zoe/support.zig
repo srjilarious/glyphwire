@@ -18,6 +18,7 @@ pub const motion = @import("motion.zig");
 pub const search = @import("search.zig");
 pub const editor = @import("editor.zig");
 pub const keys = @import("keys.zig");
+pub const actions = @import("actions.zig");
 pub const display = @import("display.zig");
 pub const tree = @import("tree.zig");
 pub const finder = @import("applib").finder;

@@ -63,6 +63,7 @@ const syntax = @import("applib").syntax;
 const themes = @import("applib").theme;
 const role = glyphwire.Color.role;
 const langconf = @import("langconf.zig");
+const actions = @import("actions.zig");
 const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
@@ -825,6 +826,10 @@ pub const Ui = struct {
     /// Ctrl+W was pressed and the next key is a window command (`v`,
     /// `s`, `q`, `w`, a direction) -- vim's prefix.
     window_prefix: bool = false,
+    /// Every key binding: the defaults with `zoe.conf.lua`'s `keys` over
+    /// them. Each buffer's `Editor` points here (`Editor.keymaps`), which
+    /// is safe because `Ui` lives on the heap and outlives its slots.
+    keymaps: actions.Keymaps = .{},
 
     /// The process environment, kept for `:cd` (`$HOME`) and passed on
     /// to the highlighter setup.
@@ -886,6 +891,10 @@ pub const Ui = struct {
         var cfg_owned: ?langconf.Config = langconf.load(alloc, io, environ);
         errdefer if (cfg_owned) |*c| c.deinit();
         const own_theme = cfg_owned.?.ownTheme();
+
+        var keymaps = try actions.Keymaps.initDefaults(alloc);
+        errdefer keymaps.deinit(alloc);
+        try keymaps.apply(alloc, cfg_owned.?.keys);
 
         // A dedicated context for the editor, shown immediately. From
         // here on every layer/split call on `client` targets it, not the
@@ -998,6 +1007,7 @@ pub const Ui = struct {
         self.* = .{
             .alloc = alloc,
             .io = io,
+            .keymaps = keymaps,
             .client = client,
             .listener = listener,
             .tree = try Tree.init(alloc, io, root_dir, .{}),
@@ -1202,7 +1212,7 @@ pub const Ui = struct {
             // The `/` line is typed into, like the `:` line, so it wants
             // the typing cadence rather than the normal-mode one.
             .insert, .command, .search => true,
-            .normal, .visual, .visual_line => false,
+            .normal, .visual, .visual_line, .select => false,
         };
         const cfg = self.hl_config orelse return if (typing) .{
             .delay_ms = langconf.key_repeat_insert_delay_ms_default,
@@ -1322,7 +1332,7 @@ pub const Ui = struct {
     /// the two can never disagree about who is drawing it.
     fn caretShape(self: *const Ui) ?glyphwire.CaretShape {
         if (!self.window_focused) return .box;
-        if (self.buf.ed.mode == .insert) return .line;
+        if (self.buf.ed.mode == .insert or self.buf.ed.mode == .select) return .line;
         return null;
     }
 
@@ -1368,6 +1378,8 @@ pub const Ui = struct {
 
         slot.* = .{ .ed = try Editor.initFromText(self.alloc, text orelse "", path) };
         errdefer slot.ed.deinit();
+        slot.ed.keymaps = &self.keymaps;
+        slot.ed.line_comment = self.lineCommentFor(path);
 
         // Same line vim shows on opening: the file and its length, or
         // that it doesn't exist yet.
@@ -1458,6 +1470,7 @@ pub const Ui = struct {
         if (self.hover_hl) |*h| h.deinit();
         if (self.completion) |*m| m.deinit();
         self.jumps.deinit(self.alloc);
+        self.keymaps.deinit(self.alloc);
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
         self.finder.deinit();
@@ -1801,6 +1814,77 @@ pub const Ui = struct {
         } else {
             self.focusGroup(self.groupById(order.items[0]));
         }
+    }
+
+    /// Runs a window-level action (`Action.isUi`). False when it doesn't
+    /// apply where the keyboard is -- the clipboard chords and the jumplist
+    /// with the tree focused, Ctrl+Space outside insert mode -- so the key
+    /// goes on to the tree or the editor as if unbound.
+    fn performUi(self: *Ui, action: actions.Action) !bool {
+        const in_buffer = self.focus == .buffer;
+        switch (action) {
+            .save => {
+                self.save(null);
+                self.status_dirty = true;
+            },
+            // The file finder, in every mode -- the chord every editor
+            // with one uses. Insert mode included: vim's meaning of Ctrl+P
+            // (previous completion) only applies with the completion popup
+            // up, and `completionKey` takes it first then.
+            .findFile => try self.openFinder(),
+            .toggleTree => try self.toggleTree(),
+            // Dotfiles and everything `.gitignore` excludes, in one flag --
+            // the sidebar, both tree searches and Ctrl+P alike. Global so
+            // it works from either pane: which files exist is a
+            // session-wide question, not a sidebar-local one.
+            .toggleHidden => try self.toggleHidden(),
+            .toggleShell => self.toggleShell(),
+            .nextTab => self.stepBuffer(true),
+            .prevTab => self.stepBuffer(false),
+            // vim's window prefix: the next key splits (`v`, `s`), closes
+            // (`q`, `c`) or moves (`w`, a direction). See `windowCommand`.
+            .windowPrefix => {
+                self.window_prefix = true;
+                self.status_dirty = true;
+            },
+            // To the editor group on that side, or from the leftmost one
+            // into the file tree.
+            .focusLeft => self.focusToward(.left),
+            .focusRight => self.focusToward(.right),
+            .focusUp => self.focusToward(.up),
+            .focusDown => self.focusToward(.down),
+            // vim's jumplist chords, and the way back from a `gd` that
+            // opened another file.
+            .jumpBack, .jumpForward => {
+                if (!in_buffer) return false;
+                self.jumpStep(action == .jumpBack);
+            },
+            // Through the system clipboard. (Ctrl+Shift+C is swallowed by
+            // glyphwire-host, which broadcasts a `copy_request` instead --
+            // see the `.copy_request` arm.)
+            .cut => {
+                if (!in_buffer) return false;
+                try self.applyOutcome(try self.buf.ed.clipboardCut());
+                self.buf.full_redraw = true;
+                self.grp.buffer_dirty = true;
+                self.status_dirty = true;
+            },
+            .paste => {
+                if (!in_buffer) return false;
+                try self.pasteFromClipboard(true);
+            },
+            // Completions here and now, whatever has (or hasn't) been
+            // typed. The space the chord also types is swallowed.
+            .complete => {
+                if (!in_buffer or self.buf.ed.mode != .insert) return false;
+                self.swallow_space_text = true;
+                self.closeCompletion();
+                self.completion_empty_at = null;
+                self.requestCompletion(null, true);
+            },
+            else => return false,
+        }
+        return true;
     }
 
     /// The key after Ctrl+W. Returns false for one that isn't a window
@@ -2191,13 +2275,6 @@ pub const Ui = struct {
                 // Vim clears it on the next keystroke; this is that.
                 self.buf.ed.status.clearRetainingCapacity();
 
-                // Ctrl+w switches panes, Ctrl+n toggles the sidebar --
-                // taken before the editor sees them so they work in any
-                // mode. The modifiers come off the event itself, as they
-                // were when the host generated it: asking the live
-                // down-set here would read a quick Ctrl+W as a plain `w`
-                // whenever a heavy redraw left this loop behind.
-                const ctrl = k.ctrl();
                 // The hover popup is transient chrome, not a mode: the next
                 // keystroke dismisses it and then does whatever it was going
                 // to do. Escape is the exception -- it only dismisses, so
@@ -2210,115 +2287,25 @@ pub const Ui = struct {
                     if (std.mem.eql(u8, k.key, "escape")) return;
                 }
                 self.swallow_space_text = false;
-                // The completion popup reads its keys before the global
-                // chords below: with it up, Ctrl+N / Ctrl+P move through it
+                // The completion popup reads its keys before the bindings
+                // below: with it up, Ctrl+N / Ctrl+P move through it
                 // rather than toggling the sidebar or opening the finder.
                 if (self.completion != null and self.focus == .buffer and self.buf.ed.mode == .insert) {
                     if (try self.completionKey(k)) return;
                 }
-                if (ctrl) {
-                    // Ctrl+Space asks for completions here and now, whatever
-                    // has (or hasn't) been typed.
-                    if (std.mem.eql(u8, k.key, "space") and self.focus == .buffer and self.buf.ed.mode == .insert) {
-                        self.swallow_space_text = true;
-                        self.closeCompletion();
-                        self.completion_empty_at = null;
-                        self.requestCompletion(null, true);
-                        return;
-                    }
-                    // Ctrl+W is vim's window prefix: the next key splits
-                    // (`v`, `s`), closes (`q`, `c`) or moves (`w`, a
-                    // direction). See `windowCommand`.
-                    if (std.mem.eql(u8, k.key, "w")) {
-                        self.window_prefix = true;
-                        self.status_dirty = true;
-                        return;
-                    }
-                    // Ctrl+O / Ctrl+I walk the jumplist -- vim's chords, and
-                    // the way back from a `gd` that opened another file.
-                    if (self.focus == .buffer and std.mem.eql(u8, k.key, "o")) {
-                        self.jumpStep(true);
-                        return;
-                    }
-                    if (self.focus == .buffer and std.mem.eql(u8, k.key, "i")) {
-                        self.jumpStep(false);
-                        return;
-                    }
-                    // Ctrl + a direction moves focus that way rather than
-                    // cycling: to the editor group on that side, or from
-                    // the leftmost one into the file tree. Insert mode in
-                    // the buffer keeps Ctrl+Left/Right for itself (word
-                    // jumps); Ctrl+W h/l and Ctrl+L still move focus.
-                    const insert_word_jump = self.focus == .buffer and self.buf.ed.mode == .insert and
-                        (std.mem.eql(u8, k.key, "left") or std.mem.eql(u8, k.key, "right"));
-                    if (!insert_word_jump) {
-                        if (focusDirection(k.key)) |dir| {
-                            self.focusToward(dir);
-                            return;
-                        }
-                    }
-                    if (std.mem.eql(u8, k.key, "n")) {
-                        try self.toggleTree();
-                        return;
-                    }
-                    // Ctrl+` opens the shell panel, in every mode. (The
-                    // finder above is modal, so it never gets here.)
-                    if (std.mem.eql(u8, k.key, "grave_accent")) {
-                        self.toggleShell();
-                        return;
-                    }
-                    // Ctrl+H shows or hides dotfiles and everything
-                    // `.gitignore` excludes, in one flag -- the sidebar,
-                    // both tree searches and Ctrl+P alike. Taken here so
-                    // it works from either pane: which files exist is a
-                    // session-wide question, not a sidebar-local one.
-                    if (std.mem.eql(u8, k.key, "h")) {
-                        try self.toggleHidden();
-                        return;
-                    }
-                    // Ctrl+S is `:w`, in every mode and from the tree too:
-                    // it saves the active buffer and leaves the mode (and
-                    // any selection) alone, the way other editors do.
-                    if (std.mem.eql(u8, k.key, "s") and !k.shift()) {
-                        self.save(null);
-                        self.status_dirty = true;
-                        return;
-                    }
-                    // Ctrl+P opens the file finder, in every mode -- the
-                    // chord every editor with one uses. Insert mode
-                    // included: vim's meaning of Ctrl+P (previous
-                    // completion) only applies with the completion popup
-                    // up, and `completionKey` takes it first then.
-                    if (std.mem.eql(u8, k.key, "p") and !k.shift()) {
-                        try self.openFinder();
-                        return;
-                    }
-                    // Ctrl+Tab / Ctrl+Shift+Tab walk the tab strip, the
-                    // chord every tabbed application uses. Taken here so
-                    // they work in insert mode too, where a bare Tab is
-                    // still a Tab.
-                    if (std.mem.eql(u8, k.key, "tab")) {
-                        self.stepBuffer(!k.shift());
-                        return;
-                    }
-                    // Ctrl+Shift+X cut and Ctrl+Shift+P paste, both
-                    // through the system clipboard. (Ctrl+Shift+C is
-                    // swallowed by glyphwire-host, which broadcasts a
-                    // `copy_request` instead -- see the `.copy_request`
-                    // arm.)
-                    if (k.shift() and self.focus == .buffer) {
-                        if (std.mem.eql(u8, k.key, "x")) {
-                            try self.applyOutcome(try self.buf.ed.clipboardCut());
-                            self.buf.full_redraw = true;
-                            self.grp.buffer_dirty = true;
-                            self.status_dirty = true;
-                            return;
-                        }
-                        if (std.mem.eql(u8, k.key, "p")) {
-                            try self.pasteFromClipboard(true);
-                            return;
-                        }
-                    }
+
+                // Everything else is a binding (`actions.zig`), looked up
+                // for the editor's mode -- the tree has no mode of its own
+                // and reads the global table. The modifiers come off the
+                // event itself, as they were when the host generated it:
+                // asking the live down-set here would read a quick Ctrl+W
+                // as a plain `w` whenever a heavy redraw left this loop
+                // behind. The window-level actions are taken here, before
+                // the editor sees the key, so they work in any mode.
+                const scope: actions.Scope = if (self.focus == .tree) .global else self.buf.ed.keyScope();
+                const action = self.keymaps.lookup(scope, k.key, k.mods);
+                if (action) |a| {
+                    if (a.isUi() and try self.performUi(a)) return;
                 }
                 if (self.focus == .tree) {
                     try self.treeKey(k);
@@ -2326,9 +2313,15 @@ pub const Ui = struct {
                     return;
                 }
                 const was_insert = self.buf.ed.mode == .insert;
-                try self.applyOutcome(try self.buf.ed.feedKey(k.key, .{ .ctrl = ctrl, .shift = k.shift(), .alt = k.alt() }));
-                if (was_insert and (std.mem.eql(u8, k.key, "backspace") or std.mem.eql(u8, k.key, "delete"))) {
-                    self.afterInsertEdit(null);
+                try self.applyOutcome(try self.buf.ed.feedKey(k.key, k.mods));
+                // Out of insert mode (into select mode, say), the popup has
+                // nothing left to complete.
+                if (self.completion != null and self.buf.ed.mode != .insert) self.closeCompletion();
+                if (was_insert) {
+                    if (action) |a| switch (a) {
+                        .backspace, .deleteForward, .deleteWordBack, .deleteWordForward => self.afterInsertEdit(null),
+                        else => {},
+                    };
                 }
             },
             .text => |t| {
@@ -2373,7 +2366,9 @@ pub const Ui = struct {
                     // does for them -- a pasted search pattern belongs on
                     // the prompt, not in the buffer.
                     const typed = switch (self.buf.ed.mode) {
-                        .insert, .command, .search => true,
+                        // Over a select-mode selection a paste is typing
+                        // too: it replaces the selection.
+                        .insert, .command, .search, .select => true,
                         .normal, .visual, .visual_line => false,
                     };
                     if (typed) {
@@ -2898,7 +2893,7 @@ pub const Ui = struct {
             }
             if (self.cellInBuffer(ev.cell)) |byte| {
                 self.drag = .{ .anchor = byte, .moved = false };
-                if (self.buf.ed.mode == .visual or self.buf.ed.mode == .visual_line) self.buf.ed.exitVisual();
+                if (self.buf.ed.hasSelection()) self.buf.ed.exitVisual();
                 self.buf.ed.moveCursorTo(byte);
                 self.focus = .buffer;
                 self.buf.full_redraw = true;
@@ -2914,7 +2909,7 @@ pub const Ui = struct {
         if (self.drag) |d| {
             self.drag = null;
             // A plain click (no drag): make sure no selection lingers.
-            if (!d.moved and (self.buf.ed.mode == .visual or self.buf.ed.mode == .visual_line)) {
+            if (!d.moved and self.buf.ed.hasSelection()) {
                 self.buf.ed.exitVisual();
             }
             // A selection dropped here is repainted by `renderBuffer`'s
@@ -3435,6 +3430,14 @@ pub const Ui = struct {
         self.setActive(target);
     }
 
+    /// The line-comment marker for `path`'s language (Ctrl+/), from the
+    /// config's languages or the built-in ones.
+    fn lineCommentFor(self: *const Ui, path: ?[]const u8) ?[]const u8 {
+        const p = path orelse return null;
+        const langs = if (self.hl_config) |cfg| cfg.langs else &syntax.default_langs;
+        return syntax.lineCommentFor(langs, p);
+    }
+
     fn save(self: *Ui, target: ?[]const u8) void {
         const dest = target orelse self.buf.ed.path orelse {
             self.buf.ed.setStatus("E32: No file name", .{});
@@ -3449,6 +3452,8 @@ pub const Ui = struct {
         };
         if (target) |t| {
             self.buf.ed.setPath(t) catch {};
+            // Saved under a new extension, it may be another language now.
+            self.buf.ed.line_comment = self.lineCommentFor(t);
             // The buffer is a different file now, so the cached absolute
             // path and whatever the servers were told about the old name
             // both stop being true.
@@ -6276,6 +6281,7 @@ pub const Ui = struct {
             .visual => "VISUAL",
             .visual_line => "V-LINE",
             .search => "SEARCH",
+            .select => "SELECT",
         };
     }
 };
