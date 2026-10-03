@@ -179,6 +179,13 @@ pub fn paneExitNotification(alloc: std.mem.Allocator, pane: core.PaneHandle, sta
     return notification(alloc, "pane_exit", protocol.PaneExitParams{ .pane = pane, .status = status });
 }
 
+/// `pane_focus` -- input focus moved to `pane`, by whatever moved it (a
+/// `focus_pane`, the host's click-to-focus, a fallback when the focused
+/// pane went away).
+pub fn paneFocusNotification(alloc: std.mem.Allocator, pane: core.PaneHandle) ![]u8 {
+    return notification(alloc, "pane_focus", protocol.PaneFocusParams{ .pane = pane });
+}
+
 /// `remote_exit` -- the remote session `session` has ended (its `ssh`
 /// exited, or the trunk failed), with wait status `status`. Broadcast on
 /// the `remote` stream rather than addressed to the connection that asked

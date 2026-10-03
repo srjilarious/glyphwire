@@ -558,6 +558,9 @@ pub const PaneLayoutParams = struct { panes: []const PaneBounds };
 /// `status`.
 pub const PaneExitParams = struct { pane: core.PaneHandle, status: i64 };
 
+/// `pane_focus` params: `pane` now has input focus.
+pub const PaneFocusParams = struct { pane: core.PaneHandle };
+
 /// `remote_exit` params: the remote session `session` (started by
 /// `start_remote`) has ended. `status` is the `ssh` process's wait status,
 /// so a non-zero value distinguishes "the remote shell exited" from "the

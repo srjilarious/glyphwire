@@ -1228,6 +1228,7 @@ pub const Subscriptions = struct {
         if (std.mem.eql(u8, event, "error")) return self.error_events;
         if (std.mem.eql(u8, event, "pane_layout")) return self.panes;
         if (std.mem.eql(u8, event, "pane_exit")) return self.panes;
+        if (std.mem.eql(u8, event, "pane_focus")) return self.panes;
         if (std.mem.eql(u8, event, "window_key")) return self.window_keys;
         if (std.mem.eql(u8, event, "window_key_down")) return self.window_keys;
         if (std.mem.eql(u8, event, "window_key_up")) return self.window_keys;
@@ -1263,6 +1264,7 @@ pub const Subscriptions = struct {
             // client can name what it wants rather than the flag.
             if (std.mem.eql(u8, e, "pane_layout")) s.panes = true;
             if (std.mem.eql(u8, e, "pane_exit")) s.panes = true;
+            if (std.mem.eql(u8, e, "pane_focus")) s.panes = true;
             if (std.mem.eql(u8, e, "window_keys")) s.window_keys = true;
             if (std.mem.eql(u8, e, "window_key")) s.window_keys = true;
             if (std.mem.eql(u8, e, "window_text")) s.window_keys = true;

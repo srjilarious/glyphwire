@@ -1367,3 +1367,36 @@ pub fn aKeyTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Allocato
     defer alloc.free(a_got);
     try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
 }
+
+/// The host's click-to-focus moves focus without the manager asking, so
+/// the manager has to be told -- otherwise gmux's `z` zooms whichever pane
+/// it last focused itself, not the one the user clicked into.
+pub fn clickToFocusTellsTheManagerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pane-focus-event-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const other = try splitIntoTwoPanes(&srv);
+
+    var dec: wire.FrameDecoder = .{};
+    defer dec.deinit(alloc);
+    var m = try connectToPane(io, alloc, &srv, socket_path, glyphwire.root_pane_handle, "[\"panes\"]", &dec);
+    defer m.thread.join();
+    defer m.stream.close(io);
+
+    try srv.focusPane(alloc, other);
+
+    const got = try readOneFrame(io, alloc, &m.stream, &dec);
+    defer alloc.free(got);
+    const Notification = struct { method: []const u8, params: struct { pane: u32 } };
+    const parsed = try std.json.parseFromSlice(Notification, alloc, got, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectEqualStr("pane_focus", parsed.value.method);
+    try testz.expectEqual(parsed.value.params.pane, other);
+}
