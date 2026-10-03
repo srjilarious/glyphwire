@@ -258,6 +258,11 @@ pub const Ui = struct {
     /// A transient bar message; cleared on the next key.
     message: ?[]u8 = null,
     pane_dirty: [2]PaneDirty = .{ .full, .full },
+    /// The context title last sent (`syncTitle`): `salacommander` and the
+    /// active pane's directory, which glyphwire-host shows in the window
+    /// title.
+    title_buf: [glyphwire.Context.max_title_len]u8 = undefined,
+    title_len: usize = 0,
     /// The cursor row and scroll position each pane's layer was last
     /// drawn with. A `.rows` repaint diffs against these to know which
     /// two rows to redraw, and falls back to a full one when `top` has
@@ -1552,6 +1557,7 @@ pub const Ui = struct {
     // ── Rendering ───────────────────────────────────────────────────────
 
     fn flush(self: *Ui) !void {
+        self.syncTitle();
         for (0..2) |i| {
             switch (self.pane_dirty[i]) {
                 .none => {},
@@ -1963,6 +1969,20 @@ pub const Ui = struct {
         }
         var sent = try b.send();
         sent.deinit();
+    }
+
+    /// Names this context after the active pane's directory. Navigating
+    /// or switching panes marks something dirty, so `flush` is where it
+    /// gets noticed; an unchanged title sends nothing.
+    fn syncTitle(self: *Ui) void {
+        var path_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        const dir = self.displayPath(&path_buf, self.panes[self.active].path, 0);
+        var next: [glyphwire.Context.max_title_len]u8 = undefined;
+        const title = std.fmt.bufPrint(&next, "salacommander {s}", .{dir}) catch "salacommander";
+        if (std.mem.eql(u8, title, self.title_buf[0..self.title_len])) return;
+        self.client.setContextTitle(title) catch return;
+        @memcpy(self.title_buf[0..title.len], title);
+        self.title_len = title.len;
     }
 
     /// `path` with `$HOME` shown as `~`, cut from the left with a leading

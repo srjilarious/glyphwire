@@ -774,6 +774,10 @@ pub const Ui = struct {
     /// nothing else going on.
     disk_check_due: ?std.Io.Clock.Timestamp = null,
     tab_tip_shown: bool = false,
+    /// The context title last sent (`syncTitle`): `zoe` and the focused
+    /// buffer's file, which glyphwire-host shows in the window title.
+    title_buf: [glyphwire.Context.max_title_len]u8 = undefined,
+    title_len: usize = 0,
     tab_tip_dirty: bool = false,
 
     /// The completion popup, non-null while it is up (insert mode only).
@@ -930,17 +934,10 @@ pub const Ui = struct {
         const context = try client.createContext(null, null, 0, false);
         errdefer client.destroyContext(context) catch {};
         try listener.attachContext(context);
-        // What the context switcher and the shell's `jobs` call this one.
-        // The starting file only: telling two editors apart is what it is
-        // for, and following every buffer switch isn't needed for that.
-        switch (target) {
-            .file => |f| {
-                var title_buf: [glyphwire.Context.max_title_len]u8 = undefined;
-                const title = std.fmt.bufPrint(&title_buf, "zoe {s}", .{std.fs.path.basename(f.path)}) catch "zoe";
-                try client.setContextTitle(title);
-            },
-            else => try client.setContextTitle("zoe"),
-        }
+        // What the context switcher, the shell's `jobs` and the window
+        // title call this one. `render` keeps it on the focused buffer's
+        // file from the first frame on (`syncTitle`).
+        try client.setContextTitle("zoe");
         // `zoe.conf.lua`'s own theme for this context, or the window's.
         // Either way the resolved copy is kept for what the host can't
         // recolour: the popups' nine-patch frame, and whether `variable`
@@ -3828,6 +3825,25 @@ pub const Ui = struct {
     /// `Slot.abs_path`). Borrowed -- the slot owns it. Null for a buffer with
     /// no file behind it, which is also "nothing a language server can say
     /// anything about".
+    /// Names this context `zoe <file>` after the focused buffer (`~` for
+    /// `$HOME`), or `zoe <cwd>` for a buffer with no file yet. Only sends
+    /// when it changed, so the per-frame call is a string compare.
+    fn syncTitle(self: *Ui) void {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const where = self.slotAbs(self.buf) orelse blk: {
+            const n = std.process.currentPath(self.io, &cwd_buf) catch 0;
+            break :blk cwd_buf[0..n];
+        };
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const shown = homepath.collapseHome(where, self.environ.get("HOME"), &home_buf);
+        var next: [glyphwire.Context.max_title_len]u8 = undefined;
+        const title = std.fmt.bufPrint(&next, "zoe {s}", .{shown}) catch "zoe";
+        if (std.mem.eql(u8, title, self.title_buf[0..self.title_len])) return;
+        self.client.setContextTitle(title) catch return;
+        @memcpy(self.title_buf[0..title.len], title);
+        self.title_len = title.len;
+    }
+
     fn slotAbs(self: *Ui, slot: *Slot) ?[]const u8 {
         if (slot.abs_path) |p| return p;
         const path = slot.ed.path orelse return null;
@@ -4689,6 +4705,7 @@ pub const Ui = struct {
     /// just the status row, leaving the buffer's syntax pass and the
     /// tree's per-entry icons untouched.
     fn render(self: *Ui) !void {
+        self.syncTitle();
         var batch = self.client.batch();
         defer batch.deinit();
         const t_build = self.prof.now();

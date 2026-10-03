@@ -382,6 +382,14 @@ fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
 /// host when it generated the event: sampling the live down-set instead
 /// lets a shell that fell behind send a TUI the wrong escape sequence
 /// (Ctrl released before its keystroke was encoded).
+/// The program a command line runs, as a title shows it: the first word's
+/// basename (`/usr/bin/htop -d 5` is `htop`).
+fn commandName(line: []const u8) []const u8 {
+    var it = std.mem.tokenizeAny(u8, line, " \t");
+    const first = it.next() orelse return "gw-shell";
+    return std.fs.path.basename(first);
+}
+
 fn ptyMods(mods: glyphwire.Mods) keyencode.Mods {
     return .{ .ctrl = mods.ctrl, .shift = mods.shift, .alt = mods.alt };
 }
@@ -1288,6 +1296,10 @@ const Prompt = struct {
     /// the shell is a panel inside somebody else's window: same prompt,
     /// same pty loop, a different surface. See `Embed`.
     layer: ?glyphwire.LayerHandle = null,
+    /// The context title last sent (`syncTitle`), so a prompt that didn't
+    /// change it costs no message.
+    title_buf: [glyphwire.Context.max_title_len]u8 = undefined,
+    title_len: usize = 0,
     /// A window resize that hasn't been applied yet -- the prompt redraw
     /// is held off until the size settles (see `resize_settle_ms` and the
     /// resize handling in `runPrompt`). Only the latest size in a burst is
@@ -2598,6 +2610,7 @@ const Prompt = struct {
         // A directory the host asked for lands here, just before the
         // prompt that will show it -- see `applyPendingCd`.
         self.applyPendingCd();
+        self.syncTitle("gw-shell");
         const cur = try self.writePromptPrefix(null);
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
@@ -3575,6 +3588,26 @@ const Prompt = struct {
     /// (`cd`, `exit`, a `defcmd`) works as a whole stage in an
     /// `&&` / `||` / `;` chain, but not as one stage of a `|` pipeline
     /// (see `runPipeline`).
+    /// Names this shell's context `"<program> <cwd>"` (`gw-shell
+    /// ~/code` at the prompt, `htop ~/code` while it runs), which
+    /// glyphwire-host shows in the window title when this pane has focus
+    /// and the context switcher lists. A glyphwire program started from
+    /// here makes and names a context of its own, so this only ever shows
+    /// for the shell itself and plain terminal programs. Embedded, the
+    /// context is the host program's, and its title is not ours to set.
+    fn syncTitle(self: *Prompt, program: []const u8) void {
+        if (self.layer != null) return;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = self.collapseHome(self.logicalCwd(&cwd_buf), &home_buf);
+        var next: [glyphwire.Context.max_title_len]u8 = undefined;
+        const title = std.fmt.bufPrint(&next, "{s} {s}", .{ program, cwd }) catch program;
+        if (std.mem.eql(u8, title, self.title_buf[0..self.title_len])) return;
+        self.client.setContextTitle(title) catch return;
+        @memcpy(self.title_buf[0..title.len], title);
+        self.title_len = title.len;
+    }
+
     fn dispatchLine(self: *Prompt) !void {
         return self.dispatchLineText(self.line.text());
     }
@@ -3621,6 +3654,7 @@ const Prompt = struct {
                     return;
                 }
 
+                self.syncTitle(commandName(trimmed));
                 const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
                 const status = try self.runLine(line);
                 const elapsed_ms = started.untilNow(self.client.io).raw.toMilliseconds();

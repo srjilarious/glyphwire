@@ -810,6 +810,19 @@ pub fn sideBySideDividerCellsDontJoinTest(_: std.Io, alloc: std.mem.Allocator) !
     for (cells.items) |c| try testz.expectEqualStr("│", c.glyph);
 }
 
+// ── Window title ───────────────────────────────────────────────────────
+
+/// The first frame always sets a title, an unchanged one sends nothing,
+/// and a context with no title shows just the app name.
+pub fn windowTitleFollowsTheContextTitleTest(_: std.Io, _: std.mem.Allocator) !void {
+    var wt: hs.window_title.WindowTitle = .{};
+    try testz.expectEqualStr("Glyphwire", wt.update("").?);
+    try testz.expectTrue(wt.update("") == null);
+    try testz.expectEqualStr("Glyphwire - zoe ~/code/x.zig", wt.update("zoe ~/code/x.zig").?);
+    try testz.expectTrue(wt.update("zoe ~/code/x.zig") == null);
+    try testz.expectEqualStr("Glyphwire - gw-shell ~/code", wt.update("gw-shell ~/code").?);
+}
+
 pub fn dividerPresetNamesTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectTrue(hs.dividers.preset("block").? == .block);
     try testz.expectEqualStr("═", hs.dividers.preset("double").?.glyphs.h);
