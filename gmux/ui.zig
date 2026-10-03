@@ -71,7 +71,14 @@ pub const Ui = struct {
         pane: PaneId,
         wrapper: glyphwire.PaneSplitHandle,
         /// What `current_root_wire` was before zooming, restored on unzoom.
+        /// A tree edit made while zoomed (a hidden pane's program exiting)
+        /// updates this instead of the wire root -- see `installRoot`.
         restore_root: glyphwire.PaneSplitHandle,
+        /// The pane's rect before it filled the window. Put back into
+        /// `bounds` on unzoom, so a focus move in the same command (an
+        /// arrow) doesn't measure from the full-window rect before the
+        /// host's `pane_layout` for the restored layout has arrived.
+        restore_bounds: Bounds,
     } = null,
 
     scrollback_rows: usize,
@@ -207,6 +214,11 @@ pub const Ui = struct {
     /// propagated: crashing the multiplexer over one failed split would
     /// take every other pane's program down with it.
     fn command(self: *Ui, key: ?[]const u8, text: ?[]const u8) void {
+        // Everything but `z` itself and `q` acts on the real layout, so a
+        // zoom is undone first -- tmux's rule. Silently ignoring a split
+        // while zoomed looked like gmux had stopped listening.
+        if (!isZoomNeutral(key, text)) self.unzoom() catch |err| self.logError("unzoom", err);
+
         if (key) |k| {
             if (std.mem.eql(u8, k, "left")) return self.moveFocus(.left);
             if (std.mem.eql(u8, k, "right")) return self.moveFocus(.right);
@@ -230,6 +242,23 @@ pub const Ui = struct {
             'q' => self.quit = true,
             else => {},
         }
+    }
+
+    /// Whether a command leaves a zoom in place: `z` toggles it itself, `q`
+    /// is about to tear everything down, and an unbound sequence does
+    /// nothing at all.
+    fn isZoomNeutral(key: ?[]const u8, text: ?[]const u8) bool {
+        if (key) |k| {
+            const arrow = std.mem.eql(u8, k, "left") or std.mem.eql(u8, k, "right") or
+                std.mem.eql(u8, k, "up") or std.mem.eql(u8, k, "down");
+            return !arrow;
+        }
+        const t = text orelse return true;
+        if (t.len != 1) return true;
+        return switch (t[0]) {
+            '"', '%', 'x', 'H', 'L', 'K', 'J' => false,
+            else => true,
+        };
     }
 
     fn logError(self: *Ui, what: []const u8, err: anyerror) void {
@@ -307,8 +336,6 @@ pub const Ui = struct {
     }
 
     fn splitFocused(self: *Ui, axis: layout.Axis) !void {
-        if (self.zoomed != null) return; // unzoom first -- see the module doc comment
-
         const made = try self.client.createPane(self.scrollback_rows);
         errdefer self.client.destroyPane(made.pane) catch {};
         try self.bounds.put(made.pane, .{});
@@ -322,12 +349,11 @@ pub const Ui = struct {
         } else {
             // The fresh split is now the whole tree -- install it as the
             // real wire root, replacing the single-pane wrapper.
-            try self.client.setRootPaneSplit(result.node.split.wire_id);
+            try self.installRoot(result.node.split.wire_id);
             if (self.single_wrapper) |w| {
                 self.client.destroyPaneSplit(w) catch {};
                 self.single_wrapper = null;
             }
-            self.current_root_wire = result.node.split.wire_id;
         }
 
         // After the tree edit, so the pane is already placed and sized when
@@ -337,7 +363,6 @@ pub const Ui = struct {
     }
 
     fn killFocused(self: *Ui) !void {
-        if (self.zoomed != null) return;
         try self.removePane(self.focused);
     }
 
@@ -350,6 +375,10 @@ pub const Ui = struct {
     /// just after an `x` for the same pane is harmless.
     fn removePane(self: *Ui, id: PaneId) !void {
         if (!self.bounds.contains(id)) return;
+        // The zoomed pane itself going away (its program exited) ends the
+        // zoom: there is nothing left to show full-window. Any other pane
+        // goes quietly, underneath it.
+        if (self.zoomed) |z| if (z.pane == id) try self.unzoom();
 
         if (self.tree.leafCount() == 1) {
             self.quit = true;
@@ -377,14 +406,10 @@ pub const Ui = struct {
                     try self.client.setPaneSplitChildren(wrapper, &.{
                         glyphwire.PaneSplitChildInput.paneWeighted(only_id, 1),
                     });
-                    try self.client.setRootPaneSplit(wrapper);
+                    try self.installRoot(wrapper);
                     self.single_wrapper = wrapper;
-                    self.current_root_wire = wrapper;
                 },
-                .split => |*s| {
-                    try self.client.setRootPaneSplit(s.wire_id);
-                    self.current_root_wire = s.wire_id;
-                },
+                .split => |*s| try self.installRoot(s.wire_id),
             }
         }
         self.client.destroyPaneSplit(removal.removed_wire_id) catch {};
@@ -401,23 +426,44 @@ pub const Ui = struct {
     /// isn't composited or focusable. The real tree, and whatever ratios a
     /// mouse drag left on it, sit untouched underneath.
     fn zoomToggle(self: *Ui) !void {
-        if (self.zoomed) |z| {
-            try self.client.setRootPaneSplit(z.restore_root);
-            self.current_root_wire = z.restore_root;
-            self.client.destroyPaneSplit(z.wrapper) catch {};
-            self.zoomed = null;
-            // Focus has to be re-asserted: it fell back to the root pane
-            // while this pane's neighbours were unmapped.
-            self.setFocus(z.pane);
-            return;
-        }
+        if (self.zoomed != null) return self.unzoom();
 
         const wrapper = try self.client.createPaneSplit(.row, true);
         try self.client.setPaneSplitChildren(wrapper, &.{glyphwire.PaneSplitChildInput.paneWeighted(self.focused, 1)});
         try self.client.setRootPaneSplit(wrapper);
-        self.zoomed = .{ .pane = self.focused, .wrapper = wrapper, .restore_root = self.current_root_wire };
+        self.zoomed = .{
+            .pane = self.focused,
+            .wrapper = wrapper,
+            .restore_root = self.current_root_wire,
+            .restore_bounds = self.bounds.get(self.focused) orelse .{},
+        };
         self.current_root_wire = wrapper;
         self.setFocus(self.focused);
+    }
+
+    /// Puts the real tree back as the wire root. A no-op when not zoomed.
+    fn unzoom(self: *Ui) !void {
+        const z = self.zoomed orelse return;
+        try self.client.setRootPaneSplit(z.restore_root);
+        self.current_root_wire = z.restore_root;
+        self.client.destroyPaneSplit(z.wrapper) catch {};
+        self.zoomed = null;
+        if (self.bounds.getPtr(z.pane)) |b| b.* = z.restore_bounds;
+        // Focus has to be re-asserted: it fell back to the root pane
+        // while this pane's neighbours were unmapped.
+        self.setFocus(z.pane);
+    }
+
+    /// Makes `handle` the root of the real tree. While zoomed the wire
+    /// root is the zoom wrapper and must stay that way, so the new root is
+    /// only recorded for `unzoom` to install.
+    fn installRoot(self: *Ui, handle: glyphwire.PaneSplitHandle) !void {
+        if (self.zoomed) |*z| {
+            z.restore_root = handle;
+            return;
+        }
+        try self.client.setRootPaneSplit(handle);
+        self.current_root_wire = handle;
     }
 
     /// `axis`: which split axis this resize applies to (the focused pane's

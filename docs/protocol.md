@@ -1328,8 +1328,18 @@ The first five are raw input, which belongs to whatever the user is
 looking at. `copy_request` rides with them because it is the answer to
 one keystroke and a single clipboard write — fanned out, every
 `"clipboard"` subscriber would answer with `set_clipboard` and the last
-one to arrive would win. Every other notification fans out to all
-subscribers, so a backgrounded client can keep its content current.
+one to arrive would win.
+
+`layout`, `scroll` and `scroll_offset` are **scoped to a context**: they
+reach only connections whose active context is the one the named layer
+belongs to, focused or not. Layer handles are per-context (every context
+numbers its layers from 1), so the same bounds or offset fanned out would
+move an unrelated layer in every other program that happens to own that
+handle. A relayout that moves several panes at once sends one `layout`
+per context.
+
+Every other notification fans out to all subscribers, so a backgrounded
+client can keep its content current.
 
 ### 7.1 Streams
 

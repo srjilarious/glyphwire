@@ -327,7 +327,8 @@ pub const Server = struct {
                 }
                 if (result.broadcast) |b| {
                     defer alloc.free(b.body);
-                    self.broadcast(&conn, b.event, b.body);
+                    const scope: ?core.ContextHandle = if (isContextScopedEvent(b.event)) d.active_ctx else null;
+                    self.broadcastIn(&conn, scope, b.event, b.body);
                 }
                 // A pane-tree edit reshaped the window: re-lay-out, tell
                 // the manager the new rects, and tell every *other* client
@@ -441,6 +442,17 @@ pub const Server = struct {
     /// this `Server` in-process and captures input directly, e.g.
     /// glyphwire-host reading its own window's keyboard).
     fn broadcast(self: *Server, sender: ?*Connection, event: []const u8, body: []const u8) void {
+        self.broadcastIn(sender, null, event, body);
+    }
+
+    /// `broadcast`, limited to connections whose context is `scope` when
+    /// one is given. For an event that names a layer: layer handles are
+    /// per-context, so a `scroll_offset` or `layout` for layer 3 fanned
+    /// out to every pane also moved whatever layer 3 happened to be in
+    /// each other pane's program (a second zoe in another pane dragging
+    /// the first one's shell panel to its own rows). Null `scope` is plain
+    /// `broadcast`.
+    fn broadcastIn(self: *Server, sender: ?*Connection, scope: ?core.ContextHandle, event: []const u8, body: []const u8) void {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
 
@@ -457,8 +469,10 @@ pub const Server = struct {
         // once, from state the session already maintains -- rather than
         // needing a multiplexer to relay every keystroke on to its panes.
         //
-        // Every other event (`resize`, `layout`, `pane_layout`, `scroll`,
-        // `selection`, `context`, ...) still fans out to all subscribers:
+        // Every other event (`resize`, `pane_layout`, `selection`,
+        // `context`, ...) still fans out to all subscribers (`layout` /
+        // `scroll` / `scroll_offset` to all of one context's -- see
+        // `broadcastIn`):
         // a backgrounded or unfocused client wants to know its panes moved
         // so it can redraw before it's shown again. `focused_context` is
         // the lock-free denormalised copy of the focused pane's stack top.
@@ -479,6 +493,7 @@ pub const Server = struct {
             if (sender != null and other == sender.?) continue;
             if (!other.subscriptions.has(event)) continue;
             if (gated and other.active_ctx != focused) continue;
+            if (scope) |s| if (other.active_ctx != s) continue;
             other.send(self.io, body) catch |err| {
                 std.log.err("glyphwire broadcast to a connection failed: {t}", .{err});
             };
@@ -493,6 +508,15 @@ pub const Server = struct {
         return std.mem.eql(u8, event, "window_key_down") or
             std.mem.eql(u8, event, "window_key_up") or
             std.mem.eql(u8, event, "window_text");
+    }
+
+    /// Whether `event` names a layer by its per-context handle, and so
+    /// means something only to clients of the context it came from (see
+    /// `broadcastIn`).
+    fn isContextScopedEvent(event: []const u8) bool {
+        return std.mem.eql(u8, event, "scroll") or
+            std.mem.eql(u8, event, "scroll_offset") or
+            std.mem.eql(u8, event, "layout");
     }
 
     fn isFocusGatedEvent(event: []const u8) bool {
@@ -601,6 +625,12 @@ pub const Server = struct {
     fn contextOrFocused(self: *Server, context: ?core.ContextHandle) ?*core.Context {
         const h = context orelse return self.session.focusedContext();
         return self.session.contextPtr(h);
+    }
+
+    /// The handle `contextOrFocused` resolves to -- what a notification
+    /// about that context is scoped to (see `broadcastIn`).
+    fn scopeOf(self: *Server, context: ?core.ContextHandle) core.ContextHandle {
+        return context orelse self.session.focused_context.load(.monotonic);
     }
 
     /// The pane under a window cell, and the context on screen there --
@@ -884,6 +914,32 @@ pub const Server = struct {
         self.broadcast(null, "key", body);
     }
 
+    /// A synthetic key press-and-release delivered to `context`'s clients
+    /// only, whether or not that context has focus -- glyphwire-host's
+    /// wheel over a full-screen program (`less`, `htop`) in a pane, which
+    /// becomes arrow keys. `reportKey` would hand them to the *focused*
+    /// pane, so a wheel over htop moved the cursor in the salacommander
+    /// next to it. Bypasses the prefix and `Session.input`: no physical
+    /// key went down, so there is nothing to route or to keep pressed.
+    pub fn reportKeyTapIn(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle, key: []const u8) !void {
+        const down = try rpc.keyNotification(alloc, key, true, .{});
+        defer alloc.free(down);
+        const up = try rpc.keyNotification(alloc, key, false, .{});
+        defer alloc.free(up);
+
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        for (self.connections.items) |conn| {
+            if (conn.active_ctx != context) continue;
+            if (!conn.subscriptions.has("key")) continue;
+            conn.send(self.io, down) catch |err| {
+                std.log.err("glyphwire: key tap to a connection failed: {t}", .{err});
+                continue;
+            };
+            conn.send(self.io, up) catch {};
+        }
+    }
+
     /// Sends `body` to the window-manager connection only. The targeted
     /// counterpart of `broadcast`, for the two events that are addressed
     /// rather than fanned out (`window_key` / `window_text`): a window
@@ -1022,13 +1078,13 @@ pub const Server = struct {
             const ctx = self.contextOrFocused(context) orelse return;
             const before = ctx.root.view_scroll;
             const after = ctx.root.scrollView(offset, delta);
-            break :blk .{ .changed = before != after, .offset = after, .max = ctx.root.history_len };
+            break :blk .{ .changed = before != after, .offset = after, .max = ctx.root.history_len, .context = self.scopeOf(context) };
         };
         if (!result.changed) return;
 
         const body = try rpc.scrollNotification(alloc, null, result.offset, result.max);
         defer alloc.free(body);
-        self.broadcast(null, "scroll", body);
+        self.broadcastIn(null, result.context, "scroll", body);
     }
 
     /// In-process scroll of a **non-root** layer's scrollback ring (see
@@ -1059,14 +1115,14 @@ pub const Server = struct {
             const l = ctx.layers.getPtr(layer) orelse break :blk null;
             const before = l.view_scroll;
             const after = l.scrollView(offset, delta);
-            break :blk .{ .changed = before != after, .offset = after, .max = l.history_len };
+            break :blk .{ .changed = before != after, .offset = after, .max = l.history_len, .context = self.scopeOf(context) };
         };
         const r = result orelse return;
         if (!r.changed) return;
 
         const body = try rpc.scrollNotification(alloc, layer, r.offset, r.max);
         defer alloc.free(body);
-        self.broadcast(null, "scroll", body);
+        self.broadcastIn(null, r.context, "scroll", body);
     }
 
     /// In-process equivalent of `report_mouse_move` -- see `reportKey`.
@@ -1187,35 +1243,55 @@ pub const Server = struct {
     /// out identical -- which is what makes it safe to call after any
     /// change that *might* have moved something.
     pub fn reportLayout(self: *Server, alloc: std.mem.Allocator) !void {
-        var changed: std.ArrayList(core.LayerBounds) = .empty;
-        defer changed.deinit(alloc);
+        // One notification per pane's on-screen context, each delivered to
+        // that context's clients only. A resize moves the layer trees in
+        // every pane at once, but layer handles are per-context -- every
+        // context numbers its layers from 1 -- so one pooled `layout` told
+        // the zoe in one pane to move its layers to where the zoe in the
+        // other pane's layers were, and the last entry won.
+        var per_context: std.ArrayList(ContextLayout) = .empty;
+        defer {
+            for (per_context.items) |*cl| cl.bounds.deinit(cl.bounds_alloc);
+            per_context.deinit(alloc);
+        }
         {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
-            // Every pane's on-screen context, not just the focused one: a
-            // resize moves the layer trees in all of them at once, and each
-            // client needs its own bounds. Layer handles are per-context so
-            // there is no ambiguity in pooling them into one notification;
-            // a client only recognises its own.
             var it = self.session.panes.valueIterator();
             while (it.next()) |pane| {
                 if (!pane.mapped) continue;
-                const ctx = self.session.contextPtr(pane.top()) orelse continue;
+                const handle = pane.top();
+                const ctx = self.session.contextPtr(handle) orelse continue;
+                // `layoutSplits` appends through the context's own
+                // allocator, so that is what frees it.
+                var changed: std.ArrayList(core.LayerBounds) = .empty;
+                errdefer changed.deinit(ctx.alloc);
                 try ctx.layoutSplits(&changed, null);
+                if (changed.items.len == 0) {
+                    changed.deinit(ctx.alloc);
+                    continue;
+                }
+                try per_context.append(alloc, .{ .context = handle, .bounds = changed, .bounds_alloc = ctx.alloc });
             }
         }
-        if (changed.items.len == 0) return;
 
-        const bounds = try alloc.alloc(protocol.LayoutBounds, changed.items.len);
-        defer alloc.free(bounds);
-        for (changed.items, 0..) |b, i| {
-            bounds[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+        for (per_context.items) |cl| {
+            const bounds = try alloc.alloc(protocol.LayoutBounds, cl.bounds.items.len);
+            defer alloc.free(bounds);
+            for (cl.bounds.items, 0..) |b, i| {
+                bounds[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+            }
+            const body = try rpc.layoutNotification(alloc, bounds);
+            defer alloc.free(body);
+            self.broadcastIn(null, cl.context, "layout", body);
         }
-
-        const body = try rpc.layoutNotification(alloc, bounds);
-        defer alloc.free(body);
-        self.broadcast(null, "layout", body);
     }
+
+    const ContextLayout = struct {
+        context: core.ContextHandle,
+        bounds: std.ArrayList(core.LayerBounds),
+        bounds_alloc: std.mem.Allocator,
+    };
 
     /// Broadcasts a `layer_resize` notification -- glyphwire-host's drag
     /// of a layer's `resize_edge` ended and the user wants it `rows`
@@ -1267,6 +1343,7 @@ pub const Server = struct {
                 .changed = after.row != before.row or after.col != before.col,
                 .off = after,
                 .max = max,
+                .context = self.scopeOf(context),
             };
         };
         if (!result.changed) return;
@@ -1280,7 +1357,7 @@ pub const Server = struct {
             result.max.col,
         );
         defer alloc.free(body);
-        self.broadcast(null, "scroll_offset", body);
+        self.broadcastIn(null, result.context, "scroll_offset", body);
     }
 
     // ── Selection & clipboard (in-process, for glyphwire-host) ──────────
