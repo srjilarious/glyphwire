@@ -3821,10 +3821,6 @@ pub const Ui = struct {
         return std.fs.path.resolve(self.alloc, &.{ cwd_buf[0..n], path }) catch null;
     }
 
-    /// `slot`'s absolute path, resolved once and cached on the slot (see
-    /// `Slot.abs_path`). Borrowed -- the slot owns it. Null for a buffer with
-    /// no file behind it, which is also "nothing a language server can say
-    /// anything about".
     /// Names this context `zoe <file>` after the focused buffer (`~` for
     /// `$HOME`), or `zoe <cwd>` for a buffer with no file yet. Only sends
     /// when it changed, so the per-frame call is a string compare.
@@ -3844,6 +3840,10 @@ pub const Ui = struct {
         self.title_len = title.len;
     }
 
+    /// `slot`'s absolute path, resolved once and cached on the slot (see
+    /// `Slot.abs_path`). Borrowed -- the slot owns it. Null for a buffer with
+    /// no file behind it, which is also "nothing a language server can say
+    /// anything about".
     fn slotAbs(self: *Ui, slot: *Slot) ?[]const u8 {
         if (slot.abs_path) |p| return p;
         const path = slot.ed.path orelse return null;
