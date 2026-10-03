@@ -355,11 +355,12 @@ pub const Scroll = struct {
         if (delta == 0) return;
 
         if (hit_target.root_owned) {
+            // Addressed to the pane under the pointer, same as every other
+            // wheel path here -- not to whichever pane has focus.
             const key: []const u8 = if (delta > 0) "up" else "down";
             var n: i64 = @intCast(@abs(delta));
             while (n > 0) : (n -= 1) {
-                self.app.server.reportKey(self.app.alloc, key, true) catch break;
-                self.app.server.reportKey(self.app.alloc, key, false) catch break;
+                self.app.server.reportKeyTapIn(self.app.alloc, hit_target.context, key) catch break;
             }
             return;
         }

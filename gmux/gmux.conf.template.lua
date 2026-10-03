@@ -27,9 +27,10 @@
 --     -- Ctrl-A, tmux-style Ctrl-B, ...). One lowercase ASCII letter.
 --     -- After it: " splits the focused pane below, % splits it to the
 --     -- right, an arrow key moves focus in that direction, x kills the
---     -- focused pane, z toggles zooming it to fill the window, H/L
---     -- shrink/grow it along a row-axis split, J/K along a column-axis
---     -- one, and q quits gmux.
+--     -- focused pane, z toggles zooming it to fill the window (any
+--     -- other command un-zooms first, then acts), H/L shrink/grow it
+--     -- along a row-axis split, J/K along a column-axis one, and q quits
+--     -- gmux.
 --     prefix_key = "b",
 --
 --     -- The command run in a fresh pane, overriding the default
