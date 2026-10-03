@@ -6,6 +6,7 @@ const glyphwire = @import("glyphwire");
 const geometry = @import("geometry.zig");
 const key_repeat = @import("key_repeat.zig");
 const host_eng = @import("host_eng");
+const dividers = @import("dividers.zig");
 
 // Font defaults. `host.conf.lua` (a global `config` table with
 // `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
@@ -257,6 +258,10 @@ pub const HostConfig = struct {
     /// (`host/theme_switcher.zig`), or null for `theme_switcher_key =
     /// false`.
     theme_switcher: ?Chord = theme_switcher_default,
+    /// How the bands between panes are drawn: `pane_divider_style`'s
+    /// preset, with any `pane_divider_chars` glyphs laid over it. Glyph
+    /// strings are `arena`-owned when set from `host.conf.lua`.
+    pane_divider: dividers.Style = dividers.default_style,
 };
 
 /// Maps `config.cursor_shape`'s string to a `CursorShape`, or null for an

@@ -8,6 +8,7 @@ const host_eng = @import("host_eng");
 const app_mod = @import("app.zig");
 const config = @import("config.zig");
 const geometry = @import("geometry.zig");
+const dividers = @import("dividers.zig");
 const shadow_mod = @import("shadow.zig");
 const scroll = @import("scroll.zig");
 const selection = @import("selection.zig");
@@ -490,8 +491,20 @@ pub const Renderer = struct {
     /// or went. See `reconcileImageTextures`.
     last_image_gen: u64 = 0,
 
+    /// How the bands between panes are drawn (`host.conf.lua`'s
+    /// `pane_divider_style` / `pane_divider_chars`). Set by `main`.
+    pane_divider: dividers.Style = dividers.default_style,
+    /// The glyph for every pane-divider cell, worked out once per pane
+    /// layout (`divider_cells_gen`) rather than every frame: the junction
+    /// rule looks at each cell's neighbours.
+    divider_cells: std.ArrayList(dividers.Cell) = .empty,
+    divider_lines: std.ArrayList(dividers.Line) = .empty,
+    divider_cells_gen: ?u64 = null,
+
     pub fn deinit(self: *Renderer) void {
         const alloc = self.app.alloc;
+        self.divider_cells.deinit(alloc);
+        self.divider_lines.deinit(alloc);
         self.deferred_icons.deinit(alloc);
         self.deferred_scaled_text.deinit(alloc);
         if (self.scaled_atlas_1_5x) |*a| a.deinit();
@@ -2326,19 +2339,39 @@ pub const Renderer = struct {
     fn renderDividers(self: *Renderer, eng: *Engine) void {
         const server = self.app.server;
         // The window theme's: a band between panes belongs to no program.
-        const color = blk: {
+        const color, const bg = blk: {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
             self.app.panes.syncLocked();
-            break :blk themeColor(&server.session.theme, .pane_divider);
+            break :blk .{
+                themeColor(&server.session.theme, .pane_divider),
+                themeColor(&server.session.theme, .bg),
+            };
         };
-        for (self.app.panes.bands.items) |d| {
-            if (d.level != .pane) continue;
-            const r = geometry.cellRectPx(d.rect);
-            eng.renderer.drawFilledRect(
-                host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                color,
-            );
+        switch (self.pane_divider) {
+            .block => for (self.app.panes.bands.items) |d| {
+                if (d.level != .pane) continue;
+                const r = geometry.cellRectPx(d.rect);
+                eng.renderer.drawFilledRect(
+                    host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
+                    color,
+                );
+            },
+            .glyphs => |*g| {
+                self.syncDividerCells(g);
+                // The band's own cells are nobody's surface, so they get
+                // the window background first: the line glyph covers only
+                // part of its cell.
+                for (self.app.panes.bands.items) |d| {
+                    if (d.level != .pane) continue;
+                    const r = geometry.cellRectPx(d.rect);
+                    eng.renderer.drawFilledRect(
+                        host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
+                        bg,
+                    );
+                }
+                for (self.divider_cells.items) |c| _ = drawCellText(eng, c.glyph, c.col, c.row, 1, color);
+            },
         }
         // The drag ghost, over the top: the real dividers above are still
         // at their pre-drag positions until the drag ends.
@@ -2364,6 +2397,22 @@ pub const Renderer = struct {
     /// as `drawPreedit` does), stopping before it would pass `max_cols`.
     /// Returns the columns used. For host-drawn chrome text; call between
     /// `begin`/`end`.
+    /// Rebuilds `divider_cells` when the pane bands moved since the last
+    /// build. A failed build (out of memory) leaves the old cells and
+    /// tries again next frame.
+    fn syncDividerCells(self: *Renderer, glyphs: *const dividers.Glyphs) void {
+        const gen = self.app.panes.pane_gen;
+        if (self.divider_cells_gen == gen) return;
+        const alloc = self.app.alloc;
+        self.divider_lines.clearRetainingCapacity();
+        for (self.app.panes.bands.items) |d| {
+            if (d.level != .pane) continue;
+            self.divider_lines.append(alloc, .{ .rect = d.rect, .vertical = d.axis == .row }) catch return;
+        }
+        dividers.layout(alloc, self.divider_lines.items, glyphs, &self.divider_cells) catch return;
+        self.divider_cells_gen = gen;
+    }
+
     fn drawCellText(eng: *Engine, text: []const u8, col: usize, row: usize, max_cols: usize, color: host_eng.Color) usize {
         const y = @as(i32, @intCast(row)) * geometry.cell_h;
         var used: usize = 0;

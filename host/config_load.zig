@@ -8,6 +8,7 @@ const host_eng = @import("host_eng");
 const config = @import("config.zig");
 const geometry = @import("geometry.zig");
 const key_repeat = @import("key_repeat.zig");
+const dividers = @import("dividers.zig");
 
 const HostConfig = config.HostConfig;
 
@@ -160,6 +161,15 @@ pub fn loadConfig(
     readChordField(lua, arena, "context_switcher_key", &cfg.context_switcher);
     readChordField(lua, arena, "theme_switcher_key", &cfg.theme_switcher);
 
+    if (luaStrField(lua, arena, "pane_divider_style")) |v| {
+        if (dividers.preset(v)) |style| {
+            cfg.pane_divider = style;
+        } else {
+            std.log.warn("glyphwire-host: host.conf.lua pane_divider_style '{s}' unknown (single, heavy, double, block); keeping the default", .{v});
+        }
+    }
+    readDividerChars(lua, arena, &cfg.pane_divider);
+
     const clamped = config.clampFontSize(cfg.font.size);
     if (clamped != cfg.font.size) {
         std.log.warn("glyphwire-host: host.conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });
@@ -229,6 +239,30 @@ pub fn loadConfig(
     }
 
     return cfg;
+}
+
+/// `pane_divider_chars`: a table of glyph overrides keyed by
+/// `dividers.Glyphs`' field names (`h`, `v`, `cross`, `t_down`, ...). Any
+/// subset; the rest keep the preset's. Over the `block` style it starts
+/// from `single`, since naming glyphs only makes sense for a glyph style.
+fn readDividerChars(lua: *Lua, arena: std.mem.Allocator, out: *dividers.Style) void {
+    _ = lua.getField(-1, "pane_divider_chars");
+    defer lua.pop(1);
+    if (!lua.isTable(-1)) return;
+    var glyphs: dividers.Glyphs = switch (out.*) {
+        .glyphs => |g| g,
+        .block => dividers.single,
+    };
+    inline for (@typeInfo(dividers.Glyphs).@"struct".field_names) |name| {
+        if (luaStrField(lua, arena, name)) |v| {
+            if (glyphwire.stringWidth(v) == 1) {
+                @field(glyphs, name) = v;
+            } else {
+                std.log.warn("glyphwire-host: host.conf.lua pane_divider_chars." ++ name ++ " '{s}' isn't one cell wide; keeping the preset's", .{v});
+            }
+        }
+    }
+    out.* = .{ .glyphs = glyphs };
 }
 
 /// A chord key (`context_switcher_key`, `theme_switcher_key`): a string

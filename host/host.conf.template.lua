@@ -113,6 +113,20 @@
 --     -- `theme` keeps it. Same chord syntax as above; false turns it off.
 --     theme_switcher_key = "super+f10",
 --
+--     ---- Pane dividers ----------------------------------------------
+--
+--     -- How the lines between panes (gmux splits) are drawn, in the
+--     -- theme's `pane_divider` colour: "single" (─ │ with ├ ┤ ┬ ┴ ┼
+--     -- where they meet), "heavy" (━ ┃ ╋), "double" (═ ║ ╬), or "block"
+--     -- (a solid band).
+--     pane_divider_style = "single",
+--
+--     -- Override any of the style's glyphs, each one cell wide. Keys:
+--     -- h, v, cross, t_down (┬), t_up (┴), t_left (┤), t_right (├),
+--     -- tl (┌), tr (┐), bl (└), br (┘). Any subset; with "block" the
+--     -- rest come from "single".
+--     pane_divider_chars = { h = "─", v = "│" },
+--
 --     ---- Grid --------------------------------------------------------
 --
 --     -- Initial grid size in cells. The window opens this many cells

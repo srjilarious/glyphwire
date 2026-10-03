@@ -446,6 +446,7 @@ pub fn main(init: std.process.Init) !void {
     }, host_cfg.cursor, host_cfg.profile, host_cfg.key_repeat);
     app.switcher.chord = host_cfg.context_switcher;
     app.theme_switcher.chord = host_cfg.theme_switcher;
+    app.renderer.pane_divider = host_cfg.pane_divider;
     try app.theme_switcher.setThemes(arena, shared_themes.customs);
 
     // `spawn_in_pane`: a window manager asks the *host* to start programs,
