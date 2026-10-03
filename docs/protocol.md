@@ -1329,14 +1329,15 @@ Rules:
 All are notifications; none expects a reply. A connection receives only
 the streams it subscribed to.
 
-`key_down`, `key_up`, `text`, `mouse_button`, `mouse_move` and
-`copy_request` are additionally **addressed**: they reach only the
+`key_down`, `key_up`, `text`, `mouse_button`, `mouse_move`,
+`copy_request` and `paste` are additionally **addressed**: they reach only the
 connection whose active context is the one on screen in the focused pane.
 The first five are raw input, which belongs to whatever the user is
 looking at. `copy_request` rides with them because it is the answer to
 one keystroke and a single clipboard write — fanned out, every
 `"clipboard"` subscriber would answer with `set_clipboard` and the last
-one to arrive would win.
+one to arrive would win. `paste` is typed input in all but name: fanned
+out, every pane's program would insert the text.
 
 `layout`, `scroll` and `scroll_offset` are **scoped to a context**: they
 reach only connections whose active context is the one the named layer
