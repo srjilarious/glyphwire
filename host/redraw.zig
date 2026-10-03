@@ -88,6 +88,29 @@ pub fn contextSig(ctx: *const glyphwire.Context) ContextSig {
     return sig;
 }
 
+/// One `ContextSig` folded to a single word, for `panesSig`.
+pub fn hashContextSig(sig: ContextSig) u64 {
+    return mix(mix(mix(0xcbf29ce484222325, sig.gen_sum), sig.topo), sig.root_view);
+}
+
+/// A fingerprint of every pane's on-screen context, plus the pane layout.
+/// `contextSig` of the focused context alone misses everything happening
+/// in the others: a wheel scroll in an unfocused pane, htop redrawing next
+/// to the editor you're typing in. The program got the event and redrew,
+/// but the window didn't repaint until something changed in the focused
+/// pane. Summed rather than mixed in order because the pane table's
+/// iteration order isn't stable. Caller holds `ctx_mutex`.
+pub fn panesSig(session: *glyphwire.Session) u64 {
+    var sum: u64 = session.pane_layout_gen.load(.monotonic);
+    var it = session.panes.iterator();
+    while (it.next()) |e| {
+        if (!e.value_ptr.mapped) continue;
+        const ctx = session.contextPtr(e.value_ptr.top()) orelse continue;
+        sum +%= mix(hashContextSig(contextSig(ctx)), e.key_ptr.*);
+    }
+    return sum;
+}
+
 /// Whether a foregrounded full-screen program owns the root screen: the
 /// alt buffer is active, a DECSTBM scroll region narrower than the screen
 /// is set, or DECCKM application-cursor-keys mode is on. Mirrors

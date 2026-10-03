@@ -810,6 +810,32 @@ pub fn sideBySideDividerCellsDontJoinTest(_: std.Io, alloc: std.mem.Allocator) !
     for (cells.items) |c| try testz.expectEqualStr("│", c.glyph);
 }
 
+// ── Redraw signature ───────────────────────────────────────────────────
+
+/// A change in a pane that doesn't have focus must still move the redraw
+/// signature, or the window never repaints it until focus moves there.
+pub fn panesSigSeesAnUnfocusedPaneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+
+    const made = try session.createPane(0, 0);
+    const split = try session.createPaneSplit(.row, true);
+    try session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try session.setRootPaneSplit(split);
+    try session.layoutPanes(null, null);
+
+    // The root pane has focus; the change lands in the other one.
+    const before = hs.redraw.panesSig(&session);
+    const other = session.contextPtr(session.panePtr(made.pane).?.top()).?;
+    try other.root.writeText("x", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(hs.redraw.panesSig(&session) != before);
+}
+
 // ── Window title ───────────────────────────────────────────────────────
 
 /// The first frame always sets a title, an unchanged one sends nothing,
