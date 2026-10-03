@@ -309,7 +309,7 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
     try reporter.reportKey("a", true);
-    try reporter.reportMouseButton("left", true, .{ .x = 12, .y = 34 }, .{ .row = 1, .col = 2 }, 0);
+    try reporter.reportMouseButton("left", true, .{ .x = 12, .y = 34 }, .{ .row = 1, .col = 2 }, 0, 1);
 
     // The listener's background thread updates asynchronously, and the key
     // and mouse-button reports are two separate notifications -- polling
@@ -358,8 +358,8 @@ pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Alloca
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
-    try reporter.reportMouseButton("left", true, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0);
-    try reporter.reportMouseButton("left", false, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0);
+    try reporter.reportMouseButton("left", true, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
+    try reporter.reportMouseButton("left", false, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
 
     var press: ?glyphwire.client.MouseButtonEvent = null;
     var attempts: usize = 0;

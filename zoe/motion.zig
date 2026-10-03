@@ -147,6 +147,25 @@ pub fn gotoLine(buf: *const Buffer, line: usize) usize {
     return firstNonBlank(buf, buf.lineStart(clamped));
 }
 
+/// The `[start, end)` byte span of the run of one `CharClass` around
+/// `off` on its line -- vim's `iw`, and what a double-click selects: a
+/// word, a punctuation run, or a run of blanks. Never crosses the line's
+/// newline; `off` on the newline itself (an empty line, or past the last
+/// character) is an empty span there. Byte-wise is enough: every byte of
+/// a multi-byte codepoint classes as `word`, so a run never splits one.
+pub fn wordAt(buf: *const Buffer, off: usize) struct { start: usize, end: usize } {
+    const line = buf.lineAt(off);
+    const line_start = buf.lineStart(line);
+    const line_end = buf.lineEnd(line);
+    if (off >= line_end) return .{ .start = line_end, .end = line_end };
+    const class = classOf(buf.byteAt(off), false);
+    var lo = off;
+    while (lo > line_start and classOf(buf.byteAt(lo - 1), false) == class) lo -= 1;
+    var hi = off + 1;
+    while (hi < line_end and classOf(buf.byteAt(hi), false) == class) hi += 1;
+    return .{ .start = lo, .end = hi };
+}
+
 /// Whether `off` is the start of an empty line. vim treats one as a word
 /// on its own, which is why `w` stops on a blank line rather than
 /// skipping the run of newlines around it.

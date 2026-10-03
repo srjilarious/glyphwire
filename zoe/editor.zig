@@ -1875,6 +1875,13 @@ pub const Editor = struct {
         self.moveTo(motion.clampNormal(&self.buf, cursor), true);
     }
 
+    /// `setVisualSelection` in `V` mode: whole lines from `anchor`'s to
+    /// `cursor`'s -- a triple-click, and the drag that follows one.
+    pub fn setVisualLineSelection(self: *Editor, anchor: usize, cursor: usize) void {
+        self.setVisualSelection(anchor, cursor);
+        self.mode = .visual_line;
+    }
+
     /// One visual-mode command character (dispatched off `feedText` like
     /// normal mode). Motions move the cursor end; `y` / `d` / `x` / `c` /
     /// `p` act on the selection and leave visual mode.

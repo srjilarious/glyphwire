@@ -175,6 +175,11 @@ segment), Ctrl+Backspace, Ctrl+U, Ctrl+K, Backspace on an empty line leaves.
 | `:lsp`, `:lsp restart` | Language server status / restart |
 | `:diag` | List diagnostics |
 
+Files changed outside zoe are noticed within about a second. A buffer with
+no unsaved edits reloads in place, keeping its cursor and scroll; one with
+edits is left alone and the status line shows `W11` once per change, so
+`:e!` (take the disk's) or `:w` (keep yours) is a deliberate choice.
+
 ### File tree pane
 
 `j` `k` / Up Down, PageUp / PageDown, `g` `G` / Home End, Enter / Space /
@@ -184,7 +189,9 @@ Escape back to the buffer.
 ### Mouse
 
 Click to place the cursor and focus a group; drag to select (enters
-visual mode); wheel and scrollbar thumb scroll any group; Shift+wheel
+visual mode); double-click selects a word (vim's `iw` run: identifier,
+punctuation or blanks) and triple-click a line (`V`), and dragging on
+from either grows the selection a word or line at a time; wheel and scrollbar thumb scroll any group; Shift+wheel
 scrolls a tab strip; click a tab to switch, its `×` to close; hover a tab
 for its full path; drag a divider to resize groups or the shell panel.
 

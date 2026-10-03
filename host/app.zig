@@ -325,6 +325,10 @@ pub const App = struct {
         // A divider drag gets first refusal of all: it sits *over* the
         // panes, so a press on the band between two of them is a resize,
         // never a click into either.
+        // Click counting first of all, so every consumer below -- chrome,
+        // selection, the wire -- agrees on whether this press is a
+        // double-click.
+        self.keys.countClicks(eng);
         const divider_took_left = self.panes.handleMouse(eng);
         // Then a pane's own scrollbar, which sits inside a pane and so
         // covers the window bar wherever the two overlap.

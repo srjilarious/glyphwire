@@ -52,6 +52,7 @@ const ls_icons = @import("applib").icons;
 
 const editor = @import("editor.zig");
 const motion = @import("motion.zig");
+const diskwatch = @import("diskwatch.zig");
 const display = @import("display.zig");
 const search = @import("search.zig");
 const tree_mod = @import("tree.zig");
@@ -537,6 +538,14 @@ const Slot = struct {
     /// whatever changes `ed.path`.
     abs_path: ?[]u8 = null,
 
+    /// The file's size and mtime as of zoe's last read or write of it --
+    /// what `Ui.checkDisk` compares against to notice a change made
+    /// outside zoe. Null for a scratch buffer, or a `[New]` one until its
+    /// first `:w`. `disk_warned` is the changed stamp already reported
+    /// for a modified buffer, so it is reported once, not every poll.
+    disk: ?diskwatch.Stamp = null,
+    disk_warned: ?diskwatch.Stamp = null,
+
     fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
         if (self.hl) |*h| h.deinit();
         self.spans.deinit(alloc);
@@ -691,7 +700,18 @@ pub const Ui = struct {
     /// first time the pointer changes cell, which is when the drag turns
     /// into a visual selection (a press+release with no move is a plain
     /// click). Null when no button is down over the pane.
-    drag: ?struct { anchor: usize, moved: bool } = null,
+    ///
+    /// A double-click (`unit = .word`) or triple-click (`.line`) selects
+    /// on the press and starts out `moved`, so its release keeps the
+    /// selection; dragging on from there grows it a whole word or line
+    /// at a time. `word` is the `[start, end)` span the press landed on,
+    /// which a word drag always keeps selected.
+    drag: ?struct {
+        anchor: usize,
+        moved: bool,
+        unit: enum { char, word, line } = .char,
+        word: struct { start: usize, end: usize } = .{ .start = 0, .end = 0 },
+    } = null,
 
     /// The Ctrl+P file finder popup. Its layers float *outside* the split
     /// tree -- placed over the buffer pane by `render`, hidden the rest of
@@ -749,6 +769,10 @@ pub const Ui = struct {
     tab_tip_index: ?usize = null,
     tab_tip_group: ?*Group = null,
     tab_tip_due: ?std.Io.Clock.Timestamp = null,
+    /// When the open files are next stat'ed for outside changes (see
+    /// `checkDisk`). Always armed: it is the one timer that runs with
+    /// nothing else going on.
+    disk_check_due: ?std.Io.Clock.Timestamp = null,
     tab_tip_shown: bool = false,
     tab_tip_dirty: bool = false,
 
@@ -1378,6 +1402,7 @@ pub const Ui = struct {
 
         slot.* = .{ .ed = try Editor.initFromText(self.alloc, text orelse "", path) };
         errdefer slot.ed.deinit();
+        if (text != null) slot.disk = self.diskStamp(path.?);
         slot.ed.keymaps = &self.keymaps;
         slot.ed.line_comment = self.lineCommentFor(path);
 
@@ -2049,7 +2074,15 @@ pub const Ui = struct {
             // So is an outstanding request's timeout: with one out, wait no
             // longer than it has left, so a server that never answers is
             // reported without needing a keystroke to notice.
+            //
+            // And the disk check: once a second the open files are
+            // stat'ed for changes made outside zoe (see `checkDisk`), so
+            // an idle zoe wakes on that beat too.
             self.armLspChange();
+            if (self.disk_check_due == null) self.disk_check_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .raw = .fromMilliseconds(diskwatch.poll_ms),
+                .clock = .awake,
+            });
             const timeout: std.Io.Timeout = if (self.nextLspDeadline()) |due|
                 .{ .deadline = due }
             else
@@ -2081,6 +2114,7 @@ pub const Ui = struct {
             self.syncCompletion();
             if (self.completionDue()) self.requestCompletion(null, false);
             if (self.tabTipDue()) self.showTabTip();
+            if (self.diskCheckDue()) self.checkDisk();
             // After the events, before the frame they produced: a mode
             // change in that batch retimes the host's key repeat before
             // the user can hold anything down in the new mode.
@@ -2895,6 +2929,20 @@ pub const Ui = struct {
                 self.drag = .{ .anchor = byte, .moved = false };
                 if (self.buf.ed.hasSelection()) self.buf.ed.exitVisual();
                 self.buf.ed.moveCursorTo(byte);
+                // The host counted the clicks: a double selects the word
+                // under the pointer, a triple its line, both on the press.
+                switch (ev.clicks) {
+                    2 => {
+                        const w = motion.wordAt(&self.buf.ed.buf, byte);
+                        self.drag = .{ .anchor = byte, .moved = true, .unit = .word, .word = .{ .start = w.start, .end = w.end } };
+                        self.buf.ed.setVisualSelection(w.start, self.lastByteOf(w.start, w.end));
+                    },
+                    3 => {
+                        self.drag = .{ .anchor = byte, .moved = true, .unit = .line };
+                        self.buf.ed.setVisualLineSelection(byte, byte);
+                    },
+                    else => {},
+                }
                 self.focus = .buffer;
                 self.buf.full_redraw = true;
                 self.grp.buffer_dirty = true;
@@ -2934,12 +2982,35 @@ pub const Ui = struct {
                 // redraw.
                 return;
             }
-            self.buf.ed.setVisualSelection(d.anchor, byte);
+            switch (d.unit) {
+                .char => self.buf.ed.setVisualSelection(d.anchor, byte),
+                .line => self.buf.ed.setVisualLineSelection(d.anchor, byte),
+                // Whole words both ways: the far end of the word the
+                // double-click landed on stays the anchor, and the moving
+                // end snaps to the edge of the word under the pointer.
+                .word => {
+                    const w = motion.wordAt(&self.buf.ed.buf, byte);
+                    if (byte < d.word.start) {
+                        self.buf.ed.setVisualSelection(self.lastByteOf(d.word.start, d.word.end), w.start);
+                    } else {
+                        self.buf.ed.setVisualSelection(d.word.start, self.lastByteOf(w.start, w.end));
+                    }
+                },
+            }
             // Just dirty: `renderBuffer` repaints the rows whose highlight
             // the step changed, not the whole pane.
             self.grp.buffer_dirty = true;
             self.status_dirty = true;
         }
+    }
+
+    /// The offset of the last character in the `[start, end)` span of the
+    /// active buffer -- where a visual selection, whose ends are both
+    /// inclusive, has to stop to cover exactly that span. `start` for an
+    /// empty one.
+    fn lastByteOf(self: *const Ui, start: usize, end: usize) usize {
+        if (end <= start) return start;
+        return motion.prevCodepoint(&self.buf.ed.buf, end);
     }
 
     /// The tab under a root-grid cell, or null when the cell isn't in
@@ -3313,6 +3384,8 @@ pub const Ui = struct {
         // `loadText` re-owns the path, freeing the string `path` points
         // at, so everything below reads it back off the editor.
         try self.buf.ed.loadText(bytes, path);
+        self.buf.disk = self.diskStamp(self.buf.ed.path.?);
+        self.buf.disk_warned = null;
         self.selectHighlightLanguage(self.buf, self.buf.ed.path);
         // Wholly different contents: the servers' copy is stale in a way the
         // edit watermark can't express, so force the next flush to send.
@@ -3325,6 +3398,96 @@ pub const Ui = struct {
         self.grp.buffer_dirty = true;
         self.grp.tabs_dirty = true;
         self.status_dirty = true;
+    }
+
+    /// `path`'s current size and mtime, or null when it can't be stat'ed
+    /// (gone, or never written).
+    fn diskStamp(self: *Ui, path: []const u8) ?diskwatch.Stamp {
+        const st = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return null;
+        return .{ .size = st.size, .mtime_ns = st.mtime.nanoseconds };
+    }
+
+    /// Whether the once-a-second disk check has come due. Disarms it, so
+    /// the next loop turn arms the next one.
+    fn diskCheckDue(self: *Ui) bool {
+        const due = self.disk_check_due orelse return false;
+        if (due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() < 0) return false;
+        self.disk_check_due = null;
+        return true;
+    }
+
+    /// Stats every open buffer's file and follows the ones that changed
+    /// outside zoe: a clean buffer reloads in place, a modified one gets
+    /// one W11 warning per change and is otherwise left alone. See
+    /// `zoe/diskwatch.zig` for the rules.
+    fn checkDisk(self: *Ui) void {
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                const path = slot.ed.path orelse continue;
+                const current = self.diskStamp(path);
+                switch (diskwatch.decide(slot.disk, slot.disk_warned, current, slot.ed.buf.dirty)) {
+                    .none => {},
+                    .reload => self.reloadFromDisk(g, slot, current.?),
+                    .warn => {
+                        slot.disk_warned = current;
+                        // On whichever buffer is showing: the status
+                        // line is the active buffer's, and this is news
+                        // the user needs before their next `:w`
+                        // overwrites someone else's change.
+                        self.buf.ed.setStatus("W11: \"{s}\" changed on disk since editing started", .{path});
+                        self.status_dirty = true;
+                    },
+                }
+            }
+        }
+    }
+
+    /// Re-reads `slot`'s file after an outside change, keeping the view:
+    /// the cursor stays on the same line and column and the pane on the
+    /// same scroll position, clamped to the new text. Unlike a bare `:e`,
+    /// which starts the file over at the top. Insert mode survives too --
+    /// a reload is something that happened to the user, not something
+    /// they asked for. A file that can't be read or has turned binary is
+    /// skipped; `stamp` is recorded either way so it isn't retried every
+    /// second.
+    fn reloadFromDisk(self: *Ui, g: *Group, slot: *Slot, stamp: diskwatch.Stamp) void {
+        slot.disk = stamp;
+        slot.disk_warned = null;
+        const path = slot.ed.path orelse return;
+        const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.alloc, .limited(max_file_bytes)) catch return;
+        defer self.alloc.free(bytes);
+        if (filetype.looksBinary(bytes)) return;
+
+        const pos = slot.ed.buf.posOf(slot.ed.cursor);
+        const was_insert = slot.ed.mode == .insert;
+        const active = slot == self.buf;
+        if (active) {
+            // Byte offsets into the old text are meaningless now.
+            self.drag = null;
+            _ = self.closeHover();
+            self.closeCompletion();
+        }
+
+        // Null path: `loadText` keeps the one it has.
+        slot.ed.loadText(bytes, null) catch return;
+        self.selectHighlightLanguage(slot, slot.ed.path);
+        // Same as `reloadCurrent`: the servers' copy is stale in a way the
+        // edit watermark can't express. A background buffer's goes out
+        // when it is next made active, like any of its edits would.
+        slot.lsp_sent_edits = slot.ed.buf.edits -% 1;
+
+        const last_line = slot.ed.buf.lineCount() - 1;
+        const line = @min(pos.line, last_line);
+        slot.ed.moveCursorTo(motion.atColumn(&slot.ed.buf, line, pos.col, false));
+        if (was_insert) slot.ed.mode = .insert;
+        slot.top_line = @min(slot.top_line, last_line);
+        slot.full_redraw = true;
+        g.buffer_dirty = true;
+        g.tabs_dirty = true;
+        if (active) {
+            slot.ed.setStatus("\"{s}\" {d}L reloaded (changed on disk)", .{ path, slot.ed.buf.lineCount() });
+            self.status_dirty = true;
+        }
     }
 
     /// Whether `:q` / `:wq` has to be refused because some *other* tab
@@ -3461,6 +3624,10 @@ pub const Ui = struct {
             self.buf.lsp_opened = false;
         }
         self.buf.ed.markSaved();
+        // Our own write moves the mtime too; this is the version on disk
+        // now, not an outside change to react to.
+        self.buf.disk = self.diskStamp(self.buf.ed.path orelse dest);
+        self.buf.disk_warned = null;
         self.lspDidSave();
         // The tab loses its `+`, and a `:w <name>` also renamed it.
         self.grp.tabs_dirty = true;
@@ -3621,7 +3788,7 @@ pub const Ui = struct {
     /// tooltip delays, and the oldest outstanding request's timeout, or null
     /// for none -- the loop's whole notion of time.
     fn nextLspDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
-        var best = earlier(earlier(self.lsp_change_due, self.completion_due), self.tab_tip_due);
+        var best = earlier(earlier(earlier(self.lsp_change_due, self.completion_due), self.tab_tip_due), self.disk_check_due);
         const pool = if (self.lsp_pool) |*p| p else return best;
         if (pool.nextDeadlineMs()) |req_ms| {
             best = earlier(best, .{

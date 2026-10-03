@@ -1183,6 +1183,14 @@ pub const Selection = struct {
     }
 };
 
+/// What a multi-click selects: a double-click a word, a triple-click a
+/// line. See `Layer.unitSpanAt`.
+pub const SelectUnit = enum { word, line };
+
+/// The inclusive ends of the word or line `Layer.unitSpanAt` found, in
+/// reading order.
+pub const UnitSpan = struct { start: SelectionPoint, end: SelectionPoint };
+
 /// A layer's viewport size in cells -- what `get_property(layer, "size")`
 /// reports. For the root layer this is the context's base size, i.e. the
 /// answer to "how big is the window right now" (see `Context.resize`).
@@ -4081,6 +4089,64 @@ pub const Layer = struct {
         self.touchRender();
     }
 
+    /// The span a double-click (`.word`) or triple-click (`.line`) at `p`
+    /// selects, as the two inclusive ends a `setSelection` takes. A line
+    /// is the whole row; `selectedSpan` already trims it to its text. A
+    /// word is the run of cells around `p` in the same `WordClass`, so a
+    /// path or URL comes out whole while a quote or bracket next to it
+    /// does not. Only `p`'s own row is searched: a word soft-wrapped onto
+    /// the next row stops at the edge. A row that is no longer retained,
+    /// or a `p` off its end, gives back `p` alone.
+    pub fn unitSpanAt(self: *const Layer, p: SelectionPoint, unit: SelectUnit) UnitSpan {
+        const at = self.glyphRowPoint(p);
+        if (unit == .line) {
+            return .{
+                .start = .{ .above = at.above, .col = 0 },
+                .end = .{ .above = at.above, .col = self.width -| 1 },
+            };
+        }
+        const cells = self.rowForAbove(at.above) orelse return .{ .start = at, .end = at };
+        if (at.col >= cells.len) return .{ .start = at, .end = at };
+        // A wide or scaled glyph's spacer and fill belong to the glyph,
+        // so classify the cell that actually holds it.
+        const head = if (multiCellGlyphAt(cells, at.col)) |g| g.start else at.col;
+        const class = wordClassOf(cells[head]);
+        if (class == .delimiter) return .{ .start = .{ .above = at.above, .col = head }, .end = .{ .above = at.above, .col = head } };
+
+        var lo = head;
+        while (lo > 0 and sameWordClass(cells, lo - 1, class)) lo -= 1;
+        var hi = head;
+        while (hi + 1 < cells.len and sameWordClass(cells, hi + 1, class)) hi += 1;
+        return .{ .start = .{ .above = at.above, .col = lo }, .end = .{ .above = at.above, .col = hi } };
+    }
+
+    /// What a host double-click groups cells by. A word is a run of
+    /// non-blank cells that aren't delimiters; blanks group with blanks;
+    /// a delimiter is always a word of its own.
+    const WordClass = enum { blank, word, delimiter };
+
+    /// Characters that end a double-click word in terminal output: the
+    /// quotes and brackets that wrap a path or URL, plus the separators
+    /// that trail one in a list. `/ . - : ~` and friends are deliberately
+    /// word characters, so `src/core.zig:42` selects as one.
+    const word_delimiters = "\"'`()[]{}<>|,;";
+
+    fn wordClassOf(c: Cell) WordClass {
+        if (!c.selectable) return .delimiter;
+        const g = c.grapheme();
+        if (g.len == 0 or std.mem.eql(u8, g, " ") or std.mem.eql(u8, g, "\t")) return .blank;
+        if (g.len == 1 and std.mem.indexOfScalar(u8, word_delimiters, g[0]) != null) return .delimiter;
+        return .word;
+    }
+
+    /// Whether the cell at `col` extends a run of `class`. A wide or
+    /// scaled glyph's spacer and fill cells take their glyph's class, so
+    /// a run steps over them rather than stopping at their empty grapheme.
+    fn sameWordClass(cells: []const Cell, col: usize, class: WordClass) bool {
+        const head = if (multiCellGlyphAt(cells, col)) |g| g.start else col;
+        return wordClassOf(cells[head]) == class;
+    }
+
     /// Whether `id` is currently highlighted -- the per-cell test the
     /// renderer runs against `Cell.metadata_id`. `null` (an untagged cell)
     /// is never highlighted.
@@ -6315,6 +6381,48 @@ pub const CellPos = struct {
     /// to a scroll position. Separate from `CellPos` because a position
     /// can't be negative but a movement can.
     pub const Delta = struct { row: i64 = 0, col: i64 = 0 };
+};
+
+/// Turns a stream of button presses into `mouse_button`'s `clicks` count:
+/// 1 for a single click, 2 for a double, 3 for a triple. A press counts
+/// on from the previous one when it is the same button, within `slop_px`
+/// of it on both axes, and within `interval_ms` of it; anything else
+/// starts over at 1. Past a triple the count wraps back to 1, so a fourth
+/// quick click is a fresh single click rather than an ever-growing number
+/// no client acts on.
+///
+/// Distance in pixels rather than "the same cell": a hand that wobbles a
+/// pixel across a cell border is still double-clicking, the way every
+/// desktop toolkit measures it.
+///
+/// The host owns the one counter, so every client sees the same count
+/// for the same gesture instead of each timing clicks its own way. Pure
+/// logic: the caller passes the clock in.
+pub const ClickCounter = struct {
+    /// Longest gap between two presses that still chain. 400ms is within
+    /// the common desktop defaults (GTK 400, Windows 500).
+    interval_ms: i64 = 400,
+    /// How far apart two chained presses may land, per axis.
+    slop_px: f32 = 4,
+    count: u8 = 0,
+    last_ms: i64 = 0,
+    last_button: u8 = 0,
+    last_px: PxPos = .{},
+
+    /// Records a press of `button` (any stable small id) at `px` at
+    /// `now_ms` and returns its click count.
+    pub fn press(self: *ClickCounter, button: u8, px: PxPos, now_ms: i64) u8 {
+        const chains = self.count != 0 and
+            button == self.last_button and
+            @abs(px.x - self.last_px.x) <= self.slop_px and
+            @abs(px.y - self.last_px.y) <= self.slop_px and
+            now_ms - self.last_ms <= self.interval_ms;
+        self.count = if (chains and self.count < 3) self.count + 1 else 1;
+        self.last_ms = now_ms;
+        self.last_button = button;
+        self.last_px = px;
+        return self.count;
+    }
 };
 
 /// Authoritative input state for a session: which keys/mouse buttons are

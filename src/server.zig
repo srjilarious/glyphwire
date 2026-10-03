@@ -962,8 +962,9 @@ pub const Server = struct {
     /// `view_offset` is the root layer's current scrollback view offset
     /// (see `core.Layer.view_scroll`), carried through into the broadcast
     /// so a subscriber (glyphwire-shell) can resolve `cell` against the
-    /// same scrolled-back row the user actually clicked.
-    pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos, view_offset: usize) !void {
+    /// same scrolled-back row the user actually clicked. `clicks` is the
+    /// press's count from the host's `core.ClickCounter` (1 = single).
+    pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos, view_offset: usize, clicks: u8) !void {
         const changed, const mods = changed: {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
@@ -973,7 +974,7 @@ pub const Server = struct {
         };
         if (!changed) return;
 
-        const body = try rpc.mouseButtonNotification(alloc, button, pressed, px, cell, view_offset, mods);
+        const body = try rpc.mouseButtonNotification(alloc, button, pressed, px, cell, view_offset, mods, clicks);
         defer alloc.free(body);
         self.broadcast(null, "mouse_button", body);
     }
@@ -1344,6 +1345,16 @@ pub const Server = struct {
         defer self.ctx_mutex.unlock(self.io);
         const layer = self.ctx.layerPtr(layer_handle) orelse return null;
         return layer.selectionText(alloc);
+    }
+
+    /// The word or line around `p` on `layer_handle` (null = root) -- what
+    /// glyphwire-host's double/triple-click selects. Null when the layer
+    /// is gone. See `core.Layer.unitSpanAt`.
+    pub fn selectionUnitAt(self: *Server, layer_handle: ?core.LayerHandle, p: core.SelectionPoint, unit: core.SelectUnit) ?core.UnitSpan {
+        self.ctx_mutex.lockUncancelable(self.io);
+        defer self.ctx_mutex.unlock(self.io);
+        const layer = self.ctx.layerPtr(layer_handle) orelse return null;
+        return layer.unitSpanAt(p, unit);
     }
 
     /// Replaces the session clipboard buffer (and bumps its serial, so

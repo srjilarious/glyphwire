@@ -141,7 +141,6 @@ const header_row = 1;
 const list_top = 2;
 const size_w = 8;
 const date_w = 16;
-const double_click_ms = 400;
 /// The longest type-to-find prefix. Well past the point where a listing
 /// has one match left.
 const find_max = 64;
@@ -269,7 +268,11 @@ pub const Ui = struct {
     /// The last `content_extent`/offset sent per pane, so an unchanged one
     /// isn't re-sent (and a host-driven scroll isn't echoed back).
     pushed_scroll: [2][2]usize = .{ .{ std.math.maxInt(usize), 0 }, .{ std.math.maxInt(usize), 0 } },
-    last_click: struct { pane: usize = 0, row: usize = 0, at_ms: i64 = 0 } = .{},
+    /// The row the last plain left click landed on, or null after a click
+    /// that must not start a double (a Ctrl+click or right-click mark).
+    /// The host counts the clicks (`MouseButtonEvent.clicks`); this only
+    /// makes sure both halves of a double were plain clicks on one row.
+    last_click: ?struct { pane: usize, row: usize } = null,
     /// `GLYPHWIRE_SALA_PROFILE=1`: print what each pane repaint cost on
     /// the wire -- rows drawn and body bytes -- to stderr. Off by
     /// default and read once at startup. It exists because "the remote
@@ -1125,16 +1128,19 @@ pub const Ui = struct {
             // picking files out of a list, and two of them in a row must
             // not turn into an activation.
             p.toggleMark(row);
-            self.last_click.at_ms = 0;
+            self.last_click = null;
             return;
         }
 
-        const now = std.Io.Timestamp.now(self.io, .awake).toMilliseconds();
         const lc = self.last_click;
-        self.last_click = .{ .pane = i, .row = row, .at_ms = now };
-        if (lc.pane == i and lc.row == row and now - lc.at_ms <= double_click_ms) {
-            self.last_click.at_ms = 0;
-            try self.activate(i);
+        self.last_click = .{ .pane = i, .row = row };
+        if (m.clicks == 2) {
+            if (lc) |prev| {
+                if (prev.pane == i and prev.row == row) {
+                    self.last_click = null;
+                    try self.activate(i);
+                }
+            }
         }
     }
 

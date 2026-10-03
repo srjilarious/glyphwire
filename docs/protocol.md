@@ -1241,7 +1241,7 @@ the host's own in-process path and by test harnesses.
 |---|---|---|---|
 | `report_key` | notification | `key`, `pressed` | — |
 | `report_text` | notification | `text` | — |
-| `report_mouse_button` | notification | `button`, `pressed`, `px`, `cell`, `view_offset?` = 0 | — |
+| `report_mouse_button` | notification | `button`, `pressed`, `px`, `cell`, `view_offset?` = 0, `clicks?` = 1 | — |
 | `report_mouse_move` | notification | `px`, `cell` | — |
 | `get_input_state` | request | — | `{keys_down, mouse_buttons_down, cursor_px, cursor_cell}` |
 | `set_key_repeat` | notification | `delay_ms?`, `interval_ms?` | — |
@@ -1367,7 +1367,7 @@ the client drains with `get_errors`.
 |---|---|
 | `key_down` / `key_up` | `{key, mods}` |
 | `text` | `{text}` |
-| `mouse_button` | `{button, pressed, px, cell, view_offset, mods}` |
+| `mouse_button` | `{button, pressed, px, cell, view_offset, mods, clicks}` |
 | `mouse_move` | `{px, cell, mods}` |
 | `resize` | `{cols, rows}` |
 | `scroll` | `{layer, offset, max}` |
@@ -1411,6 +1411,17 @@ click time. Pass it back to `get_metadata` to resolve `cell` against the
 row the user actually clicked. It is the *root* layer's, so a client whose
 content is on a layer with a scrollback ring of its own uses that layer's
 offset (from its `scroll` notifications) instead.
+
+**`mouse_button`'s `clicks`** is 1 for a single click, 2 for a double and
+3 for a triple, counted by the host: presses of one button within 400ms
+and 4px of the one before chain, and a fourth wraps back to 1. A release
+carries its press's count. A client **SHOULD** act on this count rather
+than time clicks itself, so every program agrees on what a double-click is.
+On the host's own text (a shell's output, a `mouse_select` layer) a
+double-click selects a word, a triple-click the row, and dragging on
+from either grows the selection a whole word or row at a time. A word there
+is a run of non-blank characters stopping at quotes, brackets and
+`|` `,` `;`, so a path or URL selects whole.
 
 **`mouse_move`** fires only when the pointer changes *cell*; per-pixel
 motion is coalesced.
