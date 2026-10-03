@@ -460,6 +460,29 @@ pub const Editor = struct {
                     self.pageMove(.up, false);
                     return .none;
                 }
+                // Tab / Shift+Tab: `>>` / `<<` on the cursor line, or `>` /
+                // `<` on the selection (which stays selected). A count
+                // means what it does for those: lines in normal mode,
+                // levels in visual.
+                if (eq(u8, key, "tab")) {
+                    const n = self.takeCount();
+                    self.resetPending();
+                    if (self.mode == .normal) {
+                        const line = self.buf.lineAt(self.cursor);
+                        try self.shiftLines(line, line + n - 1, !mods.shift, 1);
+                    } else {
+                        try self.visualShift(!mods.shift, n);
+                    }
+                    return .none;
+                }
+                // Alt+Up / Alt+Down: move the cursor line, or every line
+                // the selection touches, past its neighbour.
+                if (mods.alt and (eq(u8, key, "up") or eq(u8, key, "down"))) {
+                    const n = self.takeCount();
+                    self.resetPending();
+                    try self.moveLines(eq(u8, key, "down"), n);
+                    return .none;
+                }
                 if (eq(u8, key, "left")) {
                     self.moveTo(motion.left(&self.buf, self.cursor, 1), true);
                 } else if (eq(u8, key, "right")) {
@@ -484,6 +507,12 @@ pub const Editor = struct {
                     try self.insertText("\n");
                 } else if (eq(u8, key, "tab")) {
                     try self.insertTab();
+                } else if (mods.alt and (eq(u8, key, "up") or eq(u8, key, "down"))) {
+                    // Its own undo step, not part of the insert session's:
+                    // `u` after typing then moving a line puts the line
+                    // back and keeps the typing. `moveLines` opens it.
+                    try self.moveLines(eq(u8, key, "down"), 1);
+                    self.buf.closeUndoGroup();
                 } else if (eq(u8, key, "backspace")) {
                     try self.backspace();
                 } else if (eq(u8, key, "delete")) {
@@ -1257,6 +1286,63 @@ pub const Editor = struct {
 
         self.select_anchor = a.restore(&self.buf);
         self.moveTo(c.restore(&self.buf), true);
+    }
+
+    /// Alt+Up / Alt+Down: move the cursor line, or every line a visual
+    /// selection touches, `n` lines up or down, as one undo step. The
+    /// lines keep their indent; Tab / Shift+Tab is how to fix it.
+    ///
+    /// The block itself is never rewritten: the `n` lines it passes over
+    /// are cut from one side and put back on the other, so the edit (and
+    /// the reparse it costs) is the size of what moved past, and the
+    /// cursor and selection anchor just slide by that much. Stops at the
+    /// buffer's ends; already there, it does nothing.
+    fn moveLines(self: *Editor, down: bool, n: usize) !void {
+        var first = self.buf.lineAt(self.cursor);
+        var last = first;
+        if (self.mode == .visual or self.mode == .visual_line) {
+            if (self.selectionSpan()) |span| {
+                first = self.buf.lineAt(span.lo);
+                last = self.buf.lineAt(if (span.hi > span.lo) span.hi - 1 else span.hi);
+            }
+        }
+        const lc = self.buf.lineCount();
+        const steps = if (down) @min(n, lc - 1 - last) else @min(n, first);
+        if (steps == 0) return;
+
+        self.buf.undoCheckpoint(self.cursor);
+        // Down: the lines below the block, `[lineEnd(last), lineEnd(last
+        // + steps))`, are "\n" + text; they go back in front of the block
+        // as text + "\n". Up: the lines above, `[lineStart(first - steps),
+        // lineStart(first))`, are text + "\n"; they go after it as "\n" +
+        // text. Either form survives a block on the unterminated last line.
+        const cut_lo = if (down) self.buf.lineEnd(last) else self.buf.lineStart(first - steps);
+        const cut_hi = if (down) self.buf.lineEnd(last + steps) else self.buf.lineStart(first);
+        const moved = try self.buf.read(self.alloc, cut_lo, cut_hi);
+        defer self.alloc.free(moved);
+        const text = if (down) moved[1..] else moved[0 .. moved.len - 1];
+
+        const paste = try self.alloc.alloc(u8, moved.len);
+        defer self.alloc.free(paste);
+        if (down) {
+            @memcpy(paste[0..text.len], text);
+            paste[text.len] = '\n';
+        } else {
+            paste[0] = '\n';
+            @memcpy(paste[1..], text);
+        }
+
+        try self.buf.delete(cut_lo, moved.len);
+        // After the cut, the block has (going up) moved up by `steps`
+        // lines, so its end is `lineEnd(last - steps)`.
+        const at = if (down) self.buf.lineStart(first) else self.buf.lineEnd(last - steps);
+        try self.buf.insert(at, paste);
+
+        const shift = moved.len;
+        if (self.select_anchor) |a| {
+            self.select_anchor = if (down) a + shift else a - shift;
+        }
+        self.moveTo(if (down) self.cursor + shift else self.cursor - shift, false);
     }
 
     /// One end of a visual selection, remembered across an edit that

@@ -10,7 +10,8 @@
 //! rather than reaching past it into the edit functions.
 //!
 //! Everything outside `<...>` is committed text; a `<name>` is a named
-//! key, and a `c-` prefix on one (`<c-r>`) makes it a Ctrl chord. `<lt>`
+//! key, and a `c-`, `s-` or `a-` prefix on one (`<c-r>`, `<s-tab>`,
+//! `<a-up>`) makes it a Ctrl, Shift or Alt chord. `<lt>`
 //! is a literal `<`, matching vim's own escape for it. An unrecognized
 //! `<name>` is passed to `feedKey` verbatim, so a key glyphwire grows
 //! later needs no change here.
@@ -39,13 +40,23 @@ pub fn feed(ed: *Editor, script: []const u8) !Outcome {
                         else => |o| return o,
                     }
                 } else {
-                    // `<c-r>`: vim's notation for a Ctrl chord. The host
-                    // delivers those as a named key plus modifiers, which
-                    // is the only way the editor can see Ctrl+R (redo) at
-                    // all -- there is no character to carry it.
-                    const ctrl = std.ascii.startsWithIgnoreCase(name, "c-") and name.len > 2;
-                    const bare = if (ctrl) name[2..] else name;
-                    switch (try ed.feedKey(keyName(bare), .{ .ctrl = ctrl })) {
+                    // `<c-r>`: vim's notation for a Ctrl chord, and `s-` /
+                    // `a-` (or `m-`) for Shift and Alt, in any order
+                    // (`<s-tab>`, `<a-down>`). The host delivers those as
+                    // a named key plus modifiers, which is the only way
+                    // the editor can see Ctrl+R (redo) at all -- there is
+                    // no character to carry it.
+                    var mods: editor.Mods = .{};
+                    var bare = name;
+                    while (bare.len > 2 and bare[1] == '-') : (bare = bare[2..]) {
+                        switch (std.ascii.toLower(bare[0])) {
+                            'c' => mods.ctrl = true,
+                            's' => mods.shift = true,
+                            'a', 'm' => mods.alt = true,
+                            else => break,
+                        }
+                    }
+                    switch (try ed.feedKey(keyName(bare), mods)) {
                         .none => {},
                         else => |o| return o,
                     }

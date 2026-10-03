@@ -900,6 +900,23 @@ pub fn shellPanelKeepsADraggedHeightTest(_: std.Io, _: std.mem.Allocator) !void 
     try testz.expectEqual(rowsForWanted(3, 40), 1);
 }
 
+pub fn shellPanelHitTestIsItsRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const Panel = @import("applib").shellpanel.Panel;
+    // `contains` reads only what `place` recorded; no client is touched.
+    var p = Panel.init(alloc, io, undefined, 0, 0);
+    p.top_row = 20;
+    p.rows = 8;
+    // Hidden, it covers nothing.
+    try testz.expectFalse(p.contains(.{ .row = 22, .col = 5 }));
+
+    p.visible = true;
+    try testz.expectFalse(p.contains(.{ .row = 19, .col = 5 }));
+    try testz.expectTrue(p.contains(.{ .row = 20, .col = 0 }));
+    try testz.expectTrue(p.contains(.{ .row = 27, .col = 500 }));
+    // The row below it is the statusline / key bar, not the panel.
+    try testz.expectFalse(p.contains(.{ .row = 28, .col = 5 }));
+}
+
 // ─── Open actions ───────────────────────────────────────────────────────
 
 pub fn openActionResolvesByExtensionTest(_: std.Io, _: std.mem.Allocator) !void {

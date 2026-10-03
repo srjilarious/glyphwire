@@ -3520,6 +3520,84 @@ pub fn shiftUndoesInOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try expectEdit(alloc, "a\nb\nc", "3>>u", "a\nb\nc");
 }
 
+// ─── Tab / Shift+Tab ─────────────────────────────────────────────────────
+
+pub fn tabShiftsTheCursorLineInNormalModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb", "<tab>", "    a\nb");
+    try expectEdit(alloc, "    a\nb", "<s-tab>", "a\nb");
+    // A count is lines, like `3>>`.
+    try expectEdit(alloc, "a\nb\nc", "2<tab>", "    a\n    b\nc");
+}
+
+pub fn tabShiftsTheSelectionAndKeepsItTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", "Vj<tab><tab>", "        a\n        b\nc");
+    try expectEdit(alloc, "        a\n        b\nc", "Vj<s-tab>", "    a\n    b\nc");
+
+    var ed = try Editor.initFromText(alloc, "a\nb", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "Vj<tab>");
+    try testz.expectEqual(ed.mode, .visual_line);
+}
+
+pub fn tabInInsertModeStillInsertsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "ab", "a<tab><esc>", "a   b");
+}
+
+// ─── Alt+Up / Alt+Down ───────────────────────────────────────────────────
+
+pub fn altDownMovesTheCursorLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", "<a-down>", "b\na\nc");
+    try expectEdit(alloc, "a\nb\nc", "<a-down><a-down>", "b\nc\na");
+    try expectEdit(alloc, "a\nb\nc", "j<a-up>", "b\na\nc");
+}
+
+pub fn altMoveKeepsTheCursorOnItsCharacterTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc\nxy", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "ll<a-down>");
+    try expectText(alloc, &ed.buf, "xy\nabc");
+    try testz.expectEqual(ed.cursor, 5);
+    try testz.expectEqual(ed.buf.byteAt(ed.cursor), 'c');
+}
+
+pub fn altMoveStopsAtTheBufferEndsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb", "<a-up>", "a\nb");
+    try expectEdit(alloc, "a\nb", "j<a-down>", "a\nb");
+    // A count larger than the room left goes as far as it can.
+    try expectEdit(alloc, "a\nb\nc", "5<a-down>", "b\nc\na");
+}
+
+pub fn altMoveHandlesTheUnterminatedLastLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb", "j<a-up>", "b\na");
+    try expectEdit(alloc, "a\nb\n", "<a-down>", "b\na\n");
+}
+
+pub fn altMoveCarriesTheSelectedBlockTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc\nd", "Vj<a-down>", "c\na\nb\nd");
+    try expectEdit(alloc, "a\nb\nc\nd", "jjVj<a-up>", "a\nc\nd\nb");
+
+    // The selection rides along, so a second press moves it again.
+    var ed = try Editor.initFromText(alloc, "a\nb\nc\nd", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "Vj<a-down><a-down>");
+    try expectText(alloc, &ed.buf, "c\nd\na\nb");
+    try testz.expectEqual(ed.mode, .visual_line);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(ed.buf.lineAt(span.lo), 2);
+    try testz.expectEqual(ed.buf.lineAt(span.hi - 1), 3);
+}
+
+pub fn altMoveIsOneUndoStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", "Vj<a-down><esc>u", "a\nb\nc");
+}
+
+pub fn altMoveInInsertModeIsItsOwnUndoStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The typing survives undoing the move, and the move happened with
+    // the caret riding along (the `y` lands on the moved line).
+    try expectEdit(alloc, "a\nb", "Ax<a-down>y<esc>", "b\naxy");
+    try expectEdit(alloc, "a\nb", "Ax<a-down><esc>u", "ax\nb");
+}
+
 // ─── LSP: position encoding ──────────────────────────────────────────────
 //
 // The trap this whole group exists for: LSP counts UTF-16 code units by

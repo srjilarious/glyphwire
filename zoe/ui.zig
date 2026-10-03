@@ -42,7 +42,9 @@
 //! character under it readable, and the host's caret is hidden. See
 //! `syncCaret`. Ctrl+` opens a `gw-shell` panel over the bottom of the
 //! window (`applib/shellpanel.zig`) that takes the keyboard and the caret
-//! until it is closed.
+//! until it is closed or clicked away from: a click on the panes above
+//! gives them back while the panel stays up, and a click on the panel (or
+//! Ctrl+` again) returns them to the shell.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -1168,7 +1170,7 @@ pub const Ui = struct {
         // editor's no-hold repeat re-runs a command a held Enter at a
         // time. Clearing the override does that, and going back to the
         // per-mode cadence afterwards means forgetting what was sent.
-        if (self.shell.isOpen()) {
+        if (self.shell.isFocused()) {
             if (self.key_repeat_shell) return;
             self.client.setKeyRepeat(null, null) catch |err| {
                 std.log.warn("zoe: set_key_repeat failed ({t}); keeping the host's cadence", .{err});
@@ -1220,8 +1222,14 @@ pub const Ui = struct {
 
     /// Ctrl+`: shows the shell panel (starting the shell the first time)
     /// or hides it again. Hiding leaves the shell running, history and
-    /// any job in it included.
+    /// any job in it included. On a panel that is up but was clicked
+    /// away from, it hands the keyboard back to the shell instead, the
+    /// way VS Code's terminal toggle does.
     fn toggleShell(self: *Ui) void {
+        if (self.shell.isOpen() and !self.shell.isFocused()) {
+            self.focusShell();
+            return;
+        }
         if (self.shell.isOpen()) {
             self.shell.close();
             self.shellClosed();
@@ -1242,6 +1250,28 @@ pub const Ui = struct {
     /// shows them exactly as they were.
     fn shellClosed(self: *Ui) void {
         self.caret_host = null;
+    }
+
+    /// The open panel takes the keyboard back: a click on it, or Ctrl+`.
+    /// Popups go the way a keystroke would send them, since the next
+    /// keystroke is the shell's.
+    fn focusShell(self: *Ui) void {
+        if (self.shell.isFocused()) return;
+        _ = self.closeHover();
+        self.closeCompletion();
+        self.dismissTabTip();
+        self.shell.focus();
+        // The shell takes the caret; what zoe last sent no longer stands.
+        self.caret_host = null;
+    }
+
+    /// A click outside the open panel: zoe has the keyboard and the
+    /// caret again, and the panel stays where it is.
+    fn blurShell(self: *Ui) void {
+        if (!self.shell.isFocused()) return;
+        self.shell.blur();
+        self.shellClosed();
+        self.status_dirty = true;
     }
 
     /// The whole window in cells. The statusline is the last row of the
@@ -1275,7 +1305,7 @@ pub const Ui = struct {
     /// Not at all while the shell panel is up: the shell owns the caret
     /// then, and `shellClosed` makes the next call send it afresh.
     fn syncCaret(self: *Ui) void {
-        if (self.shell.isOpen()) return;
+        if (self.shell.isFocused()) return;
         const shape = self.caretShape();
         const host = shape != null;
         if (self.caret_host == host and self.caret_shape == shape) return;
@@ -2062,9 +2092,6 @@ pub const Ui = struct {
                     }
                 }
             },
-            // The pointer belongs to the shell panel too while it is up:
-            // a click on its output is the host's selection, not a move
-            // of the buffer cursor underneath.
             // The window came back or went away. Who draws the cursor
             // changes with it (`caretShape`), so the row it sits on has
             // to be repainted -- zoe's own inverted cell has to come off
@@ -2079,13 +2106,25 @@ pub const Ui = struct {
             // the host's copy is the one to take.
             .theme => try self.themeChanged(try self.client.getTheme()),
             .mouse_move => |m| {
-                if (!self.shell.isOpen()) try self.handleMouseDrag(m);
+                if (!self.shell.isFocused()) try self.handleMouseDrag(m);
                 // The strip is never under the shell panel, so hovering a
                 // tab works with it open too.
                 self.trackTabHover(m.cell);
             },
             // `defer ev.deinit` above frees the button string.
-            .mouse_button => |m| if (!self.shell.isOpen()) try self.handleMouseButton(m),
+            //
+            // With the panel up, a press decides who has the keyboard: on
+            // the panel it is the shell's (and the click is its selection,
+            // not a move of the buffer cursor underneath), anywhere else
+            // it is zoe's and the click does what it always does. The
+            // panel stays on screen either way. A release follows its
+            // press, so it reaches zoe only when the press did.
+            .mouse_button => |m| {
+                if (m.pressed and self.shell.isOpen()) {
+                    if (self.shell.contains(m.cell)) self.focusShell() else self.blurShell();
+                }
+                if (!self.shell.isFocused()) try self.handleMouseButton(m);
+            },
             else => if (ev.asInput()) |input| try self.handleInput(input),
         }
     }
@@ -2112,11 +2151,11 @@ pub const Ui = struct {
                 // carries no motion/edit of its own.
                 if (!k.pressed) return;
 
-                // With the shell panel up the keyboard is the shell's:
-                // both programs are sent every keystroke (one context,
-                // one input stream), so the only one taken here is the
-                // key that closes it.
-                if (self.shell.isOpen()) {
+                // With the shell panel focused the keyboard is the
+                // shell's: both programs are sent every keystroke (one
+                // context, one input stream), so the only one taken here
+                // is the key that closes it.
+                if (self.shell.isFocused()) {
                     if (k.ctrl() and std.mem.eql(u8, k.key, "grave_accent")) self.toggleShell();
                     return;
                 }
@@ -2279,15 +2318,15 @@ pub const Ui = struct {
                     return;
                 }
                 const was_insert = self.buf.ed.mode == .insert;
-                try self.applyOutcome(try self.buf.ed.feedKey(k.key, .{ .ctrl = ctrl }));
+                try self.applyOutcome(try self.buf.ed.feedKey(k.key, .{ .ctrl = ctrl, .shift = k.shift(), .alt = k.alt() }));
                 if (was_insert and (std.mem.eql(u8, k.key, "backspace") or std.mem.eql(u8, k.key, "delete"))) {
                     self.afterInsertEdit(null);
                 }
             },
             .text => |t| {
-                // Typed text is the shell's while its panel is up -- it
+                // Typed text is the shell's while its panel has focus -- it
                 // has a line editor of its own.
-                if (self.shell.isOpen()) return;
+                if (self.shell.isFocused()) return;
                 if (self.finder.isOpen()) {
                     try self.finder.text(t.text);
                     return;
@@ -2311,7 +2350,7 @@ pub const Ui = struct {
                 if (was_insert) self.afterInsertEdit(t.text);
             },
             .paste => |t| {
-                if (self.shell.isOpen()) return;
+                if (self.shell.isFocused()) return;
                 if (self.finder.isOpen()) {
                     try self.finder.text(t.text);
                     return;
@@ -2350,7 +2389,7 @@ pub const Ui = struct {
             //
             // While the shell panel is up the request is its business
             // (it copies its own selection), not the buffer's.
-            .copy_request => if (self.isVisible() and !self.shell.isOpen()) {
+            .copy_request => if (self.isVisible() and !self.shell.isFocused()) {
                 try self.applyOutcome(try self.buf.ed.clipboardCopy());
                 self.grp.buffer_dirty = true;
                 self.status_dirty = true;
@@ -3896,7 +3935,7 @@ pub const Ui = struct {
     /// cursor has to remember the popup exists.
     fn syncCompletion(self: *Ui) void {
         const in_insert = self.buf.ed.mode == .insert and self.focus == .buffer and
-            !self.finder.isOpen() and !self.shell.isOpen();
+            !self.finder.isOpen() and !self.shell.isFocused();
         if (!in_insert) {
             self.completion_due = null;
             self.completion_request = null;
@@ -3944,6 +3983,12 @@ pub const Ui = struct {
         const m = if (self.completion) |*x| x else return false;
         const rows = @min(m.count(), complete_max_rows);
         const ctrl = k.ctrl();
+        // Alt+Up/Down moves the line, not the popup's cursor; the popup
+        // closes like it does for any other cursor move.
+        if (k.alt() and (eq(u8, k.key, "up") or eq(u8, k.key, "down"))) {
+            self.closeCompletion();
+            return false;
+        }
         if (eq(u8, k.key, "down") or (ctrl and eq(u8, k.key, "n"))) {
             m.move(1, rows);
         } else if (eq(u8, k.key, "up") or (ctrl and eq(u8, k.key, "p"))) {

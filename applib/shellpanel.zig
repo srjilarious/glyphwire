@@ -14,8 +14,11 @@
 //!
 //! **Who has the keyboard.** Input is delivered per context and there is
 //! one context, so both programs see every keystroke and the host
-//! decides: while the panel is open it consumes nothing but Ctrl+`, and
-//! the shell is told `focus` / `blur` over the control pipe. The pipe is
+//! decides: while the panel has focus it consumes nothing but Ctrl+`, and
+//! the shell is told `focus` / `blur` over the control pipe. Open and
+//! focused are separate: a host may `blur` the panel and take the
+//! keyboard back while leaving it on screen (zoe does, on a click outside
+//! it -- `contains` is the hit test), and `focus` it again. The pipe is
 //! also how the panel follows the host's directory -- a `cd` line
 //! whenever it changes, applied by the shell before its next prompt
 //! rather than typed into whatever is on its line.
@@ -98,8 +101,15 @@ pub const Panel = struct {
     /// Write end of the control pipe. Closed when the panel is torn down,
     /// which is what tells the shell to leave.
     control_fd: ?i32 = null,
-    /// Whether the panel is on screen (and has the keyboard).
+    /// Whether the panel is on screen.
     visible: bool = false,
+    /// Whether it has the keyboard. Only ever true while `visible`;
+    /// `open` sets it, `blur` and `close` clear it.
+    focused: bool = false,
+    /// Where `place` last put the layer: its top row and height, for
+    /// `contains`.
+    top_row: usize = 0,
+    rows: usize = 0,
     /// The directory last sent, so following the panes doesn't re-send
     /// the same `cd` on every cursor move. Owned.
     sent_cwd: ?[]u8 = null,
@@ -144,6 +154,34 @@ pub const Panel = struct {
         return self.visible;
     }
 
+    pub fn isFocused(self: *const Panel) bool {
+        return self.focused;
+    }
+
+    /// Whether `cell` is on the open panel. The layer spans the window's
+    /// full width, so only the row decides.
+    pub fn contains(self: *const Panel, cell: glyphwire.CellPos) bool {
+        return self.visible and cell.row >= self.top_row and cell.row < self.top_row + self.rows;
+    }
+
+    /// Gives the keyboard (and the caret, which the shell takes itself)
+    /// back to the open panel.
+    pub fn focus(self: *Panel) void {
+        if (!self.visible or self.focused) return;
+        self.focused = true;
+        self.send("focus");
+    }
+
+    /// Takes the keyboard back but leaves the panel on screen, its output
+    /// still live. The caret is the host's again, the same as on `close`.
+    pub fn blur(self: *Panel) void {
+        if (!self.focused) return;
+        self.focused = false;
+        self.send("blur");
+        self.client.setCaretVisible(false) catch {};
+        self.client.setCaretLayer(null) catch {};
+    }
+
     /// Whether the shell has exited since the last check -- `exit` typed
     /// into the panel, or a crash. True once, when it's noticed: the
     /// panel closes, its layer is wiped, and the next Ctrl+` starts a
@@ -161,6 +199,7 @@ pub const Panel = struct {
         if (self.sent_cwd) |p| self.alloc.free(p);
         self.sent_cwd = null;
         self.visible = false;
+        self.focused = false;
         self.client.clearOn(self.layer, 0, 0, null, null) catch {};
         self.client.setLayerVisible(self.layer, false) catch {};
         self.client.setCaretVisible(false) catch {};
@@ -204,6 +243,7 @@ pub const Panel = struct {
         try self.place(win);
         try self.client.setLayerVisible(self.layer, true);
         self.visible = true;
+        self.focused = true;
         self.send("focus");
         self.setCwd(cwd);
     }
@@ -213,7 +253,8 @@ pub const Panel = struct {
     pub fn close(self: *Panel) void {
         if (!self.visible) return;
         self.visible = false;
-        self.send("blur");
+        if (self.focused) self.send("blur");
+        self.focused = false;
         self.client.setLayerVisible(self.layer, false) catch {};
         // The panel had pointed the host's caret at its own layer.
         self.client.setCaretVisible(false) catch {};
@@ -226,7 +267,10 @@ pub const Panel = struct {
         const rows = rowsForWanted(win.rows, self.wanted_rows);
         try self.client.setLayerSize(self.layer, win.cols, rows);
         // Above the key bar, not over it.
-        try self.client.setLayerCellPosition(self.layer, win.rows -| (rows + bar_rows), 0);
+        const top = win.rows -| (rows + bar_rows);
+        try self.client.setLayerCellPosition(self.layer, top, 0);
+        self.top_row = top;
+        self.rows = rows;
         if (self.child != null) self.send("size");
     }
 
