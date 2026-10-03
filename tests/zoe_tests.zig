@@ -4505,6 +4505,84 @@ pub fn completeAcceptIsOneUndoWithTheTypingTest(_: std.Io, alloc: std.mem.Alloca
     try expectText(alloc, &ed.buf, "x = \n");
 }
 
+// ─── Double-click words ──────────────────────────────────────────────────
+
+pub fn wordAtSelectsTheClassRunTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var buf = try Buffer.initFromText(alloc, "foo_bar(x, ->y)  z\nnext");
+    defer buf.deinit();
+
+    // An identifier, from its middle.
+    const w = motion.wordAt(&buf, 5);
+    try testz.expectEqual(w.start, 0);
+    try testz.expectEqual(w.end, 7);
+    // A punctuation run.
+    const p = motion.wordAt(&buf, 11);
+    try testz.expectEqual(p.start, 11);
+    try testz.expectEqual(p.end, 13);
+    // A blank run.
+    const b = motion.wordAt(&buf, 16);
+    try testz.expectEqual(b.start, 15);
+    try testz.expectEqual(b.end, 17);
+    // Never past the line: the last word stops at the newline...
+    const z = motion.wordAt(&buf, 17);
+    try testz.expectEqual(z.start, 17);
+    try testz.expectEqual(z.end, 18);
+    // ...and on the newline itself it is empty.
+    const nl = motion.wordAt(&buf, 18);
+    try testz.expectEqual(nl.start, 18);
+    try testz.expectEqual(nl.end, 18);
+}
+
+pub fn wordAtKeepsMultibyteRunsWholeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var buf = try Buffer.initFromText(alloc, "a café b");
+    defer buf.deinit();
+    const w = motion.wordAt(&buf, 3);
+    try testz.expectEqual(w.start, 2);
+    try testz.expectEqual(w.end, 7);
+}
+
+pub fn visualLineSelectionIsLinewiseTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree\n", null);
+    defer ed.deinit();
+    ed.setVisualLineSelection(5, 9);
+    try testz.expectTrue(ed.mode == .visual_line);
+    try testz.expectEqual(ed.select_anchor.?, 5);
+    try testz.expectEqual(ed.cursor, 9);
+}
+
+// ─── Disk watch ──────────────────────────────────────────────────────────
+
+const diskwatch = zoe.diskwatch;
+
+pub fn diskWatchReloadsCleanAndWarnsDirtyOnceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    const old: diskwatch.Stamp = .{ .size = 10, .mtime_ns = 100 };
+    const new: diskwatch.Stamp = .{ .size = 10, .mtime_ns = 200 };
+    const newer: diskwatch.Stamp = .{ .size = 12, .mtime_ns = 300 };
+
+    try testz.expectTrue(diskwatch.decide(old, null, old, false) == .none);
+    try testz.expectTrue(diskwatch.decide(old, null, new, false) == .reload);
+    try testz.expectTrue(diskwatch.decide(old, null, new, true) == .warn);
+    // Already reported this change: quiet...
+    try testz.expectTrue(diskwatch.decide(old, new, new, true) == .none);
+    // ...until the file changes again.
+    try testz.expectTrue(diskwatch.decide(old, new, newer, true) == .warn);
+}
+
+pub fn diskWatchIgnoresMissingFilesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    const s: diskwatch.Stamp = .{ .size = 1, .mtime_ns = 1 };
+    // Deleted under us: the buffer is the only copy, leave it.
+    try testz.expectTrue(diskwatch.decide(s, null, null, false) == .none);
+    // Never read from disk (a `[New]` buffer): nothing to compare.
+    try testz.expectTrue(diskwatch.decide(null, null, s, false) == .none);
+}
+
 // ─── Editor groups: layout tree ──────────────────────────────────────────
 
 const groups = zoe.groups;

@@ -791,17 +791,19 @@ pub const Client = struct {
         try self.notify("report_text", .{ .text = text });
     }
 
-    /// `report_mouse_button(button, pressed, px, cell, view_offset)` -- a
-    /// notification. `view_offset` is the root layer's scrollback view
+    /// `report_mouse_button(button, pressed, px, cell, view_offset, clicks)`
+    /// -- a notification. `view_offset` is the root layer's scrollback view
     /// offset at click time (see `core.Layer.view_scroll`); pass 0 from a
-    /// reporter that isn't tracking scrollback.
-    pub fn reportMouseButton(self: *Client, button: []const u8, pressed: bool, px: PxPos, cell: CellPos, view_offset: usize) !void {
+    /// reporter that isn't tracking scrollback. `clicks` is the press's
+    /// click count (1 = single, 2 = double, 3 = triple).
+    pub fn reportMouseButton(self: *Client, button: []const u8, pressed: bool, px: PxPos, cell: CellPos, view_offset: usize, clicks: u8) !void {
         try self.notify("report_mouse_button", .{
             .button = button,
             .pressed = pressed,
             .px = px,
             .cell = cell,
             .view_offset = view_offset,
+            .clicks = clicks,
         });
     }
 
@@ -3658,6 +3660,9 @@ pub const MouseButtonEvent = struct {
     view_offset: usize = 0,
     /// Modifiers held when the click happened -- see `KeyEvent.mods`.
     mods: core.Mods = .{},
+    /// 1 for a single click, 2 for a double, 3 for a triple (see
+    /// `protocol.MouseButtonParams.clicks`). A release carries its press's.
+    clicks: u8 = 1,
 
     /// Frees the owned `.button` string, like `InputEvent.deinit`. Every
     /// drained event owns its own copy (the listener dupes it per
@@ -4565,6 +4570,7 @@ pub const InputListener = struct {
                 .cell = p.value.cell,
                 .view_offset = p.value.view_offset,
                 .mods = p.value.mods,
+                .clicks = p.value.clicks,
             } });
         } else if (eql(u8, method, "mouse_move")) {
             const p = try self.parseParams(protocol.MouseMoveParams, params);

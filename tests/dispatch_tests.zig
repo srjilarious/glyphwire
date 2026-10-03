@@ -763,6 +763,35 @@ pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectTrue(empty_result.broadcast == null);
 }
 
+pub fn reportMouseButtonCarriesClicksTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+
+    const Notif = struct { params: struct { clicks: u8 } };
+
+    // Passed through from the reporter...
+    const dbl = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"report_mouse_button","params":{"button":"left","pressed":true,"px":{"x":1,"y":1},"cell":{"row":0,"col":0},"clicks":2}}
+    );
+    defer alloc.free(dbl.broadcast.?.body);
+    const a = try std.json.parseFromSlice(Notif, alloc, dbl.broadcast.?.body, .{ .ignore_unknown_fields = true });
+    defer a.deinit();
+    try testz.expectEqual(a.value.params.clicks, 2);
+
+    // ...and 1 from one that doesn't count.
+    const plain = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"report_mouse_button","params":{"button":"left","pressed":false,"px":{"x":1,"y":1},"cell":{"row":0,"col":0}}}
+    );
+    defer alloc.free(plain.broadcast.?.body);
+    const b = try std.json.parseFromSlice(Notif, alloc, plain.broadcast.?.body, .{ .ignore_unknown_fields = true });
+    defer b.deinit();
+    try testz.expectEqual(b.value.params.clicks, 1);
+}
+
 pub fn subscribeThenGetInputStateReflectsReportedInputTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

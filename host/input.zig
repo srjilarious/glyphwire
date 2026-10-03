@@ -35,6 +35,17 @@ pub const KeyInput = struct {
     /// the release branch there.
     mouse_down: [mouse_button_count]bool = @splat(false),
 
+    /// The one click counter every mouse path reads from: `countClicks`
+    /// feeds it each press, before anything else looks at the button.
+    clicks: glyphwire.ClickCounter = .{},
+    /// Each button's click count for this frame's press (1 when it wasn't
+    /// pressed), set by `countClicks`. `Selection.handleMouseSelection`
+    /// reads the left one to pick word/line selection.
+    press_clicks: [mouse_button_count]u8 = @splat(1),
+    /// The count each owed release carries: its press's, so a client sees
+    /// the same `clicks` on both halves of the pair.
+    down_clicks: [mouse_button_count]u8 = @splat(1),
+
     /// Session-wide repeat timing from `host.conf.lua`, used for every
     /// context that hasn't asked for its own with `set_key_repeat`. See
     /// `syncRepeatTiming`.
@@ -212,6 +223,24 @@ pub const KeyInput = struct {
     /// current scrollback view offset, so a click made while scrolled back
     /// carries enough context for glyphwire-shell to resolve it against
     /// the row actually under the pointer (see `Client.getMetadata`).
+    /// Counts this frame's presses into `press_clicks`. Runs once a frame
+    /// ahead of every mouse consumer -- chrome, selection, the wire -- so
+    /// the count is the same whoever ends up owning the press.
+    pub fn countClicks(self: *KeyInput, eng: *Engine) void {
+        if (!eng.inputs.mouse_enabled) return;
+        const pos = eng.inputs.mouse.pos();
+        const now_ms: i64 = @intCast(std.Io.Timestamp.now(self.app.server.io, .awake).toMilliseconds());
+        const field_names = @typeInfo(app_mod.MouseButton).@"enum".field_names;
+        inline for (field_names) |field_name| {
+            const btn = @field(app_mod.MouseButton, field_name);
+            const idx = @intFromEnum(btn);
+            self.press_clicks[idx] = if (eng.inputs.mouse.pressed(btn))
+                self.clicks.press(@intCast(idx), .{ .x = pos.x, .y = pos.y }, now_ms)
+            else
+                1;
+        }
+    }
+
     pub fn reportMouseEvents(self: *KeyInput, eng: *Engine, skip_left: bool) void {
         if (!eng.inputs.mouse_enabled) return;
         const server = self.app.server;
@@ -265,10 +294,12 @@ pub const KeyInput = struct {
                 // dropped below too, keeping the pair balanced.
                 if (!(skip_left and is_left)) {
                     if (cell_in_pane) |cell| {
-                        server.reportMouseButton(self.app.alloc, field_name, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
+                        const clicks = self.press_clicks[idx];
+                        server.reportMouseButton(self.app.alloc, field_name, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset, clicks) catch |err| {
                             std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field_name, err });
                         };
                         self.mouse_down[idx] = true;
+                        self.down_clicks[idx] = clicks;
                     }
                 }
             } else if (eng.inputs.mouse.released(btn) and self.mouse_down[idx]) {
@@ -280,7 +311,7 @@ pub const KeyInput = struct {
                 // deduped away. See `mouse_down`.
                 self.mouse_down[idx] = false;
                 if (cell_in_pane orelse server.focusedCellClamped(window_cell)) |cell| {
-                    server.reportMouseButton(self.app.alloc, field_name, false, .{ .x = pos.x, .y = pos.y }, cell, view_offset) catch |err| {
+                    server.reportMouseButton(self.app.alloc, field_name, false, .{ .x = pos.x, .y = pos.y }, cell, view_offset, self.down_clicks[idx]) catch |err| {
                         std.log.err("reportMouseButton({s}, false) failed: {t}", .{ field_name, err });
                     };
                 }
