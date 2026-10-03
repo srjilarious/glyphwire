@@ -3646,6 +3646,264 @@ pub fn shiftAltCopyIsOneUndoStepTest(_: std.Io, alloc: std.mem.Allocator) !void 
     try expectEdit(alloc, "a\nb", "Ax<s-a-down><esc>u", "ax\nb");
 }
 
+// ─── Shift+motion selection ──────────────────────────────────────────────
+
+pub fn shiftArrowInInsertTypesOverTheSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `[anchor, cursor)`, not vim's inclusive cell: two Shift+Rights
+    // select two characters.
+    try expectEdit(alloc, "hello world", "i<s-right><s-right>XY<esc>", "XYllo world");
+    try expectEdit(alloc, "hello world", "A<c-s-left>there<esc>", "hello there");
+    try expectEdit(alloc, "ab\ncd", "i<s-down><s-end>X<esc>", "X");
+    // Backspace and Delete just remove it.
+    try expectEdit(alloc, "hello world", "i<s-end><bs>x<esc>", "x");
+    try expectEdit(alloc, "hello world", "i<s-right><del><esc>", "ello world");
+    // One undo step for the replace and the typing.
+    try expectEdit(alloc, "hello", "i<s-right>XY<esc>u", "hello");
+}
+
+pub fn shiftArrowSelectModeStateTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello world", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "ll");
+    _ = try keys.feed(&ed, "i<s-right><s-right>");
+    try testz.expectEqual(ed.mode, .select);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 2);
+    try testz.expectEqual(span.hi, 4);
+
+    // An unshifted Left lands on the selection's start, back in insert.
+    _ = try keys.feed(&ed, "<left>");
+    try testz.expectEqual(ed.mode, .insert);
+    try testz.expectEqual(ed.cursor, 2);
+    try testz.expectEqual(ed.selectionSpan(), null);
+
+    // Right lands on its end.
+    _ = try keys.feed(&ed, "<s-right><s-right><right>");
+    try testz.expectEqual(ed.mode, .insert);
+    try testz.expectEqual(ed.cursor, 4);
+
+    // Shrinking it back to nothing drops it.
+    _ = try keys.feed(&ed, "<s-right><s-left>");
+    try testz.expectEqual(ed.mode, .insert);
+
+    // Escape goes all the way to normal mode.
+    _ = try keys.feed(&ed, "<s-right><esc>");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectEqual(ed.select_anchor, null);
+}
+
+pub fn shiftArrowInNormalIsVisualModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // vim's inclusive selection, and vim's operators on it.
+    try expectEdit(alloc, "hello world", "<s-right><s-right>d", "lo world");
+    var ed = try Editor.initFromText(alloc, "hello", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "<s-end>");
+    try testz.expectEqual(ed.mode, .visual);
+    // An unshifted arrow keeps extending, as in vim.
+    _ = try keys.feed(&ed, "<home>");
+    try testz.expectEqual(ed.mode, .visual);
+}
+
+pub fn selectModeTabIndentsTheSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Down to column 0 of `c` doesn't touch `c`, as in every editor.
+    try expectEdit(alloc, "a\nb\nc", "i<s-down><s-down><tab><esc>", "    a\n    b\nc");
+}
+
+pub fn selectModeAltDownMovesTheSelectedLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb\nc", "i<s-right><a-down><esc>", "b\na\nc");
+}
+
+pub fn selectModePasteReplacesTheSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "hello world", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i<s-c-right>");
+    try ed.putText("bye ", true);
+    try expectText(alloc, &ed.buf, "bye world");
+    try testz.expectEqual(ed.mode, .insert);
+    try testz.expectEqual(ed.cursor, 4);
+}
+
+// ─── Word delete ─────────────────────────────────────────────────────────
+
+pub fn ctrlBackspaceDeletesTheWordBeforeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "foo bar", "A<c-bs><esc>", "foo ");
+    try expectEdit(alloc, "foo bar", "A<c-bs><c-bs><esc>", "");
+    // Stops at the line's start rather than eating the line above...
+    try expectEdit(alloc, "a\n  b", "jA<c-bs><c-bs><esc>", "a\n");
+    // ...and at it, joins the lines like Backspace.
+    try expectEdit(alloc, "ab\ncd", "j0i<c-bs><esc>", "abcd");
+}
+
+pub fn ctrlDeleteDeletesTheWordAfterTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "foo bar", "i<c-del><esc>", "bar");
+    try expectEdit(alloc, "foo bar", "i<c-del><c-del><esc>", "");
+    try expectEdit(alloc, "ab\ncd", "A<c-del><esc>", "abcd");
+}
+
+// ─── Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y ──────────────────────────────────────
+
+pub fn ctrlZUndoesInNormalModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\nb", "Ax<esc><c-z>", "a\nb");
+    try expectEdit(alloc, "a\nb", "Ax<esc><c-z><c-s-z>", "ax\nb");
+    try expectEdit(alloc, "a\nb", "Ax<esc><c-z><c-y>", "ax\nb");
+}
+
+pub fn ctrlZInInsertModeStaysInInsertTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "ab", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "Axyz<c-z>");
+    try expectText(alloc, &ed.buf, "ab");
+    try testz.expectEqual(ed.mode, .insert);
+    // The caret goes where the undone step started, the same as `u`.
+    try testz.expectEqual(ed.cursor, 0);
+    _ = try keys.feed(&ed, "Q<esc>");
+    try expectText(alloc, &ed.buf, "Qab");
+
+    // Redo puts it back, still in insert mode.
+    _ = try keys.feed(&ed, "A<c-z><c-y>");
+    try expectText(alloc, &ed.buf, "Qab");
+    try testz.expectEqual(ed.mode, .insert);
+}
+
+pub fn ctrlZDropsASelectionFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "a\nb", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "Ax<esc>V<c-z>");
+    try expectText(alloc, &ed.buf, "a\nb");
+    try testz.expectEqual(ed.mode, .normal);
+}
+
+// ─── Ctrl+/ ──────────────────────────────────────────────────────────────
+
+/// `expectEdit` over a buffer that comments with `marker`.
+fn expectCommentEdit(alloc: std.mem.Allocator, marker: ?[]const u8, text: []const u8, script: []const u8, expected: []const u8) !void {
+    var ed = try Editor.initFromText(alloc, text, null);
+    defer ed.deinit();
+    ed.line_comment = marker;
+    _ = try keys.feed(&ed, script);
+    try expectText(alloc, &ed.buf, expected);
+}
+
+pub fn ctrlSlashCommentsTheCursorLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectCommentEdit(alloc, "//", "a\nb", "<c-slash>", "// a\nb");
+    try expectCommentEdit(alloc, "//", "// a\nb", "<c-slash>", "a\nb");
+    // No space after the marker is fine to take off too.
+    try expectCommentEdit(alloc, "#", "#a", "<c-slash>", "a");
+    // At its indent, not column 0.
+    try expectCommentEdit(alloc, "//", "    x = 1;", "<c-slash>", "    // x = 1;");
+    // An empty line gets one to type after.
+    try expectCommentEdit(alloc, "--", "", "<c-slash>", "-- ");
+    // It is one undo step.
+    try expectCommentEdit(alloc, "//", "a", "<c-slash>u", "a");
+}
+
+pub fn ctrlSlashTogglesTheSelectedBlockTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Lined up at the smallest indent, blank lines left alone.
+    try expectCommentEdit(alloc, "//", "  a\n    b\n\n  c", "Vjjj<c-slash>", "  // a\n  //   b\n\n  // c");
+    try expectCommentEdit(alloc, "//", "  // a\n  //   b\n\n  // c", "Vjjj<c-slash>", "  a\n    b\n\n  c");
+    // Partly commented: comment the lot.
+    try expectCommentEdit(alloc, "//", "// a\nb", "Vj<c-slash>", "// // a\n// b");
+    // Selections from insert mode work the same.
+    try expectCommentEdit(alloc, "#", "a\nb", "i<s-down><s-right><c-slash><esc>", "# a\n# b");
+}
+
+pub fn ctrlSlashKeepsTheCursorOnItsCharacterTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    ed.line_comment = "//";
+    _ = try keys.feed(&ed, "ll<c-slash>");
+    try testz.expectEqual(ed.buf.byteAt(ed.cursor), 'c');
+    _ = try keys.feed(&ed, "<c-slash>");
+    try testz.expectEqual(ed.buf.byteAt(ed.cursor), 'c');
+}
+
+pub fn ctrlSlashWithoutAMarkerSaysSoTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "a", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "<c-slash>");
+    try expectText(alloc, &ed.buf, "a");
+    try testz.expectTrue(std.mem.indexOf(u8, ed.status.items, "No line comment") != null);
+}
+
+pub fn lineCommentForFollowsTheLanguageTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    try testz.expectEqualStr(syntax.lineCommentFor(&syntax.default_langs, "a/b.zig").?, "//");
+    try testz.expectEqualStr(syntax.lineCommentFor(&syntax.default_langs, "x.PY").?, "#");
+    try testz.expectEqual(syntax.lineCommentFor(&syntax.default_langs, "x.json"), null);
+    try testz.expectEqual(syntax.lineCommentFor(&syntax.default_langs, "README"), null);
+
+    // A config entry that only re-claims extensions keeps the built-in
+    // marker for its language; one that names a marker wins.
+    const langs = [_]syntax.LangDef{
+        .{ .name = "c", .extensions = &.{".ino"} },
+        .{ .name = "lua", .extensions = &.{".luau"}, .line_comment = "--!" },
+    } ++ syntax.default_langs;
+    try testz.expectEqualStr(syntax.lineCommentFor(&langs, "s.ino").?, "//");
+    try testz.expectEqualStr(syntax.lineCommentFor(&langs, "s.lua").?, "--!");
+}
+
+// ─── Key bindings ────────────────────────────────────────────────────────
+
+const actions = zoe.actions;
+
+pub fn keymapsLookInTheModeTableFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymaps.initDefaults(alloc);
+    defer km.deinit(alloc);
+    // Ctrl+Left moves focus everywhere but insert mode, where it is a
+    // word jump.
+    try testz.expectEqual(km.lookup(.normal, "left", .{ .ctrl = true }).?, .focusLeft);
+    try testz.expectEqual(km.lookup(.insert, "left", .{ .ctrl = true }).?, .wordLeft);
+    try testz.expectEqual(km.lookup(.global, "s", .{ .ctrl = true }).?, .save);
+    // Modifiers match exactly.
+    try testz.expectEqual(km.lookup(.normal, "s", .{ .ctrl = true, .shift = true }), null);
+    // Every default chord parses, and the UI/editor split is what
+    // `isUi` says.
+    try testz.expectTrue(actions.Action.save.isUi());
+    try testz.expectTrue(actions.Action.complete.isUi());
+    try testz.expectFalse(actions.Action.left.isUi());
+    try testz.expectFalse(actions.Action.none.isUi());
+}
+
+pub fn keysConfigRebindsAndUnbindsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cfg = try parseConf(alloc,
+        \\config = { keys = {
+        \\  global = { ["ctrl+h"] = false, ["alt+h"] = "toggleHidden" },
+        \\  insert = { ["ctrl+d"] = "deleteWordForward", ["ctrl+left"] = false },
+        \\  normal = { ["ctrl+q"] = "noSuchAction", ["ctrl+bogus+x"] = "save" },
+        \\  nope = { ["ctrl+s"] = "save" },
+        \\} }
+    );
+    defer cfg.deinit();
+    // The two bad entries and the unknown table are dropped.
+    try testz.expectEqual(cfg.keys.len, 4);
+
+    var km = try actions.Keymaps.initDefaults(alloc);
+    defer km.deinit(alloc);
+    try km.apply(alloc, cfg.keys);
+    try testz.expectEqual(km.lookup(.normal, "h", .{ .ctrl = true }).?, .none);
+    try testz.expectEqual(km.lookup(.normal, "h", .{ .alt = true }).?, .toggleHidden);
+    // `false` in a mode table hides the global binding there.
+    try testz.expectEqual(km.lookup(.insert, "left", .{ .ctrl = true }).?, .none);
+    try testz.expectEqual(km.lookup(.normal, "left", .{ .ctrl = true }).?, .focusLeft);
+
+    // And the editor runs what the table says.
+    var ed = try Editor.initFromText(alloc, "foo bar", null);
+    defer ed.deinit();
+    ed.keymaps = &km;
+    _ = try keys.feed(&ed, "i<c-d><esc>");
+    try expectText(alloc, &ed.buf, "bar");
+}
+
+pub fn languagesConfigTakesACommentMarkerTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cfg = try parseConf(alloc,
+        \\config = { languages = {
+        \\  { name = "bash", extensions = { ".envrc" }, comment = ";;" },
+        \\} }
+    );
+    defer cfg.deinit();
+    try testz.expectEqualStr(syntax.lineCommentFor(cfg.langs, "site.envrc").?, ";;");
+}
+
 // ─── LSP: position encoding ──────────────────────────────────────────────
 //
 // The trap this whole group exists for: LSP counts UTF-16 code units by

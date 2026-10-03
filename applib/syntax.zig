@@ -365,22 +365,53 @@ pub const LoadedGrammar = struct {
 pub const LangDef = struct {
     name: []const u8,
     extensions: []const []const u8,
+    /// The marker a line comment starts with (`//`, `#`), for zoe's
+    /// Ctrl+/. Null for a language without one (JSON, Markdown), and for a
+    /// config entry that doesn't say -- `lineCommentFor` then falls back
+    /// to whatever another entry of the same name gives.
+    line_comment: ?[]const u8 = null,
 };
 
 /// The grammars `build.zig` compiles and installs. A config can add
 /// more or remap these.
 pub const default_langs = [_]LangDef{
-    .{ .name = "zig", .extensions = &.{ ".zig", ".zon" } },
+    .{ .name = "zig", .extensions = &.{ ".zig", ".zon" }, .line_comment = "//" },
     .{ .name = "json", .extensions = &.{ ".json", ".jsonc" } },
-    .{ .name = "c", .extensions = &.{ ".c", ".h" } },
-    .{ .name = "python", .extensions = &.{ ".py", ".pyi" } },
-    .{ .name = "toml", .extensions = &.{ ".toml" } },
+    .{ .name = "c", .extensions = &.{ ".c", ".h" }, .line_comment = "//" },
+    .{ .name = "python", .extensions = &.{ ".py", ".pyi" }, .line_comment = "#" },
+    .{ .name = "toml", .extensions = &.{".toml"}, .line_comment = "#" },
     .{ .name = "markdown", .extensions = &.{ ".md", ".markdown" } },
     // glyphwire's own configs are `X.conf.lua`, so `.lua` already covers
     // them and `.conf` is left to whoever actually owns it.
-    .{ .name = "lua", .extensions = &.{".lua"} },
-    .{ .name = "bash", .extensions = &.{ ".sh", ".bash", ".zsh" } },
+    .{ .name = "lua", .extensions = &.{".lua"}, .line_comment = "--" },
+    .{ .name = "bash", .extensions = &.{ ".sh", ".bash", ".zsh" }, .line_comment = "#" },
 };
+
+/// The line-comment marker for `path`: the language its extension maps to
+/// in `langs` (first match wins, as for highlighting), then the first
+/// entry of that name that gives a marker -- so a config entry that only
+/// re-claims extensions for `c` still comments with `//`. Null when no
+/// language claims the file or the language has no line comment.
+pub fn lineCommentFor(langs: []const LangDef, path: []const u8) ?[]const u8 {
+    const ext = std.fs.path.extension(path);
+    if (ext.len == 0) return null;
+    var name: ?[]const u8 = null;
+    outer: for (langs) |l| {
+        for (l.extensions) |e| {
+            if (std.ascii.eqlIgnoreCase(e, ext)) {
+                name = l.name;
+                break :outer;
+            }
+        }
+    }
+    const lang = name orelse return null;
+    for (langs) |l| {
+        if (std.mem.eql(u8, l.name, lang)) {
+            if (l.line_comment) |m| return m;
+        }
+    }
+    return null;
+}
 
 /// The grammar directories to search, highest priority first:
 ///   1. `extra` (from `config.grammar_dirs`),

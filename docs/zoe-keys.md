@@ -1,69 +1,137 @@
 # zoe key reference
 
-Every key and command zoe understands today, then the gaps in that set and
-what moving to a VSCode-style (Ctrl/Alt chord) scheme with some vim parts
-would cost or buy.
+Every key and command zoe understands, then the gaps that remain and what
+the modal scheme and a VSCode-style (Ctrl/Alt chord) scheme each cost.
 
-Keys are not configurable yet (`zoe.conf.lua` says so). Dispatch lives in
-two places: `zoe/ui.zig` takes the window-level chords first (they work in
-every mode), then `zoe/editor.zig` handles the rest per mode, with
-`feedKey` for named keys and `feedText` for printable ones.
+## How keys are dispatched
 
-## Reference
+Chords and named keys (arrows, Home, Tab, Backspace, F-keys) are **named
+actions** (`zoe/actions.zig`) looked up in four tables: the editor mode's
+own (`normal`, `visual`, `insert`), then `global`. `zoe.conf.lua`'s
+`keys` rebinds any of them by action name, or takes one away with
+`false`:
 
-### Everywhere (taken by `ui.zig` before the editor sees the key)
+```lua
+config = { keys = {
+    global = { ["ctrl+h"] = false, ["alt+h"] = "toggleHidden" },
+    insert = { ["ctrl+d"] = "deleteWordForward" },
+} }
+```
 
-| Key | Action |
+Modifiers match exactly (`shift+tab` is not `tab`). `false` in a mode
+table also hides the global binding in that mode.
+
+Not rebindable: unmodified letters in normal and visual mode (vim's
+grammar of counts, operators and prefixes, in `zoe/editor.zig`), Escape,
+the `:` / `/` line's editing keys, the file tree's keys, the key after
+Ctrl+W, and the completion popup's keys.
+
+## Actions and their default keys
+
+### Window (every mode, and the file tree)
+
+| Action | Default | What it does |
+|---|---|---|
+| `save` | Ctrl+S | `:w`, leaving the mode and selection alone |
+| `findFile` | Ctrl+P | Fuzzy file finder |
+| `toggleTree` | Ctrl+N | Show / hide the file tree |
+| `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths, in the tree and finder |
+| `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
+| `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
+| `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close, `w` (or Ctrl+W) next group, `h` `j` `k` `l` / arrows focus |
+| `focusLeft` `focusRight` `focusUp` `focusDown` | Ctrl+Left / Right / Up / Down, Ctrl+L / K / J | Focus the group (or tree) that way |
+| `jumpBack` / `jumpForward` | Ctrl+O / Ctrl+I | Jumplist (the way back from `gd`) |
+| `cut` | Ctrl+Shift+X | Selection (or line) to the clipboard, removed |
+| `paste` | Ctrl+Shift+P | Clipboard after the cursor, or over a selection |
+| `complete` | Ctrl+Space (insert) | Ask the language servers for completions |
+
+Host chords also apply: Ctrl+Shift+C copy and Ctrl+Shift+V paste, Ctrl+- /
+Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher.
+
+### Moving and selecting (every mode)
+
+| Action | Default |
 |---|---|
-| Ctrl+S | Save the active buffer (`:w`). Mode and selection are left alone |
-| Ctrl+P | Fuzzy file finder |
-| Ctrl+N | Show / hide the file tree |
-| Ctrl+H | Show / hide dotfiles and `.gitignore`d paths (tree and finder) |
-| Ctrl+\` | Shell panel (`gw-shell`) |
-| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
-| Ctrl+W then `v` / `s` | Split the editor group vertically / horizontally |
-| Ctrl+W then `q` / `c` | Close the group |
-| Ctrl+W then `w` (or Ctrl+W) | Next group, then the tree |
-| Ctrl+W then `h` `j` `k` `l` / arrows | Focus the group that way |
-| Ctrl+Left / Right / Up / Down, Ctrl+L / J / K | Focus the group (or tree) that way. Insert mode keeps Ctrl+Left/Right for word jumps |
-| Ctrl+O / Ctrl+I | Jumplist back / forward (the way back from `gd`) |
-| Ctrl+Shift+X | Cut the selection to the system clipboard |
-| Ctrl+Shift+P | Paste the system clipboard |
-| Ctrl+Shift+C | Copy (host chord; zoe answers the `copy_request`) |
-| Ctrl+Shift+V | Paste (host chord, arrives as a `paste` event) |
-| Escape | Dismisses the hover popup first, then acts as Escape |
+| `left` `right` `up` `down` | Arrows |
+| `lineStart` / `lineEnd` | Home / End |
+| `pageUp` / `pageDown` | PageUp / PageDown (also Ctrl+U / Ctrl+D in normal and visual) |
+| `wordLeft` / `wordRight` | Ctrl+Left / Ctrl+Right (insert) |
+| `fileStart` / `fileEnd` | Ctrl+Home / Ctrl+End (insert) |
+| `selectLeft` `selectRight` `selectUp` `selectDown` | Shift+arrows |
+| `selectLineStart` / `selectLineEnd` | Shift+Home / Shift+End |
+| `selectWordLeft` / `selectWordRight` | Ctrl+Shift+Left / Right |
+| `selectFileStart` / `selectFileEnd` | Ctrl+Shift+Home / End |
 
-Host-level chords that also apply: Ctrl+- / Ctrl+= font size, Super+F10
-theme switcher, Super+F12 job switcher.
+The `select…` actions start a selection if there isn't one:
+
+- **From normal mode** they enter ordinary visual mode, inclusive of the
+  cursor cell, and an unshifted arrow keeps extending it, as in vim.
+- **From insert mode** they enter **select mode** (`SELECT` in the
+  status line, bar caret): the selection is `[anchor, caret)`, typing or
+  pasting replaces it, Backspace / Delete remove it, Tab / Shift+Tab
+  indent it, an unshifted Left / Right drops it at its start / end (other
+  motions drop it and move), and Escape goes to normal mode.
+
+### Editing (every mode)
+
+| Action | Default | What it does |
+|---|---|---|
+| `undo` | Ctrl+Z | `u`. Insert mode stays in insert mode |
+| `redo` | Ctrl+Shift+Z, Ctrl+Y (and Ctrl+R in normal / visual) | Ctrl+R |
+| `indent` / `dedent` | Tab / Shift+Tab (normal, visual); Shift+Tab (insert) | `>>` / `<<`, or the selection, which stays selected |
+| `moveLinesUp` / `moveLinesDown` | Alt+Up / Alt+Down | Move the line or selected lines (count = distance) |
+| `copyLinesUp` / `copyLinesDown` | Shift+Alt+Up / Shift+Alt+Down | Copy them above / below (count = copies) |
+| `toggleComment` | Ctrl+/ | Line comments on or off, at the block's smallest indent |
+
+Each is one undo step, including in insert mode, where it is separate from
+the typing around it.
+
+Ctrl+/ uses the language's line-comment marker: `//` for Zig and C, `#`
+for Python, TOML and Bash, `--` for Lua, none for JSON and Markdown.
+`zoe.conf.lua`'s `languages` entries take a `comment` to add or change
+one.
+
+### Typing (insert mode)
+
+| Action | Default |
+|---|---|
+| `newline` | Enter, Shift+Enter |
+| `insertTab` | Tab (honours `expandtab`; indents a select-mode selection) |
+| `backspace` / `deleteForward` | Backspace (and Shift+Backspace) / Delete |
+| `deleteWordBack` | Ctrl+Backspace (stops at the line's start; at it, joins lines) |
+| `deleteWordForward` | Ctrl+Delete (stops at the line's end; at it, joins lines) |
+
+Enter does **not** auto-indent yet.
+
+With the completion popup up: Up / Down or Ctrl+N / Ctrl+P move, PageUp /
+PageDown page, Tab or Enter accept, Escape closes.
+
+## vim keys (normal and visual mode, not rebindable)
 
 ### Normal mode
 
 | Keys | Action |
 |---|---|
-| `h` `j` `k` `l`, arrows | Move. Counts work (`5j`) |
+| `h` `j` `k` `l` | Move. Counts work (`5j`) |
 | `w` `W` `b` `B` `e` `E` | Word motions (small / big word) |
-| `0` `^` `$`, Home / End | Line start / first non-blank / line end |
+| `0` `^` `$` | Line start / first non-blank / line end |
 | `gg` `G` `{n}G` `{n}gg` | First / last / line *n* |
-| PageUp / PageDown, Ctrl+U / Ctrl+D | Page up / down |
 | `i` `a` `I` `A` `o` `O` | Enter insert mode |
 | `v` `V` | Charwise / linewise visual |
 | `gv` | Reselect the last visual range |
 | `x` `X` `D` `C` `s` | Delete char / char before / to end of line, change to end, substitute |
 | `d{motion}` `y{motion}` | Delete / yank over `w` `e` `b` `h` `l` `0` `^` `$` `j` `k` `G` `gg`, or the line (`dd`, `yy`) |
 | `>{motion}` `<{motion}` | Indent / dedent over `>`/`<` (the line), `j` `k` `G` `gg` |
-| Tab / Shift+Tab | `>>` / `<<` on the cursor line |
 | `r{char}` | Replace character(s) |
 | `J` | Join lines |
 | `~` | Toggle case |
-| `u` / Ctrl+R | Undo / redo (a whole command or insert session per step) |
+| `u` | Undo (a whole command or insert session per step) |
 | `p` `P` | Paste the system clipboard after / before |
 | `/` `?` `n` `N` `*` `#` | Incremental literal search (smartcase), step, search word under cursor |
 | `:` | Command line |
 | `K` | LSP hover |
 | `gd` | LSP go to definition |
 | `]d` `[d` | Next / previous diagnostic |
-| Alt+Up / Alt+Down | Move the line up / down (count = distance) |
-| Shift+Alt+Up / Shift+Alt+Down | Copy the line above / below (count = copies) |
 
 Yanks and deletes always go to the system clipboard (one register, no
 `"a`-style named registers).
@@ -78,29 +146,11 @@ All normal-mode motions move the free end. Then:
 | `y` | Yank |
 | `d` `x` | Delete |
 | `c` `s` | Change |
-| `>` `<`, Tab / Shift+Tab | Indent / dedent, selection kept (count = levels) |
+| `>` `<` | Indent / dedent, selection kept (count = levels) |
 | `p` `P` | Replace the selection with the clipboard |
 | `/` `?` `n` `N` `*` `#` | Search, extending the selection |
 | `:` | Command line (no `'<,'>` range support) |
 | `v` / `V` | Switch kind, or leave if already that kind |
-| Alt+Up / Alt+Down | Move the selected lines |
-| Shift+Alt+Up / Shift+Alt+Down | Copy the selected lines above / below |
-
-### Insert mode
-
-| Keys | Action |
-|---|---|
-| Arrows, Home / End, PageUp / PageDown | Move |
-| Ctrl+Left / Ctrl+Right | Word back / forward (`b` / `w`) |
-| Ctrl+Home / Ctrl+End | Start / end of file |
-| Enter, Tab, Backspace, Delete | Edit (Tab honours `expandtab`; Enter does **not** auto-indent) |
-| Alt+Up / Alt+Down | Move the line (its own undo step) |
-| Shift+Alt+Up / Shift+Alt+Down | Copy the line (its own undo step) |
-| Ctrl+Space | Ask for completions |
-| Escape | Back to normal mode |
-
-With the completion popup up: Up / Down or Ctrl+N / Ctrl+P move, PageUp /
-PageDown page, Tab or Enter accept, Escape closes.
 
 ### Command line (`:`)
 
@@ -142,8 +192,6 @@ for its full path; drag a divider to resize groups or the shell panel.
 
 ### Missing for a vim user
 
-These are the things muscle memory reaches for and finds nothing:
-
 - **Text objects**: `iw` `aw` `i(` `i"` `ip` and friends. No `ciw`, `di(`, `yap`.
 - **`c` as an operator**: only `C`, `s` and visual `c` exist, so no `cw`/`cc`.
 - **`.` repeat.**
@@ -156,17 +204,20 @@ These are the things muscle memory reaches for and finds nothing:
 
 ### Missing for a VSCode user
 
-- **Shift+Arrow / Shift+Home / Shift+End / Ctrl+Shift+Arrow selection.**
-- **Ctrl+Z / Ctrl+Y** undo and redo, **Ctrl+A** select all.
+- **Ctrl+A** select all.
 - **Ctrl+C / Ctrl+X / Ctrl+V** unshifted (glyphwire's host owns Ctrl+Shift+C/V
-  as its terminal-style copy and paste).
-- **Ctrl+Backspace / Ctrl+Delete** word delete in the buffer (the `:` line has it).
-- **Ctrl+F / Ctrl+H** find and replace (Ctrl+H is taken by hidden files).
-- **Ctrl+G** go to line, **F12** definition, **Ctrl+/** toggle comment.
+  as its terminal-style copy and paste). Rebindable now for X and V; C is
+  the host's.
+- **Ctrl+F / Ctrl+H** find and replace (Ctrl+H is hidden files by default).
+- **Ctrl+G** go to line, **F12** definition.
 - **Ctrl+Shift+K** delete line, **Ctrl+Enter / Ctrl+Shift+Enter** insert line below / above.
-- **Ctrl+D** add next occurrence / multi-cursor (Ctrl+D is half-page down here).
+- **Ctrl+D** add next occurrence / multi-cursor (Ctrl+D is half-page down in normal mode).
 - **Command palette** (Ctrl+Shift+P is paste here).
 - **Auto-indent and bracket pairing.**
+
+Closed since the first version of this list: Shift+arrow selection, Ctrl+Z
+/ Ctrl+Y, Ctrl+Backspace / Ctrl+Delete, Ctrl+/, Ctrl+S, Shift+Alt+Up/Down,
+and rebindable keys.
 
 ## Modal versus Ctrl/Alt-heavy
 
@@ -199,8 +250,8 @@ These are the things muscle memory reaches for and finds nothing:
 - **Keyspace collisions.** The VSCode set wants Ctrl+H (replace), Ctrl+L
   (select line), Ctrl+D (next occurrence), Ctrl+P (finder, the same),
   Ctrl+Shift+P (palette), Ctrl+N (new file), Ctrl+W (close tab), Ctrl+Tab
-  (the same). About half of zoe's window chords would have to move,
-  probably onto Alt or a leader key.
+  (the same). With `keys` these are now a config choice rather than a
+  code change, but the defaults still favour vim.
 - **Ctrl+C / Ctrl+V** belong to the host (Ctrl+Shift+C/V, and Ctrl+C is
   the terminal's interrupt in gw-shell). Taking the unshifted forms in zoe
   is possible but makes zoe the odd one out in the window.
@@ -208,33 +259,24 @@ These are the things muscle memory reaches for and finds nothing:
   with vim's operators, and zoe's editor core is single-cursor
   (`Editor.cursor: usize`). Without it a chord-only zoe is weaker than
   both VSCode and vim.
-- **Shift+Arrow selection** is cheap: it is visual mode entered implicitly
-  and left on the next unshifted motion. `Editor.select_anchor` already
-  carries it.
 
-### A middle path
+### Where this leaves the middle path
 
-Most of what VSCode does better is *insert-mode ergonomics*, and most of
-what vim does better is *normal-mode composition*, so the hybrid that
-costs least keeps both and fixes the insert side:
+Most of what VSCode does better is insert-mode ergonomics, and most of
+what vim does better is normal-mode composition. Insert mode is now a
+reasonable editor of its own (Shift+arrow selection, word delete, Ctrl+Z,
+Ctrl+/, line move and copy), so living in insert mode and dropping to
+normal for composed commands is workable. What would round it out:
 
-1. **Insert mode becomes a capable editor of its own**: Shift+Arrow /
-   Shift+Home / Shift+End / Ctrl+Shift+Left/Right select (into visual,
-   returning to insert on the next typed key), Ctrl+Backspace / Ctrl+Delete,
-   Ctrl+Z / Ctrl+Shift+Z, Ctrl+A, auto-indent. You could then live in
-   insert mode and only drop to normal for the composed commands.
-2. **Shared chords in every mode** where they don't collide: Ctrl+S (done),
-   Alt+Up/Down and Shift+Alt+Up/Down (done), Ctrl+/ comment, Ctrl+G go to
-   line, F12 / Shift+F12, F2 rename, Ctrl+Shift+K delete line.
-3. **Fill the biggest vim gaps** (text objects, `c` operator, `.`, `f`/`t`)
-   so normal mode is worth dropping into.
-4. **Make keys rebindable** through `src/keybind.zig`, the named-action
-   table salacommander already uses, so collisions like Ctrl+H and Ctrl+D
-   are a config choice rather than a fork. This is also the prerequisite
-   for an optional "start in insert mode" setting that would make zoe
-   behave chord-first out of the box.
-5. **Command palette** on a free chord (Ctrl+Shift+O, or F1), listing the
-   same named actions, which also documents them.
+1. **Auto-indent** on Enter, `o` and `O`.
+2. **The biggest vim gaps** (text objects, `c` operator, `.`, `f`/`t`) so
+   normal mode is worth dropping into.
+3. **More shared chords**: Ctrl+A, Ctrl+G go to line, F12 / Shift+F12,
+   F2 rename, Ctrl+Shift+K delete line, find / replace.
+4. **A command palette** on a free chord (F1, or Ctrl+Shift+O), listing
+   the named actions, which also documents them.
+5. **An optional "start in insert mode" setting**, which would make zoe
+   chord-first out of the box.
 
 Multi-cursor and Ctrl+D-style occurrence selection are the large item and
 can wait until the above shows whether chord-first editing sticks.
