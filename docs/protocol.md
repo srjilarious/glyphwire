@@ -1208,6 +1208,12 @@ pane. `argv` **MUST** be non-empty; the first element is resolved through
 `SpawnUnsupported`; a failed fork or exec reports `SpawnFailed`. When the
 program exits, `pane_exit` is delivered to `panes` subscribers.
 
+Whenever the focused pane changes, by any route (`focus_pane`, the host's
+own click-to-focus, or a fallback when the focused pane is destroyed or
+unmapped), `pane_focus` is delivered to `panes` subscribers. A manager
+**SHOULD** track focus from it rather than from its own `focus_pane`
+calls alone.
+
 `set_window_prefix` registers the chord that steals the *following*
 keystroke for the manager. The **session**, not the manager, decides this,
 because the host reports each keystroke on two streams and modifier state
@@ -1363,7 +1369,7 @@ flag.
 | terminal | `terminal_reply` | `terminal` |
 | context | `context` | `context` |
 | theme | `theme` | `theme` |
-| panes | `pane_layout`, `pane_exit` | `panes`, `pane_layout`, `pane_exit` |
+| panes | `pane_layout`, `pane_exit`, `pane_focus` | `panes`, `pane_layout`, `pane_exit`, `pane_focus` |
 | window_keys | `window_key_down`, `window_key_up`, `window_text` | `window_keys`, `window_key`, `window_text` |
 | remote | `remote_exit` | `remote`, `remote_exit` |
 | error | *(nothing — see below)* | `error` |
@@ -1392,6 +1398,7 @@ the client drains with `get_errors`.
 | `theme` | `{name, dark, panel_style}` |
 | `pane_layout` | `{panes: [{pane, row, col, cols, rows}]}` |
 | `pane_exit` | `{pane, status}` |
+| `pane_focus` | `{pane}` |
 | `window_key_down` / `window_key_up` | `{key, mods}` |
 | `window_text` | `{text}` |
 | `remote_exit` | `{session, status, started}` |
