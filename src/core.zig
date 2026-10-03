@@ -1393,6 +1393,9 @@ pub const PropertyName = enum {
     /// selections on this layer (`{enabled: bool}`, default off). See
     /// `Layer.mouse_select`.
     mouse_select,
+    /// Whether the program drawing on this layer has asked for mouse
+    /// events (`{enabled: bool}`, default off). See `Layer.mouse_report`.
+    mouse_report,
     /// A soft drop shadow the host draws under the layer's bounds
     /// (`{shadow: {x, y, blur, radius, spread, color}}`, or no `shadow`
     /// for none -- the default). See `Shadow`.
@@ -1521,6 +1524,7 @@ pub const PropertyValue = union(PropertyName) {
     background: ?Color,
     pty_mode: bool,
     mouse_select: bool,
+    mouse_report: bool,
     shadow: ?Shadow,
     selection_flow: SelectionFlow,
     resize_edge: ResizeEdge,
@@ -1781,6 +1785,20 @@ pub const Layer = struct {
     /// the whole context (`Context.connection_owned`). See
     /// `host/selection.zig`.
     mouse_select: bool = false,
+    /// Whether the program whose output this layer shows has turned on
+    /// xterm mouse reporting (`?1000` / `?1002` / `?1003`) -- set by
+    /// glyphwire-shell as its pty child flips those modes. While it is,
+    /// glyphwire-host stands down on this layer: no drag or multi-click
+    /// selection, and the wheel goes to the program as wheel buttons
+    /// rather than scrolling the scrollback, so vim or htop with
+    /// `mouse=a` gets the raw presses, drags and releases it asked for.
+    /// Shift held overrides it, the xterm convention for selecting text
+    /// out of a mouse-mode program.
+    ///
+    /// Separate from `mouse_select`, which is a client-owned context's
+    /// opt-*in* to host selection; this is a terminal layer's opt-*out*,
+    /// and it follows the program, not the client.
+    mouse_report: bool = false,
     /// Which way a selection on this layer reads. See `SelectionFlow`.
     selection_flow: SelectionFlow = .{},
     /// The edge the host lets the user drag. See `ResizeEdge`.
@@ -3999,6 +4017,7 @@ pub const Layer = struct {
             .background => .{ .background = self.background },
             .pty_mode => .{ .pty_mode = self.pty_mode },
             .mouse_select => .{ .mouse_select = self.mouse_select },
+            .mouse_report => .{ .mouse_report = self.mouse_report },
             .shadow => .{ .shadow = self.shadow },
             .selection_flow => .{ .selection_flow = self.selection_flow },
             .resize_edge => .{ .resize_edge = self.resize_edge },
@@ -4049,6 +4068,7 @@ pub const Layer = struct {
                 self.pen = .{};
             },
             .mouse_select => |v| self.mouse_select = v,
+            .mouse_report => |v| self.mouse_report = v,
             .shadow => |v| self.shadow = if (v) |sh| sh.clamped() else null,
             .selection_flow => |v| self.selection_flow = .{ .mode = v.mode, .column_cols = @max(v.column_cols, 1), .origin_col = v.origin_col },
             .resize_edge => |v| self.resize_edge = v,
@@ -7218,7 +7238,7 @@ pub const Context = struct {
                 if (layer.scroll_mode != .client) return PropertyError.WrongScrollMode;
                 layer.setProperty(value);
             },
-            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select, .shadow, .selection_flow, .resize_edge => layer.setProperty(value),
+            .cursor, .position, .viewport, .scroll_offset, .scrollbars, .scroll_mode, .background, .pty_mode, .mouse_select, .mouse_report, .shadow, .selection_flow, .resize_edge => layer.setProperty(value),
         }
     }
 

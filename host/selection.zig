@@ -54,6 +54,11 @@ pub const Selection = struct {
     /// move grows it a whole unit at a time. `unit_anchor` is the word or
     /// line the press landed on, which always stays selected.
     mouse_unit: ?glyphwire.SelectUnit = null,
+    /// Set while a Shift-drag selects on a `mouse_report` layer. Its plain
+    /// click is then not forwarded either: the program asked for the
+    /// mouse, and a Shift+click that reached it anyway would be a click
+    /// the user meant for the host.
+    over_report: bool = false,
     unit_anchor: glyphwire.UnitSpan = .{ .start = .{ .above = 0, .col = 0 }, .end = .{ .above = 0, .col = 0 } },
 
     /// Which layer of the visible context the current selection lives on
@@ -482,6 +487,13 @@ pub const Selection = struct {
                 // drag is never re-checked: the visible context can't
                 // change mid-drag without the button coming up first.
                 if (!server.mouseSelectAllowed(handle)) return false;
+                // A mouse-mode program (vim, htop) on this layer gets the
+                // press raw, so its own clicks and drags work -- unless
+                // Shift is held, xterm's way of selecting text out of one
+                // anyway. See `core.Layer.mouse_report`.
+                const report = server.mouseReportOn(handle);
+                if (report and !eng.inputs.keyboard.shift()) return false;
+                self.over_report = report;
                 self.mouse_selecting = true;
                 self.mouse_moved = false;
                 self.mouse_last_cell = cell;
@@ -554,6 +566,8 @@ pub const Selection = struct {
         if (!self.mouse_moved) {
             // A plain click: hand the shell the press+release it activates
             // on, and clear any leftover selection (standard behaviour).
+            // Not for a Shift+click over a mouse-mode program (see
+            // `over_report`).
             //
             // In the *focused pane's* frame, not the window's: `cell` here
             // came straight off `cellFromPixel`, and a client seated in a
@@ -565,9 +579,11 @@ pub const Selection = struct {
             // simply dropped. Sent as a matched pair, so `Session.input`
             // stays balanced without `input.KeyInput.mouse_down`.
             const vo = self.rootViewScroll();
-            if (server.focusedCell(cell)) |pane_cell| {
-                server.reportMouseButton(self.app.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
-                server.reportMouseButton(self.app.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
+            if (!self.over_report) {
+                if (server.focusedCell(cell)) |pane_cell| {
+                    server.reportMouseButton(self.app.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
+                    server.reportMouseButton(self.app.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
+                }
             }
             // Whatever was selected, wherever it was: a plain click
             // clears it, which for a click on a different layer than the

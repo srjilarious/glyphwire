@@ -299,14 +299,31 @@ pub const Scroll = struct {
             defer server.ctx_mutex.unlock(server.io);
             const cell = geometry.cellFromPixel(pos.x, pos.y);
             const at = server.paneAtCell(cell.row, cell.col) orelse break :target null;
+            const pane = panes_mod.scrollablePaneAt(at.context, at.ctx, pos.x, pos.y);
+            // The layer whose program would get the wheel: the terminal
+            // layer under the pointer, else the root.
+            const report_layer: ?*const glyphwire.Layer = if (pane) |p| at.ctx.layers.getPtr(p.layer) else &at.ctx.root;
             break :target .{
                 .context = at.context,
-                .layer = panes_mod.scrollablePaneAt(at.context, at.ctx, pos.x, pos.y),
+                .layer = pane,
                 .root_owned = rootOwned(&at.ctx.root),
+                .report = if (report_layer) |l| l.mouse_report else false,
+                .focused = at.context == server.session.focusedContextHandle(),
             };
         };
         // In a divider band between panes there is nothing to scroll.
         const hit_target = target orelse return;
+
+        // A mouse-mode program under the pointer gets the wheel itself,
+        // as xterm wheel buttons, rather than having its screen scrolled
+        // away into scrollback (see `core.Layer.mouse_report`). Only in
+        // the focused pane: `mouse_button` goes to the focused context.
+        // Shift+wheel is left to the host, the same override Shift gives
+        // a drag.
+        if (hit_target.report and hit_target.focused and wheel_y != 0) {
+            self.reportWheel(eng, wheel_y);
+            return;
+        }
 
         // A scrollable layer under the pointer takes the wheel first: in a
         // TUI the layers cover the context's root, and a wheel over a file
@@ -353,6 +370,24 @@ pub const Scroll = struct {
         self.app.server.reportScrollIn(self.app.alloc, hit_target.context, null, delta) catch |err| {
             std.log.err("glyphwire-host: reportScroll(wheel) failed: {t}", .{err});
         };
+    }
+
+    /// Sends `wheel_y` notches as `wheel_up` / `wheel_down` button
+    /// press+release pairs, one per notch (at least one), at the pointer's
+    /// cell in the focused pane. glyphwire-shell encodes the presses as
+    /// xterm wheel reports (buttons 64/65) and drops the releases, which
+    /// xterm never sends for a wheel; they are here only so
+    /// `Session.input` never sees a wheel "button" stuck down.
+    fn reportWheel(self: *Scroll, eng: *Engine, wheel_y: f32) void {
+        const server = self.app.server;
+        const pos = eng.inputs.mouse.pos();
+        const cell = server.focusedCell(geometry.cellFromPixel(pos.x, pos.y)) orelse return;
+        const name: []const u8 = if (wheel_y > 0) "wheel_up" else "wheel_down";
+        const notches: usize = @max(1, @as(usize, @intFromFloat(@round(@abs(wheel_y)))));
+        for (0..notches) |_| {
+            server.reportMouseButton(self.app.alloc, name, true, .{ .x = pos.x, .y = pos.y }, cell, 0, 1) catch return;
+            server.reportMouseButton(self.app.alloc, name, false, .{ .x = pos.x, .y = pos.y }, cell, 0, 1) catch return;
+        }
     }
 
     /// Handles the scrollbar's own mouse interaction, before the grid sees
