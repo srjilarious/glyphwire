@@ -1789,9 +1789,16 @@ pub const Renderer = struct {
             const l = ctx.layers.getPtr(h) orelse break :blk null;
             break :blk if (l.visible) l else null;
         };
-        const shape = self.app.caret.shapeFor(ctx.caret_shape);
-        if (focused and ctx.caret_visible and focus_caret == null)
-            self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, shape, caretColor(&ctx.theme));
+        // Every pane shows its caret: the focused one as configured and
+        // blinking, the rest as a steady hollow box -- where you'd be
+        // typing if you went back, the way an unfocused window shows it.
+        const shape: CursorShape = if (focused) self.app.caret.shapeFor(ctx.caret_shape) else .box;
+        if (ctx.caret_visible and focus_caret == null) {
+            if (focused)
+                self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, shape, caretColor(&ctx.theme))
+            else
+                drawIdleRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, caretColor(&ctx.theme));
+        }
         // IME composition, over both: it covers the cells the caret is
         // about to write into, so it has to sit above the caret too.
         if (focused) self.drawPreedit(eng, &ctx.root, origin.x, origin.y, root_view);
@@ -1805,7 +1812,7 @@ pub const Renderer = struct {
             // floats over, the same as it covers that layer's cells.
             drawLayerScrollbars(eng, layer, origin);
             drawResizeEdge(eng, layer, origin, themeColor(&ctx.theme, .pane_divider));
-            if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape, caretColor(&ctx.theme));
+            if (ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape, caretColor(&ctx.theme), focused);
         }
     }
 
@@ -2069,6 +2076,17 @@ pub const Renderer = struct {
         eng.renderer.end();
     }
 
+    /// An unfocused pane's root caret: a steady hollow box at its grid
+    /// cursor. Not `drawRootCaret`, whose blink clock and scroll pin
+    /// belong to the focused context. Hidden by DECTCEM like any caret.
+    fn drawIdleRootCaret(eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize, color: host_eng.Color) void {
+        if (!root.cursor_visible) return;
+        if (root.cursor.row >= root.height or root.cursor.col >= root.width) return;
+        eng.renderer.begin(eng.projMat);
+        drawCaret(eng, root, origin_x, origin_y, root.cursor.row, root.cursor.col, view_offset, .box, color);
+        eng.renderer.end();
+    }
+
     /// The caret for a `caret_layer` pane (see `core.Context.caret_layer`):
     /// `gmux` points it at the focused pane, whose cursor is driven by
     /// that pane's PTY. Positioned through the pane's own bounds
@@ -2078,9 +2096,10 @@ pub const Renderer = struct {
     /// it is scrolled back into its own history (`view_scroll != 0`), or
     /// while the cursor sits outside the visible viewport. Shares the
     /// blink clock with the root caret.
-    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, shape: CursorShape, color: host_eng.Color) void {
+    /// `blink` is false for an unfocused pane's caret, which holds still.
+    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, shape: CursorShape, color: host_eng.Color, blink: bool) void {
         if (!layer.cursor_visible) return;
-        if (!self.app.caret.blinkOn()) return;
+        if (blink and !self.app.caret.blinkOn()) return;
         if (layer.view_scroll != 0) return;
 
         const off = layer.scroll_off;

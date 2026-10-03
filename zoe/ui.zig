@@ -822,10 +822,11 @@ pub const Ui = struct {
     /// The shape last asked of the host, so a mode change inside the
     /// host-drawn cases still re-sends it.
     caret_shape: ?glyphwire.CaretShape = null,
-    /// Whether the host's window has the keyboard, from `focus`
-    /// notifications. Assumed true until told otherwise -- a window that
-    /// has just been opened has it, and the host only reports changes.
-    window_focused: bool = true,
+    /// Whether zoe is what's being typed into -- the window has the
+    /// keyboard and zoe's pane has focus -- from `focus` notifications.
+    /// Assumed true until told otherwise: the host reports changes, and
+    /// tells a program that starts out of focus straight away.
+    has_focus: bool = true,
     /// Whether the host's key repeat is currently the shell's -- its own
     /// default, with a hold before the first repeat -- rather than the
     /// editor's per-mode cadence. See `syncKeyRepeat`.
@@ -1352,7 +1353,7 @@ pub const Ui = struct {
     /// caret is zoe's own inverted cell. Read by `renderBuffer` too, so
     /// the two can never disagree about who is drawing it.
     fn caretShape(self: *const Ui) ?glyphwire.CaretShape {
-        if (!self.window_focused) return .box;
+        if (!self.has_focus) return .box;
         if (self.buf.ed.mode == .insert or self.buf.ed.mode == .select) return .line;
         return null;
     }
@@ -2207,13 +2208,14 @@ pub const Ui = struct {
                     }
                 }
             },
-            // The window came back or went away. Who draws the cursor
-            // changes with it (`caretShape`), so the row it sits on has
-            // to be repainted -- zoe's own inverted cell has to come off
-            // before the host's box goes on, and back on afterwards.
+            // Focus came back or went away: the window, or a move to or
+            // from this pane. Who draws the cursor changes with it
+            // (`caretShape`), so the row it sits on has to be repainted --
+            // zoe's own inverted cell has to come off before the host's
+            // hollow box goes on, and back on afterwards.
             .focus => |f| {
-                if (f.focused == self.window_focused) return;
-                self.window_focused = f.focused;
+                if (f.focused == self.has_focus) return;
+                self.has_focus = f.focused;
                 self.buf.full_redraw = true;
                 self.grp.buffer_dirty = true;
             },

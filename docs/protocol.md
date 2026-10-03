@@ -1481,14 +1481,17 @@ code through, so `status` alone cannot say.
 long the host will wait before exiting anyway; it is advisory, and a client
 with nothing to flush **MAY** ignore it.
 
-**`focus`** says whether the host's window has the keyboard. It is about
-the whole window against the rest of the desktop — not which context is
-on screen (`context`) or which pane is focused within the window. Sent on
-the edge only, to every subscriber whatever their context, so a
-backgrounded client comes back up drawn correctly. A client **SHOULD**
-assume it has focus until told otherwise. While the window is away the
-host draws its own caret as a hollow box and stops blinking it; a client
-that paints its own cursor **SHOULD** do something equivalent.
+**`focus`** says whether *this connection* is the one being typed into:
+the host's window has the keyboard **and** the connection's context is
+the one on screen in the focused pane. It is sent to each subscriber
+separately, only when its own value changes — when the window gains or
+loses the keyboard, when pane focus moves, or when the connection's
+context comes on or goes off screen in the focused pane. A client
+**SHOULD** assume it has focus until told otherwise; a connection that
+doesn't is told so as soon as it subscribes. While a context is not
+focused the host draws its caret as a steady hollow box (in every
+visible pane, not only the focused one); a client that paints its own
+cursor **SHOULD** do something equivalent.
 
 ## 8. Vocabularies
 

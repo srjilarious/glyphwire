@@ -1175,7 +1175,7 @@ pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allo
     var a_buf: [4096]u8 = undefined;
     var a_w = a.writer(io, &a_buf);
     try wire.writeFrame(&a_w.interface,
-        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["theme","focus"],"pane":0}}
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["theme","shutdown"],"pane":0}}
     );
     try a_w.interface.flush();
     alloc.free(try readOneFrame(io, alloc, &a, &a_dec));
@@ -1192,7 +1192,7 @@ pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allo
     var b_w = b.writer(io, &b_buf);
     var subscribe_buf: [160]u8 = undefined;
     try wire.writeFrame(&b_w.interface, try std.fmt.bufPrint(&subscribe_buf,
-        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["theme","focus"],"pane":{d}}}}}
+        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["theme","shutdown"],"pane":{d}}}}}
     , .{made.pane}));
     try wire.writeFrame(&b_w.interface,
         \\{"jsonrpc":"2.0","method":"set_theme","params":{"name":"nord"}}
@@ -1208,9 +1208,10 @@ pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allo
 
     try srv.setWindowTheme(alloc, glyphwire.theme.resolve("catppuccin-latte", &.{}).?);
     try testz.expectEqualStr(srv.session.theme.name(), "catppuccin-latte");
-    // A focus change goes to both, so the next thing off each connection
-    // shows what the theme change sent it.
-    try srv.reportFocus(alloc, true);
+    // A shutdown goes to both, so the next thing off each connection
+    // shows what the theme change sent it. (Not `focus`, which is per
+    // connection now and `b`, in an unfocused pane, already has.)
+    try srv.reportShutdown(alloc, 0);
 
     const a_first = try readOneFrame(io, alloc, &a, &a_dec);
     defer alloc.free(a_first);
@@ -1221,7 +1222,7 @@ pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allo
 
     const b_first = try readOneFrame(io, alloc, &b, &b_dec);
     defer alloc.free(b_first);
-    try testz.expectTrue(std.mem.indexOf(u8, b_first, "\"method\":\"focus\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, b_first, "\"method\":\"shutdown\"") != null);
 }
 
 /// A connected client bound to one pane, and the accept thread serving it.
@@ -1500,6 +1501,60 @@ pub fn terminalReplyStaysInItsContextTest(io: std.Io, alloc: std.mem.Allocator) 
     const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
     defer alloc.free(a_got);
     try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
+}
+
+/// `focus` is "you are being typed into": window focus *and* pane focus.
+/// Moving to another pane tells the one left behind (zoe then draws a
+/// hollow cursor) and the one arrived at; the window losing the keyboard
+/// tells only the one that had it.
+pub fn focusFollowsThePaneAsWellAsTheWindowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pane-focus-flag-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const other = try splitIntoTwoPanes(&srv);
+
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+    var a = try connectToPane(io, alloc, &srv, socket_path, glyphwire.root_pane_handle, "[\"focus\"]", &a_dec);
+    defer a.thread.join();
+    defer a.stream.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+    var b = try connectToPane(io, alloc, &srv, socket_path, other, "[\"focus\"]", &b_dec);
+    defer b.thread.join();
+    defer b.stream.close(io);
+
+    // `b` starts out of focus and is told so straight away.
+    const b_initial = try readOneFrame(io, alloc, &b.stream, &b_dec);
+    defer alloc.free(b_initial);
+    try testz.expectTrue(std.mem.indexOf(u8, b_initial, "\"focused\":false") != null);
+
+    try srv.focusPane(alloc, other);
+    const a_left = try readOneFrame(io, alloc, &a.stream, &a_dec);
+    defer alloc.free(a_left);
+    try testz.expectTrue(std.mem.indexOf(u8, a_left, "\"focused\":false") != null);
+    const b_arrived = try readOneFrame(io, alloc, &b.stream, &b_dec);
+    defer alloc.free(b_arrived);
+    try testz.expectTrue(std.mem.indexOf(u8, b_arrived, "\"focused\":true") != null);
+
+    // The window losing the keyboard reaches `b`, the only one with it.
+    // `a` hears nothing until it is focused again, which proves it.
+    try srv.reportFocus(alloc, false);
+    const b_blurred = try readOneFrame(io, alloc, &b.stream, &b_dec);
+    defer alloc.free(b_blurred);
+    try testz.expectTrue(std.mem.indexOf(u8, b_blurred, "\"focused\":false") != null);
+    try srv.reportFocus(alloc, true);
+    try srv.focusPane(alloc, glyphwire.root_pane_handle);
+    const a_back = try readOneFrame(io, alloc, &a.stream, &a_dec);
+    defer alloc.free(a_back);
+    try testz.expectTrue(std.mem.indexOf(u8, a_back, "\"focused\":true") != null);
 }
 
 /// The host's click-to-focus moves focus without the manager asking, so
