@@ -1449,6 +1449,59 @@ pub fn pasteReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"key\":\"x\"") != null);
 }
 
+/// A terminal query's reply reaches the `"terminal"` subscriber of the
+/// context whose text asked it (it used to reach no one: the event name
+/// wasn't mapped to the stream) and no other -- fanned out, htop's `CSI
+/// 6n` in one pane would be answered into every other pane's pty child.
+/// Ordering trick: the other pane's first read is a key reported
+/// afterwards, never the reply.
+pub fn terminalReplyStaysInItsContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-term-reply-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const other = try splitIntoTwoPanes(&srv);
+
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+    var a = try connectToPane(io, alloc, &srv, socket_path, glyphwire.root_pane_handle, "[\"terminal\",\"key\"]", &a_dec);
+    defer a.thread.join();
+    defer a.stream.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+    var b = try connectToPane(io, alloc, &srv, socket_path, other, "[\"terminal\"]", &b_dec);
+    defer b.thread.join();
+    defer b.stream.close(io);
+    // The program drawing in the other pane, whose output carries the query.
+    var w_dec: wire.FrameDecoder = .{};
+    defer w_dec.deinit(alloc);
+    var w = try connectToPane(io, alloc, &srv, socket_path, other, "[\"resize\"]", &w_dec);
+    defer w.thread.join();
+    defer w.stream.close(io);
+
+    var w_buf: [4096]u8 = undefined;
+    var w_w = w.stream.writer(io, &w_buf);
+    try wire.writeFrame(&w_w.interface,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"\u001b[6n"}}
+    );
+    try w_w.interface.flush();
+
+    const b_got = try readOneFrame(io, alloc, &b.stream, &b_dec);
+    defer alloc.free(b_got);
+    try testz.expectTrue(std.mem.indexOf(u8, b_got, "terminal_reply") != null);
+
+    try srv.reportKey(alloc, "x", true);
+    const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
+    defer alloc.free(a_got);
+    try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
+}
+
 /// The host's click-to-focus moves focus without the manager asking, so
 /// the manager has to be told -- otherwise gmux's `z` zooms whichever pane
 /// it last focused itself, not the one the user clicked into.
