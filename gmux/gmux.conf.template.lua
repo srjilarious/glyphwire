@@ -19,7 +19,8 @@
 -- and whatever parsed before it is kept.
 --
 -- Keybindings, scrollback style, and the pane layout itself are not
--- configurable yet -- gmux's first version.
+-- configurable yet -- gmux's first version. How the lines between panes
+-- look is the host's to draw: see `pane_divider_style` in host.conf.lua.
 
 -- config = {
 --
