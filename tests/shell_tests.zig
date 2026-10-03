@@ -584,6 +584,16 @@ pub fn encodeMouseSgrFormTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr("\x1b[<64;5;5M", keyencode.encodeMouse(.sgr, .wheel_up, .press, 4, 4, .{}, &buf).?);
 }
 
+pub fn mouseButtonFromNameMapsWheelTest(_: std.Io, _: std.mem.Allocator) !void {
+    // The host's wheel notches over a mouse-mode program arrive under
+    // these names and must encode as xterm buttons 64/65.
+    try testz.expectTrue(keyencode.mouseButtonFromName("wheel_up").? == .wheel_up);
+    try testz.expectTrue(keyencode.mouseButtonFromName("wheel_down").? == .wheel_down);
+    try testz.expectTrue(keyencode.mouseButtonFromName("four") == null);
+    var buf: [16]u8 = undefined;
+    try testz.expectEqualStr("\x1b[<65;2;3M", keyencode.encodeMouse(.sgr, .wheel_down, .press, 1, 2, .{}, &buf).?);
+}
+
 pub fn encodeMouseLegacyFormTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [16]u8 = undefined;
     // Left press at (0,0): ESC [ M then 32+0, 32+1, 32+1.

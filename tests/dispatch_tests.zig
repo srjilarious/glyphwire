@@ -2482,6 +2482,40 @@ pub fn mouseSelectPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectFalse(ctx.layerPtr(panel).?.mouse_select);
 }
 
+pub fn mouseReportPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // Off until a mouse-mode program turns it on, root included.
+    try testz.expectFalse(ctx.root.mouse_report);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":0,"property":"mouse_report","enabled":true}}
+    );
+    try testz.expectTrue(ctx.root.mouse_report);
+
+    const get_decoded = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","id":4,"method":"get_property","params":{"layer":0,"property":"mouse_report"}}
+    );
+    defer alloc.free(get_decoded);
+    const response_body = (try d.handle(alloc, get_decoded)).response.?;
+    defer alloc.free(response_body);
+    const Response = struct { id: i64, result: struct { enabled: bool } };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectTrue(parsed.value.result.enabled);
+
+    // Independent of `mouse_select`.
+    try testz.expectFalse(ctx.root.mouse_select);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":0,"property":"mouse_report","enabled":false}}
+    );
+    try testz.expectFalse(ctx.root.mouse_report);
+}
+
 /// `selection_flow` sets and reports a layer's mode and column grid; an
 /// unknown mode is refused and leaves the layer as it was; `{}` with no
 /// mode puts it back to horizontal.

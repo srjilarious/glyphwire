@@ -407,6 +407,9 @@ fn ptyMouseButton(pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseButtonEven
     if (!modes.mouseReporting()) return;
     const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
     const btn = keyencode.mouseButtonFromName(mev.button) orelse return;
+    // A wheel notch is a press alone in xterm's reports; the release the
+    // host pairs it with is only there to keep the button state balanced.
+    if (!mev.pressed and (btn == .wheel_up or btn == .wheel_down)) return;
     const action: keyencode.MouseAction = if (mev.pressed) .press else .release;
     var buf: [16]u8 = undefined;
     if (keyencode.encodeMouse(enc, btn, action, mev.cell.col -| origin.col, mev.cell.row -| origin.row, ptyMods(mev.mods), &buf)) |seq|
@@ -2172,6 +2175,14 @@ const Prompt = struct {
     /// being written to.
     fn drawSetPtyMode(self: *Prompt, enabled: bool) !void {
         try self.client.setLayerPtyMode(self.layer orelse glyphwire.root_layer_handle, enabled);
+    }
+
+    /// Tells the host whether the foreground child wants the mouse
+    /// (`core.Layer.mouse_report`), on the same layer its output goes to,
+    /// so the host forwards raw clicks, drags and wheel notches instead
+    /// of selecting text.
+    fn drawSetMouseReport(self: *Prompt, enabled: bool) !void {
+        try self.client.setLayerMouseReport(self.layer orelse glyphwire.root_layer_handle, enabled);
     }
 
     /// Draws a rendered chain left to right starting at `(row, start_col)`:
@@ -4659,6 +4670,9 @@ const Prompt = struct {
         // re-arm `core.Layer.pty_mode`'s doc comment describes) before the
         // reset write below and the next prompt redraw.
         self.drawSetPtyMode(false) catch {};
+        // And the mouse is the host's again, even if the child died with
+        // mouse reporting still on.
+        self.drawSetMouseReport(false) catch {};
 
         // Undo the screen state a program that died without cleaning up
         // could leave behind: `?1049l` exits the alt screen, then `! p`
@@ -4712,6 +4726,7 @@ const Prompt = struct {
         };
         // The child isn't writing this layer any more; the prompt is.
         self.drawSetPtyMode(false) catch {};
+        self.drawSetMouseReport(false) catch {};
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "[{d}] {s}  (background)", .{ job.id, self.jobTitle(job) }) catch "[?] (background)";
         try self.drawText(msg, job_color, null);
@@ -4982,7 +4997,21 @@ const Prompt = struct {
         /// be reported (see `reportCrash`). Written only by the reader
         /// thread and read only after it is joined.
         tail: crashlog.Tail = .{},
+        /// The `mouse_report` value last sent for this child, so the
+        /// reader only sends on a change (see `syncMouseReport`).
+        mouse_report_sent: bool = false,
     };
+
+    /// Mirrors the child's mouse-reporting modes onto the layer's
+    /// `mouse_report` whenever `ModeTracker` says they flipped. On the
+    /// reader thread, which is already the one drawing through the
+    /// client for a plain child.
+    fn syncMouseReport(ctx: *PtyReaderCtx) void {
+        const on = ctx.modes.mouseReporting();
+        if (on == ctx.mouse_report_sent) return;
+        ctx.mouse_report_sent = on;
+        ctx.prompt.drawSetMouseReport(on) catch {};
+    }
 
     fn awareState(ctx: *const PtyReaderCtx) ?bool {
         return switch (ctx.aware.load(.acquire)) {
@@ -5030,6 +5059,9 @@ const Prompt = struct {
             // whether we're mirroring it or handing it to an aware child
             // (aware output is wire JSON -- no such sequences, harmless).
             ctx.modes.feed(chunk);
+            // Only a plain child's screen is this layer; an aware child
+            // draws on its own and handles its own mouse.
+            if (aware == null or aware.? == false) syncMouseReport(ctx);
 
             if (aware == null) {
                 pending.appendSlice(alloc, chunk) catch break;

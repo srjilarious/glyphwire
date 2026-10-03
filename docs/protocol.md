@@ -688,6 +688,7 @@ takes the value as **flat sibling fields**, not a nested `value` object —
 | `visibility` | `{visible}` | get; set on non-root layers only |
 | `pty_mode` | `{enabled}` | get / set |
 | `mouse_select` | `{enabled}` — let the host drag-select on this layer | get / set |
+| `mouse_report` | `{enabled}` — the layer's program wants raw mouse events (xterm mouse reporting); the host stops selecting there and sends the wheel as `wheel_up` / `wheel_down` buttons. Shift overrides | get / set |
 | `shadow` | `{shadow: {x?, y?, blur?, radius?, spread?, color?}}` — a soft drop shadow the host draws under the layer: a rounded rect of the layer's bounds moved by `x`/`y`, grown by `spread`, corner `radius`, blurred by `blur` (pixels; `blur`/`radius` clamp to 64), in `color` (default black, alpha 128). No `shadow` removes it. Not part of the layer's bounds | get / set |
 | `profile` | profiler state | get |
 
@@ -1422,6 +1423,11 @@ double-click selects a word, a triple-click the row, and dragging on
 from either grows the selection a whole word or row at a time. A word there
 is a run of non-blank characters stopping at quotes, brackets and
 `|` `,` `;`, so a path or URL selects whole.
+
+**`mouse_button`'s `button`** can also be `wheel_up` / `wheel_down`: over
+a `mouse_report` layer the host turns each wheel notch into a press and
+release of one of these instead of scrolling. A terminal client encodes
+the press as an xterm wheel report and drops the release.
 
 **`mouse_move`** fires only when the pointer changes *cell*; per-pixel
 motion is coalesced.

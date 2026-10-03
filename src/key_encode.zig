@@ -167,12 +167,15 @@ pub const MouseButton = enum { left, middle, right, wheel_up, wheel_down, none }
 
 /// Maps a wire mouse-button name (glyphwire-host sends the glfw
 /// `MouseButton` enum field names) to a `MouseButton`, or null for one
-/// with no xterm encoding (`four`..`eight`). Wheel "buttons" don't come
-/// over `mouse_button`; the caller derives them from scroll events.
+/// with no xterm encoding (`four`..`eight`). `wheel_up` / `wheel_down`
+/// are what glyphwire-host sends, one press+release per notch, over a
+/// layer whose program asked for the mouse (`core.Layer.mouse_report`).
 pub fn mouseButtonFromName(name: []const u8) ?MouseButton {
     if (std.mem.eql(u8, name, "left")) return .left;
     if (std.mem.eql(u8, name, "middle")) return .middle;
     if (std.mem.eql(u8, name, "right")) return .right;
+    if (std.mem.eql(u8, name, "wheel_up")) return .wheel_up;
+    if (std.mem.eql(u8, name, "wheel_down")) return .wheel_down;
     return null;
 }
 
