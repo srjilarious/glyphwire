@@ -93,6 +93,10 @@ pub const Window = struct {
         return self.close_requested;
     }
 
+    pub fn setTitle(self: *Window, title: [:0]const u8) void {
+        _ = sdl.SDL_SetWindowTitle(self.handle, title.ptr);
+    }
+
     pub fn setSize(self: *Window, width: i32, height: i32) void {
         _ = sdl.SDL_SetWindowSize(self.handle, width, height);
     }
