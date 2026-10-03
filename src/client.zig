@@ -3853,6 +3853,13 @@ pub const PaneExitEvent = struct {
     status: i64,
 };
 
+/// A queued `pane_focus` notification: `pane` now has input focus,
+/// however it got it -- including the host's click-to-focus, which no
+/// manager command caused.
+pub const PaneFocusEvent = struct {
+    pane: core.PaneHandle,
+};
+
 /// A queued `remote_exit` notification: the remote session `session`
 /// (`Client.startRemote`) has ended, with `ssh`'s wait status. Broadcast
 /// to every `remote` subscriber, so a consumer waiting on one particular
@@ -3928,6 +3935,7 @@ pub const Event = union(enum) {
     layer_resize: LayerResizeEvent,
     pane_layout: PaneLayoutEvent,
     pane_exit: PaneExitEvent,
+    pane_focus: PaneFocusEvent,
     remote_exit: RemoteExitEvent,
     context: ContextEvent,
     /// The window theme changed, and this connection's context follows
@@ -3943,7 +3951,7 @@ pub const Event = union(enum) {
             .terminal_reply => |b| alloc.free(b),
             .layout => |l| l.deinit(alloc),
             .pane_layout => |l| l.deinit(alloc),
-            .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .layer_resize, .pane_exit, .remote_exit, .context, .theme => {},
+            .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .layer_resize, .pane_exit, .pane_focus, .remote_exit, .context, .theme => {},
         }
     }
 
@@ -4647,6 +4655,10 @@ pub const InputListener = struct {
             const p = try self.parseParams(protocol.PaneExitParams, params);
             defer p.deinit();
             try self.enqueue(.{ .pane_exit = .{ .pane = p.value.pane, .status = p.value.status } });
+        } else if (eql(u8, method, "pane_focus")) {
+            const p = try self.parseParams(protocol.PaneFocusParams, params);
+            defer p.deinit();
+            try self.enqueue(.{ .pane_focus = .{ .pane = p.value.pane } });
         } else if (eql(u8, method, "remote_exit")) {
             const p = try self.parseParams(protocol.RemoteExitParams, params);
             defer p.deinit();

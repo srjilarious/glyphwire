@@ -185,6 +185,13 @@ pub const Ui = struct {
                 // closing it is gmux's decision -- and closing the last one
                 // is gmux's cue to quit.
                 .pane_exit => |e| try self.removePane(e.pane),
+                // Focus moved -- often by a click, which no command of
+                // ours caused. Followed so `z`, `x` and the arrows act on
+                // the pane the user is actually in. Only the record is
+                // updated: the host has already moved focus.
+                .pane_focus => |f| if (self.bounds.contains(f.pane)) {
+                    self.focused = f.pane;
+                },
                 else => if (ev.asInput()) |input| try self.handleInput(input),
             }
         }

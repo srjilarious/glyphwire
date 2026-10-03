@@ -105,6 +105,9 @@ pub const Server = struct {
     /// that can't (see `dispatch.RemoteStarter`). Stored by value for the
     /// same reason as `pane_spawner`.
     remote_starter: ?dispatch.RemoteStarter = null,
+    /// The focused pane as of the last `pane_focus` notification (see
+    /// `reportPaneFocusIfChanged`). Guarded by `ctx_mutex`.
+    reported_focus_pane: core.PaneHandle = core.root_pane_handle,
     listener: std.Io.net.Server,
     /// Guards every `Dispatcher.handle` call: concurrent connections all
     /// dispatch against the same `Context`.
@@ -340,6 +343,9 @@ pub const Server = struct {
                         std.log.err("glyphwire: pane relayout failed: {t}", .{err});
                     };
                 }
+                self.reportPaneFocusIfChanged(alloc) catch |err| {
+                    std.log.err("glyphwire: pane_focus failed: {t}", .{err});
+                };
                 self.wake();
             }
         }
@@ -724,6 +730,29 @@ pub const Server = struct {
         };
         if (!changed) return;
         try self.reportContext(alloc);
+        try self.reportPaneFocusIfChanged(alloc);
+    }
+
+    /// Broadcasts `pane_focus` when the focused pane differs from the one
+    /// last reported. Focus moves from more than one place -- the
+    /// manager's own `focus_pane`, the host's click-to-focus, a fallback
+    /// when the focused pane is destroyed or unmapped -- and a manager
+    /// tracking it only from its own commands acted on a stale pane (gmux
+    /// zooming the pane it last focused, not the one just clicked). One
+    /// check after every change point, rather than a notification at each,
+    /// so a new path that moves focus can't forget to say so.
+    pub fn reportPaneFocusIfChanged(self: *Server, alloc: std.mem.Allocator) !void {
+        const pane = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const now = self.session.focusedPaneHandle();
+            if (now == self.reported_focus_pane) return;
+            self.reported_focus_pane = now;
+            break :blk now;
+        };
+        const body = try rpc.paneFocusNotification(alloc, pane);
+        defer alloc.free(body);
+        self.broadcast(null, "pane_focus", body);
     }
 
     /// Brings `context` to the top of its pane's stack (the host's own
@@ -739,7 +768,10 @@ pub const Server = struct {
             self.ctx = self.session.focusedContext();
             break :blk self.session.focusedContextHandle() != before;
         };
-        if (changed) try self.reportContext(alloc);
+        if (changed) {
+            try self.reportContext(alloc);
+            try self.reportPaneFocusIfChanged(alloc);
+        }
         return changed;
     }
 
